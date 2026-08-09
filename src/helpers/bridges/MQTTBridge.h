@@ -9,6 +9,7 @@
 #include <Timezone.h>
 #include "helpers/JWTHelper.h"
 #include "helpers/MQTTPacketFilter.h"
+#include "helpers/MQTTPayloadBuilder.h"   // MQTTConnHealth
 #include "helpers/MQTTPresets.h"
 #include "helpers/MQTTPresetPolicy.h"
 #include "helpers/MQTTLifecycle.h"
@@ -542,6 +543,10 @@ private:
   bool publishToSlot(int index, const char* topic, const char* payload, size_t payload_len, bool retained = false, uint8_t qos = 0);
   bool publishToAllSlots(const char* topic, const char* payload, size_t payload_len, bool retained = false, uint8_t qos = 0);
   void publishStatusToSlot(int index);
+  // Snapshot of slot connection health for the status payload. A slot that cannot
+  // reach its broker cannot report its own outage, so every healthy slot carries
+  // this on its status publication.
+  MQTTConnHealth collectConnHealth() const;
   void updateCachedConnectionStatus();
 
   void processPacketQueue();

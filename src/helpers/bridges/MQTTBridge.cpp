@@ -373,12 +373,26 @@ void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
   if (b->_filtered_packets > 0) {
     replyAppendf(buf, bufsize, &pos, " filt=%lu", b->_filtered_packets);
   }
+  // down=<n>: enabled slots that are not connected. Without this the reply cannot
+  // show an outage at all — sN= counts publishes, and a slot that never connects
+  // never publishes, so its ok freezes and its err stays 0 for the whole outage.
+  // Omitted while zero, like filt=, so a healthy node's reply keeps its length.
+  int down = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (b->_slots[i].enabled && !b->_slots[i].connected) down++;
+  }
+  if (down > 0) {
+    replyAppendf(buf, bufsize, &pos, " down=%d", down);
+  }
   replyAppendf(buf, bufsize, &pos, " |");
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (!b->_slots[i].enabled || !b->_slots[i].client) continue;
-    replyAppendf(buf, bufsize, &pos, " s%d=%lu/%lu", i + 1,
+    // Trailing '!' marks a disconnected slot. Appended after the counts so the
+    // established "s(\d)=(\d+)/(\d+)" parsers keep matching unchanged.
+    replyAppendf(buf, bufsize, &pos, " s%d=%lu/%lu%s", i + 1,
                  b->_slots[i].client->getPublishOk(),
-                 b->_slots[i].client->getPublishErr());
+                 b->_slots[i].client->getPublishErr(),
+                 b->_slots[i].connected ? "" : "!");
   }
 }
 
@@ -3135,7 +3149,8 @@ void MQTTBridge::publishStatusToSlot(int index) {
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
-    _prefs->disable_fwd ? "off" : "on"
+    _prefs->disable_fwd ? "off" : "on",
+    collectConnHealth()
   );
 
   if (len > 0) {
@@ -3149,6 +3164,42 @@ void MQTTBridge::publishStatusToSlot(int index) {
       MQTT_DEBUG_PRINTLN("MQTT%d status publish failed", index + 1);
     }
   }
+}
+
+MQTTConnHealth MQTTBridge::collectConnHealth() const {
+  MQTTConnHealth health;
+  health.slots_up = 0;
+  health.slots_total = 0;
+
+  const unsigned long now = millis();
+  unsigned long worst_outage_ms = 0;
+  bool any_outage_timed = false;
+
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    const MQTTSlot& slot = _slots[i];
+    if (!slot.enabled) continue;   // "none" slots are not an outage, they are unconfigured
+    health.slots_total++;
+    if (slot.connected) {
+      health.slots_up++;
+      continue;
+    }
+    // A slot that has never connected since boot has no outage start time. It still
+    // counts against slots_up, which is why that pair — not this duration — is the
+    // signal to alert on.
+    if (slot.current_outage_started_ms != 0) {
+      const unsigned long outage_ms = now - slot.current_outage_started_ms;  // wrap-safe
+      if (!any_outage_timed || outage_ms > worst_outage_ms) {
+        worst_outage_ms = outage_ms;
+        any_outage_timed = true;
+      }
+    }
+  }
+
+  if (any_outage_timed) {
+    health.worst_outage_secs = static_cast<int>(worst_outage_ms / 1000UL);
+  }
+  health.heap_largest = static_cast<int>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  return health;
 }
 
 void MQTTBridge::updateCachedConnectionStatus() {
@@ -3993,7 +4044,8 @@ bool MQTTBridge::publishStatus() {
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
-    _prefs->disable_fwd ? "off" : "on"
+    _prefs->disable_fwd ? "off" : "on",
+    collectConnHealth()
   );
 
   if (len > 0) {
