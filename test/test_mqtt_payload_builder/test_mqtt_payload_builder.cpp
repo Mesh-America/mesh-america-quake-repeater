@@ -93,6 +93,85 @@ TEST(MQTTPayloadBuilder, StatusIncludesRepeatAndEveryRequestedStatistic) {
   EXPECT_EQ(47, stats["packets_received"].as<int>());
 }
 
+TEST(MQTTPayloadBuilder, StatusReportsConnectionHealthWhenSupplied) {
+  JsonDocument scratch;
+  char buffer[1024];
+  MQTTConnHealth health;
+  health.slots_up = 2;
+  health.slots_total = 3;
+  health.worst_outage_secs = 18432;
+  health.heap_largest = 16116;
+
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health);
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  ASSERT_FALSE(stats.isNull());
+  EXPECT_EQ(2, stats["mqtt_slots_up"].as<int>());
+  EXPECT_EQ(3, stats["mqtt_slots_total"].as<int>());
+  EXPECT_EQ(18432, stats["mqtt_outage_secs"].as<int>());
+  EXPECT_EQ(16116, stats["heap_largest"].as<int>());
+}
+
+// The outage key doubles as the "something is down" flag, so its absence has to be
+// meaningful: a fully healthy board must not emit it.
+TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {
+  JsonDocument scratch;
+  char buffer[768];
+  MQTTConnHealth health;
+  health.slots_up = 3;
+  health.slots_total = 3;
+  health.heap_largest = 54260;   // worst_outage_secs left at -1
+
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health);
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  ASSERT_FALSE(stats.isNull());
+  EXPECT_EQ(3, stats["mqtt_slots_up"].as<int>());
+  EXPECT_FALSE(stats["mqtt_outage_secs"].is<JsonVariant>());
+}
+
+// serializeComplete() returns 0 and clears the buffer when the payload does not fit,
+// and MQTTBridge publishes only a positive length — so overflowing STATUS_JSON_BUFFER_SIZE
+// silently stops status publication altogether. That is the same class of blindness this
+// field set exists to fix, so the worst realistic payload must fit with margin.
+TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer) {
+  constexpr size_t kStatusJsonBufferSize = 768;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  JsonDocument scratch;
+  char buffer[kStatusJsonBufferSize];
+  MQTTConnHealth health;
+  health.slots_up = 0;
+  health.slots_total = 5;              // PSRAM slot cap, the widest configuration
+  health.worst_outage_secs = 999999;
+  health.heap_largest = 4194304;
+
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch,
+      "A Repeater With A Deliberately Long Node Name",
+      "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",  // 64-char device id
+      "Heltec Wireless Tracker V1.1", "v1.17.0-observer-dev.12",
+      "915.000000,62.5,7,5", "MeshCore 1.17.0", "online", kTimestamp,
+      buffer, sizeof(buffer),
+      4200, 8640000, 65535, 6, -128, 999999, 999999, 65535, 4194304, 999999, 999999,
+      "off", health);
+
+  ASSERT_GT(len, 0) << "worst-case status payload overflowed the production buffer; "
+                       "status publication would stop silently";
+  EXPECT_LT(static_cast<size_t>(len), kStatusJsonBufferSize - 32)
+      << "less than 32 bytes of headroom left in the status buffer";
+}
+
 TEST(MQTTPayloadBuilder, StatusOmissionSentinelsRemainOmitted) {
   JsonDocument scratch;
   char buffer[768];
