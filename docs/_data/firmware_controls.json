@@ -160,8 +160,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "GAT562_30S_Mesh_Kit_room_server": {
@@ -214,8 +232,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "GAT562_Mesh_EVB_Pro_room_server": {
@@ -286,8 +322,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "GAT562_Mesh_Tracker_Pro_room_server": {
@@ -1618,8 +1672,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Internal storage accepts in-place application deltas, not full application packages."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash"
+        }
+      },
       "webconfig": false
     },
     "Heltec_mesh_solar_room_server": {
@@ -1690,8 +1762,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "Heltec_t096_room_server": {
@@ -1780,8 +1870,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "Heltec_t114_room_server": {
@@ -1852,8 +1960,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "Heltec_t114_without_display_room_server": {
@@ -1924,8 +2050,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "Heltec_t1_room_server": {
@@ -1996,8 +2140,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "Heltec_tower_v2_room_server": {
@@ -2032,8 +2194,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_sd"
+        }
+      },
       "webconfig": false
     },
     "Heltec_v2_companion_radio_full": {
@@ -2402,8 +2583,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "KeepteenLT1_room_server": {
@@ -2492,8 +2691,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Internal storage accepts in-place application deltas, not full application packages."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash"
+        }
+      },
       "webconfig": false
     },
     "LilyGo_T-Echo-Lite_room_server": {
@@ -2564,8 +2781,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Internal storage accepts in-place application deltas, not full application packages."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash"
+        }
+      },
       "webconfig": false
     },
     "LilyGo_T-Echo_Card_room_server": {
@@ -2618,8 +2853,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "LilyGo_T-Echo_repeater_lora_ota_no_external_sensors": {
@@ -2636,8 +2890,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "LilyGo_T-Echo_room_server": {
@@ -3441,8 +3714,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Internal storage accepts in-place application deltas, not full application packages."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash"
+        }
+      },
       "webconfig": false
     },
     "LilyGo_Tlora_C6_companion_radio_full_": {
@@ -3639,8 +3930,26 @@
       "rxps": false,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Internal storage accepts in-place application deltas, not full application packages."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash"
+        }
+      },
       "webconfig": false
     },
     "MeshTracker_X1_room_server": {
@@ -3711,8 +4020,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "Mesh_pocket_room_server": {
@@ -4110,8 +4437,26 @@
       "rxps": false,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "Minewsemi_me25ls01_room_server": {
@@ -4182,8 +4527,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Internal storage accepts in-place application deltas, not full application packages."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash"
+        }
+      },
       "webconfig": false
     },
     "Nano_G2_Ultra_room_server": {
@@ -4270,8 +4633,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "ProMicro_room_server": {
@@ -4360,8 +4741,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "R1Neo_room_server": {
@@ -4633,8 +5032,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "RAK_3401_repeater_rak13302_w25q16_lora_ota": {
@@ -4651,8 +5068,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "RAK_3401_room_server": {
@@ -4757,8 +5193,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "RAK_4631_repeater_bridge_rs232_serial2_lora_ota_no_external_sensors": {
@@ -4775,8 +5229,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "RAK_4631_repeater_ethernet": {
@@ -4811,8 +5283,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "RAK_4631_repeater_rak15001_slot_c_lora_ota": {
@@ -4829,8 +5319,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "RAK_4631_repeater_w25q16_lora_ota": {
@@ -4847,8 +5356,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "RAK_4631_room_server": {
@@ -4955,8 +5483,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "RAK_WisMesh_Tag_room_server": {
@@ -5081,8 +5627,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "SenseCap_Solar_repeater_lora_ota_no_external_sensors": {
@@ -5099,8 +5664,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "SenseCap_Solar_room_server": {
@@ -5892,8 +6476,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ThinkNode_M1_repeater_lora_ota_no_external_sensors": {
@@ -5910,8 +6513,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ThinkNode_M1_room_server": {
@@ -6110,8 +6732,26 @@
       "rxps": false,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "ThinkNode_M3_room_server": {
@@ -6292,8 +6932,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ThinkNode_M6_repeater_lora_ota_no_external_sensors": {
@@ -6310,8 +6969,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ThinkNode_M6_room_server": {
@@ -6493,8 +7171,26 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Internal storage accepts in-place application deltas, not full application packages."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash"
+        }
+      },
       "webconfig": false
     },
     "ThinkNode_M8_room_server": {
@@ -6748,8 +7444,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "WioTrackerL1_repeater_lora_ota_no_external_sensors": {
@@ -6766,8 +7481,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "WioTrackerL1_room_server": {
@@ -7317,8 +8051,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "Xiao_nrf52_repeater_lora_ota_no_external_sensors": {
@@ -7335,8 +8088,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "Xiao_nrf52_room_server": {
@@ -8669,8 +9441,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_handheld_nrf_e22_30dbm_repeater_lora_ota_no_external_sensors": {
@@ -8687,8 +9478,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_handheld_nrf_e22_30dbm_room_server": {
@@ -8741,8 +9551,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_nano_nrf_22dbm_repeater_lora_ota_no_external_sensors": {
@@ -8759,8 +9588,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_nano_nrf_22dbm_room_server": {
@@ -8813,8 +9661,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_nano_nrf_30dbm_repeater_lora_ota_no_external_sensors": {
@@ -8831,8 +9698,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_nano_nrf_30dbm_room_server": {
@@ -8885,8 +9771,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_nano_nrf_33dbm_repeater_lora_ota_no_external_sensors": {
@@ -8903,8 +9808,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_nano_nrf_33dbm_room_server": {
@@ -8957,8 +9881,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_stick_nrf_22dbm_repeater_lora_ota_no_external_sensors": {
@@ -8975,8 +9918,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_stick_nrf_22dbm_room_server": {
@@ -9029,8 +9991,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_stick_nrf_30dbm_repeater_lora_ota_no_external_sensors": {
@@ -9047,8 +10028,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_stick_nrf_30dbm_room_server": {
@@ -9101,8 +10101,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_stick_nrf_33dbm_repeater_lora_ota_no_external_sensors": {
@@ -9119,8 +10138,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "ikoka_stick_nrf_33dbm_room_server": {
@@ -9596,8 +10634,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "solarxiao_30S_room_server": {
@@ -9650,8 +10707,27 @@
       "rxps": true,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader."
+          ],
+          "package_types": [
+            "full",
+            "in_place_delta"
+          ],
+          "storage": "external_qspi"
+        }
+      },
       "webconfig": false
     },
     "solarxiao_33S_room_server": {
@@ -9722,8 +10798,26 @@
       "rxps": false,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash_and_retained_ram"
+        }
+      },
       "webconfig": false
     },
     "t1000e_room_server": {
@@ -9842,8 +10936,26 @@
       "rxps": false,
       "snmp": false,
       "updateMethods": [
-        "bluetooth"
+        "bluetooth",
+        "lora"
       ],
+      "updateRequirements": {
+        "lora": {
+          "bootloader": "Matching board/storage OTAFIX bootloader",
+          "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+          "notes": [
+            "Use a destination-specific .mota package matching the board, target, and storage layout.",
+            "An in-place delta requires the exact firmware currently running as its base.",
+            "The package must fit the receiver's staging and apply workspace.",
+            "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device.",
+            "Internal storage accepts in-place application deltas, not full application packages."
+          ],
+          "package_types": [
+            "in_place_delta"
+          ],
+          "storage": "internal_flash"
+        }
+      },
       "webconfig": false
     },
     "wio_wm1110_room_server": {

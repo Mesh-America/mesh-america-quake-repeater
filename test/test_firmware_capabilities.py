@@ -13,6 +13,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "scripts" / "check_firmware_capabilities.py"
+sys.path.insert(0, str(ROOT / "tools" / "mota"))
+import motalib as mota
 
 
 class FirmwareCapabilityCheckerTest(unittest.TestCase):
@@ -135,6 +137,55 @@ class FirmwareCapabilityCheckerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(manifest["verified"])
         self.assertFalse(manifest["ota_update_verified"])
+
+    def nrf_dfu(self, flags=16, *, receiver=True, corrupt=False):
+        body = b"OTA: status" + (b"invalid in-place patch geometry" if receiver else b"source only")
+        layout = mota.Nrf52Layout(0x26000, 0xED000, 0xED000, flags)
+        body = mota.ensure_nrf52_layout(body, layout)
+        image = body + mota.build_endf(body)
+        if corrupt:
+            image = b"X" + image[1:]
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("manifest.json", json.dumps({"manifest": {
+                "application": {"bin_file": "app.bin", "dat_file": "app.dat"}}}))
+            package.writestr("app.bin", image)
+            package.writestr("app.dat", b"init packet")
+        return {"dfu-package": archive.getvalue()}
+
+    def test_nrf52_lora_requires_packaged_receiver_and_valid_layout(self):
+        for artifacts in [self.nrf_dfu(receiver=False), self.nrf_dfu(corrupt=True)]:
+            result, manifest = self.run_checker(
+                b"dfu invalid in-place patch geometry", "--platform", "NRF52_PLATFORM",
+                "--require-ota", "--expect", "ota.update.bluetooth=dfu",
+                "--expect", "ota.update.lora=invalid in-place patch geometry", artifacts=artifacts)
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(manifest["ota_update_verified"])
+            self.assertNotIn("ota.update.lora", manifest["capabilities"])
+
+    def test_nrf52_lora_reports_storage_specific_requirements(self):
+        for flags, storage, types in [(16, "internal_flash_and_retained_ram", ["in_place_delta"]),
+                                      (0, "internal_flash", ["in_place_delta"]),
+                                      (4, "external_qspi", ["full", "in_place_delta"]),
+                                      (1, "external_sd", ["full", "in_place_delta"])]:
+            result, manifest = self.run_checker(
+                b"dfu invalid in-place patch geometry", "--platform", "NRF52_PLATFORM",
+                "--require-ota", "--expect", "ota.update.bluetooth=dfu",
+                "--expect", "ota.update.lora=invalid in-place patch geometry", artifacts=self.nrf_dfu(flags))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(manifest["ota_update_methods"], ["bluetooth", "lora"])
+            details = manifest["ota_update_requirements"]["lora"]
+            self.assertEqual(details["storage"], storage)
+            self.assertEqual(details["package_types"], types)
+            self.assertTrue(details["bootloader_release"].endswith("0.11.0-OTAFIX2.4.6"))
+
+    def test_nrf52_full_companion_cannot_claim_lora_self_update(self):
+        result, manifest = self.run_checker(
+            b"invalid in-place patch geometry", "--platform", "NRF52_PLATFORM",
+            "--target", "RAK_4631_companion_radio_full", "--require-ota",
+            "--expect", "ota.update.lora=invalid in-place patch geometry", artifacts=self.nrf_dfu())
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(manifest["ota_update_methods"], [])
 
 
 if __name__ == "__main__":

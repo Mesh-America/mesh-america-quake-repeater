@@ -11,6 +11,39 @@ import sys
 import struct
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "mota"))
+from motalib import parse_nrf52_layout
+
+
+def nrf52_lora_details(application):
+    """Inspect application bytes, not just an ELF symbol or an OTA CLI stub."""
+    if b"invalid in-place patch geometry" not in application or b"OTA: status" not in application:
+        raise ValueError("nRF52 LoRa OTA receiver/apply implementation is missing")
+    layout = parse_nrf52_layout(application)
+    if layout is None:
+        raise ValueError("nRF52 LoRa OTA requires a valid EndF and storage-layout record")
+    if len(application) > layout.linked_app_end - layout.app_base:
+        raise ValueError("nRF52 LoRa OTA application exceeds its linked flash region")
+    storage = ("external_qspi" if layout.qspi_backed else "external_sd" if layout.sd_backed
+               else "internal_flash_and_retained_ram" if layout.hybrid_ram else "internal_flash")
+    notes = ["Use a destination-specific .mota package matching the board, target, and storage layout.",
+             "An in-place delta requires the exact firmware currently running as its base.",
+             "The package must fit the receiver's staging and apply workspace.",
+             "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device."]
+    if layout.hybrid_ram:
+        notes.append("Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts.")
+    elif layout.external_backed:
+        notes.append("Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader.")
+    else:
+        notes.append("Internal storage accepts in-place application deltas, not full application packages.")
+    return {
+        "storage": storage,
+        "package_types": ["full", "in_place_delta"] if layout.external_backed else ["in_place_delta"],
+        "bootloader": "Matching board/storage OTAFIX bootloader",
+        "bootloader_release": "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6",
+        "notes": notes,
+    }
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -69,17 +102,27 @@ def verify_ota_artifacts(args, methods):
             if image_size <= 0 or any(image_size > size for _, size in ordered):
                 return False, "ESP32 firmware does not fit both OTA application slots"
             return True, "firmware fits both OTA application slots; otadata present"
-        if args.platform == "NRF52_PLATFORM" and "bluetooth" in methods:
+        if args.platform == "NRF52_PLATFORM" and set(methods) <= {"bluetooth", "lora"}:
             if args.dfu_package is None:
-                return False, "Bluetooth DFU requires its application ZIP"
+                return False, "nRF52 OTA verification requires its application DFU ZIP"
             with zipfile.ZipFile(args.dfu_package) as package:
                 manifest = json.loads(package.read("manifest.json"))["manifest"]
                 application = manifest["application"]
-                if not package.read(application["bin_file"]) or not package.read(application["dat_file"]):
+                image = package.read(application["bin_file"])
+                if not image or not package.read(application["dat_file"]):
                     return False, "Bluetooth DFU application ZIP is empty"
                 if package.testzip() is not None:
                     return False, "Bluetooth DFU application ZIP is corrupt"
-            return True, "application DFU ZIP verified; matching BLE DFU bootloader required"
+            evidence = []
+            if "bluetooth" in methods:
+                evidence.append("application DFU ZIP verified; matching BLE DFU bootloader required")
+            if "lora" in methods:
+                if "companion" in args.target.lower() or "comp_radio" in args.target.lower():
+                    return False, "Companion MOTA sending does not qualify as LoRa self-update"
+                details = nrf52_lora_details(image)
+                evidence.append("LoRa mOTA receiver/apply code and EndF storage layout verified: " + details["storage"] +
+                                "; matching board/storage OTAFIX bootloader and compatible destination package required")
+            return True, "; ".join(evidence)
     except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
         return False, str(exc)
     return False, "no qualified wireless update artifact for this platform"
@@ -140,6 +183,10 @@ def main() -> int:
         "ota_update_evidence": ota_evidence,
         "verified": not malformed and not missing and (not args.require_ota or ota_verified),
     }
+    if ota_verified and args.platform == "NRF52_PLATFORM" and "lora" in ota_methods:
+        with zipfile.ZipFile(args.dfu_package) as package:
+            app = json.loads(package.read("manifest.json"))["manifest"]["application"]
+            manifest["ota_update_requirements"] = {"lora": nrf52_lora_details(package.read(app["bin_file"]))}
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(f".{args.output.name}.{os.getpid()}.tmp")

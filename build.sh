@@ -2878,6 +2878,11 @@ declare_build_capability_contract() {
   if [ "$env_platform" = "NRF52_PLATFORM" ] && ! is_kiss_modem_target "$env_name"; then
     # Prove the real DFU service is linked, not merely a generic OTA CLI stub.
     record_build_expectation "ota.update.bluetooth" "_ZN6BLEDfu5beginEv"
+    if is_lora_ota_build "$env_name" && ! is_companion_build "$env_name"; then
+      # nRF52 applies mOTA in its bootloader, so the ESP32 decoder marker is
+      # absent. The checker also verifies the packaged app's EndF/storage layout.
+      record_build_expectation "ota.update.lora" "invalid in-place patch geometry"
+    fi
   fi
 
   if [ "$env_platform" = "ESP32_PLATFORM" ]; then

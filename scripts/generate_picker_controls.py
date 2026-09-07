@@ -56,6 +56,8 @@ def generate(stage, config):
                 'snmp': enabled('WITH_SNMP'),
                 'updateMethods': manifest.get('ota_update_methods', []),
             }
+            if manifest.get('ota_update_requirements'):
+                controls['updateRequirements'] = manifest['ota_update_requirements']
             for name in manifest['files']:
                 if not name.endswith(('.bin', '.uf2', '.zip', '.hex')):
                     continue

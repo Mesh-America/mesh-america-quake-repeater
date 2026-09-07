@@ -1087,6 +1087,8 @@ for rak_target in \
   BUILD_EXPECTATIONS=()
   declare_build_capability_contract "$rak_target" NRF52_PLATFORM
   expectations=" ${BUILD_EXPECTATIONS[*]} "
+  [[ "$expectations" == *"ota.update.lora=invalid in-place patch geometry"* ]] \
+    || fail "$rak_target OTA contract omitted LoRa self-update"
   [[ "$expectations" == *"sensor.gps=meshcore.capability.rak_wisblock_gps.v1"* ]] \
     || fail "$rak_target reduced OTA contract omitted retained GPS"
   [[ "$expectations" != *"sensor.gps=gps setloc"* ]] \
