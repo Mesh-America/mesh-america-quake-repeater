@@ -103,6 +103,17 @@ int MomentaryButton::check(bool repeat_click) {
   const int raw_btn =
       _threshold > 0 ? (analogRead(_pin) < _threshold) : digitalRead(_pin);
 
+#if MOMENTARY_BUTTON_WAKE_HOLD_MS > 0
+  // Keep the main loop awake after button activity, including when a press
+  // starts at millis zero or spans rollover. Holding/repressing extends it.
+  if (isPressed(raw_btn)) {
+    _last_pressed_at = now;
+    _wake_hold_active = true;
+  } else if (_wake_hold_active && !isWakeHoldActive()) {
+    _wake_hold_active = false;
+  }
+#endif
+
   // Treat prev as the stable electrical level. A raw transition must remain
   // unchanged for a short interval before it can alter gesture state. Without
   // this, one physical release can be counted two or three times and a short

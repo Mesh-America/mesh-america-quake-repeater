@@ -8,6 +8,10 @@
 #define BUTTON_EVENT_DOUBLE_CLICK 3
 #define BUTTON_EVENT_TRIPLE_CLICK 4
 
+#ifndef MOMENTARY_BUTTON_WAKE_HOLD_MS
+#define MOMENTARY_BUTTON_WAKE_HOLD_MS 0
+#endif
+
 class MomentaryButton {
   int8_t _pin;
   int8_t prev, cancel;
@@ -23,6 +27,10 @@ class MomentaryButton {
   int8_t _candidate_level;
   uint32_t _candidate_since;
   bool _debouncing;
+#if MOMENTARY_BUTTON_WAKE_HOLD_MS > 0
+  uint32_t _last_pressed_at = 0;
+  bool _wake_hold_active = false;
+#endif
 
   bool isPressed(int level) const;
 
@@ -34,7 +42,15 @@ public:
   void cancelClick();  // suppress next BUTTON_EVENT_CLICK (if already in DOWN state)
   uint8_t getPin() { return _pin; }
   bool isPressed() const;
+  bool isWakeHoldActive() const {
+#if MOMENTARY_BUTTON_WAKE_HOLD_MS > 0
+    return _wake_hold_active
+        && (uint32_t)(millis() - _last_pressed_at) < MOMENTARY_BUTTON_WAKE_HOLD_MS;
+#else
+    return false;
+#endif
+  }
   bool needsPolling() const {
-    return _debouncing || _press_active || _pending_click;
+    return _debouncing || _press_active || _pending_click || isWakeHoldActive();
   }
 };

@@ -165,6 +165,15 @@ Infrastructure `set usb.logging` has **no `reboot` suffix**, including nRF52.
 `log start/stop` records to storage independently of live USB logging. Use
 `log erase` to delete that capture.
 
+With the [G3 sleep correction](releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled),
+enabled live USB logging keeps ESP32 USB serviced and blocks light sleep,
+including when a host closes the port or disconnects. CPU idle/yield remains
+available. `set usb.logging off` removes that blocker; an attached native USB
+host still prevents sleep. On Full infrastructure, `set logging.output usb`
+and `both` enable the same USB blocker; `wifi` and `off` remove it. File capture
+with `log start` is independent. The original 1.17.1.5 binaries require the
+`powersaving off` workaround described in the release note.
+
 ### Infrastructure MQTT and logging output
 
 **Search terms:** MQTT settings, MQTT on, MQTT off, logging output, USB and WiFi logging.

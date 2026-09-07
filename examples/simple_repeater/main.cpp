@@ -368,9 +368,9 @@ void loop() {
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP \
     && defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
-  // Do not strand a stable-level debounce or multi-click deadline in the raw
-  // nRF52 event wait. The GPIO edge wakes the first poll; this gate lets the
-  // remaining 25/280 ms state-machine interval finish.
+  // GPIO wake starts the first poll. Keep debounce and multi-click deadlines
+  // awake too, so a release cannot strand the remaining 25/280 ms interval.
+  // The G3 also retains its two-minute button wake interval here.
   can_power_save = can_power_save && !user_btn.needsPolling();
 #endif
   if (can_power_save) {
@@ -388,6 +388,12 @@ void loop() {
     }
 #endif
   }
+
+#if defined(ESP32_PLATFORM)
+  if (!can_power_save && the_mesh.getNodePrefs()->powersaving_enabled) {
+    delay(1); // Idle without suspending USB or the button wake interval.
+  }
+#endif
 
   if (the_mesh.getNodePrefs()->reboot_interval > 0 &&
       the_mesh.millisHasNowPassed(the_mesh.getNodePrefs()->reboot_interval * 3600000)) {

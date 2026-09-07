@@ -135,6 +135,9 @@ void UITask::loop() {
 
       _next_refresh = millis() + 1000;   // refresh every second
     }
+#if MOMENTARY_BUTTON_WAKE_HOLD_MS > 0 && defined(PIN_USER_BTN)
+    if (user_btn.isWakeHoldActive()) _auto_off = millis() + AUTO_OFF_MILLIS;
+#endif
     if (millis() > _auto_off) {
       _display->turnOff();
     }

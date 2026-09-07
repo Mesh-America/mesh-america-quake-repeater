@@ -2461,10 +2461,14 @@ void loop() {
   serviceCompanionPowerSaving();
 #endif
 
-  // USB power alone (for example, a wall charger) must not disable power
-  // saving. Stay awake only while an enumerated USB host is attached.
+  // USB power alone (for example, a wall charger) does not inhibit sleep.
+  // Host sessions, live logging, and button activity still need service.
   bool can_sleep = the_mesh.getNodePrefs()->powersaving_enabled
       && !the_mesh.hasPendingWork();
+#if defined(ESP32_PLATFORM) && MESH_USB_LOGGING_AVAILABLE
+  // The native-USB-only light-sleep path below bypasses ESP32Board::sleep.
+  can_sleep = can_sleep && !mesh::isUsbLoggingEnabled();
+#endif
 #if defined(NRF52_PLATFORM) \
     || (defined(ESP32_PLATFORM) && defined(ENABLE_USB_INTERFACE))
   can_sleep = can_sleep && !board.isUsbHostConnected();
@@ -2472,9 +2476,9 @@ void loop() {
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP \
     && defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
-  // GPIO edges wake the nRF52 poller, but multi-click and long-press results
-  // are due after a time interval rather than another edge. Stay awake only
-  // while that small gesture state machine has a pending deadline.
+  // GPIO wake starts the poller, but multi-click and long-press results
+  // are due after a time interval rather than another edge. The G3 also
+  // retains a two-minute wake interval after button activity.
   can_sleep = can_sleep && !user_btn.needsPolling();
 #endif
   if (can_sleep) {
@@ -2506,6 +2510,11 @@ void loop() {
     board.sleep(0); // event-driven idle; interrupts wake the main loop
 #endif
   }
+#if defined(ESP32_PLATFORM)
+  else if (the_mesh.getNodePrefs()->powersaving_enabled) {
+    delay(1); // CPU idle remains available while USB/logging/button holds are active.
+  }
+#endif
 
 #if defined(ESP32) && defined(WIFI_SSID)
   #ifdef WITH_WEBCONFIG

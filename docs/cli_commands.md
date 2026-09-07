@@ -1562,6 +1562,16 @@ enable command. USB power alone does not block a remote enable request.
 The separate `set powersaving on` form saves/applies the preference without
 those guards; it is also the form used by infrastructure WebConfig.
 
+For the **1.17.1.5 G3 USB-disconnect report**, use `powersaving off` as the
+workaround. The released ESP32 sleep code can lose native USB after two
+minutes when the terminal is closed, even with a computer attached. The
+source fix blocks ESP32 light sleep while a native USB host is attached or
+live USB logging is enabled; ordinary CPU idle/yield remains available.
+The G3 button also wakes the device for at least two minutes. See the
+[G3 release note](releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled)
+for verification steps and the distinction between the fix and the published
+binaries.
+
 Companion firmware defaults this setting to `on`. Full Companion accepts the command from its local USB terminal and exposes the same setting in WebConfig. On ESP32, it lowers the CPU clock to 80 MHz, enables idle yielding, and enables the configured GPS duty cycle. USB and each active wireless transport remain available; SenseCAP Indicator Full keeps only its selected BLE or infrastructure-WiFi secondary transport active. `powersaving off` restores the board's normal CPU clock and disables the GPS duty cycle. This device setting is separate from LoRa RXPS (`radio.rxps`) and WiFi modem power save (`wifi.powersave`). Infrastructure WebConfig uses the `set powersaving` form; enabling it can put the node to sleep and make WiFi temporarily unavailable.
 
 ---

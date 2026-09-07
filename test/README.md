@@ -29,6 +29,7 @@ python3 test/test_regular_file_reads.py         # SPIFFS phantom directories, li
 python3 test/test_esp32_full_partition.py       # Full partition-preservation policy
 python3 test/test_esp32_dram.py                 # Classic ESP32 static limits and cached-image build gates
 python3 test/test_esp32_usb_serial_hygiene.py   # Single-TTY diagnostics/NVS contract
+python3 test/test_esp32_usb_sleep.py            # USB/logging sleep guards, G3 button wake and two-minute hold/rollover
 python3 test/test_esp32_tinyusb_role_hygiene.py # G2/room USB write coverage and bounded-list contracts
 python3 test/test_esp32_tinyusb_cooperative_output.py # Real role dump/list pumps with host C++ stubs
 python3 test/test_esp32_tinyusb_nonblocking.py # Native CDC stalled-host/64-byte-FIFO simulation (C++17 compiler)

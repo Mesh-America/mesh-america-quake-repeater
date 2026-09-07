@@ -506,6 +506,9 @@ void UITask::loop() {
     // `_auto_off` is only armed on activity, so a timeout changed at runtime has
     // to restart the countdown here - otherwise 0 -> 60 blanks instantly off a
     // boot-time deadline, and 60 -> 3600 still blanks at the old 60 s mark.
+#if MOMENTARY_BUTTON_WAKE_HOLD_MS > 0 && defined(PIN_USER_BTN)
+    if (user_btn.isWakeHoldActive()) _auto_off = millis() + timeout;
+#endif
     if (_powering_off_at == 0 && timeout > 0 && millisReached(millis(), _auto_off)) {
       _display->turnOff();
 #ifdef DISPLAY_REDRAW_ON_CHANGE

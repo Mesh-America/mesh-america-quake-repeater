@@ -59,7 +59,8 @@ class T096ButtonWakeProfileTest(unittest.TestCase):
         sensor_main = SENSOR_MAIN.read_text(encoding="utf-8")
 
         self.assertIn(
-            "return _debouncing || _press_active || _pending_click;", header
+            "return _debouncing || _press_active || _pending_click || isWakeHoldActive();",
+            header,
         )
         self.assertIn("defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP)", main)
         self.assertIn("!user_btn.needsPolling()", main)

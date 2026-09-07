@@ -384,7 +384,7 @@ void UITask::loop() {
     && defined(DISPLAY_CLASS) \
     && defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP
-  // Event-driven nRF52 targets must use the shared debounced button state
+  // Sleep-capable targets must use the shared debounced button state
   // machine. Raw 200 ms polling can go back to sleep after the GPIO edge and
   // miss both a short press and its release.
   int ev = user_btn.check();
@@ -506,6 +506,9 @@ void UITask::loop() {
     // `_auto_off` is only armed on activity, so a timeout changed at runtime has
     // to restart the countdown here - otherwise 0 -> 60 blanks instantly off a
     // boot-time deadline, and 60 -> 3600 still blanks at the old 60 s mark.
+#if MOMENTARY_BUTTON_WAKE_HOLD_MS > 0 && defined(PIN_USER_BTN)
+    if (user_btn.isWakeHoldActive()) _auto_off = millis() + timeout;
+#endif
 #ifdef DISPLAY_TOUCH_TOGGLE
     if (_powering_off_at == 0 && timeout > 0 && millisReached(millis(), _auto_off)) {
 #else

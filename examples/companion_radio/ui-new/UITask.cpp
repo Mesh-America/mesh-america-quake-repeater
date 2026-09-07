@@ -1955,6 +1955,9 @@ void UITask::loop() {
       _auto_off = millis() + AUTO_OFF_MILLIS;
     }
 #endif
+#if MOMENTARY_BUTTON_WAKE_HOLD_MS > 0 && defined(PIN_USER_BTN)
+    if (user_btn.isWakeHoldActive()) _auto_off = millis() + AUTO_OFF_MILLIS;
+#endif
     if (!isPairingScreenActive() && isDisplayAutoOffDue(_auto_off, AUTO_OFF_MILLIS)) {
       _display->turnOff();
     }

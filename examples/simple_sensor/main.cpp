@@ -226,4 +226,9 @@ void loop() {
     }
 #endif
   }
+#if defined(ESP32_PLATFORM)
+  if (!can_power_save && the_mesh.getNodePrefs()->powersaving_enabled) {
+    delay(1); // Keep USB and the button wake interval serviced while idle.
+  }
+#endif
 }

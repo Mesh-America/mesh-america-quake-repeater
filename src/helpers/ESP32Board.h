@@ -16,6 +16,7 @@
 #include "esp_system.h"
 #include <driver/rtc_io.h>
 #include "ESP32TrueRandom.h"
+#include "UsbLogging.h"
 
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT && \
     (!defined(ARDUINO_USB_MODE) || !ARDUINO_USB_MODE)
@@ -99,9 +100,17 @@ public:
   }
 
   void sleep(uint32_t secs) override {
-    // Skip if not allow to sleep
-    if (inhibit_sleep) {
-      delay(1); // Give MCU to OTA to run
+    // Native USB loses its connection in light sleep. An enumerated host
+    // still needs USB serviced when no terminal asserts CDC DTR (for example,
+    // after a Pi closes its serial port). Guard every caller here.
+    bool keep_awake = inhibit_sleep || isUsbHostConnected();
+#if MESH_USB_LOGGING_AVAILABLE
+    // A live logging stream must also remain available before a host opens
+    // it and across host disconnects. Compiled-out logging is not a blocker.
+    keep_awake = keep_awake || mesh::isUsbLoggingEnabled();
+#endif
+    if (keep_awake) {
+      delay(1); // Keep USB and OTA tasks running.
       return;
     }
 
@@ -110,8 +119,15 @@ public:
       esp_sleep_enable_timer_wakeup(secs * 1000000ULL); // Wake up periodically to do scheduled jobs
     }
 
-    uint32_t irqGpio = getIRQGpio();
-    if (irqGpio == static_cast<uint32_t>(-1)) {
+    const uint32_t irqGpio = getIRQGpio();
+    const bool radio_wakeup = irqGpio != static_cast<uint32_t>(-1);
+#if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
+    && MOMENTARY_BUTTON_WAKE_FROM_SLEEP && defined(PIN_USER_BTN)
+    const int button_gpio = PIN_USER_BTN;
+#else
+    const int button_gpio = -1;
+#endif
+    if (!radio_wakeup && button_gpio < 0) {
       if (secs > 0) {
         esp_light_sleep_start();
       }
@@ -124,8 +140,10 @@ public:
     // Disable CPU interrupt servicing
     portENTER_CRITICAL(&sleepMux);
 
-    // Skip sleep if there is a LoRa packet
-    if (gpio_get_level(wakeupPin) == HIGH) {
+    // Do not sleep over a pending packet or a press that needs polling.
+    if ((radio_wakeup && gpio_get_level(wakeupPin) == HIGH)
+        || (button_gpio >= 0
+            && gpio_get_level((gpio_num_t)button_gpio) == USER_BTN_PRESSED)) {
       portEXIT_CRITICAL(&sleepMux);
       delay(1);
       return;
@@ -133,14 +151,27 @@ public:
 
     // Configure GPIO wakeup
     esp_sleep_enable_gpio_wakeup();
-    gpio_wakeup_enable((gpio_num_t)wakeupPin, GPIO_INTR_HIGH_LEVEL); // Wake up when receiving a LoRa packet
+    if (radio_wakeup) {
+      gpio_wakeup_enable(wakeupPin, GPIO_INTR_HIGH_LEVEL);
+    }
+    if (button_gpio >= 0) {
+      gpio_wakeup_enable((gpio_num_t)button_gpio,
+          USER_BTN_PRESSED == LOW ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
+    }
 
     // MCU enters light sleep
     esp_light_sleep_start();
 
     // Avoid ISR flood during wakeup due to HIGH LEVEL interrupt
-    gpio_wakeup_disable(wakeupPin);
-    gpio_set_intr_type(wakeupPin, GPIO_INTR_POSEDGE);
+    if (radio_wakeup) {
+      gpio_wakeup_disable(wakeupPin);
+      gpio_set_intr_type(wakeupPin, GPIO_INTR_POSEDGE);
+    }
+    if (button_gpio >= 0) {
+      gpio_wakeup_disable((gpio_num_t)button_gpio);
+      // ESP32 MomentaryButton polls; only its sleep wake source is temporary.
+      gpio_set_intr_type((gpio_num_t)button_gpio, GPIO_INTR_DISABLE);
+    }
 
     // Enable CPU interrupt servicing
     portEXIT_CRITICAL(&sleepMux);
