@@ -255,7 +255,8 @@ restores the board default, so a separate rotated release image is not
 recommended.
 
 Ordinary non-OTA roles also use one artifact for normal operation and USB
-logging. Select the saved mode with `set usb.logging off|on`; no `-logging-`
+logging. On ESP32 1.17.1.5, run `powersaving off` before `set usb.logging on`.
+Select the saved mode with `set usb.logging off|on`; no `-logging-`
 artifact is emitted. KISS, BLE-only Companion, and constrained LoRa OTA
 repeater images retain their protocol/partition contracts and do not inherit
 plaintext USB logging.
@@ -265,8 +266,15 @@ as an ASCII terminal and automatically hands a complete `<` frame to Binary
 Companion. `set usb.logging on reboot` adds its plaintext interface `02`.
 
 Every ESP32 Full Companion instead exposes one USB TTY. Logging is off by
-default, so the TTY serves the ASCII/Binary Companion switcher. Use
-`set usb.logging on` to turn that same TTY into an input-capable plaintext
+default, so the TTY serves the ASCII/Binary Companion switcher. On 1.17.1.5,
+run these two text commands to enable USB logging:
+
+```text
+powersaving off
+set usb.logging on
+```
+
+The second command turns that same TTY into an input-capable plaintext
 CLI/logging stream; framed Binary Companion is unavailable on USB while
 logging owns it. `set usb.logging off` stops the logs and leaves the TTY in
 the normal ASCII terminal, matching a fresh Full installation. Send
@@ -276,6 +284,12 @@ while the USB TTY is logging. ESP32 Full builds use the repository's
 Arduino-ESP32 2.x base where the board supports it; RC32 and ESP32-C6 retain
 their board-required Arduino 3.x platform but still expose only one USB TTY.
 A second ESP32 CDC interface is not part of the release profile.
+
+The picker includes the power-saving workaround when selecting **USB** or
+**USB + WiFi** logging on ESP32 1.17.1.5. WiFi/MQTT-only logging does not need
+it while the Repeater/Room Server bridge is running; check `get bridge.running`.
+The workaround is not added to nRF52 directions. See [logging by role](role_feature_switches.md)
+for the saved settings and the original firmware's USB sleep issue.
 
 ## Installation methods
 

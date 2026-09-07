@@ -750,6 +750,19 @@ set usb.logging on reboot
 set usb.logging off reboot
 ```
 
+**ESP32 1.17.1.5 USB logging procedure:** disable device sleep before enabling
+the log stream, using separate text commands:
+
+```text
+powersaving off
+set usb.logging on
+```
+
+Verify with `powersaving` (expect `off`) and `get usb.logging` (expect `on`).
+Both settings are saved; disabling logging later does not restore power
+saving. This works around the [released USB sleep bug](releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled).
+nRF52 does not need this ESP32 workaround.
+
 These commands are compiled into ordinary USB-loggable artifacts and every
 Full Companion. They control live USB debug and packet output. CommonCLI roles
 save the setting in `/com_prefs`, so it survives reboot; their first boot
@@ -772,7 +785,7 @@ required when the USB interface count must change. The exact
 choice, send their reply, and reboot one second later only when needed.
 
 On every ESP32 Full Companion, enter the USB text terminal and use
-`set usb.logging on` to turn that TTY into a logging-repeater-style plaintext
+`set usb.logging on` (preceded by `powersaving off` on 1.17.1.5) to turn that TTY into a logging-repeater-style plaintext
 stream. Framed Binary Companion is unavailable on USB while logging is on. The
 TTY remains an input-capable CLI, so `set usb.logging off` works on the same
 TTY. After its reply, logging stops and the TTY remains in the normal ASCII
@@ -805,6 +818,13 @@ meshcoretomqtt. `wifi` enables the direct MQTT bridge configured by the
 stream to both consumers; do not point both consumers at the same broker unless
 the downstream setup deduplicates messages. Fresh unified FULL installs start
 in `both` mode.
+
+On **1.17.1.5 ESP32**, run `powersaving off` before selecting
+`set logging.output usb` or `set logging.output both`, since those modes
+enable USB logging. **WiFi/MQTT-only logging does not need this workaround
+while the Repeater/Room Server MQTT bridge is running**; the released code
+already blocks device sleep in that state. Check `get bridge.running`, not
+only `get bridge.enabled`. WiFi modem power saving is a separate setting.
 
 ### Begin capture of rx log to node storage
 

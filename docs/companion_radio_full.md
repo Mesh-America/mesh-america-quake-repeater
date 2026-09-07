@@ -436,8 +436,16 @@ logging off on a fresh installation.
 Every ESP32 Full Companion exposes one USB TTY with two exclusive modes. It
 starts as the ASCII terminal unless a saved logging-on preference boots
 directly into the logging terminal. If it is already binary, enter its text
-terminal with `+++MESHCORE-TERM-START`, then run `set usb.logging on`; the same
-TTY emits plaintext packet/debug logs and continues accepting CLI commands,
+terminal with `+++MESHCORE-TERM-START`. For an ESP32 1.17.1.5 USB logging session,
+run these separate commands:
+
+```text
+powersaving off
+set usb.logging on
+```
+
+The first command is the release's USB power-saving workaround. The same
+TTY then emits plaintext packet/debug logs and continues accepting CLI commands,
 including `set usb.logging off`. Framed Binary Companion is unavailable on USB
 while logging owns the TTY. Turning logging off sends the command reply, stops
 the logs, and leaves that TTY in the normal ASCII terminal, matching a fresh

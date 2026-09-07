@@ -657,6 +657,7 @@
         profile = Object.assign(parseTargetProfile(file.target), {
           files: [],
           otaPackaged: false,
+          releaseFamily: releaseSet.familyTag,
         });
         grouped.set(file.target, profile);
       }
@@ -939,6 +940,11 @@
     });
   }
 
+  function needsUsbLoggingSleepWorkaround(profile) {
+    return profile.chipFamily === "esp32" &&
+      profile.releaseFamily === "v1.17.1.5-halo-keymind-cascade-dev-26303793";
+  }
+
   function installSteps(profile, kind) {
     const common = [
       "Verify that the hardware name and every displayed variant match the physical board.",
@@ -1014,6 +1020,10 @@
         );
       }
     }
+    if (needsUsbLoggingSleepWorkaround(profile) &&
+        (profile.logging === "runtime" || profile.logging === "usb-runtime")) {
+      extra.push("1.17.1.5 ESP32 USB logging: run powersaving off before enabling USB logs. This saved workaround also applies to USB + WiFi logging; WiFi-only logging does not need the USB step.");
+    }
     return common.concat(byKind[kind] || [], extra);
   }
 
@@ -1045,6 +1055,9 @@
           ? ["set logging.output " + (mode === "none" ? "off" : mode), "get logging.output"]
           : ["set usb.logging " + (enabled ? "on" : "off") +
               (profile.dedicatedUsbLogging ? " reboot" : "")];
+        if (enabled && needsUsbLoggingSleepWorkaround(profile)) {
+          commands.unshift("powersaving off");
+        }
         return {
           label: LOGGING_LABELS[mode], commands: commands,
           text: full && info && info.mqtt
@@ -1054,11 +1067,17 @@
             : "",
         };
       });
-      section("Restore the selected logging mode", actions,
-        full ? (profile.dedicatedUsbLogging
+      let loggingNote = full ? (profile.dedicatedUsbLogging
           ? "Reboot adds/removes the second logging port. Keep Companion/MOTA on primary interface 00."
           : "USB logs and binary Companion share one port. Turn logging off, send +++MESHCORE-TERM-STOP, and close the console before connecting the app or MOTA host.")
-          : "Saved settings survive updates. These commands restore your selected output mode; downloading alone does not change it.");
+          : "Saved settings survive updates. These commands restore your selected output mode; downloading alone does not change it.";
+      if (needsUsbLoggingSleepWorkaround(profile)) {
+        loggingNote += " For 1.17.1.5 USB logging, powersaving off prevents the released USB sleep problem. Turning logging off does not restore power saving.";
+        if (infrastructure && profile.logging === "runtime") {
+          loggingNote += " WiFi-only MQTT already blocks sleep while the bridge is running; check get bridge.running.";
+        }
+      }
+      section("Restore the selected logging mode", actions, loggingNote);
     }
     if (!info) return sections;
     if (full || infrastructure) {

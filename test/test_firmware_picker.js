@@ -877,6 +877,7 @@ const controlledReleases = [release(liveFamily, '2026-09-01T00:00:00Z', [
   asset('heltec_v4_repeater_observer_mqtt-full-usb-wifi-ota-' + liveFamily + '.bin'),
 ]), release('repeater-room-' + liveFamily, '2026-09-01T00:00:00Z', [
   asset('RAK_4631_repeater-' + liveFamily + '.uf2'),
+  asset('Station_G3_ESP32_repeater-' + liveFamily + '.bin'),
 ])];
 const controlled = picker.buildCatalog(controlledReleases, controls);
 const findControlled = name => controlled.profiles.find(p => p.target === name);
@@ -885,10 +886,24 @@ const observer = findControlled('heltec_v4_repeater_observer_mqtt-full-usb-wifi'
 for (const mode of ['none', 'usb', 'wifi', 'both']) {
   const directions = picker.runtimeDirections(observer, {logging: mode});
   assert.deepStrictEqual(directions[0].actions[0].commands,
-    ['set logging.output ' + (mode === 'none' ? 'off' : mode), 'get logging.output']);
+    (mode === 'usb' || mode === 'both' ? ['powersaving off'] : []).concat(
+      ['set logging.output ' + (mode === 'none' ? 'off' : mode), 'get logging.output']));
 }
 const mqttCompanion = findControlled('heltec_v4_2_v4_3_companion_radio_full_femon');
 assert.deepStrictEqual(mqttCompanion.loggingModes, ['none', 'usb', 'wifi', 'both']);
+for (const mode of ['usb', 'both']) {
+  assert.deepStrictEqual(picker.runtimeDirections(mqttCompanion, {logging: mode})[0].actions[0].commands,
+    ['powersaving off', 'set usb.logging on']);
+}
+assert(picker.installSteps(mqttCompanion, 'bin').some(step => step.includes('powersaving off')));
+// The workaround belongs to the affected release, not every future ESP32 build.
+for (const releaseFamily of ['v1.17.1.4-old', 'v1.17.1.5-halo-keymind-cascade-dev-newfix',
+                             'v1.17.1.6-next', 'v1.17.1.50-next', '']) {
+  const otherRelease = {...mqttCompanion, releaseFamily};
+  assert.deepStrictEqual(picker.runtimeDirections(otherRelease, {logging: 'usb'})[0].actions[0].commands,
+    ['set usb.logging on']);
+  assert(!picker.installSteps(otherRelease, 'bin').some(step => step.includes('powersaving off')));
+}
 const companionWifi = picker.runtimeDirections(mqttCompanion, {logging: 'wifi'});
 assert.deepStrictEqual(companionWifi[0].actions[0].commands, ['set usb.logging off']);
 assert(companionWifi[0].actions[0].text.includes('enable the desired MQTT'));
@@ -900,6 +915,11 @@ const nrf = findControlled('RAK_4631_companion_radio_full');
 assert.deepStrictEqual(picker.runtimeDirections(nrf, {logging: 'usb'})[0].actions[0].commands,
   ['set usb.logging on reboot']);
 const rakRepeater = findControlled('RAK_4631_repeater');
+const g3Repeater = findControlled('Station_G3_ESP32_repeater');
+assert.deepStrictEqual(picker.runtimeDirections(g3Repeater, {logging: 'usb'})[0].actions[0].commands,
+  ['powersaving off', 'set usb.logging on']);
+assert.deepStrictEqual(picker.runtimeDirections(g3Repeater, {logging: 'none'})[0].actions[0].commands,
+  ['set usb.logging off']);
 const rakCommands = picker.runtimeDirections(rakRepeater, {logging: 'usb', mode: 'standard'});
 assert.deepStrictEqual(rakCommands[0].actions[0].commands, ['set usb.logging on']);
 assert.strictEqual(rakCommands.find(s => s.title.startsWith('RS232')).actions[0].label, 'Off');

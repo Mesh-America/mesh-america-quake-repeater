@@ -75,7 +75,7 @@ Full Companion MQTT switches.
 | Radio RX boost | `set radio.rxgain on` | `set radio.rxgain off` | `get radio.rxgain` |
 | External FEM RX gain | `set radio.fem.rxgain on` | `set radio.fem.rxgain off` | `get radio.fem.rxgain` |
 | External FEM TX gain | `set radio.fem.txgain on` | `set radio.fem.txgain off` | `get radio.fem.txgain` |
-| ESP32 USB logging | `set usb.logging on` | `set usb.logging off` | `get usb.logging` |
+| ESP32 USB logging | `powersaving off`, then `set usb.logging on` | `set usb.logging off` | `powersaving`, `get usb.logging` |
 | nRF52 second USB logging port | `set usb.logging on reboot` | `set usb.logging off reboot` | `get usb.logging` |
 | ESP32 persistent WebConfig | `set webui on` | `set webui off` | `get webui` |
 | ESP32 temporary setup AP | `start webconfig ap` | `stop webconfig` | `get webui` |
@@ -145,7 +145,7 @@ from some portable builds. The USB browser console still works without it.
 
 | Setting | Enable | Disable | Read back |
 | --- | --- | --- | --- |
-| Live USB logging | `set usb.logging on` | `set usb.logging off` | `get usb.logging` |
+| Live USB logging | ESP32 1.17.1.5: `powersaving off`, then `set usb.logging on`; other platforms: `set usb.logging on` | `set usb.logging off` | `powersaving`, `get usb.logging` |
 | Capture RX log to node storage | `log start` | `log stop` | `log` prints the capture locally |
 | MQTT / RS232 / ESP-NOW bridge master | `set bridge.enabled on` | `set bridge.enabled off` | `get bridge.enabled`, `get bridge.running`, `get bridge.type` |
 | MQTT periodic status publication | `set mqtt.status on` | `set mqtt.status off` | `get mqtt.status` shows connection status |
@@ -165,6 +165,21 @@ Infrastructure `set usb.logging` has **no `reboot` suffix**, including nRF52.
 `log start/stop` records to storage independently of live USB logging. Use
 `log erase` to delete that capture.
 
+For **ESP32 1.17.1.5 USB logging**, run these as separate commands in the
+role's text terminal (or remote admin CLI on infrastructure):
+
+```text
+powersaving off
+set usb.logging on
+powersaving
+get usb.logging
+```
+
+Check for power saving `off` and USB logging `on`. This avoids the released
+ESP32 USB sleep bug, including the G3 report. Both settings are saved; turning
+logging off later does not automatically restore power saving. LoRa RXPS is
+independent. nRF52 logging does not need this ESP32 workaround.
+
 With the [G3 sleep correction](releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled),
 enabled live USB logging keeps ESP32 USB serviced and blocks light sleep,
 including when a host closes the port or disconnects. CPU idle/yield remains
@@ -183,15 +198,22 @@ On unified Full infrastructure with both MQTT and USB logging compiled:
 | Command | USB logs | MQTT bridge |
 | --- | --- | --- |
 | `set logging.output off` | Off | Off |
-| `set logging.output usb` | On | Off |
+| `powersaving off`, then `set logging.output usb` | On | Off |
 | `set logging.output wifi` | Off | On |
-| `set logging.output both` | On | On |
+| `powersaving off`, then `set logging.output both` | On | On |
 
 `get logging.output` reports the selection. Fresh unified Full preferences
 select `both`; saved settings override this. To toggle only MQTT while keeping
 USB logging unchanged, use `set bridge.enabled off` / `on`. Neither setting
 turns LoRa repeating off. Repeater forwarding uses `set repeat off` / `on`
 and `get repeat` separately.
+
+The `powersaving off` step above is the **1.17.1.5 ESP32 USB workaround**.
+**WiFi/MQTT-only logging does not need it while the Repeater/Room Server MQTT
+bridge is running:** that sleep guard already exists in the released firmware.
+Use `get bridge.running` to check that the bridge is running; an enabled
+preference alone is not the running state. `set logging.output wifi` keeps
+USB logging off and uses that MQTT guard.
 
 For a custom broker on an MQTT-capable Repeater or Room Server:
 

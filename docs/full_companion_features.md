@@ -36,7 +36,7 @@ editor does not necessarily forward them.
 | Radio chip RX boost | `set radio.rxgain on` | `set radio.rxgain off` | Immediately; saved; supported radios only |
 | External FEM RX boost | `set radio.fem.rxgain on` | `set radio.fem.rxgain off` | Immediately; saved; controllable FEM only |
 | External FEM TX gain | `set radio.fem.txgain on` | `set radio.fem.txgain off` | Immediately; saved; controllable PA only |
-| ESP32 USB packet/debug logging | `set usb.logging on` | `set usb.logging off` | Immediately; saved; logging owns the USB terminal |
+| ESP32 USB packet/debug logging | For 1.17.1.5: `powersaving off`, then `set usb.logging on` | `set usb.logging off` | Immediately; saved; logging owns the USB terminal |
 | nRF52 separate USB logging port | `set usb.logging on reboot` | `set usb.logging off reboot` | Saves and reboots to add/remove the second USB port |
 | ESP32 browser settings | `set webui on` | `set webui off` | Saved; starts/stops WebConfig |
 | ESP32 temporary setup portal | `start webconfig ap` | `stop webconfig` | This session; opens a setup network/QR where available |
@@ -47,6 +47,19 @@ Check a saved switch with the corresponding `get` command, for example
 `get usb.logging`, `get radio.rxps`, or `get webui`. Use `powersaving` to
 inspect device power saving. Fresh installations enable device power saving
 and leave USB logging off. Existing saved preferences take precedence.
+
+For an **ESP32 1.17.1.5 USB logging session**, use this sequence in the text
+terminal:
+
+```text
+powersaving off
+set usb.logging on
+```
+
+The power-saving step is the documented USB-session workaround for this
+release. It is saved separately; `set usb.logging off` does not restore power
+saving. nRF52 does not need the ESP32 workaround. WiFi-only MQTT logging does
+not need this USB step; see [logging by role](role_feature_switches.md).
 
 ESP32 logging and Binary Companion share one USB port. After turning logging
 off, return to Binary Companion with `+++MESHCORE-TERM-STOP`. nRF52 keeps its
