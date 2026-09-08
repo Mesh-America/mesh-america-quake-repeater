@@ -182,10 +182,40 @@ extra command-line option is needed.
 For an ESP32 full Companion, test its separate WiFi control console instead:
 
 ```bash
-printf 'ota status\r\n' | nc 192.168.1.50 5002
+./tools/lora_ota/lora_ota.sh --tcp-cli 192.168.1.50 "ota status"
 ```
 
 It must report `OTA seeder`, `install:disabled`, and target `00000000`.
+
+This standalone fallback uses Python's raw TCP socket directly. It works with
+`meshcli` versions whose `-r` mode rejects `-t`; it does not need `meshcli`,
+`motatool`, `nc`, or a firmware package. It defaults to text port 5002; port
+5000 speaks the binary Companion protocol and port 5001 serves mOTA data.
+The firmware must expose the text console; this option does not enable one.
+
+Specify a port or adjust the total connection/command timeout (10 seconds by
+default):
+
+```bash
+./tools/lora_ota/lora_ota.sh --tcp-cli 192.168.1.50:5002 --timeout 15 "ver"
+```
+
+PowerShell uses the same option:
+
+```powershell
+.\tools\lora_ota\lora_ota.ps1 --tcp-cli 192.168.1.50 "ota status"
+```
+
+Place `--tcp-cli` first. Each invocation sends one command and waits for the
+complete reply and terminal prompt. Connection failures, timeouts, missing
+replies, and rejected commands exit nonzero. If USB owns the terminal, close
+the active USB terminal and try again. Commands are never automatically resent
+in this standalone mode: a timeout after sending may mean the command executed
+but its reply was lost. Inspect the device state before repeating a change.
+
+For an actual OTA run, continue using `--source-tcp HOST:5001` with
+`--source-cli-tcp HOST:5002`; that existing control path also bypasses `meshcli`
+raw mode. The standalone fallback does not transfer a firmware image itself.
 
 Changing a terminal to 57600 baud does not select ASCII mode. USB Companion
 builds and the normal raw management CLI use 115200 unless a particular build

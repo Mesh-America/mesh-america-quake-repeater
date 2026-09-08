@@ -2552,6 +2552,8 @@ def source_cli_command(
     deadline: float | None = None,
     retry: bool = True,
 ) -> str:
+    if not command_text.strip() or any(c in command_text for c in "\r\n\0"):
+        raise OtaError("source command must be one nonempty line")
     if retry and command_text.strip().lower().startswith("tempradio "):
         raise OtaError(
             f"{command_text!r} requires state-aware retry handling"
@@ -2566,7 +2568,7 @@ def source_cli_command(
         return ""
 
     def run_once() -> str:
-        operation_timeout = 30.0
+        operation_timeout = getattr(args, "source_cli_timeout", 30.0)
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -2598,6 +2600,34 @@ def source_cli_command(
                         if not chunk:
                             break
                         greeting.extend(chunk)
+                    greeting_text = greeting.decode("utf-8", "replace")
+                    if b"\r\n> " not in greeting or re.search(
+                        r"(?:^|\n)\s*(?:error|err|fail)\b", greeting_text, re.IGNORECASE
+                    ):
+                        raise OtaError(
+                            "source TCP console did not become ready: "
+                            f"{greeting_text.strip() or 'no greeting'}"
+                        )
+                    expected_terminal_key = getattr(
+                        args, "shared_source_public_key", None
+                    )
+                    if expected_terminal_key is not None:
+                        banner_keys = re.findall(
+                            r"(?:^|\r?\n)([0-9A-Fa-f]{64})(?=\r?\n)",
+                            greeting_text,
+                        )
+                        if len(banner_keys) != 1:
+                            raise OtaError(
+                                "shared Full Companion terminal banner did not expose "
+                                "one exact public key"
+                            )
+                        actual_terminal_key = banner_keys[0].lower()
+                        if actual_terminal_key != str(expected_terminal_key).lower():
+                            raise OtaError(
+                                "shared Full Companion terminal identity mismatch: "
+                                f"expected {str(expected_terminal_key).lower()}, "
+                                f"got {actual_terminal_key}"
+                            )
                     connection.sendall(command_text.encode("utf-8") + b"\r\n")
                     response = bytearray()
                     while b"\r\n> " not in response and len(response) < 4096:
@@ -2608,27 +2638,6 @@ def source_cli_command(
                         response.extend(chunk)
             except (OSError, UnicodeError) as exc:
                 raise TransmissionError(f"source TCP console failed: {exc}") from exc
-            expected_terminal_key = getattr(
-                args, "shared_source_public_key", None
-            )
-            if expected_terminal_key is not None:
-                greeting_text = greeting.decode("utf-8", "replace")
-                banner_keys = re.findall(
-                    r"(?:^|\r?\n)([0-9A-Fa-f]{64})(?=\r?\n)",
-                    greeting_text,
-                )
-                if len(banner_keys) != 1:
-                    raise OtaError(
-                        "shared Full Companion terminal banner did not expose "
-                        "one exact public key"
-                    )
-                actual_terminal_key = banner_keys[0].lower()
-                if actual_terminal_key != str(expected_terminal_key).lower():
-                    raise OtaError(
-                        "shared Full Companion terminal identity mismatch: "
-                        f"expected {str(expected_terminal_key).lower()}, got "
-                        f"{actual_terminal_key}"
-                    )
             text = response.decode("utf-8", "replace")
             # Legacy port 5002 prefixes its bounded OTA reply with `->`.
             # Full Companion now exposes the same terminal as USB and writes
@@ -2644,6 +2653,8 @@ def source_cli_command(
                     f"source TCP console returned no command reply: {text.strip() or 'no output'}"
                 )
             output = match.group(1).strip()
+            if not output:
+                raise TransmissionError("source TCP console returned an empty reply")
         else:
             wire_command = command_text
             if getattr(args, "source_companion_terminal", False):
@@ -2676,7 +2687,8 @@ def source_cli_command(
                 raise TransmissionError(f"source CLI link failed: {exc}") from exc
             output = f"{result.stdout}\n{result.stderr}".strip()
         lowered = output.lower()
-        if "error" in lowered or "unknown command" in lowered or "err " in lowered:
+        if ("error" in lowered or "unknown command" in lowered or "err " in lowered
+                or re.search(r"(?:^|\n)\s*(?:->\s*)?(?:err|fail)(?:\b|:)", lowered)):
             raise OtaError(f"source rejected {command_text!r}: {output}")
         if (
             command_text.startswith("tempradio ")
@@ -6618,6 +6630,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Verify, transfer, and install a MeshCore LoRa OTA package.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=(
+            "For one raw TCP command without meshcli or a package: "
+            "lora_ota.sh --tcp-cli HOST[:PORT] [--timeout SECONDS] \"ota status\" "
+            "(text console defaults to port 5002)."
+        ),
     )
     parser.add_argument("package", type=Path, metavar="PACKAGE", help=".mota or .zip")
     parser.add_argument("target", metavar="TARGET_NODE", help="destination contact name")
@@ -7068,6 +7085,38 @@ def offline_target(args: argparse.Namespace) -> TargetInfo:
     )
 
 
+def tcp_cli_main(argv: list[str]) -> int:
+    """Explicit raw TCP fallback for meshcli versions with serial-only -r."""
+    parser = argparse.ArgumentParser(
+        description="Send one raw-text command to a MeshCore TCP console.",
+        epilog=(
+            "Defaults to port 5002, not binary Companion port 5000. "
+            "No meshcli, motatool, firmware package, or netcat is needed. "
+            "Commands are sent once; a timeout after sending has an unknown outcome."
+        ),
+    )
+    parser.add_argument("--tcp-cli", required=True, metavar="HOST[:PORT]")
+    parser.add_argument("--timeout", type=float, default=10.0, metavar="SECONDS")
+    parser.add_argument("command", nargs="+", help="one command, such as 'ota status'")
+    options = parser.parse_args(argv)
+    if not math.isfinite(options.timeout) or options.timeout <= 0:
+        parser.error("--timeout must be a finite positive number")
+    args = argparse.Namespace(
+        source_cli_tcp=options.tcp_cli,
+        source_cli_serial=None,
+        source_serial=None,
+        source_cli_timeout=options.timeout,
+    )
+    try:
+        source_cli_command(args, " ".join(options.command), retry=False)
+    except OtaError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -7075,6 +7124,9 @@ def main(
 ) -> int:
     global DEBUG
 
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and (argv[0] == "--tcp-cli" or argv[0].startswith("--tcp-cli=")):
+        return tcp_cli_main(argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     DEBUG = bool(args.debug)

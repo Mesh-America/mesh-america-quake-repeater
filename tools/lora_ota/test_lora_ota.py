@@ -11,10 +11,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 import zipfile
@@ -7579,6 +7581,137 @@ class MotatoolIntegrationTests(unittest.TestCase):
                 work,
             )
             self.assertTrue(package.is_full)
+
+
+class TcpCliFallbackTests(unittest.TestCase):
+    def exchange(self, greeting, reply, *, timeout="1", close_after_reply=True):
+        received = []
+        errors = []
+        release = threading.Event()
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(3)
+        port = listener.getsockname()[1]
+
+        def serve():
+            try:
+                with listener:
+                    connection, _ = listener.accept()
+                    with connection:
+                        connection.settimeout(2)
+                        connection.sendall(greeting)
+                        data = bytearray()
+                        while not data.endswith(b"\r\n"):
+                            chunk = connection.recv(512)
+                            if not chunk:
+                                return
+                            data.extend(chunk)
+                        received.append(bytes(data))
+                        # Exercise stream handling rather than assuming one recv
+                        # corresponds to one reply or even a complete prompt.
+                        for chunk in reply:
+                            connection.sendall(chunk)
+                        if not close_after_reply:
+                            release.wait(2)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=serve, daemon=True)
+        worker.start()
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with (
+                mock.patch.object(ota, "run_checked") as subprocess_call,
+                mock.patch.object(ota, "preflight_inputs") as preflight,
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),
+            ):
+                status = ota.main([
+                    "--tcp-cli", f"127.0.0.1:{port}",
+                    "--timeout", timeout, "ota status",
+                ])
+            subprocess_call.assert_not_called()
+            preflight.assert_not_called()
+        finally:
+            release.set()
+            worker.join(3)
+            listener.close()
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(errors)
+        return status, out.getvalue(), err.getvalue(), received
+
+    def test_full_companion_reply_over_real_tcp(self):
+        status, out, err, received = self.exchange(
+            b"Companion v1.17.1\r\n> ",
+            [b"OTA seeder | install:disabled\r", b"\n>", b" "],
+        )
+        self.assertEqual(status, 0, err)
+        self.assertIn("OTA seeder | install:disabled", out)
+        self.assertEqual(received, [b"ota status\r\n"])
+
+    def test_legacy_console_reply_over_real_tcp(self):
+        status, out, err, _ = self.exchange(
+            b"OTA console - type `ota ...`\r\n> ",
+            [b"  -> OTA | target:12345678\r\n> "],
+        )
+        self.assertEqual(status, 0, err)
+        self.assertIn("[source] OTA | target:12345678", out)
+
+    def test_usb_owner_rejection_sends_no_command(self):
+        status, _, err, received = self.exchange(
+            b"ERROR: active USB currently owns the Full Companion terminal\r\n> ",
+            [],
+        )
+        self.assertEqual(status, 2)
+        self.assertIn("USB currently owns", err)
+        self.assertEqual(received, [])
+
+    def test_incomplete_reply_is_not_retried_or_reported_as_success(self):
+        status, _, err, received = self.exchange(
+            b"OTA console\r\n> ", [b"OTA seeder"],
+        )
+        self.assertEqual(status, 2)
+        self.assertIn("no command reply", err)
+        self.assertEqual(received, [b"ota status\r\n"])
+
+    def test_reply_timeout_is_bounded_and_does_not_resend(self):
+        status, _, err, received = self.exchange(
+            b"OTA console\r\n> ", [], timeout="0.1", close_after_reply=False,
+        )
+        self.assertEqual(status, 2)
+        self.assertIn("timed out", err)
+        self.assertEqual(received, [b"ota status\r\n"])
+
+    def test_rejected_and_empty_replies_fail(self):
+        for reply in (b"ERR: unavailable", b"FAIL", b"Unknown command", b""):
+            with self.subTest(reply=reply):
+                status, _, _, _ = self.exchange(
+                    b"OTA console\r\n> ", [reply + b"\r\n> "],
+                )
+                self.assertEqual(status, 2)
+
+    def test_default_port_is_text_console(self):
+        with mock.patch.object(ota.socket, "create_connection", side_effect=OSError("refused")) as connect:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(ota.main(["--tcp-cli", "192.0.2.1", "ver"]), 2)
+        self.assertEqual(connect.call_args.args[0], ("192.0.2.1", 5002))
+
+    def test_command_injection_is_rejected_before_connecting(self):
+        with mock.patch.object(ota.socket, "create_connection") as connect:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(ota.main([
+                    "--tcp-cli", "192.0.2.1", "ver\rreboot",
+                ]), 2)
+        connect.assert_not_called()
+
+    def test_invalid_timeout_is_rejected(self):
+        for timeout in ("0", "-1", "nan", "inf"):
+            with self.subTest(timeout=timeout), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as exc:
+                    ota.main(["--tcp-cli", "192.0.2.1", "--timeout", timeout, "ver"])
+                self.assertEqual(exc.exception.code, 2)
 
 
 if __name__ == "__main__":
