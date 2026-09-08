@@ -66,6 +66,21 @@ def esp_fixture(path, modern=False, fragmented=False):
 
 
 class FirmwareRamTest(unittest.TestCase):
+    def test_longer_display_previews_reserve_heap_and_contiguous_history(self):
+        defines = {"DISPLAY_CLASS": "SSD1306Display"}
+        base = ram.requirements("ESP32_PLATFORM", defines, "v4_companion")
+        expanded = ram.requirements("ESP32_PLATFORM", {
+            **defines, "UI_MSG_PREVIEW_SIZE": 161,
+        }, "v4_companion")
+        self.assertEqual(expanded["required_heap_bytes"],
+                         base["required_heap_bytes"] + 2816)
+        self.assertGreaterEqual(expanded["required_contiguous_bytes"], 11008)
+        # Shrinking the preview cannot reduce the existing safety budget.
+        smaller = ram.requirements("ESP32_PLATFORM", {
+            **defines, "UI_MSG_PREVIEW_SIZE": 32,
+        }, "v4_companion")
+        self.assertEqual(smaller, base)
+
     def test_published_image_tables_match_elf_and_use_its_own_reservations(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "reference.elf"

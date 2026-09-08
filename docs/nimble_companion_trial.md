@@ -22,6 +22,9 @@ It is not the generic XIAO profile for separately wired radio modules. Both
 boards retain their parent Full Companion features, USB mOTA sender, WiFi
 update slots, and PSRAM-backed offline queue. The V4 also retains direct MQTT.
 
+An additional [V4 Picopixel trial](v4_pixel5_font_trial.md) uses 5-pixel capital
+letters and a longer on-device message preview.
+
 ## Build
 
 Enable the optional configuration in the ignored `platformio.local.ini`:

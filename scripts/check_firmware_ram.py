@@ -84,6 +84,13 @@ def requirements(platform, defines, target):
     if display and display != "NullDisplayDriver":
         parts["display_pixels_and_driver"] = display_heap
         parts["screen_objects_and_history"] = 8192 if companion else 2048
+        if companion:
+            # ui-new retains 32 previews in one heap allocation. The baseline
+            # covers 78 bytes per message; budget larger buffers explicitly,
+            # including worst-case 8-byte Entry alignment.
+            extra = max(0, integer(defines, "UI_MSG_PREVIEW_SIZE", 78) - 78)
+            if extra:
+                parts["expanded_message_previews"] = 32 * ((extra + 7) // 8) * 8
     parts["allocation_and_transient_margin"] = 16384 if platform == "ESP32_PLATFORM" else 4096
     required = sum(parts.values())
     if platform == "NRF52_PLATFORM" and full and display == "ST7735Display":
@@ -91,6 +98,8 @@ def requirements(platform, defines, target):
     # A new profile may increase this budget; it cannot override it downward.
     required = max(required, integer(defines, "MESH_MIN_RUNTIME_HEAP", 0))
     largest = max(display_heap, parts["radio_packet_pool"], 8192 if platform == "ESP32_PLATFORM" else 0)
+    if "expanded_message_previews" in parts:
+        largest = max(largest, 8192 + parts["expanded_message_previews"])
     return {"required_heap_bytes": required, "required_contiguous_bytes": largest,
             "components": parts, "display": display, "full_companion": full}
 
