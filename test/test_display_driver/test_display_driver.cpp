@@ -3,7 +3,7 @@
 #include <helpers/ui/DisplayDriver.h>
 #include <helpers/ui/CompanionHomeLayout.h>
 #include <helpers/ui/DisplayTextLayout.h>
-#include <helpers/ui/Pixel5Text.h>
+#include <helpers/ui/SmallMessageText.h>
 #include <helpers/ui/WiFiSetupQrDisplay.h>
 #include <helpers/ui/WiFiSetupQrPayload.h>
 
@@ -134,9 +134,9 @@ TEST(DisplayDriver, EllipsizesOnlyAtUTF8CodepointBoundaries) {
   EXPECT_TRUE(isValidUTF8(display.printed.c_str()));
 }
 
-TEST(Pixel5Text, CapitalsAreFivePixelsAndNormalFontIsUntouched) {
-  TestDisplay display(128, 64, 6);
-  mesh::ui::Pixel5Text text(display);
+TEST(SmallMessageText, TinyPanelsKeepFivePixelCapitalsAndNormalFont) {
+  TestDisplay display(72, 40, 6);
+  mesh::ui::SmallMessageText text(display);
   text.setCursor(0, 0);
   text.print("A");
   const char* rows[] = {"010", "101", "111", "101", "101"};
@@ -152,7 +152,41 @@ TEST(Pixel5Text, CapitalsAreFivePixelsAndNormalFontIsUntouched) {
   EXPECT_EQ(18, display.getTextWidth("ABC"));
 }
 
-TEST(Pixel5Text, CompactOriginAllowsSixCompleteMessageRows) {
+TEST(SmallMessageText, LargerPanelsUseSixPixelCapitalsAndNormalFont) {
+  TestDisplay display(128, 64, 6);
+  mesh::ui::SmallMessageText text(display);
+  text.setCursor(0, 0);
+  text.print("A");
+  const char* rows[] = {"010", "101", "111", "101", "101", "101"};
+  bool pixels[6][3] = {};
+  for (const auto& pixel : display.fills) {
+    ASSERT_GE(pixel.x, 0); ASSERT_LT(pixel.x, 3);
+    ASSERT_GE(pixel.y, 0); ASSERT_LT(pixel.y, 6);
+    pixels[pixel.y][pixel.x] = true;
+  }
+  for (int y = 0; y < 6; ++y) for (int x = 0; x < 3; ++x)
+    EXPECT_EQ(rows[y][x] == '1', pixels[y][x]);
+  EXPECT_EQ(11, text.getTextWidth("ABC"));
+  EXPECT_EQ(18, display.getTextWidth("ABC"));
+}
+
+TEST(SmallMessageText, FontChoiceAndLineSpacingFollowPanelGeometry) {
+  const int cases[][3] = {
+      {128, 64, 6}, {64, 128, 6}, {160, 80, 6},
+      {72, 40, 5}, {40, 72, 5}, {128, 32, 5}, {32, 128, 5},
+      {64, 48, 5}, {48, 64, 5}};
+  for (const auto& dimensions : cases) {
+    TestDisplay display(dimensions[0], dimensions[1]);
+    mesh::ui::SmallMessageText text(display);
+    EXPECT_EQ(dimensions[2], text.capitalHeight());
+    EXPECT_EQ(dimensions[2] + 1, text.glyphHeight());
+    EXPECT_EQ(dimensions[2] + 2, text.lineHeight());
+    EXPECT_EQ(0, text.lineCount(display.height() - text.glyphHeight() + 1));
+    EXPECT_EQ(1, text.lineCount(display.height() - text.glyphHeight()));
+  }
+}
+
+TEST(SmallMessageText, CompactOriginAllowsFiveCompleteSixPixelMessageRows) {
   TestDisplay display(128, 64);
   mesh::ui::drawSmallMessageBody(display, std::string(61, 'W').c_str(),
                                  std::string(160, 'W').c_str());
@@ -162,33 +196,87 @@ TEST(Pixel5Text, CompactOriginAllowsSixCompleteMessageRows) {
     EXPECT_GE(pixel.x, 0); EXPECT_LT(pixel.x, 128);
     EXPECT_GE(pixel.y, 14); EXPECT_LT(pixel.y, 64);
     // The origin stays in its own line; its long name cannot cover the body.
-    EXPECT_TRUE(pixel.y < 20 || pixel.y >= 21);
+    EXPECT_TRUE(pixel.y < 21 || pixel.y >= 22);
     for (int i = 0; i < 3; ++i)
-      if (pixel.y == 60 && pixel.x == 120 + 2 * i) final_dots[i] = true;
+      if (pixel.y == 59 && pixel.x == 120 + 2 * i) final_dots[i] = true;
   }
   for (bool dot : final_dots) EXPECT_TRUE(dot);
-  EXPECT_EQ(5, mesh::ui::smallMessageLineCount(64, 25));
-  EXPECT_EQ(6, mesh::ui::smallMessageLineCount(64, 21));
-  EXPECT_EQ(3, mesh::ui::smallMessageLineCount(40, 17));
-  EXPECT_EQ(0, mesh::ui::smallMessageLineCount(64, 59));
+  mesh::ui::SmallMessageText text(display);
+  EXPECT_EQ(5, text.lineCount(22));
+  EXPECT_EQ(4, text.lineCount(22, 56));
+  EXPECT_EQ(5, text.lineCount(22, 80)); // never extend past the panel
+  EXPECT_EQ(0, text.lineCount(22, 20));
 }
 
-TEST(Pixel5Text, GlyphsStayInsideTinyAndRotatedScreens) {
-  for (auto dimensions : {std::pair<int, int>{72, 40}, {64, 128}, {128, 64}}) {
+TEST(SmallMessageText, TinyInterfaceKeepsThreeCompleteFivePixelRows) {
+  TestDisplay display(72, 40);
+  mesh::ui::SmallMessageText text(display);
+  EXPECT_EQ(3, text.lineCount(17));
+  mesh::ui::drawSmallMessageBody(display, std::string(61, 'W').c_str(),
+                               std::string(160, 'W').c_str(), 10);
+  bool final_dots[3] = {};
+  for (const auto& pixel : display.fills) {
+    EXPECT_GE(pixel.x, 0); EXPECT_LT(pixel.x, 72);
+    EXPECT_GE(pixel.y, 10); EXPECT_LT(pixel.y, 40);
+    EXPECT_TRUE(pixel.y < 16 || pixel.y >= 17);
+    for (int i = 0; i < 3; ++i)
+      if (pixel.y == 35 && pixel.x == 60 + 2 * i) final_dots[i] = true;
+  }
+  for (bool dot : final_dots) EXPECT_TRUE(dot);
+}
+
+TEST(SmallMessageText, MessageBodyRespectsReservedFooter) {
+  TestDisplay display(128, 64);
+  mesh::ui::drawSmallMessageBody(display, "Ch 0 Public [4h]:",
+                               std::string(160, 'W').c_str(), 14, 56);
+  ASSERT_FALSE(display.fills.empty());
+  for (const auto& pixel : display.fills) EXPECT_LT(pixel.y, 56);
+}
+
+TEST(SmallMessageText, Full160CharacterSamplesFitInFiveRows) {
+  class RecordingText : public mesh::ui::SmallMessageText {
+  public:
+    std::string drawn;
+    explicit RecordingText(DisplayDriver& display) : SmallMessageText(display) {}
+    void print(const char* str) override {
+      drawn += str;
+      SmallMessageText::print(str);
+    }
+  };
+  const char* samples[] = {
+      "GIANT KILLER: Out on the Mercerwood mesh today, just the V4 and a small "
+      "battery Checking the smaller font so the rest of this message is visible. "
+      "0123456789 END",
+      "NimBLE-XIAO-Trial: Picopixel: 5 pixel letters and a compact channel line. "
+      "More of this message now fits on the small screen. "
+      "0123456789 0123456789 012345678 END"};
+  for (const char* sample : samples) {
+    ASSERT_EQ(160U, strlen(sample));
+    TestDisplay display(128, 64);
+    RecordingText text(display);
+    EXPECT_EQ(5, mesh::ui::drawTextWrapped(text, 0, 22, 128,
+        text.lineHeight(), text.lineCount(22), sample));
+    EXPECT_EQ(sample, text.drawn);
+  }
+}
+
+TEST(SmallMessageText, GlyphsStayInsideTinyAndRotatedScreens) {
+  for (auto dimensions : {std::pair<int, int>{72, 40}, {40, 72},
+                         {128, 32}, {32, 128}, {64, 128}, {128, 64}}) {
     TestDisplay display(dimensions.first, dimensions.second);
-    mesh::ui::Pixel5Text text(display);
+    mesh::ui::SmallMessageText text(display);
     for (int c = 32; c <= 126; ++c) {
       display.fills.clear();
-      text.setCursor(0, display.height() - 6);
+      text.setCursor(0, display.height() - text.glyphHeight());
       text.printWordWrap(std::string(160, char(c)).c_str(), display.width());
       for (const auto& pixel : display.fills) {
         EXPECT_GE(pixel.x, 0); EXPECT_LT(pixel.x, display.width());
-        EXPECT_GE(pixel.y, display.height() - 6);
+        EXPECT_GE(pixel.y, display.height() - text.glyphHeight());
         EXPECT_LT(pixel.y, display.height());
       }
     }
     display.fills.clear();
-    text.setCursor(0, display.height() - 5);
+    text.setCursor(0, display.height() - text.glyphHeight() + 1);
     text.printWordWrap("must not start a clipped final line", display.width());
     EXPECT_TRUE(display.fills.empty());
   }

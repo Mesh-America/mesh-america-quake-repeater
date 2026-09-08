@@ -4,7 +4,7 @@
 #include <helpers/ui/CompanionHomeLayout.h>
 #include <helpers/ui/CompanionMessageHistory.h>
 #if UI_SMALL_MESSAGE_FONT == 1
-  #include <helpers/ui/Pixel5Text.h>
+  #include <helpers/ui/SmallMessageText.h>
 #endif
 #include <helpers/ui/CompanionTransportSelectorLayout.h>
 #include "../MyMesh.h"
@@ -1444,7 +1444,7 @@ public:
 
 #if UI_SMALL_MESSAGE_FONT == 1
     mesh::ui::drawSmallMessageBody(display, p->origin, p->message,
-        layout.origin_y, layout.origin_y + 7,
+        layout.origin_y,
         UI_MESSAGE_CHANNEL_FOOTER == 1
             ? display.height() - layout.filter_height : display.height());
 #else

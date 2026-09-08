@@ -30,16 +30,10 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include <stdint.h>
+#include "SmallFontGlyph.h"
 
 namespace mesh {
 namespace ui {
-
-struct Pixel5Glyph {
-  uint16_t bitmap_offset;
-  uint8_t width, height, advance;
-  int8_t x_offset, y_offset;
-};
 
 static const uint8_t pixel5Bitmaps[] = {
     0xE8, 0xB4, 0x57, 0xD5, 0xF5, 0x00, 0x4E, 0x3E, 0x80, 0xA5, 0x4A, 0x4A,
@@ -58,7 +52,7 @@ static const uint8_t pixel5Bitmaps[] = {
     0x90, 0xE8, 0x71, 0xE0, 0xBA, 0x40, 0xB5, 0x80, 0xB5, 0x00, 0x8D, 0x54,
     0xAA, 0x80, 0xAC, 0xE0, 0xE5, 0x70, 0x6A, 0x26, 0xFC, 0xC8, 0xAC, 0x5A};
 
-static const Pixel5Glyph pixel5Glyphs[] = {{0, 0, 0, 2, 0, 1},     // 0x20 ' '
+static const SmallFontGlyph pixel5Glyphs[] = {{0, 0, 0, 2, 0, 1},     // 0x20 ' '
                                             {0, 1, 5, 2, 0, -4},    // 0x21 '!'
                                             {1, 3, 2, 4, 0, -4},    // 0x22 '"'
                                             {2, 5, 5, 6, 0, -4},    // 0x23 '#'

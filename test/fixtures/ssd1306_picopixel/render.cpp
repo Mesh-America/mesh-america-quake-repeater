@@ -1,5 +1,5 @@
 #include <helpers/ui/SSD1306Display.h>
-#include <helpers/ui/Pixel5Text.h>
+#include <helpers/ui/SmallMessageText.h>
 #include <Fonts/Picopixel.h>
 #include <cassert>
 #include <fstream>
@@ -12,8 +12,13 @@ void save(const char* file) {
   f << "P1\n128 64\n";
   for (int y=0;y<64;y++) { for (int x=0;x<128;x++) f << c.getPixel(x,y) << ' '; f << '\n'; }
 }
+class TestSSD1306Display : public SSD1306Display {
+public:
+  void setCanvasSize(int w, int h) { setDimensions(w, h); }
+};
+
 int main(int argc, char** argv) {
-  SSD1306Display d;
+  TestSSD1306Display d;
   assert(d.begin());
   auto& c=*Adafruit_SSD1306::last;
   const char* message="GIANT KILLER: Out on the Mercerwood mesh today, just the V4 and a small battery Checking the smaller font so the rest of this message is visible. 0123456789 END";
@@ -32,7 +37,21 @@ int main(int argc, char** argv) {
 #if UI_SMALL_MESSAGE_FONT == 1
   assert(c.outside==0);
   assert(d.getTextWidth("ABC")==18); // regular driver font untouched
-  mesh::ui::Pixel5Text text(d);
+  mesh::ui::SmallMessageText six(d);
+  assert(six.capitalHeight()==6);
+  for (int ch=32;ch<=126;ch++) {
+    d.startFrame(); six.setCursor(0,0);
+    const std::string glyph(1,char(ch));
+    six.print(glyph.c_str());
+    // Compared with the independent upstream BDF in the Python harness.
+    std::cout << "six " << ch << ' ' << six.getTextWidth(glyph.c_str()) << ' ';
+    for (int y=0;y<8;y++) for (int x=0;x<8;x++)
+      std::cout << int(c.getPixel(x,y));
+    std::cout << '\n';
+  }
+  d.setCanvasSize(72,40);
+  mesh::ui::SmallMessageText text(d);
+  assert(text.capitalHeight()==5);
   GFXcanvas1 reference(128,64);
   reference.setFont(&Picopixel);
   reference.setTextColor(1);
@@ -44,6 +63,6 @@ int main(int argc, char** argv) {
       assert(c.getPixel(x,y)==reference.getPixel(x,y));
     assert(text.getTextWidth(std::string(1,char(ch)).c_str())==PicopixelGlyphs[ch-32].xAdvance);
   }
-  std::cout << "95 glyphs match Adafruit GFX Picopixel pixel for pixel; normal font preserved\n";
+  std::cout << "95 tiny-screen glyphs match Adafruit GFX Picopixel; normal font preserved\n";
 #endif
 }

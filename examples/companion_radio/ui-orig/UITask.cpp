@@ -1,6 +1,6 @@
 #include "UITask.h"
 #if UI_SMALL_MESSAGE_FONT == 1
-  #include <helpers/ui/Pixel5Text.h>
+  #include <helpers/ui/SmallMessageText.h>
 #endif
 #include <Arduino.h>
 #include <helpers/TxtDataHelpers.h>
@@ -246,7 +246,7 @@ void UITask::renderCurrScreen() {
     _display->print(_node_prefs->node_name);
 
 #if UI_SMALL_MESSAGE_FONT == 1
-    mesh::ui::drawSmallMessageBody(*_display, _origin, _msg, 12, 19);
+    mesh::ui::drawSmallMessageBody(*_display, _origin, _msg, 12);
 #else
     _display->setCursor(0, 12);
     _display->setColor(UIColor::secondary_txt);

@@ -1,6 +1,6 @@
 #include "UITask.h"
 #if UI_SMALL_MESSAGE_FONT == 1
-  #include <helpers/ui/Pixel5Text.h>
+  #include <helpers/ui/SmallMessageText.h>
 #endif
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
@@ -460,7 +460,7 @@ public:
   }
   int render(DisplayDriver& display) override {
     // The 72x40 interface reserves its top 8px for the scrolling status bar.
-    mesh::ui::drawSmallMessageBody(display, _origin, _message, 10, 17);
+    mesh::ui::drawSmallMessageBody(display, _origin, _message, 10);
     return 1000;
   }
   bool handleInput(char c) override {

@@ -1,23 +1,33 @@
-# Small-screen Picopixel message font
+# Small-screen message fonts
 
-Small-screen Companion builds use Picopixel for received message text and the
-channel/sender line, including `Ch 0 Public`. This covers SSD1306 and SH1106
-OLEDs, ST7735 small TFTs, and the U8g2 T-Echo Card display. The shared renderer
-uses the same font data on every driver. Larger displays keep their existing
-font. Menus, Bluetooth PINs and WiFi setup QR codes keep their normal layout.
+Small-screen Companion builds automatically select a compact font for received
+message text and the channel/sender line, including `Ch 0 Public`. This covers
+SSD1306 and SH1106 OLEDs, ST7735 small TFTs, and the U8g2 T-Echo Card display.
+The shared renderer selects by logical panel dimensions, including rotation:
 
-Capital letters are 5 logical pixels high; descenders can occupy a sixth
-pixel, so lines advance by 7 pixels. Most characters advance by 4 pixels
-horizontally. The normal OLED font uses 7-pixel letters, 8-pixel line spacing
-and 6-pixel character advances. Small TFTs retain their existing logical to
-physical scaling.
+| Panel size | Font | Capital height | Line spacing |
+| --- | --- | ---: | ---: |
+| At least 128 x 64, or 64 x 128 rotated | Squeezed Regular 6 | 6 pixels | 8 pixels |
+| Smaller panels, including 72 x 40, 128 x 32 and 64 x 48 | Picopixel | 5 pixels | 7 pixels |
 
-On a 128 x 64 OLED, compacting the channel/sender line moves message text from
-y=25 to y=21. Six complete small-font rows fit instead of five, roughly 30
-additional characters depending on the letters. Text wraps at character
-boundaries; the last line ends with `...` if it still cannot fit. Unsupported
-characters appear as `?`. Long channel/sender names are ellipsized so they
-cannot overlap the message.
+Both fonts allow one pixel for descenders and one blank pixel row between
+lines. Character widths vary: most letters advance by 4 pixels, with narrow
+letters taking less space and `M` and `W` taking 6 pixels. Squeezed Regular 6
+is a [public-domain font by Oliver Kraus](https://github.com/olikraus/u8g2/wiki/fntgrpu8g#squeezed_r6).
+Its bitmap data is stored as constants without heap allocation.
+
+On a 128 x 64 OLED, the compact channel/sender line starts at y=14 and message
+text at y=22. Five complete 6px-font rows fit. The software comparison fits
+three representative 160-character messages in those five rows. Capacity
+depends on the characters; messages with many wide letters can still overflow.
+Text wraps at character boundaries, with `...` on the last line if necessary.
+Unsupported characters appear as `?`. Long channel/sender names are ellipsized
+to stay on their own line. An enabled channel footer reserves its own space.
+
+Larger display classes keep their existing font. Menus, Bluetooth PINs and WiFi
+setup QR codes keep their normal layout. Small TFTs retain their existing
+logical to physical scaling. The normal OLED font uses 7-pixel letters,
+8-pixel line spacing and 6-pixel character advances.
 
 The preview buffer holds a complete 160-byte MeshCore message plus its
 terminator. Previously the main message UI allocated 78 bytes, leaving room
@@ -36,15 +46,17 @@ Enable `platformio.nimble.ini` in the ignored `platformio.local.ini` as shown
 in the [NimBLE trial guide](nimble_companion_trial.md#build), then run:
 
 ```sh
-OUTPUT_DIR=.releases/v4-pixel5 bash build.sh build-firmware \
-  heltec_v4_2_v4_3_companion_radio_full_femon_nimble_pixel5 \
-  --firmware-version v1.17.1.5-halo-keymind-cascade-pixel5-trial \
+OUTPUT_DIR=.releases/v4-smallfont bash build.sh build-firmware \
+  heltec_v4_2_v4_3_companion_radio_full_femon_nimble \
+  --firmware-version v1.17.1.5-halo-keymind-cascade-squeezed6-trial \
   --radio-preset usa-cascadia --profile cascade --standard --require-ota
 ```
 
-The named trial keeps NimBLE, 350 contacts, 40 channels, the V4's 512-frame
+This build keeps NimBLE, 350 contacts, 40 channels, the V4's 512-frame
 PSRAM queue, USB mOTA sending and WiFi OTA support. The smaller font is also
 the default in ordinary small-screen Companion builds from this source.
+The older `_nimble_pixel5` environment name remains available, but also uses
+the automatic 5px/6px selection.
 
 Use the application `.bin` for WiFi OTA. A clean USB install uses the merged
 image at address 0. When manually writing the application at `0x10000`, an
@@ -66,16 +78,18 @@ python3 -B test/test_firmware_ram.py
 pio test -e native -f test_display_driver -f test_companion_message_history
 ```
 
-The native tests exercise the shared renderer, five-pixel capitals, complete
-rows at display edges, long sender lines, overflow markers and tiny/rotated
-screen geometry. The additional Adafruit comparison checks all 95 printable
-ASCII glyphs pixel for pixel against the original Picopixel font, under
-address/undefined-behavior sanitizers. That comparison needs a cached
+The native tests exercise both capital heights, automatic font selection,
+160-character messages, complete rows at display edges, long sender lines,
+reserved footers, overflow markers and tiny/rotated screen geometry. The
+additional rendering comparison checks all 95 printable ASCII glyphs in each
+font, under address/undefined-behavior sanitizers. Picopixel is compared pixel
+for pixel with Adafruit GFX; Squeezed Regular 6 is compared with the upstream
+BDF fixture independently of the converted C++ tables. This needs a cached
 PlatformIO Adafruit GFX library; set `MESHCORE_GFX_LIBRARY` to its directory
 if needed. It reports a skip when the library is absent. The native tests do
 not require that dependency. Run only one PlatformIO command at a time.
 
-## Hardware and build results, 2026-09-08
+## Earlier 5px hardware and build results, 2026-09-08
 
 Source revision `eeea15ef` passed seven representative firmware builds:
 
