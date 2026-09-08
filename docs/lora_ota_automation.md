@@ -217,8 +217,23 @@ different participant aliases stop with an actionable error. Missing contacts
 must first be imported or discovered; a key alone does not create a contact.
 
 For a separate source with a managed USB/TCP console, automatic source selection
-reads `get public.key` from the physical source and matches that full key in the
-controller's contacts. It does not require the source's current name to match an
+reads the physical source's full public key and matches it in the controller's
+contacts. Repeaters use `get public.key`. Full Companion does not implement
+that repeater command: on both USB and TCP, its key is read from a **fresh
+terminal welcome banner**, with a supported `ver` reply on the same connection
+proving the terminal is live. USB briefly uses the existing STOP/START/STOP
+terminal wrapper to obtain that banner, even for an ASCII-first Full Companion;
+TCP reads the greeting from a new connection. Identity rechecks repeat this
+exchange rather than trusting a key cached from an earlier connection.
+
+`ota status` identifies the Full Companion seeder role before this probe. For
+unrecognized firmware, only an explicit unsupported `get public.key` response
+can trigger the Companion fallback. Timeouts, permission errors, malformed keys,
+missing/ambiguous banners, and failed `ver` replies still stop the run. Firmware
+that exposes neither identity mechanism needs a supported terminal firmware;
+the runner does not guess a key from the node name or skip the identity check.
+
+Source selection does not require the source's current name to match an
 old saved advert, and duplicate/emoji names cannot redirect this lookup. An
 explicit `--source-contact` must identify that same physical source. If its key
 really is missing, import the source contact or advertise/discover it on the

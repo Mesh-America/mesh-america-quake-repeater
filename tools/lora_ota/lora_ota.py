@@ -2785,6 +2785,29 @@ def parse_temp_radio(value: str) -> tuple[float, float, int, int, int]:
     return freq, bandwidth, sf, cr, minutes
 
 
+def parse_source_terminal_banner(value: str) -> tuple[str, str]:
+    """Read one Full/Companion welcome identity, not an advert or cached name."""
+    text = value.replace("\r", "")
+    headers = list(re.finditer(
+        r"(?m)^===== MeshCore (?:Full )?Companion Terminal =====[ \t]*$", text,
+    ))
+    if len(headers) != 1:
+        raise OtaError("OTA source did not expose one fresh Companion terminal banner")
+    tail = text[headers[0].end():]
+    # meshcli raw output strips trailing spaces from a standalone USB prompt.
+    prompt = re.search(r"\n>(?:[ \t]|(?=\n|$))", tail)
+    if prompt is None:
+        raise OtaError("OTA source Companion banner did not reach its terminal prompt")
+    banner = tail[:prompt.start()]
+    keys = re.findall(r"(?m)^[0-9A-Fa-f]{64}$", banner)
+    welcome = re.findall(
+        r"(?:^|\n)WELCOME[^\n]*\n([0-9A-Fa-f]{64})\nCompanion [^\n]+", banner,
+    )
+    if len(keys) != 1 or welcome != keys:
+        raise OtaError("OTA source Companion banner did not expose one exact public key after WELCOME")
+    return keys[0].lower(), tail[prompt.end():]
+
+
 def source_cli_command(
     args: argparse.Namespace,
     command_text: str,
@@ -2793,6 +2816,7 @@ def source_cli_command(
     bounded: bool = False,
     deadline: float | None = None,
     retry: bool = True,
+    full_companion_identity: bool = False,
 ) -> str:
     if not command_text.strip() or any(c in command_text for c in "\r\n\0"):
         raise OtaError("source command must be one nonempty line")
@@ -2800,6 +2824,8 @@ def source_cli_command(
         raise OtaError(
             f"{command_text!r} requires state-aware retry handling"
         )
+    if full_companion_identity and command_text != "ver":
+        raise OtaError("a Companion identity probe must use the read-only ver command")
     serial_port = args.source_cli_serial or args.source_serial
     tcp_console = args.source_cli_tcp
     if not serial_port and not tcp_console:
@@ -2810,6 +2836,7 @@ def source_cli_command(
         return ""
 
     def run_once() -> str:
+        terminal_key = None
         operation_timeout = getattr(args, "source_cli_timeout", 30.0)
         if deadline is not None:
             remaining = deadline - time.monotonic()
@@ -2853,6 +2880,8 @@ def source_cli_command(
                     expected_terminal_key = getattr(
                         args, "shared_source_public_key", None
                     )
+                    if full_companion_identity:
+                        terminal_key, _ = parse_source_terminal_banner(greeting_text)
                     if expected_terminal_key is not None:
                         banner_keys = re.findall(
                             r"(?:^|\r?\n)([0-9A-Fa-f]{64})(?=\r?\n)",
@@ -2899,7 +2928,7 @@ def source_cli_command(
                 raise TransmissionError("source TCP console returned an empty reply")
         else:
             wire_command = command_text
-            if getattr(args, "source_companion_terminal", False):
+            if full_companion_identity or getattr(args, "source_companion_terminal", False):
                 # meshcli raw mode keeps one serial open while writing this
                 # compound command. STOP first makes this independent of the
                 # port's current state: ASCII consumes it and returns to
@@ -2932,6 +2961,16 @@ def source_cli_command(
         if ("error" in lowered or "unknown command" in lowered or "err " in lowered
                 or re.search(r"(?:^|\n)\s*(?:->\s*)?(?:err|fail)(?:\b|:)", lowered)):
             raise OtaError(f"source rejected {command_text!r}: {output}")
+        if full_companion_identity:
+            version_output = output.replace("\r", "")
+            if not tcp_console:
+                terminal_key, version_output = parse_source_terminal_banner(output)
+            replies = re.findall(r"(?m)^[ \t]*(?:>[ \t]*)?Companion [^\n]+", version_output)
+            if len(replies) != 1 or extract_reply_version(replies[0]) is None:
+                raise OtaError("OTA source Companion did not confirm a live ver reply after its identity banner")
+            # Normalize only after this same connection supplied a complete
+            # welcome key AND replied to ver. No key from a previous connection.
+            output = f"> {terminal_key}"
         if (
             command_text.startswith("tempradio ")
             and "ok - temp params " not in lowered
@@ -3033,6 +3072,7 @@ def preflight_source_cli(args: argparse.Namespace) -> None:
             "repeater raw text CLI, nRF52 full Companion USB port, or "
             "companion_radio_full TCP terminal."
         )
+    args.source_full_companion = "OTA seeder" in output and "install:disabled" in output
 
 
 def has_managed_source_cli(args: argparse.Namespace) -> bool:
@@ -5001,13 +5041,20 @@ def read_source_public_key_bounded(
     *,
     deadline: float | None = None,
 ) -> str:
+    if not getattr(args, "source_full_companion", False):
+        reply = optional_source_cli_command(args, "get public.key", deadline=deadline)
+        if reply is not None:
+            return parse_cli_public_key(reply, "OTA source")
+    # Full Companion has no repeater `get public.key` command. Its supported
+    # USB/TCP terminal supplies the local key in a fresh welcome banner instead.
+    # Unknown firmware can reach this path only after an explicit unsupported
+    # reply, never after a timeout, access denial, or malformed key.
     reply = source_cli_command(
-        args,
-        "get public.key",
-        bounded=True,
-        deadline=deadline,
+        args, "ver", bounded=True, deadline=deadline, full_companion_identity=True,
     )
-    return parse_cli_public_key(reply, "OTA source")
+    key = parse_cli_public_key(reply, "OTA source")
+    args.source_full_companion = True
+    return key
 
 
 def prove_shared_source_terminal_bounded(
