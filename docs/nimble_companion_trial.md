@@ -93,6 +93,7 @@ python3 -B test/test_heltec_v4_wifi_setup_page.py
 python3 -B test/test_firmware_ram.py
 python3 -B test/test_esp32_dram.py
 python3 -B test/test_shared_mota_queue.py
+python3 -B test/test_companion_mqtt_stack.py
 pio test -e native -f test_companion_node_prefs \
   -f test_ble_tx_stall_watchdog -f test_companion_frame_queue \
   -f test_display_driver
@@ -104,6 +105,9 @@ checks PIN authentication and stealth; and exercises 176-byte frames, MTU and
 notification subscription gating, retry and duplicate prevention. Embedded
 builds compile against the pinned real library. RAM reports retain the existing
 wireless budget; linked headroom is not a measurement of live free heap.
+The MQTT save callback also has a compiler-enforced stack-frame regression
+check: nested preference copies previously overflowed the V4 loop task when
+saving MQTT settings through WebConfig, despite sufficient free heap.
 
 Hardware qualification must additionally verify pairing and reconnection,
 advertised addresses for every MAC policy, contact synchronization, WiFi/BLE

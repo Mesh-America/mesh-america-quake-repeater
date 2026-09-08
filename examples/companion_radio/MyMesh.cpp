@@ -3163,9 +3163,10 @@ void MyMesh::onConfigBatchEnd() {
     CompanionMqttSetupPortal::saveStoredConfig(_mqtt_prefs);
     if (_mqtt_started && _mqtt_bridge) _mqtt_bridge->end();
     _mqtt_started = false;
-    MQTTPrefs verified;
-    _mqtt_configured = CompanionMqttSetupPortal::loadStoredConfig(verified);
-    if (_mqtt_configured) _mqtt_prefs = verified;
+    // loadStoredConfig only replaces its destination after validation. Pass
+    // the live preferences directly: another 2.8 KB copy here nests with the
+    // loader's scratch copy and NVS calls, overflowing the ESP32 loop stack.
+    _mqtt_configured = CompanionMqttSetupPortal::loadStoredConfig(_mqtt_prefs);
     // The standalone Companion setting remains canonical even if MQTT config
     // verification reloaded an older copy of this field.
     _mqtt_prefs.wifi_power_save = getCompanionWiFiPowerSave();
