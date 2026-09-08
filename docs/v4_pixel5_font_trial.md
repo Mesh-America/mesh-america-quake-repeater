@@ -89,6 +89,45 @@ PlatformIO Adafruit GFX library; set `MESHCORE_GFX_LIBRARY` to its directory
 if needed. It reports a skip when the library is absent. The native tests do
 not require that dependency. Run only one PlatformIO command at a time.
 
+## Automatic 5px/6px results, 2026-09-08
+
+Source revision `469b47d1` passed five representative firmware builds. All
+five retained the same static RAM usage and startup heap margin as their
+earlier 5px builds. The four Full profiles also passed required OTA packaging.
+
+| Hardware/profile | Display | Selected capital height | RAM beyond the required startup budget, bytes |
+| --- | --- | ---: | ---: |
+| V4.2/V4.3 Full NimBLE | SSD1306 | 6 pixels | 88,072 |
+| T096 Full, FEM on | ST7735 | 6 pixels | 24,778 |
+| Station G3 ESP32 Full | SH1106 | 6 pixels | 82,080 |
+| RAK3401 Full | SSD1306 | 6 pixels | 46,108 |
+| T-Echo Card BLE Companion | U8g2, 72 x 40 | 5 pixels | 30,992 |
+
+The native display/history suites passed 36 tests. The Python font, RAM,
+pairing, display-profile, queue and QR checks passed 38 tests, including
+pixel comparisons for all 95 ASCII glyphs in each font. The actual SSD1306
+software rendering matches the approved 6px comparison image pixel for pixel.
+
+Both `NimBLE-V4-VM` and `NimBLE-V4-Trial` were flashed with
+`v1.17.1.5-halo-keymind-cascade-squeezed6-trial-469b47d1`. Their partition tables
+and application hashes were verified, their settings retained, and running
+versions confirmed. Each passed 201 USB protocol requests without error flags.
+The Mercerwood V4 reconnected over bonded Bluetooth at MTU 179 and retained
+the factory-address policy.
+
+The XIAO sent a private 160-byte LoRa message to the Mercerwood V4. All bytes
+arrived, and the V4 stayed responsive through 20 seconds of display refreshes
+with no uptime reset or error flags. Both temporary channel settings were
+restored. After that interval the V4 had 147,196 bytes of free internal heap,
+a minimum of 146,328 bytes, and a largest free block of 139,252 bytes.
+
+These are short functional checks. Physical readability remains a user
+judgment. A message with many wide characters can still need truncation.
+
+V4 application size: 1,778,936 bytes (1,152 bytes larger than the earlier
+5px trial). SHA-256:
+`8e6797b90741bf013b3757668e5a23378ac8c0b0ed9c75830939f13305c56a68`.
+
 ## Earlier 5px hardware and build results, 2026-09-08
 
 Source revision `eeea15ef` passed seven representative firmware builds:
