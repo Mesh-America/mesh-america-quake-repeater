@@ -139,8 +139,38 @@ command plus the `--motatool` argument to use afterward.
 The motatool repair builds the [mikecarper/motatool](https://github.com/mikecarper/motatool)
 fork at pinned revision `8c38369e7d35ad50cf74261869676d52dd24adf7`, with Cargo's
 `--locked` dependencies, in a separate per-user cache directory. It needs
-Rust/Cargo and a native linker already installed; otherwise it points to
+matching stable Cargo and rustc **1.86.0 or newer** and a native linker already
+installed; otherwise it points to
 [Rust installation](https://rustup.rs/) and stops without installing anything.
+The pinned dependency set needs more than the older `rust-version` in motatool's
+own manifest: `zeroize 1.9.0` needs edition 2024, and ICU/idna dependencies need
+Rust 1.86. Cargo 1.75 is a version problem, not a root-permission problem; no
+nightly toolchain is necessary.
+
+Before asking to build or downloading crates, the runner checks both executable
+versions. It keeps a compatible default pair; otherwise it looks for versioned
+executables on PATH (such as Ubuntu's `cargo-1.91` and `rustc-1.91`) and already
+installed stable rustup toolchains. It displays the selected paths and pins both
+for the build process, so a newer Cargo cannot silently invoke an old rustc.
+Rustup proxies are resolved to their actual toolchain binaries before changing
+to the build directory. No default toolchain, symlink, system PATH, or package
+installation is changed, and probes disable rustup's automatic toolchain install.
+Tool version probes have ten-second timeouts. A working cached motatool does not
+need Cargo or Rust checks at all.
+
+To choose a pair explicitly, append:
+
+```text
+--cargo cargo-1.91 --rustc rustc-1.91
+```
+
+These options also accept executable paths, not shell aliases or a command with
+embedded arguments. Explicit selections and `RUSTC`/`CARGO_BUILD_RUSTC` compiler
+overrides are honored; if incompatible, they fail instead of silently selecting
+another compiler. `--rustc` takes precedence over those environment variables.
+The manual build command includes the chosen compiler as well as Cargo. Native
+linker, SDK, and system-library availability are still checked by the real build;
+a passed version check is not a guarantee that every host prerequisite is present.
 Source/dependency downloads, build time and disk use are disclosed before
 confirmation. Cargo progress is displayed, with a one-hour build timeout.
 The radio admin-password environment variable is not passed to the build.
@@ -185,6 +215,32 @@ commands, so emoji names need not be typed and later name changes cannot
 redirect the run. Duplicate names, ambiguous prefixes, or the same radio under
 different participant aliases stop with an actionable error. Missing contacts
 must first be imported or discovered; a key alone does not create a contact.
+
+For a separate source with a managed USB/TCP console, automatic source selection
+reads the physical source's full public key and matches it in the controller's
+contacts. Repeaters use `get public.key`. Full Companion does not implement
+that repeater command: on both USB and TCP, its key is read from a **fresh
+terminal welcome banner**, with a supported `ver` reply on the same connection
+proving the terminal is live. USB briefly uses the existing STOP/START/STOP
+terminal wrapper to obtain that banner, even for an ASCII-first Full Companion;
+TCP reads the greeting from a new connection. Identity rechecks repeat this
+exchange rather than trusting a key cached from an earlier connection.
+
+`ota status` identifies the Full Companion seeder role before this probe. For
+unrecognized firmware, only an explicit unsupported `get public.key` response
+can trigger the Companion fallback. Timeouts, permission errors, malformed keys,
+missing/ambiguous banners, and failed `ver` replies still stop the run. Firmware
+that exposes neither identity mechanism needs a supported terminal firmware;
+the runner does not guess a key from the node name or skip the identity check.
+
+Source selection does not require the source's current name to match an
+old saved advert, and duplicate/emoji names cannot redirect this lookup. An
+explicit `--source-contact` must identify that same physical source. If its key
+really is missing, import the source contact or advertise/discover it on the
+normal channel first; the normal/TempRadio on-air ACK checks still require the
+contact. The script does not silently create contacts or skip those checks.
+When the controller and source are the same TCP Full Companion, use the verified
+`--source-shares-controller` topology; it does not need a contact for itself.
 
 ## Destination requirements
 

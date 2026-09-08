@@ -147,6 +147,10 @@ MIN_MESHCLI_VERSION = (1, 6, 0)
 MOTATOOL_REPAIR_REPOSITORY = "https://github.com/mikecarper/motatool.git"
 MOTATOOL_REPAIR_REVISION = "8c38369e7d35ad50cf74261869676d52dd24adf7"
 MOTATOOL_REPAIR_TIMEOUT_SECONDS = 60 * 60
+# The pinned lockfile, not motatool's older package-level rust-version: zeroize
+# needs edition 2024 (1.85), and idna_adapter/ICU 2.2 require Rust 1.86.
+MOTATOOL_MIN_RUST_VERSION = (1, 86, 0)
+RUST_TOOL_PROBE_TIMEOUT_SECONDS = 10
 CRYPTOGRAPHY_REPAIR_REQUIREMENT = "cryptography==50.0.1"
 CRYPTOGRAPHY_REPAIR_TIMEOUT_SECONDS = 10 * 60
 # v1.17.1.5 is the first release-version contract in which every packet,
@@ -2558,11 +2562,34 @@ def bind_contact_selectors(controller: Controller, args: argparse.Namespace) -> 
     relays = [(resolve(name), password) for name, password in args.relay_values]
     source_selector = args.source_contact_value
     if (
-        not source_selector and not args.source_shares_controller
+        not args.source_shares_controller
         and has_managed_source_cli(args)
     ):
-        source_selector = read_source_name_bounded(args)
-    source = resolve(source_selector) if source_selector else None
+        # USB/TCP identifies the physical source. Its current display name may
+        # differ from the controller's saved advert (renames, truncation, emoji).
+        # Never bind a same-named but different radio, even with --source-contact.
+        source_key = read_source_public_key_bounded(args).lower()
+        if source_selector:
+            source = resolve(source_selector)
+            if source != source_key:
+                raise OtaError(
+                    f"--source-contact identifies {source}, but the connected OTA source "
+                    f"reports {source_key}; select the contact for the physical source"
+                )
+        else:
+            if source_key not in contacts:
+                raise OtaError(
+                    f"the connected OTA source public key {source_key} is not in the "
+                    "controller's contacts; import its contact or advertise/discover it "
+                    "on the normal channel first. Renaming a different contact or passing "
+                    "--source-contact cannot replace this identity check. If source and "
+                    "controller are the same TCP Full Companion, use the verified "
+                    "--source-shares-controller topology instead"
+                )
+            source = source_key
+            print(f"[contact] OTA source -> {contacts[source].get('adv_name', '?')} [{source}]")
+    else:
+        source = resolve(source_selector) if source_selector else None
     keys = [target, *(key for key, _password in relays)]
     if source:
         keys.append(source)
@@ -2758,6 +2785,29 @@ def parse_temp_radio(value: str) -> tuple[float, float, int, int, int]:
     return freq, bandwidth, sf, cr, minutes
 
 
+def parse_source_terminal_banner(value: str) -> tuple[str, str]:
+    """Read one Full/Companion welcome identity, not an advert or cached name."""
+    text = value.replace("\r", "")
+    headers = list(re.finditer(
+        r"(?m)^===== MeshCore (?:Full )?Companion Terminal =====[ \t]*$", text,
+    ))
+    if len(headers) != 1:
+        raise OtaError("OTA source did not expose one fresh Companion terminal banner")
+    tail = text[headers[0].end():]
+    # meshcli raw output strips trailing spaces from a standalone USB prompt.
+    prompt = re.search(r"\n>(?:[ \t]|(?=\n|$))", tail)
+    if prompt is None:
+        raise OtaError("OTA source Companion banner did not reach its terminal prompt")
+    banner = tail[:prompt.start()]
+    keys = re.findall(r"(?m)^[0-9A-Fa-f]{64}$", banner)
+    welcome = re.findall(
+        r"(?:^|\n)WELCOME[^\n]*\n([0-9A-Fa-f]{64})\nCompanion [^\n]+", banner,
+    )
+    if len(keys) != 1 or welcome != keys:
+        raise OtaError("OTA source Companion banner did not expose one exact public key after WELCOME")
+    return keys[0].lower(), tail[prompt.end():]
+
+
 def source_cli_command(
     args: argparse.Namespace,
     command_text: str,
@@ -2766,6 +2816,7 @@ def source_cli_command(
     bounded: bool = False,
     deadline: float | None = None,
     retry: bool = True,
+    full_companion_identity: bool = False,
 ) -> str:
     if not command_text.strip() or any(c in command_text for c in "\r\n\0"):
         raise OtaError("source command must be one nonempty line")
@@ -2773,6 +2824,8 @@ def source_cli_command(
         raise OtaError(
             f"{command_text!r} requires state-aware retry handling"
         )
+    if full_companion_identity and command_text != "ver":
+        raise OtaError("a Companion identity probe must use the read-only ver command")
     serial_port = args.source_cli_serial or args.source_serial
     tcp_console = args.source_cli_tcp
     if not serial_port and not tcp_console:
@@ -2783,6 +2836,7 @@ def source_cli_command(
         return ""
 
     def run_once() -> str:
+        terminal_key = None
         operation_timeout = getattr(args, "source_cli_timeout", 30.0)
         if deadline is not None:
             remaining = deadline - time.monotonic()
@@ -2826,6 +2880,8 @@ def source_cli_command(
                     expected_terminal_key = getattr(
                         args, "shared_source_public_key", None
                     )
+                    if full_companion_identity:
+                        terminal_key, _ = parse_source_terminal_banner(greeting_text)
                     if expected_terminal_key is not None:
                         banner_keys = re.findall(
                             r"(?:^|\r?\n)([0-9A-Fa-f]{64})(?=\r?\n)",
@@ -2872,7 +2928,7 @@ def source_cli_command(
                 raise TransmissionError("source TCP console returned an empty reply")
         else:
             wire_command = command_text
-            if getattr(args, "source_companion_terminal", False):
+            if full_companion_identity or getattr(args, "source_companion_terminal", False):
                 # meshcli raw mode keeps one serial open while writing this
                 # compound command. STOP first makes this independent of the
                 # port's current state: ASCII consumes it and returns to
@@ -2905,6 +2961,16 @@ def source_cli_command(
         if ("error" in lowered or "unknown command" in lowered or "err " in lowered
                 or re.search(r"(?:^|\n)\s*(?:->\s*)?(?:err|fail)(?:\b|:)", lowered)):
             raise OtaError(f"source rejected {command_text!r}: {output}")
+        if full_companion_identity:
+            version_output = output.replace("\r", "")
+            if not tcp_console:
+                terminal_key, version_output = parse_source_terminal_banner(output)
+            replies = re.findall(r"(?m)^[ \t]*(?:>[ \t]*)?Companion [^\n]+", version_output)
+            if len(replies) != 1 or extract_reply_version(replies[0]) is None:
+                raise OtaError("OTA source Companion did not confirm a live ver reply after its identity banner")
+            # Normalize only after this same connection supplied a complete
+            # welcome key AND replied to ver. No key from a previous connection.
+            output = f"> {terminal_key}"
         if (
             command_text.startswith("tempradio ")
             and "ok - temp params " not in lowered
@@ -3006,6 +3072,7 @@ def preflight_source_cli(args: argparse.Namespace) -> None:
             "repeater raw text CLI, nRF52 full Companion USB port, or "
             "companion_radio_full TCP terminal."
         )
+    args.source_full_companion = "OTA seeder" in output and "install:disabled" in output
 
 
 def has_managed_source_cli(args: argparse.Namespace) -> bool:
@@ -4974,13 +5041,20 @@ def read_source_public_key_bounded(
     *,
     deadline: float | None = None,
 ) -> str:
+    if not getattr(args, "source_full_companion", False):
+        reply = optional_source_cli_command(args, "get public.key", deadline=deadline)
+        if reply is not None:
+            return parse_cli_public_key(reply, "OTA source")
+    # Full Companion has no repeater `get public.key` command. Its supported
+    # USB/TCP terminal supplies the local key in a fresh welcome banner instead.
+    # Unknown firmware can reach this path only after an explicit unsupported
+    # reply, never after a timeout, access denial, or malformed key.
     reply = source_cli_command(
-        args,
-        "get public.key",
-        bounded=True,
-        deadline=deadline,
+        args, "ver", bounded=True, deadline=deadline, full_companion_identity=True,
     )
-    return parse_cli_public_key(reply, "OTA source")
+    key = parse_cli_public_key(reply, "OTA source")
+    args.source_full_companion = True
+    return key
 
 
 def prove_shared_source_terminal_bounded(
@@ -6939,6 +7013,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--meshcli", default="meshcli")
     parser.add_argument(
+        "--cargo", help="Cargo executable for motatool repair (default: find a compatible installed toolchain)",
+    )
+    parser.add_argument(
+        "--rustc", help="Rust compiler for motatool repair (default: pair with selected Cargo)",
+    )
+    parser.add_argument(
         "--motatool", default="motatool",
         help=(
             "host packaging tool; missing/incompatible bootloader support offers "
@@ -7480,6 +7560,195 @@ def offer_cryptography_repair(failure: BootloaderCryptoError) -> None:
     print("[repair] Ed25519 self-test passed; retrying full package/signature verification.")
 
 
+@dataclass(frozen=True)
+class RustBuildTools:
+    cargo: str
+    rustc: str
+    cargo_version: tuple[int, int, int]
+    rustc_version: tuple[int, int, int]
+
+    def environment(self) -> dict[str, str]:
+        env = rust_probe_environment()
+        # Pin both executables for this child process. In particular, a versioned
+        # distro Cargo must not fall back to the old unversioned rustc on PATH.
+        env["CARGO"] = self.cargo
+        env["RUSTC"] = self.rustc
+        return env
+
+
+def rust_probe_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("MESHCORE_ADMIN_PASSWORD", None)
+    env["RUSTUP_AUTO_INSTALL"] = "0"
+    return env
+
+
+def rust_host_output(command: list[str]) -> str:
+    """Bounded, read-only probes; never invoke rustup install/update/default."""
+    try:
+        result = subprocess.run(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, check=False,
+            timeout=RUST_TOOL_PROBE_TIMEOUT_SECONDS, env=rust_probe_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OtaError(f"cannot probe {command[0]}: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[:1000]
+        raise OtaError(f"cannot probe {command[0]} (exit {result.returncode}): {detail}")
+    return result.stdout.strip()
+
+
+def rust_tool_version(command: str, tool: str) -> tuple[int, int, int]:
+    output = rust_host_output([command, "--version"])
+    match = re.match(rf"^{tool} (\d+)\.(\d+)\.(\d+)(?=\s|$)", output)
+    if match is None:
+        raise OtaError(f"cannot determine a stable {tool} version from {command}: {output[:200]}")
+    version = tuple(int(part) for part in match.groups())
+    if version < MOTATOOL_MIN_RUST_VERSION:
+        needed = ".".join(map(str, MOTATOOL_MIN_RUST_VERSION))
+        raise OtaError(f"{command} reports {tool} {'.'.join(map(str, version))}; need {needed} or newer")
+    return version
+
+
+def rust_executable(command: str) -> str:
+    path = shutil.which(command)
+    if path is None:
+        raise OtaError(f"Rust tool executable not found: {command}")
+    # Keep argv[0] intact for symlink/hardlink rustup proxies.
+    return str(Path(path).absolute())
+
+
+def resolve_rustup_proxy(command: str, tool: str) -> str:
+    rustup = shutil.which("rustup")
+    if rustup is not None:
+        try:
+            is_proxy = os.path.samefile(command, rustup)
+        except OSError:
+            is_proxy = False
+        if is_proxy:
+            # Resolve in the caller's context, then retain the real binary path:
+            # changing to the build cache must not change the active toolchain.
+            return rust_executable(rust_host_output([rustup, "which", tool]))
+    return command
+
+
+def versioned_cargo_candidates() -> list[str]:
+    found: dict[str, tuple[int, ...]] = {}
+    for directory in dict.fromkeys(os.get_exec_path()):
+        if not directory:
+            continue
+        try:
+            for entry in Path(directory).iterdir():
+                match = re.fullmatch(
+                    r"cargo-(\d+\.\d+(?:\.\d+)?)(?:\.exe)?", entry.name,
+                    flags=re.IGNORECASE if os.name == "nt" else 0,
+                )
+                if match and entry.is_file() and os.access(entry, os.X_OK):
+                    found[str(entry.absolute())] = tuple(map(int, match[1].split(".")))
+        except OSError:
+            continue
+    return sorted(found, key=lambda path: found[path], reverse=True)[:16]
+
+
+def installed_rustup_cargos() -> list[str]:
+    rustup = shutil.which("rustup")
+    if rustup is None:
+        return []
+    result = []
+    for line in rust_host_output([rustup, "toolchain", "list"]).splitlines():
+        name = line.split()[0] if line.strip() else ""
+        if not re.fullmatch(r"(?:stable|\d+\.\d+\.\d+)(?:-[A-Za-z0-9_-]+)?", name):
+            continue  # Do not select nightly/beta or arbitrary custom toolchains.
+        try:
+            result.append(rust_host_output([rustup, "which", "--toolchain", name, "cargo"]))
+        except OtaError:
+            continue  # An incompletely installed toolchain is not usable.
+        if len(result) == 16:
+            break
+    return result
+
+
+def select_motatool_build_tools(args: argparse.Namespace) -> RustBuildTools:
+    explicit_cargo = getattr(args, "cargo", None)
+    explicit_rustc = (
+        getattr(args, "rustc", None) or os.environ.get("RUSTC")
+        or os.environ.get("CARGO_BUILD_RUSTC")
+    )
+    checked: set[str] = set()
+    failures: list[str] = []
+
+    def check(candidate: str) -> RustBuildTools | None:
+        try:
+            cargo = resolve_rustup_proxy(rust_executable(candidate), "cargo")
+            if cargo in checked:
+                return None
+            checked.add(cargo)
+            cargo_version = rust_tool_version(cargo, "cargo")
+            compiler_candidates = [explicit_rustc] if explicit_rustc else []
+            if not explicit_rustc:
+                name = re.sub(r"^cargo", "rustc", Path(cargo).name, count=1, flags=re.IGNORECASE)
+                compiler_candidates = [str(Path(cargo).with_name(name)), name,
+                    f"rustc-{cargo_version[0]}.{cargo_version[1]}", "rustc"]
+            compiler_errors = []
+            seen_compilers: set[str] = set()
+            for compiler in dict.fromkeys(compiler_candidates):
+                try:
+                    rustc = resolve_rustup_proxy(rust_executable(compiler), "rustc")
+                    if rustc in seen_compilers:
+                        continue
+                    seen_compilers.add(rustc)
+                    rustc_version = rust_tool_version(rustc, "rustc")
+                    if cargo_version[:2] != rustc_version[:2]:
+                        raise OtaError(
+                            f"toolchain mismatch: Cargo {'.'.join(map(str, cargo_version))} at {cargo}, "
+                            f"rustc {'.'.join(map(str, rustc_version))} at {rustc}; select matching releases"
+                        )
+                    break
+                except OtaError as exc:
+                    compiler_errors.append(str(exc))
+            else:
+                raise OtaError(" | ".join(compiler_errors))
+            tools = RustBuildTools(cargo, rustc, cargo_version, rustc_version)
+            print(f"[host] build Cargo {'.'.join(map(str, cargo_version))}: {cargo}")
+            print(f"[host] build rustc {'.'.join(map(str, rustc_version))}: {rustc}")
+            return tools
+        except OtaError as exc:
+            failures.append(str(exc))
+            print(f"[host] {exc}")
+            return None
+
+    selected = check(explicit_cargo or "cargo")
+    if selected is not None:
+        return selected
+    if not explicit_cargo:
+        for candidate in versioned_cargo_candidates():
+            selected = check(candidate)
+            if selected is not None:
+                return selected
+        try:
+            installed = installed_rustup_cargos()
+        except OtaError as exc:
+            failures.append(str(exc))
+            installed = []
+        for candidate in installed:
+            selected = check(candidate)
+            if selected is not None:
+                return selected
+    needed = ".".join(map(str, MOTATOOL_MIN_RUST_VERSION))
+    raise OtaError(
+        f"motatool repair needs matching stable Cargo and rustc {needed} or newer "
+        "for its pinned dependencies, plus a native linker. "
+        "Select an installed pair with --cargo cargo-1.91 --rustc rustc-1.91, "
+        "or install a current stable user toolchain from https://rustup.rs "
+        "(with rustup already installed: rustup toolchain install stable --profile minimal). "
+        "Root access and nightly are not required for this version issue. "
+        "Shell aliases do not affect this script; explicit --cargo/--rustc and compiler "
+        "environment overrides are not silently replaced. No build or radio changes "
+        "were made. " + " | ".join(failures[-4:])
+    )
+
+
 def motatool_repair_command(root: Path, cargo: str = "cargo") -> list[str]:
     return [
         cargo, "install", "--git", MOTATOOL_REPAIR_REPOSITORY,
@@ -7520,9 +7789,14 @@ def offer_motatool_repair(
         print(f"[host] using previously installed, rechecked motatool: {binary}")
         return
 
-    cargo = shutil.which("cargo")
-    command = motatool_repair_command(root, cargo or "cargo")
+    build_tools = None if cached else select_motatool_build_tools(args)
+    command = motatool_repair_command(root, build_tools.cargo if build_tools else "cargo")
     manual = display_host_command(command)
+    if build_tools is not None:
+        if os.name == "nt":
+            manual = "$env:RUSTC = '" + build_tools.rustc.replace("'", "''") + "'; " + manual
+        else:
+            manual = "RUSTC=" + shlex.quote(build_tools.rustc) + " " + manual
     selection = display_host_command(["--motatool", str(binary)])
     # Display an argument, not a PowerShell call operator for an option.
     if os.name == "nt":
@@ -7533,12 +7807,6 @@ def offer_motatool_repair(
     print("[repair] Existing motatool installations and PATH will not be changed.")
     print(f"[repair] Manual install command: {manual}")
     print(f"[repair] To select this build explicitly, append: {selection}")
-    if not cached and cargo is None:
-        raise OtaError(
-            "automatic motatool repair requires Rust/Cargo and a native linker; "
-            "install the toolchain from https://rustup.rs and rerun, or select a "
-            "bootloader-capable build with --motatool. No installation was attempted"
-        )
     if not sys.stdin.isatty():
         raise OtaError(
             "motatool repair needs separate interactive approval (--yes does not approve "
@@ -7565,8 +7833,8 @@ def offer_motatool_repair(
         # No cache directories, downloads or builds before affirmative consent.
         root.mkdir(parents=True, exist_ok=True)
         print("[repair] Building motatool (Cargo output follows)...", flush=True)
-        build_env = os.environ.copy()
-        build_env.pop("MESHCORE_ADMIN_PASSWORD", None)
+        assert build_tools is not None
+        build_env = build_tools.environment()
         try:
             result = subprocess.run(
                 command, cwd=str(root), stdin=subprocess.DEVNULL,
