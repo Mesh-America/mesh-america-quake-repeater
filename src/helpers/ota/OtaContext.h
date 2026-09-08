@@ -11,6 +11,19 @@
 #include "OtaFormat.h"
 #include "OtaSelf.h"          // ota_self_firmware() - prefer self-describing EndF identity at begin()
 #include "OtaBlInfo.h"        // bootloader OTA-apply capability marker (nRF52); cached after first read
+
+// Storage policy for the mOTA context. A "dynamic" context is created on demand
+// and handed back once idle, so its multi-kilobyte workspace only occupies RAM
+// while an OTA operation is actually in flight:
+//   OTA_SHARED_COMPANION_QUEUE - borrows the Companion's offline message queue
+//   OTA_HEAP_CONTEXT           - allocates from the heap, failing softly
+// Every other build keeps the plain .bss singleton.
+#if defined(OTA_SHARED_COMPANION_QUEUE) || defined(OTA_HEAP_CONTEXT)
+  #define OTA_DYNAMIC_CONTEXT 1
+#else
+  #define OTA_DYNAMIC_CONTEXT 0
+#endif
+
 #if defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
   #include "OtaStoreQspiNrf52.h"
 #elif defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
@@ -82,7 +95,7 @@ class FolderMotaStore;   // pull destination over the seeder link (full type onl
 #endif
 
 struct OtaContext {
-#if defined(OTA_SHARED_COMPANION_QUEUE)
+#if OTA_DYNAMIC_CONTEXT
   // Release at a main-loop boundary, after callers finish using this context.
   bool release_when_idle = false;
 #endif
@@ -409,7 +422,7 @@ struct OtaContext {
       return false;
     }
     folder_active = true;
-#if defined(OTA_SHARED_COMPANION_QUEUE)
+#if OTA_DYNAMIC_CONTEXT
     release_when_idle = false;
 #endif
     _folder_link = link;
@@ -439,7 +452,7 @@ struct OtaContext {
     folder_active = false;
     _folder_link = FOLDER_LINK_NONE;
     _folder_source = nullptr;
-#if defined(OTA_SHARED_COMPANION_QUEUE)
+#if OTA_DYNAMIC_CONTEXT
     release_when_idle = true;
 #endif
   }
@@ -641,6 +654,14 @@ uint8_t ota_hop_limit();
     !defined(OTA_SEEDER_ONLY) || !defined(COMPANION_RADIO_FULL)
 #error "Shared mOTA queue storage requires an nRF52 or ESP32 Full source-only Companion"
 #endif
+#if defined(OTA_HEAP_CONTEXT)
+#error "OTA_HEAP_CONTEXT and OTA_SHARED_COMPANION_QUEUE both own the context storage"
+#endif
+#endif
+
+#if OTA_DYNAMIC_CONTEXT
+// ota_ctx() is only valid while storage is held. Callers that can run before a
+// successful ota_acquire_context() must gate on ota_context_if_active() first.
 void ota_set_context_storage(void* owner, OtaContext* (*acquire)(void*),
                              void (*release)(void*));
 void ota_release_context_if_idle(bool temporary_radio_active);

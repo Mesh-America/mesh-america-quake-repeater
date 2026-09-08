@@ -278,7 +278,10 @@ void Mesh::loop() {
 
 bool Mesh::hasPendingOtaApply() const {
 #if defined(ENABLE_OTA) && !defined(OTA_SEEDER_ONLY)
-  return ota::ota_ctx().apply_pending;
+  // A released dynamic context cannot hold a pending apply: the context is only
+  // handed back once apply_pending is clear.
+  const ota::OtaContext* oc = ota::ota_context_if_active();
+  return oc && oc->apply_pending;
 #else
   return false;
 #endif
@@ -328,6 +331,14 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
     }
   }
 #if defined(ENABLE_OTA)
+#if OTA_DYNAMIC_CONTEXT
+  // Nothing below can run without storage, and a released context holds no
+  // pending apply or egress. Bail before any ota_ctx() dereference.
+  if (!ota::ota_context_if_active()) {
+    _ota_temp_was_active = false;
+    return;
+  }
+#endif
 #if !defined(OTA_SEEDER_ONLY)
   // Deferred apply-reboot: a verified `ota applydelta` approves the update but does NOT reboot inline,
   // so its "verified; applying" reply can be delivered first (over LoRa that reply is the operator's
@@ -355,12 +366,6 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
         }
       }
     }
-  }
-#endif
-#if defined(OTA_SHARED_COMPANION_QUEUE)
-  if (!ota::ota_context_if_active()) {
-    _ota_temp_was_active = false;
-    return;
   }
 #endif
   const bool ota_active = isTempRadioActive();
