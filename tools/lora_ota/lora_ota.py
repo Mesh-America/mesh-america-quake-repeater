@@ -33,6 +33,7 @@ import stat
 import struct
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
@@ -146,6 +147,8 @@ MIN_MESHCLI_VERSION = (1, 6, 0)
 MOTATOOL_REPAIR_REPOSITORY = "https://github.com/mikecarper/motatool.git"
 MOTATOOL_REPAIR_REVISION = "8c38369e7d35ad50cf74261869676d52dd24adf7"
 MOTATOOL_REPAIR_TIMEOUT_SECONDS = 60 * 60
+CRYPTOGRAPHY_REPAIR_REQUIREMENT = "cryptography==50.0.1"
+CRYPTOGRAPHY_REPAIR_TIMEOUT_SECONDS = 10 * 60
 # v1.17.1.5 is the first release-version contract in which every packet,
 # including retries, uses the same tuple-selected physical preamble: normally
 # 32 symbols at SF5-SF8, then 64 or 128 only where each shorter choice cannot
@@ -166,6 +169,10 @@ T = TypeVar("T")
 
 class OtaError(RuntimeError):
     """Expected, actionable operator error."""
+
+
+class BootloaderCryptoError(OtaError):
+    """The CLI may offer dependency repair; library parsing never installs code."""
 
 
 class TransmissionError(OtaError):
@@ -854,9 +861,9 @@ def parse_bootloader_mota(blob: bytes, path: Path | None) -> MotaInfo:
         if problems:
             raise ValueError("; ".join(problems))
     except ImportError as exc:
-        raise OtaError(
+        raise BootloaderCryptoError(
             "bootloader signature verification requires Python cryptography; "
-            "install it in the Python environment running this script"
+            f"the dependency could not load in {sys.executable}: {exc}"
         ) from exc
     except (ValueError, struct.error) as exc:
         raise OtaError(f"invalid bootloader mOTA: {exc}") from exc
@@ -7330,7 +7337,7 @@ def report_staged_update(
     print("[manual] Do not use `ota install`. The device still enforces signer trust, continuity and upgrade-only checks.")
 
 
-def motatool_repair_root() -> Path:
+def host_repair_cache() -> Path:
     if os.name == "nt":
         cache = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     elif sys.platform == "darwin":
@@ -7338,8 +7345,139 @@ def motatool_repair_root() -> Path:
     else:
         cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     if not cache.is_absolute():
-        raise OtaError("motatool repair needs an absolute user cache directory")
-    return cache / "meshcore-lora-ota" / "motatool" / MOTATOOL_REPAIR_REVISION
+        raise OtaError("host tool repair needs an absolute user cache directory")
+    return cache / "meshcore-lora-ota"
+
+
+def motatool_repair_root() -> Path:
+    return host_repair_cache() / "motatool" / MOTATOOL_REPAIR_REVISION
+
+
+def cryptography_repair_root() -> Path:
+    # Do not mix wheels between virtual environments, architectures or ABIs.
+    identity = "|".join((
+        sys.executable, sys.version, sysconfig.get_platform(),
+        str(sysconfig.get_config_var("SOABI")),
+    ))
+    tag = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return host_repair_cache() / "python" / tag / CRYPTOGRAPHY_REPAIR_REQUIREMENT
+
+
+def cryptography_repair_command(root: Path) -> list[str]:
+    return [
+        sys.executable, "-m", "pip", "--isolated", "--disable-pip-version-check",
+        "install", "--no-input", "--only-binary=:all:", "--no-cache-dir",
+        "--index-url", "https://pypi.org/simple", "--upgrade",
+        "--target", str(root), CRYPTOGRAPHY_REPAIR_REQUIREMENT,
+    ]
+
+
+def activate_cached_cryptography(root: Path) -> None:
+    """Load a private wheel installation without unloading live native modules."""
+    old_path = sys.path[:]
+    sys.path.insert(0, str(root))
+    importlib.invalidate_caches()
+    try:
+        import cryptography
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        if not Path(cryptography.__file__).resolve().is_relative_to(root.resolve()):
+            raise ImportError(
+                "private installation did not provide cryptography; a conflicting or "
+                "partially loaded system installation may need repair in your Python environment"
+            )
+        # RFC 8032 test 1: a working import is not enough to prove Ed25519 works.
+        key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        ))
+        signature = bytes.fromhex(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555f"
+            "b8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        )
+        key.verify(signature, b"")
+        try:
+            key.verify(signature, b"tampered")
+        except InvalidSignature:
+            pass
+        else:
+            raise ValueError("Ed25519 accepted a modified message")
+    except Exception as exc:
+        # Never unload/reload Rust/CFFI extensions: their retained exception
+        # classes may then differ from Python's, breaking signature rejection.
+        sys.path[:] = old_path
+        importlib.invalidate_caches()
+        raise OtaError(f"cached cryptography failed its Ed25519 check: {exc}") from exc
+
+
+def offer_cryptography_repair(failure: BootloaderCryptoError) -> None:
+    root = cryptography_repair_root()
+    print(f"[host] {failure}")
+    if root.is_dir():
+        try:
+            activate_cached_cryptography(root)
+        except OtaError as exc:
+            print(f"[host] {exc}")
+        else:
+            print(f"[host] using previously installed, rechecked cryptography: {root}")
+            return
+
+    command = cryptography_repair_command(root)
+    print(f"[repair] Python: {sys.executable}")
+    print(f"[repair] Download {CRYPTOGRAPHY_REPAIR_REQUIREMENT} and its wheel dependencies from PyPI.")
+    print(f"[repair] Private install: {root}")
+    print("[repair] System/virtual-environment packages and PATH will not be changed.")
+    print(f"[repair] Manual install command: {display_host_command(command)}")
+    print("[repair] After a manual install, rerun the same OTA command; it rechecks this cache.")
+    # Probe this interpreter, not an unrelated `pip` executable on PATH.
+    install_env = os.environ.copy()
+    install_env.pop("MESHCORE_ADMIN_PASSWORD", None)
+    install_env["PIP_CONFIG_FILE"] = os.devnull
+    try:
+        pip = subprocess.run(
+            [sys.executable, "-m", "pip", "--isolated", "--version"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=False, env=install_env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OtaError(f"cannot check pip in {sys.executable}: {exc}; no installation attempted") from exc
+    if pip.returncode != 0:
+        bootstrap = display_host_command([sys.executable, "-m", "ensurepip", "--upgrade"])
+        raise OtaError(
+            f"pip is unavailable in this Python environment. Enable it with {bootstrap}, "
+            "or install your operating system's Python pip/venv package and rerun. "
+            "No installation or radio changes were made"
+        )
+    if not sys.stdin.isatty():
+        raise OtaError(
+            "cryptography repair needs separate interactive approval (--yes does not "
+            "approve software installation); rerun in a terminal or use the printed "
+            "manual command. No installation was attempted"
+        )
+    try:
+        approved = input("Install cryptography privately and retry signature verification? [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        approved = False
+    if not approved:
+        raise OtaError("cryptography repair declined; no installation or radio changes were made")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        print("[repair] Installing binary wheels (pip output follows)...", flush=True)
+        result = subprocess.run(
+            command, stdin=subprocess.DEVNULL, timeout=CRYPTOGRAPHY_REPAIR_TIMEOUT_SECONDS,
+            check=False, env=install_env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OtaError(f"cryptography repair failed: {exc}; stopping before radio access") from exc
+    if result.returncode != 0:
+        raise OtaError(
+            f"cryptography repair failed (pip exit {result.returncode}); check network, "
+            "disk space and wheel support for this Python/platform. If pip is too old, "
+            "update it in your Python environment. No source builds, system-package "
+            f"overrides or radio changes were attempted; partial files may remain in {root}"
+        )
+    activate_cached_cryptography(root)
+    print("[repair] Ed25519 self-test passed; retrying full package/signature verification.")
 
 
 def motatool_repair_command(root: Path, cargo: str = "cargo") -> list[str]:
@@ -7479,6 +7617,8 @@ def require_bootloader_tool_support(args: argparse.Namespace) -> None:
                         if info.is_bootloader:
                             temporary_blob = info.blob
                             break
+                    except BootloaderCryptoError:
+                        raise  # A missing dependency is not an invalid ZIP member.
                     except OtaError as exc:
                         failures.append(f"{member.filename}: {exc}")
         except zipfile.BadZipFile as exc:
@@ -7499,14 +7639,21 @@ def require_bootloader_tool_support(args: argparse.Namespace) -> None:
             offer_motatool_repair(args, probe, exc)
 
 
+def preflight_package_tools(args: argparse.Namespace) -> None:
+    args.package_kind = inspect_package_kind(args.package, args.zip_member)
+    print(f"[package] detected {args.package_kind} update from container metadata")
+    require_package_action(args, args.package_kind == "bootloader")
+    if args.package_kind == "bootloader":
+        require_bootloader_tool_support(args)
+    else:
+        require_command(args.motatool, "motatool")
+
+
 def preflight_inputs(args: argparse.Namespace) -> None:
     if not args.package.is_file():
         raise OtaError(f"package does not exist: {args.package.resolve()}")
     if args.package.suffix.lower() not in (".zip", ".mota"):
         raise OtaError("PACKAGE must be a .zip or .mota file")
-    args.package_kind = inspect_package_kind(args.package, args.zip_member)
-    print(f"[package] detected {args.package_kind} update from container metadata")
-    require_package_action(args, args.package_kind == "bootloader")
     for label, path in (
         ("--base", args.base),
         ("--sign-key", args.sign_key),
@@ -7514,10 +7661,14 @@ def preflight_inputs(args: argparse.Namespace) -> None:
     ):
         if path is not None and not path.is_file():
             raise OtaError(f"{label} file does not exist: {path.resolve()}")
-    if args.package_kind == "bootloader":
-        require_bootloader_tool_support(args)
-    else:
-        require_command(args.motatool, "motatool")
+    try:
+        preflight_package_tools(args)
+    except BootloaderCryptoError as exc:
+        # Refuse unsupported actions before offering software installation. Retry
+        # once only, and never skip the original package/signature validation.
+        require_package_action(args, True)
+        offer_cryptography_repair(exc)
+        preflight_package_tools(args)
     if not args.prepare_only:
         require_meshcli_version(args.meshcli)
 
