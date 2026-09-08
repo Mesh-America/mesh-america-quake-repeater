@@ -323,6 +323,12 @@ These capacities preserve the required 8 KiB static internal-DRAM reserve
 alongside MOTA and all Full transports; their ordinary transport-specific
 images retain 160 contacts, 40 channels, and 128 queued frames.
 
+The 1.17.1.5 memory replacements for Generic ESP-NOW, Heltec Wireless Paper,
+Wireless Tracker, CT62, V3, Tracker V2, and XIAO C3 Full Companion use **150
+contacts** and retain their **256-frame queue** and Full transports. Export
+contacts before updating if you have more than 150; entries beyond the new
+limit may be unavailable and a later save may omit them.
+
 Full Companions normally retain 256 pending Companion message frames. ESP32
 boards with configured PSRAM retain 512 and allocate that queue from PSRAM
 before WiFi and BLE start. If PSRAM is unavailable at runtime, allocation falls
@@ -333,11 +339,10 @@ direct messages; it is not flash-backed history. See
 [Companion offline message queue](./companion_offline_queue.md) for all platform
 defaults and full-queue behavior.
 
-The corrected T096 Full profile keeps **256 offline frames normally** and
+Every corrected nRF52 Full profile keeps **256 offline frames normally** and
 temporarily lends 128 slots to mOTA to leave room for
-its color framebuffer, Bluetooth tasks, and UI allocations. It retains 350
-contacts, 40 channels, and USB/Bluetooth mOTA sending. The published 1.17.1.5
-`26303793` image predates this [memory correction](releases/1.17.1.5.md#t096-full-companion-bluetooth-and-menu-freeze-report).
+Bluetooth tasks, displays and UI allocations. Queue sharing preserves the
+board's contacts, channels, and USB/Bluetooth mOTA sending. See the [memory correction](releases/1.17.1.5.md#t096-full-companion-bluetooth-and-menu-freeze-report).
 
 The nRF52 target inherits the board's ordinary USB Companion installation
 format and adds BLE plus the serial mOTA source. It does not enable an SD cache

@@ -1,5 +1,10 @@
 # MeshCore memory monitoring
 
+Every firmware build also has a [runtime RAM capacity check](docs/firmware_memory_budget.md)
+before packaging. Its `.memory.json` report describes linked capacity before
+startup allocation. Continue to use the runtime readings below for load and
+soak testing; the two measurements answer different questions.
+
 MeshCore exposes current allocator information through the CLI. On an ESP32
 build, run `memory` over a supported local or administrator CLI transport:
 

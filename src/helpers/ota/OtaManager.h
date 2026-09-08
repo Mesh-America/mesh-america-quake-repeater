@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "OtaFormat.h"
+#include "OtaMemoryPolicy.h"
 #include "OtaProtocol.h"
 #include "OtaByteIO.h"
 #include "OtaStore.h"

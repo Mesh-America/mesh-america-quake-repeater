@@ -49,13 +49,16 @@ class T096FullMemoryTest(unittest.TestCase):
                 self.assertNotIn("-DMAX_CONTACTS", flags)
                 self.assertNotIn("-DMAX_GROUP_CHANNELS", flags)
 
-    def test_other_nrf52_profiles_keep_their_queue_policy(self):
-        for target in ("RAK_4631_companion_radio_full",
-                       "Heltec_t096_companion_radio_ble_femon"):
+    def test_all_nrf52_full_profiles_share_without_changing_legacy(self):
+        for target in ("RAK_4631_companion_radio_full", "WioTrackerL1Eink_companion_radio_full",
+                       "Heltec_t114_companion_radio_full", "RAK_3401_companion_radio_full"):
             with self.subTest(target=target):
                 flags = full_flags(target)
-                self.assertNotIn("-DOTA_SHARED_COMPANION_QUEUE", flags)
-                self.assertNotIn("__mesh_nrf52_min_heap_size", flags)
+                self.assertIn("-DOTA_SHARED_COMPANION_QUEUE=1", flags)
+                self.assertIn("-DOFFLINE_QUEUE_SIZE=256", flags.splitlines()[0])
+        flags = full_flags("Heltec_t096_companion_radio_ble_femon")
+        self.assertNotIn("-DOTA_SHARED_COMPANION_QUEUE", flags)
+        self.assertNotIn("__mesh_nrf52_min_heap_size", flags)
 
     def test_real_linker_rejects_release_heap_and_enforces_boundary(self):
         flags = full_flags("Heltec_t096_companion_radio_full_femon")

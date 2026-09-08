@@ -10,7 +10,11 @@ import json
 from pathlib import Path
 import re
 import shutil
+import sys
 from urllib.parse import quote, urljoin
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from firmware_memory_manifest import validate_package
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,8 +66,11 @@ def collect_artifacts(directory, version):
                 raise ValueError(f"{stem}: nRF52 UF2/DFU artifacts incomplete")
         if any(item.stat().st_size == 0 for item in files):
             raise ValueError(f"{stem}: empty firmware artifact")
+        memory = validate_package(directory / stem)
+        manifest["runtime_ram"] = {key: memory[key] for key in (
+            "passed", "available_internal_bytes", "required_heap_bytes", "elf_sha256")}
         accounted.update(files)
-        records.append({"manifest": manifest, "files": sorted(files) + [path]})
+        records.append({"manifest": manifest, "files": sorted(files) + [path, directory / (stem + ".memory.json")]})
     unaccounted = {path for path in directory.iterdir() if path.suffix in FIRMWARE_SUFFIXES} - accounted
     if unaccounted:
         raise ValueError("firmware without qualification: " + ", ".join(sorted(p.name for p in unaccounted)))

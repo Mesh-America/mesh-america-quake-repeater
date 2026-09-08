@@ -1,4 +1,5 @@
 #pragma once
+#include <helpers/ota/OtaMemoryPolicy.h>
 
 // Features are selected independently so adding a transport or changing an
 // image-size profile cannot accidentally remove unrelated Companion behavior.

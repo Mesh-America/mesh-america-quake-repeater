@@ -673,7 +673,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     const bool discarded = !was_folder && !was_sd_archive &&
                            c.fetch_store.discard();
     // Fetch cancellation and serving are independent. In particular, a
-    // manual ESP32 serve view can point into serve_buf, so leave the manager
+    // manual serve view can point into serve_buf, so leave the manager
     // view and its caller-owned buffer intact until `ota dev clear` (which
     // detaches the view before releasing the buffer).
     c.session_started_ms = 0;

@@ -13,6 +13,7 @@ require integration or target testing; see "Local testing without hardware" in
 pio test -e native                      # all suites except KISS modem
 pio test -e native_kiss_modem           # KISS modem suite
 pio test -e native -f test_webconfig_keys   # a single suite
+python3 test/test_firmware_ram.py        # every firmware hook, ELF heaps, reservations, RAM report binding
 python3 test/test_indicator_display_profile.py  # Indicator RAM/scale contract
 python3 test/test_indicator_render_profile.py   # four-mode Indicator canvas matrix/fallback contract
 python3 test/test_indicator_exclusive_transport.py  # Indicator secondary-transport ownership contract

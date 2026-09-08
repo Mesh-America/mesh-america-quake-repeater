@@ -105,10 +105,10 @@ struct OtaContext {
   OtaStoreRam<OTA_FETCH_BUF_SIZE> fetch_store;
 #endif
   SignerAllowlist allow;
-#if defined(ESP32_PLATFORM)
-  // Manual `ota dev stage` is a diagnostic path. Reserving its full buffer in
-  // .bss prevents high-capacity classic ESP32 images from linking, even when
-  // the command is never used, so allocate it only while a manual stage exists.
+#if defined(ESP32_PLATFORM) || (defined(NRF52_PLATFORM) && !defined(OTA_SEEDER_ONLY))
+  // Manual `ota dev stage` is a diagnostic path. Keep its buffer out of
+  // startup RAM on ESP32 and nRF52 receivers; normal mOTA uses the staging
+  // store. A failed allocation is reported by the CLI before any write.
   uint8_t* serve_buf = nullptr;
   bool ensureServeBuffer() {
     if (!serve_buf) serve_buf = static_cast<uint8_t*>(malloc(OTA_SERVE_BUF_SIZE));

@@ -65,6 +65,11 @@ class ReleaseQualificationTest(unittest.TestCase):
             (inputs / (stem + ".capabilities.json")).write_text(json.dumps(manifest))
             (inputs / (stem + ".bin")).write_bytes(b"test application")
             (inputs / (stem + "-merged.bin")).write_bytes(b"test merged image")
+            proof = dict(schema_version=1, passed=True, available_internal_bytes=80000,
+                         required_heap_bytes=50000, largest_internal_region_bytes=80000,
+                         required_contiguous_bytes=5120, elf_sha256="a" * 64,
+                         files={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs.iterdir()})
+            (inputs / (stem + ".memory.json")).write_text(json.dumps(proof))
             status = directory / "status"
             settings = (f"exit_code=0\nworking_directory={directory}\noutput_directory=input\n"
                         f"source_commit={commit}\nfirmware_version={label}\nfirmware_profile=cascade\n"

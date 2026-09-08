@@ -3504,19 +3504,18 @@ apply_companion_radio_full_profile() {
     append_platformio_build_unflags "-UOTA_FOLDER_SERIAL"
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOTA_FOLDER_SERIAL=1 -DCOMPANION_FEATURE_USB_MOTA_SOURCE=1 -DCOMPANION_FEATURE_BLE_MOTA_SOURCE=1 -DCOMPANION_FEATURE_DEDICATED_USB_LOGGING=1 -DCFG_TUD_CDC=2 -DMESH_DUAL_CDC_LOGGING=1 -DMESH_DEBUG=1 -DMESH_PACKET_LOGGING=1"
 
-    case "${env_name,,}" in
-      heltec_t096_companion_radio_full*)
-        # The TFT allocates 25 KiB after linking. Together with the loop,
-        # callback and BLE task stacks, packet pool, filesystems and message
-        # previews, this exhausts the 1.17.1.5 image's ~53 KiB heap. Keep all
-        # 256 offline slots normally; lend the upper 128 to the mOTA context
-        # only while needed. Reserve 72 KiB for runtime allocations at link.
-        append_platformio_build_unflags "-DOFFLINE_QUEUE_SIZE=512 -DOFFLINE_QUEUE_SIZE=128"
-        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOFFLINE_QUEUE_SIZE=256 -DOTA_SHARED_COMPANION_QUEUE=1 -Wl,--defsym=__mesh_nrf52_min_heap_size=73728"
-        record_build_reduction \
-          "T096 Full: 256 offline frames normally; 128 while mOTA borrows queue storage"
+    # Every nRF52 Full Companion lends the upper half of its offline queue
+    # to the cold mOTA context. Keep 256 slots for everyday use and reserve
+    # runtime space for Bluetooth, displays, tasks and filesystem buffers.
+    append_platformio_build_unflags "-DOFFLINE_QUEUE_SIZE=512 -DOFFLINE_QUEUE_SIZE=128 -DOFFLINE_QUEUE_SIZE=16"
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOFFLINE_QUEUE_SIZE=256 -DOTA_SHARED_COMPANION_QUEUE=1"
+    case "$env_name" in
+      Heltec_t096_companion_radio_full_*)
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -Wl,--defsym=__mesh_nrf52_min_heap_size=73728"
         ;;
     esac
+    record_build_reduction \
+      "nRF52 Full: 256 offline frames normally; 128 while mOTA borrows queue storage"
 
     if ! pio_env_option_contains "$pio_env_name" build_src_filter "helpers/ota/*.cpp"; then
       append_platformio_build_src_filter "+<helpers/ota/*.cpp>"
@@ -3609,6 +3608,20 @@ apply_companion_radio_full_profile() {
   # measured-safe tables for FULL OTA without changing ordinary USB/BLE/WiFi
   # companion builds.
   case "${env_name,,}" in
+    generic_espnow_companion_radio_full|\
+    heltec_wireless_paper_companion_radio_full|\
+    heltec_wireless_tracker_companion_radio_full|\
+    heltec_ct62_companion_radio_full|\
+    heltec_v3_companion_radio_full|\
+    xiao_c3_companion_radio_full|\
+    heltec_tracker_v2_companion_radio_full_*)
+      # Published 1.17.1.5 images failed the runtime heap budget with 350
+      # contacts. Preserve the 256-frame queue and simultaneous transports.
+      append_platformio_build_unflags "-DMAX_CONTACTS=350"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=150"
+      record_build_reduction \
+        "companion.capacity limited to 150 contacts for runtime RAM; 256 queued frames and all Full transports retained"
+      ;;
     meshadventurer_sx1262_companion_radio_full|\
     meshadventurer_sx1268_companion_radio_full)
       append_platformio_build_unflags "-DMAX_CONTACTS=160 -DMAX_GROUP_CHANNELS=40 -DOFFLINE_QUEUE_SIZE=128"
@@ -3840,6 +3853,8 @@ build_artifacts_exist() {
   local firmware_filename=$2
 
   output_artifact_exists "${firmware_filename}.capabilities.json" || return 1
+  python3 scripts/firmware_memory_manifest.py validate-package \
+    "${OUTPUT_DIR}/${firmware_filename}" >/dev/null 2>&1 || return 1
   grep -q '"verified": true' \
     "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" || return 1
   if [ "${REQUIRE_OTA_UPDATES:-0}" = "1" ]; then
@@ -3882,6 +3897,9 @@ collect_build_artifacts() {
   local env_platform=$2
   local pio_env_name=$3
   local firmware_filename=$4
+  local build_output_dir="${PIO_BUILD_DIR_OVERRIDE:-${PLATFORMIO_BUILD_DIR:-.pio/build}}/${pio_env_name}"
+
+  python3 scripts/firmware_memory_manifest.py validate-build "$build_output_dir" || return $?
 
   # Qualify the linked image before copying anything into out/. A failed
   # capability contract must not leave an apparently publishable firmware
@@ -3911,6 +3929,8 @@ collect_build_artifacts() {
       ;;
   esac
 
+  python3 scripts/firmware_memory_manifest.py package "$build_output_dir" \
+    --stem "${OUTPUT_DIR}/${firmware_filename}" || return $?
 }
 
 get_firmware_filename() {
@@ -4147,6 +4167,13 @@ build_firmware() {
       && ! pio_env_option_contains "$pio_env_name" extra_scripts \
           "scripts/check_esp32_dram.py"; then
     append_platformio_extra_script "post:scripts/check_esp32_dram.py"
+  fi
+
+  # Variant-specific extra_scripts can replace their platform base. Every
+  # release path, including Option 3 and direct target builds, must be gated.
+  if ! pio_env_option_contains "$pio_env_name" extra_scripts \
+      "scripts/check_firmware_ram.py"; then
+    append_platformio_extra_script "post:scripts/check_firmware_ram.py"
   fi
 
   print_build_flags "$pio_env_name" "$env_name"
