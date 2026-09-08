@@ -143,16 +143,14 @@ static bool drawCompactCompanionWiFiSetupPage(
   display.setCompactText(true);
   display.setTextSize(1);
   display.setColor(UIColor::primary_txt);
-  display.drawTextCentered(
-      display.width() / 2, 20,
-      setup_active ? "SETUP AP ACTIVE" : "SETUP AP INACTIVE");
 
+  // Put the connection and its address above the setup AP controls.
   if (setup_active) {
-    display.drawTextEllipsized(0, 31, display.width(), setup_ssid);
+    display.drawTextEllipsized(0, 20, display.width(), setup_ssid);
     char open_ip[22];
     snprintf(open_ip, sizeof(open_ip), "OPEN %s", setup_ip);
     display.setColor(UIColor::secondary_txt);
-    display.drawTextCentered(display.width() / 2, 42, open_ip);
+    display.drawTextCentered(display.width() / 2, 31, open_ip);
   } else {
     const bool show_ip = wifi_connected && wifi_ip[0] != 0;
     const char* wifi_status = !wifi_enabled
@@ -160,14 +158,18 @@ static bool drawCompactCompanionWiFiSetupPage(
         : wifi_connected
             ? "WIFI CONNECTED"
             : wifi_configured ? "WIFI CONNECTING" : "WIFI NOT CONFIGURED";
+    display.drawTextCentered(display.width() / 2, 20, wifi_status);
     display.setColor(UIColor::secondary_txt);
-    display.drawTextCentered(display.width() / 2, show_ip ? 31 : 37, wifi_status);
     if (show_ip) {
       char ip_line[19]; // "IP " plus the longest IPv4 address and terminator
       snprintf(ip_line, sizeof(ip_line), "IP %s", wifi_ip);
-      display.drawTextCentered(display.width() / 2, 42, ip_line);
+      display.drawTextCentered(display.width() / 2, 31, ip_line);
     }
   }
+
+  display.drawTextCentered(
+      display.width() / 2, 42,
+      setup_active ? "SETUP AP ACTIVE" : "SETUP AP INACTIVE");
 
   display.setColor(UIColor::warning_txt);
   display.drawTextCentered(
