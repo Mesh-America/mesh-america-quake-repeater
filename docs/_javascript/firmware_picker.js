@@ -222,9 +222,14 @@
     const merged = stem.endsWith("-merged");
     if (merged) stem = stem.slice(0, -"-merged".length);
 
+    // Corrected assets can have a new source hash on the existing release
+    // page. Keep the complete version/flavor boundary, allowing its commit
+    // suffix to differ from the original tag's commit.
+    const familyRoot = familyTag.replace(/-[0-9a-f]{7,8}$/i, "");
+    const sourceSuffix = familyRoot === familyTag
+      ? "(?:-[0-9a-f]{7,8})?" : "-[0-9a-f]{7,8}(?:-[0-9a-f]{7,8})?";
     const versionPattern = new RegExp(
-      "^(.*?)-(ota-)?" + escapeRegExp(familyTag) +
-        "(?:-[0-9a-f]{7,8})?$",
+      "^(.*?)-(ota-)?" + escapeRegExp(familyRoot) + sourceSuffix + "$",
       "i"
     );
     const versionMatch = stem.match(versionPattern);
@@ -950,6 +955,13 @@
       "Verify that the hardware name and every displayed variant match the physical board.",
       "Back up configuration, keys, and radio settings before changing roles or profiles.",
     ];
+    const memory = profile.controls;
+    const selectedAsset = canonicalAsset(profile.files, kind);
+    if (memory && memory.memoryNote && memory.memorySource &&
+        selectedAsset &&
+        selectedAsset.name.includes("-" + memory.memorySource.slice(0, 8))) {
+      common.push(memory.memoryNote);
+    }
     const byKind = {
       "merged-bin": [
         "Flash the merged image over a data-capable USB connection.",
@@ -1131,7 +1143,7 @@
     if (profile.role === "repeater") toggle("Repeat mesh traffic", "set repeat", "get repeat");
     if (info.rs232 && infrastructure) {
       const mode = chosen.mode;
-      section("RS232 bridge" + (mode === "rs232" ? " — selected" : ""), [
+      section("RS232 bridge" + (mode === "rs232" ? " - selected" : ""), [
         { label: "On", commands: ["set bridge.enabled on", "get bridge.running"] },
         { label: "Off", commands: ["set bridge.enabled off"] },
         { label: "Set baud", commands: ["set bridge.enabled off", "set bridge.baud 115200", "set bridge.enabled on"] },
@@ -1174,7 +1186,7 @@
     const consoleLink = createElement("a", "Open USB web console");
     consoleLink.href = "https://flasher.meshcore.io/console";
     links.appendChild(consoleLink);
-    links.appendChild(document.createTextNode(" · "));
+    links.appendChild(document.createTextNode(" | "));
     const guide = createElement("a", "Complete role commands and board exceptions");
     guide.href = "https://github.com/mikecarper/MeshCore/blob/keymindCascade/docs/role_feature_switches.md";
     links.appendChild(guide);
@@ -1244,7 +1256,7 @@
     card.className = "firmware-picker-card";
     card.appendChild(createElement(
       "h3",
-      humanizeHardware(profile.hardware) + " — " +
+      humanizeHardware(profile.hardware) + " - " +
         (ROLE_LABELS[profile.role] || profile.role)
     ));
 
@@ -1362,13 +1374,13 @@
     if (copyLinkButton && shareLink) copyLinkButton.addEventListener("click", function () {
       const copy = global.navigator.clipboard && global.navigator.clipboard.writeText;
       if (!copy) {
-        linkStatus.textContent = "Copy the address bar, or copy the ‘Link to these settings’ link.";
+        linkStatus.textContent = "Copy the address bar, or copy the 'Link to these settings' link.";
         return;
       }
       global.navigator.clipboard.writeText(shareLink.href).then(function () {
         linkStatus.textContent = "Link copied.";
       }).catch(function () {
-        linkStatus.textContent = "Copy the address bar, or copy the ‘Link to these settings’ link.";
+        linkStatus.textContent = "Copy the address bar, or copy the 'Link to these settings' link.";
       });
     });
     global.addEventListener("popstate", restoreSelectionUrl);
@@ -1382,7 +1394,7 @@
     function setSelectOptions(select, field, values, selected) {
       select.replaceChildren();
       const placeholders = {
-        chipFamily: "Any chip family — skip this filter",
+        chipFamily: "Any chip family - skip this filter",
         hardwareFamily: "Any hardware",
         hardware: "Choose a hardware variant",
         mode: "Any connection / mode",
@@ -1500,7 +1512,7 @@
         hardwareVariants.length <= 1;
       const chipSummary = root.querySelector('[data-role="chip-family-summary"]');
       if (chipSummary) chipSummary.textContent = "Optional: chip family" +
-        (filters.chipFamily ? " — " + labelFor("chipFamily", filters.chipFamily) : "");
+        (filters.chipFamily ? " - " + labelFor("chipFamily", filters.chipFamily) : "");
       render();
       updateSelectionUrl();
     }
@@ -1601,7 +1613,7 @@
         item.appendChild(link);
         const meta = createElement(
           "span",
-          row.releaseName + " — " + formatBytes(row.size)
+          row.releaseName + " - " + formatBytes(row.size)
         );
         meta.className = "firmware-asset-meta";
         item.appendChild(meta);
@@ -1675,16 +1687,16 @@
         releaseSetStatus.appendChild(
           createElement(
             "strong",
-            set.name + (set.prerelease ? " — prerelease" : "")
+            set.name + (set.prerelease ? " - prerelease" : "")
           )
         );
         releaseSetStatus.appendChild(document.createTextNode(
-          " · " + catalog.profiles.length + " configurations · " +
-          catalog.rows.length + " firmware files · " +
+          " | " + catalog.profiles.length + " configurations | " +
+          catalog.rows.length + " firmware files | " +
           set.releases.length + " release pages"
         ));
         if (set.url) {
-          releaseSetStatus.appendChild(document.createTextNode(" · "));
+          releaseSetStatus.appendChild(document.createTextNode(" | "));
           const link = createElement("a", "open primary release");
           link.href = set.url;
           releaseSetStatus.appendChild(link);

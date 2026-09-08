@@ -24,7 +24,7 @@ def package(releases, controls):
     payload = json.dumps({'releases': compact, 'controls': controls}).replace('<', '\\u003c')
     css = (ROOT / 'docs/_stylesheets/firmware_picker.css').read_text()
     js = (ROOT / 'docs/_javascript/firmware_picker.js').read_text()
-    title = html.escape('MeshCore firmware picker — ' + controls['familyTag'])
+    title = html.escape('MeshCore firmware picker - ' + controls['familyTag'])
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{title}</title><style>'

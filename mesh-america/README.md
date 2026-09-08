@@ -1,7 +1,14 @@
 # Mesh America provider catalogs
 
 Both active provider catalogs now use **1.17.1.5 USA Cascade**, published from
-firmware commit `26303793`. They cover **94 device cards, 540 selectable
+original firmware commit `26303793`, with **52 memory-corrected entries** from
+`aa20e927`. All 11 release profiles that failed the RAM budget have replacements;
+all 43 nRF52 Full Companions use shared mOTA/queue storage. The seven corrected
+ESP32 Full profiles use 150 contacts and keep their 256-message queue; read
+the entry notes and export contacts before upgrading if you exceed that limit.
+The release audit also covers 43 supplemental Full repeater profiles available
+on GitHub and in the firmware picker. The catalogs retain their canonical
+selection and cover **94 device cards, 540 selectable
 entries, 539 unique firmware profiles, and 1,078 unique firmware files**.
 One Full Companion image is listed under two compatible device/accessory cards.
 The MQTT simulation environment is a laboratory target and is not a device

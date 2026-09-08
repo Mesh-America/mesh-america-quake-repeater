@@ -872,6 +872,7 @@ const liveFamily = controls.familyTag;
 const controlledReleases = [release(liveFamily, '2026-09-01T00:00:00Z', [
   asset('heltec_v4_2_v4_3_companion_radio_full_femon-' + liveFamily + '.bin'),
   asset('RAK_4631_companion_radio_full-' + liveFamily + '.uf2'),
+  asset('Heltec_v3_companion_radio_full-' + liveFamily + '.bin'),
   asset('SenseCapIndicator-LoRa_companion_radio_full-' + liveFamily + '.bin'),
 ]), release('full-profiles-' + liveFamily, '2026-09-01T00:00:00Z', [
   asset('heltec_v4_repeater_observer_mqtt-full-usb-wifi-ota-' + liveFamily + '.bin'),
@@ -930,6 +931,31 @@ assert(commands(indicator).includes('set companion.transport ble'));
 assert(!indicator.some(s => s.title.startsWith('MQTT')));
 // Never apply old hardware capabilities to another release, or to an unknown
 // exact target. Fall back to role documentation rather than invented switches.
+// Capacity directions belong to the corrected image, even when the release
+// tag is shared with older assets or a user opens an older offline picker.
+const memoryControl = controls.profiles.Heltec_v3_companion_radio_full;
+assert(memoryControl.memoryNote.includes('150 contacts'));
+const replacementFilename = 'Heltec_v3_companion_radio_full-v1.17.1.5-halo-keymind-cascade-dev-aa20e927.bin';
+const replacementCatalog = picker.buildCatalog([release(liveFamily, '2026-09-01T00:00:00Z', [asset(replacementFilename)])], controls);
+assert.strictEqual(replacementCatalog.profiles.length, 1, 'A replacement source hash must remain visible on the original release page');
+const correctedMemoryProfile = replacementCatalog.profiles[0];
+assert.strictEqual(picker.parseFirmwareAsset(asset(replacementFilename.replace('1.17.1.5-', '1.17.1.50-')), liveFamily), null);
+const memorySteps = picker.installSteps(correctedMemoryProfile, 'bin');
+assert(memorySteps.includes(memoryControl.memoryNote));
+assert(memorySteps.indexOf(memoryControl.memoryNote) < memorySteps.findIndex(step => step.startsWith('Use this app-only image')));
+assert(!picker.installSteps({...correctedMemoryProfile,
+  files: [{name: 'Heltec_v3_companion_radio_full-v1.17.1.5-halo-keymind-cascade-dev-26303793.bin'}]}, 'bin').includes(memoryControl.memoryNote));
+// During publication, both source revisions can briefly coexist. Directions
+// must describe the selected download, even if another image is corrected.
+const mixedMemoryCatalog = picker.buildCatalog([release(liveFamily, '2026-09-01T00:00:00Z', [
+  asset(replacementFilename),
+  asset(replacementFilename.replace('aa20e927', '26303793')),
+  asset(replacementFilename.replace('.bin', '-merged.bin')),
+])], controls);
+const mixedMemoryProfile = mixedMemoryCatalog.profiles[0];
+assert(!picker.installSteps(mixedMemoryProfile, 'bin').includes(memoryControl.memoryNote));
+assert(picker.installSteps(mixedMemoryProfile, 'merged-bin').includes(memoryControl.memoryNote));
+
 const stale = picker.buildCatalog(controlledReleases, {...controls, familyTag: 'v0.0.0'});
 assert(stale.profiles.every(p => !p.controls));
 assert(!picker.runtimeDirections({...mqttCompanion, controls: undefined}, {}).some(s => s.title === 'GPS'));

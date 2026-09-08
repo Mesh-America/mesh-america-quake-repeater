@@ -42,7 +42,7 @@ from the published firmware assets.
       <div class="firmware-picker-control firmware-picker-select-control">
         <label for="firmware-picker-chip-family">Chip family</label>
         <select id="firmware-picker-chip-family" data-field="chipFamily" aria-describedby="firmware-picker-chip-help" disabled>
-          <option value="">Any chip family — skip this filter</option>
+          <option value="">Any chip family - skip this filter</option>
         </select>
       </div>
     </details>
@@ -390,3 +390,14 @@ This HTML embeds its catalog and directions, so selections work without an
 internet connection. Firmware downloads and the USB web console still need
 network access. When replacing the downloadable picker on release pages,
 update its entry in each page's `SHA256SUMS.txt` as well.
+
+
+## Memory-corrected 1.17.1.5 downloads
+
+Corrected downloads retain the 1.17.1.5 release page and use source suffix
+`aa20e927`. The picker accepts replacement source hashes within that exact
+release version. Its installation directions identify the nRF52 queue-sharing
+behavior and the 150-contact limit on seven affected ESP32 Full profiles.
+Those notices apply only to the corrected files. See the
+[memory correction details](releases/1.17.1.5.md#memory-corrections-in-aa20e927)
+and each replacement's `.memory.json` report before updating.
