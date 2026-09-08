@@ -42,9 +42,23 @@
 //   DacPaSX1276Wrapper radio_driver(radio, board, PIN_APC, LEVELS, 3,
 //                                   DAC_PA_TABLE_MAX, RADIO_DBM);
 //
-// radio_dbm must have one entry per level. Its values go to the SX1276 on the
-// PA_BOOST path; a board wired to RFO_HF instead would need RadioLib's useRfo
-// argument plumbed through, which this class does not do yet.
+// radio_dbm must have one entry per level.
+//
+// Which output pin those values reach depends on how the board is wired. Set
+// force_rfo for a board whose radio feeds the amplifier from RFO_HF rather
+// than PA_BOOST (ExpressLRS layouts flag this as "radio_rfo_hf"). It matters
+// because the two paths accept different ranges and RadioLib will not guess:
+//
+//   RFO       -4 .. 15 dBm
+//   PA_BOOST   2 .. 17 dBm, plus a special case at 20
+//
+// RadioLib selects RFO on its own for anything below 2 dBm, so a board whose
+// levels are all negative works either way. One sitting in the overlap - the
+// Radiomaster Bandit's [2, 6, 9, 10], for instance - would silently come out
+// of the wrong pin without this flag.
+//
+// drive_dbm's +2 default is the PA_BOOST floor; an RFO board should pass its
+// own, since -4 is where that path bottoms out instead.
 //
 // The gain control is written through writeGainControl(), which uses the
 // ESP32's DAC by default. A board driving its PA from a PWM pin or an external
@@ -88,10 +102,11 @@ public:
                      const DacPaLevel* levels, uint8_t num_levels,
                      int8_t max_dbm = DAC_PA_TABLE_MAX,
                      const int8_t* radio_dbm = NULL,
+                     bool force_rfo = false,
                      int8_t drive_dbm = DAC_PA_DEFAULT_DRIVE_DBM)
       : CustomSX1276Wrapper(radio, board),
         _ctrl_pin(ctrl_pin), _levels(levels), _num_levels(num_levels),
-        _radio_dbm(radio_dbm), _drive_dbm(drive_dbm) {
+        _radio_dbm(radio_dbm), _force_rfo(force_rfo), _drive_dbm(drive_dbm) {
     _min_dbm = levels[0].dbm;
     _max_dbm = levels[num_levels - 1].dbm;
     if (max_dbm < _max_dbm) _max_dbm = max_dbm;
@@ -109,9 +124,13 @@ public:
   //
   // Boards carrying a radio_dbm table have no fixed drive level to park at;
   // applyCachedTxPower() sets the radio for each step instead.
+  //
+  // This is also where an RFO board is corrected: std_init()'s begin() always
+  // configures PA_BOOST, so the first write from here moves it. Nothing
+  // transmits in between.
   void beginPowerControl(int8_t dbm) {
     if (_radio_dbm == NULL) {
-      ((CustomSX1276 *)_radio)->setOutputPower(_drive_dbm);
+      ((CustomSX1276 *)_radio)->setOutputPower(_drive_dbm, _force_rfo);
     }
     if (dbm < _min_dbm) dbm = _min_dbm;
     if (dbm > _max_dbm) dbm = _max_dbm;
@@ -141,7 +160,7 @@ protected:
       // steps, so the amplifier is never asked to pass a level the radio has
       // already exceeded.
       const int16_t status =
-          ((CustomSX1276 *)_radio)->setOutputPower(_radio_dbm[idx]);
+          ((CustomSX1276 *)_radio)->setOutputPower(_radio_dbm[idx], _force_rfo);
       if (status != RADIOLIB_ERR_NONE) return status;
     }
     writeGainControl(_levels[idx].dac);
@@ -162,6 +181,7 @@ private:
   const DacPaLevel* _levels;
   uint8_t _num_levels;
   const int8_t* _radio_dbm;
+  bool _force_rfo;
   int8_t _drive_dbm;
   int8_t _min_dbm;
   int8_t _max_dbm;
