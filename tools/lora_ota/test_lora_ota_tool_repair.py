@@ -29,6 +29,10 @@ class MotatoolRepairTests(unittest.TestCase):
         self.addCleanup(stack.close)
         stack.enter_context(mock.patch.object(ota, "motatool_repair_root", return_value=self.root))
         stack.enter_context(mock.patch.object(ota.shutil, "which", return_value="cargo"))
+        self.build_tools = ota.RustBuildTools("cargo", "rustc", (1, 91, 0), (1, 91, 0))
+        self.select_tools = stack.enter_context(mock.patch.object(
+            ota, "select_motatool_build_tools", return_value=self.build_tools,
+        ))
         stack.enter_context(mock.patch.object(ota.sys.stdin, "isatty", return_value=True))
         self.prompt = stack.enter_context(mock.patch("builtins.input", return_value="yes"))
         self.check = stack.enter_context(mock.patch.object(ota, "check_bootloader_tool"))
@@ -54,6 +58,9 @@ class MotatoolRepairTests(unittest.TestCase):
         self.assertIn(ota.MOTATOOL_REPAIR_REVISION, command)
         self.assertIn("--locked", command)
         self.assertNotIn("MESHCORE_ADMIN_PASSWORD", self.install.call_args.kwargs["env"])
+        self.assertEqual(self.install.call_args.kwargs["env"]["RUSTC"], "rustc")
+        self.assertEqual(self.install.call_args.kwargs["env"]["CARGO"], "cargo")
+        self.assertEqual(self.install.call_args.kwargs["env"]["RUSTUP_AUTO_INSTALL"], "0")
         self.assertEqual(self.install.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(self.install.call_args.kwargs["timeout"], ota.MOTATOOL_REPAIR_TIMEOUT_SECONDS)
         self.check.assert_called_once_with(str(self.binary), self.probe)
@@ -89,11 +96,20 @@ class MotatoolRepairTests(unittest.TestCase):
         self.assertFalse(self.root.exists())
 
     def test_missing_cargo_gives_prerequisite_without_installing_anything(self):
+        self.select_tools.side_effect = ota.OtaError("install a matching toolchain from https://rustup.rs")
         with mock.patch.object(ota.shutil, "which", return_value=None):
             with self.assertRaisesRegex(ota.OtaError, "https://rustup.rs"):
                 self.repair()
         self.install.assert_not_called()
         self.prompt.assert_not_called()
+        self.assertFalse(self.root.exists())
+
+    def test_old_compiler_stops_before_prompt_build_or_cache_creation(self):
+        self.select_tools.side_effect = ota.OtaError("rustc 1.75.0; need 1.86.0 or newer")
+        with self.assertRaisesRegex(ota.OtaError, "rustc 1.75.0"):
+            self.repair()
+        self.prompt.assert_not_called()
+        self.install.assert_not_called()
         self.assertFalse(self.root.exists())
 
     def test_cargo_failure_stops_and_preserves_original_selection(self):
@@ -134,6 +150,7 @@ class MotatoolRepairTests(unittest.TestCase):
             self.repair()
         self.prompt.assert_not_called()
         self.install.assert_not_called()
+        self.select_tools.assert_not_called()
         self.check.assert_called_once_with(str(self.binary), self.probe)
         self.assertEqual(self.args.motatool, str(self.binary))
 
@@ -151,6 +168,7 @@ class MotatoolRepairTests(unittest.TestCase):
         with mock.patch.object(ota.shutil, "which", return_value=None):
             self.repair()
         self.install.assert_not_called()
+        self.select_tools.assert_not_called()
         self.assertEqual(self.check.call_count, 2)
         self.assertEqual(self.args.motatool, str(self.binary))
 

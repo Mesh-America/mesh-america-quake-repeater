@@ -304,6 +304,9 @@ class BootloaderStagingTests(unittest.TestCase):
                 mock.patch.object(ota, "run_checked", side_effect=ota.OtaError("unsupported format_ver 3")),
                 mock.patch.object(ota, "motatool_repair_root", return_value=Path(directory) / "cache"),
                 mock.patch.object(ota.shutil, "which", return_value="cargo"),
+                mock.patch.object(ota, "select_motatool_build_tools", return_value=ota.RustBuildTools(
+                    "cargo", "rustc", (1, 91, 0), (1, 91, 0),
+                )),
                 mock.patch.object(ota.sys.stdin, "isatty", return_value=False),
                 self.assertRaisesRegex(ota.OtaError, "separate interactive approval"),
             ):
@@ -350,7 +353,7 @@ class BootloaderStagingTests(unittest.TestCase):
                     "switch_controller_to_temp_radio", "source_cli_command",
                 ):
                     stack.enter_context(mock.patch.object(ota, name))
-                stack.enter_context(mock.patch.object(ota, "read_source_name_bounded", return_value="source"))
+                stack.enter_context(mock.patch.object(ota, "read_source_public_key_bounded", return_value=source_key))
                 stack.enter_context(mock.patch.object(ota, "read_source_rxps", return_value=ota.RxpsSettings(False, 0, 0)))
                 stack.enter_context(mock.patch.object(ota, "read_remote_rxps", return_value=ota.RxpsSettings(False, 0, 0)))
                 stack.enter_context(mock.patch.object(
@@ -427,6 +430,84 @@ class StationSelectionTests(unittest.TestCase):
         args.relay_values = [(self.key[:12], "unused")]
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(ota.OtaError, "different radios"):
             ota.bind_contact_selectors(self.controller(), args)
+
+    def test_source_binds_by_local_key_despite_stale_or_emoji_name(self):
+        source_key = "b2" * 32
+        controller = self.controller()
+        controller._run.return_value[0][source_key] = {
+            "public_key": source_key, "adv_name": "Old source name \U0001f4e1",
+        }
+        args = self.args(self.name)
+        args.source_shares_controller = False
+        args.source_cli_tcp = "source:5002"
+        with (
+            mock.patch.object(ota, "read_source_public_key_bounded", return_value=source_key.upper()) as read_key,
+            mock.patch.object(ota, "read_source_name_bounded") as read_name,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            ota.bind_contact_selectors(controller, args)
+        self.assertEqual(args.source_contact_value, source_key)
+        read_key.assert_called_once_with(args)
+        read_name.assert_not_called()
+        controller.remote_command.assert_not_called()
+
+    def test_missing_source_key_does_not_bind_same_named_other_radio(self):
+        args = self.args(self.name)
+        args.source_shares_controller = False
+        args.source_serial = "source"
+        source_key = "b2" * 32
+        controller = self.controller()
+        controller._run.return_value[0]["c3" * 32] = {
+            "public_key": "c3" * 32, "adv_name": "W4JEC MC OTA2",
+        }
+        with (
+            mock.patch.object(ota, "read_source_public_key_bounded", return_value=source_key),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(ota.OtaError, "connected OTA source public key.*not in") as error,
+        ):
+            ota.bind_contact_selectors(controller, args)
+        self.assertIn(source_key, str(error.exception))
+        self.assertIn("normal channel", str(error.exception))
+        controller.remote_command.assert_not_called()
+
+    def test_explicit_source_contact_must_match_connected_source_key(self):
+        args = self.args(self.name)
+        args.source_shares_controller = False
+        args.source_serial = "source"
+        args.source_contact_value = "Saved source"
+        controller = self.controller()
+        controller._run.return_value[0]["c3" * 32] = {
+            "public_key": "c3" * 32, "adv_name": "Saved source",
+        }
+        with (
+            mock.patch.object(ota, "read_source_public_key_bounded", return_value="b2" * 32),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(ota.OtaError, "--source-contact identifies.*connected OTA source"),
+        ):
+            ota.bind_contact_selectors(controller, args)
+        controller.remote_command.assert_not_called()
+
+    def test_auto_source_cannot_also_be_destination(self):
+        args = self.args(self.name)
+        args.source_shares_controller = False
+        args.source_serial = "source"
+        with (
+            mock.patch.object(ota, "read_source_public_key_bounded", return_value=self.key),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(ota.OtaError, "different radios"),
+        ):
+            ota.bind_contact_selectors(self.controller(), args)
+
+    def test_shared_source_does_not_require_its_own_contact_or_repeater_cli(self):
+        args = self.args(self.name)
+        args.source_cli_tcp = "shared:5002"
+        with (
+            mock.patch.object(ota, "read_source_public_key_bounded") as read_key,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            ota.bind_contact_selectors(self.controller(), args)
+        read_key.assert_not_called()
+        self.assertIsNone(args.source_contact_value)
 
     def test_remote_reply_accepts_key_selector_with_emoji_name(self):
         for selector in (self.name, self.key, self.key[:12]):
