@@ -4431,48 +4431,47 @@ class TempRadioPreflightTests(unittest.TestCase):
                 "--work-dir", str(Path(directory) / "work"),
                 "--yes",
             ]
-            with (
-                mock.patch.object(ota, "preflight_inputs"),
-                mock.patch.object(ota, "bind_contact_selectors"),
-                mock.patch.object(ota, "preflight_source_cli"),
-                mock.patch.object(
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(ota, "preflight_inputs"))
+                stack.enter_context(mock.patch.object(ota, "bind_contact_selectors"))
+                stack.enter_context(mock.patch.object(ota, "preflight_source_cli"))
+                stack.enter_context(mock.patch.object(
                     ota,
                     "ensure_source_clock_gate_safe",
                     return_value=(1_800_000_000, 1_800_000_059),
-                ),
-                mock.patch.object(ota, "read_source_rxps", return_value=saved),
-                mock.patch.object(ota, "query_target", return_value=target()),
-                mock.patch.object(
+                ))
+                stack.enter_context(mock.patch.object(ota, "read_source_rxps", return_value=saved))
+                stack.enter_context(mock.patch.object(ota, "query_target", return_value=target()))
+                stack.enter_context(mock.patch.object(
                     ota,
                     "prepare_package",
                     return_value=(Path("release.mota"), package, None),
-                ),
-                mock.patch.object(
+                ))
+                stack.enter_context(mock.patch.object(
                     ota,
                     "read_lora_ota_participant_versions",
                     return_value={"destination": VERSION_NEW},
-                ),
-                mock.patch.object(
+                ))
+                stack.enter_context(mock.patch.object(
                     ota,
                     "read_remote_rxps",
                     return_value=ota.RxpsSettings(False, 18205, 20423, 8, 16),
-                ),
-                mock.patch.object(ota, "confirm_update"),
-                mock.patch.object(
+                ))
+                stack.enter_context(mock.patch.object(ota, "confirm_update"))
+                rehearsal = stack.enter_context(mock.patch.object(
                     ota,
                     "run_temp_radio_preflight",
                     side_effect=ota.OtaError("synthetic rehearsal failure"),
-                ) as rehearsal,
-                mock.patch.object(ota, "disable_source_rxps") as disable_source,
-                mock.patch.object(ota, "apply_remote_rxps_policy") as mutate_target,
-                mock.patch.object(ota, "arm_target_temp_radio") as arm_long_target,
-                mock.patch.object(ota, "switch_controller_to_temp_radio") as switch_long,
-                mock.patch.object(ota, "SeederProcess") as seeder,
-                mock.patch.object(ota, "find_and_start_pull") as pull,
-                mock.patch.object(ota, "request_install") as install,
-                contextlib.redirect_stdout(io.StringIO()),
-                contextlib.redirect_stderr(io.StringIO()),
-            ):
+                ))
+                disable_source = stack.enter_context(mock.patch.object(ota, "disable_source_rxps"))
+                mutate_target = stack.enter_context(mock.patch.object(ota, "apply_remote_rxps_policy"))
+                arm_long_target = stack.enter_context(mock.patch.object(ota, "arm_target_temp_radio"))
+                switch_long = stack.enter_context(mock.patch.object(ota, "switch_controller_to_temp_radio"))
+                seeder = stack.enter_context(mock.patch.object(ota, "SeederProcess"))
+                pull = stack.enter_context(mock.patch.object(ota, "find_and_start_pull"))
+                install = stack.enter_context(mock.patch.object(ota, "request_install"))
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
                 result = ota.main(argv, controller_override=controller)
 
         self.assertEqual(result, 2)
