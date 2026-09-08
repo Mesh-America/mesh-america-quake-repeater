@@ -1185,7 +1185,7 @@ the frame and reply format.
 **Usage:**
 
 - `get bluetooth.mac`
-- `set bluetooth.mac <address|random|random-every-boot|default>`
+- `set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>`
 
 `get ble.mac` and `set ble.mac ...` are accepted aliases. The setting is
 available on every Companion build that includes Bluetooth.
@@ -1195,6 +1195,7 @@ available on every Companion build that includes Bluetooth.
 | `C2:11:22:33:44:55` | Save and use that custom address. |
 | `random` | Generate one random address now, save it, and reuse it on later boots. |
 | `random-every-boot` | Generate a new address once at each boot. `random everyboot` is also accepted. |
+| `random-after-connect` | Keep one random address through unused boots. After an authenticated connection, arm a new address for the next boot. |
 | `default` or `clear` | Remove the override and use the chipset's factory Bluetooth address. |
 
 A custom value must be a valid BLE random-static address in
@@ -1207,9 +1208,63 @@ the device. Forget the old device entry and pair again. `random-every-boot`
 also clears the Companion's saved peer bonds during each startup, so pairing
 and PIN entry are expected again after every reboot.
 
+`random-after-connect` keeps the same address across any number of reboots when
+nobody successfully authenticated. As soon as an authenticated BLE connection
+succeeds, the next boot rotates the address and clears stale bonds. The marker
+is saved while connected, so a normal reboot, power switch, or battery pull
+after that connection all produce the same next-boot rotation.
+
+The address setting does not enable or disable stealth. Use the separate
+`bluetooth.stealth` flag below. `default` changes only the address policy.
+
+#### View or change Bluetooth stealth (BLE Companion)
+
+```text
+get bluetooth.stealth
+set bluetooth.stealth on
+set bluetooth.stealth off
+```
+
+`get ble.stealth` and `set ble.stealth on|off` are short aliases. This flag
+defaults to `off` and is independent of the Bluetooth address policy. Enabling
+or disabling it keeps the configured custom/random/factory address policy
+unchanged and requires a reboot. Repeating `on` keeps an existing stealth
+pairing; repeating `off` does not alter address settings.
+
+For a custom address with stealth:
+
+```text
+set bluetooth.mac C2:11:22:33:44:55
+set bluetooth.stealth on
+reboot
+```
+
+Use `set bluetooth.mac random` instead of the first line for one saved random
+address. Both combinations keep their address and bond across later boots.
+Rotating policies still rotate: `random-every-boot` reopens pairing at every
+boot, while `random-after-connect` reopens it on the first boot after an
+authenticated connection. Stealth stays enabled; each new address begins
+with a fresh pairing window so it cannot get hidden behind an unusable bond.
+
+With stealth on, the node is normally discoverable until the first authenticated pairing.
+After that, nRF52 uses directed advertising to the saved peer. ESP32 uses a
+minimal unnamed advertisement and a controller allowlist because its common
+Arduino BLE API does not expose the directed-advertising peer field. Both
+reject connection and scan requests from other peers. BLE cannot be completely
+radio silent and still accept a connection, so a passive radio sniffer may
+still observe packets. To deliberately clear the saved stealth peer, send
+`set bluetooth.stealth off`, then `set bluetooth.stealth on`, then reboot over
+USB or an existing authenticated connection. To leave stealth, set it `off`
+and reboot. If the saved node-side bond is lost, recovery reopens pairing.
+The former `set bluetooth.mac stealth` command is no longer accepted.
+
 This changes only the running MeshCore Companion application. On nRF52, the
 OTAFIX bootloader still uses its own address, which is visible only while the
 board is in BLE DFU/recovery mode. USB and LoRa updates are unaffected.
+Bluetooth update tools must follow that separate bootloader address after the
+handoff; they must not assume that a custom application address remains the
+DFU address. See the [hardware observations](hardware_validation_bluetooth_stealth_2026-09-07.md)
+for the tested XIAO handoff and host-cache caveats.
 
 ---
 

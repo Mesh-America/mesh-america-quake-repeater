@@ -165,6 +165,10 @@ TEST(CompanionNodePrefs, BluetoothMacDefaultsToFactoryIdentity) {
             prefs.bluetooth_mac_mode);
   EXPECT_FALSE(mesh::companion::hasCustomBluetoothMac(
       prefs.bluetooth_mac));
+  EXPECT_EQ(mesh::companion::BLUETOOTH_PEER_ADDRESS_NONE,
+            prefs.bluetooth_stealth_peer_type);
+  EXPECT_EQ(mesh::companion::BLUETOOTH_STEALTH_OFF,
+            prefs.bluetooth_stealth_mode);
 }
 
 TEST(CompanionNodePrefs, BluetoothMacParsesAndFormatsRandomStaticAddress) {
@@ -219,6 +223,27 @@ TEST(CompanionNodePrefs, BluetoothMacRandomBytesAreNormalized) {
   EXPECT_EQ(0xFE, all_one[5]);
 }
 
+TEST(CompanionNodePrefs,
+     BluetoothMacRandomAfterConnectCannotReuseTheOldAddress) {
+  uint8_t address[mesh::companion::BLUETOOTH_MAC_BYTES] = {
+      0xC0, 0x00, 0x00, 0x00, 0x00, 0x01};
+  uint8_t previous[mesh::companion::BLUETOOTH_MAC_BYTES];
+  memcpy(previous, address, sizeof(previous));
+
+  mesh::companion::makeRandomStaticBluetoothMacDifferentFrom(
+      address, previous);
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMac(address));
+  EXPECT_NE(0, memcmp(address, previous, sizeof(address)));
+
+  memset(address, 0xFF, sizeof(address));
+  address[5] = 0xFE;
+  memcpy(previous, address, sizeof(previous));
+  mesh::companion::makeRandomStaticBluetoothMacDifferentFrom(
+      address, previous);
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMac(address));
+  EXPECT_NE(0, memcmp(address, previous, sizeof(address)));
+}
+
 TEST(CompanionNodePrefs, BluetoothMacModesDescribeSavedAndPerBootUse) {
   EXPECT_TRUE(mesh::companion::isValidBluetoothMacMode(
       mesh::companion::BLUETOOTH_MAC_DEFAULT));
@@ -228,13 +253,129 @@ TEST(CompanionNodePrefs, BluetoothMacModesDescribeSavedAndPerBootUse) {
       mesh::companion::BLUETOOTH_MAC_RANDOM_SAVED));
   EXPECT_TRUE(mesh::companion::isValidBluetoothMacMode(
       mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT));
-  EXPECT_FALSE(mesh::companion::isValidBluetoothMacMode(4));
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMacMode(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT));
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMacMode(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED));
+  EXPECT_FALSE(mesh::companion::isValidBluetoothMacMode(6));
+  EXPECT_FALSE(mesh::companion::isValidBluetoothMacMode(7));
+  EXPECT_FALSE(mesh::companion::isValidBluetoothMacMode(8));
   EXPECT_TRUE(mesh::companion::bluetoothMacModeUsesSavedAddress(
       mesh::companion::BLUETOOTH_MAC_CUSTOM));
   EXPECT_TRUE(mesh::companion::bluetoothMacModeUsesSavedAddress(
       mesh::companion::BLUETOOTH_MAC_RANDOM_SAVED));
+  EXPECT_TRUE(mesh::companion::bluetoothMacModeUsesSavedAddress(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT));
   EXPECT_FALSE(mesh::companion::bluetoothMacModeUsesSavedAddress(
       mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT));
+}
+
+TEST(CompanionNodePrefs,
+     BluetoothMacRandomAfterConnectRotatesOnlyWhenArmedOrInvalid) {
+  const uint8_t valid[mesh::companion::BLUETOOTH_MAC_BYTES] = {
+      0xC2, 0x11, 0x22, 0x33, 0x44, 0x55};
+  const uint8_t invalid[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+
+  EXPECT_TRUE(mesh::companion::bluetoothMacModeIsRandomAfterConnect(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT));
+  EXPECT_TRUE(mesh::companion::bluetoothMacModeIsRandomAfterConnect(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED));
+  EXPECT_FALSE(mesh::companion::bluetoothMacModeIsRandomAfterConnect(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT));
+
+  EXPECT_FALSE(mesh::companion::bluetoothMacShouldRotateAtBoot(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT, valid));
+  EXPECT_TRUE(mesh::companion::bluetoothMacShouldRotateAtBoot(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED, valid));
+  EXPECT_TRUE(mesh::companion::bluetoothMacShouldRotateAtBoot(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT, invalid));
+  EXPECT_FALSE(mesh::companion::bluetoothMacShouldRotateAtBoot(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_SAVED, invalid));
+}
+
+TEST(CompanionNodePrefs, BluetoothStealthTracksPairingIndependently) {
+  EXPECT_TRUE(mesh::companion::bluetoothStealthEnabled(
+      mesh::companion::BLUETOOTH_STEALTH_PAIRING));
+  EXPECT_TRUE(mesh::companion::bluetoothStealthEnabled(
+      mesh::companion::BLUETOOTH_STEALTH_PAIRED));
+  EXPECT_FALSE(mesh::companion::bluetoothStealthEnabled(
+      mesh::companion::BLUETOOTH_STEALTH_OFF));
+  EXPECT_FALSE(mesh::companion::isValidBluetoothStealthMode(3));
+  EXPECT_FALSE(mesh::companion::bluetoothStealthEnabled(255));
+
+  mesh::companion::BluetoothPeerIdentity peer;
+  EXPECT_FALSE(mesh::companion::isValidBluetoothPeerIdentity(peer));
+  peer.type = mesh::companion::BLUETOOTH_PEER_ADDRESS_RANDOM;
+  peer.address[0] = 0xC2;
+  peer.address[5] = 0x55;
+  EXPECT_TRUE(mesh::companion::isValidBluetoothPeerIdentity(peer));
+  peer.type = 3;
+  EXPECT_FALSE(mesh::companion::isValidBluetoothPeerIdentity(peer));
+}
+
+TEST(CompanionNodePrefs, StealthFlagPreservesEveryMacPolicyAndAddress) {
+  const uint8_t address[] = {0xC2, 0x11, 0x22, 0x33, 0x44, 0x55};
+  for (uint8_t mode = mesh::companion::BLUETOOTH_MAC_DEFAULT;
+       mode <= mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED;
+       mode++) {
+    CompanionNodePrefs prefs;
+    prefs.bluetooth_mac_mode = mode;
+    memcpy(prefs.bluetooth_mac, address, sizeof(address));
+    EXPECT_TRUE(setCompanionBluetoothStealth(prefs, true));
+    EXPECT_EQ(mesh::companion::BLUETOOTH_STEALTH_PAIRING,
+              prefs.bluetooth_stealth_mode);
+    EXPECT_EQ(mode, prefs.bluetooth_mac_mode);
+    EXPECT_EQ(0, memcmp(address, prefs.bluetooth_mac, sizeof(address)));
+
+    prefs.bluetooth_stealth_mode = mesh::companion::BLUETOOTH_STEALTH_PAIRED;
+    prefs.bluetooth_stealth_peer_type = mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC;
+    memcpy(prefs.bluetooth_stealth_peer, address, sizeof(address));
+    EXPECT_FALSE(setCompanionBluetoothStealth(prefs, true));
+    EXPECT_EQ(mesh::companion::BLUETOOTH_STEALTH_PAIRED,
+              prefs.bluetooth_stealth_mode);
+    EXPECT_EQ(0, memcmp(address, prefs.bluetooth_stealth_peer, sizeof(address)));
+
+    EXPECT_TRUE(setCompanionBluetoothStealth(prefs, false));
+    EXPECT_EQ(mesh::companion::BLUETOOTH_STEALTH_OFF, prefs.bluetooth_stealth_mode);
+    EXPECT_EQ(mode, prefs.bluetooth_mac_mode);
+    EXPECT_EQ(0, memcmp(address, prefs.bluetooth_mac, sizeof(address)));
+    EXPECT_EQ(mesh::companion::BLUETOOTH_PEER_ADDRESS_NONE,
+              prefs.bluetooth_stealth_peer_type);
+    const uint8_t empty[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+    EXPECT_EQ(0, memcmp(empty, prefs.bluetooth_stealth_peer, sizeof(empty)));
+    EXPECT_FALSE(setCompanionBluetoothStealth(prefs, false));
+  }
+}
+
+TEST(CompanionNodePrefs, AddressChangeReopensPairingWithoutDisablingStealth) {
+  CompanionNodePrefs prefs;
+  prefs.bluetooth_mac_mode = mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED;
+  prefs.bluetooth_stealth_mode = mesh::companion::BLUETOOTH_STEALTH_PAIRED;
+  prefs.bluetooth_stealth_peer_type = mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC;
+  memset(prefs.bluetooth_stealth_peer, 0x12, sizeof(prefs.bluetooth_stealth_peer));
+  clearCompanionBluetoothStealthPeer(prefs);
+  EXPECT_EQ(mesh::companion::BLUETOOTH_STEALTH_PAIRING,
+            prefs.bluetooth_stealth_mode);
+  EXPECT_EQ(mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED,
+            prefs.bluetooth_mac_mode);
+  EXPECT_EQ(mesh::companion::BLUETOOTH_PEER_ADDRESS_NONE,
+            prefs.bluetooth_stealth_peer_type);
+
+  prefs.bluetooth_stealth_mode = mesh::companion::BLUETOOTH_STEALTH_OFF;
+  clearCompanionBluetoothStealthPeer(prefs);
+  EXPECT_EQ(mesh::companion::BLUETOOTH_STEALTH_OFF, prefs.bluetooth_stealth_mode);
+}
+
+TEST(CompanionNodePrefs, ArmingRotationDoesNotChangeSessionPolicy) {
+  EXPECT_TRUE(mesh::companion::bluetoothMacPoliciesMatch(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT,
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED));
+  EXPECT_TRUE(mesh::companion::bluetoothMacPoliciesMatch(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED,
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT));
+  EXPECT_FALSE(mesh::companion::bluetoothMacPoliciesMatch(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT,
+      mesh::companion::BLUETOOTH_MAC_RANDOM_AFTER_CONNECT));
 }
 
 TEST(CompanionNodePrefs, MigratesRegressedPowerSavingDefaultOnce) {

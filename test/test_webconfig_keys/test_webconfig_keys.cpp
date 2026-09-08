@@ -10,6 +10,7 @@ TEST(WebConfigKeys, AllowsKnownScalarKeys) {
   EXPECT_TRUE(wcIsAllowedSetKey("name"));
   EXPECT_TRUE(wcIsAllowedSetKey("bluetooth.name"));
   EXPECT_TRUE(wcIsAllowedSetKey("bluetooth.mac"));
+  EXPECT_TRUE(wcIsAllowedSetKey("bluetooth.stealth"));
   EXPECT_TRUE(wcIsAllowedSetKey("radio"));
   EXPECT_TRUE(wcIsAllowedSetKey("radio.rxps"));
   EXPECT_TRUE(wcIsAllowedSetKey("powersaving"));
@@ -36,6 +37,7 @@ TEST(WebConfigKeys, RejectsDangerousOrUnknownKeys) {
   EXPECT_FALSE(wcIsAllowedSetKey("password"));
   EXPECT_FALSE(wcIsAllowedSetKey("reboot"));
   EXPECT_FALSE(wcIsAllowedSetKey("bogus"));
+  EXPECT_FALSE(wcIsAllowedSetKey("bluetooth.stealth.extra"));
   EXPECT_FALSE(wcIsAllowedSetKey("mqtt1.bogus"));   // unknown slot field
   EXPECT_FALSE(wcIsAllowedSetKey(""));
 }
@@ -72,6 +74,8 @@ TEST(WebConfigKeys, IsCaseSensitive) {
 TEST(WebConfigKeys, AddressChangingKeysAlwaysRequireAReboot) {
   EXPECT_TRUE(wcSetKeyRequiresReboot("espnow.channel"));
   EXPECT_TRUE(wcSetKeyRequiresReboot("bluetooth.mac"));
+  EXPECT_TRUE(wcSetKeyRequiresReboot("bluetooth.stealth"));
+  EXPECT_FALSE(wcSetKeyRequiresReboot("bluetooth.stealth.extra"));
   EXPECT_FALSE(wcSetKeyRequiresReboot(NULL));
   EXPECT_FALSE(wcSetKeyRequiresReboot("espnow.channel.extra"));
   EXPECT_FALSE(wcSetKeyRequiresReboot("ESPNOW.channel"));

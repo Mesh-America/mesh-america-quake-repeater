@@ -384,13 +384,24 @@ prefix, accept up to 31 valid UTF-8 bytes, and take effect after reboot. This
 does not change the node's mesh advertisement name.
 
 Every Bluetooth Companion also supports `get bluetooth.mac` and
-`set bluetooth.mac <address|random|random-every-boot|default>`. A literal
-address is a BLE random-static identity, `random` creates one persistent
-identity, `random-every-boot` rotates it on startup, and `default` (or `clear`)
-restores the chipset address. Reboot and re-pair after changing modes. The
-per-boot mode intentionally clears local bonds and needs a new pairing after
-every reboot. On nRF52 this affects the MeshCore application only, not the
-OTAFIX bootloader's separate BLE DFU identity.
+`set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>`.
+A literal address is a BLE random-static identity, `random` creates one
+persistent identity, `random-every-boot` rotates it on startup, and
+`random-after-connect` rotates it on the first boot after an authenticated
+connection while leaving unused boots unchanged. `default` (or `clear`)
+restores the chipset address. None of these values changes the stealth flag.
+Reboot and re-pair after changing modes or after a rotation. Address rotation
+clears stale local bonds. On nRF52 this affects the MeshCore application only,
+not the OTAFIX bootloader's separate BLE DFU identity.
+
+`get bluetooth.stealth` and `set bluetooth.stealth on|off` control an independent
+flag, defaulting to off. Combine it with a custom address or `random` to retain
+the address and bond across boots. With stealth on, normal discovery ends
+after the first authenticated pairing and only the saved peer may reconnect.
+Rotating MAC policies still rotate and reopen first pairing when they do;
+stealth remains enabled. Repeating `on` keeps an existing bond. Toggle `off`,
+then `on`, then reboot to reset first pairing. All flag changes need reboot.
+The node still sends directed or allowlisted BLE packets; it is not radio silent.
 
 ESP32 ports 5000, 5001, 5002, and WebConfig have no independent login layer.
 Expose them only on a trusted LAN or temporary setup network. See

@@ -15,15 +15,46 @@ enum BluetoothMacMode : uint8_t {
   BLUETOOTH_MAC_CUSTOM = 1,
   BLUETOOTH_MAC_RANDOM_SAVED = 2,
   BLUETOOTH_MAC_RANDOM_EVERY_BOOT = 3,
+  BLUETOOTH_MAC_RANDOM_AFTER_CONNECT = 4,
+  // Internal persisted state: the current identity completed an authenticated
+  // connection and must rotate before it advertises next boot.
+  BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED = 5,
 };
 
 inline bool isValidBluetoothMacMode(uint8_t mode) {
-  return mode <= BLUETOOTH_MAC_RANDOM_EVERY_BOOT;
+  return mode <= BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED;
+}
+
+inline bool bluetoothMacModeIsRandomAfterConnect(uint8_t mode) {
+  return mode == BLUETOOTH_MAC_RANDOM_AFTER_CONNECT
+      || mode == BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED;
+}
+
+enum BluetoothStealthMode : uint8_t {
+  BLUETOOTH_STEALTH_OFF = 0,
+  BLUETOOTH_STEALTH_PAIRING = 1,
+  BLUETOOTH_STEALTH_PAIRED = 2,
+};
+
+inline bool isValidBluetoothStealthMode(uint8_t mode) {
+  return mode <= BLUETOOTH_STEALTH_PAIRED;
+}
+
+inline bool bluetoothStealthEnabled(uint8_t mode) {
+  return mode == BLUETOOTH_STEALTH_PAIRING
+      || mode == BLUETOOTH_STEALTH_PAIRED;
+}
+
+inline bool bluetoothMacPoliciesMatch(uint8_t first, uint8_t second) {
+  return first == second
+      || (bluetoothMacModeIsRandomAfterConnect(first)
+          && bluetoothMacModeIsRandomAfterConnect(second));
 }
 
 inline bool bluetoothMacModeUsesSavedAddress(uint8_t mode) {
   return mode == BLUETOOTH_MAC_CUSTOM
-      || mode == BLUETOOTH_MAC_RANDOM_SAVED;
+      || mode == BLUETOOTH_MAC_RANDOM_SAVED
+      || bluetoothMacModeIsRandomAfterConnect(mode);
 }
 
 inline bool hasCustomBluetoothMac(
@@ -51,6 +82,40 @@ inline bool isValidBluetoothMac(
   return !payload_all_zero && !payload_all_one;
 }
 
+inline bool bluetoothMacShouldRotateAtBoot(
+    uint8_t mode, const uint8_t address[BLUETOOTH_MAC_BYTES]) {
+  return bluetoothMacModeIsRandomAfterConnect(mode)
+      && (mode == BLUETOOTH_MAC_RANDOM_AFTER_CONNECT_ARMED
+          || !isValidBluetoothMac(address));
+}
+
+enum BluetoothPeerAddressType : uint8_t {
+  BLUETOOTH_PEER_ADDRESS_NONE = 0,
+  BLUETOOTH_PEER_ADDRESS_PUBLIC = 1,
+  BLUETOOTH_PEER_ADDRESS_RANDOM = 2,
+};
+
+struct BluetoothPeerIdentity {
+  uint8_t type = BLUETOOTH_PEER_ADDRESS_NONE;
+  uint8_t address[BLUETOOTH_MAC_BYTES] = {};
+};
+
+inline bool isValidBluetoothPeerIdentity(
+    const BluetoothPeerIdentity& peer) {
+  if (peer.type != BLUETOOTH_PEER_ADDRESS_PUBLIC
+      && peer.type != BLUETOOTH_PEER_ADDRESS_RANDOM) {
+    return false;
+  }
+
+  bool all_zero = true;
+  bool all_one = true;
+  for (size_t i = 0; i < BLUETOOTH_MAC_BYTES; i++) {
+    all_zero = all_zero && peer.address[i] == 0;
+    all_one = all_one && peer.address[i] == 0xFFu;
+  }
+  return !all_zero && !all_one;
+}
+
 // Convert six random bytes into a valid BLE random-static identity. This is
 // deterministic for a given input so both saved-random and per-boot modes can
 // use the platform's existing entropy source without platform-specific rules.
@@ -59,6 +124,24 @@ inline void makeRandomStaticBluetoothMac(
   if (address == NULL) return;
   address[0] |= 0xC0u;
   if (!isValidBluetoothMac(address)) address[5] ^= 0x01u;
+}
+
+inline void makeRandomStaticBluetoothMacDifferentFrom(
+    uint8_t address[BLUETOOTH_MAC_BYTES],
+    const uint8_t previous[BLUETOOTH_MAC_BYTES]) {
+  makeRandomStaticBluetoothMac(address);
+  if (address == NULL || previous == NULL
+      || memcmp(address, previous, BLUETOOTH_MAC_BYTES) != 0) {
+    return;
+  }
+
+  address[5] ^= 0x01u;
+  if (!isValidBluetoothMac(address)) {
+    // The old payload was one bit away from all-zero or all-one. Restore that
+    // bit and flip a second payload bit so the result is valid and different.
+    address[5] ^= 0x01u;
+    address[4] ^= 0x01u;
+  }
 }
 
 inline int bluetoothMacHexDigit(char value) {

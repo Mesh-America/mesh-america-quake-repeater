@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../BaseSerialInterface.h"
+#include "../BluetoothMac.h"
 #include "../BleTxStallWatchdog.h"
 #include "../UsbLogging.h"
 #include "SecuritySessionTimer.h"
@@ -34,7 +35,16 @@ class SerialBLEInterface : public BaseSerialInterface {
   ble_gap_addr_t _peer_address = {};
   bool _peer_address_valid;
   bool _bond_removed_for_connection;
+  ble_gap_addr_t _successful_peer_address = {};
+  bool _stealth_pair_once;
+  bool _bonded_only;
+  bool _bonded_only_configure_pending;
+  mesh::companion::BluetoothPeerIdentity _pending_bonded_peer;
+  std::atomic<bool> _advertisingSuppressed{false};
+  std::atomic<bool> _bondedOnlyRecoveryPending{false};
   std::atomic<bool> _pairingRequestPending{false};
+  std::atomic<bool> _successfulConnectionPending{false};
+  std::atomic<uint32_t> _successfulConnectionStarted{0};
   SecuritySessionTimer _security_timer;
   mesh::BleTxStallWatchdog _tx_stall_watchdog;
   mesh::BleDisconnectRecovery _tx_disconnect_recovery;
@@ -59,6 +69,16 @@ class SerialBLEInterface : public BaseSerialInterface {
   void recoverStalledTx(const char* cause);
   void serviceTxRecovery(uint32_t now);
   bool removeStoredBondForPeer(const char* cause);
+  void noteSuccessfulConnection(const ble_gap_addr_t& peer_address);
+  bool resolveSuccessfulPeer(
+      mesh::companion::BluetoothPeerIdentity& peer) const;
+  bool configureBondedOnlyAdvertising(
+      const mesh::companion::BluetoothPeerIdentity& peer,
+      bool require_stored_bond);
+  void serviceBondedOnlyTransition();
+  void requestBondedOnlyRecovery(const char* cause);
+  bool advertisingAllowed() const;
+  bool startAdvertising(const char* failure_cause);
   bool isValidConnection(uint16_t handle, bool requireWaitingForSecurity = false) const;
   bool isAdvertising() const;
   static void onConnect(uint16_t connection_handle);
@@ -85,6 +105,9 @@ public:
     _last_retry_attempt = 0;
     _peer_address_valid = false;
     _bond_removed_for_connection = false;
+    _stealth_pair_once = false;
+    _bonded_only = false;
+    _bonded_only_configure_pending = false;
     send_queue_len = 0;
     recv_queue_len = 0;
   }
@@ -96,10 +119,14 @@ public:
    * @param pin_code   the BLE security pin
    * @param custom_address optional human-order BLE random-static address
    * @param clear_bonds clear saved peer bonds before accepting connections
+   * @param stealth_pair_once suppress general advertising after first pairing
+   * @param bonded_only_peer optional peer allowed to reconnect in stealth mode
    */
   bool begin(const char* prefix, const char* name, uint32_t pin_code,
              const uint8_t* custom_address = nullptr,
-             bool clear_bonds = false);
+             bool clear_bonds = false, bool stealth_pair_once = false,
+             const mesh::companion::BluetoothPeerIdentity*
+                 bonded_only_peer = nullptr);
 
   void disconnect();
   void enable() override;
@@ -111,6 +138,15 @@ public:
   bool hasPendingIO() const override;
   bool takePairingRequest() override {
     return _pairingRequestPending.exchange(false, std::memory_order_acq_rel);
+  }
+  bool takeSuccessfulConnection(
+      mesh::companion::BluetoothPeerIdentity* peer = nullptr);
+  bool enableBondedOnlyAdvertising(
+      const mesh::companion::BluetoothPeerIdentity& peer);
+  void cancelStealthPairingTransition();
+  bool takeBondedOnlyRecovery() {
+    return _bondedOnlyRecoveryPending.exchange(
+        false, std::memory_order_acq_rel);
   }
   size_t writeFrame(const uint8_t src[], size_t len) override;
   size_t checkRecvFrame(uint8_t dest[]) override;

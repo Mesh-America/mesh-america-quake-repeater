@@ -85,6 +85,7 @@ public:
     CAP_BLUETOOTH_NAME = 1UL << 14,
     CAP_ESPNOW_CHANNEL = 1UL << 15,
     CAP_BLUETOOTH_MAC = 1UL << 16,
+    CAP_BLUETOOTH_STEALTH = 1UL << 17,
     CAP_DELAYS = CAP_RX_DELAY | CAP_TX_DELAY,
   };
 
@@ -95,6 +96,7 @@ public:
     char name[32];
     char bluetooth_name[32];       // empty = transport's default device name
     char bluetooth_mac[24];        // empty = chipset factory address
+    bool bluetooth_stealth;        // independent of the address policy
     char admin_password[32];       // empty = trusted LAN/no login prompt
     double lat;
     double lon;

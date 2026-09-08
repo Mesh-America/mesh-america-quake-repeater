@@ -18,7 +18,8 @@
 // separately, see wcIsAdminPasswordKey below.
 static const char* const WC_ALLOWED_SET_KEYS[] = {
   // NodePrefs (radio / node)
-  "name", "bluetooth.name", "bluetooth.mac", "lat", "lon", "radio", "tx", "af", "rxdelay", "txdelay",
+  "name", "bluetooth.name", "bluetooth.mac", "bluetooth.stealth",
+  "lat", "lon", "radio", "tx", "af", "rxdelay", "txdelay",
   "cad", "radio.rxgain", "radio.fem.rxgain", "radio.rxps", "powersaving",
   "repeat",
   "advert.interval", "flood.advert.interval",
@@ -66,7 +67,8 @@ static inline bool wcIsEspNowChannelKey(const char* key) {
 static inline bool wcSetKeyRequiresReboot(const char* key) {
   return key != NULL
       && (wcIsEspNowChannelKey(key)
-          || strcmp(key, "bluetooth.mac") == 0);
+          || strcmp(key, "bluetooth.mac") == 0
+          || strcmp(key, "bluetooth.stealth") == 0);
 }
 
 // The admin password maps to the top-level `password` command, not a setter, so

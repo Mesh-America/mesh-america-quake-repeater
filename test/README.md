@@ -20,6 +20,10 @@ python3 test/test_companion_transport_selector.py  # Indicator transport-selecto
 python3 test/test_color_theme.py                # shared color-display dark-palette contract
 python3 test/test_indicator_font_recovery.py  # Indicator TLS/SD font recovery contract
 python3 test/test_companion_terminal_profile.py  # Companion CLI capability gates
+python3 test/test_bluetooth_mac_contract.py     # MAC policies, separate stealth flag and BLE backend integration
+python3 test/test_companion_settings_persistence_contract.py  # Atomic settings and appended Bluetooth fields
+python3 test/test_webconfig_ui.py              # Web controls, reboot handling and generated-page consistency
+python3 test/test_webconfig_ui_runtime.py      # Real Chromium, including independent stealth toggle
 python3 test/test_nrf52_uf2reset_cli.py          # all nRF52 text-CLI reset dispatchers
 python3 test/test_client_login_profile_contract.py  # ACL login ordering/role contract
 python3 test/test_client_acl_spiffs.py          # Actual ACL: first login, replay/reboot, failed storage
@@ -39,6 +43,11 @@ python3 test/test_esp32_tinyusb_cooperative_output.py # Real role pumps: large l
 python3 test/test_temp_radio_reply_delivery_contract.py  # TempRadio ACK path/barrier integration
 python3 test/test_tls_download_clock_gates.py   # Fresh-NTP/TLS download integration contract
 ```
+
+The WebConfig browser suite skips if no Chromium-family browser is available.
+With a sandboxed browser that cannot read `/tmp`, set `TMPDIR` to a writable
+directory visible to that browser before running it. The Bluetooth settings
+contracts and WebConfig suites also run in the unit-test GitHub workflow.
 
 A green `[PASSED]` per suite means GoogleTest returned 0 (all assertions
 passed). PlatformIO's "0 test cases" line is just its Unity-style counter and
@@ -96,7 +105,7 @@ does not reflect the GoogleTest count -- run the built binary directly
 | `test_lazy_persistence` | `src/helpers/LazyPersistence.h` | first-write scheduling without postponement, zero-sentinel rollover preservation, capped exponential save-failure backoff that mutations cannot defeat, and reset only after success |
 | `test_client_acl_file_transaction` | `src/helpers/ClientACLFileTransaction.h` | verified temp publication, preservation of the prior ACL on verification/rename failure, post-commit cleanup-failure handling, and recovery at every temp/backup/primary boundary |
 | `test_cad_timing` | `src/helpers/radiolib/CadTiming.h`, `LR2021SideDetectorConfig.h`, `RadioAirtime.h` | Cascade and slow-profile CAD deadlines; invalid airtime handling; bounded LR2021 side-detector parsing and LDRO recomputation |
-| `test_companion_node_prefs` | `examples/companion_radio/NodePrefs.h` | independent device power saving, RXPS, Wi-Fi, FEM, Bluetooth name, and Bluetooth address preferences; random-static address validation/generation; one-time migration of the regressed power-saving default |
+| `test_companion_node_prefs` | `examples/companion_radio/NodePrefs.h` | independent device power saving, RXPS, Wi-Fi, FEM, Bluetooth name, address policy and stealth flag; random-static address validation/generation; idempotent stealth toggles, pairing reset and armed rotation policy matching; one-time migration of the regressed power-saving default |
 | `test_config_serializer` | `src/helpers/ConfigSerializer.cpp`, Companion `NodePrefs` | escaped config save/load, whitespace and malformed input, unknown fields, and FEM/ESP-NOW bridge-format preference round trips |
 | `test_deferred_cli_command` | `src/helpers/DeferredCliCommand.h` | copying authenticated command context, single-pending-command enforcement, clearing, and length rejection |
 | `test_host_cli_bridge` | `src/helpers/HostCliBridge.h` | bounded request/reply parsing, Base64URL serial framing, correlation preservation, one-time service-claim proofs, request-token fields, line safety, and UTF-8-safe truncation |

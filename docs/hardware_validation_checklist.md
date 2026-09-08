@@ -10,6 +10,17 @@ when its log identifies the physical device, firmware artifact, artifact hash,
 command result, and cold/warm boot outcome. Do not infer success from a tool's
 exit code when the tool has a documented false-success mode.
 
+## Bluetooth stealth qualification - 2026-09-07
+
+The [XIAO stealth report](hardware_validation_bluetooth_stealth_2026-09-07.md)
+records exact artifacts for the initial implementation and independent-flag
+follow-up. The flag run covers custom/saved-random pairing and bonded reboot
+reconnect, idempotent `on`, `off` preserving the MAC, directed advertising,
+and both rotating policies with stealth still enabled. It also gives the
+repeatable hardware regression procedure. True battery-disconnected cold boot,
+phone address-privacy behavior, a second unbonded central, and ESP32 hardware
+remain separate uncompleted gates; do not infer them from the XIAO results.
+
 ## Current marathon ledger (through 2026-09-04)
 
 | Hardware | Stable identity | Current state | Next blocking check |

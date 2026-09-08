@@ -347,6 +347,55 @@ class WebConfigUiRuntimeTest(unittest.TestCase):
         self.assertIn('data-test-dirty-name="Early App Edit"', dom)
         self.assertIn('data-test-capture="clear"', dom)
 
+    def test_bluetooth_stealth_toggle_preserves_custom_mac(self):
+        status, config = self.setup_values()
+        status["mode"] = "lan"
+        status["capabilities"] = (1 << 16) | (1 << 17)
+        config["radio"]["bluetooth_mac"] = "C2:11:22:33:44:55"
+        config["radio"]["bluetooth_stealth"] = False
+        prelude = """
+<script>
+(function(){
+  var status=%s,config=%s;
+  function response(value){
+    return {ok:true,status:200,json:function(){return Promise.resolve(value)}};
+  }
+  window.fetch=function(path){
+    if(path==="/api/status")return Promise.resolve(response(status));
+    if(path==="/api/config")return Promise.resolve(response(config));
+    return Promise.resolve({ok:false,status:404,json:function(){return Promise.resolve({})}});
+  };
+  window.addEventListener("load",function(){
+    setTimeout(function(){
+      var flag=document.querySelector('#v-app [data-k="bluetooth.stealth"]');
+      var mac=document.querySelector('#v-app [data-k="bluetooth.mac"]');
+      var body=document.body;
+      body.setAttribute("data-test-initial-flag",flag.value);
+      flag.value="on";
+      flag.dispatchEvent(new Event("input",{bubbles:true}));
+      flag.dispatchEvent(new Event("change",{bubbles:true}));
+      body.setAttribute("data-test-dirty-flag",st.dirty["bluetooth.stealth"]||"");
+      body.setAttribute("data-test-dirty-keys",Object.keys(st.dirty).join(","));
+      body.setAttribute("data-test-mac",mac.value);
+      body.setAttribute("data-test-config-mac",cfgVal("bluetooth.mac"));
+      flag.value="off";
+      flag.dispatchEvent(new Event("input",{bubbles:true}));
+      flag.dispatchEvent(new Event("change",{bubbles:true}));
+      body.setAttribute("data-test-restored-dirty-count",Object.keys(st.dirty).length);
+    },500);
+  });
+})();
+</script>
+""" % (json.dumps(status), json.dumps(config))
+
+        dom = self.run_page(prelude)
+        self.assertIn('data-test-initial-flag="off"', dom)
+        self.assertIn('data-test-dirty-flag="on"', dom)
+        self.assertIn('data-test-dirty-keys="bluetooth.stealth"', dom)
+        self.assertIn('data-test-mac="C2:11:22:33:44:55"', dom)
+        self.assertIn('data-test-config-mac="C2:11:22:33:44:55"', dom)
+        self.assertIn('data-test-restored-dirty-count="0"', dom)
+
     def test_second_load_auto_password_clear_remains_restorable(self):
         status, config = self.setup_values()
         prelude = """

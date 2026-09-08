@@ -115,8 +115,18 @@ class CompanionSettingsPersistenceContractTests(unittest.TestCase):
         cad_at = self.prefs.index("uint16_t cad_max_duration_ms")
         mode_at = self.prefs.index("uint8_t bluetooth_mac_mode", cad_at)
         address_at = self.prefs.index("uint8_t bluetooth_mac[", mode_at)
+        peer_type_at = self.prefs.index(
+            "uint8_t bluetooth_stealth_peer_type", address_at
+        )
+        peer_at = self.prefs.index(
+            "uint8_t bluetooth_stealth_peer[", peer_type_at
+        )
+        stealth_at = self.prefs.index("uint8_t bluetooth_stealth_mode", peer_at)
         self.assertLess(cad_at, mode_at)
         self.assertLess(mode_at, address_at)
+        self.assertLess(address_at, peer_type_at)
+        self.assertLess(peer_type_at, peer_at)
+        self.assertLess(peer_at, stealth_at)
 
         load = function_body(
             self.store,
@@ -130,7 +140,22 @@ class CompanionSettingsPersistenceContractTests(unittest.TestCase):
         read_address_at = load.index(
             "readOptionalField(loaded_prefs.bluetooth_mac", read_mode_at
         )
+        read_peer_type_at = load.index(
+            "readOptionalField(&loaded_prefs.bluetooth_stealth_peer_type",
+            read_address_at,
+        )
+        read_peer_at = load.index(
+            "readOptionalField(loaded_prefs.bluetooth_stealth_peer",
+            read_peer_type_at,
+        )
+        read_stealth_at = load.index(
+            "readOptionalField(&loaded_prefs.bluetooth_stealth_mode", read_peer_at
+        )
+        self.assertIn("sizeof(loaded_prefs.bluetooth_stealth_mode)", load)
         self.assertLess(read_mode_at, read_address_at)
+        self.assertLess(read_address_at, read_peer_type_at)
+        self.assertLess(read_peer_type_at, read_peer_at)
+        self.assertLess(read_peer_at, read_stealth_at)
 
         save = function_body(
             self.store,
@@ -140,7 +165,17 @@ class CompanionSettingsPersistenceContractTests(unittest.TestCase):
         write_address_at = save.index(
             "(uint8_t *)_prefs.bluetooth_mac,", write_mode_at
         )
+        write_peer_type_at = save.index(
+            "&_prefs.bluetooth_stealth_peer_type", write_address_at
+        )
+        write_peer_at = save.index(
+            "(uint8_t *)_prefs.bluetooth_stealth_peer,", write_peer_type_at
+        )
+        write_stealth_at = save.index("&_prefs.bluetooth_stealth_mode", write_peer_at)
         self.assertLess(write_mode_at, write_address_at)
+        self.assertLess(write_address_at, write_peer_type_at)
+        self.assertLess(write_peer_type_at, write_peer_at)
+        self.assertLess(write_peer_at, write_stealth_at)
 
     def test_channel_source_discovery_and_open_failures_latch_quarantine(self):
         load = function_body(self.store, "void DataStore::loadChannels(")

@@ -87,15 +87,28 @@ takes effect after reboot. `get ble.name` and `set ble.name` are short aliases.
 
 ```
 get bluetooth.mac
-set bluetooth.mac {address|random|random-every-boot|default}
+set bluetooth.mac {address|random|random-every-boot|random-after-connect|default}
+get bluetooth.stealth
+set bluetooth.stealth {on|off}
 ```
 Shows or changes the Bluetooth identity on Companion builds with BLE. A
 literal address must be BLE random-static, such as `C2:11:22:33:44:55`.
 `random` generates and saves one address; `random-every-boot` generates a new
-one on each startup (`random everyboot` is also accepted); `default` or `clear`
-restores the factory address. Reboot,
-forget the old phone entry, and pair again. Per-boot random mode requires
-pairing after every reboot. `get ble.mac` and `set ble.mac` are short aliases.
+one on each startup (`random everyboot` is also accepted).
+`random-after-connect` keeps its address across unused power cycles, then
+rotates on the next boot after an authenticated connection. `default` or
+`clear` restores the factory address without changing the stealth flag.
+Reboot, forget the old phone entry, and pair again after an address change.
+`get ble.mac` and `set ble.mac` are short aliases.
+
+The independent `bluetooth.stealth` flag defaults off and preserves the chosen
+address policy. With it on, the node is discoverable until its first
+authenticated pairing, then accepts only that bonded peer. Custom and saved
+random addresses keep the bond across boots; rotating modes reopen pairing
+when the address rotates, leaving stealth enabled. It still transmits the
+directed or allowlisted packets BLE requires for reconnection. Repeating `on`
+keeps the bond. Send `off`, then `on`, then reboot to reopen pairing manually.
+`ble.stealth` is the short alias. Flag changes require reboot.
 
 ```
 set lat {latitude}

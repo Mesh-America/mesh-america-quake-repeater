@@ -289,7 +289,8 @@ The equivalent framed CLI commands are:
 | FEM receive gain | `get radio.fem.rxgain`; `set radio.fem.rxgain on|off` |
 | WiFi power save | `get wifi.powersave`; `set wifi.powersave none|min|max` |
 | Bluetooth name | `get bluetooth.name`; `set bluetooth.name <name|default>` |
-| Bluetooth address | `get bluetooth.mac`; `set bluetooth.mac <address|random|random-every-boot|default>` |
+| Bluetooth address | `get bluetooth.mac`; `set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>` |
+| Bluetooth stealth | `get bluetooth.stealth`; `set bluetooth.stealth on|off` |
 
 The framed form works over the normal binary USB, BLE, or TCP transport and
 does not need the USB terminal-start token. Unsupported settings return the
@@ -328,11 +329,22 @@ custom name is limited to 31 valid UTF-8 bytes and takes effect after reboot.
 Bluetooth Companion builds also accept `bluetooth.mac` (`ble.mac` is an
 alias). A literal address must be a BLE random-static address; `random`
 generates and saves one, `random-every-boot` rotates it at each startup, and
-`default` or `clear` restores the factory address. The change takes effect
-after reboot. The client must forget and re-pair the old identity. Per-boot
-random mode clears local peer bonds each startup and therefore requires a new
-pairing after every reboot. This is an application setting; an nRF52 OTAFIX
-bootloader continues to advertise its separate DFU identity.
+`random-after-connect` retains it through unused boots but rotates it on the
+first boot after an authenticated connection. `default` or `clear` restores
+the factory address. The change takes effect after reboot.
+
+`bluetooth.stealth on|off` (`ble.stealth` is an alias) is a separate flag,
+defaulting to off. It preserves the address policy and can be combined with
+custom, saved random, rotating random, or factory addresses. With stealth on,
+the node advertises normally until the first authenticated pairing, then
+permits only that bonded peer to reconnect. Address changes clear the saved
+peer and reopen pairing without disabling stealth. Rotating policies retain
+their normal rotation triggers. Repeating `on` does not clear an existing bond.
+Both flag changes require reboot. The old MAC value `stealth` is not accepted.
+
+BLE still transmits directed or allowlisted advertisements; stealth is not
+radio silence. These are application settings; an nRF52 OTAFIX bootloader
+continues to advertise its separate DFU identity.
 
 ### Bluetooth LoRa mOTA source
 

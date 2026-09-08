@@ -1922,10 +1922,52 @@ void halt() {
   static uint8_t companion_bluetooth_session_address[
       mesh::companion::BLUETOOTH_MAC_BYTES] = {};
   static bool companion_bluetooth_session_address_ready = false;
+  static bool companion_bluetooth_identity_prepared = false;
+  static bool companion_bluetooth_clear_bonds_this_boot = false;
+  static uint8_t companion_bluetooth_session_mode =
+      mesh::companion::BLUETOOTH_MAC_DEFAULT;
+  static uint8_t companion_bluetooth_session_stealth_mode =
+      mesh::companion::BLUETOOTH_STEALTH_OFF;
+  static uint8_t companion_bluetooth_saved_session_address[
+      mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+  static bool companion_bluetooth_rotation_arm_pending = false;
+  static bool companion_bluetooth_stealth_transition_pending = false;
+  static mesh::companion::BluetoothPeerIdentity
+      companion_bluetooth_stealth_transition_peer;
+  static bool companion_bluetooth_stealth_recovery_pending = false;
+  static uint32_t companion_bluetooth_identity_retry_at = 0;
+
+  static bool prepareCompanionBluetoothIdentity(
+      CompanionNodePrefs* prefs) {
+    if (companion_bluetooth_identity_prepared) return true;
+    if (prefs == nullptr) return false;
+
+    bool address_rotated = false;
+    if (!the_mesh.prepareBluetoothMacForBoot(address_rotated)) {
+      mesh::usbLoggingPort().println(
+          "Companion: Bluetooth address preparation save failed");
+      return false;
+    }
+
+    companion_bluetooth_identity_prepared = true;
+    companion_bluetooth_session_mode = prefs->bluetooth_mac_mode;
+    companion_bluetooth_session_stealth_mode = prefs->bluetooth_stealth_mode;
+    companion_bluetooth_clear_bonds_this_boot = address_rotated
+        || companion_bluetooth_session_stealth_mode
+            == mesh::companion::BLUETOOTH_STEALTH_PAIRING;
+    memcpy(companion_bluetooth_saved_session_address,
+           prefs->bluetooth_mac,
+           sizeof(companion_bluetooth_saved_session_address));
+    if (address_rotated) {
+      mesh::usbLoggingPort().println(
+          "Companion: Bluetooth address changed for this boot");
+    }
+    return true;
+  }
 
   static const uint8_t* companionBluetoothAddress(
       const CompanionNodePrefs* prefs, bool& clear_bonds) {
-    clear_bonds = false;
+    clear_bonds = companion_bluetooth_clear_bonds_this_boot;
     if (prefs == nullptr
         || !mesh::companion::isValidBluetoothMacMode(
             prefs->bluetooth_mac_mode)) {
@@ -1970,6 +2012,13 @@ void halt() {
     companion_bluetooth_start_at = 0;
 
     mesh::usbLoggingPort().println("Companion: starting Bluetooth");
+    CompanionNodePrefs* prefs = the_mesh.getNodePrefs();
+    if (!prepareCompanionBluetoothIdentity(prefs)) {
+      mesh::usbLoggingPort().println(
+          "Companion: Bluetooth identity preparation failed; retrying");
+      scheduleCompanionBluetoothRetry();
+      return;
+    }
     if (!interface_manager.addInterface(InterfaceType::Bluetooth,
                                         &bluetooth_interface)) {
       mesh::usbLoggingPort().println(
@@ -1977,18 +2026,33 @@ void halt() {
       scheduleCompanionBluetoothRetry();
       return;
     }
-    CompanionNodePrefs* prefs = the_mesh.getNodePrefs();
     const bool custom_bluetooth_name =
         mesh::companion::hasCustomBluetoothName(prefs->bluetooth_name);
     bool clear_bonds = false;
     const uint8_t* bluetooth_address =
         companionBluetoothAddress(prefs, clear_bonds);
+    const bool stealth_pair_once = companion_bluetooth_session_stealth_mode
+        == mesh::companion::BLUETOOTH_STEALTH_PAIRING;
+    mesh::companion::BluetoothPeerIdentity bonded_only_peer;
+    const mesh::companion::BluetoothPeerIdentity* bonded_only_peer_ptr =
+        nullptr;
+    if (companion_bluetooth_session_stealth_mode
+        == mesh::companion::BLUETOOTH_STEALTH_PAIRED) {
+      bonded_only_peer.type = prefs->bluetooth_stealth_peer_type;
+      memcpy(bonded_only_peer.address, prefs->bluetooth_stealth_peer,
+             sizeof(bonded_only_peer.address));
+      if (mesh::companion::isValidBluetoothPeerIdentity(
+              bonded_only_peer)) {
+        bonded_only_peer_ptr = &bonded_only_peer;
+      }
+    }
     if (!bluetooth_interface.begin(custom_bluetooth_name ? "" : BLE_NAME_PREFIX,
                                    custom_bluetooth_name
                                        ? prefs->bluetooth_name
                                        : prefs->node_name,
                                    the_mesh.getBLEPin(), bluetooth_address,
-                                   clear_bonds)) {
+                                   clear_bonds, stealth_pair_once,
+                                   bonded_only_peer_ptr)) {
       interface_manager.removeInterface(&bluetooth_interface);
       mesh::usbLoggingPort().println(
           "Companion: Bluetooth initialization failed; retrying in 5 seconds");
@@ -2008,6 +2072,128 @@ void halt() {
     if (companion_bluetooth_start_at == 0
         || (int32_t)(millis() - companion_bluetooth_start_at) < 0) return;
     startCompanionBluetooth();
+  }
+
+  static void serviceCompanionBluetoothIdentity() {
+    if (!companion_bluetooth_initialized) return;
+
+    if (bluetooth_interface.takeBondedOnlyRecovery()) {
+      companion_bluetooth_stealth_recovery_pending = true;
+      companion_bluetooth_identity_retry_at = 0;
+    }
+    const uint32_t now = millis();
+    if (companion_bluetooth_identity_retry_at != 0
+        && (int32_t)(now - companion_bluetooth_identity_retry_at) < 0) {
+      return;
+    }
+
+    if (companion_bluetooth_stealth_recovery_pending) {
+      if (the_mesh.resetBluetoothStealthPairing()) {
+        mesh::usbLoggingPort().println(
+            "Companion: saved stealth bond unavailable; reopening pairing");
+        board.reboot();
+      } else {
+        companion_bluetooth_identity_retry_at =
+            now + COMPANION_BLUETOOTH_RETRY_MS;
+        if (companion_bluetooth_identity_retry_at == 0) {
+          companion_bluetooth_identity_retry_at = 1;
+        }
+        mesh::usbLoggingPort().println(
+            "Companion: stealth recovery save failed; retrying");
+      }
+      return;
+    }
+
+    const CompanionNodePrefs* prefs = the_mesh.getNodePrefs();
+    bool successful_connection = false;
+    if (companion_bluetooth_session_stealth_mode
+        == mesh::companion::BLUETOOTH_STEALTH_PAIRING) {
+      if (!companion_bluetooth_stealth_transition_pending) {
+        mesh::companion::BluetoothPeerIdentity peer;
+        if (bluetooth_interface.takeSuccessfulConnection(&peer)) {
+          successful_connection = true;
+          companion_bluetooth_stealth_transition_peer = peer;
+          companion_bluetooth_stealth_transition_pending = true;
+        }
+      }
+      if (companion_bluetooth_stealth_transition_pending) {
+        if (prefs == nullptr
+            || prefs->bluetooth_stealth_mode
+                != mesh::companion::BLUETOOTH_STEALTH_PAIRING
+            || !mesh::companion::bluetoothMacPoliciesMatch(
+                prefs->bluetooth_mac_mode, companion_bluetooth_session_mode)
+            || memcmp(prefs->bluetooth_mac,
+                      companion_bluetooth_saved_session_address,
+                      sizeof(companion_bluetooth_saved_session_address)) != 0) {
+          // A command changed identity while this session was running. Keep
+          // it usable until reboot applies the requested settings.
+          bluetooth_interface.cancelStealthPairingTransition();
+          companion_bluetooth_stealth_transition_pending = false;
+          companion_bluetooth_session_stealth_mode =
+              mesh::companion::BLUETOOTH_STEALTH_OFF;
+          companion_bluetooth_identity_retry_at = 0;
+        } else if (the_mesh.saveBluetoothStealthPeer(
+                       companion_bluetooth_stealth_transition_peer)) {
+          companion_bluetooth_stealth_transition_pending = false;
+          companion_bluetooth_session_stealth_mode =
+              mesh::companion::BLUETOOTH_STEALTH_PAIRED;
+          companion_bluetooth_identity_retry_at = 0;
+          if (bluetooth_interface.enableBondedOnlyAdvertising(
+                  companion_bluetooth_stealth_transition_peer)) {
+            mesh::usbLoggingPort().println(
+                "Companion: stealth Bluetooth now accepts its bonded peer only");
+          } else {
+            companion_bluetooth_stealth_recovery_pending = true;
+          }
+        } else {
+          companion_bluetooth_identity_retry_at =
+              now + COMPANION_BLUETOOTH_RETRY_MS;
+          if (companion_bluetooth_identity_retry_at == 0) {
+            companion_bluetooth_identity_retry_at = 1;
+          }
+          mesh::usbLoggingPort().println(
+              "Companion: stealth peer save failed; retrying");
+        }
+      }
+    } else {
+      successful_connection = bluetooth_interface.takeSuccessfulConnection();
+    }
+
+    // Stealth and MAC rotation consume the same authenticated event; neither
+    // policy may swallow it before the other has persisted its state.
+    if (!mesh::companion::bluetoothMacModeIsRandomAfterConnect(
+            companion_bluetooth_session_mode)) {
+      return;
+    }
+    if (successful_connection) {
+      companion_bluetooth_rotation_arm_pending = true;
+    }
+    if (!companion_bluetooth_rotation_arm_pending) return;
+
+    if (prefs == nullptr
+        || !mesh::companion::bluetoothMacModeIsRandomAfterConnect(
+            prefs->bluetooth_mac_mode)
+        || memcmp(prefs->bluetooth_mac,
+                  companion_bluetooth_saved_session_address,
+                  sizeof(companion_bluetooth_saved_session_address)) != 0) {
+      companion_bluetooth_rotation_arm_pending = false;
+      return;
+    }
+
+    if (the_mesh.armBluetoothMacRotationAfterConnection()) {
+      companion_bluetooth_rotation_arm_pending = false;
+      companion_bluetooth_identity_retry_at = 0;
+      mesh::usbLoggingPort().println(
+          "Companion: Bluetooth rotation armed for next boot");
+    } else {
+      companion_bluetooth_identity_retry_at =
+          now + COMPANION_BLUETOOTH_RETRY_MS;
+      if (companion_bluetooth_identity_retry_at == 0) {
+        companion_bluetooth_identity_retry_at = 1;
+      }
+      mesh::usbLoggingPort().println(
+          "Companion: Bluetooth rotation marker save failed; retrying");
+    }
   }
 #endif
 
@@ -2692,5 +2878,6 @@ void loop() {
 #else
   serviceDeferredCompanionBluetooth();
 #endif
+  serviceCompanionBluetoothIdentity();
 #endif
 }

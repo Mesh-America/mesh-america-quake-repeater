@@ -77,6 +77,10 @@ public:
   uint16_t cad_max_duration_ms = 0;
   uint8_t bluetooth_mac_mode = mesh::companion::BLUETOOTH_MAC_DEFAULT;
   uint8_t bluetooth_mac[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+  uint8_t bluetooth_stealth_peer_type =
+      mesh::companion::BLUETOOTH_PEER_ADDRESS_NONE;
+  uint8_t bluetooth_stealth_peer[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+  uint8_t bluetooth_stealth_mode = mesh::companion::BLUETOOTH_STEALTH_OFF;
 
 private:
   class RadioPrefs : public CommonRadioPrefs {
@@ -208,5 +212,29 @@ inline bool migrateCompanionPowerSavingDefault(CompanionNodePrefs& prefs) {
 
   prefs.powersaving_enabled = 1;
   prefs.powersaving_policy_version = COMPANION_POWERSAVING_POLICY_VERSION;
+  return true;
+}
+
+inline void clearCompanionBluetoothStealthPeer(CompanionNodePrefs& prefs) {
+  if (mesh::companion::bluetoothStealthEnabled(prefs.bluetooth_stealth_mode)) {
+    prefs.bluetooth_stealth_mode = mesh::companion::BLUETOOTH_STEALTH_PAIRING;
+  }
+  prefs.bluetooth_stealth_peer_type =
+      mesh::companion::BLUETOOTH_PEER_ADDRESS_NONE;
+  memset(prefs.bluetooth_stealth_peer, 0, sizeof(prefs.bluetooth_stealth_peer));
+}
+
+// An on/off flag must not change the address policy or erase a valid bond
+// when the same value is submitted repeatedly.
+inline bool setCompanionBluetoothStealth(CompanionNodePrefs& prefs,
+                                        bool enabled) {
+  if (mesh::companion::bluetoothStealthEnabled(prefs.bluetooth_stealth_mode)
+      == enabled) {
+    return false;
+  }
+  prefs.bluetooth_stealth_mode = enabled
+      ? mesh::companion::BLUETOOTH_STEALTH_PAIRING
+      : mesh::companion::BLUETOOTH_STEALTH_OFF;
+  clearCompanionBluetoothStealthPeer(prefs);
   return true;
 }

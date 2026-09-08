@@ -140,6 +140,13 @@ public:
   const char *getNodeName();
   CompanionNodePrefs *getNodePrefs();
   uint32_t getBLEPin();
+#if defined(BLE_PIN_CODE)
+  bool prepareBluetoothMacForBoot(bool& address_rotated);
+  bool armBluetoothMacRotationAfterConnection();
+  bool saveBluetoothStealthPeer(
+      const mesh::companion::BluetoothPeerIdentity& peer);
+  bool resetBluetoothStealthPairing();
+#endif
   int getOfflineQueueCapacity() const;
   void noteInternetClockSet() {
 #ifdef COMPANION_MESH_CLOCK_SYNC
@@ -354,6 +361,9 @@ private:
   bool applyAndSaveBluetoothMac(const char* value, char* reply,
                                 size_t reply_size);
   void formatBluetoothMacStatus(char* reply, size_t reply_size) const;
+  bool applyAndSaveBluetoothStealth(const char* value, char* reply,
+                                   size_t reply_size);
+  void formatBluetoothStealthStatus(char* reply, size_t reply_size) const;
 #endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
   bool applyAndSaveEspNowChannel(const char* value, char* reply,

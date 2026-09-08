@@ -194,8 +194,21 @@ class WebConfigUiTest(unittest.TestCase):
         self.assertIn('data-k="bluetooth.mac"', page)
         self.assertIn('case"bluetooth.mac":return r.bluetooth_mac||"";', page)
         self.assertIn("random-every-boot", page)
+        self.assertIn("random-after-connect", page)
+        self.assertNotIn("random-after-connect, or stealth", page)
         self.assertIn('("bluetooth.mac" in setmap)', page)
         self.assertIn("Bluetooth address saved [OK] - rebooting", page)
+
+    def test_stealth_flag_has_independent_control_and_reboot_flow(self):
+        page = SOURCE.read_text(encoding="utf-8")
+        self.assertIn('data-cap="131072"><label>Bluetooth stealth</label>', page)
+        self.assertIn('data-k="bluetooth.stealth"', page)
+        self.assertIn('case"bluetooth.stealth":return r.bluetooth_stealth?"on":"off";', page)
+        self.assertIn('("bluetooth.stealth" in setmap)', page)
+        self.assertIn('("bluetooth.stealth" in st.dirty)', page)
+        self.assertIn('("bluetooth.stealth" in submitted)', page)
+        self.assertIn("Bluetooth stealth saved [OK] - rebooting", page)
+        self.assertNotIn("|stealth|", page)
 
     def test_scan_panel_exposes_automatic_updates_accessibly(self):
         page = SOURCE.read_text(encoding="utf-8")

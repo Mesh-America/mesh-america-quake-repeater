@@ -27,6 +27,7 @@ extern "C" bool bleInUse(void) {
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 #define ADVERT_RESTART_DELAY  1000   // millis
+#define BLE_BOND_PERSIST_TIMEOUT_MS 15000
 
 static void clearStoredBluetoothBonds() {
 #if defined(CONFIG_NIMBLE_ENABLED)
@@ -58,11 +59,245 @@ static void clearStoredBluetoothBonds() {
 #endif
 }
 
+static bool bluetoothPeersEqual(
+    const mesh::companion::BluetoothPeerIdentity& lhs,
+    const mesh::companion::BluetoothPeerIdentity& rhs) {
+  return lhs.type == rhs.type
+      && memcmp(lhs.address, rhs.address, sizeof(lhs.address)) == 0;
+}
+
+void SerialBLEInterface::noteSuccessfulConnection(
+    const mesh::companion::BluetoothPeerIdentity& peer) {
+  if (_stealth_pair_once) {
+    _advertisingSuppressed.store(true, std::memory_order_release);
+    _adv_restart_pending = false;
+  }
+
+  if (!_successfulConnectionPending.load(std::memory_order_acquire)) {
+    _successfulPeer = peer;
+    _successfulConnectionStarted.store(
+        (uint32_t)millis(), std::memory_order_relaxed);
+    _successfulConnectionPending.store(true, std::memory_order_release);
+  }
+}
+
+#if defined(CONFIG_NIMBLE_ENABLED)
+static void bluetoothPeerFromNimbleAddress(
+    const ble_addr_t& address,
+    mesh::companion::BluetoothPeerIdentity& peer) {
+  peer.type = (address.type & 0x01u) == BLE_ADDR_PUBLIC
+      ? mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC
+      : mesh::companion::BLUETOOTH_PEER_ADDRESS_RANDOM;
+  for (size_t i = 0; i < mesh::companion::BLUETOOTH_MAC_BYTES; i++) {
+    peer.address[i] = address.val[
+        mesh::companion::BLUETOOTH_MAC_BYTES - 1 - i];
+  }
+}
+
+static ble_addr_t nimbleAddressFromBluetoothPeer(
+    const mesh::companion::BluetoothPeerIdentity& peer) {
+  ble_addr_t address = {};
+  address.type =
+      peer.type == mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC
+          ? BLE_ADDR_PUBLIC
+          : BLE_ADDR_RANDOM;
+  for (size_t i = 0; i < mesh::companion::BLUETOOTH_MAC_BYTES; i++) {
+    address.val[i] = peer.address[
+        mesh::companion::BLUETOOTH_MAC_BYTES - 1 - i];
+  }
+  return address;
+}
+
+static bool nimbleBondExistsForPeer(
+    const mesh::companion::BluetoothPeerIdentity& peer) {
+  ble_addr_t bonded_peers[8];
+  int count = 0;
+  if (ble_store_util_bonded_peers(
+          bonded_peers, &count,
+          sizeof(bonded_peers) / sizeof(bonded_peers[0])) != 0) {
+    return false;
+  }
+  for (int i = 0; i < count; i++) {
+    mesh::companion::BluetoothPeerIdentity candidate;
+    bluetoothPeerFromNimbleAddress(bonded_peers[i], candidate);
+    if (bluetoothPeersEqual(candidate, peer)) return true;
+  }
+  return false;
+}
+#else
+static void bluetoothPeerFromBluedroidBond(
+    const esp_ble_bond_dev_t& bond, uint8_t fallback_type,
+    mesh::companion::BluetoothPeerIdentity& peer) {
+  const bool has_identity =
+      (bond.bond_key.key_mask & ESP_LE_KEY_PID) != 0;
+  const uint8_t* address = has_identity
+      ? bond.bond_key.pid_key.static_addr
+      : bond.bd_addr;
+  const uint8_t address_type = has_identity
+      ? bond.bond_key.pid_key.addr_type
+      : fallback_type;
+  peer.type = address_type == BLE_ADDR_TYPE_PUBLIC
+      ? mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC
+      : mesh::companion::BLUETOOTH_PEER_ADDRESS_RANDOM;
+  memcpy(peer.address, address, sizeof(peer.address));
+}
+
+static bool findBluedroidBondedPeer(
+    const mesh::companion::BluetoothPeerIdentity& requested,
+    mesh::companion::BluetoothPeerIdentity& resolved) {
+  int count = esp_ble_get_bond_device_num();
+  if (count <= 0) return false;
+
+  esp_ble_bond_dev_t* devices = static_cast<esp_ble_bond_dev_t*>(
+      malloc(sizeof(esp_ble_bond_dev_t) * count));
+  if (devices == NULL) return false;
+  if (esp_ble_get_bond_device_list(&count, devices) != ESP_OK) {
+    free(devices);
+    return false;
+  }
+
+  bool found = false;
+  for (int i = 0; i < count; i++) {
+    mesh::companion::BluetoothPeerIdentity candidate;
+    bluetoothPeerFromBluedroidBond(
+        devices[i],
+        requested.type == mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC
+            ? BLE_ADDR_TYPE_PUBLIC
+            : BLE_ADDR_TYPE_RANDOM,
+        candidate);
+    if (bluetoothPeersEqual(candidate, requested)
+        || memcmp(devices[i].bd_addr, requested.address,
+                  sizeof(requested.address)) == 0
+        || count == 1) {
+      resolved = candidate;
+      found = mesh::companion::isValidBluetoothPeerIdentity(resolved);
+      break;
+    }
+  }
+  free(devices);
+  return found;
+}
+#endif
+
+bool SerialBLEInterface::resolveSuccessfulPeer(
+    mesh::companion::BluetoothPeerIdentity& peer) const {
+#if defined(CONFIG_NIMBLE_ENABLED)
+  if (!mesh::companion::isValidBluetoothPeerIdentity(_successfulPeer)
+      || !nimbleBondExistsForPeer(_successfulPeer)) {
+    return false;
+  }
+  peer = _successfulPeer;
+  return true;
+#else
+  if (!mesh::companion::isValidBluetoothPeerIdentity(_successfulPeer)) {
+    return false;
+  }
+  return findBluedroidBondedPeer(_successfulPeer, peer);
+#endif
+}
+
+bool SerialBLEInterface::configureBondedOnlyAdvertising(
+    const mesh::companion::BluetoothPeerIdentity& peer,
+    bool require_stored_bond) {
+  if (!mesh::companion::isValidBluetoothPeerIdentity(peer)
+      || pServer == NULL) {
+    return false;
+  }
+
+#if defined(CONFIG_NIMBLE_ENABLED)
+  if (require_stored_bond && !nimbleBondExistsForPeer(peer)) {
+    requestBondedOnlyRecovery("saved peer bond is unavailable");
+    return false;
+  }
+  const ble_addr_t native_peer = nimbleAddressFromBluetoothPeer(peer);
+  if (ble_gap_wl_set(&native_peer, 1) != 0) {
+    requestBondedOnlyRecovery("could not set NimBLE allowlist");
+    return false;
+  }
+#else
+  if (require_stored_bond) {
+    mesh::companion::BluetoothPeerIdentity resolved;
+    if (!findBluedroidBondedPeer(peer, resolved)
+        || !bluetoothPeersEqual(peer, resolved)) {
+      requestBondedOnlyRecovery("saved peer bond is unavailable");
+      return false;
+    }
+  }
+  esp_bd_addr_t native_peer;
+  memcpy(native_peer, peer.address, sizeof(native_peer));
+  const esp_ble_wl_addr_type_t address_type =
+      peer.type == mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC
+          ? BLE_WL_ADDR_TYPE_PUBLIC
+          : BLE_WL_ADDR_TYPE_RANDOM;
+  // The Bluedroid API adds one entry at a time. Replace any controller state
+  // left by an older mode/session so the requested peer is genuinely the only
+  // address allowed to scan or connect.
+  if (esp_ble_gap_clear_whitelist() != ESP_OK) {
+    requestBondedOnlyRecovery("could not clear Bluedroid allowlist");
+    return false;
+  }
+  if (esp_ble_gap_update_whitelist(true, native_peer, address_type)
+      != ESP_OK) {
+    requestBondedOnlyRecovery("could not set Bluedroid allowlist");
+    return false;
+  }
+#endif
+
+  BLEAdvertising* advertising = pServer->getAdvertising();
+  if (advertising == NULL) {
+    requestBondedOnlyRecovery("Bluetooth advertising is unavailable");
+    return false;
+  }
+  advertising->stop();
+  BLEAdvertisementData minimal_advertisement;
+  minimal_advertisement.setFlags(ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
+  advertising->setScanResponse(false);
+  advertising->setScanFilter(true, true);
+  advertising->setAdvertisementData(minimal_advertisement);
+
+  _bonded_only = true;
+  _stealth_pair_once = false;
+  _advertisingSuppressed.store(false, std::memory_order_release);
+  _adv_restart_pending = false;
+  if (_isEnabled && pServer->getConnectedCount() == 0) {
+    advertising->start();
+  }
+  return true;
+}
+
+void SerialBLEInterface::requestBondedOnlyRecovery(const char* cause) {
+  BLE_DEBUG_PRINTLN("SerialBLEInterface: stealth recovery required (%s)",
+                    cause);
+  _bonded_only = true;
+  _stealth_pair_once = false;
+  _advertisingSuppressed.store(true, std::memory_order_release);
+  _bondedOnlyRecoveryPending.store(true, std::memory_order_release);
+  _adv_restart_pending = false;
+  if (pServer != NULL && pServer->getAdvertising() != NULL) {
+    pServer->getAdvertising()->stop();
+  }
+}
+
+bool SerialBLEInterface::advertisingAllowed() const {
+  return _isEnabled
+      && !_advertisingSuppressed.load(std::memory_order_acquire)
+      && !_bondedOnlyRecoveryPending.load(std::memory_order_acquire);
+}
+
 bool SerialBLEInterface::begin(const char* prefix, const char* name,
                                uint32_t pin_code,
                                const uint8_t* custom_address,
-                               bool clear_bonds) {
+                               bool clear_bonds, bool stealth_pair_once,
+                               const mesh::companion::BluetoothPeerIdentity*
+                                   bonded_only_peer) {
   _pin_code = pin_code;
+  _successfulConnectionPending.store(false, std::memory_order_release);
+  _successfulConnectionStarted.store(0, std::memory_order_relaxed);
+  _bondedOnlyRecoveryPending.store(false, std::memory_order_release);
+  _advertisingSuppressed.store(false, std::memory_order_release);
+  _successfulPeer = mesh::companion::BluetoothPeerIdentity();
+  _stealth_pair_once = stealth_pair_once;
+  _bonded_only = false;
 
   if (custom_address != nullptr
       && !mesh::companion::isValidBluetoothMac(custom_address)) {
@@ -220,6 +455,9 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   pRxCharacteristic->setCallbacks(this);
 
   pServer->getAdvertising()->addServiceUUID(SERVICE_UUID);
+  if (bonded_only_peer != nullptr) {
+    configureBondedOnlyAdvertising(*bonded_only_peer, true);
+  }
   return true;
 }
 
@@ -250,10 +488,14 @@ bool SerialBLEInterface::onSecurityRequest() {
 #if defined(CONFIG_NIMBLE_ENABLED)
 void SerialBLEInterface::onAuthenticationComplete(ble_gap_conn_desc* desc) {
   const bool success = desc != NULL && desc->sec_state.encrypted &&
-                       desc->sec_state.authenticated;
+                       desc->sec_state.authenticated
+                       && desc->sec_state.bonded;
   if (success) {
     BLE_DEBUG_PRINTLN(" - SecurityCallback - Authentication Success");
     deviceConnected = true;
+    mesh::companion::BluetoothPeerIdentity peer;
+    bluetoothPeerFromNimbleAddress(desc->peer_id_addr, peer);
+    noteSuccessfulConnection(peer);
   } else {
     BLE_DEBUG_PRINTLN(" - SecurityCallback - Authentication Failure");
 
@@ -268,10 +510,15 @@ void SerialBLEInterface::onAuthenticationComplete(ble_gap_conn_desc* desc) {
     }
 
     deviceConnected = false;
+    if (_bonded_only) {
+      requestBondedOnlyRecovery("bond authentication failed");
+    }
     if (desc != NULL) {
       pServer->disconnect(desc->conn_handle);
     }
-    scheduleAdvertisingRestart((uint32_t)millis());
+    if (advertisingAllowed()) {
+      scheduleAdvertisingRestart((uint32_t)millis());
+    }
   }
 }
 #else
@@ -279,6 +526,12 @@ void SerialBLEInterface::onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
   if (cmpl.success) {
     BLE_DEBUG_PRINTLN(" - SecurityCallback - Authentication Success");
     deviceConnected = true;
+    mesh::companion::BluetoothPeerIdentity peer;
+    peer.type = cmpl.addr_type == BLE_ADDR_TYPE_PUBLIC
+        ? mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC
+        : mesh::companion::BLUETOOTH_PEER_ADDRESS_RANDOM;
+    memcpy(peer.address, cmpl.bd_addr, sizeof(peer.address));
+    noteSuccessfulConnection(peer);
   } else {
     BLE_DEBUG_PRINTLN(" - SecurityCallback - Authentication Failure, reason=%u", (unsigned)cmpl.fail_reason);
 
@@ -294,8 +547,13 @@ void SerialBLEInterface::onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
     }
 
     deviceConnected = false;
+    if (_bonded_only) {
+      requestBondedOnlyRecovery("bond authentication failed");
+    }
     pServer->disconnect(pServer->getConnId());
-    scheduleAdvertisingRestart((uint32_t)millis());
+    if (advertisingAllowed()) {
+      scheduleAdvertisingRestart((uint32_t)millis());
+    }
   }
 }
 #endif
@@ -355,7 +613,7 @@ void SerialBLEInterface::onDisconnect(BLEServer* pServer) {
   xQueueReset(recv_queue);
   _tx_reset_pending.store(true, std::memory_order_release);
   if (pTxDescriptor != NULL) pTxDescriptor->setNotifications(false);
-  if (_isEnabled) {
+  if (advertisingAllowed()) {
     scheduleAdvertisingRestart((uint32_t)millis());
   }
 }
@@ -416,6 +674,47 @@ void SerialBLEInterface::onStatus(BLECharacteristic* pCharacteristic, Status sta
 
 // ---------- public methods
 
+bool SerialBLEInterface::takeSuccessfulConnection(
+    mesh::companion::BluetoothPeerIdentity* peer) {
+  if (!_successfulConnectionPending.load(std::memory_order_acquire)) {
+    return false;
+  }
+  if (peer != nullptr && !resolveSuccessfulPeer(*peer)) {
+    // Bond storage can finish shortly after authentication. Keep the event
+    // pending so the main loop can retry without reopening general access. A
+    // failed bond write must not leave the node unavailable indefinitely.
+    const uint32_t started = _successfulConnectionStarted.load(
+        std::memory_order_relaxed);
+    if (_stealth_pair_once
+        && (uint32_t)((uint32_t)millis() - started)
+            >= BLE_BOND_PERSIST_TIMEOUT_MS) {
+      _successfulConnectionPending.store(false, std::memory_order_release);
+      requestBondedOnlyRecovery("new peer bond did not persist");
+    }
+    return false;
+  }
+  const bool pending = _successfulConnectionPending.exchange(
+      false, std::memory_order_acq_rel);
+  if (pending) {
+    _successfulConnectionStarted.store(0, std::memory_order_relaxed);
+  }
+  return pending;
+}
+
+bool SerialBLEInterface::enableBondedOnlyAdvertising(
+    const mesh::companion::BluetoothPeerIdentity& peer) {
+  return configureBondedOnlyAdvertising(peer, false);
+}
+
+void SerialBLEInterface::cancelStealthPairingTransition() {
+  if (!_stealth_pair_once) return;
+  _stealth_pair_once = false;
+  _advertisingSuppressed.store(false, std::memory_order_release);
+  if (_isEnabled && pServer != NULL && pServer->getConnectedCount() == 0) {
+    scheduleAdvertisingRestart((uint32_t)millis());
+  }
+}
+
 void SerialBLEInterface::clearBuffers() {
   xQueueReset(recv_queue);
   send_queue_len = 0;
@@ -435,6 +734,10 @@ void SerialBLEInterface::servicePendingTxReset() {
 }
 
 void SerialBLEInterface::scheduleAdvertisingRestart(uint32_t now) {
+  if (!advertisingAllowed()) {
+    _adv_restart_pending = false;
+    return;
+  }
   _adv_restart_started = now;
   _adv_restart_pending = true;
 }
@@ -446,7 +749,7 @@ void SerialBLEInterface::serviceTxRecovery(uint32_t now) {
     BLE_DEBUG_PRINTLN("SerialBLEInterface: stalled TX link is already closed");
     deviceConnected = false;
     clearBuffers();
-    if (_isEnabled) scheduleAdvertisingRestart(now);
+    if (advertisingAllowed()) scheduleAdvertisingRestart(now);
     return;
   }
 
@@ -488,7 +791,9 @@ void SerialBLEInterface::enable() {
   //pServer->getAdvertising()->setMinInterval(500);
   //pServer->getAdvertising()->setMaxInterval(1000);
 
-  pServer->getAdvertising()->start();
+  if (advertisingAllowed()) {
+    pServer->getAdvertising()->start();
+  }
   _adv_restart_pending = false;
 }
 
@@ -607,7 +912,7 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
       //pServer->getAdvertising()->setMinInterval(500);
       //pServer->getAdvertising()->setMaxInterval(1000);
 
-      scheduleAdvertisingRestart(now);
+      if (advertisingAllowed()) scheduleAdvertisingRestart(now);
     } else {
       BLE_DEBUG_PRINTLN("SerialBLEInterface -> stopping advertising");
       BLE_DEBUG_PRINTLN("SerialBLEInterface -> connecting...");
@@ -619,7 +924,7 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     oldDeviceConnected = deviceConnected;
   }
 
-  if (_adv_restart_pending &&
+  if (advertisingAllowed() && _adv_restart_pending &&
       mesh::bleElapsedAtLeast(now, _adv_restart_started,
                               ADVERT_RESTART_DELAY)) {
     if (pServer->getConnectedCount() == 0) {

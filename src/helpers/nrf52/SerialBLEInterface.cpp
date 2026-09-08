@@ -10,6 +10,7 @@
 // Magic numbers came from actual testing
 #define BLE_HEALTH_CHECK_INTERVAL  10000  // Advertising watchdog check every 10 seconds
 #define BLE_RETRY_THROTTLE_MS      250    // Throttle retries to 250ms when queue buildup detected
+#define BLE_BOND_PERSIST_TIMEOUT_MS 15000 // Bound first-pair transition recovery
 
 // Connection parameters (units: interval=1.25ms, timeout=10ms)
 #define BLE_MIN_CONN_INTERVAL      12     // 15ms
@@ -108,11 +109,20 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
         if (conn != nullptr && conn->bonded()) {
           instance->removeStoredBondForPeer("unsecured link");
         }
+        if (instance->_bonded_only) {
+          instance->requestBondedOnlyRecovery("unsecured bonded-only link");
+        }
         instance->disconnect();
         return;
       }
 
       instance->_isDeviceConnected = true;
+      if (conn->bonded()) {
+        instance->noteSuccessfulConnection(conn->getPeerAddr());
+      } else {
+        BLE_DEBUG_PRINTLN(
+            "SerialBLEInterface: secured connection was not bonded");
+      }
       instance->_security_timer.cancel();
       
       // Connection interval units: 1.25ms, supervision timeout units: 10ms
@@ -155,8 +165,19 @@ void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t a
     if (instance->isValidConnection(connection_handle)) {
       if (auth_status == BLE_GAP_SEC_STATUS_SUCCESS) {
         BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing successful");
+        BLEConnection* conn = Bluefruit.Connection(connection_handle);
+        if (conn != nullptr && conn->secured()) {
+          // Bluefruit may invoke onSecured before it marks a newly paired
+          // connection as bonded. Record the completed pairing here as well;
+          // resolveSuccessfulPeer() will keep the event pending until the
+          // deferred bond write can be loaded.
+          instance->noteSuccessfulConnection(conn->getPeerAddr());
+        }
       } else {
         BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing failed, clearing stale bond and disconnecting");
+        if (instance->_bonded_only) {
+          instance->requestBondedOnlyRecovery("pairing failure");
+        }
         BLEConnection* conn = Bluefruit.Connection(connection_handle);
         if (conn != nullptr && conn->bonded()) {
           instance->removeStoredBondForPeer("pairing failure");
@@ -189,6 +210,9 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
       if (conn->bonded()) {
         instance->removeStoredBondForPeer("failed bond encryption");
       }
+      if (instance->_bonded_only) {
+        instance->requestBondedOnlyRecovery("failed bond encryption");
+      }
       instance->_isDeviceConnected = false;
       instance->_security_timer.cancel();
       sd_ble_gap_disconnect(conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
@@ -197,6 +221,10 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
     ble_gap_evt_disconnected_t const* disconnected = &evt->evt.gap_evt.params.disconnected;
     if (isBondAuthenticationFailure(disconnected->reason)) {
       instance->removeStoredBondForPeer("authentication disconnect");
+      if (instance->_bonded_only) {
+        instance->requestBondedOnlyRecovery(
+            "bond authentication disconnect");
+      }
     }
     instance->_peer_address_valid = false;
   } else if (evt->header.evt_id == BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST) {
@@ -239,11 +267,149 @@ bool SerialBLEInterface::removeStoredBondForPeer(const char* cause) {
   return true;
 }
 
+void SerialBLEInterface::noteSuccessfulConnection(
+    const ble_gap_addr_t& peer_address) {
+  if (_stealth_pair_once) {
+    _advertisingSuppressed.store(true, std::memory_order_release);
+    Bluefruit.Advertising.restartOnDisconnect(false);
+  }
+
+  if (!_successfulConnectionPending.load(std::memory_order_acquire)) {
+    _successful_peer_address = peer_address;
+    _successfulConnectionStarted.store(
+        (uint32_t)millis(), std::memory_order_relaxed);
+    _successfulConnectionPending.store(true, std::memory_order_release);
+  }
+}
+
+bool SerialBLEInterface::resolveSuccessfulPeer(
+    mesh::companion::BluetoothPeerIdentity& peer) const {
+  ble_gap_addr_t lookup = _successful_peer_address;
+  bond_keys_t keys;
+  if (!bond_load_keys(BLE_GAP_ROLE_PERIPH, &lookup, &keys)) {
+    return false;
+  }
+
+  const ble_gap_addr_t& identity = keys.peer_id.id_addr_info;
+  if (identity.addr_type == BLE_GAP_ADDR_TYPE_PUBLIC) {
+    peer.type = mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC;
+  } else if (identity.addr_type == BLE_GAP_ADDR_TYPE_RANDOM_STATIC) {
+    peer.type = mesh::companion::BLUETOOTH_PEER_ADDRESS_RANDOM;
+  } else {
+    return false;
+  }
+  for (size_t i = 0; i < mesh::companion::BLUETOOTH_MAC_BYTES; i++) {
+    peer.address[i] = identity.addr[
+        mesh::companion::BLUETOOTH_MAC_BYTES - 1 - i];
+  }
+  return mesh::companion::isValidBluetoothPeerIdentity(peer);
+}
+
+bool SerialBLEInterface::configureBondedOnlyAdvertising(
+    const mesh::companion::BluetoothPeerIdentity& peer,
+    bool require_stored_bond) {
+  if (!mesh::companion::isValidBluetoothPeerIdentity(peer)) return false;
+
+  ble_gap_addr_t native_peer = {};
+  native_peer.addr_type =
+      peer.type == mesh::companion::BLUETOOTH_PEER_ADDRESS_PUBLIC
+          ? BLE_GAP_ADDR_TYPE_PUBLIC
+          : BLE_GAP_ADDR_TYPE_RANDOM_STATIC;
+  for (size_t i = 0; i < mesh::companion::BLUETOOTH_MAC_BYTES; i++) {
+    native_peer.addr[i] = peer.address[
+        mesh::companion::BLUETOOTH_MAC_BYTES - 1 - i];
+  }
+
+  ble_gap_addr_t lookup = native_peer;
+  bond_keys_t keys;
+  if (!bond_load_keys(BLE_GAP_ROLE_PERIPH, &lookup, &keys)
+      || keys.peer_id.id_addr_info.addr_type != native_peer.addr_type
+      || memcmp(keys.peer_id.id_addr_info.addr, native_peer.addr,
+                sizeof(native_peer.addr)) != 0) {
+    if (require_stored_bond) {
+      requestBondedOnlyRecovery("saved peer bond is unavailable");
+    }
+    return false;
+  }
+
+  if (isAdvertising() && !Bluefruit.Advertising.stop()) {
+    requestBondedOnlyRecovery("general advertising could not stop");
+    return false;
+  }
+
+  // A bonded phone may reconnect from a resolvable private address. Loading
+  // its identity key lets the SoftDevice put a current RPA in TargetA instead
+  // of directing advertisements only to the phone's static identity address.
+  const ble_gap_id_key_t* peer_identities[] = {&keys.peer_id};
+  const uint32_t identity_error = sd_ble_gap_device_identities_set(
+      peer_identities, nullptr, 1);
+  if (identity_error != NRF_SUCCESS) {
+    BLE_DEBUG_PRINTLN(
+        "SerialBLEInterface: peer identity-list setup failed: %lu",
+        (unsigned long)identity_error);
+    requestBondedOnlyRecovery("peer identity-list setup failed");
+    return false;
+  }
+
+  // Legacy directed advertisements do not carry an advertising or scan
+  // response payload. Leaving the normal name/service payload configured can
+  // make the SoftDevice reject the directed advertising parameters.
+  Bluefruit.Advertising.clearData();
+  Bluefruit.ScanResponse.clearData();
+  Bluefruit.Advertising.setType(
+      BLE_GAP_ADV_TYPE_CONNECTABLE_NONSCANNABLE_DIRECTED);
+  Bluefruit.Advertising.setPeerAddress(native_peer);
+  Bluefruit.Advertising.restartOnDisconnect(true);
+  _bonded_only = true;
+  _stealth_pair_once = false;
+  _advertisingSuppressed.store(false, std::memory_order_release);
+
+  if (_isEnabled && _conn_handle == BLE_CONN_HANDLE_INVALID
+      && !startAdvertising("directed advertising failed to start")) {
+    return false;
+  }
+  return true;
+}
+
+void SerialBLEInterface::requestBondedOnlyRecovery(const char* cause) {
+  BLE_DEBUG_PRINTLN("SerialBLEInterface: stealth recovery required (%s)",
+                    cause);
+  _bonded_only = true;
+  _stealth_pair_once = false;
+  _advertisingSuppressed.store(true, std::memory_order_release);
+  _bondedOnlyRecoveryPending.store(true, std::memory_order_release);
+  Bluefruit.Advertising.restartOnDisconnect(false);
+  if (isAdvertising()) Bluefruit.Advertising.stop();
+}
+
+bool SerialBLEInterface::advertisingAllowed() const {
+  return _isEnabled
+      && !_advertisingSuppressed.load(std::memory_order_acquire)
+      && !_bondedOnlyRecoveryPending.load(std::memory_order_acquire);
+}
+
+bool SerialBLEInterface::startAdvertising(const char* failure_cause) {
+  if (!advertisingAllowed()) return false;
+  if (Bluefruit.Advertising.start(0)) return true;
+  if (_bonded_only) requestBondedOnlyRecovery(failure_cause);
+  return false;
+}
+
 bool SerialBLEInterface::begin(const char* prefix, const char* name,
                                uint32_t pin_code,
                                const uint8_t* custom_address,
-                               bool clear_bonds) {
+                               bool clear_bonds, bool stealth_pair_once,
+                               const mesh::companion::BluetoothPeerIdentity*
+                                   bonded_only_peer) {
   instance = this;
+  _successfulConnectionPending.store(false, std::memory_order_release);
+  _successfulConnectionStarted.store(0, std::memory_order_relaxed);
+  _bondedOnlyRecoveryPending.store(false, std::memory_order_release);
+  _advertisingSuppressed.store(false, std::memory_order_release);
+  _stealth_pair_once = stealth_pair_once;
+  _bonded_only = false;
+  _bonded_only_configure_pending = false;
+  _pending_bonded_peer = mesh::companion::BluetoothPeerIdentity();
 
   char charpin[20];
   snprintf(charpin, sizeof(charpin), "%lu", (unsigned long)pin_code);
@@ -377,6 +543,8 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   bledfu.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_ENC_WITH_MITM);
   bledfu.begin();
 
+  Bluefruit.Advertising.setType(
+      BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();
   Bluefruit.Advertising.addService(bleuart);
@@ -388,7 +556,82 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
 
   Bluefruit.Advertising.restartOnDisconnect(true);
 
+  if (bonded_only_peer != nullptr) {
+    configureBondedOnlyAdvertising(*bonded_only_peer, true);
+  }
+
   return true;
+}
+
+bool SerialBLEInterface::takeSuccessfulConnection(
+    mesh::companion::BluetoothPeerIdentity* peer) {
+  if (!_successfulConnectionPending.load(std::memory_order_acquire)) {
+    return false;
+  }
+  if (peer != nullptr && !resolveSuccessfulPeer(*peer)) {
+    // Bond persistence is deferred by Bluefruit. Leave the event pending and
+    // let the main loop retry after that callback has written the keys. If the
+    // deferred write failed, reopen pairing instead of remaining hidden until
+    // somebody manually power-cycles the node.
+    const uint32_t started = _successfulConnectionStarted.load(
+        std::memory_order_relaxed);
+    if (_stealth_pair_once
+        && (uint32_t)((uint32_t)millis() - started)
+            >= BLE_BOND_PERSIST_TIMEOUT_MS) {
+      _successfulConnectionPending.store(false, std::memory_order_release);
+      requestBondedOnlyRecovery("new peer bond did not persist");
+    }
+    return false;
+  }
+  const bool pending = _successfulConnectionPending.exchange(
+      false, std::memory_order_acq_rel);
+  if (pending) {
+    _successfulConnectionStarted.store(0, std::memory_order_relaxed);
+  }
+  return pending;
+}
+
+bool SerialBLEInterface::enableBondedOnlyAdvertising(
+    const mesh::companion::BluetoothPeerIdentity& peer) {
+  if (!mesh::companion::isValidBluetoothPeerIdentity(peer)) return false;
+
+  // The SoftDevice may reject identity-list changes while a connection is
+  // using that list. Preserve the newly paired session and finish switching
+  // to directed advertising from the main loop after it disconnects.
+  if (_conn_handle != BLE_CONN_HANDLE_INVALID) {
+    _pending_bonded_peer = peer;
+    _bonded_only_configure_pending = true;
+    _bonded_only = true;
+    _stealth_pair_once = false;
+    _advertisingSuppressed.store(true, std::memory_order_release);
+    Bluefruit.Advertising.restartOnDisconnect(false);
+    return true;
+  }
+  return configureBondedOnlyAdvertising(peer, false);
+}
+
+void SerialBLEInterface::serviceBondedOnlyTransition() {
+  if (!_bonded_only_configure_pending
+      || _conn_handle != BLE_CONN_HANDLE_INVALID) {
+    return;
+  }
+
+  const mesh::companion::BluetoothPeerIdentity peer = _pending_bonded_peer;
+  _bonded_only_configure_pending = false;
+  configureBondedOnlyAdvertising(peer, true);
+}
+
+void SerialBLEInterface::cancelStealthPairingTransition() {
+  if (!_stealth_pair_once) return;
+  _stealth_pair_once = false;
+  _advertisingSuppressed.store(false, std::memory_order_release);
+  Bluefruit.Advertising.setType(
+      BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
+  Bluefruit.Advertising.restartOnDisconnect(true);
+  if (_isEnabled && _conn_handle == BLE_CONN_HANDLE_INVALID
+      && !isAdvertising()) {
+    startAdvertising("advertising failed after stealth cancellation");
+  }
 }
 
 void SerialBLEInterface::clearBuffers() {
@@ -454,8 +697,8 @@ void SerialBLEInterface::serviceTxRecovery(uint32_t now) {
     _peer_address_valid = false;
     _security_timer.cancel();
     clearBuffers();
-    if (_isEnabled && !isAdvertising()) {
-      Bluefruit.Advertising.start(0);
+    if (advertisingAllowed() && !isAdvertising()) {
+      startAdvertising("advertising failed after TX recovery");
     }
     return;
   }
@@ -510,9 +753,7 @@ bool SerialBLEInterface::isValidConnection(uint16_t handle, bool requireWaitingF
 }
 
 bool SerialBLEInterface::isAdvertising() const {
-  ble_gap_addr_t adv_addr;
-  uint32_t err_code = sd_ble_gap_adv_addr_get(0, &adv_addr);
-  return (err_code == NRF_SUCCESS);
+  return Bluefruit.Advertising.isRunning();
 }
 
 void SerialBLEInterface::enable() {
@@ -523,8 +764,10 @@ void SerialBLEInterface::enable() {
   clearBuffers();
   _last_health_check = millis();
 
-  Bluefruit.Advertising.restartOnDisconnect(true);
-  Bluefruit.Advertising.start(0);
+  if (advertisingAllowed()) {
+    Bluefruit.Advertising.restartOnDisconnect(true);
+    startAdvertising("advertising failed while enabling Bluetooth");
+  }
 }
 
 void SerialBLEInterface::disconnect() {
@@ -568,6 +811,7 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   const uint32_t check_now = (uint32_t)millis();
+  serviceBondedOnlyTransition();
   if (_tx_disconnect_recovery.pending()) {
     serviceTxRecovery(check_now);
     return 0;
@@ -655,13 +899,14 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     _security_timer.cancel();
     disconnect();
   }
-  if (_isEnabled && !isConnected() && _conn_handle == BLE_CONN_HANDLE_INVALID) {
+  if (advertisingAllowed() && !isConnected()
+      && _conn_handle == BLE_CONN_HANDLE_INVALID) {
     if (now - _last_health_check >= BLE_HEALTH_CHECK_INTERVAL) {
       _last_health_check = now;
       
       if (!isAdvertising()) {
         BLE_DEBUG_PRINTLN("SerialBLEInterface: advertising watchdog - advertising stopped, restarting");
-        Bluefruit.Advertising.start(0);
+        startAdvertising("advertising watchdog restart failed");
       }
     }
   }

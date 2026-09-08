@@ -1797,6 +1797,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     radio["name"] = (const char*)node.name;
     radio["bluetooth_name"] = (const char*)node.bluetooth_name;
     radio["bluetooth_mac"] = (const char*)node.bluetooth_mac;
+    radio["bluetooth_stealth"] = node.bluetooth_stealth;
     radio["lat"] = node.lat;
     radio["lon"] = node.lon;
     radio["advert_interval"] = node.advert_interval;
