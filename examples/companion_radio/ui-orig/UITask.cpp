@@ -1,4 +1,7 @@
 #include "UITask.h"
+#if UI_SMALL_MESSAGE_FONT == 1
+  #include <helpers/ui/Pixel5Text.h>
+#endif
 #include <Arduino.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
@@ -242,6 +245,9 @@ void UITask::renderCurrScreen() {
     _display->setColor(UIColor::primary_txt);
     _display->print(_node_prefs->node_name);
 
+#if UI_SMALL_MESSAGE_FONT == 1
+    mesh::ui::drawSmallMessageBody(*_display, _origin, _msg, 12, 19);
+#else
     _display->setCursor(0, 12);
     _display->setColor(UIColor::secondary_txt);
     _display->print(_origin);
@@ -253,6 +259,7 @@ void UITask::renderCurrScreen() {
     _display->setColor(UIColor::primary_txt);
     sprintf(tmp, "%d", _msgcount);
     _display->print(tmp);
+#endif
     _display->setColor(UIColor::secondary_txt); // last color will be kept on T114
   } else if (!pairing_screen_active && (millis() - ui_started_at) < BOOT_SCREEN_MILLIS) { // boot screen
     // meshcore logo

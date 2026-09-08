@@ -27,9 +27,6 @@ class SSD1306Display : public DisplayDriver {
 #endif
   uint8_t _color;
   RefCountedDigitalPin* _peripher_power;
-#if defined(UI_SSD1306_PICOPIXEL_MESSAGES) && UI_SSD1306_PICOPIXEL_MESSAGES == 1
-  bool _picopixel_message = false;
-#endif
 
   bool i2c_probe(TwoWire& wire, uint8_t addr);
   void applyRotation();
@@ -54,9 +51,6 @@ public:
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char* str) override;
-#if defined(UI_SSD1306_PICOPIXEL_MESSAGES) && UI_SSD1306_PICOPIXEL_MESSAGES == 1
-  void printWordWrap(const char* str, int max_width) override;
-#endif
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;
   void drawXbm(int x, int y, const uint8_t* bits, int w, int h) override;

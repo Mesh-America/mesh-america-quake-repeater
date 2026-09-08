@@ -3,6 +3,7 @@
 #include <helpers/ui/DisplayDriver.h>
 #include <helpers/ui/CompanionHomeLayout.h>
 #include <helpers/ui/DisplayTextLayout.h>
+#include <helpers/ui/Pixel5Text.h>
 #include <helpers/ui/WiFiSetupQrDisplay.h>
 #include <helpers/ui/WiFiSetupQrPayload.h>
 
@@ -131,6 +132,66 @@ TEST(DisplayDriver, EllipsizesOnlyAtUTF8CodepointBoundaries) {
   display.drawTextEllipsized(0, 0, 5, "AB\xF0\x9F\x98\x80" "CDE");
   EXPECT_EQ("AB...", display.printed);
   EXPECT_TRUE(isValidUTF8(display.printed.c_str()));
+}
+
+TEST(Pixel5Text, CapitalsAreFivePixelsAndNormalFontIsUntouched) {
+  TestDisplay display(128, 64, 6);
+  mesh::ui::Pixel5Text text(display);
+  text.setCursor(0, 0);
+  text.print("A");
+  const char* rows[] = {"010", "101", "111", "101", "101"};
+  bool pixels[5][3] = {};
+  for (const auto& pixel : display.fills) {
+    ASSERT_GE(pixel.x, 0); ASSERT_LT(pixel.x, 3);
+    ASSERT_GE(pixel.y, 0); ASSERT_LT(pixel.y, 5);
+    pixels[pixel.y][pixel.x] = true;
+  }
+  for (int y = 0; y < 5; ++y) for (int x = 0; x < 3; ++x)
+    EXPECT_EQ(rows[y][x] == '1', pixels[y][x]);
+  EXPECT_EQ(12, text.getTextWidth("ABC"));
+  EXPECT_EQ(18, display.getTextWidth("ABC"));
+}
+
+TEST(Pixel5Text, CompactOriginAllowsSixCompleteMessageRows) {
+  TestDisplay display(128, 64);
+  mesh::ui::drawSmallMessageBody(display, std::string(61, 'W').c_str(),
+                                 std::string(160, 'W').c_str());
+  ASSERT_FALSE(display.fills.empty());
+  bool final_dots[3] = {};
+  for (const auto& pixel : display.fills) {
+    EXPECT_GE(pixel.x, 0); EXPECT_LT(pixel.x, 128);
+    EXPECT_GE(pixel.y, 14); EXPECT_LT(pixel.y, 64);
+    // The origin stays in its own line; its long name cannot cover the body.
+    EXPECT_TRUE(pixel.y < 20 || pixel.y >= 21);
+    for (int i = 0; i < 3; ++i)
+      if (pixel.y == 60 && pixel.x == 120 + 2 * i) final_dots[i] = true;
+  }
+  for (bool dot : final_dots) EXPECT_TRUE(dot);
+  EXPECT_EQ(5, mesh::ui::smallMessageLineCount(64, 25));
+  EXPECT_EQ(6, mesh::ui::smallMessageLineCount(64, 21));
+  EXPECT_EQ(3, mesh::ui::smallMessageLineCount(40, 17));
+  EXPECT_EQ(0, mesh::ui::smallMessageLineCount(64, 59));
+}
+
+TEST(Pixel5Text, GlyphsStayInsideTinyAndRotatedScreens) {
+  for (auto dimensions : {std::pair<int, int>{72, 40}, {64, 128}, {128, 64}}) {
+    TestDisplay display(dimensions.first, dimensions.second);
+    mesh::ui::Pixel5Text text(display);
+    for (int c = 32; c <= 126; ++c) {
+      display.fills.clear();
+      text.setCursor(0, display.height() - 6);
+      text.printWordWrap(std::string(160, char(c)).c_str(), display.width());
+      for (const auto& pixel : display.fills) {
+        EXPECT_GE(pixel.x, 0); EXPECT_LT(pixel.x, display.width());
+        EXPECT_GE(pixel.y, display.height() - 6);
+        EXPECT_LT(pixel.y, display.height());
+      }
+    }
+    display.fills.clear();
+    text.setCursor(0, display.height() - 5);
+    text.printWordWrap("must not start a clipped final line", display.width());
+    EXPECT_TRUE(display.fills.empty());
+  }
 }
 
 TEST(DisplayDriver, QrCodeIsOptionalByDefault) {

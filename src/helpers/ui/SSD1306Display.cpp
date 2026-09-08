@@ -1,16 +1,5 @@
 #include "SSD1306Display.h"
 
-#if defined(UI_SSD1306_PICOPIXEL_MESSAGES) && UI_SSD1306_PICOPIXEL_MESSAGES == 1
-#include <Fonts/Picopixel.h>
-#include "DisplayTextLayout.h"
-
-// The message UI has already replaced unsupported UTF-8 with CP437 blocks.
-// Picopixel is ASCII-only; retain a visible placeholder for those characters.
-static uint8_t picopixelCharacter(uint8_t c) {
-  return c >= 0x20 && c <= 0x7E ? c : '?';
-}
-#endif
-
 bool SSD1306Display::i2c_probe(TwoWire& wire, uint8_t addr) {
   wire.beginTransmission(addr);
   uint8_t error = wire.endTransmission();
@@ -123,42 +112,12 @@ void SSD1306Display::setColor(ColorVal c) {
 }
 
 void SSD1306Display::setCursor(int x, int y) {
-#if defined(UI_SSD1306_PICOPIXEL_MESSAGES) && UI_SSD1306_PICOPIXEL_MESSAGES == 1
-  // GFX custom fonts take a baseline; the shared UI takes a top coordinate.
-  if (_picopixel_message) y += 4;
-#endif
   display.setCursor(x, y);
 }
 
 void SSD1306Display::print(const char* str) {
-#if defined(UI_SSD1306_PICOPIXEL_MESSAGES) && UI_SSD1306_PICOPIXEL_MESSAGES == 1
-  if (_picopixel_message) {
-    while (*str) display.write(picopixelCharacter((uint8_t)*str++));
-    return;
-  }
-#endif
   display.print(str);
 }
-
-#if defined(UI_SSD1306_PICOPIXEL_MESSAGES) && UI_SSD1306_PICOPIXEL_MESSAGES == 1
-void SSD1306Display::printWordWrap(const char* str, int max_width) {
-  const int x = display.getCursorX();
-  const int y = display.getCursorY();
-  if (max_width > width() - x) max_width = width() - x;
-  // Capitals are 5px high; descenders can use a sixth pixel. Leave one blank
-  // row between lines and never start a partially visible final line.
-  const int max_lines = (height() - y + 1) / 7;
-  display.setFont(&Picopixel);
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  _picopixel_message = true;
-  mesh::ui::drawTextWrapped(*this, x, y, max_width, 7, max_lines, str);
-  _picopixel_message = false;
-  display.setFont(nullptr);
-  display.setTextWrap(true);
-  display.setCursor(x, y);
-}
-#endif
 
 void SSD1306Display::fillRect(int x, int y, int w, int h) {
   display.fillRect(x, y, w, h, _color);
@@ -173,17 +132,6 @@ void SSD1306Display::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
 }
 
 uint16_t SSD1306Display::getTextWidth(const char* str) {
-#if defined(UI_SSD1306_PICOPIXEL_MESSAGES) && UI_SSD1306_PICOPIXEL_MESSAGES == 1
-  if (_picopixel_message) {
-    // Include advances for spaces; GFX's ink bounds omit trailing whitespace.
-    uint16_t width = 0;
-    while (*str) {
-      const uint8_t c = picopixelCharacter((uint8_t)*str++);
-      width += pgm_read_byte(&PicopixelGlyphs[c - 0x20].xAdvance);
-    }
-    return width;
-  }
-#endif
   int16_t x1, y1;
   uint16_t w, h;
   display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);

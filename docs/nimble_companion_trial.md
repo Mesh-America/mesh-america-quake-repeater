@@ -22,8 +22,9 @@ It is not the generic XIAO profile for separately wired radio modules. Both
 boards retain their parent Full Companion features, USB mOTA sender, WiFi
 update slots, and PSRAM-backed offline queue. The V4 also retains direct MQTT.
 
-An additional [V4 Picopixel trial](v4_pixel5_font_trial.md) uses 5-pixel capital
-letters and a longer on-device message preview.
+The [small-screen Picopixel layout](v4_pixel5_font_trial.md) uses 5-pixel
+capital letters, a compact channel/sender line and full message previews.
+A named V4 trial profile is available for hardware qualification.
 
 ## Build
 

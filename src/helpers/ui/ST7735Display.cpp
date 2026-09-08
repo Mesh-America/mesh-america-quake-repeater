@@ -632,7 +632,10 @@ void ST7735Display::print(const char* str) {
 
 void ST7735Display::fillRect(int x, int y, int w, int h) {
   if (!spriteReady()) return;
-  sprite->fillRect(x*SCALE_X, y*SCALE_Y, w*SCALE_X, h*SCALE_Y, curr_color);
+  // Scale the edges, so adjacent 1px font cells meet at fractional scaling.
+  const int left = x*SCALE_X, top = y*SCALE_Y;
+  sprite->fillRect(left, top, int((x+w)*SCALE_X)-left,
+                    int((y+h)*SCALE_Y)-top, curr_color);
 }
 
 void ST7735Display::drawRect(int x, int y, int w, int h) {

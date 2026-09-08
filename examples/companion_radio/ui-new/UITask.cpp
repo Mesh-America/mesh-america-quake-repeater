@@ -3,6 +3,9 @@
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
 #include <helpers/ui/CompanionHomeLayout.h>
 #include <helpers/ui/CompanionMessageHistory.h>
+#if UI_SMALL_MESSAGE_FONT == 1
+  #include <helpers/ui/Pixel5Text.h>
+#endif
 #include <helpers/ui/CompanionTransportSelectorLayout.h>
 #include "../MyMesh.h"
 #include "../CompanionWiFi.h"
@@ -1171,7 +1174,11 @@ public:
 };
 
 #ifndef UI_MSG_PREVIEW_SIZE
-  #define UI_MSG_PREVIEW_SIZE 78
+  #if UI_SMALL_MESSAGE_FONT == 1
+    #define UI_MSG_PREVIEW_SIZE 161
+  #else
+    #define UI_MSG_PREVIEW_SIZE 78
+  #endif
 #endif
 #ifndef UI_COMPACT_MESSAGE_STATUS
   #define UI_COMPACT_MESSAGE_STATUS 0
@@ -1407,7 +1414,7 @@ public:
     display.setCursor(0, 0);
     display.setTextSize(1);
     display.setColor(UIColor::corp_blue);
-    snprintf(tmp, sizeof(tmp), "Message %d/%d",
+    snprintf(tmp, sizeof(tmp), display.width() < 100 ? "%d/%d" : "Message %d/%d",
              filtered_count == 0 ? 0 : view_offset + 1, filtered_count);
     display.print(tmp);
 
@@ -1425,12 +1432,22 @@ public:
 
     mesh::ui::formatCompanionMessageAge(
         tmp, sizeof(tmp), companionMessageElapsedMillis(p->heard_millis));
+    if (display.width() < 100) {
+      char* suffix = strchr(tmp, ' ');
+      if (suffix != nullptr) *suffix = 0;
+    }
     display.setCursor(display.width() - display.getTextWidth(tmp) - 2, 0);
     display.print(tmp);
 
     display.drawRect(0, layout.header_divider_y, display.width(), 1);
     display.setCompactText(false);
 
+#if UI_SMALL_MESSAGE_FONT == 1
+    mesh::ui::drawSmallMessageBody(display, p->origin, p->message,
+        layout.origin_y, layout.origin_y + 7,
+        UI_MESSAGE_CHANNEL_FOOTER == 1
+            ? display.height() - layout.filter_height : display.height());
+#else
     display.setCursor(0, layout.origin_y);
     display.setColor(UIColor::secondary_txt);
     char filtered_origin[sizeof(p->origin)];
@@ -1442,6 +1459,7 @@ public:
     char filtered_msg[sizeof(p->message)];
     display.translateUTF8ToBlocks(filtered_msg, p->message, sizeof(filtered_msg));
     display.printWordWrap(filtered_msg, display.width());
+#endif
 
     renderChannelFilter(display);
 

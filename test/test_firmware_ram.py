@@ -67,7 +67,7 @@ def esp_fixture(path, modern=False, fragmented=False):
 
 class FirmwareRamTest(unittest.TestCase):
     def test_longer_display_previews_reserve_heap_and_contiguous_history(self):
-        defines = {"DISPLAY_CLASS": "SSD1306Display"}
+        defines = {"DISPLAY_CLASS": "SSD1306Display", "UI_SMALL_MESSAGE_FONT": 0}
         base = ram.requirements("ESP32_PLATFORM", defines, "v4_companion")
         expanded = ram.requirements("ESP32_PLATFORM", {
             **defines, "UI_MSG_PREVIEW_SIZE": 161,
@@ -80,6 +80,10 @@ class FirmwareRamTest(unittest.TestCase):
             **defines, "UI_MSG_PREVIEW_SIZE": 32,
         }, "v4_companion")
         self.assertEqual(smaller, base)
+        default = ram.requirements("ESP32_PLATFORM", {
+            "DISPLAY_CLASS": "SSD1306Display",
+        }, "v4_companion")
+        self.assertEqual(default, expanded)
 
     def test_published_image_tables_match_elf_and_use_its_own_reservations(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -166,7 +170,8 @@ int main() {
                 subprocess.run([str(binary)], check=True)
 
     def test_t096_release_fails_and_exact_boundary_passes(self):
-        flags = {"COMPANION_RADIO_FULL": 1, "DISPLAY_CLASS": "ST7735Display", "BLE_PIN_CODE": 123456}
+        flags = {"COMPANION_RADIO_FULL": 1, "DISPLAY_CLASS": "ST7735Display",
+                 "BLE_PIN_CODE": 123456, "UI_SMALL_MESSAGE_FONT": 0}
         with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             path = Path(temp) / "firmware.elf"
             for available, accepted in ((54724, False), (73727, False), (73728, True), (74060, True)):

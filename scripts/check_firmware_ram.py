@@ -88,7 +88,12 @@ def requirements(platform, defines, target):
             # ui-new retains 32 previews in one heap allocation. The baseline
             # covers 78 bytes per message; budget larger buffers explicitly,
             # including worst-case 8-byte Entry alignment.
-            extra = max(0, integer(defines, "UI_MSG_PREVIEW_SIZE", 78) - 78)
+            small_display = display in {
+                "SSD1306Display", "SH1106Display", "ST7735Display", "U8g2Display",
+            }
+            small_font = integer(defines, "UI_SMALL_MESSAGE_FONT", int(small_display))
+            default_preview = 161 if small_font else 78
+            extra = max(0, integer(defines, "UI_MSG_PREVIEW_SIZE", default_preview) - 78)
             if extra:
                 parts["expanded_message_previews"] = 32 * ((extra + 7) // 8) * 8
     parts["allocation_and_transient_margin"] = 16384 if platform == "ESP32_PLATFORM" else 4096

@@ -31,7 +31,11 @@ class UITask : public AbstractUITask {
   CompanionNodePrefs* _node_prefs;
   char _version_info[32];
   char _origin[62];
+#if UI_SMALL_MESSAGE_FONT == 1
+  char _msg[161];
+#else
   char _msg[80];
+#endif
   char _alert[80];
   int _msgcount;
   bool _need_refresh = true;

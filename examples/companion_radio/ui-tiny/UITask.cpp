@@ -1,4 +1,7 @@
 #include "UITask.h"
+#if UI_SMALL_MESSAGE_FONT == 1
+  #include <helpers/ui/Pixel5Text.h>
+#endif
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
 #include "../MyMesh.h"
@@ -439,6 +442,38 @@ public:
 };
 
 
+#if UI_SMALL_MESSAGE_FONT == 1
+class TinyMessageScreen : public UIScreen {
+  UITask* _task;
+  char _origin[62] = {};
+  char _message[161] = {};
+public:
+  explicit TinyMessageScreen(UITask* task) : _task(task) {}
+  void setMessage(uint8_t path_len, const char* from, const char* message) {
+    if (path_len == 0xFF) {
+      snprintf(_origin, sizeof(_origin), "%s [direct]:", from);
+    } else {
+      snprintf(_origin, sizeof(_origin), "%s [%uh]:", from,
+                 (unsigned int)path_len);
+    }
+    StrHelper::strncpy(_message, message, sizeof(_message));
+  }
+  int render(DisplayDriver& display) override {
+    // The 72x40 interface reserves its top 8px for the scrolling status bar.
+    mesh::ui::drawSmallMessageBody(display, _origin, _message, 10, 17);
+    return 1000;
+  }
+  bool handleInput(char c) override {
+    if (c == KEY_NEXT || c == KEY_PREV || c == KEY_LEFT || c == KEY_RIGHT
+        || c == KEY_ENTER) {
+      _task->gotoHomeScreen();
+      return true;
+    }
+    return false;
+  }
+};
+#endif
+
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNodePrefs* node_prefs) {
   _display = display;
   _sensors = sensors;
@@ -478,6 +513,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
 
   splash = new SplashScreen(this);
   home = new HomeScreen(this, &rtc_clock, sensors, node_prefs);
+#if UI_SMALL_MESSAGE_FONT == 1
+  msg_preview = new TinyMessageScreen(this);
+#endif
   setCurrScreen(splash);
 }
 
@@ -519,6 +557,11 @@ switch(t){
 void UITask::msgRead(int msgcount) {
   _msgcount = msgcount;
   if (msgcount == 0) {
+#if UI_SMALL_MESSAGE_FONT == 1
+    if (curr == msg_preview
+        && static_cast<int32_t>(millis() - _msg_preview_until) < 0) return;
+    _deferred_msg_preview = false;
+#endif
     gotoHomeScreen();
   }
 }
@@ -529,6 +572,12 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
   (void)channel_idx;
   (void)channel_name;
   _msgcount = msgcount;
+#if UI_SMALL_MESSAGE_FONT == 1
+  static_cast<TinyMessageScreen*>(msg_preview)->setMessage(path_len, from_name, text);
+  if (isPairingScreenActive()) _deferred_msg_preview = true;
+  else setCurrScreen(msg_preview);
+  _msg_preview_until = millis() + 15000UL;
+#endif
 
   if (_display != NULL) {
     if (!_display->isOn() && shouldWakeDisplayForMessage()) {
@@ -591,6 +640,12 @@ void UITask::showPairingPin() {
 void UITask::finishPairingScreen(bool timed_out) {
   _pairing_screen_until = 0;
   _next_refresh = 0;
+#if UI_SMALL_MESSAGE_FONT == 1
+  if (_deferred_msg_preview) {
+    _deferred_msg_preview = false;
+    setCurrScreen(msg_preview);
+  }
+#endif
   if (_display == NULL) return;
 
   if (timed_out) {

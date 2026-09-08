@@ -56,7 +56,11 @@ class UITask : public AbstractUITask {
 
   UIScreen* splash;
   UIScreen* home;
-  // UIScreen* msg_preview;
+#if UI_SMALL_MESSAGE_FONT == 1
+  UIScreen* msg_preview = nullptr;
+  bool _deferred_msg_preview = false;
+  unsigned long _msg_preview_until = 0;
+#endif
   UIScreen* curr;
 
 

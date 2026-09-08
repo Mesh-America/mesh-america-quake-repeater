@@ -3,8 +3,7 @@
 
 Build a V4 environment first to install Adafruit GFX, or point
 MESHCORE_GFX_LIBRARY to that library's directory. Only the hardware panel,
-Arduino strings and Print glue are replaced; font metrics and drawing come
-from the library used by the firmware.
+Arduino strings and Print glue are replaced; the shared pixel renderer is compared with the original Adafruit font.
 """
 
 import os
@@ -35,7 +34,7 @@ class SSD1306PicopixelTest(unittest.TestCase):
                     result = subprocess.run([
                         "c++", "-std=c++17", "-g",
                         "-fsanitize=address,undefined", "-DARDUINO=10819",
-                        f"-DUI_SSD1306_PICOPIXEL_MESSAGES={enabled}",
+                        f"-DUI_SMALL_MESSAGE_FONT={enabled}",
                         "-I", str(FIXTURE / "mocks"),
                         "-I", str(ROOT / "src"), "-I", str(library),
                         str(ROOT / "src/helpers/ui/SSD1306Display.cpp"),
