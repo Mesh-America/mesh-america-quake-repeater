@@ -4,19 +4,34 @@
 #include "../BluetoothMac.h"
 #include "../BleTxStallWatchdog.h"
 #include "../UsbLogging.h"
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  #include <NimBLEDevice.h>
+#else
+  #include <BLEDevice.h>
+  #include <BLEServer.h>
+  #include <BLEUtils.h>
+  #include <BLE2902.h>
+#endif
+#if defined(MESH_USE_NIMBLE_ARDUINO) || defined(CONFIG_NIMBLE_ENABLED)
+  #define MESH_BLE_USES_NIMBLE 1
+#else
+  #define MESH_BLE_USES_NIMBLE 0
+#endif
 #include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLEServerCallbacks, BLECharacteristicCallbacks {
+class SerialBLEInterface : public BaseSerialInterface,
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
+    public BLESecurityCallbacks,
+#endif
+    public BLEServerCallbacks, public BLECharacteristicCallbacks {
   BLEServer *pServer;
   BLEService *pService;
   BLECharacteristic * pTxCharacteristic;
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
   BLE2902 *pTxDescriptor;
+#endif
   bool deviceConnected;
   bool oldDeviceConnected;
   bool notifySucceeded;
@@ -67,6 +82,16 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   bool advertisingAllowed() const;
 
 protected:
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  uint32_t onPassKeyDisplay() override;
+  void onAuthenticationComplete(NimBLEConnInfo& info) override;
+  void onConnect(BLEServer* server, NimBLEConnInfo& info) override;
+  void onDisconnect(BLEServer* server, NimBLEConnInfo& info, int reason) override;
+  void onMTUChange(uint16_t mtu, NimBLEConnInfo& info) override;
+  void onWrite(BLECharacteristic* characteristic, NimBLEConnInfo& info) override;
+  void onSubscribe(BLECharacteristic* characteristic, NimBLEConnInfo& info,
+                   uint16_t value) override;
+#else
   // BLESecurityCallbacks methods
   uint32_t onPassKeyRequest() override;
   void onPassKeyNotify(uint32_t pass_key) override;
@@ -98,13 +123,16 @@ protected:
   void onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) override;
   #endif
   void onStatus(BLECharacteristic* pCharacteristic, Status status, uint32_t code) override;
+#endif
 
 public:
   SerialBLEInterface() {
     pServer = NULL;
     pService = NULL;
     pTxCharacteristic = NULL;
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
     pTxDescriptor = NULL;
+#endif
     deviceConnected = false;
     oldDeviceConnected = false;
     notifySucceeded = false;

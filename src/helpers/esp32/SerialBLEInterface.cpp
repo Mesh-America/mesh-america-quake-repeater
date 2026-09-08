@@ -3,10 +3,10 @@
 #include "../CompanionFrameQueue.h"
 #include "esp_mac.h"
 #include <stdlib.h>
-#if defined(CONFIG_BLUEDROID_ENABLED)
+#if defined(CONFIG_BLUEDROID_ENABLED) && !defined(MESH_USE_NIMBLE_ARDUINO)
 #include "esp_gap_ble_api.h"
 #endif
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE && !defined(MESH_USE_NIMBLE_ARDUINO)
 #include <host/ble_store.h>
 #endif
 
@@ -29,8 +29,17 @@ extern "C" bool bleInUse(void) {
 #define ADVERT_RESTART_DELAY  1000   // millis
 #define BLE_BOND_PERSIST_TIMEOUT_MS 15000
 
+static void cleanupFailedBluetoothStart() {
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  BLEDevice::deinit(true);
+#else
+  BLEDevice::deinit(false);
+#endif
+}
+
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
 static void clearStoredBluetoothBonds() {
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
   const int result = ble_store_clear();
   if (result != 0) {
     BLE_DEBUG_PRINTLN("Could not clear NimBLE bonds: %d", result);
@@ -59,6 +68,8 @@ static void clearStoredBluetoothBonds() {
 #endif
 }
 
+#endif
+
 static bool bluetoothPeersEqual(
     const mesh::companion::BluetoothPeerIdentity& lhs,
     const mesh::companion::BluetoothPeerIdentity& rhs) {
@@ -81,7 +92,7 @@ void SerialBLEInterface::noteSuccessfulConnection(
   }
 }
 
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
 static void bluetoothPeerFromNimbleAddress(
     const ble_addr_t& address,
     mesh::companion::BluetoothPeerIdentity& peer) {
@@ -110,6 +121,9 @@ static ble_addr_t nimbleAddressFromBluetoothPeer(
 
 static bool nimbleBondExistsForPeer(
     const mesh::companion::BluetoothPeerIdentity& peer) {
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  return BLEDevice::isBonded(BLEAddress(nimbleAddressFromBluetoothPeer(peer)));
+#else
   ble_addr_t bonded_peers[8];
   int count = 0;
   if (ble_store_util_bonded_peers(
@@ -123,6 +137,7 @@ static bool nimbleBondExistsForPeer(
     if (bluetoothPeersEqual(candidate, peer)) return true;
   }
   return false;
+#endif
 }
 #else
 static void bluetoothPeerFromBluedroidBond(
@@ -181,7 +196,7 @@ static bool findBluedroidBondedPeer(
 
 bool SerialBLEInterface::resolveSuccessfulPeer(
     mesh::companion::BluetoothPeerIdentity& peer) const {
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
   if (!mesh::companion::isValidBluetoothPeerIdentity(_successfulPeer)
       || !nimbleBondExistsForPeer(_successfulPeer)) {
     return false;
@@ -204,7 +219,7 @@ bool SerialBLEInterface::configureBondedOnlyAdvertising(
     return false;
   }
 
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
   if (require_stored_bond && !nimbleBondExistsForPeer(peer)) {
     requestBondedOnlyRecovery("saved peer bond is unavailable");
     return false;
@@ -250,8 +265,13 @@ bool SerialBLEInterface::configureBondedOnlyAdvertising(
   }
   advertising->stop();
   BLEAdvertisementData minimal_advertisement;
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  minimal_advertisement.setFlags(BLE_HS_ADV_F_BREDR_UNSUP);
+  advertising->enableScanResponse(false);
+#else
   minimal_advertisement.setFlags(ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
   advertising->setScanResponse(false);
+#endif
   advertising->setScanFilter(true, true);
   advertising->setAdvertisementData(minimal_advertisement);
 
@@ -325,7 +345,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   }
 
   // Create the BLE Device
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
   if (!BLEDevice::init(dev_name)) {
     BLE_DEBUG_PRINTLN("BLEDevice::init failed");
     return false;
@@ -336,9 +356,17 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   BLEDevice::init(dev_name);
 #endif
 
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  if (clear_bonds && !BLEDevice::deleteAllBonds()) {
+    BLE_DEBUG_PRINTLN("Could not clear NimBLE bonds for the new identity");
+    cleanupFailedBluetoothStart();
+    return false;
+  }
+#else
   if (clear_bonds) clearStoredBluetoothBonds();
+#endif
 
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
   if (custom_address != nullptr) {
     uint8_t native_address[mesh::companion::BLUETOOTH_MAC_BYTES];
     for (size_t i = 0; i < mesh::companion::BLUETOOTH_MAC_BYTES; i++) {
@@ -348,19 +376,32 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
     if (!BLEDevice::setOwnAddr(native_address)
         || !BLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM)) {
       BLE_DEBUG_PRINTLN("Custom Bluetooth MAC setup failed");
-      BLEDevice::deinit(false);
+      cleanupFailedBluetoothStart();
       return false;
     }
   }
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  else if (!BLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC)) {
+    cleanupFailedBluetoothStart();
+    return false;
+  }
+#endif
 #endif
 
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
   BLEDevice::setSecurityCallbacks(this);
+#endif
   // ATT notifications consume three bytes of the negotiated MTU. Reserve
   // that overhead so a MAX_FRAME_SIZE protocol frame fits without truncation.
   BLEDevice::setMTU(MAX_FRAME_SIZE + 3);
 
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  BLEDevice::setSecurityPasskey(pin_code);
+  BLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
+  BLEDevice::setSecurityAuth(true, true, true);
+#else
   BLESecurity  sec;
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
   sec.setPassKey(true, pin_code);
   // A passkey alone does not provide MITM protection when the controller's
   // default capability is NoInputNoOutput: the peers can silently fall back
@@ -374,6 +415,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   sec.setCapability(ESP_IO_CAP_OUT);
   sec.setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
 #endif
+#endif
 
   //BLEDevice::setPower(ESP_PWR_LVL_N8);
 
@@ -381,12 +423,18 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   pServer = BLEDevice::createServer();
   if (pServer == NULL) {
     BLE_DEBUG_PRINTLN("BLEDevice::createServer failed");
-    BLEDevice::deinit(false);
+    cleanupFailedBluetoothStart();
     return false;
   }
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  // The interface is owned by the application, not by the NimBLE server.
+  pServer->setCallbacks(this, false);
+  pServer->advertiseOnDisconnect(false);
+#else
   pServer->setCallbacks(this);
+#endif
 
-#if !defined(CONFIG_NIMBLE_ENABLED)
+#if !MESH_BLE_USES_NIMBLE
   if (custom_address != nullptr) {
     esp_bd_addr_t native_address;
     memcpy(native_address, custom_address, sizeof(native_address));
@@ -402,33 +450,41 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   pService = pServer->createService(SERVICE_UUID);
   if (pService == NULL) {
     BLE_DEBUG_PRINTLN("BLEServer::createService failed");
-    BLEDevice::deinit(false);
+    cleanupFailedBluetoothStart();
     pServer = NULL;
     return false;
   }
 
   // Create a BLE Characteristic
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  uint32_t tx_properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY |
+                           NIMBLE_PROPERTY::READ_AUTHEN;
+  uint32_t rx_properties = NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_AUTHEN;
+#else
   uint32_t tx_properties = BLECharacteristic::PROPERTY_READ |
                            BLECharacteristic::PROPERTY_NOTIFY;
   uint32_t rx_properties = BLECharacteristic::PROPERTY_WRITE;
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
   // NimBLE ignores setAccessPermissions(). Authentication requirements must
   // be part of the characteristic properties instead.
   tx_properties |= BLECharacteristic::PROPERTY_READ_AUTHEN;
   rx_properties |= BLECharacteristic::PROPERTY_WRITE_AUTHEN;
 #endif
+#endif
   pTxCharacteristic = pService->createCharacteristic(
       CHARACTERISTIC_UUID_TX, tx_properties);
   if (pTxCharacteristic == NULL) {
     BLE_DEBUG_PRINTLN("BLEService::createCharacteristic(TX) failed");
-    BLEDevice::deinit(false);
+    cleanupFailedBluetoothStart();
     pServer = NULL;
     pService = NULL;
     return false;
   }
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
   pTxCharacteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM);
+#endif
   pTxCharacteristic->setCallbacks(this);
-#if !defined(CONFIG_NIMBLE_ENABLED)
+#if !MESH_BLE_USES_NIMBLE
   // NimBLE creates and owns the 0x2902 descriptor automatically.
   pTxDescriptor = new BLE2902();
   // Make notification setup start/finish pairing before the client begins its
@@ -444,16 +500,24 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
       CHARACTERISTIC_UUID_RX, rx_properties);
   if (pRxCharacteristic == NULL) {
     BLE_DEBUG_PRINTLN("BLEService::createCharacteristic(RX) failed");
-    BLEDevice::deinit(false);
+    cleanupFailedBluetoothStart();
     pServer = NULL;
     pService = NULL;
     pTxCharacteristic = NULL;
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
     pTxDescriptor = NULL;
+#endif
     return false;
   }
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
   pRxCharacteristic->setAccessPermissions(ESP_GATT_PERM_WRITE_ENC_MITM);
+#endif
   pRxCharacteristic->setCallbacks(this);
 
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  pServer->getAdvertising()->setName(dev_name);
+  pServer->getAdvertising()->enableScanResponse(true);
+#endif
   pServer->getAdvertising()->addServiceUUID(SERVICE_UUID);
   if (bonded_only_peer != nullptr) {
     configureBondedOnlyAdvertising(*bonded_only_peer, true);
@@ -463,6 +527,27 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
 
 // -------- BLESecurityCallbacks methods
 
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+uint32_t SerialBLEInterface::onPassKeyDisplay() {
+  _pairingRequestPending.store(true, std::memory_order_release);
+  return _pin_code;
+}
+
+void SerialBLEInterface::onAuthenticationComplete(NimBLEConnInfo& info) {
+  if (info.isEncrypted() && info.isAuthenticated() && info.isBonded()) {
+    deviceConnected = true;
+    mesh::companion::BluetoothPeerIdentity peer;
+    bluetoothPeerFromNimbleAddress(*info.getIdAddress().getBase(), peer);
+    noteSuccessfulConnection(peer);
+  } else {
+    BLEDevice::deleteBond(info.getIdAddress());
+    deviceConnected = false;
+    if (_bonded_only) requestBondedOnlyRecovery("bond authentication failed");
+    pServer->disconnect(info.getConnHandle());
+    if (advertisingAllowed()) scheduleAdvertisingRestart((uint32_t)millis());
+  }
+}
+#else
 uint32_t SerialBLEInterface::onPassKeyRequest() {
   BLE_DEBUG_PRINTLN("onPassKeyRequest()");
   _pairingRequestPending.store(true, std::memory_order_release);
@@ -485,7 +570,7 @@ bool SerialBLEInterface::onSecurityRequest() {
   return true;  // allow
 }
 
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
 void SerialBLEInterface::onAuthenticationComplete(ble_gap_conn_desc* desc) {
   const bool success = desc != NULL && desc->sec_state.encrypted &&
                        desc->sec_state.authenticated
@@ -558,12 +643,31 @@ void SerialBLEInterface::onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
 }
 #endif
 
+#endif
+
 // -------- BLEServerCallbacks methods
 
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+void SerialBLEInterface::onConnect(BLEServer* pServer, NimBLEConnInfo& info) {
+  last_conn_id = info.getConnHandle();
+  deviceConnected = false;
+  oldDeviceConnected = false;
+  notifySucceeded = false;
+  notificationsEnabled.store(false, std::memory_order_release);
+  xQueueReset(recv_queue);
+  _tx_reset_pending.store(true, std::memory_order_release);
+  _adv_restart_pending = false;
+}
+
+void SerialBLEInterface::onMTUChange(uint16_t mtu, NimBLEConnInfo& info) {
+  (void)info;
+  BLE_DEBUG_PRINTLN("onMtuChanged(), mtu=%d", mtu);
+}
+#else
 void SerialBLEInterface::onConnect(BLEServer* pServer) {
 }
 
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
 void SerialBLEInterface::onConnect(BLEServer* pServer, ble_gap_conn_desc* desc) {
   BLE_DEBUG_PRINTLN("onConnect(), conn_id=%d, mtu=%d", desc->conn_handle,
                     pServer->getPeerMTU(desc->conn_handle));
@@ -597,7 +701,9 @@ void SerialBLEInterface::onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t 
   xQueueReset(recv_queue);
   _tx_reset_pending.store(true, std::memory_order_release);
   _adv_restart_pending = false;
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
   if (pTxDescriptor != NULL) pTxDescriptor->setNotifications(false);
+#endif
 }
 
 void SerialBLEInterface::onMtuChanged(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
@@ -605,14 +711,25 @@ void SerialBLEInterface::onMtuChanged(BLEServer* pServer, esp_ble_gatts_cb_param
 }
 #endif
 
+#endif
+
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+void SerialBLEInterface::onDisconnect(BLEServer* pServer, NimBLEConnInfo& info,
+                                       int reason) {
+  (void)info;
+  (void)reason;
+#else
 void SerialBLEInterface::onDisconnect(BLEServer* pServer) {
+#endif
   BLE_DEBUG_PRINTLN("onDisconnect()");
   deviceConnected = false;
   notifySucceeded = false;
   notificationsEnabled.store(false, std::memory_order_release);
   xQueueReset(recv_queue);
   _tx_reset_pending.store(true, std::memory_order_release);
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
   if (pTxDescriptor != NULL) pTxDescriptor->setNotifications(false);
+#endif
   if (advertisingAllowed()) {
     scheduleAdvertisingRestart((uint32_t)millis());
   }
@@ -620,7 +737,11 @@ void SerialBLEInterface::onDisconnect(BLEServer* pServer) {
 
 // -------- BLECharacteristicCallbacks methods
 
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic,
+                                 NimBLEConnInfo& info) {
+  if (!info.isEncrypted() || !info.isAuthenticated() || !info.isBonded()) return;
+#elif MESH_BLE_USES_NIMBLE
 void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic,
                                  ble_gap_conn_desc* desc) {
   (void)desc;
@@ -634,8 +755,14 @@ void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic,
     return;
   }
 
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  const auto value = pCharacteristic->getValue();
+  const uint8_t* rxValue = value.data();
+  const int len = value.size();
+#else
   uint8_t* rxValue = pCharacteristic->getData();
   int len = pCharacteristic->getLength();
+#endif
 
   if (len > MAX_FRAME_SIZE) {
     BLE_DEBUG_PRINTLN("ERROR: onWrite(), frame too big, len=%d", len);
@@ -650,11 +777,17 @@ void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic,
   }
 }
 
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+void SerialBLEInterface::onSubscribe(BLECharacteristic* pCharacteristic,
+                                     NimBLEConnInfo& info, uint16_t subValue) {
+  (void)info;
+#elif MESH_BLE_USES_NIMBLE
 void SerialBLEInterface::onSubscribe(BLECharacteristic* pCharacteristic,
                                      ble_gap_conn_desc* desc,
                                      uint16_t subValue) {
   (void)desc;
+#endif
+#if MESH_BLE_USES_NIMBLE
   if (pCharacteristic == pTxCharacteristic) {
     // NimBLE uses bit 0 for notification subscriptions.
     notificationsEnabled.store((subValue & 0x0001u) != 0,
@@ -663,6 +796,7 @@ void SerialBLEInterface::onSubscribe(BLECharacteristic* pCharacteristic,
 }
 #endif
 
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
 void SerialBLEInterface::onStatus(BLECharacteristic* pCharacteristic, Status status, uint32_t code) {
   (void)pCharacteristic;
   notifySucceeded = status == SUCCESS_NOTIFY;
@@ -671,6 +805,8 @@ void SerialBLEInterface::onStatus(BLECharacteristic* pCharacteristic, Status sta
                       (int)status, (unsigned)code);
   }
 }
+
+#endif
 
 // ---------- public methods
 
@@ -784,7 +920,14 @@ void SerialBLEInterface::enable() {
   clearBuffers();
 
   // Start the service
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  if (!pServer->start()) {
+    _isEnabled = false;
+    return;
+  }
+#else
   pService->start();
+#endif
 
   // Start advertising
 
@@ -804,7 +947,9 @@ void SerialBLEInterface::disable() {
 
   pServer->getAdvertising()->stop();
   pServer->disconnect(last_conn_id);
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
   pService->stop();
+#endif
   oldDeviceConnected = deviceConnected = false;
   clearBuffers();
   _adv_restart_pending = false;
@@ -852,7 +997,7 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
                                BLE_WRITE_MIN_INTERVAL)    // space the writes apart
   ) {
     const uint16_t peer_mtu = pServer->getPeerMTU(last_conn_id);
-#if defined(CONFIG_NIMBLE_ENABLED)
+#if MESH_BLE_USES_NIMBLE
     const bool notifications_ready =
         notificationsEnabled.load(std::memory_order_acquire);
 #else
@@ -870,7 +1015,13 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
       _last_write = now;
       notifySucceeded = false;
       pTxCharacteristic->setValue(send_queue[0].buf, send_queue[0].len);
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+      // NimBLE reports queue acceptance directly. Its status callback may run
+      // later; do not retain or duplicate an already accepted frame awaiting it.
+      notifySucceeded = pTxCharacteristic->notify(last_conn_id);
+#else
       pTxCharacteristic->notify();
+#endif
 
       if (notifySucceeded) {
         BLE_DEBUG_PRINTLN("writeBytes: sz=%d, hdr=%d", (uint32_t)send_queue[0].len, (uint32_t) send_queue[0].buf[0]);
