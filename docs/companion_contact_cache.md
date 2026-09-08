@@ -5,6 +5,9 @@ and 16 shared secrets in RAM. Every contact remains in the contact table;
 selecting a different contact loads its saved path as needed. This recovers
 about 25.4 KiB of internal RAM in the 350-contact ESP32 qualification builds.
 
+See the [qualification results](companion_contact_cache_results.md) for the
+six-board RAM comparison, physical tests, and shared-secret timings.
+
 PSRAM boards retain their existing complete contact table in external RAM.
 Legacy USB/BLE/WiFi Companion profiles also retain their inline paths and
 secrets. The build flag `MESH_CONTACT_CACHE=0` or `1` overrides this policy for

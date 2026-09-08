@@ -9,6 +9,8 @@ measured RAM, MAC-policy checks, WiFi updates, and remaining qualification.
 
 The [contact-cache guide](companion_contact_cache.md) adds six optional
 350-contact trials for ESP32 boards without PSRAM, including Heltec V3.
+Their [qualification results](companion_contact_cache_results.md) include
+linked RAM margins, V4/RAK hardware tests and the mOTA queue policy.
 
 | Hardware | Trial environment | Contacts | Channels | Offline queue |
 | --- | --- | ---: | ---: | ---: |
