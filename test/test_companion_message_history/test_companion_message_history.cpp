@@ -1,6 +1,23 @@
 #include <gtest/gtest.h>
+#include "helpers/ui/CompanionMessageHistory.h"
 
-#include <helpers/ui/CompanionMessageHistory.h>
+TEST(CompanionMessageNativeLayout, NormalFontsFitHeadersFootersAndSummaryRows) {
+  for (int line_height : {10, 18, 22, 30}) {
+    const auto chrome = mesh::ui::makeCompanionMessageChromeLayout(false, line_height);
+    EXPECT_GE(chrome.header_divider_y, line_height);
+    EXPECT_GE(chrome.origin_y, chrome.header_divider_y + 2);
+    EXPECT_GE(chrome.message_y, chrome.origin_y + line_height);
+    EXPECT_GE(chrome.filter_height, chrome.filter_text_offset + line_height);
+    const auto list = mesh::ui::makeCompanionMessageListLayout(240, line_height);
+    EXPECT_GE(list.preview_offset, list.title_offset + line_height);
+    EXPECT_GE(list.divider_offset, list.preview_offset + line_height);
+    EXPECT_LE(list.top + list.visible_rows * list.row_height, 240);
+    // Indicator compact chrome is independent of native font metrics.
+    const auto indicator = mesh::ui::makeCompanionMessageChromeLayout(true, line_height);
+    EXPECT_EQ(8, indicator.header_divider_y);
+    EXPECT_EQ(14, indicator.filter_height);
+  }
+}
 
 #include <cstdint>
 #include <cstring>

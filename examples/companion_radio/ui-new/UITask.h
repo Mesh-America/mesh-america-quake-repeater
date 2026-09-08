@@ -24,6 +24,7 @@
 
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
+#include <helpers/CompanionJohnConfig.h>
 
 class UITask : public AbstractUITask {
   DisplayDriver* _display;
@@ -84,6 +85,9 @@ class UITask : public AbstractUITask {
   UIScreen* home;
   UIScreen* msg_preview;
   UIScreen* curr;
+#if COMPANION_FEATURE_JOHN
+  UIScreen* john_reader = nullptr;
+#endif
 
   void userLedHandler();
 
@@ -119,6 +123,11 @@ public:
 
   void gotoHomeScreen() { setCurrScreen(home); }
   void showMessages();
+#if COMPANION_FEATURE_JOHN
+  bool isJohnReaderActive() const { return john_reader && curr == john_reader; }
+  void showJohnReader();
+  void closeJohnReader();
+#endif
   void showAlert(const char* text, int duration_millis);
   int  getMsgCount() const { return _msgcount; }
   int getPreviewCount() const;

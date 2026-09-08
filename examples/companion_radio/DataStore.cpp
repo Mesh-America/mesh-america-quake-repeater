@@ -6,6 +6,9 @@
 #if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
 #include <helpers/ContactFileTransaction.h>
 #endif
+#if COMPANION_FEATURE_JOHN
+#include <helpers/bible/JohnBookmarkFiles.h>
+#endif
 
 #if defined(NRF52_PLATFORM)
 #include <helpers/AtomicFileWriter.h>
@@ -388,6 +391,74 @@ uint32_t DataStore::getStorageTotalKb() const {
 File DataStore::openRead(const char* filename) {
   return openRead(_fs, filename);
 }
+
+#if COMPANION_FEATURE_JOHN
+namespace {
+class JohnBookmarkFiles {
+  FILESYSTEM* _fs;
+public:
+  explicit JohnBookmarkFiles(FILESYSTEM* fs) : _fs(fs) {}
+  bool exists(const char* path) {
+#if defined(NRF52_PLATFORM)
+    bool present = false;
+    // Unknown presence must take the read/abort path, never the new-file path.
+    return !contactPathPresence(_fs, path, present) || present;
+#else
+    return _fs->exists(path);
+#endif
+  }
+  bool remove(const char* path) {
+#if defined(NRF52_PLATFORM)
+    bool present = false;
+    if (!contactPathPresence(_fs, path, present)) return false;
+    return !present || _fs->remove(path);
+#else
+    return !exists(path) || _fs->remove(path);
+#endif
+  }
+  bool rename(const char* from, const char* to) { return _fs->rename(from, to); }
+  bool read(const char* path, uint8_t (&data)[mesh::bible::kBookmarkBytes]) {
+    File file = mesh::openFileRead(_fs, path);
+    if (!file) return false;
+    if (file.size() != sizeof(data)) {
+      // Known malformed record, not an I/O failure. Let the codec reject it
+      // and permit a later verified replacement instead of trapping resume.
+      memset(data, 0, sizeof(data));
+      file.close();
+      return true;
+    }
+    const bool ok = file.read(data, sizeof(data)) == sizeof(data);
+    file.close();
+    return ok;
+  }
+  bool write(const char* path, const uint8_t (&data)[mesh::bible::kBookmarkBytes]) {
+    File file = openWrite(_fs, path);
+    if (!file) return false;
+    const bool ok = file.write(data, sizeof(data)) == sizeof(data);
+    file.flush();
+    file.close();
+    return ok;
+  }
+};
+} // namespace
+
+bool DataStore::loadJohnBookmark(mesh::bible::Position& pos) {
+  pos = mesh::bible::Position{};
+#if defined(NRF52_PLATFORM)
+  if (_primary_storage_unavailable) return false;
+#endif
+  JohnBookmarkFiles files(_fs);
+  return mesh::bible::loadReaderBookmark(files, pos);
+}
+
+bool DataStore::saveJohnBookmark(mesh::bible::Position pos) {
+#if defined(NRF52_PLATFORM)
+  if (_primary_storage_unavailable) return false;
+#endif
+  JohnBookmarkFiles files(_fs);
+  return mesh::bible::saveReaderBookmark(files, pos);
+}
+#endif
 
 File DataStore::openRead(FILESYSTEM* fs, const char* filename) {
   return mesh::openFileRead(fs, filename);

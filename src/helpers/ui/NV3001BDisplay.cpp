@@ -51,22 +51,6 @@
   #define DISPLAY_ROTATION 0
 #endif
 
-#ifndef NV3001B_SCREEN_WIDTH
-  #define NV3001B_SCREEN_WIDTH 220
-#endif
-
-#ifndef NV3001B_SCREEN_HEIGHT
-  #define NV3001B_SCREEN_HEIGHT 128
-#endif
-
-#ifndef DISPLAY_SCALE_X
-  #define DISPLAY_SCALE_X ((float)NV3001B_SCREEN_WIDTH / NV3001B_LOGICAL_WIDTH)
-#endif
-
-#ifndef DISPLAY_SCALE_Y
-  #define DISPLAY_SCALE_Y ((float)NV3001B_SCREEN_HEIGHT / NV3001B_LOGICAL_HEIGHT)
-#endif
-
 #define NV3001B_SWRESET 0x01
 #define NV3001B_SLPOUT  0x11
 #define NV3001B_DISPON  0x29
@@ -81,22 +65,6 @@
 #define NV3001B_MADCTL_MV  0x20
 #define NV3001B_MADCTL_RGB 0x00
 
-#ifndef NV3001B_TEXT_SIZE1_SCALE_X
-  #define NV3001B_TEXT_SIZE1_SCALE_X 1
-#endif
-
-#ifndef NV3001B_TEXT_SIZE1_SCALE_Y
-  #define NV3001B_TEXT_SIZE1_SCALE_Y 2
-#endif
-
-#ifndef NV3001B_TEXT_SIZE2_SCALE_X
-  #define NV3001B_TEXT_SIZE2_SCALE_X 2
-#endif
-
-#ifndef NV3001B_TEXT_SIZE2_SCALE_Y
-  #define NV3001B_TEXT_SIZE2_SCALE_Y 3
-#endif
-
 // Color scheme
 ColorVal UIColor::window_bkg = mesh::ui::color_theme::WINDOW_BACKGROUND;
 ColorVal UIColor::title_bkg = mesh::ui::color_theme::TITLE_BACKGROUND;
@@ -107,26 +75,6 @@ ColorVal UIColor::warning_txt = mesh::ui::color_theme::WARNING_TEXT;
 ColorVal UIColor::popup_bkg = mesh::ui::color_theme::POPUP_BACKGROUND;
 ColorVal UIColor::popup_txt = mesh::ui::color_theme::TEXT;
 ColorVal UIColor::corp_blue = mesh::ui::color_theme::ACCENT;
-
-static int scaleX(int x) {
-  return (int)(x * DISPLAY_SCALE_X);
-}
-
-static int scaleY(int y) {
-  return (int)(y * DISPLAY_SCALE_Y);
-}
-
-static int scaleWidth(int x, int w) {
-  if (w <= 0) return 0;
-  int scaled = scaleX(x + w) - scaleX(x);
-  return scaled > 0 ? scaled : 1;
-}
-
-static int scaleHeight(int y, int h) {
-  if (h <= 0) return 0;
-  int scaled = scaleY(y + h) - scaleY(y);
-  return scaled > 0 ? scaled : 1;
-}
 
 static uint8_t nv3001bMADCTL(uint8_t rotation) {
   uint8_t madctl;
@@ -181,11 +129,11 @@ static const uint8_t font5x7[] PROGMEM = {
 };
 
 static int textPixelScaleX(uint8_t size) {
-  return size <= 1 ? NV3001B_TEXT_SIZE1_SCALE_X : NV3001B_TEXT_SIZE2_SCALE_X;
+  return size;
 }
 
 static int textPixelScaleY(uint8_t size) {
-  return size <= 1 ? NV3001B_TEXT_SIZE1_SCALE_Y : NV3001B_TEXT_SIZE2_SCALE_Y;
+  return size;
 }
 
 static void setupOptionalOutput(int pin, int level) {
@@ -487,8 +435,8 @@ void NV3001BDisplay::setColor(ColorVal c) {
 }
 
 void NV3001BDisplay::setCursor(int x, int y) {
-  cursor_x = scaleX(x);
-  cursor_y = scaleY(y);
+  cursor_x = x;
+  cursor_y = y;
 }
 
 void NV3001BDisplay::print(const char* str) {
@@ -511,14 +459,15 @@ void NV3001BDisplay::print(const char* str) {
 }
 
 void NV3001BDisplay::fillRect(int x, int y, int w, int h) {
-  fillPhysicalRect(scaleX(x), scaleY(y), scaleWidth(x, w), scaleHeight(y, h));
+  fillPhysicalRect(x, y, w, h);
 }
 
 void NV3001BDisplay::drawRect(int x, int y, int w, int h) {
-  int x1 = scaleX(x);
-  int y1 = scaleY(y);
-  int sw = scaleWidth(x, w);
-  int sh = scaleHeight(y, h);
+  if (w <= 0 || h <= 0) return;
+  int x1 = x;
+  int y1 = y;
+  int sw = w;
+  int sh = h;
 
   fillPhysicalRect(x1, y1, sw, 1);
   fillPhysicalRect(x1, y1 + sh - 1, sw, 1);
@@ -534,7 +483,7 @@ void NV3001BDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
     for (int i = 0; i < w; i++) {
       uint8_t byte = pgm_read_byte(bits + j * byte_width + i / 8);
       if (byte & (0x80 >> (i & 7))) {
-        fillPhysicalRect(scaleX(x + i), scaleY(y + j), scaleWidth(x + i, 1), scaleHeight(y + j, 1));
+        fillPhysicalRect(x + i, y + j, 1, 1);
       }
     }
   }
@@ -545,7 +494,7 @@ uint16_t NV3001BDisplay::getTextWidth(const char* str) {
 
   uint16_t len = 0;
   while (str[len] && str[len] != '\n' && str[len] != '\r') len++;
-  return (uint16_t)((len * 6 * textPixelScaleX(text_size)) / DISPLAY_SCALE_X);
+  return (uint16_t)((len * 6 * textPixelScaleX(text_size)));
 }
 
 void NV3001BDisplay::endFrame() {

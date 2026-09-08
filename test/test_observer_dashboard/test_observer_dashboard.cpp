@@ -277,8 +277,8 @@ TEST(ObserverDashboardLayout, AllTextIsPaddedInsideTheMargins) {
 }
 
 TEST(ObserverDashboardLayout, NoTextSilentlyShrinksToTheFallbackScale) {
-  // The portrait driver halves the glyph size rather than clipping. A row that
-  // only fits because of that would break the grid, so it must never happen.
+  // Native drivers retain the requested font size. Rows must fit without a
+  // driver-level fallback that hides layout errors.
   for (const RadioActivitySnapshot& s : {makeBusy(), makeEmpty()}) {
     MockDisplay d(MockDisplay::PORTRAIT);
     drawFull(d, portraitLayout(), makeContext(), s);
@@ -471,6 +471,9 @@ TEST(ObserverDashboardSignature, DataChangesBelowTheGraphResolutionDoNotRepaint)
   Context ctx = makeContext();
 
   RadioActivitySnapshot a = makeBusy();
+  // The taller native graph needs a larger peak for a one-packet change to
+  // stay below one pixel of vertical resolution.
+  a.buckets[0] = a.peak_per_min = 1000;
   RadioActivitySnapshot b = a;
   b.buckets[N - 1] = (uint16_t)(a.buckets[N - 1] + 1);
 

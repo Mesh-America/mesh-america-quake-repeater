@@ -8,6 +8,10 @@
 #if MESH_CONTACT_CACHE
 #include <helpers/ContactSecretCache.h>
 #endif
+#include <helpers/CompanionJohnConfig.h>
+#if COMPANION_FEATURE_JOHN
+#include <helpers/bible/JohnReader.h>
+#endif
 
 class DataStoreHost {
 public:
@@ -102,6 +106,10 @@ public:
   bool loadPrefs(CompanionNodePrefs& prefs, double& node_lat,
                  double& node_lon);
   bool savePrefs(const CompanionNodePrefs& prefs, double node_lat, double node_lon);
+#if COMPANION_FEATURE_JOHN
+  bool loadJohnBookmark(mesh::bible::Position& pos);
+  bool saveJohnBookmark(mesh::bible::Position pos);
+#endif
   void loadContacts(DataStoreHost* host);
   bool saveContacts(DataStoreHost* host, bool (*filter)(const ContactInfo& c) = NULL);
   bool markContactDirty(const ContactInfo& contact);

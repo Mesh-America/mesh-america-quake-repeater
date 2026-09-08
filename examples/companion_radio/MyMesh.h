@@ -319,6 +319,10 @@ public:
     if (saved) _prefs.clearDirty();
     return saved;
   }
+#if COMPANION_FEATURE_JOHN
+  bool loadJohnBookmark(mesh::bible::Position& pos) { return _store->loadJohnBookmark(pos); }
+  bool saveJohnBookmark(mesh::bible::Position pos) { return _store->saveJohnBookmark(pos); }
+#endif
 
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {

@@ -4,12 +4,12 @@
 #include <SPI.h>
 #include <helpers/RefCountedDigitalPin.h>
 
-#ifndef NV3001B_LOGICAL_WIDTH
-  #define NV3001B_LOGICAL_WIDTH 128
+// Landscape dimensions, matching the panel controller's configured orientation.
+#ifndef NV3001B_SCREEN_WIDTH
+  #define NV3001B_SCREEN_WIDTH 220
 #endif
-
-#ifndef NV3001B_LOGICAL_HEIGHT
-  #define NV3001B_LOGICAL_HEIGHT 64
+#ifndef NV3001B_SCREEN_HEIGHT
+  #define NV3001B_SCREEN_HEIGHT 128
 #endif
 
 #ifndef NV3001B_PANEL_WIDTH
@@ -44,7 +44,7 @@ class NV3001BDisplay : public DisplayDriver {
 
 public:
   NV3001BDisplay(RefCountedDigitalPin* power = nullptr) :
-      DisplayDriver(NV3001B_LOGICAL_WIDTH, NV3001B_LOGICAL_HEIGHT), spi(NV3001B_SPI_HOST), periph_power(power) { }
+      DisplayDriver(NV3001B_SCREEN_WIDTH, NV3001B_SCREEN_HEIGHT), spi(NV3001B_SPI_HOST), periph_power(power) { }
 
   bool begin();
   static const char* driverName() { return "NV3001B"; }

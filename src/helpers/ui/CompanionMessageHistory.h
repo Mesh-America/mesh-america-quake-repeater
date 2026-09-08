@@ -27,21 +27,28 @@ struct CompanionMessageChromeLayout {
 };
 
 inline CompanionMessageChromeLayout makeCompanionMessageChromeLayout(
-    bool compact_text) {
+    bool compact_text, int native_line_height = 0) {
   if (compact_text) {
     // At the Indicator's 3x physical mapping these are a 27px header and a
     // 42px footer around a 24px-tall fractionally scaled status font.
     return {true, 8, 11, 22, 14, 3};
   }
+  if (native_line_height > 11) {
+    const int bar_height = native_line_height + 8 > 24 ? native_line_height + 8 : 24;
+    return {false, native_line_height + 1, native_line_height + 4,
+            2 * native_line_height + 4, bar_height,
+            (bar_height - native_line_height) / 2};
+  }
   return {false, 11, 14, 25, 24, 8};
 }
 
 inline CompanionMessageListLayout makeCompanionMessageListLayout(
-    int display_height) {
-  const int top = 20;
-  const int row_height = 26;
+    int display_height, int native_line_height = 10) {
+  if (native_line_height < 10) native_line_height = 10;
+  const int top = native_line_height + 4 > 20 ? native_line_height + 4 : 20;
+  const int row_height = native_line_height * 2 + 6;
   const int usable_height = display_height > top ? display_height - top : 0;
-  return {top, row_height, 0, 11, 23, usable_height / row_height};
+  return {top, row_height, 0, native_line_height + 1, row_height - 3, usable_height / row_height};
 }
 
 inline void formatCompanionMessageAge(char* output, size_t output_size,

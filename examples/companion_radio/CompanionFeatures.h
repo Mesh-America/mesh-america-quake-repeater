@@ -1,4 +1,5 @@
 #pragma once
+#include <helpers/CompanionJohnConfig.h>
 #include <helpers/ota/OtaMemoryPolicy.h>
 
 // Features are selected independently so adding a transport or changing an

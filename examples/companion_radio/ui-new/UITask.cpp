@@ -3,6 +3,7 @@
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
 #include <helpers/ui/CompanionHomeLayout.h>
 #include <helpers/ui/CompanionMessageHistory.h>
+#include <helpers/ui/DisplayTextLayout.h>
 #if UI_SMALL_MESSAGE_FONT == 1
   #include <helpers/ui/SmallMessageText.h>
 #endif
@@ -10,6 +11,10 @@
 #include "../MyMesh.h"
 #include "../CompanionWiFi.h"
 #include "target.h"
+#if COMPANION_FEATURE_JOHN
+#include "JohnReaderScreen.h"
+#include <new>
+#endif
 #include <time.h>
 #ifdef WIFI_SSID
   #include <WiFi.h>
@@ -513,6 +518,9 @@ public:
   }
 
   void showFirstPage() { _page = HomePage::FIRST; }
+#if COMPANION_FEATURE_JOHN
+  bool isRadioPage() const { return _page == HomePage::RADIO; }
+#endif
 
   bool isTransportSelectorPage() const {
 #ifdef COMPANION_EXCLUSIVE_WIFI_BLE
@@ -552,8 +560,14 @@ public:
   }
 
   int render(DisplayDriver& display) override {
+    display.setTextSize(1);
+    const int normal_line = !display.useSmallMessageFont()
+        && display.renderWidth() == display.width() ? display.textLineHeight() : 11;
+    const int row_height = normal_line > 11 ? normal_line : 11;
+    const int header_height = row_height + 1;
+    const int body_top = header_height + 8;
     display.setColor(UIColor::title_bkg);
-    display.fillRect(0, 0, display.width(), 12);
+    display.fillRect(0, 0, display.width(), header_height);
     char tmp[80];
     // status indicators
     display.setTextSize(1);
@@ -577,7 +591,7 @@ public:
       // equal-background branch above and retain their light text colour.
       display.setColor(UIColor::corp_blue);
     }
-    int y = 14;
+    int y = header_height + 2;
     int x = display.width() / 2 - 5 * (HomePage::Count-1);
     for (uint8_t i = 0; i < HomePage::Count; i++, x += 10) {
       if (i == _page) {
@@ -600,12 +614,12 @@ public:
       } else {
         sprintf(tmp, "INBOX: %d", _task->getPreviewCount());
         display.setTextSize(2);
-        display.drawTextCentered(display.width() / 2, 22, tmp);
+        display.drawTextCentered(display.width() / 2, body_top + 2, tmp);
       }
 #else
       display.setTextSize(2);
       sprintf(tmp, "INBOX: %d", _task->getPreviewCount());
-      display.drawTextCentered(display.width() / 2, 22, tmp);
+      display.drawTextCentered(display.width() / 2, body_top + 2, tmp);
 #endif
 #ifdef UI_DEDICATED_PAIRING_BLOCK
       const mesh::ui::CompanionHomeLayout layout =
@@ -815,8 +829,8 @@ public:
     } else if (_page == HomePage::RECENT) {
       the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
       display.setColor(UIColor::primary_txt);
-      int y = 20;
-      for (int i = 0; i < UI_RECENT_LIST_SIZE; i++, y += 11) {
+      int y = body_top;
+      for (int i = 0; i < UI_RECENT_LIST_SIZE && y + row_height <= display.height(); i++, y += row_height) {
         auto a = &recent[i];
         if (a->name[0] == 0) continue;  // empty slot
         int secs = _rtc->getCurrentTime() - a->recv_timestamp;
@@ -841,19 +855,19 @@ public:
       display.setColor(UIColor::primary_txt);
       display.setTextSize(1);
       // freq / sf
-      display.setCursor(0, 20);
+      display.setCursor(0, body_top);
       sprintf(tmp, "FQ: %06.3f   SF: %d", _node_prefs->freq, _node_prefs->sf);
       display.print(tmp);
 
-      display.setCursor(0, 31);
+      display.setCursor(0, body_top + row_height);
       sprintf(tmp, "BW: %03.2f     CR: %d", _node_prefs->bw, _node_prefs->cr);
       display.print(tmp);
 
       // tx power,  noise floor
-      display.setCursor(0, 42);
+      display.setCursor(0, body_top + 2 * row_height);
       sprintf(tmp, "TX: %ddBm", _node_prefs->tx_power_dbm);
       display.print(tmp);
-      display.setCursor(0, 53);
+      display.setCursor(0, body_top + 3 * row_height);
       float noise_floor = radio_driver.getNoiseFloorDbm();
       if (noise_floor == 0.0f) {
         strcpy(tmp, "Noise floor: measuring");
@@ -903,23 +917,23 @@ public:
 #else
     } else if (_page == HomePage::BLUETOOTH) {
       display.setColor(UIColor::corp_blue);
-      display.drawXbm((display.width() - 32) / 2, 18,
+      display.drawXbm((display.width() - 32) / 2, body_top - 2,
           _task->isBluetoothEnabled() ? bluetooth_on : bluetooth_off,
           32, 32);
       display.setColor(UIColor::secondary_txt);
       display.setTextSize(1);
-      display.drawTextCentered(display.width() / 2, 64 - 11, "toggle: " PRESS_LABEL);
+      display.drawTextCentered(display.width() / 2, body_top + 33, "toggle: " PRESS_LABEL);
 #endif
     } else if (_page == HomePage::ADVERT) {
       display.setColor(UIColor::corp_blue);
-      display.drawXbm((display.width() - 32) / 2, 18, advert_icon, 32, 32);
+      display.drawXbm((display.width() - 32) / 2, body_top - 2, advert_icon, 32, 32);
       display.setColor(UIColor::secondary_txt);
-      display.drawTextCentered(display.width() / 2, 64 - 11, "advert: " PRESS_LABEL);
+      display.drawTextCentered(display.width() / 2, body_top + 33, "advert: " PRESS_LABEL);
 #if ENV_INCLUDE_GPS == 1
     } else if (_page == HomePage::GPS) {
       LocationProvider* nmea = sensors.getLocationProvider();
       char buf[50];
-      int y = 18;
+      int y = body_top - 2;
       bool gps_state = _task->getGPSState();
 #ifdef PIN_GPS_SWITCH
       bool hw_gps_state = digitalRead(PIN_GPS_SWITCH);
@@ -934,38 +948,38 @@ public:
       display.setColor(UIColor::primary_txt);
       display.drawTextLeftAlign(0, y, buf);
       if (nmea == NULL) {
-        y = y + 12;
+        y += row_height > 12 ? row_height : 12;
         display.setColor(UIColor::secondary_txt);
         display.drawTextLeftAlign(0, y, "Can't access GPS");
       } else {
         display.setColor(UIColor::primary_txt);
         strcpy(buf, nmea->isValid()?"fix":"no fix");
         display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        y += row_height > 12 ? row_height : 12;
         display.setColor(UIColor::secondary_txt);
         display.drawTextLeftAlign(0, y, "sat");
         display.setColor(UIColor::primary_txt);
         sprintf(buf, "%d", nmea->satellitesCount());
         display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        y += row_height > 12 ? row_height : 12;
         display.setColor(UIColor::secondary_txt);
         display.drawTextLeftAlign(0, y, "pos");
         display.setColor(UIColor::primary_txt);
         sprintf(buf, "%.4f %.4f",
           nmea->getLatitude()/1000000., nmea->getLongitude()/1000000.);
         display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        y += row_height > 12 ? row_height : 12;
         display.setColor(UIColor::secondary_txt);
         display.drawTextLeftAlign(0, y, "alt");
         display.setColor(UIColor::primary_txt);
         sprintf(buf, "%.2f", nmea->getAltitude()/1000.);
         display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        y += row_height > 12 ? row_height : 12;
       }
 #endif
 #if UI_SENSORS_PAGE == 1
     } else if (_page == HomePage::SENSORS) {
-      int y = 18;
+      int y = body_top - 2;
       refresh_sensors();
       if (sensors_lpp.getBuffer() == nullptr) {
         display.setColor(UIColor::warning_txt);
@@ -1038,7 +1052,7 @@ public:
           display.width()-display.getTextWidth(buf)-1, y
         );
         display.print(buf);
-        y = y + 12;
+        y += row_height > 12 ? row_height : 12;
       }
       if (sensors_scroll) sensors_scroll_offset = (sensors_scroll_offset+1)%sensors_nb;
       else sensors_scroll_offset = 0;
@@ -1076,6 +1090,12 @@ public:
       _page = (_page + HomePage::Count - 1) % HomePage::Count;
       return true;
     }
+#if COMPANION_FEATURE_JOHN
+    if (c == KEY_ENTER && _page == HomePage::RADIO) {
+      _task->showJohnReader();
+      return true;
+    }
+#endif
     if (c == KEY_NEXT || c == KEY_RIGHT) {
       _page = (_page + 1) % HomePage::Count;
       if (_page == HomePage::RECENT) {
@@ -1291,9 +1311,12 @@ class MsgPreviewScreen : public UIScreen {
 
   void renderChannelFilter(DisplayDriver& display) const {
 #if UI_MESSAGE_CHANNEL_FOOTER == 1
+    display.setTextSize(1);
     const mesh::ui::CompanionMessageChromeLayout layout =
         mesh::ui::makeCompanionMessageChromeLayout(
-            UI_COMPACT_MESSAGE_STATUS == 1);
+            UI_COMPACT_MESSAGE_STATUS == 1,
+            !display.useSmallMessageFont() && display.renderWidth() == display.width()
+                ? display.textLineHeight() : 0);
     const int bar_height = layout.filter_height;
     const int bar_y = display.height() - bar_height;
     display.setColor(UIColor::window_bkg);
@@ -1347,8 +1370,11 @@ public:
   }
 
   void renderSummary(DisplayDriver& display) const {
+    display.setTextSize(1);
     const mesh::ui::CompanionMessageListLayout layout =
-        mesh::ui::makeCompanionMessageListLayout(display.height());
+        mesh::ui::makeCompanionMessageListLayout(display.height(),
+            !display.useSmallMessageFont() && display.renderWidth() == display.width()
+                ? display.textLineHeight() : 10);
     int rendered = 0;
 
     display.setTextSize(1);
@@ -1404,9 +1430,14 @@ public:
   }
 
   int render(DisplayDriver& display) override {
+    // Native larger panels retain their normal font, including the taller
+    // Arial/FreeSans faces. Leave the Indicator's scaled chrome unchanged.
+    display.setTextSize(1);
+    const bool native_large = !display.useSmallMessageFont()
+        && display.renderWidth() == display.width();
     const mesh::ui::CompanionMessageChromeLayout layout =
-        mesh::ui::makeCompanionMessageChromeLayout(
-            UI_COMPACT_MESSAGE_STATUS == 1);
+        mesh::ui::makeCompanionMessageChromeLayout(UI_COMPACT_MESSAGE_STATUS == 1,
+            native_large ? display.textLineHeight() : 0);
     char tmp[24];
     int filtered_count = filteredCount();
     if (view_offset >= filtered_count) view_offset = 0;
@@ -1458,7 +1489,15 @@ public:
     display.setColor(UIColor::primary_txt);
     char filtered_msg[sizeof(p->message)];
     display.translateUTF8ToBlocks(filtered_msg, p->message, sizeof(filtered_msg));
-    display.printWordWrap(filtered_msg, display.width());
+    if (native_large) {
+      const int bottom = UI_MESSAGE_CHANNEL_FOOTER == 1
+          ? display.height() - layout.filter_height : display.height();
+      mesh::ui::drawTextWrapped(display, 0, layout.message_y, display.width(),
+          display.textLineHeight(), (bottom - layout.message_y) / display.textLineHeight(),
+          filtered_msg);
+    } else {
+      display.printWordWrap(filtered_msg, display.width());
+    }
 #endif
 
     renderChannelFilter(display);
@@ -1564,6 +1603,24 @@ void UITask::showMessages() {
   setCurrScreen(msg_preview);
 }
 
+#if COMPANION_FEATURE_JOHN
+void UITask::showJohnReader() {
+  if (!_display || isPairingScreenActive()) return;
+  if (!_display->isOn()) _display->turnOn();
+  if (!john_reader) john_reader = new (std::nothrow) JohnReaderScreen(this, _display);
+  if (!john_reader) { showAlert("Reader: no memory", 1500); return; }
+  static_cast<JohnReaderScreen*>(john_reader)->open();
+  setCurrScreen(john_reader);
+  _auto_off = millis() + AUTO_OFF_MILLIS;
+}
+
+void UITask::closeJohnReader() {
+  // Home retains the selected radio page while the reader is open.
+  setCurrScreen(home);
+  _auto_off = millis() + AUTO_OFF_MILLIS;
+}
+#endif
+
 int UITask::getPreviewCount() const {
   return static_cast<const MsgPreviewScreen*>(msg_preview)->messageCount();
 }
@@ -1608,7 +1665,11 @@ void UITask::msgRead(int msgcount) {
     _deferred_msg_preview = false;
     const bool holding_usb_preview = curr == msg_preview && _msg_preview_until != 0
         && static_cast<int32_t>(millis() - _msg_preview_until) < 0;
-    if (!holding_usb_preview) {
+    if (!holding_usb_preview
+#if COMPANION_FEATURE_JOHN
+        && !isJohnReaderActive()
+#endif
+    ) {
       gotoHomeScreen();
     }
   }
@@ -1625,7 +1686,14 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
     // Keep the PIN visible, but retain the preview so it can be shown after
     // pairing completes or the pairing display window expires.
     _deferred_msg_preview = true;
-  } else {
+  }
+#if COMPANION_FEATURE_JOHN
+  else if (isJohnReaderActive()) {
+    // Queue incoming messages without stealing the reader's page.
+    _deferred_msg_preview = true;
+  }
+#endif
+  else {
     setCurrScreen(msg_preview);
   }
 
@@ -1670,6 +1738,12 @@ void UITask::userLedHandler() {
 }
 
 void UITask::setCurrScreen(UIScreen* c) {
+#if COMPANION_FEATURE_JOHN
+  if (isJohnReaderActive() && c != john_reader
+      && !static_cast<JohnReaderScreen*>(john_reader)->flush()) {
+    showAlert("Bookmark save failed", 1500);
+  }
+#endif
   curr = c;
   _next_refresh = 100;
 }
@@ -1752,6 +1826,9 @@ void UITask::servicePairingState() {
 */
 void UITask::shutdown(bool restart){
   if (!prepareForShutdown()) return;
+#if COMPANION_FEATURE_JOHN
+  if (john_reader) static_cast<JohnReaderScreen*>(john_reader)->flush();
+#endif
 
   #ifdef PIN_BUZZER
   /* note: we have a choice here -
@@ -1819,6 +1896,11 @@ void UITask::loop() {
   if (ev == BUTTON_EVENT_CLICK) {
     c = checkDisplayOn(KEY_ENTER);
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+#if COMPANION_FEATURE_JOHN
+    if (isJohnReaderActive() || (curr == home && static_cast<HomeScreen*>(home)->isRadioPage()))
+      c = handleLongPress(KEY_ENTER);
+    else
+#endif
     display.turnOff();
   } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
     c = handleDoubleClick(KEY_SELECT);
@@ -1959,6 +2041,9 @@ void UITask::loop() {
 #endif
 
   if (curr) curr->poll();
+#if COMPANION_FEATURE_JOHN
+  if (john_reader && curr != john_reader) john_reader->poll();
+#endif
 
   if (_msgcount == 0 && _msg_preview_until != 0
       && static_cast<int32_t>(millis() - _msg_preview_until) >= 0) {
@@ -2000,6 +2085,9 @@ void UITask::loop() {
     if (user_btn.isWakeHoldActive()) _auto_off = millis() + AUTO_OFF_MILLIS;
 #endif
     if (!isPairingScreenActive() && isDisplayAutoOffDue(_auto_off, AUTO_OFF_MILLIS)) {
+#if COMPANION_FEATURE_JOHN
+      if (isJohnReaderActive()) static_cast<JohnReaderScreen*>(john_reader)->flush();
+#endif
       _display->turnOff();
     }
 #endif
@@ -2044,6 +2132,15 @@ char UITask::checkDisplayOn(char c) {
 }
 
 char UITask::handleLongPress(char c) {
+#if COMPANION_FEATURE_JOHN
+  // The radio page's reader gesture, including exit, takes precedence over
+  // the global early-boot rescue gesture just like the WiFi setup page.
+  if (isJohnReaderActive()) { closeJohnReader(); return 0; }
+  if (curr == home && static_cast<HomeScreen*>(home)->isRadioPage()) {
+    showJohnReader();
+    return 0;
+  }
+#endif
 #if UI_WIFI_SETUP_HOME_PAGE == 1
   // A setup AP may focus this page immediately at boot. Its documented HOLD
   // action must win over the otherwise-global early-boot CLI rescue gesture.

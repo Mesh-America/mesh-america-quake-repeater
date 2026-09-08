@@ -31,6 +31,12 @@ public:
 
   int width() const { return _w; }
   int height() const { return _h; }
+  // Dense 5/6px body fonts are only for sub-160px panels, in either rotation.
+  bool useSmallMessageFont() const { return _w < 160 && _h < 160; }
+  virtual int textLineHeight() {
+    const int glyph = getTextWidth("M");
+    return glyph <= 6 ? 10 : glyph * 2;
+  }
 
   virtual bool isOn() = 0;
   virtual bool supportsRotation() const { return false; }
