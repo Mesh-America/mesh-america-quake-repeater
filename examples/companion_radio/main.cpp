@@ -222,6 +222,7 @@ public:
       return false;
     }
 
+    if (!mesh::ota::ota_acquire_context(reply, reply_size)) return false;
     mesh::ota::OtaContext& context = mesh::ota::ota_ctx();
     if (context.folder_active
         && context.folderLink() != mesh::ota::OtaContext::FOLDER_LINK_BLE) {
@@ -247,24 +248,32 @@ public:
 
   bool stop(char* reply, size_t reply_size) override {
     if (!reply || reply_size == 0) return false;
-    mesh::ota::OtaContext& context = mesh::ota::ota_ctx();
     bluetooth_interface.setMotaStreamActive(false);
+    if (!mesh::ota::ota_context_if_active()) {
+      snprintf(reply, reply_size, "OK Bluetooth mOTA source stopped");
+      return true;
+    }
+    mesh::ota::OtaContext& context = mesh::ota::ota_ctx();
     if (context.folder_active
         && context.folderLink() == mesh::ota::OtaContext::FOLDER_LINK_BLE) {
       context.detach_folder();
       context.manager.announce();
       mesh::usbLoggingPort().println("Bluetooth mOTA source detached");
+      _last_packets_sent = context.manager.packetsSent()
+          - _packets_sent_at_start;
     }
-    _last_packets_sent = context.manager.packetsSent()
-        - _packets_sent_at_start;
     snprintf(reply, reply_size, "OK Bluetooth mOTA source stopped");
     return true;
   }
 
   mesh::companion::MotaSourceStatus status() const override {
-    const mesh::ota::OtaContext& context = mesh::ota::ota_ctx();
     mesh::companion::MotaSourceStatus result;
     result.channel_ready = bluetooth_interface.isMotaChannelReady();
+    if (!mesh::ota::ota_context_if_active()) {
+      result.packets_sent = _last_packets_sent;
+      return result;
+    }
+    const mesh::ota::OtaContext& context = mesh::ota::ota_ctx();
     result.attached = context.folder_active
         && context.folderLink() == mesh::ota::OtaContext::FOLDER_LINK_BLE
         && bluetooth_interface.isMotaStreamActive();
@@ -281,6 +290,10 @@ public:
   }
 
   void loop() {
+    if (!mesh::ota::ota_context_if_active()) {
+      bluetooth_interface.setMotaStreamActive(false);
+      return;
+    }
     mesh::ota::OtaContext& context = mesh::ota::ota_ctx();
     const bool owns_folder = context.folder_active
         && context.folderLink() == mesh::ota::OtaContext::FOLDER_LINK_BLE;
@@ -2054,9 +2067,17 @@ void halt() {
                                    clear_bonds, stealth_pair_once,
                                    bonded_only_peer_ptr)) {
       interface_manager.removeInterface(&bluetooth_interface);
+#if defined(NRF52_PLATFORM)
+      // A partly initialized Bluefruit stack cannot be started again safely.
+      // Leave the interface unregistered so the UI cannot advertise a PIN
+      // for it, and avoid consuming more heap every five seconds.
+      mesh::usbLoggingPort().println(
+          "Companion: Bluetooth initialization failed; reboot required");
+#else
       mesh::usbLoggingPort().println(
           "Companion: Bluetooth initialization failed; retrying in 5 seconds");
       scheduleCompanionBluetoothRetry();
+#endif
       return;
     }
 #if defined(ESP32_PLATFORM) && COMPANION_BT_MODEM_SLEEP_AVAILABLE

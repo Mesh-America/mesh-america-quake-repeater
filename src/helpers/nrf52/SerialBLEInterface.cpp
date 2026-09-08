@@ -1,4 +1,5 @@
 #include "SerialBLEInterface.h"
+#include "BleTaskStartup.h"
 #include "../BluetoothMac.h"
 #include "../CompanionFrameQueue.h"
 #include <stdio.h>
@@ -401,6 +402,12 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
                                bool clear_bonds, bool stealth_pair_once,
                                const mesh::companion::BluetoothPeerIdentity*
                                    bonded_only_peer) {
+  // Bluefruit cannot safely reinitialize a partly started SoftDevice: doing
+  // so leaks worker tasks, FIFOs and GATT registrations on every retry. Keep
+  // USB/UI usable after a failed start; recovery requires a corrected build
+  // or configuration and a reboot.
+  if (_begin_attempted) return _begin_ready;
+  _begin_attempted = true;
   instance = this;
   _successfulConnectionPending.store(false, std::memory_order_release);
   _successfulConnectionStarted.store(0, std::memory_order_relaxed);
@@ -417,9 +424,11 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   // If we want to control BLE LED ourselves, uncomment this:
   // Bluefruit.autoConnLed(false);
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-  if (!Bluefruit.begin()) {
+  mesh::nrf52::resetBleTaskStartup();
+  if (!Bluefruit.begin() || !mesh::nrf52::bleTasksStarted()) {
     instance = nullptr;
-    BLE_DEBUG_PRINTLN("Bluefruit.begin failed");
+    mesh::usbLoggingPort().println(
+        "Bluetooth startup failed (SoftDevice/tasks); check runtime heap and reboot");
     return false;
   }
 
@@ -501,7 +510,11 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   Bluefruit.setEventCallback(onBLEEvent);
 
   bleuart.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_ENC_WITH_MITM);
-  bleuart.begin();
+  if (bleuart.begin() != ERROR_NONE) {
+    instance = nullptr;
+    BLE_DEBUG_PRINTLN("Bluetooth UART service begin failed");
+    return false;
+  }
   bleuart.setRxCallback(onBleUartRX);
 
 #if COMPANION_FEATURE_BLE_MOTA_SOURCE
@@ -511,6 +524,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   _mota_service.setPermission(SECMODE_ENC_WITH_MITM,
                               SECMODE_ENC_WITH_MITM);
   if (_mota_service.begin() != ERROR_NONE) {
+    instance = nullptr;
     BLE_DEBUG_PRINTLN("Bluetooth mOTA service begin failed");
     return false;
   }
@@ -521,6 +535,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   _mota_request.setMaxLen(mesh::ota::BLE_MOTA_REQUEST_MAX);
   _mota_request.setUserDescriptor("mOTA device request");
   if (_mota_request.begin() != ERROR_NONE) {
+    instance = nullptr;
     BLE_DEBUG_PRINTLN("Bluetooth mOTA request characteristic begin failed");
     return false;
   }
@@ -532,6 +547,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   _mota_response.setUserDescriptor("mOTA host response");
   _mota_response.setWriteCallback(onMotaResponse);
   if (_mota_response.begin() != ERROR_NONE) {
+    instance = nullptr;
     BLE_DEBUG_PRINTLN("Bluetooth mOTA response characteristic begin failed");
     return false;
   }
@@ -541,7 +557,11 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   // Register DFU on the main BLE stack so paired clients can discover it
   // without switching the device into a separate OTA-only BLE mode first.
   bledfu.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_ENC_WITH_MITM);
-  bledfu.begin();
+  if (bledfu.begin() != ERROR_NONE) {
+    instance = nullptr;
+    BLE_DEBUG_PRINTLN("Bluetooth DFU service begin failed");
+    return false;
+  }
 
   Bluefruit.Advertising.setType(
       BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
@@ -560,6 +580,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
     configureBondedOnlyAdvertising(*bonded_only_peer, true);
   }
 
+  _begin_ready = true;
   return true;
 }
 

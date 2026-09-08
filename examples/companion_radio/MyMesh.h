@@ -48,6 +48,10 @@
 #include <helpers/TerminalCommandTracker.h>
 #include <helpers/TerminalDisplayFilter.h>
 #include <target.h>
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+#include <helpers/BorrowableFrameBuffer.h>
+#include <helpers/ota/OtaContext.h>
+#endif
 
 #ifdef COMPANION_MESH_CLOCK_SYNC
 #include <helpers/ClientACL.h>
@@ -569,7 +573,12 @@ private:
   void initializeOfflineQueue();
   int offline_queue_len;
   int offline_queue_head;
-#if defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+  static_assert(OFFLINE_QUEUE_SIZE == 256, "Shared mOTA queue requires 256 normal slots");
+  mesh::BorrowableFrameBuffer<Frame, OFFLINE_QUEUE_SIZE, 128, mesh::ota::OtaContext> offline_queue;
+  static mesh::ota::OtaContext* acquireOfflineQueueForOta(void* owner);
+  static void releaseOfflineQueueFromOta(void* owner);
+#elif defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
   enum {
     OFFLINE_QUEUE_PSRAM_FALLBACK_SIZE =
         OFFLINE_QUEUE_SIZE < 16 ? OFFLINE_QUEUE_SIZE : 16

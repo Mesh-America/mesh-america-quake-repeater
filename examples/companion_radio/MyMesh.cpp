@@ -408,7 +408,9 @@ bool MyMesh::Frame::isChannelMsg() const {
 }
 
 int MyMesh::getOfflineQueueCapacity() const {
-#if defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+  return offline_queue.capacity();
+#elif defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
   return offline_queue_capacity;
 #else
   return OFFLINE_QUEUE_SIZE;
@@ -416,11 +418,29 @@ int MyMesh::getOfflineQueueCapacity() const {
 }
 
 MyMesh::Frame& MyMesh::offlineQueueFrameAt(int logical_index) {
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+  return offline_queue.at((offline_queue_head + logical_index) % getOfflineQueueCapacity());
+#else
   return offline_queue[(offline_queue_head + logical_index) % getOfflineQueueCapacity()];
+#endif
 }
 
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+mesh::ota::OtaContext* MyMesh::acquireOfflineQueueForOta(void* owner) {
+  MyMesh* mesh = static_cast<MyMesh*>(owner);
+  return mesh->offline_queue.acquire(mesh->offline_queue_len, mesh->offline_queue_head);
+}
+
+void MyMesh::releaseOfflineQueueFromOta(void* owner) {
+  MyMesh* mesh = static_cast<MyMesh*>(owner);
+  mesh->offline_queue.release(mesh->offline_queue_head);
+}
+#endif
+
 void MyMesh::initializeOfflineQueue() {
-#if defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+  mesh::ota::ota_set_context_storage(this, acquireOfflineQueueForOta, releaseOfflineQueueFromOta);
+#elif defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
   if (offline_queue != offline_queue_fallback || OFFLINE_QUEUE_SIZE <= offline_queue_capacity) return;
 
   int requested_capacity = OFFLINE_QUEUE_SIZE;
@@ -2080,6 +2100,10 @@ bool MyMesh::scheduleTempRadio(float freq, float bw, uint8_t sf, uint8_t cr,
     return false;
   }
 
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+  if (!mesh::ota::ota_acquire_context(reply, reply_size)) return false;
+  mesh::ota::ota_ctx().release_when_idle = false;
+#endif
   _temp_radio_freq = freq;
   _temp_radio_bw = bw;
   _temp_radio_sf = sf;
@@ -8192,6 +8216,9 @@ void MyMesh::loop() {
   }
 #if COMPANION_FEATURE_TEMP_RADIO
   serviceTempRadio();
+#endif
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+  mesh::ota::ota_release_context_if_idle(isTempRadioActive() || _temp_radio_set_at != 0);
 #endif
   BaseChatMesh::loop();
 #ifdef COMPANION_MESH_CLOCK_SYNC

@@ -35,6 +35,9 @@ python3 test/test_esp32_dram.py                 # Classic ESP32 static limits an
 python3 test/test_esp32_usb_serial_hygiene.py   # Single-TTY diagnostics/NVS contract
 python3 test/test_esp32_usb_sleep.py            # USB/logging sleep guards, G3 button wake and two-minute hold/rollover
 python3 test/test_logging_sleep_contract.py    # USB enable examples and real Repeater/Room MQTT sleep gates
+python3 test/test_t096_full_memory.py          # Full profile, shared queue wraparound, heap reserve and sensor OOM
+python3 test/test_nrf52_ble_startup.py          # Real task wrapper/BLE startup with worker and GATT failures
+python3 test/test_shared_mota_queue.py          # Real mOTA transfers, BLE stop/disconnect, queue loans and policy retention
 python3 test/test_esp32_tinyusb_role_hygiene.py # G2/room USB write coverage and bounded-list contracts
 python3 test/test_esp32_tinyusb_cooperative_output.py # Real role dump/list pumps with host C++ stubs
 python3 test/test_esp32_tinyusb_nonblocking.py # Native CDC stalled-host/64-byte-FIFO simulation (C++17 compiler)

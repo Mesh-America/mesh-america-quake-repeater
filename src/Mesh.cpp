@@ -188,7 +188,7 @@ bool Mesh::otaSendAdapter(void* ctx, const uint8_t* msg, uint16_t len, bool /*fl
 
 // Runtime OTA flood reach (`ota config hops`, persisted in NodePrefs): accept packets up to N hops away and
 // relay those still under N hops. 0 = direct only. Overridable per-role by subclassing.
-uint8_t Mesh::getOtaHopLimit() const { return ota::ota_ctx().manager.max_hops(); }
+uint8_t Mesh::getOtaHopLimit() const { return ota::ota_hop_limit(); }
 #endif
 
 void Mesh::begin() {
@@ -263,8 +263,7 @@ void Mesh::begin() {
   #ifdef MOTA_HW_ID
     my_hw = MOTA_HW_ID;                     // human-readable hardware tag (per-variant), for the apply hw gate
   #endif
-  ota::ota_ctx().begin(my_tid, Mesh::otaSendAdapter, this, my_hw);   // also sets the platform apply codec
-  ota::ota_ctx().manager.set_seeder_id(self_id.pub_key);      // node id (pubkey[0:4]) for advert seeder count
+  ota::ota_begin_context(my_tid, Mesh::otaSendAdapter, this, my_hw, self_id.pub_key);
 #endif
 }
 
@@ -356,6 +355,12 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
         }
       }
     }
+  }
+#endif
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+  if (!ota::ota_context_if_active()) {
+    _ota_temp_was_active = false;
+    return;
   }
 #endif
   const bool ota_active = isTempRadioActive();
@@ -1093,12 +1098,13 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       const uint8_t ota_priority = otaTrafficPriority(pkt->payload, pkt->payload_len);
       bool terminal_ota = false;
 #if defined(ENABLE_OTA)
-      ota::ota_ctx().manager.set_clock(_ms->getMillis());                 // discovery jitter/ages
-      ota::ota_ctx().manager.note_rx_path_hops(n);                        // adaptive fetch timing
-      terminal_ota = ota::ota_ctx().manager.on_message(pkt->payload, pkt->payload_len);
-                                                                         // central OTA receive (all roles)
-      ota::ota_ctx().track_session(ota::ota_ctx().manager.fetchState(), _ms->getMillis());
-      onOtaRecv(pkt);                                                     // optional per-example hook
+      if (ota::OtaContext* context = ota::ota_context_if_active()) {
+        context->manager.set_clock(_ms->getMillis());
+        context->manager.note_rx_path_hops(n);
+        terminal_ota = context->manager.on_message(pkt->payload, pkt->payload_len);
+        context->track_session(context->manager.fetchState(), _ms->getMillis());
+        onOtaRecv(pkt);
+      }
 #endif
       // Re-flood discovery at background priority, but keep an active transfer primary at every relay hop.
       // The free-pool reserve still sheds periodic discovery under pressure; requested transfer packets are

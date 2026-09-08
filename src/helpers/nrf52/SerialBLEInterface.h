@@ -28,6 +28,8 @@ class SerialBLEInterface : public BaseSerialInterface {
   mesh::ota::BleMotaStream _mota_stream;
 #endif
   bool _isEnabled;
+  bool _begin_attempted = false;
+  bool _begin_ready = false;
   bool _isDeviceConnected;
   uint16_t _conn_handle;
   unsigned long _last_health_check;

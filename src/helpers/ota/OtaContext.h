@@ -82,6 +82,10 @@ class FolderMotaStore;   // pull destination over the seeder link (full type onl
 #endif
 
 struct OtaContext {
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+  // Release at a main-loop boundary, after callers finish using this context.
+  bool release_when_idle = false;
+#endif
   OtaManager manager;
 #if defined(OTA_SEEDER_ONLY)
   // A seeder-only node never stages an image for itself. Keep a valid default
@@ -405,6 +409,9 @@ struct OtaContext {
       return false;
     }
     folder_active = true;
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+    release_when_idle = false;
+#endif
     _folder_link = link;
     _folder_source = source;
     uint16_t offered = 0, advertised = 0;
@@ -432,6 +439,9 @@ struct OtaContext {
     folder_active = false;
     _folder_link = FOLDER_LINK_NONE;
     _folder_source = nullptr;
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+    release_when_idle = true;
+#endif
   }
 
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
@@ -617,6 +627,23 @@ private:
 };
 
 OtaContext& ota_ctx();   // process-wide singleton
+
+// On constrained source-only Companions, the context exists only while its
+// queue-backed workspace is owned by mOTA. Other builds keep the singleton.
+OtaContext* ota_context_if_active();
+bool ota_acquire_context(char* reply, size_t cap);
+void ota_begin_context(uint32_t target, OtaSend send, void* ctx,
+                       const char* hw, const uint8_t* seeder_id);
+uint8_t ota_hop_limit();
+
+#if defined(OTA_SHARED_COMPANION_QUEUE)
+#if !defined(NRF52_PLATFORM) || !defined(OTA_SEEDER_ONLY) || !defined(COMPANION_RADIO_FULL)
+#error "Shared mOTA queue storage requires an nRF52 Full source-only Companion"
+#endif
+void ota_set_context_storage(void* owner, OtaContext* (*acquire)(void*),
+                             void (*release)(void*));
+void ota_release_context_if_idle(bool temporary_radio_active);
+#endif
 
 } // namespace ota
 } // namespace mesh

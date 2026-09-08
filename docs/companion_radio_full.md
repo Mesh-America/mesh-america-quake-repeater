@@ -333,6 +333,12 @@ direct messages; it is not flash-backed history. See
 [Companion offline message queue](./companion_offline_queue.md) for all platform
 defaults and full-queue behavior.
 
+The corrected T096 Full profile keeps **256 offline frames normally** and
+temporarily lends 128 slots to mOTA to leave room for
+its color framebuffer, Bluetooth tasks, and UI allocations. It retains 350
+contacts, 40 channels, and USB/Bluetooth mOTA sending. The published 1.17.1.5
+`26303793` image predates this [memory correction](releases/1.17.1.5.md#t096-full-companion-bluetooth-and-menu-freeze-report).
+
 The nRF52 target inherits the board's ordinary USB Companion installation
 format and adds BLE plus the serial mOTA source. It does not enable an SD cache
 or any other board-specific storage behavior; host files are streamed as they

@@ -41,6 +41,12 @@ jobs:
       - name: Verify nRF52 UF2-reset CLI coverage
         run: python3 -B test/test_nrf52_uf2reset_cli.py
 
+      - name: Verify T096 Full memory and nRF52 Bluetooth startup
+        run: |
+          python3 -B test/test_t096_full_memory.py
+          python3 -B test/test_nrf52_ble_startup.py
+          python3 -B test/test_shared_mota_queue.py
+
       - name: Verify Companion Bluetooth settings and WebConfig
         run: |
           python3 -B test/test_bluetooth_mac_contract.py

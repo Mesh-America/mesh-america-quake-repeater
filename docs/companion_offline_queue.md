@@ -12,6 +12,7 @@ A reboot clears it.
 | ESP32 with configured PSRAM | 512 |
 | ESP32 without PSRAM | 256 |
 | nRF52840 | 256 |
+| T096 Full Companion with the memory correction | 256 normally; 128 while mOTA owns shared storage |
 | RP2040 | 256 |
 | STM32 | 16 |
 | Known constrained classic ESP32 target override | 128 |
@@ -24,6 +25,22 @@ their combined WiFi, BLE, and LoRa mOTA image retains enough internal DRAM.
 Meshadventurer SX1262 and SX1268 Full Companion use 16 frames together with 100
 contacts and 30 group channels; their ordinary transport-specific images keep
 128 frames and 40 channels.
+
+The [T096 Full memory correction](releases/1.17.1.5.md#t096-full-companion-bluetooth-and-menu-freeze-report)
+keeps 256 frames normally, while retaining 350 contacts, 40 channels, and all
+Full transports. The upper 128 slots temporarily hold the mOTA context when
+a source or TempRadio discovery session starts. Stopping or disconnecting the
+USB/Bluetooth source returns all 256 slots; a discovery-only session returns
+them when TempRadio ends. This shares a fixed memory region and avoids heap
+fragmentation from resizing.
+
+Existing unread messages retain their order. If more than 128 frames are
+pending, mOTA refuses the loan and asks you to sync messages with a Companion
+app first. While the loan is active, the overflow policy below applies at 128
+frames. The original `26303793` 1.17.1.5 download reserves the queue and mOTA
+state separately, leaving too little runtime headroom for its color display
+and Bluetooth. The corrected profile recovers about 19 KiB by sharing storage
+and requires at least 72 KiB of heap space at link time.
 
 Standard, logging, MQTT, and Cascade build overlays retain the selected target
 capacity; they do not silently shrink the queue.

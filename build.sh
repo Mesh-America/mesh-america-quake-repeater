@@ -3504,6 +3504,20 @@ apply_companion_radio_full_profile() {
     append_platformio_build_unflags "-UOTA_FOLDER_SERIAL"
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOTA_FOLDER_SERIAL=1 -DCOMPANION_FEATURE_USB_MOTA_SOURCE=1 -DCOMPANION_FEATURE_BLE_MOTA_SOURCE=1 -DCOMPANION_FEATURE_DEDICATED_USB_LOGGING=1 -DCFG_TUD_CDC=2 -DMESH_DUAL_CDC_LOGGING=1 -DMESH_DEBUG=1 -DMESH_PACKET_LOGGING=1"
 
+    case "${env_name,,}" in
+      heltec_t096_companion_radio_full*)
+        # The TFT allocates 25 KiB after linking. Together with the loop,
+        # callback and BLE task stacks, packet pool, filesystems and message
+        # previews, this exhausts the 1.17.1.5 image's ~53 KiB heap. Keep all
+        # 256 offline slots normally; lend the upper 128 to the mOTA context
+        # only while needed. Reserve 72 KiB for runtime allocations at link.
+        append_platformio_build_unflags "-DOFFLINE_QUEUE_SIZE=512 -DOFFLINE_QUEUE_SIZE=128"
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOFFLINE_QUEUE_SIZE=256 -DOTA_SHARED_COMPANION_QUEUE=1 -Wl,--defsym=__mesh_nrf52_min_heap_size=73728"
+        record_build_reduction \
+          "T096 Full: 256 offline frames normally; 128 while mOTA borrows queue storage"
+        ;;
+    esac
+
     if ! pio_env_option_contains "$pio_env_name" build_src_filter "helpers/ota/*.cpp"; then
       append_platformio_build_src_filter "+<helpers/ota/*.cpp>"
     fi

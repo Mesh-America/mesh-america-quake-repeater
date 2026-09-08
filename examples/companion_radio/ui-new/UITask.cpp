@@ -456,6 +456,14 @@ class HomeScreen : public UIScreen {
   int next_sensors_refresh = 0;
 
   void refresh_sensors() {
+    // CayenneLPP retains its requested capacity even if its allocation fails.
+    // Its add methods would then write through NULL when this page is opened.
+    if (sensors_lpp.getBuffer() == nullptr) {
+      sensors_nb = 0;
+      sensors_scroll = false;
+      sensors_scroll_offset = 0;
+      return;
+    }
     if (millis() > next_sensors_refresh) {
       sensors_lpp.reset();
       sensors_nb = 0;
@@ -947,6 +955,12 @@ public:
     } else if (_page == HomePage::SENSORS) {
       int y = 18;
       refresh_sensors();
+      if (sensors_lpp.getBuffer() == nullptr) {
+        display.setColor(UIColor::warning_txt);
+        display.drawTextCentered(display.width() / 2, 34,
+                                 "Sensors: low memory");
+        return 5000;
+      }
       char buf[30];
       char name[30];
       LPPReader r(sensors_lpp.getBuffer(), sensors_lpp.getSize());

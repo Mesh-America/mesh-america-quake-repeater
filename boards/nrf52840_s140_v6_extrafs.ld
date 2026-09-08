@@ -47,3 +47,4 @@ SECTIONS
 }
 
 INCLUDE "nrf52_common.ld"
+INCLUDE "boards/nrf52_heap_reserve.ld"

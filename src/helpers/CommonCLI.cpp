@@ -856,6 +856,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #if defined(ENABLE_OTA)
 // Push the persisted OTA policy + signer allowlist into the running OtaContext (called after load).
 void CommonCLI::syncOtaConfigFromPrefs() {
+  if (!mesh::ota::ota_acquire_context(nullptr, 0)) return;
   mesh::ota::OtaContext& c = mesh::ota::ota_ctx();
   c.manager.set_autofetch(_prefs->ota_autofetch);
   c.manager.set_checkpoint_blocks(_prefs->ota_checkpoint_blocks);
@@ -2638,7 +2639,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         strcpy(reply, "LoRa OTA needs temp radio on every node. Run: tempradio 909.950,250,5,5,120");
       } else {
         mesh::ota::handle_ota_command(command, reply, *_board);
-        if (mesh::ota::ota_ctx().config_dirty) {        // a policy/key changed via the CLI -> persist it
+        if (mesh::ota::ota_context_if_active()
+            && mesh::ota::ota_ctx().config_dirty) {    // a policy/key changed via the CLI -> persist it
           mesh::ota::OtaContext& c = mesh::ota::ota_ctx();
           _prefs->ota_autofetch = c.manager.autofetch();
           _prefs->ota_checkpoint_blocks = c.manager.checkpoint_blocks();

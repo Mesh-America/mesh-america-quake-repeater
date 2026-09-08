@@ -155,6 +155,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
   const char* a = command + 3;
   if (*a != 0 && *a != ' ') return false;
   while (*a == ' ') a++;
+  if (!ota_acquire_context(reply, 160)) return true;
   OtaContext& c = ota_ctx();
   const char* rest = a;
 
