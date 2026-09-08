@@ -124,7 +124,8 @@ static void drawCompanionTransportChoice(DisplayDriver& display,
 #if UI_WIFI_SETUP_HOME_PAGE == 1
 static bool drawCompactCompanionWiFiSetupPage(
     DisplayDriver& display, bool setup_active, const char* setup_ssid,
-    const char* setup_ip, bool wifi_enabled, bool wifi_connected,
+    const char* setup_ip, const char* wifi_ip,
+    bool wifi_enabled, bool wifi_connected,
     bool wifi_configured) {
   if (display.width() > 128 || display.height() > 64) return false;
 
@@ -153,13 +154,19 @@ static bool drawCompactCompanionWiFiSetupPage(
     display.setColor(UIColor::secondary_txt);
     display.drawTextCentered(display.width() / 2, 42, open_ip);
   } else {
+    const bool show_ip = wifi_connected && wifi_ip[0] != 0;
     const char* wifi_status = !wifi_enabled
         ? "WIFI OFF"
         : wifi_connected
-            ? "WIFI READY"
+            ? "WIFI CONNECTED"
             : wifi_configured ? "WIFI CONNECTING" : "WIFI NOT CONFIGURED";
     display.setColor(UIColor::secondary_txt);
-    display.drawTextCentered(display.width() / 2, 37, wifi_status);
+    display.drawTextCentered(display.width() / 2, show_ip ? 31 : 37, wifi_status);
+    if (show_ip) {
+      char ip_line[19]; // "IP " plus the longest IPv4 address and terminator
+      snprintf(ip_line, sizeof(ip_line), "IP %s", wifi_ip);
+      display.drawTextCentered(display.width() / 2, 42, ip_line);
+    }
   }
 
   display.setColor(UIColor::warning_txt);
@@ -178,6 +185,15 @@ static void drawCompanionWiFiSetupPage(DisplayDriver& display) {
   const bool wifi_enabled = isCompanionWiFiEnabled();
   const bool wifi_connected = isCompanionWiFiConnected();
   const bool wifi_configured = hasCompanionWiFiCredentials();
+  char wifi_ip[16] = {0};
+  if (wifi_connected) {
+    // localIP() can retain the previous lease after a disconnect. Show only
+    // an address from a live station link, after DHCP has supplied one.
+    const IPAddress ip = WiFi.localIP();
+    if (static_cast<uint32_t>(ip) != 0) {
+      snprintf(wifi_ip, sizeof(wifi_ip), "%s", ip.toString().c_str());
+    }
+  }
   const CompanionWiFiDisplayState state = setup_active
       ? CompanionWiFiDisplayState::Setup
       : !wifi_enabled
@@ -200,7 +216,7 @@ static void drawCompanionWiFiSetupPage(DisplayDriver& display) {
   noteCompanionWiFiDisplayState(state);
 
   if (drawCompactCompanionWiFiSetupPage(
-          display, setup_active, setup_ssid, setup_ip, wifi_enabled,
+          display, setup_active, setup_ssid, setup_ip, wifi_ip, wifi_enabled,
           wifi_connected, wifi_configured)) {
     return;
   }
@@ -245,11 +261,16 @@ static void drawCompanionWiFiSetupPage(DisplayDriver& display) {
     display.drawTextCentered(display.width() / 2, 112, "THEN REBOOT");
   } else if (wifi_connected) {
     display.setTextSize(2);
-    display.drawTextCentered(display.width() / 2, 25, "WIFI READY");
+    if (display.getTextWidth("WIFI CONNECTED") > display.width()) {
+      display.setTextSize(1);
+    }
+    display.drawTextCentered(display.width() / 2, 25, "WIFI CONNECTED");
+    display.setTextSize(2);
     const String ssid = WiFi.SSID();
     display.drawTextEllipsized(4, 60, display.width() - 8, ssid.c_str());
-    const String ip = WiFi.localIP().toString();
-    display.drawTextCentered(display.width() / 2, 95, ip.c_str());
+    if (wifi_ip[0]) {
+      display.drawTextCentered(display.width() / 2, 95, wifi_ip);
+    }
   } else if (!wifi_configured) {
     display.setTextSize(3);
     display.drawTextCentered(display.width() / 2, 45, "WIFI SETUP");

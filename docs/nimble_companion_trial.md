@@ -95,6 +95,11 @@ pixel modules. The SSID, portal address and `HOLD STOP` hint remain beside it.
 Short-click to leave the page; hold the button on this page to start or stop
 the setup AP. From USB, `start webconfig ap` starts the same setup session.
 
+When the setup AP is inactive and the node has joined WiFi, this page shows
+`WIFI CONNECTED` and an `IP <address>` row above `HOLD START AP`. The address appears
+once assigned and clears when the station disconnects. While the setup AP is
+active, the QR page shows the setup portal's address instead.
+
 ## Regression checks
 
 ```sh
