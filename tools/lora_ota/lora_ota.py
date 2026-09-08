@@ -1603,11 +1603,11 @@ def reply_matches_command(command_text: str, reply: str) -> bool:
     if command == "ota stats":
         return text.startswith("OTA | fw ") or is_unknown or needs_temp
     if command == "get bootloader.ver":
-        return (
-            bool(re.fullmatch(r">\s*\S+", text))
-            or is_unknown
-            or (is_error and "unsupported" in lowered)
-        )
+        try:
+            parse_bootloader_version_reply(text)
+            return True
+        except OtaError:
+            return False
     if command == "ota ls":
         return (
             text.startswith("Updates ")
@@ -1681,13 +1681,20 @@ def parse_bootloader_version_reply(
 ) -> tuple[str | None, str | None]:
     """Return platform/version, or no platform for legacy firmware."""
     text = reply.strip()
-    version_match = re.fullmatch(r">\s*(\S+)", text)
+    version_match = re.fullmatch(r">\s*(\S+(?:[ \t]+\(base\))?)", text)
     if version_match:
         version = version_match.group(1)
+        # Older getters use this generic response for an unknown config key;
+        # it is neither a bootloader version nor evidence of the platform.
+        if version.lower() == "unsupported":
+            return None, None
         return "nrf52", None if version.lower() == "unknown" else version
     if re.fullmatch(r"err(?:or)?:\s*unsupported", text, re.IGNORECASE):
         return "esp32", None
-    if text.lower().startswith(("unknown command", "command not found")):
+    if re.match(
+        r"^(?:err(?:or)?[: ,]\s*)?(?:unknown (?:command|config)\b|command not found\b)",
+        text, re.IGNORECASE,
+    ):
         return None, None
     raise OtaError(
         "could not interpret destination `get bootloader.ver` reply: "
@@ -2787,12 +2794,20 @@ def query_target(
     if not match:
         raise OtaError("could not read destination target ID from `ota status`")
     target_id = int(match.group(1), 16)
-    bootloader_reply = controller.remote_command(
-        args.target, "get bootloader.ver"
-    )
-    reported_platform, bootloader_version = parse_bootloader_version_reply(
-        bootloader_reply
-    )
+    # Version text is diagnostic, not an install gate. In particular, deployed
+    # applications can report unknown for the signed OTAFIX 2.4.6 SD image,
+    # which has BLM2 metadata but no legacy UF2 string. One optional attempt;
+    # never enter interactive/unbounded retries for a missing getter.
+    reported_platform, bootloader_version = None, None
+    try:
+        bootloader_reply = controller.remote_command(
+            args.target, "get bootloader.ver", retry=False
+        )
+        reported_platform, bootloader_version = parse_bootloader_version_reply(
+            bootloader_reply
+        )
+    except OtaError as exc:
+        print(f"[warn] optional `get bootloader.ver` probe unavailable: {exc}")
     self_status = controller.remote_command(args.target, "ota self")
     hash_match = re.search(r"base_hash=([0-9A-Fa-f]{16})", self_status)
     if not hash_match:
@@ -2800,18 +2815,26 @@ def query_target(
     base_hash = bytes.fromhex(hash_match.group(1))
     max_block_size = parse_target_max_block_size(status, self_status)
     combined = f"{status} {self_status}"
+    has_nrf_markers = "bootloader:" in combined or "| bl:" in combined
     if reported_platform is None:
         platform = (
             "nrf52"
-            if "bootloader:" in combined or "| bl:" in combined
+            if has_nrf_markers
             else "esp32"
         )
         print(
-            "[warn] destination firmware does not implement "
-            "`get bootloader.ver`; using legacy `ota self` platform markers"
+            "[warn] destination bootloader version is unavailable; "
+            "using legacy `ota self` platform markers"
         )
     else:
-        platform = reported_platform
+        # A generic unsupported response must not classify a positive nRF52
+        # capability report as ESP32 and skip its ABI/codec checks.
+        platform = "nrf52" if has_nrf_markers else reported_platform
+        if platform == "nrf52" and bootloader_version is None:
+            print(
+                "[warn] bootloader version text is unavailable; continuing with "
+                "live `ota status`/`ota self` capabilities (ABI/codec checks still required)"
+            )
     nrf_sd = "SD apply OK" in combined or bool(
         re.search(r"\bbl:SD\b", combined)
     )

@@ -26,6 +26,7 @@ python3 test/test_companion_settings_persistence_contract.py  # Atomic settings 
 python3 test/test_webconfig_ui.py              # Web controls, reboot handling and generated-page consistency
 python3 test/test_webconfig_ui_runtime.py      # Real Chromium, including independent stealth toggle
 python3 test/test_nrf52_uf2reset_cli.py          # all nRF52 text-CLI reset dispatchers
+python3 test/test_nrf52_bootloader_version.py -v  # real C++ version reader, metadata and firmware wiring
 python3 test/test_client_login_profile_contract.py  # ACL login ordering/role contract
 python3 test/test_client_acl_spiffs.py          # Actual ACL: first login, replay/reboot, failed storage
 python3 test/test_replay_reset_command.py       # Strict full keys and one-use recovery confirmations
@@ -52,6 +53,21 @@ The WebConfig browser suite skips if no Chromium-family browser is available.
 With a sandboxed browser that cannot read `/tmp`, set `TMPDIR` to a writable
 directory visible to that browser before running it. The Bluetooth settings
 contracts and WebConfig suites also run in the unit-test GitHub workflow.
+
+The bootloader-version regression compiles the production reader with a C++17
+`g++` (or `CXX`) compiler. Its offline cases include the MeshTower V2 SD 2.4.6
+missing-UF2-text failure, OTAFIX metadata versus cached base-version precedence,
+stock/vendor/preview strings, bounds, truncation, invalid CRCs and malformed
+metadata. A separate CI job also downloads the pinned OTAFIX 2.4.6 release
+archive, verifies its SHA-256 and all 17 signed packages, and feeds their actual
+bootloader payloads through the same C++ reader. No radio is accessed or flashed.
+To repeat the release test locally, install Python `cryptography` and set
+`MESHCORE_BOOTLOADER_MOTA_ZIP` to the downloaded
+`OTAFIX-2.4.6-bootloader-mota.zip` before running the command above.
+The same CI job runs `python3 -B -m unittest discover -s tools/lora_ota -p
+test_lora_ota_bootloader_version.py -v`: simulated old-firmware replies and lost
+optional probes must not block either OTA launcher, while required capability,
+identity, storage, codec and package checks must still reject unsafe updates.
 
 A green `[PASSED]` per suite means GoogleTest returned 0 (all assertions
 passed). PlatformIO's "0 test cases" line is just its Unity-style counter and

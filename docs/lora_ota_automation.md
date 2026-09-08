@@ -435,14 +435,30 @@ ota self
 ota stats
 ```
 
-The script uses `get bootloader.ver` to distinguish ESP32 from nRF52 and, for
-nRF52, report the installed bootloader version. It then requires `ota self` to
+The script uses `get bootloader.ver` as an optional platform/version hint, not
+as an install gate. It makes one attempt without an interactive retry loop.
+`unknown`, an unsupported/missing command, an unrecognized reply, or a lost reply
+produces a warning and does not by itself block the run. In particular, older
+MeshCore firmware can report `unknown` for the installed signed OTAFIX 2.4.6
+MeshTower V2 SD image because it omits the legacy UF2 version string. Both the
+shell and PowerShell launchers use this same behavior; no application or
+Companion firmware update is required for this host-side workaround. The runner
+also accepts the new `OTAFIX2.4.6` and explicitly labelled `0.11.0 (base)` formats.
+
+The runner still requires `ota self` to
 report `bootloader: apply OK`, `bootloader: QSPI apply OK`, or
 `bootloader: SD apply OK` and checks the
 reported bootloader ABI and codec mask against the selected package. If the
 version command is unavailable on older firmware, the script warns and falls
 back to the legacy `ota self` platform marker. If an nRF52 bootloader lacks
 the required capabilities, install the exact-board OTAFIX bootloader first.
+Positive nRF52 capability markers take precedence over a generic unsupported
+getter response, so it cannot silently skip nRF52 safety checks. Bootloader
+packages still require the independently checked `ota bootloader status` board,
+target, ABI, codec and storage identity; missing version text never bypasses
+package signature checks or the explicit bootloader-install workflow. The
+separate hardware-qualified `rak3401_mota_chain.py` retains its exact deployed
+version restriction; it is not a general OTAFIX 2.4.6 update runner.
 Current firmware also reports `maxblk:2048` near the front of both OTA replies.
 The runner treats a missing marker as the deployed 1 KiB receive limit, rejects
 a ready 2 KiB package for such a target before transfer, and passes the live

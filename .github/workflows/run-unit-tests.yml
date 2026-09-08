@@ -10,6 +10,36 @@ on:
   workflow_dispatch:
 
 jobs:
+  bootloader-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Verify bootloader version regressions without hardware or downloads
+        run: python3 -B test/test_nrf52_bootloader_version.py -v
+
+      - name: Install signed-package verification dependency
+        run: python3 -m pip install cryptography
+
+      - name: Verify old-firmware compatibility in both OTA launchers
+        run: python3 -B -m unittest discover -s tools/lora_ota -p test_lora_ota_bootloader_version.py -v
+
+      - name: Verify all signed OTAFIX 2.4.6 release images
+        env:
+          MESHCORE_BOOTLOADER_MOTA_ZIP: ${{ runner.temp }}/OTAFIX-2.4.6-bootloader-mota.zip
+        # The test pins the archive SHA-256, verifies every .mota signature,
+        # and checks the exact MeshTower V2 SD CRC from the bug report.
+        run: |
+          curl --fail --location --retry 3 --max-time 120 --output "$MESHCORE_BOOTLOADER_MOTA_ZIP" \
+            https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/download/0.11.0-OTAFIX2.4.6/OTAFIX-2.4.6-bootloader-mota.zip
+          python3 -B test/test_nrf52_bootloader_version.py -v
+
   test:
     runs-on: ubuntu-latest
     steps:
