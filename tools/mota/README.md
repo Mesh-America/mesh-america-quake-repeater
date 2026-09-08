@@ -82,4 +82,6 @@ from the generated application target table.
 This library does not authorize a device update. A capable node will only arm
 such a v3 package through the exact manual confirmation described in
 [`docs/ota_nrf52_bootloader_update.md`](../../docs/ota_nrf52_bootloader_update.md).
-The ordinary `tools/lora_ota` runner rejects bootloader packages.
+The `tools/lora_ota` runner accepts verified bootloader packages only with
+`--no-install`, checks the destination's bootloader-specific identity and
+capabilities, and leaves installation to that explicit manual confirmation.

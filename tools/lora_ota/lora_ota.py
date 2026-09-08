@@ -17,6 +17,7 @@ import argparse
 import atexit
 import getpass
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -32,11 +33,14 @@ import stat
 import struct
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import lru_cache
+from types import ModuleType
 from typing import Callable, TypeVar
 import zipfile
 
@@ -138,6 +142,13 @@ RELAY_TIMING_RECOVERY_FILE = "relay-timing-settings.json"
 TARGET_RXPS_RECOVERY_FILE = "target-rxps-settings.json"
 SOURCE_RXPS_RECOVERY_FILE = "source-rxps-settings.json"
 MIN_MESHCLI_VERSION = (1, 6, 0)
+# Tested format-3 inspect/verify/serve support. Keep automatic repairs pinned;
+# neither a package nor a moving branch may choose code to install on the host.
+MOTATOOL_REPAIR_REPOSITORY = "https://github.com/mikecarper/motatool.git"
+MOTATOOL_REPAIR_REVISION = "8c38369e7d35ad50cf74261869676d52dd24adf7"
+MOTATOOL_REPAIR_TIMEOUT_SECONDS = 60 * 60
+CRYPTOGRAPHY_REPAIR_REQUIREMENT = "cryptography==50.0.1"
+CRYPTOGRAPHY_REPAIR_TIMEOUT_SECONDS = 10 * 60
 # v1.17.1.5 is the first release-version contract in which every packet,
 # including retries, uses the same tuple-selected physical preamble: normally
 # 32 symbols at SF5-SF8, then 64 or 128 only where each shorter choice cannot
@@ -158,6 +169,10 @@ T = TypeVar("T")
 
 class OtaError(RuntimeError):
     """Expected, actionable operator error."""
+
+
+class BootloaderCryptoError(OtaError):
+    """The CLI may offer dependency repair; library parsing never installs code."""
 
 
 class TransmissionError(OtaError):
@@ -193,6 +208,7 @@ class MotaInfo:
     hw_id: str
     base_hash: bytes
     payload_offset: int
+    bootloader_storage: int | None = None
 
     @property
     def is_full(self) -> bool:
@@ -200,7 +216,13 @@ class MotaInfo:
 
     @property
     def kind(self) -> str:
+        if self.is_bootloader:
+            return "bootloader full"
         return "full" if self.is_full else "delta"
+
+    @property
+    def is_bootloader(self) -> bool:
+        return bool(self.flags & MOTA_FLAG_BOOTLOADER)
 
     @property
     def version(self) -> str:
@@ -233,6 +255,9 @@ class TargetInfo:
     nrf_qspi: bool = False
     # Firmware predating the live maxblk marker had 1 KiB receive buffers.
     max_block_size: int = LEGACY_TARGET_MAX_BLOCK_SIZE
+    boot_target_id: int | None = None
+    boot_hw_id: str | None = None
+    boot_storage: int | None = None
 
     @property
     def nrf_external(self) -> bool:
@@ -810,6 +835,52 @@ def merkle_root(leaves: list[bytes]) -> bytes:
     return level[0]
 
 
+@lru_cache(maxsize=1)
+def bootloader_library() -> ModuleType:
+    """Reuse the repository's strict v3 reference validator, not a second codec."""
+    path = Path(__file__).resolve().parents[1] / "mota" / "motalib.py"
+    name = "_meshcore_lora_ota_motalib"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise OtaError(f"bootloader validator is unavailable: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # dataclasses resolves annotations through this registry
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, ImportError) as exc:
+        sys.modules.pop(name, None)
+        raise OtaError(f"cannot load bootloader validator: {exc}") from exc
+    return module
+
+
+def parse_bootloader_mota(blob: bytes, path: Path | None) -> MotaInfo:
+    library = bootloader_library()
+    try:
+        parsed = library.parse_container(blob)
+        problems = library.verify(parsed)
+        if problems:
+            raise ValueError("; ".join(problems))
+    except ImportError as exc:
+        raise BootloaderCryptoError(
+            "bootloader signature verification requires Python cryptography; "
+            f"the dependency could not load in {sys.executable}: {exc}"
+        ) from exc
+    except (ValueError, struct.error) as exc:
+        raise OtaError(f"invalid bootloader mOTA: {exc}") from exc
+    manifest = parsed.manifest
+    return MotaInfo(
+        path=path, blob=blob, flags=manifest.flags,
+        target_id=manifest.target_id, fw_version=manifest.fw_version,
+        image_size=manifest.image_size, payload_size=manifest.payload_size,
+        block_size=manifest.block_size, merkle_root=manifest.merkle_root,
+        image_hash=manifest.image_hash, codec_id=manifest.codec_id,
+        hw_id=manifest.hw_id.rstrip(b"\0").decode("ascii"),
+        base_hash=manifest.base_hash,
+        payload_offset=len(blob) - len(MOTA_TRAILER) - manifest.payload_size,
+        bootloader_storage=library.bootloader_caps_storage(parsed.payload),
+    )
+
+
 def parse_mota(blob: bytes, path: Path | None = None) -> MotaInfo:
     if len(blob) < 8 + MOTA_FIXED_MANIFEST_SIZE + len(MOTA_TRAILER):
         raise OtaError("mOTA is truncated")
@@ -821,17 +892,14 @@ def parse_mota(blob: bytes, path: Path | None = None) -> MotaInfo:
             f"mOTA size field is {declared_size}, but the file is {len(blob)} bytes"
         )
     flags = blob[9]
-    if blob[8] == MOTA_BOOT_FORMAT_VERSION and flags & MOTA_FLAG_BOOTLOADER:
-        raise OtaError(
-            "bootloader mOTA packages require the device's explicit `ota bootloader install` "
-            "workflow; this application-update runner deliberately refuses them"
-        )
+    if blob[10] != 0x12:
+        raise OtaError(f"unsupported mOTA hash algorithm 0x{blob[10]:02x}")
+    if blob[8] == MOTA_BOOT_FORMAT_VERSION:
+        return parse_bootloader_mota(blob, path)
     if blob[8] != MOTA_FORMAT_VERSION:
         raise OtaError(f"unsupported mOTA format version {blob[8]}")
     if flags & MOTA_FLAG_BOOTLOADER or flags & ~MOTA_KNOWN_FLAGS:
         raise OtaError("invalid flags in v2 application mOTA")
-    if blob[10] != 0x12:
-        raise OtaError(f"unsupported mOTA hash algorithm 0x{blob[10]:02x}")
 
     target_id, fw_version, image_size, payload_size = struct.unpack_from("<IIII", blob, 11)
     block_size_log2 = blob[27]
@@ -1001,6 +1069,27 @@ def read_zip_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> bytes:
 
 
 def compatible_mota(info: MotaInfo, target: TargetInfo) -> tuple[bool, str]:
+    if info.is_bootloader:
+        if target.platform != "nrf52" or target.boot_target_id is None:
+            return False, "destination has no verified `ota bootloader status` capability"
+        if info.target_id != target.boot_target_id or info.hw_id != target.boot_hw_id:
+            return False, (
+                f"bootloader target {info.target_id:08X} hw={info.hw_id}, need "
+                f"{target.boot_target_id:08X} hw={target.boot_hw_id}"
+            )
+        if target.bootloader_abi is None or target.bootloader_abi < 3:
+            return False, "bootloader self-update requires installed ABI 3 or newer"
+        if target.bootloader_codecs != 0x5:
+            return False, "bootloader self-update requires FULL|INPLACE codecs 0x5"
+        expected_storage = 0x09 if target.nrf_sd else 0x0E if target.nrf_qspi else 0x0A
+        if (
+            target.boot_storage != expected_storage
+            or info.bootloader_storage != expected_storage
+        ):
+            return False, "bootloader package, installed capabilities, and application storage differ"
+        if info.block_size > target.max_block_size:
+            return False, f"bootloader block exceeds destination maxblk:{target.max_block_size}"
+        return True, ""
     if info.target_id != target.target_id:
         return False, f"target {info.target_id:08X}, need {target.target_id:08X}"
     if info.hw_id and target.hw_id and info.hw_id != target.hw_id:
@@ -1052,6 +1141,8 @@ def select_mota_from_zip(
     archive: zipfile.ZipFile,
     target: TargetInfo,
     requested_member: str | None,
+    *,
+    package_kind: str = "application",
 ) -> tuple[MotaInfo, str] | None:
     candidates: list[tuple[MotaInfo, str]] = []
     rejected: list[str] = []
@@ -1062,6 +1153,9 @@ def select_mota_from_zip(
             continue
         try:
             info = parse_mota(read_zip_member(archive, member))
+            if info.is_bootloader != (package_kind == "bootloader"):
+                rejected.append(f"{member.filename}: different update type; select it explicitly")
+                continue
             good, reason = compatible_mota(info, target)
             if good:
                 candidates.append((info, member.filename))
@@ -1070,7 +1164,9 @@ def select_mota_from_zip(
         except (OtaError, zipfile.BadZipFile) as exc:
             rejected.append(f"{member.filename}: {exc}")
     if not candidates:
-        if requested_member and requested_member.lower().endswith(".mota"):
+        if package_kind == "bootloader" or (
+            requested_member and requested_member.lower().endswith(".mota")
+        ):
             details = "; ".join(rejected) or "member not found"
             raise OtaError(f"requested ZIP mOTA is unusable: {details}")
         return None
@@ -1144,8 +1240,8 @@ def load_base_image(path: Path, target: TargetInfo) -> EndFInfo:
         info = parse_mota(
             read_bounded_file(path, MAX_ARCHIVE_MEMBER_SIZE, "mOTA file"), path
         )
-        if not info.is_full:
-            raise OtaError("--base mOTA must be a full-image container")
+        if info.is_bootloader or not info.is_full:
+            raise OtaError("--base mOTA must be a full application-image container")
         identity = parse_endf(info.payload)
     elif suffix == ".zip":
         identities: list[tuple[EndFInfo, str]] = []
@@ -1156,7 +1252,7 @@ def load_base_image(path: Path, target: TargetInfo) -> EndFInfo:
                     try:
                         if suffix == ".mota":
                             candidate = parse_mota(read_zip_member(archive, member))
-                            if not candidate.is_full:
+                            if candidate.is_bootloader or not candidate.is_full:
                                 continue
                             candidate_identity = parse_endf(candidate.payload)
                         elif suffix in (".bin", ".hex"):
@@ -1339,6 +1435,10 @@ def prepare_package(
     source = args.package.resolve()
     if not source.is_file():
         raise OtaError(f"package does not exist: {source}")
+    package_kind = getattr(args, "package_kind", None) or inspect_package_kind(
+        source, args.zip_member
+    )
+    require_package_action(args, package_kind == "bootloader")
     served_dir = work_dir / "served"
     served_dir.mkdir(parents=True, exist_ok=False)
     selected: MotaInfo | None = None
@@ -1354,7 +1454,8 @@ def prepare_package(
         try:
             with zipfile.ZipFile(source) as archive:
                 mota_member = select_mota_from_zip(
-                    archive, target, args.zip_member
+                    archive, target, args.zip_member,
+                    package_kind=package_kind,
                 )
                 if mota_member is not None:
                     selected, member_name = mota_member
@@ -1371,6 +1472,9 @@ def prepare_package(
         raise OtaError("PACKAGE must be a .mota or .zip file")
 
     if selected is not None:
+        if selected.is_bootloader != (package_kind == "bootloader"):
+            raise OtaError("package type changed after preflight; restart with the intended input")
+        require_package_action(args, selected.is_bootloader)
         good, reason = compatible_mota(selected, target)
         if not good:
             raise OtaError(f"package is not installable on {target.name}: {reason}")
@@ -1437,7 +1541,7 @@ def prepare_package(
 
     verify_with_motatool(args.motatool, output, args.public_key)
     expected_body_hash: bytes | None = None
-    if selected.is_full:
+    if selected.is_full and not selected.is_bootloader:
         try:
             expected_body_hash = parse_endf(selected.payload).body_hash
         except OtaError:
@@ -1478,6 +1582,14 @@ def reply_matches_command(command_text: str, reply: str) -> bool:
     needs_temp = lowered.startswith("lora ota needs temp radio")
     if command == "ota status":
         return text.startswith("OTA |") or "not included" in lowered or is_unknown
+    if command in ("ota bootloader", "ota bootloader status"):
+        return (
+            text.startswith("BL board=")
+            or lowered.startswith("bootloader update unavailable:")
+            or is_unknown
+            or needs_temp
+            or (is_error and "bootloader" in lowered)
+        )
     if command == "ota self":
         return (
             lowered.startswith("self ")
@@ -2048,9 +2160,7 @@ class Controller:
         contact_keys = [
             value["public_key"].lower()
             for value in json_objects(after)
-            if value.get("adv_name") == target
-            and isinstance(value.get("public_key"), str)
-            and re.fullmatch(r"[0-9A-Fa-f]{64}", value["public_key"])
+            if contact_matches_selector(value, target)
         ]
         if contact_keys != [expected_public_key.lower()]:
             raise OtaError(
@@ -2114,9 +2224,7 @@ class Controller:
         contact_keys = [
             value["public_key"].lower()
             for value in post_objects
-            if value.get("adv_name") == target
-            and isinstance(value.get("public_key"), str)
-            and re.fullmatch(r"[0-9A-Fa-f]{64}", value["public_key"])
+            if contact_matches_selector(value, target)
         ]
         if len(contact_keys) != 1:
             if any(
@@ -2267,16 +2375,15 @@ class Controller:
             for item in objects
         ):
             raise OtaError(f"controller has no contact named {target!r}")
-        target_key = None
-        for item in objects:
-            if (
-                item.get("adv_name") == target
-                and isinstance(item.get("public_key"), str)
-            ):
-                target_key = item["public_key"].lower()
-                break
-        if target_key is None:
+        target_keys = {
+            item["public_key"].lower() for item in objects
+            if contact_matches_selector(item, target)
+        }
+        if len(target_keys) > 1:
+            raise OtaError(f"ambiguous contact identity for {target}; use a full public key")
+        if not target_keys:
             raise TransmissionError(f"meshcli did not return contact identity for {target}")
+        target_key = target_keys.pop()
 
         messages = [
             item for item in post_objects
@@ -2396,6 +2503,111 @@ def parse_target_max_block_size(status: str, self_status: str) -> int:
     return value
 
 
+def contact_matches_selector(contact: dict, selector: str) -> bool:
+    key = contact.get("public_key")
+    if not isinstance(key, str) or not re.fullmatch(r"[0-9A-Fa-f]{64}", key):
+        return False
+    name = contact.get("adv_name")
+    return (
+        isinstance(name, str) and name.casefold() == selector.casefold()
+    ) or (
+        re.fullmatch(r"[0-9A-Fa-f]{1,64}", selector) is not None
+        and key.lower().startswith(selector.lower())
+    )
+
+
+def bind_contact_selectors(controller: Controller, args: argparse.Namespace) -> None:
+    """Resolve the local contact table once, before any remote command is sent.
+
+    meshcli already accepts keys. Pin unique selectors to complete keys so names
+    with emojis, renames, duplicate names, and prefix collisions cannot redirect
+    maintenance halfway through a run. Reading contacts sends no LoRa packets.
+    """
+    objects = controller._run(["contacts"], "resolve OTA station identifiers")
+    contacts: dict[str, dict] = {}
+    for obj in objects:
+        for key, value in obj.items():
+            if (
+                isinstance(value, dict)
+                and isinstance(key, str)
+                and re.fullmatch(r"[0-9A-Fa-f]{64}", key)
+                and isinstance(value.get("public_key"), str)
+                and value["public_key"].lower() == key.lower()
+            ):
+                contacts[key.lower()] = value
+
+    def resolve(selector: str) -> str:
+        matches = [
+            key for key, value in contacts.items()
+            if contact_matches_selector(value, selector)
+        ]
+        if not matches:
+            raise OtaError(
+                f"controller has no contact matching {selector!r}; import or discover it first"
+            )
+        if len(matches) != 1:
+            raise OtaError(
+                f"ambiguous station {selector!r}: {len(matches)} contacts match; "
+                "use a full public key"
+            )
+        key = matches[0]
+        print(f"[contact] {selector} -> {contacts[key].get('adv_name', '?')} [{key}]")
+        return key
+
+    target = resolve(args.target)
+    relays = [(resolve(name), password) for name, password in args.relay_values]
+    source_selector = args.source_contact_value
+    if (
+        not source_selector and not args.source_shares_controller
+        and has_managed_source_cli(args)
+    ):
+        source_selector = read_source_name_bounded(args)
+    source = resolve(source_selector) if source_selector else None
+    keys = [target, *(key for key, _password in relays)]
+    if source:
+        keys.append(source)
+    if len(keys) != len(set(keys)):
+        raise OtaError("destination, relays, and source contact must identify different radios")
+    args.target = target
+    args.relay_values = relays
+    args.source_contact_value = source
+
+
+def query_bootloader_target(
+    controller: Controller, target: TargetInfo,
+) -> TargetInfo:
+    reply = controller.remote_command(target.name, "ota bootloader status")
+    match = re.fullmatch(
+        r"BL board=([0-9A-Fa-f]{8}) target=([0-9A-Fa-f]{8}) name=(\S+) "
+        r"crc=([0-9A-Fa-f]{8}) abi=(\d+) caps=([0-9A-Fa-f]{2}) "
+        r"\| staged:(?:ready|none) mid=(?:-|[0-9A-Fa-f]{8}) hash=(?:-|[0-9A-Fa-f]{16})",
+        reply.strip(),
+    )
+    if match is None:
+        raise OtaError(
+            f"destination cannot stage a bootloader update: {reply}; "
+            "requires exact-board ABI-3 self-update bootloader and capable application"
+        )
+    board, target_id, name, _crc, abi, caps = match.groups()
+    library = bootloader_library()
+    try:
+        hw_id = (
+            library.bootloader_hw_id(int(board, 16), name)
+            .rstrip(b"\0").decode("ascii")
+        )
+        derived_target = library.bootloader_target_id(int(board, 16), name)
+    except (ValueError, UnicodeError) as exc:
+        raise OtaError(f"invalid destination bootloader identity: {exc}") from exc
+    if derived_target != int(target_id, 16):
+        raise OtaError("destination bootloader board/name does not match its target ID")
+    if int(abi) < 3 or int(abi) != target.bootloader_abi:
+        raise OtaError("destination reports inconsistent or unsupported bootloader ABI")
+    return replace(
+        target, boot_target_id=derived_target, boot_hw_id=hw_id,
+        boot_storage=int(caps, 16),
+    )
+
+
 def query_target(
     controller: Controller,
     args: argparse.Namespace,
@@ -2502,7 +2714,7 @@ def query_target(
             )
         current_version = format_version(version_value)
         current_version_source = "ver"
-    return TargetInfo(
+    target = TargetInfo(
         name=args.target,
         target_id=target_id,
         base_hash=base_hash,
@@ -2519,6 +2731,9 @@ def query_target(
         nrf_qspi=nrf_qspi,
         max_block_size=max_block_size,
     )
+    if getattr(args, "package_kind", "application") == "bootloader":
+        return query_bootloader_target(controller, target)
+    return target
 
 
 def parse_temp_radio(value: str) -> tuple[float, float, int, int, int]:
@@ -3942,6 +4157,7 @@ def confirm_update(
     target: TargetInfo,
     package: MotaInfo,
 ) -> None:
+    require_package_action(args, package.is_bootloader)
     print("\nValidated update plan:")
     print(f"  destination : {target.name} ({target.target_id:08X}, {target.platform})")
     print(f"  running base: {target.base_hash.hex().upper()}")
@@ -3956,6 +4172,9 @@ def confirm_update(
         print("  bootloader  : not required")
     print(f"  update      : {package.version} {package.kind} hw={package.hw_id or '?'}")
     print(f"  mOTA id     : {package.manifest_id}")
+    if package.is_bootloader:
+        print(f"  boot target : {package.target_id:08X}; stage only, explicit install required")
+        print("  boot safety : destination rechecks trust, continuity and upgrade-only policy at manual install")
     print(f"  TempRadio   : {args.temp_radio}")
     saved_rxps = getattr(args, "target_rxps_saved", None)
     rxps_profile = getattr(args, "target_rxps_profile", None)
@@ -3982,7 +4201,10 @@ def confirm_update(
     current_version = (
         parse_version(target.current_version) if target.current_version else None
     )
-    if current_version is not None and current_version >= package.fw_version:
+    if (
+        not package.is_bootloader and current_version is not None
+        and current_version >= package.fw_version
+    ):
         print(
             f"  warning     : destination reports {target.current_version}; "
             f"package is {package.version}"
@@ -6189,6 +6411,11 @@ def request_install(
     package: MotaInfo,
 ) -> bool:
     """Request install without ever blindly replaying an uncertain command."""
+    if package.is_bootloader:
+        raise OtaError(
+            "bootloader installation requires explicit "
+            "`ota bootloader install <MID8> <HASH16>`; this runner only stages it"
+        )
     cycle_started = time.monotonic()
     retries = 0
     confirm_ready_to_install(controller, args, package)
@@ -6637,7 +6864,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("package", type=Path, metavar="PACKAGE", help=".mota or .zip")
-    parser.add_argument("target", metavar="TARGET_NODE", help="destination contact name")
+    parser.add_argument("target", metavar="TARGET_NODE", help="destination contact name, full public key, or unique key prefix")
     controller = parser.add_mutually_exclusive_group()
     controller.add_argument("--controller-serial", metavar="PORT")
     controller.add_argument("--controller-tcp", metavar="HOST[:PORT]")
@@ -6661,14 +6888,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="destination admin password (prefer the MESHCORE_ADMIN_PASSWORD environment variable)",
     )
     parser.add_argument(
-        "--relay", action="append", default=[], metavar="NAME[=PASSWORD]",
-        help="optional relay, ordered farthest-to-nearest; repeat as needed",
+        "--relay", action="append", default=[], metavar="NAME_OR_KEY[=PASSWORD]",
+        help="optional relay name/key/unique key prefix, farthest-to-nearest; repeat as needed",
     )
     parser.add_argument(
         "--source-contact",
-        metavar="NAME",
+        metavar="NAME_OR_KEY",
         help=(
-            "controller contact for a separate OTA source, used for the "
+            "controller contact name/key/unique key prefix for a separate OTA source, used for the "
             "three-minute on-air proof; defaults to the source's local name "
             "(no remote-admin password is required)"
         ),
@@ -6711,7 +6938,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--meshcli", default="meshcli")
-    parser.add_argument("--motatool", default="motatool")
+    parser.add_argument(
+        "--motatool", default="motatool",
+        help=(
+            "host packaging tool; missing/incompatible bootloader support offers "
+            "a separately confirmed private install (--yes does not approve it)"
+        ),
+    )
     parser.add_argument(
         "--package-build-timeout",
         type=int,
@@ -6761,7 +6994,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--leave-controller-radio", action="store_true",
         help="leave the controller on --temp-radio instead of restoring it",
     )
-    parser.add_argument("--no-install", action="store_true", help="download and verify, but do not install")
+    parser.add_argument("--no-install", action="store_true", help="download and verify, but do not install (required for bootloader mOTA)")
     parser.add_argument(
         "--replace-active-download", action="store_true",
         help="discard a different update already staged on the destination",
@@ -7015,6 +7248,407 @@ def require_meshcli_version(command: str) -> tuple[int, int, int]:
     return version
 
 
+def require_package_action(args: argparse.Namespace, bootloader: bool) -> None:
+    if not bootloader:
+        return
+    if not getattr(args, "no_install", False):
+        raise OtaError(
+            "detected a bootloader mOTA, not an application update; use --no-install "
+            "to stage it. Installation remains the device's explicit "
+            "`ota bootloader install <MID8> <HASH16>` workflow"
+        )
+    if getattr(args, "prepare_only", False):
+        raise OtaError(
+            "bootloader staging requires live destination capability checks; "
+            "--prepare-only is application-only"
+        )
+    if getattr(args, "base", None) or getattr(args, "allow_non_upgrade", False):
+        raise OtaError(
+            "--base and --allow-non-upgrade are application-only; "
+            "bootloader continuity and upgrade policy cannot be overridden"
+        )
+
+
+def inspect_package_kind(source: Path, requested_member: str | None) -> str:
+    """Choose the update family before opening radios; never rank app vs BL versions."""
+    if source.suffix.lower() == ".mota":
+        info = parse_mota(
+            read_bounded_file(source, MAX_ARCHIVE_MEMBER_SIZE, "mOTA file"), source
+        )
+        return "bootloader" if info.is_bootloader else "application"
+    kinds: set[str] = set()
+    found = False
+    try:
+        with zipfile.ZipFile(source) as archive:
+            for member in archive.infolist():
+                if member.is_dir() or (
+                    requested_member and member.filename != requested_member
+                ):
+                    continue
+                if requested_member and found:
+                    raise OtaError(f"ZIP member name is duplicated: {requested_member}")
+                found = True
+                suffix = Path(member.filename).suffix.lower()
+                if suffix == ".mota":
+                    # Classification is deliberately cheap and conservative. Full
+                    # validation (including signatures for BL) follows selection.
+                    # A malformed boot declaration must never fall back to an app.
+                    with archive.open(member) as stream:
+                        header = stream.read(10)
+                    is_boot = len(header) == 10 and header[:4] == MOTA_MAGIC and (
+                        header[8] == MOTA_BOOT_FORMAT_VERSION
+                        or header[9] & MOTA_FLAG_BOOTLOADER
+                    )
+                    kinds.add("bootloader" if is_boot else "application")
+                elif suffix in (".bin", ".hex"):
+                    kinds.add("application")
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise OtaError(f"cannot inspect ZIP archive {source}: {exc}") from exc
+    if requested_member and not found:
+        raise OtaError(f"requested ZIP member not found: {requested_member}")
+    if len(kinds) > 1:
+        raise OtaError(
+            "ZIP contains both application and bootloader inputs; choose the intended "
+            "update with --zip-member (their versions and target IDs are unrelated)"
+        )
+    return next(iter(kinds), "application")
+
+
+def report_staged_update(
+    controller: Controller, args: argparse.Namespace, package: MotaInfo,
+) -> None:
+    if not package.is_bootloader:
+        print(f"{args.target} is ready to install; leaving the verified update staged.")
+        return
+    reply = controller.remote_command(args.target, "ota bootloader status")
+    match = re.search(
+        r"\btarget=([0-9A-Fa-f]{8}) .*\| staged:ready "
+        r"mid=([0-9A-Fa-f]{8}) hash=([0-9A-Fa-f]{16})$", reply.strip(),
+    )
+    if match is None or (
+        int(match[1], 16) != package.target_id
+        or match[2].upper() != package.manifest_id
+        or match[3].lower() != package.image_hash[:8].hex()
+    ):
+        raise OtaError(f"destination did not confirm the exact staged bootloader MID/hash: {reply}")
+    print(f"[staged] bootloader {package.version} on {args.target}; NOT installed")
+    print("[manual] Review `ota bootloader status` on the destination, then explicitly send:")
+    print(f"  ota bootloader install {package.manifest_id} {package.image_hash[:8].hex().upper()}")
+    print("[manual] Do not use `ota install`. The device still enforces signer trust, continuity and upgrade-only checks.")
+
+
+def host_repair_cache() -> Path:
+    if os.name == "nt":
+        cache = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        cache = Path.home() / "Library" / "Caches"
+    else:
+        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    if not cache.is_absolute():
+        raise OtaError("host tool repair needs an absolute user cache directory")
+    return cache / "meshcore-lora-ota"
+
+
+def motatool_repair_root() -> Path:
+    return host_repair_cache() / "motatool" / MOTATOOL_REPAIR_REVISION
+
+
+def cryptography_repair_root() -> Path:
+    # Do not mix wheels between virtual environments, architectures or ABIs.
+    identity = "|".join((
+        sys.executable, sys.version, sysconfig.get_platform(),
+        str(sysconfig.get_config_var("SOABI")),
+    ))
+    tag = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return host_repair_cache() / "python" / tag / CRYPTOGRAPHY_REPAIR_REQUIREMENT
+
+
+def cryptography_repair_command(root: Path) -> list[str]:
+    return [
+        sys.executable, "-m", "pip", "--isolated", "--disable-pip-version-check",
+        "install", "--no-input", "--only-binary=:all:", "--no-cache-dir",
+        "--index-url", "https://pypi.org/simple", "--upgrade",
+        "--target", str(root), CRYPTOGRAPHY_REPAIR_REQUIREMENT,
+    ]
+
+
+def activate_cached_cryptography(root: Path) -> None:
+    """Load a private wheel installation without unloading live native modules."""
+    old_path = sys.path[:]
+    sys.path.insert(0, str(root))
+    importlib.invalidate_caches()
+    try:
+        import cryptography
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        if not Path(cryptography.__file__).resolve().is_relative_to(root.resolve()):
+            raise ImportError(
+                "private installation did not provide cryptography; a conflicting or "
+                "partially loaded system installation may need repair in your Python environment"
+            )
+        # RFC 8032 test 1: a working import is not enough to prove Ed25519 works.
+        key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        ))
+        signature = bytes.fromhex(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555f"
+            "b8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        )
+        key.verify(signature, b"")
+        try:
+            key.verify(signature, b"tampered")
+        except InvalidSignature:
+            pass
+        else:
+            raise ValueError("Ed25519 accepted a modified message")
+    except Exception as exc:
+        # Never unload/reload Rust/CFFI extensions: their retained exception
+        # classes may then differ from Python's, breaking signature rejection.
+        sys.path[:] = old_path
+        importlib.invalidate_caches()
+        raise OtaError(f"cached cryptography failed its Ed25519 check: {exc}") from exc
+
+
+def offer_cryptography_repair(failure: BootloaderCryptoError) -> None:
+    root = cryptography_repair_root()
+    print(f"[host] {failure}")
+    if root.is_dir():
+        try:
+            activate_cached_cryptography(root)
+        except OtaError as exc:
+            print(f"[host] {exc}")
+        else:
+            print(f"[host] using previously installed, rechecked cryptography: {root}")
+            return
+
+    command = cryptography_repair_command(root)
+    print(f"[repair] Python: {sys.executable}")
+    print(f"[repair] Download {CRYPTOGRAPHY_REPAIR_REQUIREMENT} and its wheel dependencies from PyPI.")
+    print(f"[repair] Private install: {root}")
+    print("[repair] System/virtual-environment packages and PATH will not be changed.")
+    print(f"[repair] Manual install command: {display_host_command(command)}")
+    print("[repair] After a manual install, rerun the same OTA command; it rechecks this cache.")
+    # Probe this interpreter, not an unrelated `pip` executable on PATH.
+    install_env = os.environ.copy()
+    install_env.pop("MESHCORE_ADMIN_PASSWORD", None)
+    install_env["PIP_CONFIG_FILE"] = os.devnull
+    try:
+        pip = subprocess.run(
+            [sys.executable, "-m", "pip", "--isolated", "--version"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=False, env=install_env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OtaError(f"cannot check pip in {sys.executable}: {exc}; no installation attempted") from exc
+    if pip.returncode != 0:
+        bootstrap = display_host_command([sys.executable, "-m", "ensurepip", "--upgrade"])
+        raise OtaError(
+            f"pip is unavailable in this Python environment. Enable it with {bootstrap}, "
+            "or install your operating system's Python pip/venv package and rerun. "
+            "No installation or radio changes were made"
+        )
+    if not sys.stdin.isatty():
+        raise OtaError(
+            "cryptography repair needs separate interactive approval (--yes does not "
+            "approve software installation); rerun in a terminal or use the printed "
+            "manual command. No installation was attempted"
+        )
+    try:
+        approved = input("Install cryptography privately and retry signature verification? [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        approved = False
+    if not approved:
+        raise OtaError("cryptography repair declined; no installation or radio changes were made")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        print("[repair] Installing binary wheels (pip output follows)...", flush=True)
+        result = subprocess.run(
+            command, stdin=subprocess.DEVNULL, timeout=CRYPTOGRAPHY_REPAIR_TIMEOUT_SECONDS,
+            check=False, env=install_env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OtaError(f"cryptography repair failed: {exc}; stopping before radio access") from exc
+    if result.returncode != 0:
+        raise OtaError(
+            f"cryptography repair failed (pip exit {result.returncode}); check network, "
+            "disk space and wheel support for this Python/platform. If pip is too old, "
+            "update it in your Python environment. No source builds, system-package "
+            f"overrides or radio changes were attempted; partial files may remain in {root}"
+        )
+    activate_cached_cryptography(root)
+    print("[repair] Ed25519 self-test passed; retrying full package/signature verification.")
+
+
+def motatool_repair_command(root: Path, cargo: str = "cargo") -> list[str]:
+    return [
+        cargo, "install", "--git", MOTATOOL_REPAIR_REPOSITORY,
+        "--rev", MOTATOOL_REPAIR_REVISION, "--locked", "--bin", "motatool",
+        "--root", str(root), "--target-dir", str(root / "build"), "--force",
+    ]
+
+
+def display_host_command(command: list[str]) -> str:
+    if os.name == "nt":
+        return "& " + " ".join("'" + word.replace("'", "''") + "'" for word in command)
+    return shlex.join(command)
+
+
+def check_bootloader_tool(command: str, probe: Path) -> None:
+    run_checked(
+        [command, "inspect", str(probe)],
+        label="check motatool bootloader support", timeout=30,
+    )
+
+
+def offer_motatool_repair(
+    args: argparse.Namespace, probe: Path, failure: OtaError,
+) -> None:
+    """Install only after separate consent; never replace the selected/PATH binary."""
+    root = motatool_repair_root()
+    binary = root / "bin" / ("motatool.exe" if os.name == "nt" else "motatool")
+    print(f"[host] {args.motatool} cannot inspect this format-3 bootloader package: {failure}")
+    cached = False
+    if binary.is_file():
+        try:
+            check_bootloader_tool(str(binary), probe)
+            cached = True
+        except OtaError as exc:
+            print(f"[host] cached motatool also failed its capability check: {exc}")
+    if cached and args.motatool == "motatool":
+        args.motatool = str(binary)
+        print(f"[host] using previously installed, rechecked motatool: {binary}")
+        return
+
+    cargo = shutil.which("cargo")
+    command = motatool_repair_command(root, cargo or "cargo")
+    manual = display_host_command(command)
+    selection = display_host_command(["--motatool", str(binary)])
+    # Display an argument, not a PowerShell call operator for an option.
+    if os.name == "nt":
+        selection = selection.removeprefix("& ")
+    print(f"[repair] source: {MOTATOOL_REPAIR_REPOSITORY}")
+    print(f"[repair] pinned revision: {MOTATOOL_REPAIR_REVISION}")
+    print(f"[repair] private install: {root}")
+    print("[repair] Existing motatool installations and PATH will not be changed.")
+    print(f"[repair] Manual install command: {manual}")
+    print(f"[repair] To select this build explicitly, append: {selection}")
+    if not cached and cargo is None:
+        raise OtaError(
+            "automatic motatool repair requires Rust/Cargo and a native linker; "
+            "install the toolchain from https://rustup.rs and rerun, or select a "
+            "bootloader-capable build with --motatool. No installation was attempted"
+        )
+    if not sys.stdin.isatty():
+        raise OtaError(
+            "motatool repair needs separate interactive approval (--yes does not approve "
+            "software installation); rerun in a terminal or use the printed manual "
+            "command and --motatool. No installation was attempted"
+        )
+    if cached:
+        question = "Use the checked cached motatool for this run instead? [y/N] "
+    else:
+        print(
+            "[repair] This downloads and compiles the pinned source and locked dependencies. "
+            "It can take several minutes and use substantial disk space; "
+            "only a previous copy in the private install folder may be replaced."
+        )
+        question = "Install this bootloader-capable motatool and continue after verification? [y/N] "
+    try:
+        approved = input(question).strip().lower() in ("y", "yes")
+    except EOFError:
+        approved = False
+    if not approved:
+        raise OtaError("motatool repair declined; no installation or radio changes were made")
+
+    if not cached:
+        # No cache directories, downloads or builds before affirmative consent.
+        root.mkdir(parents=True, exist_ok=True)
+        print("[repair] Building motatool (Cargo output follows)...", flush=True)
+        build_env = os.environ.copy()
+        build_env.pop("MESHCORE_ADMIN_PASSWORD", None)
+        try:
+            result = subprocess.run(
+                command, cwd=str(root), stdin=subprocess.DEVNULL,
+                timeout=MOTATOOL_REPAIR_TIMEOUT_SECONDS, check=False,
+                env=build_env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OtaError(
+                f"motatool repair failed: {exc}; existing installations are unchanged. "
+                f"Build files may remain in {root}; fix the toolchain/network and rerun"
+            ) from exc
+        if result.returncode != 0:
+            raise OtaError(
+                f"motatool repair failed (Cargo exit {result.returncode}); see the build "
+                f"output above. Existing installations are unchanged; build files remain in {root}"
+            )
+        if not binary.is_file():
+            raise OtaError(f"motatool installer returned success but did not produce {binary}")
+    # Recheck even after Cargo success; do not silently fall back to the old binary.
+    try:
+        check_bootloader_tool(str(binary), probe)
+    except OtaError as exc:
+        raise OtaError(
+            f"repaired motatool still failed bootloader verification: {exc}; "
+            "stopping before radio access"
+        ) from exc
+    args.motatool = str(binary)
+    print(f"[repair] bootloader support verified; continuing with {binary}")
+
+
+def require_bootloader_tool_support(args: argparse.Namespace) -> None:
+    """Probe actual format support: old and new motatool builds can share a version."""
+    if args.package.suffix.lower() == ".mota":
+        probe = args.package
+        temporary_blob = None
+    else:
+        temporary_blob = None
+        failures: list[str] = []
+        try:
+            with zipfile.ZipFile(args.package) as archive:
+                for member in archive.infolist():
+                    if not member.filename.lower().endswith(".mota") or (
+                        args.zip_member and member.filename != args.zip_member
+                    ):
+                        continue
+                    try:
+                        info = parse_mota(read_zip_member(archive, member))
+                        if info.is_bootloader:
+                            temporary_blob = info.blob
+                            break
+                    except BootloaderCryptoError:
+                        raise  # A missing dependency is not an invalid ZIP member.
+                    except OtaError as exc:
+                        failures.append(f"{member.filename}: {exc}")
+        except zipfile.BadZipFile as exc:
+            raise OtaError(f"invalid ZIP archive: {args.package}") from exc
+        if temporary_blob is None:
+            raise OtaError("ZIP contains no valid bootloader mOTA: " + "; ".join(failures))
+
+    # This is a local parser probe, never a serve/pull operation. Do not require
+    # every hardware variant in an archive to share the operator's signer pin;
+    # the selected package is independently verified with that pin later.
+    with tempfile.TemporaryDirectory(prefix="meshcore-boot-probe-") as directory:
+        if temporary_blob is not None:
+            probe = Path(directory) / "bootloader.mota"
+            probe.write_bytes(temporary_blob)
+        try:
+            check_bootloader_tool(args.motatool, probe)
+        except OtaError as exc:
+            offer_motatool_repair(args, probe, exc)
+
+
+def preflight_package_tools(args: argparse.Namespace) -> None:
+    args.package_kind = inspect_package_kind(args.package, args.zip_member)
+    print(f"[package] detected {args.package_kind} update from container metadata")
+    require_package_action(args, args.package_kind == "bootloader")
+    if args.package_kind == "bootloader":
+        require_bootloader_tool_support(args)
+    else:
+        require_command(args.motatool, "motatool")
+
+
 def preflight_inputs(args: argparse.Namespace) -> None:
     if not args.package.is_file():
         raise OtaError(f"package does not exist: {args.package.resolve()}")
@@ -7027,7 +7661,14 @@ def preflight_inputs(args: argparse.Namespace) -> None:
     ):
         if path is not None and not path.is_file():
             raise OtaError(f"{label} file does not exist: {path.resolve()}")
-    require_command(args.motatool, "motatool")
+    try:
+        preflight_package_tools(args)
+    except BootloaderCryptoError as exc:
+        # Refuse unsupported actions before offering software installation. Retry
+        # once only, and never skip the original package/signature validation.
+        require_package_action(args, True)
+        offer_cryptography_repair(exc)
+        preflight_package_tools(args)
     if not args.prepare_only:
         require_meshcli_version(args.meshcli)
 
@@ -7252,6 +7893,7 @@ def main(
                 )
             if controller is None:
                 controller = Controller(args, password)
+            bind_contact_selectors(controller, args)
             verify_shared_source_identity(controller, args)
             # These gates are intentionally before query_target() or any other
             # on-air remote operation. First prove that advancing the managed
@@ -7519,7 +8161,7 @@ def main(
         monitor_download(controller, args, package, seeder)
 
         if args.no_install:
-            print(f"{args.target} is ready to install; leaving the verified update staged.")
+            report_staged_update(controller, args, package)
             restore_relay_timings(controller, relay_timing_settings)
             relay_timing_settings.clear()
             if args.leave_controller_radio:
