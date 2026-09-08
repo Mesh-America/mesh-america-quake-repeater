@@ -140,6 +140,14 @@ OUTPUT_DIR=.releases/contact-cache-v3 bash build.sh build-firmware \
 The firmware RAM guard remains enabled. A successful linked budget is distinct
 from live free heap and physical Bluetooth/LoRa qualification on each board.
 
+The smaller NimBLE applications let the CT62, XIAO C3 and Generic ESP-NOW
+trials use two 1.5 MiB WiFi OTA slots on 4 MiB flash. Their 896 KiB SPIFFS and
+coredump stay at the same addresses as the ordinary `huge_app.csv` Full
+layout. Install the trial's merged image over USB first to install its
+partition table. Subsequent WiFi updates must fit the new slots. An
+application-only update from the ordinary single-slot Full layout cannot
+change that layout or enable WiFi OTA.
+
 ## Regression checks
 
 ```sh

@@ -170,6 +170,32 @@ class Esp32FullPartitionTest(unittest.TestCase):
         )
         self.assertEqual(board.values["build.partitions"], "huge_app.csv")
 
+    def test_explicit_small_full_trial_uses_dual_ota_with_large_spiffs(self):
+        table = "variants/dual_ota_1536k.csv"
+        board, _output = apply_policy(
+            {
+                "upload.flash_size": "4MB",
+                "build.mcu": "esp32c3",
+                "build.partitions": "huge_app.csv",
+                "build.full_partitions": table,
+            }
+        )
+        self.assertEqual(board.values["build.partitions"], table)
+        # Retain the huge_app SPIFFS/coredump placement and enough storage for
+        # two complete 350-contact snapshots, rather than the 64 KiB table.
+        partitions = (ROOT / table).read_text()
+        self.assertIn("spiffs,   data, spiffs,  0x310000,0xE0000", partitions)
+        self.assertIn("app1,     app,  ota_1,   0x190000,0x180000", partitions)
+
+    def test_explicit_small_full_trial_rejects_insufficient_flash(self):
+        with self.assertRaisesRegex(ValueError, "at least 4 MiB"):
+            apply_policy(
+                {
+                    "upload.flash_size": "2MB",
+                    "build.full_partitions": "variants/dual_ota_1536k.csv",
+                }
+            )
+
     def test_tbeam_1w_factory_layout_keeps_precedence(self):
         board, _output = apply_policy(
             {

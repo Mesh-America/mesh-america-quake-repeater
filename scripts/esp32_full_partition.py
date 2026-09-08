@@ -12,6 +12,10 @@ PRESERVED_FULL_PARTITION_TABLES = {
     "variants/sensecap_indicator-espnow/dual_ota_6400k_preserve_spiffs.csv",
 }
 
+# Explicitly selected by the smaller NimBLE capacity trials. The normal
+# 4 MiB Full Companion still needs huge_app.csv for its larger application.
+OPT_IN_FULL_PARTITION_TABLES = {"variants/dual_ota_1536k.csv"}
+
 
 def parse_flash_size(value):
     text = str(value).strip().upper()
@@ -39,10 +43,14 @@ if os.environ.get("MESHCORE_ESP32_FULL_BUILD") == "1":
     flash_size = parse_flash_size(board.get("upload.flash_size", "4MB"))
     requested_partitions = os.environ.get(
         "MESHCORE_ESP32_FULL_PARTITION_TABLE", ""
-    ).strip()
+    ).strip() or str(board.get("build.full_partitions", "")).strip()
     required_partitions = preserved_full_partition_table(
         requested_partitions
     )
+    if requested_partitions in OPT_IN_FULL_PARTITION_TABLES:
+        if flash_size < 4 * 1024 * 1024:
+            raise ValueError("Full dual-OTA trial requires at least 4 MiB flash")
+        required_partitions = requested_partitions
     if requested_partitions and not required_partitions:
         raise ValueError(
             "unsupported required Full partition table: "
