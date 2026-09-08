@@ -143,11 +143,11 @@ class FormatTests(unittest.TestCase):
         with self.assertRaisesRegex(ota.OtaError, "block hashes"):
             ota.parse_mota(bytes(blob))
 
-    def test_bootloader_packages_are_explicitly_refused(self) -> None:
+    def test_relabelling_application_does_not_make_a_bootloader(self) -> None:
         blob = bytearray(mota_blob(firmware(b"B" * 5000, VERSION_NEW)))
         blob[8] = ota.MOTA_BOOT_FORMAT_VERSION
         blob[9] |= ota.MOTA_FLAG_SIGNED | ota.MOTA_FLAG_BOOTLOADER
-        with self.assertRaisesRegex(ota.OtaError, "bootloader mOTA packages"):
+        with self.assertRaisesRegex(ota.OtaError, "invalid bootloader mOTA"):
             ota.parse_mota(bytes(blob))
 
         blob[8] = ota.MOTA_FORMAT_VERSION
@@ -836,6 +836,13 @@ class DebugTests(unittest.TestCase):
 
 
 class SourceCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These lifecycle tests stub the controller and source transports.
+        # Station resolution itself is covered by StationSelectionTests.
+        patcher = mock.patch.object(ota, "bind_contact_selectors")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def source_args() -> argparse.Namespace:
         return argparse.Namespace(
@@ -4426,6 +4433,7 @@ class TempRadioPreflightTests(unittest.TestCase):
             ]
             with (
                 mock.patch.object(ota, "preflight_inputs"),
+                mock.patch.object(ota, "bind_contact_selectors"),
                 mock.patch.object(ota, "preflight_source_cli"),
                 mock.patch.object(
                     ota,

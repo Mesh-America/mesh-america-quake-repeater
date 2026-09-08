@@ -197,6 +197,13 @@ closed instead of selecting smaller or overlapping geometry.
 
 ## Explicit install workflow
 
+The `tools/lora_ota/lora_ota.sh` and `.ps1` runners can perform the discovery,
+transfer, verification and radio cleanup for a bootloader mOTA with
+`--no-install`. They detect format 3 automatically and check the destination's
+bootloader-specific identity/capabilities. They do not install it: the final
+MID/hash confirmation below remains an explicit operator action. A mixed
+application/bootloader ZIP requires `--zip-member`.
+
 Check the installed identity and capability marker:
 
 ```text

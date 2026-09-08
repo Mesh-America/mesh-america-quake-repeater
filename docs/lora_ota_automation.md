@@ -77,6 +77,83 @@ mOTA ownership state as nRF52. The exact `ota folder on` line transfers the USB
 port from startup ASCII or idle Binary Companion mode before binary mOTA frames
 begin; neither console mode shares that port until the folder detaches.
 
+## Bootloader packages and station identifiers
+
+Both wrappers use the same package-aware runner. It identifies application
+versus bootloader updates from container metadata, not filenames. A ZIP mixing
+application inputs and bootloader mOTAs requires `--zip-member`; their versions
+and target IDs are independent and must not be ranked together.
+
+Signed format-3 nRF52 bootloader packages can be **staged with `--no-install`**.
+Use the same controller/source/TempRadio arguments as an application transfer,
+but provide the bootloader `.mota` (or its ZIP member) and `--no-install`.
+Without that flag, even `--yes` stops before opening a radio. Bootloader staging
+requires Python `cryptography` in the interpreter running the wrapper and a
+current `motatool` supporting format 3. The runner reuses `tools/mota/motalib.py`
+for strict geometry, embedded identity/CRC, capability, hash and signature
+validation, and still runs `motatool verify` including any `--public-key` pin.
+It probes actual `motatool inspect` support before radio access: older and newer
+builds may advertise the same version. If the tool is missing or incompatible,
+an interactive run offers an automatic repair:
+
+```text
+Install this bootloader-capable motatool and continue after verification? [y/N]
+```
+
+Only `y` or `yes` approves installation. **`--yes` does not approve host software
+installation.** Noninteractive runs stop and print a copyable manual installation
+command plus the `--motatool` argument to use afterward.
+
+The repair builds the [mikecarper/motatool](https://github.com/mikecarper/motatool)
+fork at pinned revision `8c38369e7d35ad50cf74261869676d52dd24adf7`, with Cargo's
+`--locked` dependencies, in a separate per-user cache directory. It needs
+Rust/Cargo and a native linker already installed; otherwise it points to
+[Rust installation](https://rustup.rs/) and stops without installing anything.
+Source/dependency downloads, build time and disk use are disclosed before
+confirmation. Cargo progress is displayed, with a one-hour build timeout.
+The radio admin-password environment variable is not passed to the build.
+
+The installer does not overwrite the selected/system `motatool` or alter PATH.
+It may replace only a previous copy in its displayed private install directory.
+After installation it repeats the bootloader-package capability check and uses
+the new binary for this run only if that check passes. A later run using the
+default `motatool` selection can reuse the checked cache without downloading
+again; switching from an explicit `--motatool` path still asks permission.
+Refusal, a failed build, or a failed recheck stops before opening any radio.
+Failed build files may remain in the displayed cache directory for diagnostics.
+
+The install root is `meshcore-lora-ota/motatool/<revision>` under `%LOCALAPPDATA%`
+on Windows, `~/Library/Caches` on macOS, or `$XDG_CACHE_HOME` (default
+`~/.cache`) on Linux. Cargo uses an explicit
+[`--root`, `--rev`, and `--locked`](https://doc.rust-lang.org/cargo/commands/cargo-install.html)
+instead of replacing a global installation or following a moving branch.
+
+Before transfer it queries the destination's `ota bootloader status`, checks its
+bootloader-specific target/hardware identity, installed ABI/codecs and matching
+internal/QSPI/SD storage profile. It does not compare an application version or
+application target ID to a bootloader package. After transfer it checks the
+destination's exact staged MID and image-hash confirmation, then prints the
+manual command; it **never sends a bootloader install command**:
+
+```text
+ota bootloader status
+ota bootloader install <MID8> <HASH16>
+```
+
+Review and send those commands on the **destination**, not the source. The
+device independently enforces signer authorization, safe live storage,
+continuity and upgrade-only policy at installation. `--base`,
+`--allow-non-upgrade`, and `--prepare-only` remain application-only. See the
+[bootloader prerequisites and recovery limits](ota_nrf52_bootloader_update.md).
+
+`TARGET_NODE`, `--relay`, and `--source-contact` accept a contact name, full
+public key, or unique hexadecimal key prefix. The runner reads the controller's
+existing contact table and binds each selection to a full key before remote
+commands, so emoji names need not be typed and later name changes cannot
+redirect the run. Duplicate names, ambiguous prefixes, or the same radio under
+different participant aliases stop with an actionable error. Missing contacts
+must first be imported or discovered; a key alone does not create a contact.
+
 ## Destination requirements
 
 | Destination | Package installed | One-time prerequisite | Raw ZIP handling |
@@ -559,7 +636,7 @@ Useful controls:
   If the version gate required RXPS off, it stays off while that topology is
   preserved; use `target-rxps-settings.json` to restore it only after sending
   `normalradio`.
-- `--allow-non-upgrade` deliberately permits the same or an older version.
+- `--allow-non-upgrade` deliberately permits the same or an older application version.
 - `--replace-active-download` deliberately discards a different update already
   downloading or staged on the target. Without it, that update is preserved.
 - `--source-shares-controller` is for a Full Companion whose USB Binary API is
