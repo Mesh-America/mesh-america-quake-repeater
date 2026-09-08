@@ -144,6 +144,22 @@ struct OtaContext {
   // count (the manager's fixed 4 KiB scratch covers <=1024 blocks, about 2 MiB at the new default).
   uint8_t* serve_self_leaves = nullptr;
   uint8_t* serve_self_proof  = nullptr;
+
+  // These raw buffers are owned by the context and are otherwise only freed
+  // when self-serve re-allocates them. A dynamic-storage build destroys the
+  // context between operations (OTA_HEAP_CONTEXT deletes it; the Companion's
+  // borrowed queue runs ~OtaContext() in place), so teardown has to release
+  // them or every acquire/release cycle leaks. A self-serving node reaches
+  // release with both buffers populated, so this is the normal path, not an
+  // edge case.
+  ~OtaContext() {
+    releaseServeBuffer();          // no-op where serve_buf is a fixed array
+    free(serve_self_leaves);
+    free(serve_self_proof);
+  }
+  OtaContext() = default;
+  OtaContext(const OtaContext&) = delete;             // would double-free above
+  OtaContext& operator=(const OtaContext&) = delete;
   uint8_t  serve_self_manifest[MOTA_MFL];   // fixed-layout full+unsigned manifest-minus-leaves (197 B)
   ApplyState apply_st;           // pending apply (P6)
 
