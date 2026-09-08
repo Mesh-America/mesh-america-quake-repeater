@@ -359,6 +359,9 @@ body.tab-cli{padding-bottom:0}
       <div class="f" data-cap="16384"><label>Bluetooth name</label>
         <input type="text" data-k="bluetooth.name" maxlength="31" placeholder="Use MeshCore-&lt;node name&gt;">
         <div class="hint">Optional complete Bluetooth device name. Leave blank to follow the node name.</div></div>
+      <div class="f" data-cap="65536"><label>Bluetooth address</label>
+        <input type="text" data-k="bluetooth.mac" maxlength="24" placeholder="Use factory address">
+        <div class="hint">Use C2:11:22:33:44:55, random, or random-every-boot. Clear to restore the factory address. Reboot and re-pair after a change.</div></div>
       <div class="row" data-cap="1">
         <div class="f"><label>Latitude</label><input type="number" data-k="lat" step="any"></div>
         <div class="f"><label>Longitude</label><input type="number" data-k="lon" step="any"></div>
@@ -776,6 +779,7 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
   if((m=k.match(/^mqtt([1-9])\.(\w+)$/))){var s=(q.slots||[])[+m[1]-1]||{};var v=s[m[2]];return v==null?"":String(v)}
   switch(k){
     case"name":return r.name;case"bluetooth.name":return r.bluetooth_name||"";
+    case"bluetooth.mac":return r.bluetooth_mac||"";
     case"lat":return String(r.lat);case"lon":return String(r.lon);
     case"tx":return String(r.tx);case"af":return String(r.af);
     case"rxdelay":return String(r.rxdelay);case"txdelay":return String(r.txdelay);
@@ -1177,7 +1181,7 @@ function saveChanges(extra,cb){
   // Applying new station credentials necessarily drops this page. Reboot
   // after a successful batch so the bridge joins with the complete SSID and
   // password together instead of reconnecting between the two writes.
-  if((extra&&extra.reboot)||("wifi.ssid" in setmap)||("wifi.pwd" in setmap)||("espnow.channel" in setmap))body.reboot=true;
+  if((extra&&extra.reboot)||("wifi.ssid" in setmap)||("wifi.pwd" in setmap)||("espnow.channel" in setmap)||("bluetooth.mac" in setmap))body.reboot=true;
   if(Object.keys(setmap).length===0&&!body.reboot){toast("Nothing to save");return}
   var reqid=mkReqId();body.reqid=reqid;
   $("#save-btn").disabled=true;
@@ -1213,8 +1217,8 @@ function saveChanges(extra,cb){
   });
 }
 function appSave(){
-  var wifiChanged=("wifi.ssid" in st.dirty)||("wifi.pwd" in st.dirty)||("espnow.channel" in st.dirty);
-  var pwdErr=adminPwdError(wifiChanged);
+  var rebootChanged=("wifi.ssid" in st.dirty)||("wifi.pwd" in st.dirty)||("espnow.channel" in st.dirty)||("bluetooth.mac" in st.dirty);
+  var pwdErr=adminPwdError(rebootChanged);
   if(pwdErr){
     $('#tabs button[data-t="radio"]').click();
     toast(pwdErr);
@@ -1255,10 +1259,13 @@ function pollResult(cb,errs,idles,acked,reqid,submitted){
     if(fails)toast(fails+" setting(s) rejected - see fields");
     else if(r.reboot){
       st.dirty={};
+      var bluetoothAddressChanged=submitted&&("bluetooth.mac" in submitted);
       showReboot(r.wifi_ip
         ? "The node joined the selected WiFi. This page and address stay visible while it reboots. Reconnect your phone or laptop to that network, then open the address."
-        : "The node is restarting with the saved WiFi settings. Reconnect to that network and open the node at its router-assigned address.",
-        false,"Settings saved [OK] - rebooting",r.wifi_ip,rebootSeconds(r));
+        : bluetoothAddressChanged
+          ? "The node is restarting with its new Bluetooth address. Forget its old Bluetooth entry, scan again, and pair with the new identity."
+          : "The node is restarting with the saved WiFi settings. Reconnect to that network and open the node at its router-assigned address.",
+        false,bluetoothAddressChanged?"Bluetooth address saved [OK] - rebooting":"Settings saved [OK] - rebooting",r.wifi_ip,rebootSeconds(r));
       return;
     }else toast("Saved [OK]");
     loadConfigSoft();
@@ -1814,6 +1821,8 @@ var CLI_VERBS=[
   ["powersaving","Show the power-saving mode"],
   ["powersaving on","Enable power saving"],
   ["powersaving off","Disable power saving"],
+  ["get bluetooth.mac","Show the Bluetooth address mode"],
+  ["set bluetooth.mac ","Set address {C2:11:22:33:44:55|random|random everyboot|default}"],
   ["password ","Change the admin password {new-password}"],
   ["alert test","Send a test alert on the configured channel"],
   ["ota check","Check for a newer build (does not flash)"],

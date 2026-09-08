@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <cstdint>
 
+#include <helpers/BluetoothMac.h>
 #include <helpers/CommonRadioPrefs.h>
 #include <helpers/DynamicConfigSerializer.h>
 
@@ -74,6 +75,8 @@ public:
   uint16_t cad_scan_timeout_ms = 0;
   uint16_t cad_retry_delay_ms = 0;
   uint16_t cad_max_duration_ms = 0;
+  uint8_t bluetooth_mac_mode = mesh::companion::BLUETOOTH_MAC_DEFAULT;
+  uint8_t bluetooth_mac[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
 
 private:
   class RadioPrefs : public CommonRadioPrefs {

@@ -9,6 +9,7 @@
 TEST(WebConfigKeys, AllowsKnownScalarKeys) {
   EXPECT_TRUE(wcIsAllowedSetKey("name"));
   EXPECT_TRUE(wcIsAllowedSetKey("bluetooth.name"));
+  EXPECT_TRUE(wcIsAllowedSetKey("bluetooth.mac"));
   EXPECT_TRUE(wcIsAllowedSetKey("radio"));
   EXPECT_TRUE(wcIsAllowedSetKey("radio.rxps"));
   EXPECT_TRUE(wcIsAllowedSetKey("powersaving"));
@@ -68,13 +69,21 @@ TEST(WebConfigKeys, IsCaseSensitive) {
   EXPECT_FALSE(wcIsAllowedSetKey("MQTT1.preset"));
 }
 
-TEST(WebConfigKeys, EspNowChannelAlwaysRequiresAReboot) {
+TEST(WebConfigKeys, AddressChangingKeysAlwaysRequireAReboot) {
   EXPECT_TRUE(wcSetKeyRequiresReboot("espnow.channel"));
+  EXPECT_TRUE(wcSetKeyRequiresReboot("bluetooth.mac"));
   EXPECT_FALSE(wcSetKeyRequiresReboot(NULL));
   EXPECT_FALSE(wcSetKeyRequiresReboot("espnow.channel.extra"));
   EXPECT_FALSE(wcSetKeyRequiresReboot("ESPNOW.channel"));
   EXPECT_FALSE(wcSetKeyRequiresReboot("wifi.ssid"));
   EXPECT_FALSE(wcSetKeyRequiresReboot(""));
+}
+
+TEST(WebConfigKeys, EspNowChannelClassificationIsNarrow) {
+  EXPECT_TRUE(wcIsEspNowChannelKey("espnow.channel"));
+  EXPECT_FALSE(wcIsEspNowChannelKey("bluetooth.mac"));
+  EXPECT_FALSE(wcIsEspNowChannelKey("espnow.channel.extra"));
+  EXPECT_FALSE(wcIsEspNowChannelKey(NULL));
 }
 
 // ---- short-key OOB guard --------------------------------------------------

@@ -289,6 +289,7 @@ The equivalent framed CLI commands are:
 | FEM receive gain | `get radio.fem.rxgain`; `set radio.fem.rxgain on|off` |
 | WiFi power save | `get wifi.powersave`; `set wifi.powersave none|min|max` |
 | Bluetooth name | `get bluetooth.name`; `set bluetooth.name <name|default>` |
+| Bluetooth address | `get bluetooth.mac`; `set bluetooth.mac <address|random|random-every-boot|default>` |
 
 The framed form works over the normal binary USB, BLE, or TCP transport and
 does not need the USB terminal-start token. Unsupported settings return the
@@ -323,6 +324,15 @@ The Bluetooth name can be configured over USB, BLE, or TCP. Use
 `set bluetooth.name default` to restore `MeshCore-<advert name>`; an empty CLI
 value is rejected. (`clear` is also accepted as an alias for `default`.) A
 custom name is limited to 31 valid UTF-8 bytes and takes effect after reboot.
+
+Bluetooth Companion builds also accept `bluetooth.mac` (`ble.mac` is an
+alias). A literal address must be a BLE random-static address; `random`
+generates and saves one, `random-every-boot` rotates it at each startup, and
+`default` or `clear` restores the factory address. The change takes effect
+after reboot. The client must forget and re-pair the old identity. Per-boot
+random mode clears local peer bonds each startup and therefore requires a new
+pairing after every reboot. This is an application setting; an nRF52 OTAFIX
+bootloader continues to advertise its separate DFU identity.
 
 ### Bluetooth LoRa mOTA source
 

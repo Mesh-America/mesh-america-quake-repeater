@@ -1,6 +1,8 @@
 #include "SerialBLEInterface.h"
+#include "../BluetoothMac.h"
 #include "../CompanionFrameQueue.h"
 #include "esp_mac.h"
+#include <stdlib.h>
 #if defined(CONFIG_BLUEDROID_ENABLED)
 #include "esp_gap_ble_api.h"
 #endif
@@ -26,8 +28,47 @@ extern "C" bool bleInUse(void) {
 
 #define ADVERT_RESTART_DELAY  1000   // millis
 
-bool SerialBLEInterface::begin(const char* prefix, const char* name, uint32_t pin_code) {
+static void clearStoredBluetoothBonds() {
+#if defined(CONFIG_NIMBLE_ENABLED)
+  const int result = ble_store_clear();
+  if (result != 0) {
+    BLE_DEBUG_PRINTLN("Could not clear NimBLE bonds: %d", result);
+  }
+#else
+  int count = esp_ble_get_bond_device_num();
+  if (count <= 0) return;
+
+  esp_ble_bond_dev_t* devices = static_cast<esp_ble_bond_dev_t*>(
+      malloc(sizeof(esp_ble_bond_dev_t) * count));
+  if (devices == NULL) {
+    BLE_DEBUG_PRINTLN("Could not allocate Bluetooth bond list");
+    return;
+  }
+  if (esp_ble_get_bond_device_list(&count, devices) != ESP_OK) {
+    BLE_DEBUG_PRINTLN("Could not read Bluetooth bond list");
+    free(devices);
+    return;
+  }
+  for (int i = 0; i < count; i++) {
+    if (esp_ble_remove_bond_device(devices[i].bd_addr) != ESP_OK) {
+      BLE_DEBUG_PRINTLN("Could not remove Bluetooth bond %d", i);
+    }
+  }
+  free(devices);
+#endif
+}
+
+bool SerialBLEInterface::begin(const char* prefix, const char* name,
+                               uint32_t pin_code,
+                               const uint8_t* custom_address,
+                               bool clear_bonds) {
   _pin_code = pin_code;
+
+  if (custom_address != nullptr
+      && !mesh::companion::isValidBluetoothMac(custom_address)) {
+    BLE_DEBUG_PRINTLN("Custom Bluetooth MAC is invalid");
+    return false;
+  }
 
   char resolved_name[32];
   const char* suffix = name;
@@ -59,6 +100,25 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name, uint32_t pi
   // failure is a null server below, which is handled without dereferencing it.
   BLEDevice::init(dev_name);
 #endif
+
+  if (clear_bonds) clearStoredBluetoothBonds();
+
+#if defined(CONFIG_NIMBLE_ENABLED)
+  if (custom_address != nullptr) {
+    uint8_t native_address[mesh::companion::BLUETOOTH_MAC_BYTES];
+    for (size_t i = 0; i < mesh::companion::BLUETOOTH_MAC_BYTES; i++) {
+      native_address[i] = custom_address[
+          mesh::companion::BLUETOOTH_MAC_BYTES - 1 - i];
+    }
+    if (!BLEDevice::setOwnAddr(native_address)
+        || !BLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM)) {
+      BLE_DEBUG_PRINTLN("Custom Bluetooth MAC setup failed");
+      BLEDevice::deinit(false);
+      return false;
+    }
+  }
+#endif
+
   BLEDevice::setSecurityCallbacks(this);
   // ATT notifications consume three bytes of the negotiated MTU. Reserve
   // that overhead so a MAX_FRAME_SIZE protocol frame fits without truncation.
@@ -90,6 +150,18 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name, uint32_t pi
     return false;
   }
   pServer->setCallbacks(this);
+
+#if !defined(CONFIG_NIMBLE_ENABLED)
+  if (custom_address != nullptr) {
+    esp_bd_addr_t native_address;
+    memcpy(native_address, custom_address, sizeof(native_address));
+    // Arduino-ESP32 2.x returns void here, while newer Bluedroid wrappers
+    // return bool. Both configure the advertising address type and report any
+    // controller failure through the BLE library log.
+    pServer->getAdvertising()->setDeviceAddress(
+        native_address, BLE_ADDR_TYPE_RANDOM);
+  }
+#endif
 
   // Create the BLE Service
   pService = pServer->createService(SERVICE_UUID);

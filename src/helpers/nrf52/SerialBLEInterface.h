@@ -94,8 +94,12 @@ public:
    * @param prefix   a prefix for the device name
    * @param name  a name for the device (combined with prefix); "@@MAC" uses the hardware address
    * @param pin_code   the BLE security pin
+   * @param custom_address optional human-order BLE random-static address
+   * @param clear_bonds clear saved peer bonds before accepting connections
    */
-  bool begin(const char* prefix, const char* name, uint32_t pin_code);
+  bool begin(const char* prefix, const char* name, uint32_t pin_code,
+             const uint8_t* custom_address = nullptr,
+             bool clear_bonds = false);
 
   void disconnect();
   void enable() override;

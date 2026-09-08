@@ -32,6 +32,7 @@ class CompanionSettingsPersistenceContractTests(unittest.TestCase):
         cls.store = source("examples/companion_radio/DataStore.cpp")
         cls.store_header = source("examples/companion_radio/DataStore.h")
         cls.mesh = source("examples/companion_radio/MyMesh.cpp")
+        cls.prefs = source("examples/companion_radio/NodePrefs.h")
 
     def test_preferences_load_has_an_observable_fail_closed_result(self):
         self.assertIn("bool loadPrefs(CompanionNodePrefs& prefs", self.store_header)
@@ -109,6 +110,37 @@ class CompanionSettingsPersistenceContractTests(unittest.TestCase):
             guarded_region,
             r"if\s*\(prefs_ready\s*&&\s*\(",
         )
+
+    def test_bluetooth_mac_config_is_an_append_only_preference_tail(self):
+        cad_at = self.prefs.index("uint16_t cad_max_duration_ms")
+        mode_at = self.prefs.index("uint8_t bluetooth_mac_mode", cad_at)
+        address_at = self.prefs.index("uint8_t bluetooth_mac[", mode_at)
+        self.assertLess(cad_at, mode_at)
+        self.assertLess(mode_at, address_at)
+
+        load = function_body(
+            self.store,
+            "bool DataStore::loadPrefsInt(const char *filename",
+        )
+        self.assertIn("sizeof(loaded_prefs.bluetooth_mac_mode)", load)
+        self.assertIn("sizeof(loaded_prefs.bluetooth_mac)", load)
+        read_mode_at = load.index(
+            "readOptionalField(&loaded_prefs.bluetooth_mac_mode"
+        )
+        read_address_at = load.index(
+            "readOptionalField(loaded_prefs.bluetooth_mac", read_mode_at
+        )
+        self.assertLess(read_mode_at, read_address_at)
+
+        save = function_body(
+            self.store,
+            "bool DataStore::savePrefs(const CompanionNodePrefs& _prefs",
+        )
+        write_mode_at = save.index("&_prefs.bluetooth_mac_mode")
+        write_address_at = save.index(
+            "(uint8_t *)_prefs.bluetooth_mac,", write_mode_at
+        )
+        self.assertLess(write_mode_at, write_address_at)
 
     def test_channel_source_discovery_and_open_failures_latch_quarantine(self):
         load = function_body(self.store, "void DataStore::loadChannels(")

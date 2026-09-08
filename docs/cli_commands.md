@@ -1180,6 +1180,39 @@ the frame and reply format.
 
 ---
 
+#### View or change the Bluetooth address (BLE Companion)
+
+**Usage:**
+
+- `get bluetooth.mac`
+- `set bluetooth.mac <address|random|random-every-boot|default>`
+
+`get ble.mac` and `set ble.mac ...` are accepted aliases. The setting is
+available on every Companion build that includes Bluetooth.
+
+| Value | Result after reboot |
+|---|---|
+| `C2:11:22:33:44:55` | Save and use that custom address. |
+| `random` | Generate one random address now, save it, and reuse it on later boots. |
+| `random-every-boot` | Generate a new address once at each boot. `random everyboot` is also accepted. |
+| `default` or `clear` | Remove the override and use the chipset's factory Bluetooth address. |
+
+A custom value must be a valid BLE random-static address in
+`XX:XX:XX:XX:XX:XX` form. Its first byte must be from `C0` through `FF`, and
+you are responsible for keeping addresses unique. Hyphens are also accepted
+on input; status output uses uppercase colons.
+
+Every change requires a reboot and invalidates the phone's previous view of
+the device. Forget the old device entry and pair again. `random-every-boot`
+also clears the Companion's saved peer bonds during each startup, so pairing
+and PIN entry are expected again after every reboot.
+
+This changes only the running MeshCore Companion application. On nRF52, the
+OTAFIX bootloader still uses its own address, which is visible only while the
+board is in BLE DFU/recovery mode. USB and LoRa updates are unaffected.
+
+---
+
 #### View or change this node's latitude
 **Usage:**
 - `get lat`

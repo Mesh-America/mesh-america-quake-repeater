@@ -188,6 +188,15 @@ class WebConfigUiTest(unittest.TestCase):
             'pwdChanged?(d["wifi.pwd"]?"******":"(open network)")', review
         )
 
+    def test_bluetooth_address_field_is_capability_gated_and_bound(self):
+        page = SOURCE.read_text(encoding="utf-8")
+        self.assertIn('data-cap="65536"><label>Bluetooth address</label>', page)
+        self.assertIn('data-k="bluetooth.mac"', page)
+        self.assertIn('case"bluetooth.mac":return r.bluetooth_mac||"";', page)
+        self.assertIn("random-every-boot", page)
+        self.assertIn('("bluetooth.mac" in setmap)', page)
+        self.assertIn("Bluetooth address saved [OK] - rebooting", page)
+
     def test_scan_panel_exposes_automatic_updates_accessibly(self):
         page = SOURCE.read_text(encoding="utf-8")
         self.assertIn('id="wz-scan-btn"', page)
@@ -221,6 +230,10 @@ class WebConfigUiTest(unittest.TestCase):
         self.assertIn("function restoreConfigLoadEdits(capture)", page)
         self.assertIn("function pollScan(url,epoch)", page)
         self.assertIn("function clearInheritedWiFiPassword(target,nextSsid)", page)
+        self.assertIn('data-cap="65536"><label>Bluetooth address</label>', page)
+        self.assertIn('data-k="bluetooth.mac"', page)
+        self.assertIn('case"bluetooth.mac":return r.bluetooth_mac||"";', page)
+        self.assertIn("random-every-boot", page)
 
     def test_skipped_mqtt_does_not_pin_display_in_setup_mode(self):
         main = (ROOT / "examples" / "companion_radio" / "main.cpp").read_text(

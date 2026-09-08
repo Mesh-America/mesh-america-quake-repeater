@@ -159,6 +159,84 @@ TEST(CompanionNodePrefs, BluetoothNameRequiresBoundedValidUtf8) {
   EXPECT_FALSE(mesh::companion::isValidBluetoothName(malformed));
 }
 
+TEST(CompanionNodePrefs, BluetoothMacDefaultsToFactoryIdentity) {
+  CompanionNodePrefs prefs = {};
+  EXPECT_EQ(mesh::companion::BLUETOOTH_MAC_DEFAULT,
+            prefs.bluetooth_mac_mode);
+  EXPECT_FALSE(mesh::companion::hasCustomBluetoothMac(
+      prefs.bluetooth_mac));
+}
+
+TEST(CompanionNodePrefs, BluetoothMacParsesAndFormatsRandomStaticAddress) {
+  uint8_t address[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+  ASSERT_TRUE(mesh::companion::parseBluetoothMac(
+      "C2:11:22:33:44:55", address));
+  EXPECT_EQ(0xC2, address[0]);
+  EXPECT_EQ(0x55, address[5]);
+
+  char formatted[mesh::companion::BLUETOOTH_MAC_TEXT_SIZE];
+  ASSERT_TRUE(mesh::companion::formatBluetoothMac(
+      address, formatted, sizeof(formatted)));
+  EXPECT_STREQ("C2:11:22:33:44:55", formatted);
+
+  ASSERT_TRUE(mesh::companion::parseBluetoothMac(
+      "d6-aa-bb-cc-dd-ee", address));
+  ASSERT_TRUE(mesh::companion::formatBluetoothMac(
+      address, formatted, sizeof(formatted)));
+  EXPECT_STREQ("D6:AA:BB:CC:DD:EE", formatted);
+}
+
+TEST(CompanionNodePrefs, BluetoothMacRejectsInvalidOrMalformedAddress) {
+  uint8_t address[mesh::companion::BLUETOOTH_MAC_BYTES];
+  memset(address, 0xA5, sizeof(address));
+
+  EXPECT_FALSE(mesh::companion::parseBluetoothMac(
+      "02:11:22:33:44:55", address));
+  EXPECT_FALSE(mesh::companion::parseBluetoothMac(
+      "C0:00:00:00:00:00", address));
+  EXPECT_FALSE(mesh::companion::parseBluetoothMac(
+      "FF:FF:FF:FF:FF:FF", address));
+  EXPECT_FALSE(mesh::companion::parseBluetoothMac(
+      "C2:11-22:33:44:55", address));
+  EXPECT_FALSE(mesh::companion::parseBluetoothMac(
+      "C2:11:22:33:44", address));
+
+  for (size_t i = 0; i < sizeof(address); i++) {
+    EXPECT_EQ(0xA5, address[i]);
+  }
+}
+
+TEST(CompanionNodePrefs, BluetoothMacRandomBytesAreNormalized) {
+  uint8_t all_zero[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+  mesh::companion::makeRandomStaticBluetoothMac(all_zero);
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMac(all_zero));
+  EXPECT_EQ(0xC0, all_zero[0]);
+
+  uint8_t all_one[mesh::companion::BLUETOOTH_MAC_BYTES];
+  memset(all_one, 0xFF, sizeof(all_one));
+  mesh::companion::makeRandomStaticBluetoothMac(all_one);
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMac(all_one));
+  EXPECT_EQ(0xFE, all_one[5]);
+}
+
+TEST(CompanionNodePrefs, BluetoothMacModesDescribeSavedAndPerBootUse) {
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMacMode(
+      mesh::companion::BLUETOOTH_MAC_DEFAULT));
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMacMode(
+      mesh::companion::BLUETOOTH_MAC_CUSTOM));
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMacMode(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_SAVED));
+  EXPECT_TRUE(mesh::companion::isValidBluetoothMacMode(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT));
+  EXPECT_FALSE(mesh::companion::isValidBluetoothMacMode(4));
+  EXPECT_TRUE(mesh::companion::bluetoothMacModeUsesSavedAddress(
+      mesh::companion::BLUETOOTH_MAC_CUSTOM));
+  EXPECT_TRUE(mesh::companion::bluetoothMacModeUsesSavedAddress(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_SAVED));
+  EXPECT_FALSE(mesh::companion::bluetoothMacModeUsesSavedAddress(
+      mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT));
+}
+
 TEST(CompanionNodePrefs, MigratesRegressedPowerSavingDefaultOnce) {
   CompanionNodePrefs prefs = {};
   prefs.powersaving_enabled = 0;

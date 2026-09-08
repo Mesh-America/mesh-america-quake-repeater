@@ -18,7 +18,7 @@
 // separately, see wcIsAdminPasswordKey below.
 static const char* const WC_ALLOWED_SET_KEYS[] = {
   // NodePrefs (radio / node)
-  "name", "bluetooth.name", "lat", "lon", "radio", "tx", "af", "rxdelay", "txdelay",
+  "name", "bluetooth.name", "bluetooth.mac", "lat", "lon", "radio", "tx", "af", "rxdelay", "txdelay",
   "cad", "radio.rxgain", "radio.fem.rxgain", "radio.rxps", "powersaving",
   "repeat",
   "advert.interval", "flood.advert.interval",
@@ -57,12 +57,16 @@ static inline bool wcIsAllowedSetKey(const char* key) {
   return false;
 }
 
-// Changing the primary ESP-NOW channel cannot be applied live: every peer and
-// any infrastructure-WiFi association must stay on the boot channel until the
-// node restarts. The server enforces this even when a crafted client omits the
-// browser's reboot flag.
-static inline bool wcSetKeyRequiresReboot(const char* key) {
+static inline bool wcIsEspNowChannelKey(const char* key) {
   return key != NULL && strcmp(key, "espnow.channel") == 0;
+}
+
+// These settings cannot be applied to a running transport. The server enforces
+// a reboot even when a crafted client omits the browser's reboot flag.
+static inline bool wcSetKeyRequiresReboot(const char* key) {
+  return key != NULL
+      && (wcIsEspNowChannelKey(key)
+          || strcmp(key, "bluetooth.mac") == 0);
 }
 
 // The admin password maps to the top-level `password` command, not a setter, so

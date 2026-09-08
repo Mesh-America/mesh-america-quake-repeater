@@ -1,4 +1,5 @@
 #include "SerialBLEInterface.h"
+#include "../BluetoothMac.h"
 #include "../CompanionFrameQueue.h"
 #include <stdio.h>
 #include <string.h>
@@ -238,7 +239,10 @@ bool SerialBLEInterface::removeStoredBondForPeer(const char* cause) {
   return true;
 }
 
-bool SerialBLEInterface::begin(const char* prefix, const char* name, uint32_t pin_code) {
+bool SerialBLEInterface::begin(const char* prefix, const char* name,
+                               uint32_t pin_code,
+                               const uint8_t* custom_address,
+                               bool clear_bonds) {
   instance = this;
 
   char charpin[20];
@@ -251,6 +255,29 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name, uint32_t pi
     instance = nullptr;
     BLE_DEBUG_PRINTLN("Bluefruit.begin failed");
     return false;
+  }
+
+  if (clear_bonds) Bluefruit.Periph.clearBonds();
+
+  if (custom_address != nullptr) {
+    if (!mesh::companion::isValidBluetoothMac(custom_address)) {
+      instance = nullptr;
+      BLE_DEBUG_PRINTLN("Custom Bluetooth MAC is invalid");
+      return false;
+    }
+
+    ble_gap_addr_t address = {};
+    address.addr_type = BLE_GAP_ADDR_TYPE_RANDOM_STATIC;
+    for (size_t i = 0; i < mesh::companion::BLUETOOTH_MAC_BYTES; i++) {
+      address.addr[i] = custom_address[
+          mesh::companion::BLUETOOTH_MAC_BYTES - 1 - i];
+    }
+    const uint32_t address_error = sd_ble_gap_addr_set(&address);
+    if (address_error != NRF_SUCCESS) {
+      instance = nullptr;
+      BLE_DEBUG_PRINTLN("Custom Bluetooth MAC failed: %lu", address_error);
+      return false;
+    }
   }
  
   char resolved_name[32];

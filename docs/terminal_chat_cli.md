@@ -86,6 +86,18 @@ valid UTF-8 bytes. `default` restores `MeshCore-<node name>`. The saved change
 takes effect after reboot. `get ble.name` and `set ble.name` are short aliases.
 
 ```
+get bluetooth.mac
+set bluetooth.mac {address|random|random-every-boot|default}
+```
+Shows or changes the Bluetooth identity on Companion builds with BLE. A
+literal address must be BLE random-static, such as `C2:11:22:33:44:55`.
+`random` generates and saves one address; `random-every-boot` generates a new
+one on each startup (`random everyboot` is also accepted); `default` or `clear`
+restores the factory address. Reboot,
+forget the old phone entry, and pair again. Per-boot random mode requires
+pairing after every reboot. `get ble.mac` and `set ble.mac` are short aliases.
+
+```
 set lat {latitude}
 ```
 Sets your advertisement map latitude. (decimal degrees)

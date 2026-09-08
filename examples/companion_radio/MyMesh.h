@@ -349,6 +349,12 @@ private:
   bool applyAndSaveBluetoothName(const char* value, char* reply,
                                  size_t reply_size);
   void formatBluetoothNameStatus(char* reply, size_t reply_size) const;
+#if defined(BLE_PIN_CODE)
+  bool saveBluetoothMac(uint8_t mode, const uint8_t* address);
+  bool applyAndSaveBluetoothMac(const char* value, char* reply,
+                                size_t reply_size);
+  void formatBluetoothMacStatus(char* reply, size_t reply_size) const;
+#endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
   bool applyAndSaveEspNowChannel(const char* value, char* reply,
                                  size_t reply_size);

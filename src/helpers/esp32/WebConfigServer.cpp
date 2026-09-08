@@ -205,7 +205,7 @@ static bool isAllowedSetKey(const char* key, bool has_mqtt) {
 #if !defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW
   // The shared source-level allowlist is host-tested, but only a target whose
   // mesh transport is ESP-NOW has a meaningful primary-radio channel to set.
-  if (wcSetKeyRequiresReboot(key)) return false;
+  if (wcIsEspNowChannelKey(key)) return false;
 #endif
   const bool mqtt_only = strncmp(key, "mqtt.", 5) == 0
                       || strncmp(key, "mqtt", 4) == 0
@@ -1418,7 +1418,7 @@ void WebConfigServer::drainBatch(uint32_t now) {
     if (strcmp(_batch[i].key, "wifi.ssid") == 0
         || strcmp(_batch[i].key, "wifi.pwd") == 0) {
       wifi_credentials_changed = true;
-    } else if (wcSetKeyRequiresReboot(_batch[i].key)) {
+    } else if (wcIsEspNowChannelKey(_batch[i].key)) {
       espnow_channel_changed = true;
     }
   }
@@ -1796,6 +1796,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     radio["loop_detect"] = LOOP_MODES[node.loop_detect <= 3 ? node.loop_detect : 0];
     radio["name"] = (const char*)node.name;
     radio["bluetooth_name"] = (const char*)node.bluetooth_name;
+    radio["bluetooth_mac"] = (const char*)node.bluetooth_mac;
     radio["lat"] = node.lat;
     radio["lon"] = node.lon;
     radio["advert_interval"] = node.advert_interval;
@@ -1942,7 +1943,7 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
       req->send(400, "application/json", out);
       return;
     }
-    if (wcSetKeyRequiresReboot(key)) {
+    if (wcIsEspNowChannelKey(key)) {
       uint8_t channel = 0;
       if (!mesh::wifi::parseEspNowChannel(val, channel)) {
         StaticJsonDocument<128> err;

@@ -383,6 +383,15 @@ Custom names replace the complete Bluetooth label rather than inheriting the
 prefix, accept up to 31 valid UTF-8 bytes, and take effect after reboot. This
 does not change the node's mesh advertisement name.
 
+Every Bluetooth Companion also supports `get bluetooth.mac` and
+`set bluetooth.mac <address|random|random-every-boot|default>`. A literal
+address is a BLE random-static identity, `random` creates one persistent
+identity, `random-every-boot` rotates it on startup, and `default` (or `clear`)
+restores the chipset address. Reboot and re-pair after changing modes. The
+per-boot mode intentionally clears local bonds and needs a new pairing after
+every reboot. On nRF52 this affects the MeshCore application only, not the
+OTAFIX bootloader's separate BLE DFU identity.
+
 ESP32 ports 5000, 5001, 5002, and WebConfig have no independent login layer.
 Expose them only on a trusted LAN or temporary setup network. See
 [WiFi setup](./WiFi.md) for credential setup and reconnect behavior.

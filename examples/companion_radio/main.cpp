@@ -1,5 +1,6 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
+#include <helpers/BluetoothMac.h>
 #include "MyMesh.h"
 #include "CompanionWiFi.h"
 #if MESH_PACKET_LOGGING
@@ -1918,6 +1919,46 @@ void halt() {
   static bool companion_bluetooth_initialized = false;
   static uint32_t companion_bluetooth_start_at = 0;
   static constexpr uint32_t COMPANION_BLUETOOTH_RETRY_MS = 5000UL;
+  static uint8_t companion_bluetooth_session_address[
+      mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+  static bool companion_bluetooth_session_address_ready = false;
+
+  static const uint8_t* companionBluetoothAddress(
+      const CompanionNodePrefs* prefs, bool& clear_bonds) {
+    clear_bonds = false;
+    if (prefs == nullptr
+        || !mesh::companion::isValidBluetoothMacMode(
+            prefs->bluetooth_mac_mode)) {
+      mesh::usbLoggingPort().println(
+          "Companion: invalid Bluetooth MAC mode; using factory address");
+      return nullptr;
+    }
+
+    if (prefs->bluetooth_mac_mode
+        == mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT) {
+      if (!companion_bluetooth_session_address_ready) {
+        fast_rng.random(companion_bluetooth_session_address,
+                        sizeof(companion_bluetooth_session_address));
+        mesh::companion::makeRandomStaticBluetoothMac(
+            companion_bluetooth_session_address);
+        companion_bluetooth_session_address_ready = true;
+      }
+      // A new local identity cannot safely reuse bonds created for the
+      // previous boot's identity.
+      clear_bonds = true;
+      return companion_bluetooth_session_address;
+    }
+
+    if (mesh::companion::bluetoothMacModeUsesSavedAddress(
+            prefs->bluetooth_mac_mode)) {
+      if (mesh::companion::isValidBluetoothMac(prefs->bluetooth_mac)) {
+        return prefs->bluetooth_mac;
+      }
+      mesh::usbLoggingPort().println(
+          "Companion: invalid saved Bluetooth MAC; using factory address");
+    }
+    return nullptr;
+  }
 
   static void scheduleCompanionBluetoothRetry() {
     companion_bluetooth_start_at = millis() + COMPANION_BLUETOOTH_RETRY_MS;
@@ -1939,11 +1980,15 @@ void halt() {
     CompanionNodePrefs* prefs = the_mesh.getNodePrefs();
     const bool custom_bluetooth_name =
         mesh::companion::hasCustomBluetoothName(prefs->bluetooth_name);
+    bool clear_bonds = false;
+    const uint8_t* bluetooth_address =
+        companionBluetoothAddress(prefs, clear_bonds);
     if (!bluetooth_interface.begin(custom_bluetooth_name ? "" : BLE_NAME_PREFIX,
                                    custom_bluetooth_name
                                        ? prefs->bluetooth_name
                                        : prefs->node_name,
-                                   the_mesh.getBLEPin())) {
+                                   the_mesh.getBLEPin(), bluetooth_address,
+                                   clear_bonds)) {
       interface_manager.removeInterface(&bluetooth_interface);
       mesh::usbLoggingPort().println(
           "Companion: Bluetooth initialization failed; retrying in 5 seconds");

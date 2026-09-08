@@ -2426,6 +2426,37 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     return true;
   }
 
+#if defined(BLE_PIN_CODE)
+  if (strcmp(command, "get bluetooth.mac") == 0
+      || strcmp(command, "get ble.mac") == 0) {
+    formatBluetoothMacStatus(reply, reply_size);
+    return true;
+  }
+
+  const char* bluetooth_mac_value = NULL;
+  if (strncmp(command, "set bluetooth.mac", 17) == 0
+      && (command[17] == 0 || command[17] == ' '
+          || command[17] == '\t')) {
+    bluetooth_mac_value = command + 17;
+  } else if (strncmp(command, "set ble.mac", 11) == 0
+             && (command[11] == 0 || command[11] == ' '
+                 || command[11] == '\t')) {
+    bluetooth_mac_value = command + 11;
+  }
+  if (bluetooth_mac_value != NULL) {
+    while (*bluetooth_mac_value == ' ' || *bluetooth_mac_value == '\t') {
+      bluetooth_mac_value++;
+    }
+    if (bluetooth_mac_value[0] == 0) {
+      snprintf(reply, reply_size,
+               "Error: use set bluetooth.mac <address|random|random-every-boot|default>");
+    } else {
+      applyAndSaveBluetoothMac(bluetooth_mac_value, reply, reply_size);
+    }
+    return true;
+  }
+#endif
+
   if (strncmp(command, "set pin", 7) == 0
       && (command[7] == 0 || command[7] == ' '
           || command[7] == '\t')) {
@@ -2907,7 +2938,19 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   s.capabilities = WebConfigServer::CAP_LOCATION | WebConfigServer::CAP_AIRTIME
       | WebConfigServer::CAP_RX_DELAY | WebConfigServer::CAP_POWER_SAVING;
 #ifdef BLE_PIN_CODE
-  s.capabilities |= WebConfigServer::CAP_BLUETOOTH_NAME;
+  s.capabilities |= WebConfigServer::CAP_BLUETOOTH_NAME
+      | WebConfigServer::CAP_BLUETOOTH_MAC;
+  if (_prefs.bluetooth_mac_mode
+      == mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT) {
+    wcCopyValue(s.bluetooth_mac, sizeof(s.bluetooth_mac),
+                "random-every-boot");
+  } else if (mesh::companion::bluetoothMacModeUsesSavedAddress(
+                 _prefs.bluetooth_mac_mode)
+             && mesh::companion::isValidBluetoothMac(
+                 _prefs.bluetooth_mac)) {
+    mesh::companion::formatBluetoothMac(
+        _prefs.bluetooth_mac, s.bluetooth_mac, sizeof(s.bluetooth_mac));
+  }
 #endif
 #if defined(ESP32) && defined(WIFI_SSID)
   s.capabilities |= WebConfigServer::CAP_WIFI_POWER_SAVE;
@@ -3030,6 +3073,13 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     formatBluetoothNameStatus(reply, 160);
     return;
   }
+#if defined(BLE_PIN_CODE)
+  if (cmd && (strcmp(cmd, "get bluetooth.mac") == 0
+              || strcmp(cmd, "get ble.mac") == 0)) {
+    formatBluetoothMacStatus(reply, 160);
+    return;
+  }
+#endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
   if (cmd && strcmp(cmd, "get espnow.channel") == 0) {
     formatEspNowChannel(reply, 160);
@@ -3068,6 +3118,12 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     applyAndSaveBluetoothName(value, reply, 160);
     return;
   }
+#if defined(BLE_PIN_CODE)
+  if (strcmp(key, "bluetooth.mac") == 0) {
+    applyAndSaveBluetoothMac(value, reply, 160);
+    return;
+  }
+#endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
   if (strcmp(key, "espnow.channel") == 0) {
     applyAndSaveEspNowChannel(value, reply, 160);
@@ -5735,6 +5791,118 @@ void MyMesh::formatBluetoothNameStatus(char* reply, size_t reply_size) const {
                ? "custom" : "default from node name");
 }
 
+#if defined(BLE_PIN_CODE)
+bool MyMesh::saveBluetoothMac(uint8_t mode, const uint8_t* address) {
+  if (!mesh::companion::isValidBluetoothMacMode(mode)) return false;
+  if (mesh::companion::bluetoothMacModeUsesSavedAddress(mode)
+      && !mesh::companion::isValidBluetoothMac(address)) {
+    return false;
+  }
+
+  const uint8_t previous_mode = _prefs.bluetooth_mac_mode;
+  uint8_t previous_address[mesh::companion::BLUETOOTH_MAC_BYTES];
+  memcpy(previous_address, _prefs.bluetooth_mac, sizeof(previous_address));
+
+  _prefs.bluetooth_mac_mode = mode;
+  memset(_prefs.bluetooth_mac, 0, sizeof(_prefs.bluetooth_mac));
+  if (mesh::companion::bluetoothMacModeUsesSavedAddress(mode)) {
+    memcpy(_prefs.bluetooth_mac, address, sizeof(_prefs.bluetooth_mac));
+  }
+
+  if (savePrefs()) return true;
+  _prefs.bluetooth_mac_mode = previous_mode;
+  memcpy(_prefs.bluetooth_mac, previous_address, sizeof(_prefs.bluetooth_mac));
+  return false;
+}
+
+bool MyMesh::applyAndSaveBluetoothMac(const char* value, char* reply,
+                                      size_t reply_size) {
+  if (reply == NULL || reply_size == 0) return false;
+  if (value == NULL) {
+    snprintf(reply, reply_size,
+             "Error: use set bluetooth.mac <address|random|random-every-boot|default>");
+    return false;
+  }
+
+  uint8_t mode = mesh::companion::BLUETOOTH_MAC_DEFAULT;
+  uint8_t address[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+  if (value[0] == 0 || strcmp(value, "default") == 0
+      || strcmp(value, "clear") == 0) {
+    mode = mesh::companion::BLUETOOTH_MAC_DEFAULT;
+  } else if (strcmp(value, "random") == 0) {
+    mode = mesh::companion::BLUETOOTH_MAC_RANDOM_SAVED;
+    getRNG()->random(address, sizeof(address));
+    mesh::companion::makeRandomStaticBluetoothMac(address);
+  } else if (strcmp(value, "random-every-boot") == 0
+             || strcmp(value, "random-everyboot") == 0
+             || strcmp(value, "random_every_boot") == 0
+             || strcmp(value, "random everyboot") == 0
+             || strcmp(value, "random every boot") == 0
+             || strcmp(value, "everyboot") == 0) {
+    mode = mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT;
+  } else {
+    const char* custom_value = value;
+    if (strncmp(custom_value, "custom", 6) == 0
+        && (custom_value[6] == ' ' || custom_value[6] == '\t')) {
+      custom_value += 7;
+      while (*custom_value == ' ' || *custom_value == '\t') custom_value++;
+    }
+    if (!mesh::companion::parseBluetoothMac(custom_value, address)) {
+      snprintf(reply, reply_size,
+               "Error: use a random-static address (first byte C0-FF), random, random-every-boot, or default");
+      return false;
+    }
+    mode = mesh::companion::BLUETOOTH_MAC_CUSTOM;
+  }
+
+  if (!saveBluetoothMac(mode, address)) {
+    snprintf(reply, reply_size, "Error: Bluetooth MAC save failed");
+    return false;
+  }
+
+  char formatted[mesh::companion::BLUETOOTH_MAC_TEXT_SIZE];
+  if (mode == mesh::companion::BLUETOOTH_MAC_DEFAULT) {
+    snprintf(reply, reply_size,
+             "OK - factory Bluetooth address restored; reboot and re-pair");
+  } else if (mode == mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT) {
+    snprintf(reply, reply_size,
+             "OK - Bluetooth address will randomize every boot; reboot and pair each time");
+  } else {
+    mesh::companion::formatBluetoothMac(address, formatted,
+                                        sizeof(formatted));
+    snprintf(reply, reply_size,
+             "OK - Bluetooth address saved as %s; reboot and re-pair",
+             formatted);
+  }
+  return true;
+}
+
+void MyMesh::formatBluetoothMacStatus(char* reply, size_t reply_size) const {
+  if (reply == NULL || reply_size == 0) return;
+
+  const uint8_t mode = _prefs.bluetooth_mac_mode;
+  if (!mesh::companion::isValidBluetoothMacMode(mode)) {
+    snprintf(reply, reply_size,
+             "> factory address (invalid saved mode ignored)");
+  } else if (mode == mesh::companion::BLUETOOTH_MAC_DEFAULT) {
+    snprintf(reply, reply_size, "> factory address (default)");
+  } else if (mode == mesh::companion::BLUETOOTH_MAC_RANDOM_EVERY_BOOT) {
+    snprintf(reply, reply_size, "> random-every-boot (pair after each reboot)");
+  } else if (!mesh::companion::isValidBluetoothMac(
+                 _prefs.bluetooth_mac)) {
+    snprintf(reply, reply_size,
+             "> factory address (invalid saved address ignored)");
+  } else {
+    char formatted[mesh::companion::BLUETOOTH_MAC_TEXT_SIZE];
+    mesh::companion::formatBluetoothMac(
+        _prefs.bluetooth_mac, formatted, sizeof(formatted));
+    snprintf(reply, reply_size, "> %s (%s)", formatted,
+             mode == mesh::companion::BLUETOOTH_MAC_CUSTOM
+                 ? "custom" : "saved random");
+  }
+}
+#endif
+
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
 void MyMesh::formatEspNowChannel(char* reply, size_t reply_size) const {
   if (reply == NULL || reply_size == 0) return;
@@ -7175,6 +7343,11 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().print("  set {name|lat|lon|freq|tx|af} {value}\r\n");
     terminalOutput().print("  get bluetooth.name\r\n");
     terminalOutput().print("  set bluetooth.name <name|default>\r\n");
+#if defined(BLE_PIN_CODE)
+    terminalOutput().print("  get bluetooth.mac\r\n");
+    terminalOutput().print(
+        "  set bluetooth.mac <address|random|random-every-boot|default>\r\n");
+#endif
     terminalOutput().print("  set pin <0-999999>\r\n");
     terminalOutput().print("  powersaving [on|off]\r\n");
 #if MESH_USB_LOGGING_AVAILABLE
