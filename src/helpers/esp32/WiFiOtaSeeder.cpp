@@ -39,11 +39,11 @@ bool networkReady() {
 
 void detachTcpFolder() {
   if (!tcp_folder_attached) return;
-  OtaContext& context = ota_ctx();
-  if (context.folderLink() == OtaContext::FOLDER_LINK_TCP) {
-    context.detach_folder();
-    context.clear_folder_dest();
-    context.manager.announce();
+  OtaContext* context = ota_context_if_active();
+  if (context && context->folderLink() == OtaContext::FOLDER_LINK_TCP) {
+    context->detach_folder();
+    context->clear_folder_dest();
+    context->manager.announce();
   }
   tcp_folder_attached = false;
 }
@@ -74,11 +74,15 @@ void WiFiOtaSeeder::loop() {
 
   if (!listener_active) return;
 
-  OtaContext& context = ota_ctx();
+  // An idle listener must leave all 256 queue slots available. A CLI detach
+  // can also return the shared context before the next WiFi poll.
+  OtaContext* active = ota_context_if_active();
   if (WiFiOtaSeederPolicy::tcpFolderWasDetached(tcp_folder_attached,
-                                                 context.folder_active)) {
+          active && active->folder_active &&
+          active->folderLink() == OtaContext::FOLDER_LINK_TCP)) {
     if (seeder_client) seeder_client.stop();
-    context.clear_folder_dest();
+    // A different host transport may already own the replacement context.
+    if (active && !active->folder_active) active->clear_folder_dest();
     tcp_folder_attached = false;
   }
   if (seeder_client && seeder_client.connected()) return;
@@ -89,6 +93,14 @@ void WiFiOtaSeeder::loop() {
 
   incoming.setNoDelay(true);                       // tiny framed requests should leave immediately
 
+  char attach_reply[120];
+  if (!ota_acquire_context(attach_reply, sizeof(attach_reply))) {
+    incoming.stop();
+    mesh::usbLoggingPort().printf(
+        "OTA seeder rejected TCP client: %s\n", attach_reply);
+    return;
+  }
+  OtaContext& context = ota_ctx();
   if (!WiFiOtaSeederPolicy::canAttachTcpFolder(context.folder_active,
                                                 tcp_folder_attached)) {
     incoming.stop();
@@ -98,7 +110,6 @@ void WiFiOtaSeeder::loop() {
   }
 
   seeder_client = incoming;
-  char attach_reply[120];
   if (!context.attach_folder_source(&seeder_source, OtaContext::FOLDER_LINK_TCP,
                                     "tcp", attach_reply, sizeof(attach_reply))) {
     seeder_client.stop();

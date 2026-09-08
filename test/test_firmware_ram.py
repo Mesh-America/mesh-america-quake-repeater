@@ -218,13 +218,16 @@ int main() {
             with self.assertRaises(ValueError):
                 ram.requirements(platform, definitions, "companion")
 
-    def test_nrf52_queue_sharing_applies_to_direct_full_builds_only(self):
+    def test_queue_sharing_applies_to_qualified_direct_full_builds_only(self):
         source = '#include "src/helpers/ota/OtaMemoryPolicy.h"\n#ifdef OTA_SHARED_COMPANION_QUEUE\nSHARING_ENABLED\n#endif\n'
         for flags, expected in (
             (["NRF52_PLATFORM", "COMPANION_RADIO_FULL", "OTA_SEEDER_ONLY"], True),
             (["NRF52_PLATFORM", "OTA_SEEDER_ONLY"], False),
             (["NRF52_PLATFORM", "COMPANION_RADIO_FULL"], False),
             (["ESP32_PLATFORM", "COMPANION_RADIO_FULL", "OTA_SEEDER_ONLY"], False),
+            (["ESP32_PLATFORM", "HELTEC_WIRELESS_PAPER", "COMPANION_RADIO_FULL", "OTA_SEEDER_ONLY"], True),
+            (["ESP32_PLATFORM", "HELTEC_WIRELESS_PAPER", "OTA_SEEDER_ONLY"], False),
+            (["ESP32_PLATFORM", "HELTEC_WIRELESS_PAPER", "COMPANION_RADIO_FULL"], False),
         ):
             result = subprocess.run(["c++", "-x", "c++", "-E", "-I", str(ROOT),
                                      *("-D" + flag for flag in flags), "-"], input=source,
@@ -233,7 +236,8 @@ int main() {
 
     def test_affected_esp32_full_overlay_keeps_queue_and_both_transports(self):
         for target in ("Heltec_v3_companion_radio_full", "Xiao_C3_companion_radio_full",
-                       "heltec_tracker_v2_companion_radio_full_femon"):
+                       "heltec_tracker_v2_companion_radio_full_femon",
+                       "Heltec_Wireless_Paper_companion_radio_full"):
             result = subprocess.run(["bash", "-c", '''
 source build.sh
 PIO_ENV_PLATFORM_BY_NAME["$1"]=ESP32_PLATFORM
@@ -242,8 +246,15 @@ requires_esp32_companion_full_ota_fallback() { return 1; }
 apply_companion_radio_full_profile "$1" "$1"
 printf '%s\\n' "$PLATFORMIO_BUILD_FLAGS"
 ''', "test", target], cwd=ROOT, text=True, capture_output=True, check=True)
-            self.assertIn("-DMAX_CONTACTS=150", result.stdout)
-            self.assertNotIn("-DOFFLINE_QUEUE_SIZE=", result.stdout)
+            if target == "Heltec_Wireless_Paper_companion_radio_full":
+                self.assertIn("-DMAX_CONTACTS=350", result.stdout)
+                self.assertNotIn("-DMAX_CONTACTS=150", result.stdout)
+                self.assertIn("-DOFFLINE_QUEUE_SIZE=256", result.stdout)
+                self.assertIn("-DOTA_SHARED_COMPANION_QUEUE=1", result.stdout)
+            else:
+                self.assertIn("-DMAX_CONTACTS=150", result.stdout)
+                self.assertNotIn("-DOFFLINE_QUEUE_SIZE=", result.stdout)
+                self.assertNotIn("-DOTA_SHARED_COMPANION_QUEUE", result.stdout)
             self.assertIn("-DWIFI_OTA_SEEDER=1", result.stdout)
             self.assertIn("-DBLE_PIN_CODE=123456", result.stdout)
 

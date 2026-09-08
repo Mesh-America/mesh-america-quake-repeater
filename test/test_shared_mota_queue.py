@@ -12,6 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class SharedMotaQueueTest(unittest.TestCase):
     def test_context_lifecycle_and_real_transfers_preserve_unread_messages(self):
+        self.run_transfer_test("NRF52_PLATFORM")
+
+    def test_wireless_paper_wifi_listener_and_transfers_share_only_when_needed(self):
+        self.run_transfer_test("ESP32_PLATFORM")
+
+    def run_transfer_test(self, platform):
         with tempfile.TemporaryDirectory(prefix="meshcore-mota-queue-") as temp:
             binary = Path(temp) / "transfer"
             tinf = Path(temp) / "tinf.o"
@@ -29,11 +35,18 @@ class SharedMotaQueueTest(unittest.TestCase):
                 "src/helpers/ota/MerkleTree.cpp", "src/helpers/ota/OtaDeflate.cpp",
                 "src/Utils.cpp",
             ]
+            flags = ["-D" + platform + "=1"]
+            if platform == "ESP32_PLATFORM":
+                flags += ["-DHELTEC_WIRELESS_PAPER=1", "-DWIFI_OTA_SEEDER=1"]
+                sources += ["src/helpers/esp32/WiFiOtaSeeder.cpp",
+                            "src/helpers/ota/MotaSourceSerial.cpp",
+                            "src/helpers/ota/FolderMotaStore.cpp"]
             built = subprocess.run([
                 "c++", "-std=c++17", "-fsanitize=address,undefined", "-g",
-                "-DNRF52_PLATFORM=1", "-DOTA_SEEDER_ONLY=1",
+                *flags, "-DOTA_SEEDER_ONLY=1",
                 "-DCOMPANION_RADIO_FULL=1", "-DOTA_SHARED_COMPANION_QUEUE=1",
                 "-DENABLE_OTA=1", "-I", str(ROOT / "src"),
+                "-I", str(ROOT / "test/fixtures/shared_mota_queue/mocks"),
                 "-I", str(ROOT / "test/mocks"), "-I", temp,
                 *[str(ROOT / source) for source in sources], str(tinf),
                 "-o", str(binary),

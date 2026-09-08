@@ -12,6 +12,13 @@ namespace ota {
 
 OtaManager::~OtaManager() {
   free(_catalog_heap);
+  free(_leaves_buf);
+#if defined(ESP32_PLATFORM)
+  // A shared Companion workspace is destroyed between mOTA sessions. Return
+  // the lazy source/proof buffers before its queue slots are reused.
+  free(_src_leaves);
+  free(_scratch);
+#endif
 }
 
 bool OtaManager::expandCatalog() {

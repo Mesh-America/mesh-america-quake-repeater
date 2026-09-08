@@ -40,6 +40,13 @@ closed. `MESH_MIN_RUNTIME_HEAP` can raise a profile's requirement; it cannot
 lower the calculated requirement. Add an allocation allowance when adding a
 display, transport or other substantial feature.
 
+Wireless Paper Full keeps 350 contacts and 256 offline frames by lending the
+upper 128 queue slots to its mOTA workspace during a session. An idle WiFi
+mOTA listener leaves all 256 slots available. More than 128 unread frames
+refuses the loan; sync messages with an app first. USB/TCP source detach or
+disconnect returns all 256 slots and releases the ESP32 proof/leaf scratch
+buffers. The display and simultaneous USB, Bluetooth and WiFi remain enabled.
+
 ## Release evidence and regression tests
 
 Each newly built firmware has a matching `.memory.json` report. It records
@@ -65,7 +72,9 @@ binding and the published T096 failing budget. Shared mOTA tests exercise
 complete transfers, queue wraparound, unread-message order, source ownership,
 stop/disconnect and repeated reuse. Bluetooth tests inject task and service
 startup failures. The manual staging buffer also has allocation-failure and
-repeated release tests.
+repeated release tests. ESP32 tests run the actual WiFi mOTA listener and source
+framing through complete transfers, idle polling, queue-full refusal, network
+loss, CLI detach and USB/TCP ownership changes under address/leak sanitizers.
 
 For older releases without saved ELFs, an audit can compare their ESP allocator
 tables against a matching pinned SDK ELF and read reservations from the

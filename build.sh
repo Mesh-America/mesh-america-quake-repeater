@@ -3608,8 +3608,15 @@ apply_companion_radio_full_profile() {
   # measured-safe tables for FULL OTA without changing ordinary USB/BLE/WiFi
   # companion builds.
   case "${env_name,,}" in
+    heltec_wireless_paper_companion_radio_full)
+      # The cold mOTA workspace fits in half the offline queue. Keep the
+      # board's 350 contacts and all simultaneous Full transports.
+      append_platformio_build_unflags "-DMAX_CONTACTS=150 -DOFFLINE_QUEUE_SIZE=512 -DOFFLINE_QUEUE_SIZE=128 -DOFFLINE_QUEUE_SIZE=16"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=350 -DOFFLINE_QUEUE_SIZE=256 -DOTA_SHARED_COMPANION_QUEUE=1"
+      record_build_reduction \
+        "Wireless Paper Full: 350 contacts; 256 offline frames normally, 128 while mOTA borrows queue storage"
+      ;;
     generic_espnow_companion_radio_full|\
-    heltec_wireless_paper_companion_radio_full|\
     heltec_wireless_tracker_companion_radio_full|\
     heltec_ct62_companion_radio_full|\
     heltec_v3_companion_radio_full|\

@@ -637,8 +637,9 @@ void ota_begin_context(uint32_t target, OtaSend send, void* ctx,
 uint8_t ota_hop_limit();
 
 #if defined(OTA_SHARED_COMPANION_QUEUE)
-#if !defined(NRF52_PLATFORM) || !defined(OTA_SEEDER_ONLY) || !defined(COMPANION_RADIO_FULL)
-#error "Shared mOTA queue storage requires an nRF52 Full source-only Companion"
+#if (!defined(NRF52_PLATFORM) && !defined(ESP32_PLATFORM)) || \
+    !defined(OTA_SEEDER_ONLY) || !defined(COMPANION_RADIO_FULL)
+#error "Shared mOTA queue storage requires an nRF52 or ESP32 Full source-only Companion"
 #endif
 void ota_set_context_storage(void* owner, OtaContext* (*acquire)(void*),
                              void (*release)(void*));

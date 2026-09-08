@@ -10,6 +10,15 @@ not require rebuilding it. USB remains the normal way to update the Companion
 itself. WiFi/Bluetooth updates are optional, and Full does not install LoRa
 MOTA packages on itself.
 
+The Wireless Paper Full memory-sharing update keeps 350 contacts and 256
+queued messages normally. During an mOTA session, 128 message slots are
+available while the other half holds its workspace. If more than 128 unread
+messages are queued, sync them with an app before starting mOTA. Disconnecting
+the source or turning it off returns all 256 slots. Idle WiFi mOTA listening
+does not borrow the queue. See the [1.17.1.5 release guide](releases/1.17.1.5.md)
+for the corrected download; the earlier `aa20e927` Wireless Paper image has
+150 contacts.
+
 ## Open the text terminal
 
 Close the app or serial monitor using the USB port, then open a terminal at

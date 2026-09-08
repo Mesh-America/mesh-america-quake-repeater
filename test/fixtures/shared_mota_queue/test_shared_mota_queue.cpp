@@ -61,6 +61,7 @@ public:
 
 // The actual BLE source controller below sees a ready/not-ready link and a
 // source with real container bytes. Hardware GATT/serial framing is separate.
+#if !defined(ESP32_PLATFORM)
 struct Bluetooth {
   bool ready = false, active = false;
   int motaStream() { return 0; }
@@ -78,6 +79,7 @@ public:
 };
 } }
 #include "ble_control_under_test.h"
+#endif
 
 struct Packet { bool to_source; std::vector<uint8_t> bytes; };
 static std::deque<Packet> packets;
@@ -85,6 +87,35 @@ static bool send(void* to_source, const uint8_t* bytes, uint16_t length, bool) {
   packets.push_back({to_source != nullptr, {bytes, bytes + length}});
   return true;
 }
+
+static void transfer(OtaContext& context, void* reply_route) {
+  OtaManager receiver;
+  OtaStoreRam<8192> destination;
+  receiver.begin(EXP_TARGET_ID, send, reply_route);
+  receiver.set_fetch_store(&destination);
+  assert(receiver.pull(EXP_MERKLE_ROOT, EXP_TARGET_ID) == OtaManager::PULL_STARTED);
+  for (uint32_t time = 100; time < 300000 && receiver.fetchState() != OtaManager::COMPLETE;
+       time += 100) {
+    context.manager.set_clock(time);
+    receiver.set_clock(time);
+    context.manager.serviceEgress();
+    receiver.serviceEgress();
+    if (time % 1000 == 0) { context.manager.loop(); receiver.loop(); }
+    while (!packets.empty()) {
+      Packet packet = packets.front();
+      packets.pop_front();
+      (packet.to_source ? context.manager : receiver).on_message(
+          packet.bytes.data(), packet.bytes.size());
+    }
+  }
+  assert(receiver.fetchState() == OtaManager::COMPLETE);
+  assert(destination.staged_size() == MOTA_VEC_LEN);
+  assert(memcmp(destination.data(), MOTA_VEC, MOTA_VEC_LEN) == 0);
+}
+
+#if defined(ESP32_PLATFORM)
+#include "test_wifi_shared_queue.h"
+#endif
 
 int main() {
   Queue q;
@@ -145,28 +176,7 @@ int main() {
         "wrong owner", reply, sizeof reply));
     assert(context.folderLink() == link);
 
-    OtaManager receiver;
-    OtaStoreRam<8192> destination;
-    receiver.begin(EXP_TARGET_ID, send, &q);
-    receiver.set_fetch_store(&destination);
-    assert(receiver.pull(EXP_MERKLE_ROOT, EXP_TARGET_ID) == OtaManager::PULL_STARTED);
-    for (uint32_t time = 100; time < 300000 && receiver.fetchState() != OtaManager::COMPLETE;
-         time += 100) {
-      context.manager.set_clock(time);
-      receiver.set_clock(time);
-      context.manager.serviceEgress();
-      receiver.serviceEgress();
-      if (time % 1000 == 0) { context.manager.loop(); receiver.loop(); }
-      while (!packets.empty()) {
-        Packet packet = packets.front();
-        packets.pop_front();
-        (packet.to_source ? context.manager : receiver).on_message(
-            packet.bytes.data(), packet.bytes.size());
-      }
-    }
-    assert(receiver.fetchState() == OtaManager::COMPLETE);
-    assert(destination.staged_size() == MOTA_VEC_LEN);
-    assert(memcmp(destination.data(), MOTA_VEC, MOTA_VEC_LEN) == 0);
+    transfer(context, &q);
     check_messages();
     context.detach_folder(); // same cleanup for USB/BLE stop and disconnect
     context.manager.announce(); // callers may still use the context until loop boundary
@@ -195,6 +205,9 @@ int main() {
   assert(!ota_context_if_active() && q.buffer.capacity() == 256);
   check_messages();
 
+#if defined(ESP32_PLATFORM)
+  test_wifi_shared_queue(q, check_messages);
+#else
   Nrf52BleMotaSourceControl ble;
   assert(!ble.start(reply, sizeof reply)); // no subscription, no storage loan
   assert(!ota_context_if_active() && q.buffer.capacity() == 256);
@@ -235,4 +248,5 @@ int main() {
   ota_release_context_if_idle(true);
   assert(!ota_context_if_active() && q.buffer.capacity() == 256);
   check_messages();
+#endif
 }
