@@ -429,10 +429,15 @@ void Dispatcher::loop() {
       }
 
       _radio->onSendFinished();
+      // RX can occur entirely between two loop observations during a TX
+      // burst. Start a fresh RX recovery allowance after each successful TX;
+      // otherwise a later CAD pause can trip the eight-second watchdog using
+      // the start time of the whole healthy burst.
+      radio_nonrx_start = _ms->getMillis();
 #ifdef RADIO_LIVENESS_SOFT_ONLY
-      last_radio_activity_ms = _ms->getMillis();  // TX success -> radio is alive
+      last_radio_activity_ms = radio_nonrx_start;  // TX success -> radio is alive
 #else
-      radio_liveness.noteActivity(_ms->getMillis());  // TX success -> radio is alive
+      radio_liveness.noteActivity(radio_nonrx_start);  // TX success -> radio is alive
 #endif
       restoreOutboundTxOverrides();
       logTx(outbound, 2 + outbound->getPathByteLen() + outbound->payload_len);
