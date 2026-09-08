@@ -2,6 +2,10 @@
 
 #include <Arduino.h>
 #include <Mesh.h>
+#include "ContactCachePolicy.h"
+#if MESH_CONTACT_CACHE
+#include "ContactPathCache.h"
+#endif
 #if defined(NRF52_PLATFORM)
 #include "PersistentStoreFormat.h"
 #endif
@@ -10,16 +14,20 @@
 
 struct ContactInfo {
   mesh::Identity id;
-  char name[32];
-  uint8_t type;   // on of ADV_TYPE_*
-  uint8_t flags;
-  uint8_t out_path_len;
-  mutable bool shared_secret_valid; // flag to indicate if shared_secret has been calculated
+  char name[32] = {};
+  uint8_t type = 0;   // one of ADV_TYPE_*
+  uint8_t flags = 0;
+  uint8_t out_path_len = 0;
+  mutable bool shared_secret_valid = false;
+#if MESH_CONTACT_CACHE
+  mesh::ContactPathRef path_ref;
+#else
   uint8_t out_path[MAX_PATH_SIZE];
-  uint32_t last_advert_timestamp;   // by THEIR clock
-  uint32_t lastmod;  // by OUR clock
-  int32_t gps_lat, gps_lon;    // 6 dec places
-  uint32_t sync_since;
+#endif
+  uint32_t last_advert_timestamp = 0;   // by THEIR clock
+  uint32_t lastmod = 0;  // by OUR clock
+  int32_t gps_lat = 0, gps_lon = 0;    // 6 dec places
+  uint32_t sync_since = 0;
 
   // Runtime-only position in the paged companion contact store.  It is not
   // part of the on-disk record; the record's page/slot supplies it on load.
@@ -28,6 +36,47 @@ struct ContactInfo {
   mutable uint16_t storage_slot = mesh::storage::CONTACT_SLOT_NONE;
 #endif
 
+  // The pointer is a short-lived borrow. Copy bytes for a queued operation;
+  // another contact-cache access may replace the resident entry.
+  const uint8_t* getPath() const {
+#if MESH_CONTACT_CACHE
+    return path_ref.view();
+#else
+    return out_path;
+#endif
+  }
+  bool copyPathTo(uint8_t path[MAX_PATH_SIZE]) const {
+#if MESH_CONTACT_CACHE
+    return path_ref.read(path);
+#else
+    memcpy(path, out_path, MAX_PATH_SIZE);
+    return true;
+#endif
+  }
+  bool setRawPath(const uint8_t path[MAX_PATH_SIZE]) {
+#if MESH_CONTACT_CACHE
+    return path_ref.set(path);
+#else
+    memcpy(out_path, path, MAX_PATH_SIZE);
+    return true;
+#endif
+  }
+  bool setPath(const uint8_t* path, uint8_t encoded_len) {
+    if (encoded_len != OUT_PATH_UNKNOWN &&
+        !mesh::Packet::isValidPathLen(encoded_len)) return false;
+    uint8_t normalized[MAX_PATH_SIZE] = {};
+    if (encoded_len != OUT_PATH_UNKNOWN && (encoded_len & 63)) {
+      if (!path) return false;
+      mesh::Packet::copyPath(normalized, path, encoded_len);
+    }
+    if (!setRawPath(normalized)) return false;
+    out_path_len = encoded_len;
+    return true;
+  }
+
+#if MESH_CONTACT_CACHE
+  const uint8_t* getSharedSecret(const mesh::LocalIdentity& self_id) const;
+#else
   const uint8_t* getSharedSecret(const mesh::LocalIdentity& self_id) const {
     if (!shared_secret_valid) {
       self_id.calcSharedSecret(shared_secret, id.pub_key);
@@ -35,6 +84,7 @@ struct ContactInfo {
     }
     return shared_secret;
   }
+#endif
 
   bool isFav() const { return flags & 0x01; }
   bool isTelemBaseAllowed() const { return flags & 0x02; }
@@ -43,5 +93,7 @@ struct ContactInfo {
   bool isRemoteCLIAllowed() const { return flags & 0x10; }
 
 private:
+#if !MESH_CONTACT_CACHE
   mutable uint8_t shared_secret[PUB_KEY_SIZE];
+#endif
 };

@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 
@@ -115,7 +116,14 @@ class Nrf52ExtraFsContractTest(unittest.TestCase):
         self.assertLess(incomplete_at, source_at)
         self.assertLess(legacy_stat_at, source_at)
         self.assertLess(marker_stat_at, source_at)
-        self.assertNotIn("->exists(", load_contacts)
+        # ESP32 has a separate SPIFFS recovery path. Check the actual nRF52
+        # branch so its tri-state discovery cannot regress to exists().
+        nrf_load = subprocess.run(
+            ["c++", "-E", "-P", "-x", "c++", "-DNRF52_PLATFORM=1",
+             "-DMESH_CONTACT_CACHE=1", "-"],
+            input=load_contacts, text=True, capture_output=True, check=True,
+        ).stdout
+        self.assertNotIn("->exists(", nrf_load)
 
         for body in (prepare, truncate, service):
             self.assertIn("contactPathPresence(", body)
@@ -231,7 +239,8 @@ class Nrf52ExtraFsContractTest(unittest.TestCase):
 
         terminal_path = function_body(mesh, "void MyMesh::handleTerminalPath(")
         self.assertIn("const ContactInfo previous = recipient", terminal_path)
-        self.assertIn("if (!scheduleContactWrite(recipient))", terminal_path)
+        self.assertIn("if (!recipient.setPath(", terminal_path)
+        self.assertIn("|| !scheduleContactWrite(recipient)", terminal_path)
         self.assertIn("recipient = previous", terminal_path)
 
         terminal = function_body(mesh, "void MyMesh::handleTerminalCommand(")

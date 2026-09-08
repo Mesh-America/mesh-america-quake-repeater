@@ -7,6 +7,9 @@ release matrix and firmware picker.
 See the [2026-09-08 hardware results](nimble_companion_trial_results.md) for
 measured RAM, MAC-policy checks, WiFi updates, and remaining qualification.
 
+The [contact-cache guide](companion_contact_cache.md) adds six optional
+350-contact trials for ESP32 boards without PSRAM, including Heltec V3.
+
 | Hardware | Trial environment | Contacts | Channels | Offline queue |
 | --- | --- | ---: | ---: | ---: |
 | Heltec V4.2/V4.3 OLED, FEM on | `heltec_v4_2_v4_3_companion_radio_full_femon_nimble` | 350 | 40 | 512 |

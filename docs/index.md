@@ -17,6 +17,7 @@ Below are a few quick start guides.
 - [Telemetry Decoder](./telemetry_decoder.md)
 - [CLI Availability by Firmware Build](./cli_build_matrix.md)
 - [Classic ESP32 image memory budget](./esp32_memory_budget.md)
+- [Full Companion contact caches and capacity trials](./companion_contact_cache.md)
 - [Easy LoRa OTA: ESP32 and nRF52 firmware updates](./ota_easy.md)
 - [Scripted LoRa OTA: Bash and PowerShell](./lora_ota_automation.md)
 - [nRF52 repeater OTA with external QSPI](./ota_nrf52_qspi.md)

@@ -323,7 +323,7 @@ bool MyMesh::writeContactRespFrame(uint8_t code, const ContactInfo &contact) {
   out_frame[i++] = contact.type;
   out_frame[i++] = contact.flags;
   out_frame[i++] = contact.out_path_len;
-  memcpy(&out_frame[i], contact.out_path, MAX_PATH_SIZE);
+  if (!contact.copyPathTo(&out_frame[i])) return false;
   i += MAX_PATH_SIZE;
   StrHelper::strzcpy((char *)&out_frame[i], contact.name, 32);
   i += 32;
@@ -339,6 +339,7 @@ bool MyMesh::writeContactRespFrame(uint8_t code, const ContactInfo &contact) {
 }
 
 void MyMesh::stopContactsIterator() {
+  _iter_pending_contact = ContactInfo();
   if (!_iter_started) return;
   _iter_started = false;
   _iter_start_pending = false;
@@ -383,7 +384,7 @@ bool MyMesh::updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, co
   contact.type = frame[i++];
   contact.flags = frame[i++];
   contact.out_path_len = frame[i++];
-  memcpy(contact.out_path, &frame[i], MAX_PATH_SIZE);
+  if (!contact.setRawPath(&frame[i])) return false;
   i += MAX_PATH_SIZE;
   memcpy(contact.name, &frame[i], 32);
   contact.name[sizeof(contact.name) - 1] = 0;
@@ -2326,6 +2327,29 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     return true;
   }
 
+  if (strcmp(command, "get contact.cache.timing") == 0) {
+#if MESH_CONTACT_CACHE
+    const auto& cache = mesh::contactSecretCache();
+    snprintf(reply, reply_size, "last_flash_us=%lu last_calculation_us=%lu",
+             (unsigned long)cache.last_flash_read_us,
+             (unsigned long)cache.last_calculation_us);
+#else
+    snprintf(reply, reply_size, "contact cache disabled");
+#endif
+    return true;
+  }
+  if (strcmp(command, "get contact.cache") == 0) {
+#if MESH_CONTACT_CACHE
+    const auto& cache = mesh::contactSecretCache();
+    snprintf(reply, reply_size, "paths=16 secrets=16 miss=%s ram_hits=%lu flash_hits=%lu calculations=%lu save_skips=%lu",
+             MESH_CONTACT_SECRET_FLASH_CACHE ? "flash" : "calculate",
+             (unsigned long)cache.ram_hits, (unsigned long)cache.flash_hits,
+             (unsigned long)cache.calculations, (unsigned long)cache.save_failures);
+#else
+    snprintf(reply, reply_size, "paths=inline secrets=inline");
+#endif
+    return true;
+  }
 #if COMPANION_FEATURE_MEMORY_DIAGNOSTICS
   if (strcmp(command, "memory") == 0) {
     const mesh::CompanionMemoryDiagnostics diagnostics = {
@@ -5217,6 +5241,12 @@ static bool save_filter(const ContactInfo& c) {
   return c.type != ADV_TYPE_NONE;   // don't save the transient/anon entries
 }
 
+void MyMesh::onContactCacheFlushed() {
+  // Eviction already saved the pending mutations. Avoid writing them again
+  // when the old five-second lazy-save deadline arrives.
+  mesh::resetLazyPersistenceAfterSuccess(dirty_contacts_expiry, dirty_contacts_failures);
+}
+
 void MyMesh::saveContacts() {
   const bool success = _store->saveContacts(this, save_filter);
   if (!success) {
@@ -6583,10 +6613,15 @@ void MyMesh::printTerminalPath(const ContactInfo& recipient) {
     return;
   }
 
+  uint8_t path_bytes[MAX_PATH_SIZE];
+  if (!recipient.copyPathTo(path_bytes)) {
+    terminalOutput().print("unavailable (storage read failed)\r\n");
+    return;
+  }
   for (uint8_t hop = 0; hop < hop_count; hop++) {
     if (hop != 0) terminalOutput().print(',');
     mesh::Utils::printHex(terminalOutput(),
-                          &recipient.out_path[(size_t)hop * hash_size],
+                          &path_bytes[(size_t)hop * hash_size],
                           hash_size);
   }
   terminalOutput().printf(" (%u %s, %u-byte hashes; used by DIRECT sends)\r\n",
@@ -6604,7 +6639,7 @@ void MyMesh::handleTerminalPath(ContactInfo& recipient,
   mesh::cli::TerminalPath path;
   const mesh::cli::TerminalPathParseResult parsed =
       mesh::cli::parseTerminalPath(path_spec, _terminal_tmp_buf,
-                                   sizeof(recipient.out_path), 63, path);
+                                   MAX_PATH_SIZE, 63, path);
   switch (parsed) {
     case mesh::cli::TerminalPathParseResult::Valid:
       break;
@@ -6629,14 +6664,9 @@ void MyMesh::handleTerminalPath(ContactInfo& recipient,
   }
 
   const ContactInfo previous = recipient;
-  memset(recipient.out_path, 0, sizeof(recipient.out_path));
-  if (path.mode == mesh::cli::TerminalPathMode::Clear) {
-    recipient.out_path_len = OUT_PATH_UNKNOWN;
-  } else {
-    recipient.out_path_len = mesh::Packet::copyPath(
-        recipient.out_path, _terminal_tmp_buf, path.encoded_len);
-  }
-  if (!scheduleContactWrite(recipient)) {
+  if (!recipient.setPath(_terminal_tmp_buf,
+        path.mode == mesh::cli::TerminalPathMode::Clear ? OUT_PATH_UNKNOWN : path.encoded_len)
+      || !scheduleContactWrite(recipient)) {
     recipient = previous;
     terminalOutput().print(
         "  ERROR: contact storage is unavailable; reboot and retry\r\n");
@@ -6793,10 +6823,13 @@ void MyMesh::printTerminalSendStatus(const char* operation,
     } else {
       const uint8_t hash_size = (recipient.out_path_len >> 6) + 1;
       terminalOutput().print("DIRECT via path ");
-      for (uint8_t hop = 0; hop < hop_count; hop++) {
+      uint8_t path_bytes[MAX_PATH_SIZE];
+      const bool path_ready = recipient.copyPathTo(path_bytes);
+      if (!path_ready) terminalOutput().print("unavailable");
+      for (uint8_t hop = 0; path_ready && hop < hop_count; hop++) {
         if (hop != 0) terminalOutput().print(',');
         mesh::Utils::printHex(
-            terminalOutput(), &recipient.out_path[(size_t)hop * hash_size], hash_size);
+            terminalOutput(), &path_bytes[(size_t)hop * hash_size], hash_size);
       }
       terminalOutput().printf("; %u %s, %u-byte hashes", (unsigned)hop_count,
                     hop_count == 1 ? "hop" : "hops", (unsigned)hash_size);
@@ -7052,8 +7085,9 @@ void MyMesh::sendTerminalTrace(ContactInfo& recipient) {
   const bool include_endpoint = recipient.type == ADV_TYPE_REPEATER
       || recipient.type == ADV_TYPE_ROOM;
   mesh::RoundTripTracePath route;
-  if (!mesh::buildRoundTripTracePath(
-          recipient.out_path, recipient.out_path_len, recipient.id.pub_key,
+  uint8_t path_bytes[MAX_PATH_SIZE];
+  if (!recipient.copyPathTo(path_bytes) || !mesh::buildRoundTripTracePath(
+          path_bytes, recipient.out_path_len, recipient.id.pub_key,
           include_endpoint, _terminal_tmp_buf, MAX_PACKET_PAYLOAD - 9,
           route)) {
     terminalOutput().print("  ERROR: recipient has no traceable round-trip path\r\n");

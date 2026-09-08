@@ -5,17 +5,28 @@
 #include <helpers/ChannelDetails.h>
 #include <helpers/PersistentStoreFormat.h>
 #include "NodePrefs.h"
+#if MESH_CONTACT_CACHE
+#include <helpers/ContactSecretCache.h>
+#endif
 
 class DataStoreHost {
 public:
   virtual bool onContactLoaded(const ContactInfo& contact) =0;
   virtual bool getContactForSave(uint32_t idx, ContactInfo& contact) =0;
   virtual ContactInfo* getContactForStore(uint32_t idx) =0;
+  virtual void onContactCacheFlushed() {}
   virtual bool onChannelLoaded(uint8_t channel_idx, const ChannelDetails& ch) =0;
   virtual bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) =0;
 };
 
-class DataStore {
+class DataStore
+#if MESH_CONTACT_CACHE
+  : public mesh::ContactPathBackend
+#if MESH_CONTACT_SECRET_FLASH_CACHE
+  , public mesh::ContactSecretBackend
+#endif
+#endif
+{
   FILESYSTEM* _fs;
   FILESYSTEM* _fsExtra;
   // Keep the configured secondary even when normal I/O falls back to the
@@ -24,6 +35,23 @@ class DataStore {
   FILESYSTEM* _configuredFsExtra;
   mesh::RTCClock* _clock;
   IdentityStore identity_store;
+#if MESH_CONTACT_CACHE
+  DataStoreHost* _cache_host = nullptr;
+  bool _cache_load_incomplete = false;
+#if defined(ESP32_PLATFORM)
+  File _contact_path_reader;
+#endif
+  bool readStoredPath(uint16_t source, uint8_t path[64]) override;
+  bool flushCachedPaths() override;
+#if MESH_CONTACT_SECRET_FLASH_CACHE
+  uint32_t _secret_retry_at = 0;
+  bool readSavedSecret(const uint8_t peer[32], const uint8_t identity[32],
+                       uint8_t secret[32]) override;
+  bool saveSecret(const uint8_t peer[32], const uint8_t identity[32],
+                  const uint8_t secret[32]) override;
+  uint16_t secretSlot(const uint8_t peer[32]) const;
+#endif
+#endif
 
 #if defined(NRF52_PLATFORM)
   mesh::storage::ContactSlotMap _contact_slots;

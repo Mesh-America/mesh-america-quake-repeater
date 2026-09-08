@@ -49,6 +49,11 @@ buffers. The display and simultaneous USB, Bluetooth and WiFi remain enabled.
 
 ## Release evidence and regression tests
 
+Full Companions without PSRAM also use
+[16-entry path and shared-secret caches](companion_contact_cache.md).
+The optional NimBLE capacity trials retain the same RAM guards at 350
+contacts and 256 normal offline frames.
+
 Each newly built firmware has a matching `.memory.json` report. It records
 the linked ELF SHA-256, available internal RAM, required RAM, largest region,
 and SHA-256 hashes for the actual firmware files and capability manifest.

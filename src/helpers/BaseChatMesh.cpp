@@ -44,7 +44,15 @@ bool BaseChatMesh::initializeContactStorage() {
     return false;
   }
 
+#if MESH_CONTACT_CACHE
+  for (int i = 0; i < requested_capacity; ++i) new (&expanded_contacts[i]) ContactInfo();
+  for (int i = 0; i < num_contacts; ++i) {
+    expanded_contacts[i] = contacts[i];
+    contacts[i] = ContactInfo();
+  }
+#else
   memcpy(expanded_contacts, contacts, sizeof(ContactInfo) * num_contacts);
+#endif
   contacts = expanded_contacts;
   sort_array = expanded_sort_array;
   contact_capacity = requested_capacity;
@@ -84,12 +92,12 @@ void BaseChatMesh::sendAckTo(const ContactInfo& dest, const uint8_t* ack_hash, u
     uint32_t d = TXT_ACK_DELAY;
     if (getExtraAckTransmitCount() > 0) {
       mesh::Packet* a1 = createMultiAck(ack_hash, ack_len, 1);
-      if (a1) sendDirect(a1, dest.out_path, dest.out_path_len, d);
+      if (a1) sendDirect(a1, dest.getPath(), dest.out_path_len, d);
       d += 300;
     }
 
     mesh::Packet* a2 = createAck(ack_hash, ack_len);
-    if (a2) sendDirect(a2, dest.out_path, dest.out_path_len, d);
+    if (a2) sendDirect(a2, dest.getPath(), dest.out_path_len, d);
   }
 }
 
@@ -154,7 +162,7 @@ ContactInfo* BaseChatMesh::allocateContactSlot(bool transient_only) {
 }
 
 void BaseChatMesh::populateContactFromAdvert(ContactInfo& ci, const mesh::Identity& id, const AdvertDataParser& parser, uint32_t timestamp) {
-  memset(&ci, 0, sizeof(ci));
+  ci = ContactInfo();
 #if defined(NRF52_PLATFORM)
   ci.storage_slot = mesh::storage::CONTACT_SLOT_NONE;
 #endif
@@ -205,7 +213,7 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
   }
 
   if (from && from->type == ADV_TYPE_NONE) {   // already in contacts, but from a temporary ANON_REQ ?
-    memset(from, 0, sizeof(*from));  // clear the anon/temp slot
+    *from = ContactInfo();  // release the anon/temp path as well
 #if defined(NRF52_PLATFORM)
     from->storage_slot = mesh::storage::CONTACT_SLOT_NONE;
 #endif
@@ -352,7 +360,7 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
           if (from.out_path_len == OUT_PATH_UNKNOWN) {
             sendFloodScoped(from, reply_pkt, CLI_REPLY_DELAY_MILLIS);
           } else {
-            sendDirect(reply_pkt, from.out_path, from.out_path_len, CLI_REPLY_DELAY_MILLIS);
+            sendDirect(reply_pkt, from.getPath(), from.out_path_len, CLI_REPLY_DELAY_MILLIS);
           }
         }
       }
@@ -393,7 +401,7 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
         mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, from.id, secret, temp_buf, reply_len);
         if (reply) {
           if (from.out_path_len != OUT_PATH_UNKNOWN) {  // we have an out_path, so send DIRECT
-            sendDirect(reply, from.out_path, from.out_path_len, SERVER_RESPONSE_DELAY);
+            sendDirect(reply, from.getPath(), from.out_path_len, SERVER_RESPONSE_DELAY);
           } else {
             sendFloodScoped(from, reply, SERVER_RESPONSE_DELAY);
           }
@@ -425,7 +433,7 @@ bool BaseChatMesh::onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_
   // NOTE: default impl, we just replace the current 'out_path' regardless, whenever sender sends us a new out_path.
   // FUTURE: could store multiple out_paths per contact, and try to find which is the 'best'(?)
   if (canMutateContacts()) {
-    from.out_path_len = mesh::Packet::copyPath(from.out_path, out_path, out_path_len);  // store a copy of path, for sendDirect()
+    if (!from.setPath(out_path, out_path_len)) return false;
     from.lastmod = getRTCClock()->getCurrentTime();
 
     onContactPathUpdated(from);
@@ -459,7 +467,7 @@ void BaseChatMesh::handleReturnPathRetry(const ContactInfo& contact, const uint8
   // NOTE: simplest impl is just to re-send a reciprocal return path to sender (DIRECTLY)
   //        override this method in various firmwares, if there's a better strategy
   mesh::Packet* rpath = createPathReturn(contact.id, contact.getSharedSecret(self_id), path, path_len, 0, NULL, 0);
-  if (rpath) sendDirect(rpath, contact.out_path, contact.out_path_len, 3000);   // 3 second delay
+  if (rpath) sendDirect(rpath, contact.getPath(), contact.out_path_len, 3000);   // 3 second delay
 }
 
 #ifdef MAX_GROUP_CHANNELS
@@ -565,7 +573,7 @@ int BaseChatMesh::sendMessage(const ContactInfo& recipient, uint32_t timestamp, 
     est_timeout = calcFloodTimeoutMillisFor(t);
     rc = MSG_SEND_SENT_FLOOD;
   } else {
-    sent = sendDirect(pkt, recipient.out_path, recipient.out_path_len);
+    sent = sendDirect(pkt, recipient.getPath(), recipient.out_path_len);
     est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
     rc = MSG_SEND_SENT_DIRECT;
   }
@@ -632,7 +640,7 @@ int BaseChatMesh::sendCommandData(const ContactInfo& recipient,
     sent = sendFloodScoped(recipient, pkt);
     rc = MSG_SEND_SENT_FLOOD;
   } else {
-    sent = sendDirect(pkt, recipient.out_path, recipient.out_path_len);
+    sent = sendDirect(pkt, recipient.getPath(), recipient.out_path_len);
     rc = MSG_SEND_SENT_DIRECT;
   }
   if (!sent) {
@@ -755,7 +763,7 @@ int BaseChatMesh::sendLogin(const ContactInfo& recipient, const char* password, 
       est_timeout = calcFloodTimeoutMillisFor(t);
       return MSG_SEND_SENT_FLOOD;
     } else {
-      sendDirect(pkt, recipient.out_path, recipient.out_path_len);
+      if (!sendDirect(pkt, recipient.getPath(), recipient.out_path_len)) return MSG_SEND_FAILED;
       est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
       return MSG_SEND_SENT_DIRECT;
     }
@@ -780,7 +788,7 @@ int BaseChatMesh::sendAnonReq(const ContactInfo& recipient, const uint8_t* data,
       est_timeout = calcFloodTimeoutMillisFor(t);
       return MSG_SEND_SENT_FLOOD;
     } else {
-      sendDirect(pkt, recipient.out_path, recipient.out_path_len);
+      if (!sendDirect(pkt, recipient.getPath(), recipient.out_path_len)) return MSG_SEND_FAILED;
       est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
       return MSG_SEND_SENT_DIRECT;
     }
@@ -807,7 +815,7 @@ int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t* req_
       est_timeout = calcFloodTimeoutMillisFor(t);
       return MSG_SEND_SENT_FLOOD;
     } else {
-      sendDirect(pkt, recipient.out_path, recipient.out_path_len);
+      if (!sendDirect(pkt, recipient.getPath(), recipient.out_path_len)) return MSG_SEND_FAILED;
       est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
       return MSG_SEND_SENT_DIRECT;
     }
@@ -834,7 +842,7 @@ int  BaseChatMesh::sendRequest(const ContactInfo& recipient, uint8_t req_type, u
       est_timeout = calcFloodTimeoutMillisFor(t);
       return MSG_SEND_SENT_FLOOD;
     } else {
-      sendDirect(pkt, recipient.out_path, recipient.out_path_len);
+      if (!sendDirect(pkt, recipient.getPath(), recipient.out_path_len)) return MSG_SEND_FAILED;
       est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
       return MSG_SEND_SENT_DIRECT;
     }
@@ -950,7 +958,7 @@ void BaseChatMesh::checkConnections() {
 
       auto pkt = createDatagram(PAYLOAD_TYPE_REQ, contact->id, contact->getSharedSecret(self_id), data, 9);
       if (pkt) {
-        sendDirect(pkt, contact->out_path, contact->out_path_len);
+        sendDirect(pkt, contact->getPath(), contact->out_path_len);
       }
     
       // schedule next KEEP_ALIVE
@@ -1033,7 +1041,7 @@ bool BaseChatMesh::isTransientContact(const ContactInfo& contact) const {
 
 bool BaseChatMesh::clearTransientContact(ContactInfo& contact) {
   if (!isTransientContact(contact)) return false;
-  memset(&contact, 0, sizeof(contact));
+  contact = ContactInfo();
 #if defined(NRF52_PLATFORM)
   contact.storage_slot = mesh::storage::CONTACT_SLOT_NONE;
 #endif
@@ -1065,6 +1073,7 @@ bool BaseChatMesh::removeContact(ContactInfo& contact) {
     contacts[idx] = contacts[idx + 1];
     idx++;
   }
+  contacts[num_contacts] = ContactInfo(); // release the retired tail path
   contact_table_revision++;
   return true;  // Success
 }

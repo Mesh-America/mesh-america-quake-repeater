@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include "DataStore.h"
 #include <helpers/FileRead.h>
+#include <helpers/AdvertDataHelpers.h>
+#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#include <helpers/ContactFileTransaction.h>
+#endif
 
 #if defined(NRF52_PLATFORM)
 #include <helpers/AtomicFileWriter.h>
@@ -420,6 +424,9 @@ bool DataStore::removeFile(FILESYSTEM* fs, const char* filename) {
 }
 
 bool DataStore::formatFileSystem() {
+#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+  _contact_path_reader.close();
+#endif
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   #if defined(NRF52_PLATFORM)
   resetContactPageState();
@@ -440,6 +447,9 @@ bool DataStore::formatFileSystem() {
   // failed erase must keep the boot's load quarantine latched.
   if (success) {
     _contact_load_incomplete = false;
+#if MESH_CONTACT_CACHE
+    _cache_load_incomplete = false;
+#endif
     _identity_creation_blocked = false;
     _prefs_load_incomplete = false;
   }
@@ -858,7 +868,7 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
   return false;
 }
 
-static void serializeContactRecord(const ContactInfo& c,
+static bool serializeContactRecord(const ContactInfo& c,
                                    uint8_t out[mesh::storage::CONTACT_RECORD_SIZE]) {
   size_t offset = 0;
   const uint8_t unused = 0;
@@ -870,14 +880,18 @@ static void serializeContactRecord(const ContactInfo& c,
   memcpy(&out[offset], &c.sync_since, 4); offset += 4;
   out[offset++] = c.out_path_len;
   memcpy(&out[offset], &c.last_advert_timestamp, 4); offset += 4;
-  memcpy(&out[offset], c.out_path, 64); offset += 64;
+  if (!c.copyPathTo(&out[offset])) return false;
+  offset += 64;
   memcpy(&out[offset], &c.lastmod, 4); offset += 4;
   memcpy(&out[offset], &c.gps_lat, 4); offset += 4;
   memcpy(&out[offset], &c.gps_lon, 4);
+  return true;
 }
 
 static bool deserializeContactRecord(
-    const uint8_t in[mesh::storage::CONTACT_RECORD_SIZE], ContactInfo& c) {
+    const uint8_t in[mesh::storage::CONTACT_RECORD_SIZE], ContactInfo& c,
+    uint16_t path_source, bool* path_unavailable = nullptr) {
+  if (path_unavailable) *path_unavailable = false;
   size_t offset = 0;
   uint8_t pub_key[32];
   memcpy(pub_key, &in[offset], 32); offset += 32;
@@ -889,7 +903,16 @@ static bool deserializeContactRecord(
   memcpy(&c.sync_since, &in[offset], 4); offset += 4;
   c.out_path_len = in[offset++];
   memcpy(&c.last_advert_timestamp, &in[offset], 4); offset += 4;
-  memcpy(c.out_path, &in[offset], 64); offset += 64;
+#if MESH_CONTACT_CACHE
+  if (!c.path_ref.bind(path_source, &in[offset])) {
+    if (path_unavailable) *path_unavailable = true;
+    return false;
+  }
+#else
+  (void)path_source;
+  if (!c.setRawPath(&in[offset])) return false;
+#endif
+  offset += 64;
   memcpy(&c.lastmod, &in[offset], 4); offset += 4;
   memcpy(&c.gps_lat, &in[offset], 4); offset += 4;
   memcpy(&c.gps_lon, &in[offset], 4);
@@ -957,7 +980,12 @@ void DataStore::resetContactPageState(bool clear_incomplete) {
   _contact_slots.clear();
   _dirty_contact_pages.clearAll();
   _unread_contact_pages.clearAll();
-  if (clear_incomplete) _contact_load_incomplete = false;
+  if (clear_incomplete) {
+    _contact_load_incomplete = false;
+#if MESH_CONTACT_CACHE
+    _cache_load_incomplete = false;
+#endif
+  }
   memset(_contact_page_generations, 0, sizeof(_contact_page_generations));
   _legacy_contacts_pending_cleanup = false;
   _legacy_migration_ready = false;
@@ -1153,7 +1181,18 @@ bool DataStore::loadContactPages(DataStoreHost* host, uint16_t minimum_slot,
       }
 
       ContactInfo contact;
-      if (!deserializeContactRecord(record, contact) || !_contact_slots.reserve(slot)) {
+      bool path_unavailable = false;
+      const bool valid = deserializeContactRecord(record, contact,
+          0x8000 | slot, &path_unavailable);
+      if (path_unavailable) {
+        // Cache exhaustion is not a corrupt record. Keep the complete page
+        // on disk and refuse changes until it can be loaded after reboot.
+        _contact_load_incomplete = true;
+        _dirty_contact_pages.clearAll();
+        free(payload);
+        return true;
+      }
+      if (!valid || !_contact_slots.reserve(slot)) {
         MESH_DEBUG_PRINTLN("DataStore: contact page %u slot %u is invalid/duplicate", page, index);
         _dirty_contact_pages.mark(page);
         continue;
@@ -1209,12 +1248,28 @@ bool DataStore::writeContactPage(DataStoreHost* host, uint8_t page,
     occupied |= 1UL << page_slot;
   }
 
+#if MESH_CONTACT_CACHE
+  auto& paths = mesh::contactPathStorage();
+  paths.beginCommit();
+  for (auto* contact : page_contacts) if (contact) paths.mark(contact->path_ref.handle());
+  const uint16_t first_slot = page * mesh::storage::CONTACTS_PER_PAGE;
+  if (!paths.preserveSnapshots(0x8000 | first_slot, mesh::storage::CONTACTS_PER_PAGE)
+      || !paths.preserveSnapshots(first_slot, mesh::storage::CONTACTS_PER_PAGE)) {
+    paths.endCommit(false);
+    return false;
+  }
+#endif
   uint32_t payload_crc = 0xFFFFFFFFUL;
   uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
   for (uint8_t slot = 0; slot < mesh::storage::CONTACTS_PER_PAGE; slot++) {
     memset(record, 0, sizeof(record));
     if (page_contacts[slot] != nullptr) {
-      serializeContactRecord(*page_contacts[slot], record);
+      if (!serializeContactRecord(*page_contacts[slot], record)) {
+#if MESH_CONTACT_CACHE
+        mesh::contactPathStorage().endCommit(false);
+#endif
+        return false;
+      }
     }
     payload_crc = mesh::storage::updateCRC32(payload_crc, record, sizeof(record));
   }
@@ -1235,21 +1290,50 @@ bool DataStore::writeContactPage(DataStoreHost* host, uint8_t page,
   for (uint8_t slot = 0; wrote && slot < mesh::storage::CONTACTS_PER_PAGE; slot++) {
     memset(record, 0, sizeof(record));
     if (page_contacts[slot] != nullptr) {
-      serializeContactRecord(*page_contacts[slot], record);
+      if (!serializeContactRecord(*page_contacts[slot], record)) {
+#if MESH_CONTACT_CACHE
+        mesh::contactPathStorage().endCommit(false);
+#endif
+        return false;
+      }
     }
     wrote = writer.write(record, sizeof(record)) == sizeof(record);
   }
   if (!writer.commit(wrote)) {
+#if MESH_CONTACT_CACHE
+    paths.endCommit(false);
+#endif
     MESH_DEBUG_PRINTLN("DataStore: atomic contact page %u write failed", page);
     return false;
   }
 
+#if MESH_CONTACT_CACHE
+  for (auto* contact : page_contacts) if (contact)
+    paths.publish(contact->path_ref.handle(), 0x8000 | contact->storage_slot);
+  paths.endCommit(true);
+#endif
   _contact_page_generations[page] = header.generation;
   return true;
 }
 #endif
 
 void DataStore::loadContacts(DataStoreHost* host) {
+#if MESH_CONTACT_CACHE
+  _cache_host = host;
+  mesh::contactPathStorage().attach(this);
+#if MESH_CONTACT_SECRET_FLASH_CACHE
+  mesh::contactSecretCache().attach(this);
+#endif
+  if (_cache_load_incomplete) return;
+#if defined(ESP32_PLATFORM)
+  _contact_path_reader.close();
+  if (!mesh::ContactFileTransaction::recover(_getContactsChannelsFS(), "/contacts3")) {
+    MESH_DEBUG_PRINTLN("DataStore: contact transaction recovery failed");
+    _cache_load_incomplete = true;
+    return;
+  }
+#endif
+#endif
 #if defined(NRF52_PLATFORM)
   // loadContacts() is also used after an identity import.  Rebuild runtime
   // slot ownership from disk so stale pointers/slots from the previous in-RAM
@@ -1359,6 +1443,12 @@ void DataStore::loadContacts(DataStoreHost* host) {
 #endif
 
   File file = openRead(_getContactsChannelsFS(), "/contacts3");
+#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+  if (!file && _getContactsChannelsFS()->exists("/contacts3")) {
+    _cache_load_incomplete = true;
+    return;
+  }
+#endif
 #if defined(NRF52_PLATFORM)
   if (!file) {
     // Never delete, truncate, or write alongside a legacy source that could
@@ -1381,20 +1471,33 @@ void DataStore::loadContacts(DataStoreHost* host) {
 #endif
   if (file) {
     bool full = false;
+    uint16_t record_index = 0;
+#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+    if (file.size() % mesh::storage::CONTACT_RECORD_SIZE != 0) {
+      _cache_load_incomplete = true;
+      file.close();
+      return;
+    }
+#endif
 #if defined(NRF52_PLATFORM)
     _legacy_contact_count =
         mesh::storage::legacyContactCountForSize(legacy_size);
-    uint16_t record_index = 0;
     bool legacy_read_failed = false;
     bool legacy_host_refused = false;
 #endif
     while (!full
+#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+           && record_index < file.size() / mesh::storage::CONTACT_RECORD_SIZE
+#endif
 #if defined(NRF52_PLATFORM)
            && record_index < _legacy_contact_count
 #endif
     ) {
       uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
       if (file.read(record, sizeof(record)) != sizeof(record)) {
+#if MESH_CONTACT_CACHE
+        _cache_load_incomplete = true;
+#endif
 #if defined(NRF52_PLATFORM)
         legacy_read_failed = true;
 #endif
@@ -1402,20 +1505,34 @@ void DataStore::loadContacts(DataStoreHost* host) {
       }
 
       ContactInfo contact;
-      if (!deserializeContactRecord(record, contact)) {
+      bool path_unavailable = false;
+      if (!deserializeContactRecord(record, contact, record_index, &path_unavailable)) {
+        if (path_unavailable) {
+#if MESH_CONTACT_CACHE
+          _cache_load_incomplete = true;
+#endif
+#if defined(NRF52_PLATFORM)
+          legacy_read_failed = true;
+#endif
+          break;
+        }
         // Preserve the contact while containing corrupt legacy routing data.
         contact.out_path_len = OUT_PATH_UNKNOWN;
       }
 #if defined(NRF52_PLATFORM)
-      const uint16_t slot = record_index++;
+      const uint16_t slot = record_index;
       if (!_contact_slots.reserve(slot)) {
         legacy_read_failed = true;
         break;
       }
       contact.storage_slot = slot;
 #endif
+      ++record_index;
       if (!host->onContactLoaded(contact)) {
         full = true;
+#if MESH_CONTACT_CACHE
+        _cache_load_incomplete = true;
+#endif
 #if defined(NRF52_PLATFORM)
         _contact_slots.release(slot);
         legacy_host_refused = true;
@@ -1470,6 +1587,7 @@ void DataStore::loadContacts(DataStoreHost* host) {
 }
 
 bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactInfo& c)) {
+  if (hasIncompleteContactLoad()) return false;
 #if defined(NRF52_PLATFORM)
   bool success = true;
   for (uint32_t idx = 0;; idx++) {
@@ -1479,6 +1597,44 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
     success = markContactDirty(*contact) && success;
   }
   return flushContactWrites(host, filter) && success;
+#elif MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+  auto& paths = mesh::contactPathStorage();
+  paths.beginCommit();
+  for (uint32_t i = 0;; ++i) {
+    auto* c = host->getContactForStore(i);
+    if (!c) break;
+    if (!filter || filter(*c)) paths.mark(c->path_ref.handle());
+  }
+  if (!paths.preserveSnapshots(0, 0x8000)) {
+    paths.endCommit(false);
+    return false;
+  }
+  // The cold-path reader reuses one SPIFFS File during this streaming write.
+  // Close it before replacing the original name so later reads reopen the
+  // committed file. No complete contact-table copy is needed in RAM.
+  mesh::ContactFileTransaction writer(_getContactsChannelsFS(), "/contacts3");
+  bool success = writer;
+  uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
+  for (uint32_t i = 0; success; ++i) {
+    auto* c = host->getContactForStore(i);
+    if (!c) break;
+    if (filter && !filter(*c)) continue;
+    success = serializeContactRecord(*c, record)
+        && writer.write(record, sizeof(record)) == sizeof(record);
+  }
+  _contact_path_reader.close();
+  success = writer.commit(success);
+  if (success) {
+    uint16_t index = 0;
+    for (uint32_t i = 0;; ++i) {
+      auto* c = host->getContactForStore(i);
+      if (!c) break;
+      if (filter && !filter(*c)) continue;
+      paths.publish(c->path_ref.handle(), index++);
+    }
+  }
+  paths.endCommit(success);
+  return success;
 #else
   File file = openWrite(_getContactsChannelsFS(), "/contacts3");
   bool success = (bool)file;
@@ -1500,7 +1656,8 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
       success = success && (file.write((uint8_t *)&c.sync_since, 4) == 4);
       success = success && (file.write((uint8_t *)&c.out_path_len, 1) == 1);
       success = success && (file.write((uint8_t *)&c.last_advert_timestamp, 4) == 4);
-      success = success && (file.write(c.out_path, 64) == 64);
+      uint8_t path[64];
+      success = success && c.copyPathTo(path) && (file.write(path, 64) == 64);
       success = success && (file.write((uint8_t *)&c.lastmod, 4) == 4);
       success = success && (file.write((uint8_t *)&c.gps_lat, 4) == 4);
       success = success && (file.write((uint8_t *)&c.gps_lon, 4) == 4);
@@ -1667,6 +1824,7 @@ bool DataStore::serviceContactWrites(DataStoreHost* host,
 
 bool DataStore::flushContactWrites(DataStoreHost* host,
                                    bool (*filter)(const ContactInfo& c)) {
+  if (hasIncompleteContactLoad()) return false;
 #if defined(NRF52_PLATFORM)
   while (hasPendingContactWrites()) {
     if (!serviceContactWrites(host, filter)) return false;
@@ -1687,6 +1845,9 @@ bool DataStore::hasPendingContactWrites() const {
 }
 
 bool DataStore::hasIncompleteContactLoad() const {
+#if MESH_CONTACT_CACHE
+  if (_cache_load_incomplete) return true;
+#endif
 #if defined(NRF52_PLATFORM)
   return _contact_load_incomplete || !_unread_contact_pages.empty();
 #else
@@ -2718,4 +2879,184 @@ bool DataStore::deleteBlobByKey(const uint8_t key[], int key_len) {
   
   return true; // return true even if file did not exist
 }
+#endif
+
+#if MESH_CONTACT_CACHE
+namespace {
+bool cachedContactFilter(const ContactInfo& c) { return c.type != ADV_TYPE_NONE; }
+#if MESH_CONTACT_SECRET_FLASH_CACHE
+#if defined(NRF52_PLATFORM)
+// ExtraFS allocates 4 KiB data blocks. Pack derived keys into almost a full
+// block; tiny pages would consume the available flash after only a few peers.
+constexpr size_t SECRET_PAGE_SLOTS = 56;
+#else
+constexpr size_t SECRET_PAGE_SLOTS = 8;
+#endif
+constexpr size_t SECRET_HEADER_SIZE = 36;
+constexpr size_t SECRET_RECORD_SIZE = 68;
+void secretPagePath(uint16_t slot, char path[24]) {
+  snprintf(path, 24, "/csecret%03x", slot / SECRET_PAGE_SLOTS);
+}
+void secretHeader(uint8_t header[SECRET_HEADER_SIZE], const uint8_t identity[32]) {
+  memcpy(header, "MCS1", 4);
+  memcpy(header + 4, identity, 32);
+}
+bool validSecretRecord(const uint8_t record[SECRET_RECORD_SIZE]) {
+  return mesh::storage::readLE32(record + 64) ==
+      mesh::storage::updateCRC32(0xffffffff, record, 64);
+}
+#endif
+}
+
+bool DataStore::readStoredPath(uint16_t source, uint8_t path[64]) {
+  if (source == mesh::ContactPathStorage::NONE || hasIncompleteContactLoad()) return false;
+  char filename[24] = "/contacts3";
+  size_t offset = static_cast<size_t>(source) * mesh::storage::CONTACT_RECORD_SIZE;
+#if defined(ESP32_PLATFORM)
+  if (!(source & mesh::ContactPathStorage::PAGED)) {
+    // SPIFFS open scans metadata. Doing it for every contact made bulk saves
+    // and app synchronization take tens of seconds. Share one read handle;
+    // loadContacts/saveContacts close it before recovery or replacement.
+    if (!_contact_path_reader)
+      _contact_path_reader = openRead(_getContactsChannelsFS(), filename);
+    File& file = _contact_path_reader;
+    const bool ok = file && file.size() >= offset + mesh::storage::CONTACT_RECORD_SIZE
+        && file.seek(offset + 76) && file.read(path, 64) == 64;
+    if (!ok) file.close();
+    return ok;
+  }
+#endif
+  if (source & mesh::ContactPathStorage::PAGED) {
+#if defined(NRF52_PLATFORM)
+    const uint16_t slot = source & ~mesh::ContactPathStorage::PAGED;
+    if (slot >= mesh::storage::CONTACT_PAGE_COUNT * mesh::storage::CONTACTS_PER_PAGE) return false;
+    makeContactPagePath(slot / mesh::storage::CONTACTS_PER_PAGE, filename);
+    offset = mesh::storage::CONTACT_PAGE_HEADER_SIZE +
+        (slot % mesh::storage::CONTACTS_PER_PAGE) * mesh::storage::CONTACT_RECORD_SIZE;
+#else
+    return false;
+#endif
+  }
+  File file = openRead(_getContactsChannelsFS(), filename);
+  const bool ok = file && file.size() >= offset + mesh::storage::CONTACT_RECORD_SIZE
+      && file.seek(offset + 76) && file.read(path, 64) == 64;
+  if (file) file.close();
+  // The pool checks the CRC captured when this immutable path value was bound.
+  return ok;
+}
+
+bool DataStore::flushCachedPaths() {
+  if (!_cache_host || hasIncompleteContactLoad()
+      || !flushContactWrites(_cache_host, cachedContactFilter)) return false;
+  _cache_host->onContactCacheFlushed();
+  return true;
+}
+
+#if MESH_CONTACT_SECRET_FLASH_CACHE
+uint16_t DataStore::secretSlot(const uint8_t peer[32]) const {
+  if (!_cache_host || hasIncompleteContactLoad()) return mesh::storage::CONTACT_SLOT_NONE;
+  uint16_t persistent_index = 0;
+  for (uint32_t i = 0;; ++i) {
+    const auto* c = _cache_host->getContactForStore(i);
+    if (!c) break;
+    if (c->type == ADV_TYPE_NONE) continue;
+    if (memcmp(c->id.pub_key, peer, 32) == 0) {
+#if defined(NRF52_PLATFORM)
+      return c->storage_slot;
+#else
+      return persistent_index;
+#endif
+    }
+    ++persistent_index;
+  }
+  return mesh::storage::CONTACT_SLOT_NONE;
+}
+
+bool DataStore::readSavedSecret(const uint8_t peer[32], const uint8_t identity[32],
+                                uint8_t secret[32]) {
+  const uint16_t slot = secretSlot(peer);
+  if (slot == mesh::storage::CONTACT_SLOT_NONE) return false;
+  char path[24];
+  secretPagePath(slot, path);
+#if defined(ESP32_PLATFORM)
+  if (!mesh::ContactFileTransaction::recover(_getContactsChannelsFS(), path)) return false;
+#endif
+  File file = openRead(_getContactsChannelsFS(), path);
+  uint8_t expected[SECRET_HEADER_SIZE], header[SECRET_HEADER_SIZE];
+  secretHeader(expected, identity);
+  uint8_t record[SECRET_RECORD_SIZE];
+  const bool ok = file && file.size() == SECRET_HEADER_SIZE + SECRET_PAGE_SLOTS * SECRET_RECORD_SIZE
+      && file.read(header, sizeof(header)) == sizeof(header)
+      && memcmp(header, expected, sizeof(header)) == 0
+      && file.seek(SECRET_HEADER_SIZE + (slot % SECRET_PAGE_SLOTS) * SECRET_RECORD_SIZE)
+      && file.read(record, sizeof(record)) == sizeof(record)
+      && memcmp(record, peer, 32) == 0 && validSecretRecord(record);
+  if (file) file.close();
+  if (ok) memcpy(secret, record + 32, 32);
+  return ok;
+}
+
+bool DataStore::saveSecret(const uint8_t peer[32], const uint8_t identity[32],
+                           const uint8_t secret[32]) {
+  const uint16_t slot = secretSlot(peer);
+  if (slot == mesh::storage::CONTACT_SLOT_NONE ||
+      (_secret_retry_at && static_cast<int32_t>(millis() - _secret_retry_at) < 0)) return false;
+
+  // Derived keys are expendable. Keep room for contact replacement, preferences
+  // and filesystem metadata instead of letting this cache prevent a real save.
+  size_t free_bytes = 0;
+  size_t reserve_bytes = 0;
+#if defined(NRF52_PLATFORM)
+  const auto* config = _getContactsChannelsFS()->_getFS()->cfg;
+  const int used = _getLfsUsedBlockCount(_getContactsChannelsFS());
+  if (used < 0 || static_cast<uint32_t>(used) > config->block_count) return false;
+  free_bytes = (config->block_count - used) * config->block_size;
+  reserve_bytes = 4 * config->block_size;
+#else
+  const size_t total = SPIFFS.totalBytes(), used = SPIFFS.usedBytes();
+  if (used > total) return false;
+  free_bytes = total - used;
+  reserve_bytes = MAX_CONTACTS * mesh::storage::CONTACT_RECORD_SIZE + 16384;
+#endif
+  if (free_bytes < reserve_bytes + 2 * (SECRET_HEADER_SIZE + SECRET_PAGE_SLOTS * SECRET_RECORD_SIZE)) {
+    _secret_retry_at = millis() + 30000;
+    return false;
+  }
+
+  char path[24];
+  secretPagePath(slot, path);
+  uint8_t header[SECRET_HEADER_SIZE], previous_header[SECRET_HEADER_SIZE];
+  secretHeader(header, identity);
+#if defined(ESP32_PLATFORM)
+  if (!mesh::ContactFileTransaction::recover(_getContactsChannelsFS(), path)) return false;
+#endif
+  File old = openRead(_getContactsChannelsFS(), path);
+  bool reuse = old && old.size() == SECRET_HEADER_SIZE + SECRET_PAGE_SLOTS * SECRET_RECORD_SIZE
+      && old.read(previous_header, sizeof(previous_header)) == sizeof(previous_header)
+      && memcmp(previous_header, header, sizeof(header)) == 0;
+#if defined(NRF52_PLATFORM)
+  mesh::AtomicFileWriter writer(_getContactsChannelsFS(), path);
+#else
+  mesh::ContactFileTransaction writer(_getContactsChannelsFS(), path);
+#endif
+  bool ok = writer && writer.write(header, sizeof(header)) == sizeof(header);
+  uint8_t record[SECRET_RECORD_SIZE];
+  for (size_t i = 0; ok && i < SECRET_PAGE_SLOTS; ++i) {
+    memset(record, 0, sizeof(record));
+    if (reuse && (old.read(record, sizeof(record)) != sizeof(record) || !validSecretRecord(record)))
+      memset(record, 0, sizeof(record));
+    if (i == slot % SECRET_PAGE_SLOTS) {
+      memcpy(record, peer, 32);
+      memcpy(record + 32, secret, 32);
+      mesh::storage::writeLE32(record + 64,
+          mesh::storage::updateCRC32(0xffffffff, record, 64));
+    }
+    ok = writer.write(record, sizeof(record)) == sizeof(record);
+  }
+  if (old) old.close();
+  ok = writer.commit(ok);
+  if (!ok) _secret_retry_at = millis() + 30000;
+  return ok;
+}
+#endif
 #endif

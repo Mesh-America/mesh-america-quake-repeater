@@ -84,7 +84,7 @@ class BaseChatMesh : public mesh::Mesh {
   ContactInfo contacts[MAX_CONTACTS+MAX_ANON_CONTACTS];
   int sort_array[MAX_CONTACTS+MAX_ANON_CONTACTS];
 #endif
-  int num_contacts;
+  int num_contacts = 0;
   uint32_t contact_table_revision;
   int matching_peer_indexes[MAX_SEARCH_RESULTS];
   unsigned long txt_send_timeout;
@@ -124,7 +124,7 @@ protected:
   bool initializeContactStorage();
 
   void resetContacts() {
-    memset(contacts, 0, sizeof(contacts[0])*MAX_ANON_CONTACTS);   // set all to have type = ADV_TYPE_NONE(0)
+    for (int i = 0; i < num_contacts; ++i) contacts[i] = ContactInfo();
 #if defined(NRF52_PLATFORM)
     for (int i = 0; i < MAX_ANON_CONTACTS; i++) {
       contacts[i].storage_slot = mesh::storage::CONTACT_SLOT_NONE;
