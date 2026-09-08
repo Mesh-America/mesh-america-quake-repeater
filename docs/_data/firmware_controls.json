@@ -1363,8 +1363,8 @@
       "femRx": false,
       "femTx": false,
       "gps": false,
-      "memoryNote": "Memory-corrected Full Companion: 150 contacts; the 256-message queue and all Full transports are retained. Export contacts before updating if you have more than 150; entries beyond this limit may be unavailable and a later save may omit them.",
-      "memorySource": "aa20e9278ebdd574c4769fdb58d46fd9d4face68",
+      "memoryNote": "Wireless Paper Full: 350 contacts and 40 channels; 256 offline message slots normally, 128 while mOTA borrows shared storage. Idle WiFi mOTA listening keeps all 256 slots. Sync unread messages with a Companion app before starting mOTA if more than 128 are pending. Stopping or disconnecting the source restores all 256 slots and frees scratch buffers. USB, Bluetooth, WiFi and the display are retained.",
+      "memorySource": "1e4d1e167a984abee34e92288b44d55f3d0e15a6",
       "mqtt": false,
       "platform": "ESP32_PLATFORM",
       "primaryEspnow": false,
@@ -11898,5 +11898,8 @@
       "webconfig": false
     }
   },
-  "source": "2630379365cf47cb7eec146b7d1b57b354efe251"
+  "source": "2630379365cf47cb7eec146b7d1b57b354efe251",
+  "memoryFollowupSources": {
+    "Heltec_Wireless_Paper_companion_radio_full": "1e4d1e167a984abee34e92288b44d55f3d0e15a6"
+  }
 }

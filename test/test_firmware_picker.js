@@ -956,6 +956,20 @@ const mixedMemoryProfile = mixedMemoryCatalog.profiles[0];
 assert(!picker.installSteps(mixedMemoryProfile, 'bin').includes(memoryControl.memoryNote));
 assert(picker.installSteps(mixedMemoryProfile, 'merged-bin').includes(memoryControl.memoryNote));
 
+const paperControl = controls.profiles.Heltec_Wireless_Paper_companion_radio_full;
+assert(paperControl.memoryNote.includes('350 contacts and 40 channels'));
+assert(paperControl.memoryNote.includes('128 while mOTA'));
+const paperFilename = 'Heltec_Wireless_Paper_companion_radio_full-' +
+  liveFamily.replace('26303793', paperControl.memorySource.slice(0, 8)) + '.bin';
+const paperCatalog = picker.buildCatalog([
+  release(liveFamily, '2026-09-08T00:00:00Z', [asset(paperFilename)])
+], controls);
+assert(picker.installSteps(paperCatalog.profiles[0], 'bin').includes(paperControl.memoryNote));
+const oldPaperCatalog = picker.buildCatalog([
+  release(liveFamily, '2026-09-08T00:00:00Z', [asset(paperFilename.replace('1e4d1e16', 'aa20e927'))])
+], controls);
+assert(!picker.installSteps(oldPaperCatalog.profiles[0], 'bin').includes(paperControl.memoryNote));
+
 const stale = picker.buildCatalog(controlledReleases, {...controls, familyTag: 'v0.0.0'});
 assert(stale.profiles.every(p => !p.controls));
 assert(!picker.runtimeDirections({...mqttCompanion, controls: undefined}, {}).some(s => s.title === 'GPS'));

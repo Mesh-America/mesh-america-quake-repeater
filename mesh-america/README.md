@@ -3,8 +3,10 @@
 Both active provider catalogs now use **1.17.1.5 USA Cascade**, published from
 original firmware commit `26303793`, with **52 memory-corrected entries** from
 `aa20e927`. All 11 release profiles that failed the RAM budget have replacements;
-all 43 nRF52 Full Companions use shared mOTA/queue storage. The seven corrected
-ESP32 Full profiles use 150 contacts and keep their 256-message queue; read
+all 43 nRF52 Full Companions use shared mOTA/queue storage. Wireless Paper Full
+now uses source `1e4d1e16`, restoring 350 contacts and 40 channels with 256
+message slots normally, or 128 while mOTA borrows the other half. The other six
+corrected ESP32 Full profiles use 150 contacts and keep their 256-message queue; read
 the entry notes and export contacts before upgrading if you exceed that limit.
 The release audit also covers 43 supplemental Full repeater profiles available
 on GitHub and in the firmware picker. The catalogs retain their canonical

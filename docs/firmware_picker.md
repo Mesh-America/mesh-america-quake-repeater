@@ -395,9 +395,11 @@ update its entry in each page's `SHA256SUMS.txt` as well.
 ## Memory-corrected 1.17.1.5 downloads
 
 Corrected downloads retain the 1.17.1.5 release page and use source suffix
-`aa20e927`. The picker accepts replacement source hashes within that exact
+`aa20e927`, with `1e4d1e16` for Wireless Paper Full's 350-contact follow-up.
+The picker accepts replacement source hashes within that exact
 release version. Its installation directions identify the nRF52 queue-sharing
-behavior and the 150-contact limit on seven affected ESP32 Full profiles.
+behavior, Wireless Paper Full's 350 contacts with a shared 256/128-slot queue,
+and the 150-contact limit on the other six affected ESP32 Full profiles.
 Those notices apply only to the corrected files. See the
 [memory correction details](releases/1.17.1.5.md#memory-corrections-in-aa20e927)
 and each replacement's `.memory.json` report before updating.
