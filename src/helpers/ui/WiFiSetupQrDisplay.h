@@ -13,7 +13,8 @@ namespace ui {
 // panels so a normal setup IP has the full 66-pixel text row beside it.
 // Returns false when the payload or panel geometry cannot be represented.
 inline bool drawWiFiSetupQr(DisplayDriver& display, const char* ssid,
-                            const char* address) {
+                            const char* address, bool compact_border = false,
+                            const char* action = nullptr) {
   char payload[256];
   const char* password = nullptr;
 #ifdef WEBCONFIG_AP_PASSWORD
@@ -27,18 +28,24 @@ inline bool drawWiFiSetupQr(DisplayDriver& display, const char* ssid,
   int qr_size = display.height() < display.width() / 2
       ? display.height() : display.width() / 2;
   static constexpr int compact_qr_size = (21 + 4 * 2) * 2;
-  if (display.height() == 64 && qr_size >= compact_qr_size) {
+  if (compact_border && qr_size >= 44) {
+    // Version 1: 21 modules at 2 pixels, plus an exact one-pixel border.
+    qr_size = 44;
+  } else if (display.height() == 64 && qr_size >= compact_qr_size) {
     qr_size = compact_qr_size;
   }
-  if (!display.drawQrCode(payload, 0, 0, qr_size)) return false;
+  const bool rendered = compact_border
+      ? display.drawQrCodeWithBorder(payload, 0, 0, qr_size, 1)
+      : display.drawQrCode(payload, 0, 0, qr_size);
+  if (!rendered) return false;
 
   const int text_x = qr_size + 4;
   display.setTextSize(1);
   display.setColor(UIColor::primary_txt);
   display.setCursor(text_x, 2);
-  display.print("SCAN TO");
+  display.print(action ? "SCAN JOIN" : "SCAN TO");
   display.setCursor(text_x, 12);
-  display.print("JOIN:");
+  display.print(action ? action : "JOIN:");
   display.drawTextEllipsized(
       text_x, 22, display.width() - text_x, ssid);
   display.setCursor(text_x, 37);

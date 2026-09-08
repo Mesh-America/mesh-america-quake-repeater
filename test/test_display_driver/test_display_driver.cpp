@@ -106,6 +106,7 @@ public:
   int qr_x = -1;
   int qr_y = -1;
   int qr_size = -1;
+  int qr_border = -1;
 
   QrTestDisplay(int width, int height, int glyph_width)
       : TestDisplay(width, height, glyph_width) {}
@@ -115,6 +116,11 @@ public:
     qr_y = y;
     qr_size = size;
     return true;
+  }
+  bool drawQrCodeWithBorder(const char* text, int x, int y, int size,
+                            int border) override {
+    qr_border = border;
+    return drawQrCode(text, x, y, size);
   }
 };
 
@@ -161,6 +167,31 @@ TEST(WiFiSetupQrPayload, EncodesOpenSetupNetwork) {
   EXPECT_STREQ("WIFI:S:MC-90DF;;", small_payload);
   // MC-XXXX uses 16 payload bytes, within QR Version 1-L's 17-byte capacity.
   EXPECT_LE(strlen(small_payload), 17U);
+}
+
+TEST(DisplayDriver, V4QrUsesOnePixelBorderAndKeepsActionsBesideTheCode) {
+  QrTestDisplay display(128, 64, 6);
+  ASSERT_TRUE(mesh::ui::drawWiFiSetupQr(
+      display, "MC-F7F0", "192.168.4.1", true, "HOLD STOP"));
+  EXPECT_EQ(44, display.qr_size);
+  EXPECT_EQ(1, display.qr_border);
+  EXPECT_EQ(21 * 2 + 2 * display.qr_border, display.qr_size);
+  ASSERT_EQ(5U, display.rows.size());
+  EXPECT_EQ("SCAN JOIN", display.rows[0].text);
+  EXPECT_EQ("HOLD STOP", display.rows[1].text);
+  EXPECT_EQ("192.168.4.1", display.rows.back().text);
+  for (const auto& row : display.rows) {
+    EXPECT_GE(row.x, display.qr_size + 4);
+    EXPECT_LE(row.x + display.getTextWidth(row.text.c_str()), display.width());
+    EXPECT_LE(row.y + 8, display.height());
+  }
+}
+
+TEST(DisplayDriver, V4QrKeepsFallbackWhenRendererIsUnavailable) {
+  TestDisplay display(128, 64, 6);
+  EXPECT_FALSE(mesh::ui::drawWiFiSetupQr(
+      display, "MC-F7F0", "192.168.4.1", true, "HOLD STOP"));
+  EXPECT_TRUE(display.rows.empty());
 }
 
 TEST(WiFiSetupQrPayload, EscapesProtectedNetworkFields) {

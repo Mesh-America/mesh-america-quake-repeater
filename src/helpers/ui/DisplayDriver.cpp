@@ -5,9 +5,15 @@
 #include <qrcode.h>
 
 bool DisplayDriver::drawQrCode(const char* text, int x, int y, int size) {
+  return drawQrCodeWithBorder(text, x, y, size, -1);
+}
+
+bool DisplayDriver::drawQrCodeWithBorder(const char* text, int x, int y,
+                                        int size, int border_pixels) {
   if (text == nullptr || text[0] == 0 || x < 0 || y < 0 || size <= 0
       || size > width() || size > height()
-      || x > width() - size || y > height() - size) {
+      || x > width() - size || y > height() - size
+      || border_pixels < -1 || border_pixels > (size - 1) / 2) {
     return false;
   }
 
@@ -28,13 +34,17 @@ bool DisplayDriver::drawQrCode(const char* text, int x, int y, int size) {
   if (!initialized) return false;
 
   static constexpr int quiet_zone = 4;
-  const int module_size = size / (qr.size + quiet_zone * 2);
+  const int module_size = border_pixels < 0
+      ? size / (qr.size + quiet_zone * 2)
+      : (size - border_pixels * 2) / qr.size;
   if (module_size <= 0) return false;
-  const int used_size = module_size * (qr.size + quiet_zone * 2);
+  const int border = border_pixels < 0
+      ? quiet_zone * module_size : border_pixels;
+  const int used_size = module_size * qr.size + border * 2;
   const int left = x + (size - used_size) / 2;
   const int top = y + (size - used_size) / 2;
-  const int matrix_left = left + quiet_zone * module_size;
-  const int matrix_top = top + quiet_zone * module_size;
+  const int matrix_left = left + border;
+  const int matrix_top = top + border;
 
   // Dark-theme OLED/TFT drivers use a dark window and light popup text;
   // e-paper reverses that convention. Always emit the conventional dark
@@ -42,7 +52,10 @@ bool DisplayDriver::drawQrCode(const char* text, int x, int y, int size) {
   const ColorVal light = isEink() ? UIColor::window_bkg : UIColor::popup_txt;
   const ColorVal dark = isEink() ? UIColor::primary_txt : UIColor::window_bkg;
   setColor(light);
-  fillRect(x, y, size, size);
+  // An explicit border is exact, even if a larger QR version leaves unused
+  // space in the requested square. Do not add that space to the white border.
+  if (border_pixels < 0) fillRect(x, y, size, size);
+  else fillRect(left, top, used_size, used_size);
   setColor(dark);
   for (uint8_t row = 0; row < qr.size; ++row) {
     for (uint8_t column = 0; column < qr.size; ++column) {

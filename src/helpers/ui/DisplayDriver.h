@@ -74,12 +74,25 @@ public:
   // fallback layout in place.
 #if defined(ESP32_PLATFORM) && defined(MESHCORE_HAS_REAL_DISPLAY)
   virtual bool drawQrCode(const char* text, int x, int y, int size);
+  // Explicit pixel border for compact setup screens; -1 keeps the normal
+  // four-module quiet zone. The matrix always uses whole pixels.
+  virtual bool drawQrCodeWithBorder(const char* text, int x, int y, int size,
+                                    int border_pixels);
 #else
   virtual bool drawQrCode(const char* text, int x, int y, int size) {
     (void)text;
     (void)x;
     (void)y;
     (void)size;
+    return false;
+  }
+  virtual bool drawQrCodeWithBorder(const char* text, int x, int y, int size,
+                                    int border_pixels) {
+    (void)text;
+    (void)x;
+    (void)y;
+    (void)size;
+    (void)border_pixels;
     return false;
   }
 #endif

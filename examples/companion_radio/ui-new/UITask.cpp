@@ -14,6 +14,7 @@
 #if UI_WIFI_SETUP_HOME_PAGE == 1
   #include <helpers/esp32/WebConfigServer.h>
   #include <helpers/ui/WiFiSetupQrPayload.h>
+  #include <helpers/ui/WiFiSetupQrDisplay.h>
 #endif
 #if defined(ESP32)
   #include <esp_timer.h>
@@ -124,9 +125,17 @@ static bool drawCompactCompanionWiFiSetupPage(
     bool wifi_configured) {
   if (display.width() > 128 || display.height() > 64) return false;
 
-  // Four small rows fit below the shared title bar and page dots. The OLED
-  // deliberately uses text instead of a QR: at this scale the SSID, portal IP,
-  // and physical-button action are more useful and remain readable.
+  // Use the whole compact screen for an active setup QR. Clear the shared
+  // title/page dots first so they cannot overlap its one-pixel white border.
+  if (setup_active) {
+    display.setCompactText(false);
+    display.setColor(UIColor::window_bkg);
+    display.fillRect(0, 0, display.width(), display.height());
+    if (mesh::ui::drawWiFiSetupQr(
+            display, setup_ssid, setup_ip, true, "HOLD STOP")) return true;
+  }
+
+  // Keep the readable text fallback for unsupported panels or QR payloads.
   display.setCompactText(true);
   display.setTextSize(1);
   display.setColor(UIColor::primary_txt);

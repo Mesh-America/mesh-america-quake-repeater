@@ -41,7 +41,7 @@ class HeltecV4WiFiSetupPageTest(unittest.TestCase):
         )
         self.assertNotIn("UI_WIFI_SETUP_HOME_PAGE", R8_PROFILE.read_text())
 
-    def test_compact_page_fits_128_by_64_without_qr_or_cli_copy(self):
+    def test_compact_page_restores_qr_with_a_readable_text_fallback(self):
         ui = UI.read_text(encoding="utf-8")
         start = ui.index("static bool drawCompactCompanionWiFiSetupPage")
         end = ui.index("\nstatic void drawCompanionWiFiSetupPage", start)
@@ -53,8 +53,12 @@ class HeltecV4WiFiSetupPageTest(unittest.TestCase):
         self.assertIn('"HOLD STOP AP" : "HOLD START AP"', compact)
         self.assertIn('snprintf(open_ip, sizeof(open_ip), "OPEN %s", setup_ip)', compact)
         self.assertIn("display.drawTextEllipsized", compact)
-        self.assertNotIn("drawQrCode", compact)
-        self.assertNotIn("buildWiFiSetupQrPayload", compact)
+        self.assertIn("mesh::ui::drawWiFiSetupQr(", compact)
+        self.assertIn('display, setup_ssid, setup_ip, true, "HOLD STOP"', compact)
+        self.assertLess(compact.index("display.fillRect(0, 0,"),
+                        compact.index("mesh::ui::drawWiFiSetupQr("))
+        self.assertLess(compact.index("mesh::ui::drawWiFiSetupQr("),
+                        compact.index('"SETUP AP ACTIVE"'))
         self.assertNotIn("start webconfig", compact.lower())
 
         # Default size-one glyphs are six by eight logical pixels.
