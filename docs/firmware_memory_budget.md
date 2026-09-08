@@ -33,6 +33,12 @@ Headless and OLED devices use their own smaller totals. The JSON lists each
 component and checks the largest available region against the largest planned
 single allocation.
 
+The [small-screen message layout](v4_pixel5_font_trial.md) retains complete
+160-byte messages. Its expanded preview records add 2,816 bytes to the
+startup allowance and increase the contiguous history allocation budget.
+The V4 can allocate that history in PSRAM; the guard conservatively reserves
+internal capacity so that PSRAM availability cannot hide a RAM shortage.
+
 These are engineering allowances for supported configurations, not measured
 free heap after boot or a guarantee against every future allocation failure.
 Unknown platforms, unknown display drivers and missing linker metadata fail

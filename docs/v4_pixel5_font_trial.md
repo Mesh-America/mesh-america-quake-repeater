@@ -46,9 +46,12 @@ The named trial keeps NimBLE, 350 contacts, 40 channels, the V4's 512-frame
 PSRAM queue, USB mOTA sending and WiFi OTA support. The smaller font is also
 the default in ordinary small-screen Companion builds from this source.
 
-For a V4 already using the matching 16 MB Full Companion partition layout,
-flash the application `.bin` at `0x10000`, or use it for WiFi OTA. A clean
-USB install uses the merged image at address 0.
+Use the application `.bin` for WiFi OTA. A clean USB install uses the merged
+image at address 0. When manually writing the application at `0x10000`, an
+existing OTA selector may still boot app1. Check the running `ver` afterward.
+On the matching V4 16 MB layout only, clearing the 8 KB `otadata` partition at
+`0xe000` selects the newly written app0 without clearing NVS/settings. Confirm
+the partition table and verify the app write before changing that selector.
 
 A custom build can set `-D UI_SMALL_MESSAGE_FONT=0` to restore the old font
 and spacing. Remove any explicit `UI_MSG_PREVIEW_SIZE` flag too if the old
@@ -71,3 +74,45 @@ address/undefined-behavior sanitizers. That comparison needs a cached
 PlatformIO Adafruit GFX library; set `MESHCORE_GFX_LIBRARY` to its directory
 if needed. It reports a skip when the library is absent. The native tests do
 not require that dependency. Run only one PlatformIO command at a time.
+
+## Hardware and build results, 2026-09-08
+
+Source revision `eeea15ef` passed seven representative firmware builds:
+
+| Hardware/profile | Display | RAM beyond the required startup budget, bytes |
+| --- | --- | ---: |
+| V4.2/V4.3 Full NimBLE Picopixel | SSD1306 | 88,072 |
+| T096 Full, FEM on | ST7735 | 24,778 |
+| Station G3 ESP32 Full | SH1106 | 82,080 |
+| RAK3401 Full | SSD1306 | 46,108 |
+| Wireless Tracker Full NimBLE capacity trial | ST7735 | 28,022 |
+| Wio Tracker L1 Full | SH1106 | 45,744 |
+| T-Echo Card BLE Companion | U8g2 | 30,992 |
+
+These are linked-capacity checks before runtime allocation, not live free
+heap measurements. The six Full profiles also passed their required OTA
+packaging checks. The T-Echo Card row is a BLE Companion build.
+
+Both physical V4.3 nodes, `NimBLE-V4-VM` and `NimBLE-V4-Trial`, were flashed,
+their image hashes verified, and their running versions confirmed. Each
+passed 201 USB protocol requests with zero reported error flags. The
+Mercerwood V4 also reconnected over authenticated, bonded Bluetooth with
+MTU 179 and the existing factory-address policy.
+
+A private XIAO-to-V4 LoRa test delivered all 160 message bytes. The V4
+continued responding during 20 seconds of message redraws, with zero error
+flags. Both temporary channel configurations were restored. Free internal
+heap after that interval was 147,200 bytes, minimum 146,340 bytes, and the
+largest free block was 139,252 bytes. These are short functional checks;
+physical readability remains a user judgment.
+
+A matching pre/post-boot Mercerwood measurement showed the longer preview
+using 2,816 additional PSRAM bytes, with unchanged internal free heap. Boards
+without PSRAM use their ordinary RAM for the larger preview records.
+
+The native display/history suites passed 31 tests. The Python font, RAM,
+pairing, display-profile, queue and QR checks passed 38 tests. The Adafruit
+comparison covers all 95 printable ASCII glyphs.
+
+V4 application SHA-256:
+`d914d80124b499d7b719f8427f3794ab1b6d15fd0112e3ef89ba2fac26b5a974`.
