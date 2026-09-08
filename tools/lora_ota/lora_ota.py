@@ -2520,6 +2520,146 @@ def contact_matches_selector(contact: dict, selector: str) -> bool:
     )
 
 
+def parse_source_contact_card(output: str, expected_key: str) -> tuple[str, dict]:
+    """Check the identity in a pathless self-card; firmware verifies its signature.
+
+    This is only an envelope/key check, not a replacement for MeshCore's advert
+    importer. Never construct a contact or route from a bare public key.
+    """
+    cards = re.findall(r"(?m)^[ \t]*(?:>[ \t]*)?(meshcore://[0-9A-Fa-f]+)[ \t]*$",
+                       output.replace("\r", ""))
+    if len(cards) != 1 or output.count("meshcore://") != 1:
+        raise OtaError("OTA source did not return one exact contact card")
+    try:
+        packet = bytes.fromhex(cards[0][11:])
+    except ValueError as exc:
+        raise OtaError("OTA source returned malformed contact-card hex") from exc
+    # Packet::writeTo(): v1 flood ADVERT, no path, key + timestamp + signature
+    # + app data. `card` creates this envelope without sending a radio packet.
+    if not 104 <= len(packet) <= 134 or packet[:2] != b"\x11\x00":
+        raise OtaError("OTA source card is not a supported pathless self-advert")
+    key = packet[2:34].hex()
+    if key != expected_key.lower():
+        raise OtaError(f"OTA source contact card key mismatch: expected {expected_key}, got {key}")
+    flags = packet[102]
+    name_offset = 103 + (8 if flags & 0x10 else 0) + (2 if flags & 0x20 else 0) + (2 if flags & 0x40 else 0)
+    name = packet[name_offset:].rstrip(b"\x00")
+    if (flags & 0x0f) not in (1, 2, 3, 4) or not flags & 0x80 or not name or b"\x00" in name:
+        raise OtaError("OTA source contact card has no supported named station")
+    return "meshcore://" + packet.hex(), {
+        "public_key": key, "adv_name": name.decode("utf-8", "replace"),
+    }
+
+
+def read_import_contact_table(controller: Controller, *, pending: bool = False) -> dict[str, dict]:
+    command = "pending_contacts" if pending else "reload_contacts"
+    objects = controller._run([command], f"verify OTA source {command}", timeout=15)
+    # reload_contacts explicitly refreshes the device table; `contacts` alone
+    # can return meshcli's cache in the persistent connection.
+    if len(objects) != 1 or not all(
+        isinstance(key, str) and re.fullmatch(r"[0-9A-Fa-f]{64}", key)
+        and isinstance(value, dict) and isinstance(value.get("public_key"), str)
+        and value["public_key"].lower() == key.lower()
+        for key, value in objects[0].items()
+    ):
+        raise OtaError(f"controller did not return a complete {command} table")
+    return {key.lower(): value for key, value in objects[0].items()}
+
+
+def require_contact_overwrite_disabled(controller: Controller) -> None:
+    # meshcli prints this getter as hex even with -j. Do not enable auto-add or
+    # change the user's policy. Refuse if insertion could evict another contact.
+    result = controller._execute(["get", "autoadd_config"], "check contact overwrite policy", timeout=15)
+    values = re.findall(r"(?m)^[ \t]*0x([0-9A-Fa-f]{2})[ \t]*$", result.stdout.replace("\r", ""))
+    if len(values) != 1 or re.search(r"(?im)^\s*(?:error|err|fail|can't)\b", result.stdout + "\n" + result.stderr):
+        raise OtaError("cannot verify that controller contact overwrite is disabled; import manually")
+    config = int(values[0], 16)
+    if config & 1:
+        raise OtaError(
+            "controller contact overwrite is enabled; automatic import refused to protect existing contacts. "
+            f"Disable overwrite first (`set autoadd_config 0x{config & ~1:02x}` in meshcli), "
+            "or import manually. No controller settings were changed"
+        )
+
+
+def execute_contact_import_command(controller: Controller, commands: list[str]) -> None:
+    # import_contact can succeed with no JSON output. Send each mutation once;
+    # never retry an uncertain acknowledgement or treat it as completed storage.
+    result = controller._execute(commands, f"OTA source {commands[0]}", timeout=15)
+    output = "\n".join((result.stdout, result.stderr))
+    if re.search(r"(?im)^\s*(?:error|err|fail|unknown command|can't)\b", output) or any(
+        "error" in obj or "error_code" in obj for obj in json_objects(output)
+    ):
+        raise OtaError(f"controller rejected OTA source {commands[0]}: {output.strip()}")
+
+
+def offer_source_contact_import(
+    controller: Controller, args: argparse.Namespace, source_key: str,
+    contacts: dict[str, dict],
+) -> dict[str, dict]:
+    missing = (
+        f"the connected OTA source public key {source_key} is not in the controller's contacts; "
+        "import its contact or advertise/discover it on the normal channel first. "
+        "If source and controller are the same TCP Full Companion, use the verified "
+        "--source-shares-controller topology instead"
+    )
+    if not sys.stdin.isatty():
+        raise OtaError(missing + ". Rerun interactively for the contact-import prompt; --yes does not approve it")
+    original_controller_key = controller.get_public_key().lower()
+    if original_controller_key == source_key:
+        raise OtaError("source is the controller itself; use --source-shares-controller instead of importing itself")
+    output = optional_source_cli_command(args, "card")
+    if output is None:
+        raise OtaError(missing + ". This source terminal does not support `card`; no import was attempted")
+    uri, card_contact = parse_source_contact_card(output, source_key)
+    selector = args.source_contact_value
+    if selector and not contact_matches_selector(card_contact, selector):
+        raise OtaError("--source-contact does not identify the connected source's contact card; no import attempted")
+    print(f"[contact] Missing OTA source: {card_contact['adv_name']!r} [{source_key}]")
+    print("[contact] Import its contact card over USB/TCP using MeshCore. No LoRa advertisement will be sent.")
+    print("[contact] This adds a saved contact; it does not change auto-add settings or remove other contacts.")
+    try:
+        approved = input("Add the connected OTA source to this controller's contacts? [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        approved = False
+    if not approved:
+        raise OtaError(missing + ". Contact import declined; no contact changes were made")
+    # The user may have been at the prompt for a while. Recheck both identities
+    # and the live table before adding anything. Never overwrite a newly added
+    # source contact or import a card from a swapped source/controller.
+    controller_key = controller.get_public_key().lower()
+    if controller_key != original_controller_key or read_source_public_key_bounded(args).lower() != source_key:
+        raise OtaError("OTA source/controller identity changed before contact import; stopping")
+    current = read_import_contact_table(controller)
+    if not contacts.keys() <= current.keys():
+        raise OtaError("controller contacts changed during the import prompt; rerun before adding a contact")
+    if source_key in current:
+        return current
+    require_contact_overwrite_disabled(controller)
+    execute_contact_import_command(controller, ["import_contact", uri])
+    added_pending = False
+    for attempt in range(5):
+        current_after = read_import_contact_table(controller)
+        if not current.keys() <= current_after.keys():
+            raise OtaError("controller contact inventory lost an existing key during import; stopping for inspection")
+        if source_key in current_after:
+            print(f"[contact] Imported and verified OTA source [{source_key}]")
+            return current_after
+        # Manual-add controllers expose a signature-checked advert as pending.
+        # Add ONLY the exact approved key through the existing MeshCore API.
+        if not added_pending and source_key in read_import_contact_table(controller, pending=True):
+            require_contact_overwrite_disabled(controller)
+            execute_contact_import_command(controller, ["add_pending", source_key])
+            added_pending = True
+        if attempt < 4:
+            time.sleep(0.25)
+    raise OtaError(
+        "OTA source contact import was not confirmed in the controller's refreshed table. "
+        "Its table may be full, storage unavailable, or the card rejected. No contacts were deleted "
+        "by this script; check the controller and rerun. The import will not be retried automatically"
+    )
+
+
 def bind_contact_selectors(controller: Controller, args: argparse.Namespace) -> None:
     """Resolve the local contact table once, before any remote command is sent.
 
@@ -2569,23 +2709,24 @@ def bind_contact_selectors(controller: Controller, args: argparse.Namespace) -> 
         # differ from the controller's saved advert (renames, truncation, emoji).
         # Never bind a same-named but different radio, even with --source-contact.
         source_key = read_source_public_key_bounded(args).lower()
+        selected = None
+        if source_selector and any(contact_matches_selector(value, source_selector) for value in contacts.values()):
+            selected = resolve(source_selector)
+            if selected != source_key:
+                raise OtaError(
+                    f"--source-contact identifies {selected}, but the connected OTA source "
+                    f"reports {source_key}; select the contact for the physical source"
+                )
+        if source_key not in contacts:
+            contacts = offer_source_contact_import(controller, args, source_key, contacts)
         if source_selector:
-            source = resolve(source_selector)
+            source = selected or resolve(source_selector)
             if source != source_key:
                 raise OtaError(
                     f"--source-contact identifies {source}, but the connected OTA source "
                     f"reports {source_key}; select the contact for the physical source"
                 )
         else:
-            if source_key not in contacts:
-                raise OtaError(
-                    f"the connected OTA source public key {source_key} is not in the "
-                    "controller's contacts; import its contact or advertise/discover it "
-                    "on the normal channel first. Renaming a different contact or passing "
-                    "--source-contact cannot replace this identity check. If source and "
-                    "controller are the same TCP Full Companion, use the verified "
-                    "--source-shares-controller topology instead"
-                )
             source = source_key
             print(f"[contact] OTA source -> {contacts[source].get('adv_name', '?')} [{source}]")
     else:
@@ -2928,7 +3069,8 @@ def source_cli_command(
                 raise TransmissionError("source TCP console returned an empty reply")
         else:
             wire_command = command_text
-            if full_companion_identity or getattr(args, "source_companion_terminal", False):
+            if (full_companion_identity or getattr(args, "source_full_companion", False)
+                    or getattr(args, "source_companion_terminal", False)):
                 # meshcli raw mode keeps one serial open while writing this
                 # compound command. STOP first makes this independent of the
                 # port's current state: ASCII consumes it and returns to
@@ -6970,7 +7112,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME_OR_KEY",
         help=(
             "controller contact name/key/unique key prefix for a separate OTA source, used for the "
-            "three-minute on-air proof; defaults to the source's local name "
+            "three-minute on-air proof; defaults to the connected source's full public key, "
+            "with a separately approved contact-card import if missing "
             "(no remote-admin password is required)"
         ),
     )
@@ -7100,7 +7243,7 @@ def build_parser() -> argparse.ArgumentParser:
             "used when a delta does not expose its reconstructed target hash"
         ),
     )
-    parser.add_argument("--yes", action="store_true", help="skip the destructive-action confirmation")
+    parser.add_argument("--yes", action="store_true", help="skip the OTA destructive-action confirmation (not contact import or host-tool installation)")
     parser.add_argument(
         "--require-system-watchdog-off",
         action="store_true",

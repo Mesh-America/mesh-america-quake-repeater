@@ -462,6 +462,7 @@ class StationSelectionTests(unittest.TestCase):
         }
         with (
             mock.patch.object(ota, "read_source_public_key_bounded", return_value=source_key),
+            mock.patch.object(ota.sys.stdin, "isatty", return_value=False),
             contextlib.redirect_stdout(io.StringIO()),
             self.assertRaisesRegex(ota.OtaError, "connected OTA source public key.*not in") as error,
         ):
