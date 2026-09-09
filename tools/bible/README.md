@@ -24,15 +24,20 @@ reader from the radio-settings page:
 - Single click advances one screenful, then to the next verse.
 - Double click goes back one screenful; at a verse boundary it shows the
   previous verse's last screenful.
+- Three taps jump to verse one of the next chapter; four taps jump to verse
+  one of the previous chapter. Navigation stops at the first and last chapters.
 - Long press exits to the radio page. It does not invoke early-boot CLI rescue
   while opening or closing the reader.
 
-The header shows the reference and part count. Single-button builds show
-`<- 2 tap  1 tap ->  long press: exit` at the bottom, matching the message reader.
-These are taps of the user button. Narrower displays shorten or split the
-hint across lines; touch/joystick builds keep their own controls. The entry
-gesture stays hidden on the radio page. The footer has reserved space in the
-pagination calculation, so text continues on another page when necessary.
+The header shows the reference and part count. Single-button builds alternate
+`<- 2 tap  1 tap ->  long press: exit` and `<<- 4 tap  3 tap ->>` in the footer
+every three seconds, matching the message controls (which change channels).
+These are taps of the user button. Narrower displays use `hold: X` for exit
+or split the hint across lines. Both hint views reserve the same height; the
+V4 keeps its existing single footer row. Touch/joystick builds keep their own
+controls. The entry gesture stays hidden on the radio page. The footer has
+reserved space in the pagination calculation, so text continues on another
+page when necessary.
 Text wraps at word boundaries without truncation. Both the screen and CLI use
 the same text with plain ASCII quotes, apostrophes, dashes and spaces; wording
 and capitalization are unchanged. Incoming messages are retained without

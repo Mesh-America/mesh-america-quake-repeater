@@ -32,12 +32,18 @@ Readers without the button hint retain the y=14 origin and y=22 message text.
 
 On V4 and other single-button builds using this reader, the home screen says
 `hold button: inbox`. Hold the user button for about 1.2 seconds to open it.
-The bottom of the reader shows `<- 2 tap  1 tap ->  long press: exit`: double tap
-the button for the previous message, tap once for the next, and hold to
-return home. Advancing past the last message also returns home. The hint
-appears even when the inbox is empty and reflows onto additional lines on
-narrower screens. It replaces the unusable channel selector on single-button
-builds. These are button taps. Touchscreen and joystick builds retain
+The bottom alternates between `<- 2 tap  1 tap ->  long press: exit` and
+`<<- 4 tap  3 tap ->>` every three seconds. Double tap goes to the previous
+message, one tap advances, three taps select the next channel, and four taps
+select the previous channel. Channel selection cycles through All, configured
+channels, and direct messages, starting at the newest message in each filter.
+The header shows `All`, `Ch N`, or `DM`, including when a channel is empty.
+Hold to return home; advancing past the last message also returns home.
+The hints share the same footer space and use `hold: X` when the longer exit
+label does not fit. Both fit in the V4's existing 8-pixel footer at y=56, leaving
+five message rows. Narrower screens split the hint across lines; switching
+hints does not change the space reserved for text. The hints appear even when
+the inbox is empty. These are button taps. Touchscreen and joystick builds retain
 instructions appropriate to their controls. During the first eight
 seconds after startup, holding the button on an ordinary home page enters
 CLI rescue instead; wait for that startup window to finish before opening
@@ -45,9 +51,11 @@ the inbox. Exiting a message preview and the WiFi setup page's hold action
 remain available immediately.
 
 The hidden [John reader](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/bible/README.md#on-device-reader), opened
-by a long press on the radio page, uses the same button hint. It reserves the
-hint before pagination and resumes saved bookmarks at the page containing
-the same text, even after the available page size changes.
+by a long press on the radio page, uses the same button hints. Three taps jump
+to the first verse of the next chapter; four taps jump to the first verse of
+the previous chapter. Chapter navigation stops at the beginning and end of
+the book. It reserves the hint before pagination and resumes saved bookmarks
+at the page containing the same text, even after the available page size changes.
 
 Larger display classes keep their existing font. Menus, Bluetooth PINs and WiFi
 setup QR codes keep their normal layout. TFT drivers use native panel

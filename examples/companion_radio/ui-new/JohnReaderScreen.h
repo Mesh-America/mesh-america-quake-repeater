@@ -40,7 +40,8 @@ class JohnReaderScreen : public UIScreen {
     DisplayDriver& hint_text = small_hint
         ? static_cast<DisplayDriver&>(compact) : *_display;
     const auto hint = mesh::ui::makeButtonReaderHintLayout(hint_text,
-        small_hint ? compact.glyphHeight() : header_height, bottom);
+        small_hint ? compact.glyphHeight() : header_height, bottom,
+        (millis() / 3000U) % 2 != 0);
     bottom = hint.top;
 #endif
 #if UI_SMALL_MESSAGE_FONT
@@ -143,11 +144,22 @@ public:
     const uint32_t now = millis();
     if (_bookmark.due(now) && (!_retry_at || int32_t(now - _retry_at) >= 0)) flush();
   }
-  int render(DisplayDriver&) override { process(0, true); return 5000; }
+  int render(DisplayDriver&) override { process(0, true); return 1000; }
   bool handleInput(char c) override {
     const uint8_t key = static_cast<uint8_t>(c);
     if (key == KEY_NEXT || key == KEY_RIGHT) { process(1, false); return true; }
     if (key == KEY_PREV || key == KEY_LEFT) { process(-1, false); return true; }
+    if (key == KEY_DOWN || key == KEY_UP) {
+      using namespace mesh::bible;
+      const Reference current = referenceAt(_bookmark.position().verse);
+      const int chapter = current.chapter + (key == KEY_DOWN ? 1 : -1);
+      Position pos;
+      if (chapter >= 1 && chapter <= int(sizeof(kChapterVerses))
+          && verseNumber({static_cast<uint8_t>(chapter), 1}, pos.verse)) {
+        _bookmark.move(pos, millis());
+      }
+      return true;
+    }
     if (key == KEY_ENTER || key == KEY_CANCEL) { _task->closeJohnReader(); return true; }
     return false;
   }

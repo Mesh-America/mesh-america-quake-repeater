@@ -118,6 +118,44 @@ TEST_F(MomentaryButtonTest, MulticlickDisabledEmitsOnAcceptedRelease) {
   EXPECT_FALSE(button.needsPolling());
 }
 
+TEST_F(MomentaryButtonTest, FourClicksHaveDistinctEventOnlyWhenEnabled) {
+  for (bool enabled : {false, true}) {
+    MomentaryButton button(kPin, 1000, true, true, true);
+    button.begin();
+    if (enabled) button.enableQuadrupleClick();
+    for (int click = 0; click < 4; ++click) {
+      cleanPress(button);
+      EXPECT_EQ(BUTTON_EVENT_NONE, cleanRelease(button));
+      advance(80);
+      EXPECT_EQ(BUTTON_EVENT_NONE, button.check());
+    }
+    advance(200);
+    EXPECT_EQ(enabled ? BUTTON_EVENT_QUADRUPLE_CLICK : BUTTON_EVENT_TRIPLE_CLICK,
+              button.check());
+    EXPECT_FALSE(button.needsPolling());
+    EXPECT_EQ(BUTTON_EVENT_NONE, button.check());
+  }
+}
+
+TEST_F(MomentaryButtonTest, FourthPressBeforeDeadlineDoesNotEmitTripleEarly) {
+  MomentaryButton button(kPin, 1000, true, true, true);
+  button.begin();
+  button.enableQuadrupleClick();
+  g_mock_millis = UINT32_MAX - 500;
+  for (int click = 0; click < 3; ++click) {
+    cleanPress(button);
+    EXPECT_EQ(BUTTON_EVENT_NONE, cleanRelease(button));
+    if (click < 2) advance(80);
+  }
+  advance(279);
+  EXPECT_EQ(BUTTON_EVENT_NONE, beginTransition(button, LOW));
+  EXPECT_EQ(BUTTON_EVENT_NONE, finishDebounce(button));
+  EXPECT_EQ(BUTTON_EVENT_NONE, cleanRelease(button));
+  advance(280);
+  EXPECT_EQ(BUTTON_EVENT_QUADRUPLE_CLICK, button.check());
+  EXPECT_FALSE(button.needsPolling());
+}
+
 TEST_F(MomentaryButtonTest, LongPressEmitsOnceAndDoesNotBecomeClick) {
   MomentaryButton button(kPin, 1000, true, true, true);
   button.begin();

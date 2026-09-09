@@ -7,6 +7,7 @@
 #define BUTTON_EVENT_LONG_PRESS  2
 #define BUTTON_EVENT_DOUBLE_CLICK 3
 #define BUTTON_EVENT_TRIPLE_CLICK 4
+#define BUTTON_EVENT_QUADRUPLE_CLICK 5
 
 #ifndef MOMENTARY_BUTTON_WAKE_HOLD_MS
 #define MOMENTARY_BUTTON_WAKE_HOLD_MS 0
@@ -24,6 +25,7 @@ class MomentaryButton {
   uint32_t _last_click_time;
   int _multi_click_window;
   bool _pending_click;
+  bool _quadruple_click = false;
   int8_t _candidate_level;
   uint32_t _candidate_since;
   bool _debouncing;
@@ -39,6 +41,7 @@ public:
   MomentaryButton(int8_t pin, int long_press_mills, int analog_threshold);
   virtual void begin();
   virtual int check(bool repeat_click=false);  // returns one of BUTTON_EVENT_*
+  void enableQuadrupleClick() { _quadruple_click = true; }
   void cancelClick();  // suppress next BUTTON_EVENT_CLICK (if already in DOWN state)
   uint8_t getPin() { return _pin; }
   bool isPressed() const;

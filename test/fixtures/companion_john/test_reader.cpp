@@ -264,6 +264,38 @@ int main(int argc, char** argv) {
     assert(task.closed);
   }
 
+  // Group navigation starts at verse one of the adjacent chapter, resets
+  // the page offset, stops at book boundaries, and checkpoints normally.
+  the_mesh = FakeMesh{};
+  Display chapters_display(128, 64);
+  UITask chapters_task;
+  JohnReaderScreen chapters(&chapters_task, &chapters_display);
+  chapters.open();
+  assert(chapters.handleInput(KEY_UP));
+  assert(chapters.flush() && the_mesh.saves == 0);
+  for (uint8_t chapter = 2; chapter <= sizeof(kChapterVerses); ++chapter) {
+    assert(chapters.handleInput(KEY_DOWN));
+    assert(chapters.flush());
+    Position saved;
+    assert(the_mesh.loadJohnBookmark(saved));
+    assert(referenceAt(saved.verse).chapter == chapter && saved.offset == 0);
+    assert(referenceAt(saved.verse).verse == 1);
+  }
+  const int writes = the_mesh.saves;
+  assert(chapters.handleInput(KEY_DOWN));
+  assert(chapters.flush() && the_mesh.saves == writes);
+  // Moving backwards from the middle of a chapter reaches the preceding one.
+  assert(the_mesh.saveJohnBookmark(pos(91, 12))); // 3:16, with a stale page offset
+  JohnReaderScreen middle(&chapters_task, &chapters_display);
+  middle.open();
+  assert(middle.handleInput(KEY_UP) && middle.flush());
+  Position chapter_saved;
+  assert(the_mesh.loadJohnBookmark(chapter_saved));
+  assert(referenceAt(chapter_saved.verse).chapter == 2);
+  assert(referenceAt(chapter_saved.verse).verse == 1 && chapter_saved.offset == 0);
+  assert(middle.handleInput(KEY_UP) && middle.flush());
+  assert(!the_mesh.loadJohnBookmark(chapter_saved) && chapter_saved.atStart());
+
   // Resume within a split verse; independent screen and store lifecycle.
   the_mesh = FakeMesh{};
   Display display(64,32);

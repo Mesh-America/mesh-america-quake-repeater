@@ -264,19 +264,38 @@ TEST(SmallMessageText, ButtonHintReflowsOnTinyAndRotatedScreens) {
                          {128, 32}, {32, 128}, {64, 128}, {128, 64}}) {
     TestDisplay display(dimensions.first, dimensions.second);
     mesh::ui::SmallMessageText text(display);
-    const auto hint = mesh::ui::makeButtonReaderHintLayout(
+    const auto navigation = mesh::ui::makeButtonReaderHintLayout(
         text, text.lineHeight(), display.height());
-    for (int row = 0; row < hint.line_count; ++row)
-      EXPECT_LE(text.getTextWidth(hint.lines[row]), display.width());
-    mesh::ui::drawButtonReaderHint(text, hint);
-    ASSERT_FALSE(display.fills.empty());
-    for (const auto& pixel : display.fills) {
-      EXPECT_GE(pixel.x, 0);
-      EXPECT_LE(pixel.x + pixel.width, display.width());
-      EXPECT_GE(pixel.y, hint.top);
-      EXPECT_LE(pixel.y + pixel.height, display.height());
+    for (bool groups : {false, true}) {
+      display.fills.clear();
+      const auto hint = mesh::ui::makeButtonReaderHintLayout(
+          text, text.lineHeight(), display.height(), groups);
+      EXPECT_EQ(navigation.top, hint.top);
+      EXPECT_EQ(navigation.line_count, hint.line_count);
+      for (int row = 0; row < hint.line_count; ++row)
+        EXPECT_LE(text.getTextWidth(hint.lines[row]), display.width());
+      mesh::ui::drawButtonReaderHint(text, hint);
+      ASSERT_FALSE(display.fills.empty());
+      for (const auto& pixel : display.fills) {
+        EXPECT_GE(pixel.x, 0);
+        EXPECT_LE(pixel.x + pixel.width, display.width());
+        EXPECT_GE(pixel.y, hint.top);
+        EXPECT_LE(pixel.y + pixel.height, display.height());
+      }
     }
   }
+}
+
+TEST(SmallMessageText, GroupHintFitsV4FooterWithoutLosingMessageRows) {
+  TestDisplay display(128, 64);
+  mesh::ui::SmallMessageText text(display);
+  const auto hint = mesh::ui::makeButtonReaderHintLayout(
+      text, text.lineHeight(), display.height(), true);
+  ASSERT_EQ(1, hint.line_count);
+  EXPECT_STREQ("<<- 4 tap  3 tap ->>", hint.lines[0]);
+  EXPECT_LE(text.getTextWidth(hint.lines[0]), 128);
+  EXPECT_EQ(56, hint.top);
+  EXPECT_EQ(5, text.lineCount(2 * text.lineHeight(), hint.top));
 }
 
 TEST(SmallMessageText, Full160CharacterSamplesFitInFiveRows) {

@@ -1240,8 +1240,8 @@ public:
 #ifndef UI_COMPACT_MESSAGE_STATUS
   #define UI_COMPACT_MESSAGE_STATUS 0
 #endif
-// Single-button readers cannot operate the up/down channel selector. Use
-// their footer space for the available navigation controls instead.
+// Single-button screens use multi-tap hints in place of the taller channel
+// selector. Three/four taps use the same up/down channel actions.
 #ifndef UI_MESSAGE_CHANNEL_FOOTER
   #if defined(MESHCORE_HAS_SMALL_DISPLAY) || UI_BUTTON_READER_HINT == 1
     #define UI_MESSAGE_CHANNEL_FOOTER 0
@@ -1500,7 +1500,8 @@ public:
   #endif
     const mesh::ui::ButtonReaderHintLayout hint =
         mesh::ui::makeButtonReaderHintLayout(
-            reader_text, hint_line_height, body_bottom);
+            reader_text, hint_line_height, body_bottom,
+            (millis() / 3000U) % 2 != 0);
     body_bottom = hint.top;
     DisplayDriver& header = reader_text;
 #else
@@ -1511,11 +1512,34 @@ public:
     if (view_offset >= filtered_count) view_offset = 0;
     header.setCursor(0, 0);
     header.setColor(UIColor::corp_blue);
+#if UI_BUTTON_READER_HINT == 1
+    // Keep the selected filter visible even when that channel has no messages.
+    char channel[12];
+    if (channel_filter == CHANNEL_FILTER_ALL) strcpy(channel, "All");
+    else if (channel_filter == CHANNEL_FILTER_DIRECT) strcpy(channel, "DM");
+    else snprintf(channel, sizeof(channel), "Ch %d", channel_filter);
+    snprintf(tmp, sizeof(tmp), "%s %d/%d", channel,
+             filtered_count == 0 ? 0 : view_offset + 1, filtered_count);
+#else
     snprintf(tmp, sizeof(tmp), display.width() < 100 ? "%d/%d" : "Message %d/%d",
              filtered_count == 0 ? 0 : view_offset + 1, filtered_count);
-    header.print(tmp);
-
+#endif
     const MsgEntry* p = filteredEntry(view_offset);
+    char age[16] = {};
+    if (p != nullptr) {
+      mesh::ui::formatCompanionMessageAge(
+          age, sizeof(age), companionMessageElapsedMillis(p->heard_millis));
+      if (display.width() < 100) {
+        char* suffix = strchr(age, ' ');
+        if (suffix != nullptr) *suffix = 0;
+      }
+    }
+    // On narrow rotations the channel and position take priority over age.
+    const bool show_age = age[0] != 0
+        && header.getTextWidth(tmp) + header.getTextWidth(age) + 4 <= display.width();
+    const int header_width = display.width()
+        - (show_age ? header.getTextWidth(age) + 4 : 0);
+    header.drawTextEllipsized(0, 0, header_width, tmp);
 
     if (p == nullptr) {
       display.drawRect(0, layout.header_divider_y, display.width(), 1);
@@ -1532,17 +1556,13 @@ public:
                                "No buffered messages");
 #endif
       renderChannelFilter(display);
-      return 5000;
+      return UI_BUTTON_READER_HINT == 1 ? 3000 : 5000;
     }
 
-    mesh::ui::formatCompanionMessageAge(
-        tmp, sizeof(tmp), companionMessageElapsedMillis(p->heard_millis));
-    if (display.width() < 100) {
-      char* suffix = strchr(tmp, ' ');
-      if (suffix != nullptr) *suffix = 0;
+    if (show_age) {
+      header.setCursor(display.width() - header.getTextWidth(age) - 2, 0);
+      header.print(age);
     }
-    header.setCursor(display.width() - header.getTextWidth(tmp) - 2, 0);
-    header.print(tmp);
 
     display.drawRect(0, layout.header_divider_y, display.width(), 1);
     display.setCompactText(false);
@@ -1578,14 +1598,15 @@ public:
     renderChannelFilter(display);
 
 #if AUTO_OFF_MILLIS==0 // probably e-ink
-    return 10000; // 10 s
+    return UI_BUTTON_READER_HINT == 1 ? 3000 : 10000;
 #else
     return 1000;  // next render after 1000 ms
 #endif
   }
 
   bool handleInput(char c) override {
-    if (c == KEY_NEXT || c == KEY_RIGHT) {
+    const uint8_t key = static_cast<uint8_t>(c);
+    if (key == KEY_NEXT || key == KEY_RIGHT) {
       if (view_offset + 1 < filteredCount()) {
         ++view_offset;
       } else {
@@ -1596,19 +1617,19 @@ public:
       }
       return true;
     }
-    if (c == KEY_PREV || c == KEY_LEFT) {
+    if (key == KEY_PREV || key == KEY_LEFT) {
       if (view_offset > 0) --view_offset;
       return true;
     }
-    if (c == KEY_DOWN) {
+    if (key == KEY_DOWN) {
       cycleChannelFilter(1);
       return true;
     }
-    if (c == KEY_UP) {
+    if (key == KEY_UP) {
       cycleChannelFilter(-1);
       return true;
     }
-    if (c == KEY_ENTER) {
+    if (key == KEY_ENTER) {
       _task->gotoHomeScreen();
       return true;
     }
@@ -1626,12 +1647,17 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
 
 #if defined(PIN_USER_BTN)
   user_btn.begin();
+  user_btn.enableQuadrupleClick();
+#endif
+#if UI_HAS_JOYSTICK
+  back_btn.enableQuadrupleClick();
 #endif
 #if defined(TBEAM_1W) && defined(WIFI_SSID) && defined(PIN_WIFI_BTN)
   wifi_btn.begin();
 #endif
 #if defined(PIN_USER_BTN_ANA)
   analog_btn.begin();
+  analog_btn.enableQuadrupleClick();
 #endif
 
   _node_prefs = node_prefs;
@@ -1962,8 +1988,8 @@ void UITask::loop() {
     c = handleLongPress(KEY_RIGHT);
   }
   ev = back_btn.check();
-  if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
-    c = handleTripleClick(KEY_SELECT);
+  if (ev == BUTTON_EVENT_TRIPLE_CLICK || ev == BUTTON_EVENT_QUADRUPLE_CLICK) {
+    c = handleMultiClick(KEY_SELECT, ev == BUTTON_EVENT_QUADRUPLE_CLICK);
   }
 #elif defined(PIN_USER_BTN)
   int ev = user_btn.check();
@@ -1979,8 +2005,8 @@ void UITask::loop() {
     display.turnOff();
   } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
     c = handleDoubleClick(KEY_SELECT);
-  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
-    c = handleTripleClick(KEY_SELECT);
+  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK || ev == BUTTON_EVENT_QUADRUPLE_CLICK) {
+    c = handleMultiClick(KEY_SELECT, ev == BUTTON_EVENT_QUADRUPLE_CLICK);
   }
   #else
   if (ev == BUTTON_EVENT_CLICK) {
@@ -1993,10 +2019,10 @@ void UITask::loop() {
     c = (_display != NULL && !_display->isOn())
         ? checkDisplayOn(KEY_ENTER)
         : handleDoubleClick(KEY_PREV);
-  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
+  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK || ev == BUTTON_EVENT_QUADRUPLE_CLICK) {
     c = (_display != NULL && !_display->isOn())
         ? checkDisplayOn(KEY_ENTER)
-        : handleTripleClick(KEY_SELECT);
+        : handleMultiClick(KEY_SELECT, ev == BUTTON_EVENT_QUADRUPLE_CLICK);
   }
   #endif  
 #endif
@@ -2019,8 +2045,8 @@ void UITask::loop() {
       c = handleLongPress(KEY_ENTER);
     } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
       c = handleDoubleClick(KEY_PREV);
-    } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
-      c = handleTripleClick(KEY_SELECT);
+    } else if (ev == BUTTON_EVENT_TRIPLE_CLICK || ev == BUTTON_EVENT_QUADRUPLE_CLICK) {
+      c = handleMultiClick(KEY_SELECT, ev == BUTTON_EVENT_QUADRUPLE_CLICK);
     }
     _analogue_pin_read_millis = millis();
   }
@@ -2239,12 +2265,17 @@ char UITask::handleDoubleClick(char c) {
   return c;
 }
 
-char UITask::handleTripleClick(char c) {
-  MESH_DEBUG_PRINTLN("UITask: triple click triggered");
+char UITask::handleMultiClick(char c, bool backwards) {
+  if (curr == msg_preview
+#if COMPANION_FEATURE_JOHN
+      || isJohnReaderActive()
+#endif
+  ) {
+    return checkDisplayOn(backwards ? KEY_UP : KEY_DOWN);
+  }
   checkDisplayOn(c);
   toggleBuzzer();
-  c = 0;
-  return c;
+  return 0;
 }
 
 bool UITask::getGPSState() {

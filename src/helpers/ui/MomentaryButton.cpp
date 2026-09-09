@@ -210,8 +210,9 @@ int MomentaryButton::check(bool repeat_click) {
         event = BUTTON_EVENT_TRIPLE_CLICK;
         break;
       default:
-        // For 4+ clicks, treat as triple click?
-        event = BUTTON_EVENT_TRIPLE_CLICK;
+        // Screens with group navigation opt into a distinct four-tap event.
+        event = _quadruple_click ? BUTTON_EVENT_QUADRUPLE_CLICK
+                                : BUTTON_EVENT_TRIPLE_CLICK;
         break;
     }
     _click_count = 0;

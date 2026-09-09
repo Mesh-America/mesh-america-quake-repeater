@@ -95,7 +95,7 @@ class UITask : public AbstractUITask {
   char checkDisplayOn(char c);
   char handleLongPress(char c);
   char handleDoubleClick(char c);
-  char handleTripleClick(char c);
+  char handleMultiClick(char c, bool backwards);
 
   void setCurrScreen(UIScreen* c);
   bool isPairingScreenActive() const;
