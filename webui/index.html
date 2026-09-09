@@ -741,7 +741,7 @@ function boot(){
     st.passwordSupported=!!s.password_supported;st.needsPassword=!!s.needs_password;
     st.radioOptional=!!s.radio_optional;
     st.needsSetup=!!s.needs_setup;st.caps=s.capabilities||0;
-    st.nslots=st.hasMqtt?(s.active_slots||s.runtime_slots||0):0;
+    st.nslots=st.hasMqtt?Math.min(s.active_slots||s.runtime_slots||0,s.runtime_slots||s.active_slots||0):0;
     if(s.max_cmds>0)CLI_MAX=s.max_cmds;
     st.fw=s.fw||"";st.build=s.build_date||"";st.role=s.role||"";st.board=s.board||"";
     $("#h-name").textContent=s.name||"MeshCore";
@@ -1128,7 +1128,7 @@ function buildSlots(sel){
       +slotFieldHtml(i,"username","text","Username","")
       +slotFieldHtml(i,"password","password","Password","")
       +slotFieldHtml(i,"server","text","Server host","")
-      +slotFieldHtml(i,"port","number","Port","")
+      +slotFieldHtml(i,"port","number","Port","0 uses the default port of a full server URL")
       +slotFieldHtml(i,"topic","text","Topic template","Placeholders: {iata} {device} {type} {token}")
       +slotFieldHtml(i,"audience","text","JWT audience","Optional - blank for user/pass auth")
       +packetFilterHtml(i)
@@ -1944,7 +1944,7 @@ var CLI_KEYS=[
 var CLI_SLOT=[
   ["preset","preset",1],
   ["server","custom broker hostname"],
-  ["port","broker port {1-65535}"],
+  ["port","broker port {0-65535; 0 uses URI default}"],
   ["username","username"],
   ["password","password"],
   ["token","token (required by some presets)"],

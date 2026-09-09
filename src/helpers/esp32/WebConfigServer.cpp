@@ -1671,7 +1671,9 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
 #ifdef WITH_MQTT_BRIDGE
   doc["runtime_slots"] = has_mqtt ? RUNTIME_MQTT_SLOTS : 0;
   doc["max_slots"] = has_mqtt ? MAX_MQTT_SLOTS : 0;
-  doc["active_slots"] = has_mqtt ? MQTTBridge::getMaxActiveSlots() : 0;
+  const int active_slots = MQTTBridge::getMaxActiveSlots();
+  doc["active_slots"] = has_mqtt
+      ? (active_slots < RUNTIME_MQTT_SLOTS ? active_slots : RUNTIME_MQTT_SLOTS) : 0;
 #else
   doc["runtime_slots"] = 0;
   doc["max_slots"] = 0;

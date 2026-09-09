@@ -574,14 +574,14 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       _callbacks->restartBridgeSlot(slot);
       strcpy(reply, "OK");
     } else if (memcmp(subcmd, "port ", 5) == 0) {
-      int port = atoi(&subcmd[5]);
-      if (port > 0 && port <= 65535) {
+      uint16_t port;
+      if (mesh::cli::parseMqttPort(&subcmd[5], port)) {
         _mqtt_prefs.mqtt_slot_port[slot] = port;
         saveObserverPrefs();
         _callbacks->restartBridgeSlot(slot);
         strcpy(reply, "OK");
       } else {
-        strcpy(reply, "Error: port must be between 1 and 65535");
+        strcpy(reply, "Error: port must be 0-65535 (0 uses the URI default)");
       }
     } else if (memcmp(subcmd, "username ", 9) == 0) {
       if (valueTooLong(&subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_username[slot]), reply, "username")) return true;

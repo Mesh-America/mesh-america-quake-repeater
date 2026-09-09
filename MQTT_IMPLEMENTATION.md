@@ -437,7 +437,7 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.preset custom` - Set slot N to custom broker (configure server/port/username/password)
 - `set mqttN.preset none` - Disable slot N
 - `set mqttN.server <hostname>` - Set custom server hostname for slot N
-- `set mqttN.port <port>` - Set custom server port for slot N (1-65535)
+- `set mqttN.port <port>` - Set custom server port for slot N (0-65535; 0 clears the override and uses a full URI's default port)
 - `set mqttN.username <username>` - Set username for slot N (`custom` preset, or presets like `inwmesh` that require per-device credentials)
 - `set mqttN.password <password>` - Set password for slot N (`custom` preset, or presets like `inwmesh` that require per-device credentials)
 - `set mqttN.token <token>` - Set per-slot token (required for MeshRank preset)

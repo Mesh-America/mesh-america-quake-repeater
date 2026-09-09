@@ -20,6 +20,7 @@ public:
   bool isActive() const { return _active; }
 
   static bool loadStoredConfig(MQTTPrefs& prefs);
+  static bool hasConfiguredSlot(const MQTTPrefs& prefs);
   static bool saveStoredConfig(const MQTTPrefs& prefs);
   static bool loadEnabled();
   static bool saveEnabled(bool enabled);

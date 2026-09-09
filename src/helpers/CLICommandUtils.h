@@ -675,6 +675,14 @@ inline bool parseUnsignedIntegerStrict(const char* text, uint32_t& result) {
   return true;
 }
 
+// Zero clears a custom port override; a full broker URI supplies its default.
+inline bool parseMqttPort(const char* text, uint16_t& result) {
+  uint32_t value;
+  if (!parseUnsignedIntegerStrict(text, value) || value > 65535) return false;
+  result = static_cast<uint16_t>(value);
+  return true;
+}
+
 // Copy and split a bounded CLI argument string on runs of spaces/tabs. This
 // provides scanf-like token handling without pulling scanf into firmware. The
 // caller controls the maximum accepted token count through field_capacity.

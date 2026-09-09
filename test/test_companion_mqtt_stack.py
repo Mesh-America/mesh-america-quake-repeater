@@ -15,6 +15,7 @@ struct MQTTBridge { void end(); };
 struct CompanionMqttSetupPortal {
   static bool saveStoredConfig(const MQTTPrefs&);
   static bool loadStoredConfig(MQTTPrefs&);
+  static bool hasConfiguredSlot(const MQTTPrefs&);
 };
 struct MyMesh {
   void onConfigBatchEnd();

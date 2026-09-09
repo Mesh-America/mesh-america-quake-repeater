@@ -98,6 +98,7 @@ def firmware_commands():
             found.add(lit.strip())
     return found - NOT_OFFERED
 ROUND_TRIPS = [
+    ("set mqtt1.port 0", "get mqtt1.port", "0"),
     ("set usb.logging on", "get usb.logging", "on"),
     ("set usb.logging off", "get usb.logging", "off"),
     ("set powersaving on", "get powersaving", "on"),

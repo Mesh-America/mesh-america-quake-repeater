@@ -114,6 +114,22 @@ TEST(CLICommandUtils, NormalizesCapitalizedSetVerb) {
   EXPECT_STREQ("set altpath 600000,0d2784,F8DADA", command);
 }
 
+TEST(CLICommandUtils, MqttPortSupportsDefaultAndRejectsMalformedValues) {
+  uint16_t port = 99;
+  EXPECT_TRUE(mesh::cli::parseMqttPort("0", port));
+  EXPECT_EQ(0, port);
+  EXPECT_TRUE(mesh::cli::parseMqttPort("1883", port));
+  EXPECT_EQ(1883, port);
+  EXPECT_TRUE(mesh::cli::parseMqttPort("65535", port));
+  EXPECT_EQ(65535, port);
+  const char* invalid[] = {nullptr, "", "-1", "65536", "1883junk", "999999999999999999999"};
+  for (const char* value : invalid) {
+    port = 99;
+    EXPECT_FALSE(mesh::cli::parseMqttPort(value, port));
+    EXPECT_EQ(99, port);
+  }
+}
+
 TEST(CLICommandUtils, LoggingToggleHasOneGrammarForEveryRole) {
   bool enabled = false, reboot = false;
   ASSERT_TRUE(mesh::cli::parseLoggingToggle("on", enabled, reboot));

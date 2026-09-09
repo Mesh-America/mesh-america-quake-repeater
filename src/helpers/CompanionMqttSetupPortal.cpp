@@ -612,29 +612,36 @@ bool CompanionMqttSetupPortal::loadStoredConfig(MQTTPrefs& prefs) {
     return false;
   }
 
-  const char* preset = loaded.mqtt_slot_preset[0];
-  const bool custom = strcmp(preset, MQTT_PRESET_CUSTOM) == 0;
-  const MQTTPresetDef* preset_def = custom ? nullptr : findMQTTPreset(preset);
-  if (!preset[0] || (!custom && !preset_def)) return false;
-  if (custom) {
-    const char* host = loaded.mqtt_slot_host[0];
-    if (!host[0]
-        || (loaded.mqtt_slot_port[0] == 0 && strstr(host, "://") == nullptr)
-        || (!loaded.mqtt_slot_topic[0][0] && !isThreeLetterCode(loaded.mqtt_iata))) {
-      return false;
-    }
-  } else {
-    if (preset_def->topic_style == MQTT_TOPIC_MESHCORE
-        && !isThreeLetterCode(loaded.mqtt_iata)) return false;
-    if (preset_def->topic_style == MQTT_TOPIC_MESHRANK
-        && !loaded.mqtt_slot_token[0][0]) return false;
-    if (mqttPresetNeedsSlotCredentials(preset_def)
-        && (!loaded.mqtt_slot_username[0][0] || !loaded.mqtt_slot_password[0][0])) {
-      return false;
-    }
-  }
+  // Incomplete and disabled slots are valid saved settings. Readiness is a
+  // separate decision, so disabling slot 1 or saving a broker in stages cannot
+  // discard all slots and credentials on the next boot.
   prefs = loaded;
   return true;
+}
+
+bool CompanionMqttSetupPortal::hasConfiguredSlot(const MQTTPrefs& prefs) {
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
+    const char* preset = prefs.mqtt_slot_preset[i];
+    if (!preset[0] || strcmp(preset, MQTT_PRESET_NONE) == 0) continue;
+    if (strcmp(preset, MQTT_PRESET_CUSTOM) == 0) {
+      const char* host = prefs.mqtt_slot_host[i];
+      if (host[0] && (prefs.mqtt_slot_port[i] != 0 || strstr(host, "://"))
+          && (prefs.mqtt_slot_topic[i][0] || isThreeLetterCode(prefs.mqtt_iata))) {
+        return true;
+      }
+      continue;
+    }
+    const MQTTPresetDef* def = findMQTTPreset(preset);
+    if (!def) continue;
+    if (def->topic_style == MQTT_TOPIC_MESHCORE
+        && !isThreeLetterCode(prefs.mqtt_iata)) continue;
+    if (def->topic_style == MQTT_TOPIC_MESHRANK
+        && !prefs.mqtt_slot_token[i][0]) continue;
+    if (mqttPresetNeedsSlotUsername(def) && !prefs.mqtt_slot_username[i][0]) continue;
+    if (mqttPresetNeedsSlotPassword(def) && !prefs.mqtt_slot_password[i][0]) continue;
+    return true;
+  }
+  return false;
 }
 
 bool CompanionMqttSetupPortal::loadEnabled() {

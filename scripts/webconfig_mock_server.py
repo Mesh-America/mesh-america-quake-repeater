@@ -467,9 +467,9 @@ def apply_slot_set(cfg, idx, field, val):
         try:
             p = int(val)
         except ValueError:
-            return False, "Error: port must be between 1 and 65535"
-        if not (1 <= p <= 65535):
-            return False, "Error: port must be between 1 and 65535"
+            return False, "Error: port must be 0-65535 (0 uses the URI default)"
+        if not (0 <= p <= 65535):
+            return False, "Error: port must be 0-65535 (0 uses the URI default)"
         slot["port"] = p
         return True, "OK"
     if field == "filter":

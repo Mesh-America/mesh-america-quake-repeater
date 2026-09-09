@@ -116,7 +116,7 @@ class WebConfigUiRuntimeTest(unittest.TestCase):
 
     def test_companion_console_runs_commands_and_uses_role_suggestions(self):
         status, config = self.setup_values()
-        status.update(mode="lan", cli=True, mqtt=True, active_slots=1,
+        status.update(mode="lan", cli=True, mqtt=True, active_slots=5, runtime_slots=1,
                       password_supported=False)
         prelude = """
 <script>
@@ -188,7 +188,7 @@ class WebConfigUiRuntimeTest(unittest.TestCase):
                         "set mqtt1.preset ", "get name", "get radio"):
             self.assertIn(command, suggestions)
         for command in ("erase", "password ", "setperm ", "get prv.key",
-                        "set bridge.enabled ", "get mqtt1.password"):
+                        "set bridge.enabled ", "get mqtt1.password", "set mqtt2.preset "):
             self.assertNotIn(command, suggestions)
 
     def test_console_stays_hidden_when_disabled_or_on_setup_ap(self):

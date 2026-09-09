@@ -1906,8 +1906,10 @@ void MyMesh::begin(bool has_display, bool radio_available) {
   _mqtt_enabled = CompanionMqttSetupPortal::loadEnabled();
   // Keep settings available to the USB CLI even when this boot selects BLE.
   applyMQTTDefaults(&_mqtt_prefs);
-  _mqtt_configured = CompanionMqttSetupPortal::loadStoredConfig(_mqtt_prefs);
-  if (!_mqtt_configured) applyMQTTDefaults(&_mqtt_prefs);
+  if (!CompanionMqttSetupPortal::loadStoredConfig(_mqtt_prefs)) {
+    applyMQTTDefaults(&_mqtt_prefs);
+  }
+  _mqtt_configured = CompanionMqttSetupPortal::hasConfiguredSlot(_mqtt_prefs);
   // Companion WiFi owns the connection and its mesh-wifi NVS setting is
   // canonical. Keep MQTT reconnects from restoring a stale MQTT-pref value.
   _mqtt_prefs.wifi_power_save = getCompanionWiFiPowerSave();
@@ -3356,7 +3358,8 @@ void MyMesh::onConfigBatchEnd() {
     // loadStoredConfig only replaces its destination after validation. Pass
     // the live preferences directly: another 2.8 KB copy here nests with the
     // loader's scratch copy and NVS calls, overflowing the ESP32 loop stack.
-    _mqtt_configured = CompanionMqttSetupPortal::loadStoredConfig(_mqtt_prefs);
+    CompanionMqttSetupPortal::loadStoredConfig(_mqtt_prefs);
+    _mqtt_configured = CompanionMqttSetupPortal::hasConfiguredSlot(_mqtt_prefs);
     // The standalone Companion setting remains canonical even if MQTT config
     // verification reloaded an older copy of this field.
     _mqtt_prefs.wifi_power_save = getCompanionWiFiPowerSave();
@@ -3751,9 +3754,9 @@ void MyMesh::execCommand(char* cmd, char* reply) {
       changed = wcCopyValue(_mqtt_prefs.mqtt_slot_host[slot],
                             sizeof(_mqtt_prefs.mqtt_slot_host[slot]), value);
     } else if (strcmp(field, "port") == 0) {
-      long port;
-      if (!wcParseLong(value, 1, 65535, port)) {
-        strcpy(reply, "Error: port must be 1-65535");
+      uint16_t port;
+      if (!mesh::cli::parseMqttPort(value, port)) {
+        strcpy(reply, "Error: port must be 0-65535 (0 uses the URI default)");
         return;
       }
       _mqtt_prefs.mqtt_slot_port[slot] = static_cast<uint16_t>(port);
