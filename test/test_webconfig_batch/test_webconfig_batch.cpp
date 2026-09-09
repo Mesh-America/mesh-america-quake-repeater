@@ -347,6 +347,16 @@ TEST(WebConfigBatch, OnlyWritesGateTheDeferredReboot) {
   EXPECT_FALSE(Batch::cliWriteSucceeded(""));
 }
 
+TEST(WebConfigBatch, PasswordEchoIsMaskedOnlyAfterARealChange) {
+  EXPECT_TRUE(Batch::cliPasswordChanged("password now: new-password"));
+  EXPECT_TRUE(Batch::cliPasswordChanged("OK"));
+  EXPECT_FALSE(Batch::cliPasswordChanged("Error: unsupported command"));
+  EXPECT_FALSE(Batch::cliPasswordChanged("Error: failed to save"));
+  EXPECT_FALSE(Batch::cliPasswordChanged("(no reply)"));
+  EXPECT_FALSE(Batch::cliPasswordChanged(""));
+  EXPECT_FALSE(Batch::cliPasswordChanged(NULL));
+}
+
 TEST(WebConfigBatch, CliRebootIsWithheldWhenAnyCommandInTheSequenceFailed) {
   EXPECT_TRUE(Batch::cliRebootAllowed(/*has_reboot=*/true, /*all_ok=*/true));
   // Same rule a config save follows: do not reboot into a half-applied config

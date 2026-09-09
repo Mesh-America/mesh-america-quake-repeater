@@ -6200,14 +6200,14 @@ class Rak3401TransferGuardrailTests(unittest.TestCase):
                 self.rxps_level = 0
                 self.rxps_preamble = 0
                 return f"OK - on,{rx_us},{sleep_us}"
-            if command == "powersaving":
-                return "on" if self.powersaving_enabled else "off"
-            if command == "powersaving off":
+            if command == "get powersaving":
+                return "> on" if self.powersaving_enabled else "> off"
+            if command == "set powersaving off":
                 self.powersaving_enabled = False
                 return "off"
-            if command == "powersaving on":
+            if command == "set powersaving on":
                 self.powersaving_enabled = True
-                return "on - Immediate effect"
+                return "OK - powersaving on"
             if command == "get rxdelay":
                 return f"> {self.rxdelay}"
             if command.startswith("set rxdelay "):
@@ -6249,7 +6249,7 @@ class Rak3401TransferGuardrailTests(unittest.TestCase):
         self.assertEqual(controller.rxdelay, "2.0")
         self.assertEqual(controller.airtime_factor, "1.0")
         self.assertEqual(controller.ota_hops, 3)
-        self.assertIn("powersaving on", controller.commands)
+        self.assertIn("set powersaving on", controller.commands)
         self.assertEqual(controller.commands[-1], "ota config")
 
     def test_restore_converges_when_saved_power_saving_was_off(self) -> None:
@@ -6261,7 +6261,7 @@ class Rak3401TransferGuardrailTests(unittest.TestCase):
         rak_chain.restore_transfer_settings(controller, "remote", saved)
 
         self.assertFalse(controller.powersaving_enabled)
-        self.assertIn("powersaving off", controller.commands)
+        self.assertIn("set powersaving off", controller.commands)
 
     def test_guardrails_preserve_airtime_without_opt_in(self) -> None:
         controller = self.Controller()

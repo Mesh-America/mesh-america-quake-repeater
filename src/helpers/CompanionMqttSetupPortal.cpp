@@ -637,6 +637,22 @@ bool CompanionMqttSetupPortal::loadStoredConfig(MQTTPrefs& prefs) {
   return true;
 }
 
+bool CompanionMqttSetupPortal::loadEnabled() {
+  Preferences nvs;
+  if (!nvs.begin(NVS_NAMESPACE, false)) return true;
+  const bool enabled = !nvs.isKey("enabled") || nvs.getBool("enabled", true);
+  nvs.end();
+  return enabled;
+}
+
+bool CompanionMqttSetupPortal::saveEnabled(bool enabled) {
+  Preferences nvs;
+  if (!nvs.begin(NVS_NAMESPACE, false)) return false;
+  const bool saved = nvs.putBool("enabled", enabled) == sizeof(bool);
+  nvs.end();
+  return saved;
+}
+
 bool CompanionMqttSetupPortal::saveStoredConfig(const MQTTPrefs& prefs) {
   Preferences nvs;
   if (!nvs.begin(NVS_NAMESPACE, false)) return false;

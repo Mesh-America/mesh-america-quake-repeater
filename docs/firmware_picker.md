@@ -255,7 +255,7 @@ restores the board default, so a separate rotated release image is not
 recommended.
 
 Ordinary non-OTA roles also use one artifact for normal operation and USB
-logging. On ESP32 1.17.1.5, run `powersaving off` before `set usb.logging on`.
+logging. On ESP32 1.17.1.5, run `set powersaving off` before `set usb.logging on`.
 Select the saved mode with `set usb.logging off|on`; no `-logging-`
 artifact is emitted. KISS, BLE-only Companion, and constrained LoRa OTA
 repeater images retain their protocol/partition contracts and do not inherit
@@ -270,7 +270,7 @@ default, so the TTY serves the ASCII/Binary Companion switcher. On 1.17.1.5,
 run these two text commands to enable USB logging:
 
 ```text
-powersaving off
+set powersaving off
 set usb.logging on
 ```
 
@@ -287,7 +287,7 @@ A second ESP32 CDC interface is not part of the release profile.
 
 The picker includes the power-saving workaround when selecting **USB** or
 **USB + WiFi** logging on ESP32 1.17.1.5. WiFi/MQTT-only logging does not need
-it while the Repeater/Room Server bridge is running; check `get bridge.running`.
+it while the Repeater/Room Server bridge is running; check `get mqtt.running`.
 The workaround is not added to nRF52 directions. See [logging by role](role_feature_switches.md)
 for the saved settings and the original firmware's USB sleep issue.
 

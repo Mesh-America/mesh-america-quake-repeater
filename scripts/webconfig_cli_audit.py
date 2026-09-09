@@ -98,6 +98,18 @@ def firmware_commands():
             found.add(lit.strip())
     return found - NOT_OFFERED
 ROUND_TRIPS = [
+    ("set usb.logging on", "get usb.logging", "on"),
+    ("set usb.logging off", "get usb.logging", "off"),
+    ("set powersaving on", "get powersaving", "on"),
+    ("set powersaving off", "get powersaving", "off"),
+    ("set gps on", "get gps", "on"),
+    ("set gps off", "get gps", "off"),
+    ("set mqtt.enabled on", "get mqtt.enabled", "on"),
+    ("set mqtt.enabled off", "get mqtt.enabled", "off"),
+    ("set logging.output both", "get logging.output", "both"),
+    ("set logging.output wifi", "get logging.output", "wifi"),
+    ("set logging.output usb", "get logging.output", "usb"),
+    ("set logging.output off", "get logging.output", "off"),
     ("set radio.watchdog 30", "get radio.watchdog", "30"),
     ("set dutycycle 25", "get dutycycle", "25.0"),
     ("set alert.mqtt on", "get alert.mqtt", "on"),

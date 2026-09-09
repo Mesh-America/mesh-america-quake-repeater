@@ -40,12 +40,12 @@ editor does not necessarily forward them.
 
 | Feature | Turn on | Turn off | When it takes effect |
 | --- | --- | --- | --- |
-| Device power saving | `powersaving on` | `powersaving off` | Immediately; saved |
+| Device power saving | `set powersaving on` | `set powersaving off` | Immediately; saved |
 | LoRa receive power saving | `set radio.rxps on` | `set radio.rxps off` | Saved; radio applies when available |
 | Radio chip RX boost | `set radio.rxgain on` | `set radio.rxgain off` | Immediately; saved; supported radios only |
 | External FEM RX boost | `set radio.fem.rxgain on` | `set radio.fem.rxgain off` | Immediately; saved; controllable FEM only |
 | External FEM TX gain | `set radio.fem.txgain on` | `set radio.fem.txgain off` | Immediately; saved; controllable PA only |
-| ESP32 USB packet/debug logging | For 1.17.1.5: `powersaving off`, then `set usb.logging on` | `set usb.logging off` | Immediately; saved; logging owns the USB terminal |
+| ESP32 USB packet/debug logging | For 1.17.1.5: `set powersaving off`, then `set usb.logging on` | `set usb.logging off` | Immediately; saved; logging owns the USB terminal |
 | nRF52 separate USB logging port | `set usb.logging on reboot` | `set usb.logging off reboot` | Saves and reboots to add/remove the second USB port |
 | ESP32 browser settings | `set webui on` | `set webui off` | Saved; starts/stops WebConfig |
 | ESP32 temporary setup portal | `start webconfig ap` | `stop webconfig` | This session; opens a setup network/QR where available |
@@ -53,7 +53,7 @@ editor does not necessarily forward them.
 | Temporary MOTA radio window | `tempradio 910.525,250,5,5,120` | `normalradio` | Bounded window; saved normal settings return afterward |
 
 Check a saved switch with the corresponding `get` command, for example
-`get usb.logging`, `get radio.rxps`, or `get webui`. Use `powersaving` to
+`get usb.logging`, `get radio.rxps`, or `get webui`. Use `get powersaving` to
 inspect device power saving. Fresh installations enable device power saving
 and leave USB logging off. Existing saved preferences take precedence.
 
@@ -61,7 +61,7 @@ For an **ESP32 1.17.1.5 USB logging session**, use this sequence in the text
 terminal:
 
 ```text
-powersaving off
+set powersaving off
 set usb.logging on
 ```
 
@@ -109,20 +109,21 @@ Use `set companion.transport ble` followed by `reboot` to select Bluetooth
 instead. USB stays available. The ESP-NOW layout keeps its primary ESP-NOW
 mesh active in either mode.
 
-For GPS-equipped boards, use the Companion app's GPS/custom sensor setting:
-`gps=1` enables GPS and `gps=0` disables it. Only boards with a compiled GPS
-provider expose this setting. This is separate from sharing location with
-contacts.
+For GPS-equipped boards, use `get gps`, `set gps on`, and `set gps off`.
+The Companion app's `gps=1` / `gps=0` custom setting controls the same GPS.
+Only boards with a compiled GPS provider expose this setting. Sharing location
+with contacts is a separate setting.
 
-When the exact Full image includes MQTT, use WebConfig's MQTT cards. Select
-and configure a broker slot to enable it; choose the `none` preset for every
-slot to disable broker connections. The MQTT status, packets, raw, receive,
-and transmit switches control their individual functions. Save the settings
-and follow any reboot instruction shown. Builds without MQTT omit these
-controls. Full Companion does not accept infrastructure text commands such as
-`set bridge.enabled`, `set logging.output`, or `set mqtt1.preset`; use these
-WebConfig controls for MQTT. There is no need for a separate logging or WiFi-MQTT Companion
-image when that feature is included in Full.
+When the exact Full image includes MQTT, use WebConfig's MQTT cards or the
+same CLI settings used by infrastructure, such as `set mqtt1.preset custom`
+and `set mqtt1.server broker.example.com`. `set mqtt.enabled on|off` controls
+MQTT without erasing the configured slots; check `get mqtt.enabled`,
+`get mqtt.running`, and `get mqtt.status`. The MQTT tab's **Enable MQTT**
+checkbox controls the same saved switch. `set logging.output off|usb|wifi|both`
+selects USB and MQTT outputs together. Status, packets, raw, receive, and
+transmit switches control their individual publications. Builds without MQTT
+omit these controls. There is no need for a separate logging or WiFi-MQTT
+Companion image when that feature is included in Full.
 
 ## Send MOTA from any Full Companion
 

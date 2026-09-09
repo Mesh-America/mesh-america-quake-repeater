@@ -67,7 +67,7 @@ get John 3:16
 
 This returns a single complete verse from John, using plain ASCII punctuation
 with unchanged wording and capitalization, through the local USB/TCP terminal.
-See [John lookup and compression](../tools/bible/README.md) for the
+See [John lookup and compression](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/bible/README.md) for the
 source, supported build profiles and memory costs.
 
 ```
@@ -142,8 +142,7 @@ set af {air-time-factor}
 Sets the transmit air-time-factor. Deprecated - use `set dutycycle` instead.
 
 ```
-powersaving
-powersaving {on|off}
+get powersaving
 set powersaving {on|off}
 ```
 Shows or changes Companion device power saving. On ESP32 this controls CPU and

@@ -1772,6 +1772,7 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   s.rx_ps_rx_us = _prefs.rx_ps_rx_us;
   s.rx_ps_sleep_us = _prefs.rx_ps_sleep_us;
   s.power_saving = _prefs.powersaving_enabled;
+  s.mqtt_enabled = _prefs.bridge_enabled != 0;
   s.repeat = !_prefs.disable_fwd;
   s.advert_interval = _prefs.advert_interval * 2;
   s.flood_advert_interval = _prefs.flood_advert_interval;

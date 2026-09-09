@@ -26,7 +26,7 @@ static const char* const WC_ALLOWED_SET_KEYS[] = {
   "flood.max", "flood.max.advert", "flood.max.unscoped", "loop.detect",
   // MQTTPrefs (WiFi / MQTT / misc observer)
   "wifi.ssid", "wifi.pwd", "wifi.powersave", "espnow.channel",
-  "mqtt.origin", "mqtt.iata", "mqtt.status", "mqtt.packets", "mqtt.raw",
+  "mqtt.enabled", "mqtt.origin", "mqtt.iata", "mqtt.status", "mqtt.packets", "mqtt.raw",
   "mqtt.tx", "mqtt.rx", "mqtt.interval", "mqtt.neighbors", "mqtt.neighbors.interval",
   "mqtt.ntp", "mqtt.owner", "mqtt.email",
   "timezone", "timezone.offset", "snmp", "snmp.community",

@@ -521,6 +521,37 @@ inline bool isUf2ResetCommand(const char* command) {
   return matchNoArgCommand(command, "uf2reset") == NoArgCommandMatch::Exact;
 }
 
+// Shared by Companion and infrastructure logging controls. The optional suffix
+// requests a restart only when changing USB descriptors actually needs one.
+inline bool parseLoggingToggle(const char* value, bool& enabled, bool& reboot) {
+  if (value == nullptr) return false;
+  if (strcmp(value, "on") == 0 || strcmp(value, "on reboot") == 0) {
+    enabled = true;
+    reboot = value[2] != 0;
+    return true;
+  }
+  if (strcmp(value, "off") == 0 || strcmp(value, "off reboot") == 0) {
+    enabled = false;
+    reboot = value[3] != 0;
+    return true;
+  }
+  return false;
+}
+
+inline bool parseLoggingOutput(const char* value, bool& usb, bool& wifi) {
+  if (value == nullptr) return false;
+  if (strcmp(value, "off") == 0) { usb = false; wifi = false; }
+  else if (strcmp(value, "usb") == 0) { usb = true; wifi = false; }
+  else if (strcmp(value, "wifi") == 0) { usb = false; wifi = true; }
+  else if (strcmp(value, "both") == 0) { usb = true; wifi = true; }
+  else return false;
+  return true;
+}
+
+inline const char* loggingOutputName(bool usb, bool wifi) {
+  return usb ? (wifi ? "both" : "usb") : (wifi ? "wifi" : "off");
+}
+
 inline void formatUnknownSetting(char* reply, size_t capacity,
                                  const char* setting) {
   if (reply == nullptr || capacity == 0) return;

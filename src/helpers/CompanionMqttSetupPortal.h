@@ -21,6 +21,8 @@ public:
 
   static bool loadStoredConfig(MQTTPrefs& prefs);
   static bool saveStoredConfig(const MQTTPrefs& prefs);
+  static bool loadEnabled();
+  static bool saveEnabled(bool enabled);
 
 private:
   volatile bool _active;

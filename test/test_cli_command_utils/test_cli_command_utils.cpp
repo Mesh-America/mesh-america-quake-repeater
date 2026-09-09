@@ -114,6 +114,38 @@ TEST(CLICommandUtils, NormalizesCapitalizedSetVerb) {
   EXPECT_STREQ("set altpath 600000,0d2784,F8DADA", command);
 }
 
+TEST(CLICommandUtils, LoggingToggleHasOneGrammarForEveryRole) {
+  bool enabled = false, reboot = false;
+  ASSERT_TRUE(mesh::cli::parseLoggingToggle("on", enabled, reboot));
+  EXPECT_TRUE(enabled);
+  EXPECT_FALSE(reboot);
+  ASSERT_TRUE(mesh::cli::parseLoggingToggle("off reboot", enabled, reboot));
+  EXPECT_FALSE(enabled);
+  EXPECT_TRUE(reboot);
+  ASSERT_TRUE(mesh::cli::parseLoggingToggle("on reboot", enabled, reboot));
+  EXPECT_TRUE(enabled);
+  EXPECT_TRUE(reboot);
+  ASSERT_TRUE(mesh::cli::parseLoggingToggle("off", enabled, reboot));
+  EXPECT_FALSE(enabled);
+  EXPECT_FALSE(reboot);
+  for (const char* value : {"", "onward", "1", "off reboot now", "on\nreboot"}) {
+    EXPECT_FALSE(mesh::cli::parseLoggingToggle(value, enabled, reboot)) << value;
+  }
+  EXPECT_FALSE(mesh::cli::parseLoggingToggle(nullptr, enabled, reboot));
+}
+
+TEST(CLICommandUtils, LoggingOutputsControlUsbAndWifiIndependently) {
+  bool usb = true, wifi = true;
+  for (const char* mode : {"off", "usb", "wifi", "both"}) {
+    ASSERT_TRUE(mesh::cli::parseLoggingOutput(mode, usb, wifi));
+    EXPECT_STREQ(mode, mesh::cli::loggingOutputName(usb, wifi));
+    EXPECT_EQ(usb, strcmp(mode, "usb") == 0 || strcmp(mode, "both") == 0);
+    EXPECT_EQ(wifi, strcmp(mode, "wifi") == 0 || strcmp(mode, "both") == 0);
+  }
+  EXPECT_FALSE(mesh::cli::parseLoggingOutput("bluetooth", usb, wifi));
+  EXPECT_FALSE(mesh::cli::parseLoggingOutput(nullptr, usb, wifi));
+}
+
 TEST(CLICommandUtils, NormalizesAnyCommandVerbCase) {
   char get_command[] = "GET outpath";
   char clear_command[] = "cLeAr recent.repeater";

@@ -43,11 +43,13 @@ requirements, and its actual GitHub release page.
 
 - **Full Companion:** ESP32 uses `set usb.logging on` / `set usb.logging off`;
   nRF52 uses `set usb.logging on reboot` / `set usb.logging off reboot` for its
-  optional second USB port. MQTT-capable Full Companions use WebConfig broker
-  cards, not infrastructure MQTT commands.
-- **Infrastructure:** `set usb.logging on` / `set usb.logging off` controls live
-  USB logs. MQTT-capable unified Full images use `set logging.output off`,
-  `usb`, `wifi`, or `both`; `set bridge.enabled on` / `off` toggles the bridge.
+  optional second USB port. On 1.17.1.5 ESP32, run `set powersaving off` first.
+- **Shared controls:** All roles use `get usb.logging` / `set usb.logging on|off`
+  for live USB logs. MQTT-capable images use `set mqtt.enabled on|off` without
+  erasing broker slots. Images with both outputs use
+  `set logging.output off|usb|wifi|both`. Check `get mqtt.running` and
+  `get mqtt.status`; configure brokers with `set mqtt1.preset` and related
+  settings or WebConfig. RS232/ESP-NOW bridges use `bridge.enabled` separately.
 - Open the [USB web console](https://flasher.meshcore.io/console) at 115200 baud.
   Full Companion and infrastructure start in ASCII mode. Download-only board
   entries retain their external programming requirements.

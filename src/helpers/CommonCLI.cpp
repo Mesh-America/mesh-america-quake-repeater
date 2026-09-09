@@ -2861,41 +2861,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         strcpy(reply, "Can't find GPS");
       }
 #endif
-    } else if (memcmp(command, "powersaving on", 14) == 0) {
-#if defined(NRF52_PLATFORM)
-      if (sender_timestamp == 0 || _board->isUsbDataConnected()) {
-        strcpy(reply, "Error: USB serial connected");
-      } else {
-        _prefs->powersaving_enabled = 1;
-        _sensors->setPowerSavingEnabled(true);
-        savePrefs();
-        strcpy(reply, "on - Immediate effect");
-      }
-#elif defined(ESP32) && !defined(WITH_BRIDGE)
-      if (sender_timestamp == 0 || _board->isUsbDataConnected()) {
-        strcpy(reply, "Error: USB serial connected");
-      } else {
-        _prefs->powersaving_enabled = 1;
-        _sensors->setPowerSavingEnabled(true);
-        savePrefs();
-        strcpy(reply, "on - After 2 minutes");
-      }
-#elif defined(WITH_BRIDGE)
-      strcpy(reply, "Bridge not supported");
-#else
-      strcpy(reply, "Board not supported");
-#endif
-    } else if (memcmp(command, "powersaving off", 15) == 0) {
-      _prefs->powersaving_enabled = 0;
-      _sensors->setPowerSavingEnabled(false);
-      savePrefs();
-      strcpy(reply, "off");
-    } else if (memcmp(command, "powersaving", 11) == 0) {
-      if (_prefs->powersaving_enabled) {
-        strcpy(reply, "on");
-      } else {
-        strcpy(reply, "off");
-      }
+    } else if (strcmp(command, "powersaving on") == 0 || strcmp(command, "powersaving off") == 0) {
+      char canonical[24];
+      snprintf(canonical, sizeof(canonical), "set %s", command);
+      handleSetCmd(sender_timestamp, canonical, reply);
+    } else if (strcmp(command, "powersaving") == 0) {
+      char canonical[] = "get powersaving";
+      handleGetCmd(sender_timestamp, canonical, reply);
     } else if (memcmp(command, "sensor", 6) == 0) {
       // I2C
 #if ENV_HAS_SECONDARY_I2C
@@ -3122,6 +3094,18 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
 
 void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+#if ENV_INCLUDE_GPS == 1
+  if (strncmp(config, "gps ", 4) == 0) {
+    if (strcmp(config + 4, "on") != 0 && strcmp(config + 4, "off") != 0) {
+      strcpy(reply, "Error: use set gps on|off");
+    } else {
+      char gps_command[8];
+      snprintf(gps_command, sizeof(gps_command), "%s", config);
+      handleCommand(sender_timestamp, gps_command, reply);
+    }
+    return;
+  }
+#endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
   if (strncmp(config, "espnow.channel", 14) == 0
       && (config[14] == 0 || config[14] == ' ' || config[14] == '\t')) {
@@ -3155,8 +3139,8 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       && (config[11] == 0 || config[11] == ' ' || config[11] == '\t')) {
     const char* value = &config[11];
     while (*value == ' ' || *value == '\t') value++;
-    if (strcmp(value, "on") == 0 || strcmp(value, "off") == 0) {
-      const bool enabled = strcmp(value, "on") == 0;
+    bool enabled = false, reboot_if_needed = false;
+    if (mesh::cli::parseLoggingToggle(value, enabled, reboot_if_needed)) {
       _prefs->usb_logging_enabled = enabled ? 1 : 0;
       mesh::setUsbLoggingEnabled(enabled);
       savePrefs();
@@ -3174,19 +3158,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     while (*value == ' ' || *value == '\t') value++;
     bool usb_enabled;
     bool wifi_enabled;
-    if (strcmp(value, "off") == 0) {
-      usb_enabled = false;
-      wifi_enabled = false;
-    } else if (strcmp(value, "usb") == 0) {
-      usb_enabled = true;
-      wifi_enabled = false;
-    } else if (strcmp(value, "wifi") == 0) {
-      usb_enabled = false;
-      wifi_enabled = true;
-    } else if (strcmp(value, "both") == 0) {
-      usb_enabled = true;
-      wifi_enabled = true;
-    } else {
+    if (!mesh::cli::parseLoggingOutput(value, usb_enabled, wifi_enabled)) {
       strcpy(reply, "Error: usage set logging.output off|usb|wifi|both");
       return;
     }
@@ -4329,6 +4301,17 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 
 void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+  if (strcmp(config, "powersaving") == 0) {
+    snprintf(reply, 160, "> %s", _prefs->powersaving_enabled ? "on" : "off");
+    return;
+  }
+#if ENV_INCLUDE_GPS == 1
+  if (strcmp(config, "gps") == 0) {
+    char gps_command[] = "gps";
+    handleCommand(sender_timestamp, gps_command, reply);
+    return;
+  }
+#endif
 #if defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW
   if (strcmp(config, "espnow.channel") == 0) {
     const uint8_t saved = mesh::wifi::loadConfiguredEspNowChannel();
@@ -4353,9 +4336,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strcmp(config, "logging.output") == 0) {
     const bool usb_enabled = mesh::isUsbLoggingEnabled();
     const bool wifi_enabled = _prefs->bridge_enabled != 0;
-    const char* mode = usb_enabled
-        ? (wifi_enabled ? "both" : "usb")
-        : (wifi_enabled ? "wifi" : "off");
+    const char* mode = mesh::cli::loggingOutputName(usb_enabled, wifi_enabled);
     snprintf(reply, 160, "> %s", mode);
     return;
   }

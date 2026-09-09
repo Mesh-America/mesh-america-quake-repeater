@@ -2,6 +2,7 @@
 
 #include <stddef.h>   // size_t / NULL for the reply classifiers below
 #include <stdint.h>
+#include <string.h>
 
 // Fork-owned, dependency-free spec for the WebConfig "config batch / reboot /
 // stop" decision + timing core, plus its host tests (test/test_webconfig_batch/).
@@ -318,6 +319,14 @@ static inline bool cliReplyGatesReboot(const char* cmd) {
 // setter in CommonCLI actually keeps.
 static inline bool cliWriteSucceeded(const char* reply) {
   return reply != NULL && reply[0] == 'O' && reply[1] == 'K';
+}
+
+// CommonCLI echoes a newly saved password instead of returning "OK". Mask
+// that success before sending it over HTTP, while preserving unsupported-role
+// errors from roles such as Companion which have no admin password.
+static inline bool cliPasswordChanged(const char* reply) {
+  return cliWriteSucceeded(reply)
+      || (reply != NULL && strncmp(reply, "password now:", 13) == 0);
 }
 
 // --------------------------------------------------------------------------

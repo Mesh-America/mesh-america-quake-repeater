@@ -135,7 +135,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | System | [`get/set system.watchdog`](cli_commands.md#enable-or-disable-the-nrf52-system-watchdog) | nRF52 | Yes | Yes | Yes |
 | System | [`get public.key`](cli_commands.md#view-this-nodes-public-key) | All text CLI roles | Yes | Yes | Yes |
 | System | [`get role`](cli_commands.md#view-this-nodes-configured-role) | All text CLI roles | Yes | Yes | Yes |
-| System | [`powersaving`; `powersaving on/off`](cli_commands.md#view-or-change-this-nodes-power-saving-flag) | Supported repeater board | Feature | Feature | Feature |
+| System | [`get powersaving`; `set powersaving on/off`](cli_commands.md#view-or-change-this-nodes-power-saving-flag) | Supported repeater board | Feature | Feature | Feature |
 | System | [`get/set reboot.interval`](#reboot-interval) | Full parser | Yes | Yes | Yes |
 | Clock sync | [`get/set clock.sync.*`; `clock.sync.mesh now`](cli_commands.md#estimate-and-correct-infrastructure-node-time-after-startup) | Repeater, sensor, and room server; `clock.sync.internet` needs MQTT repeater | Yes | Yes | Yes |
 | Routing | [`get/set repeat`](cli_commands.md#view-or-change-this-nodes-repeat-flag) | Forwarding-capable role | Yes | Yes | Yes |
@@ -179,7 +179,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Retry | [`get/set direct.retry.count`](cli_commands.md#view-or-change-direct-retry-count); [`get/set direct.retry.base`](cli_commands.md#view-or-change-direct-retry-base-delay); [`get/set direct.retry.step`](cli_commands.md#view-or-change-direct-retry-step-delay) | Role with retry support | Yes | Yes | Yes |
 | Retry | [`get/set direct.retry.margin`](cli_commands.md#view-or-change-direct-retry-snr-margin); [`get/set direct.retry.cr`](cli_commands.md#view-or-change-adaptive-direct-retry-coding-rate) | Role with retry support | Yes | Yes | Yes |
 | Retry | [`get/set/clear recent.repeater`; `get recent.repeaters`](cli_commands.md#view-seed-or-clear-the-recent-repeater-table) | Repeater | Yes | Yes | Yes |
-| GPS | [`gps`; `gps on/off`](cli_commands.md#view-or-change-gps-state) | Compiled GPS | Feature | Feature | Feature |
+| GPS | [`get gps`; `set gps on/off`](cli_commands.md#view-or-change-gps-state) | Compiled GPS | Feature | Feature | Feature |
 | GPS | [`gps sync`](cli_commands.md#sync-this-nodes-clock-with-gps-time) | Compiled GPS | Feature | Feature | Feature |
 | GPS | [`gps setloc`](cli_commands.md#set-this-nodes-location-based-on-the-gps-coordinates) | Compiled GPS | Feature | Feature | Feature |
 | GPS | [`gps advert [none/share/prefs]`](cli_commands.md#view-or-change-the-gps-advert-policy) | Compiled GPS | Feature | Feature | Feature |
@@ -302,7 +302,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | System | [`get/set system.watchdog`](cli_commands.md#enable-or-disable-the-nrf52-system-watchdog) | nRF52 only | No | No | No | No | No |
 | System | [`get public.key`](cli_commands.md#view-this-nodes-public-key) | Full parser | Yes | Yes | Yes | Yes | Yes |
 | System | [`get role`](cli_commands.md#view-this-nodes-configured-role) | All text CLI roles | Yes | Yes | Yes | Yes | Yes |
-| System | [`powersaving`; `powersaving on/off`](cli_commands.md#view-or-change-this-nodes-power-saving-flag) | Supported repeater board | Feature | Feature | Feature | Feature | Feature |
+| System | [`get powersaving`; `set powersaving on/off`](cli_commands.md#view-or-change-this-nodes-power-saving-flag) | Supported repeater board | Feature | Feature | Feature | Feature | Feature |
 | System | [`get/set reboot.interval`](#reboot-interval) | Full parser | Yes | Yes | Yes | Yes | Yes |
 | Clock sync | [`get/set clock.sync.*`; `clock.sync.mesh now`](cli_commands.md#estimate-and-correct-infrastructure-node-time-after-startup) | Repeater, sensor, and room server; `clock.sync.internet` needs MQTT repeater | Yes | Yes | Yes | Yes | Yes |
 | Routing | [`get/set repeat`](cli_commands.md#view-or-change-this-nodes-repeat-flag) | Forwarding-capable role | Yes | Yes | Yes | Yes | Yes |
@@ -346,7 +346,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Retry | [`get/set direct.retry.count`](cli_commands.md#view-or-change-direct-retry-count); [`get/set direct.retry.base`](cli_commands.md#view-or-change-direct-retry-base-delay); [`get/set direct.retry.step`](cli_commands.md#view-or-change-direct-retry-step-delay) | Role with retry support | Yes | Yes | Yes | Yes | Yes |
 | Retry | [`get/set direct.retry.margin`](cli_commands.md#view-or-change-direct-retry-snr-margin); [`get/set direct.retry.cr`](cli_commands.md#view-or-change-adaptive-direct-retry-coding-rate) | Role with retry support | Yes | Yes | Yes | Yes | Yes |
 | Retry | [`get/set/clear recent.repeater`; `get recent.repeaters`](cli_commands.md#view-seed-or-clear-the-recent-repeater-table) | Repeater | Yes | Yes | Yes | Yes | Yes |
-| GPS | [`gps`; `gps on/off`](cli_commands.md#view-or-change-gps-state) | Compiled onboard GPS | Feature | Feature | Feature | Feature | Feature |
+| GPS | [`get gps`; `set gps on/off`](cli_commands.md#view-or-change-gps-state) | Compiled onboard GPS | Feature | Feature | Feature | Feature | Feature |
 | GPS | [`gps sync`](cli_commands.md#sync-this-nodes-clock-with-gps-time) | Compiled onboard GPS | Feature | Feature | Feature | Feature | Feature |
 | GPS | [`gps setloc`](cli_commands.md#set-this-nodes-location-based-on-the-gps-coordinates) | Compiled onboard GPS | Feature | Feature | Feature | Feature | Feature |
 | GPS | [`gps advert [none/share/prefs]`](cli_commands.md#view-or-change-the-gps-advert-policy) | Compiled onboard GPS | Feature | Feature | Feature | Feature | Feature |

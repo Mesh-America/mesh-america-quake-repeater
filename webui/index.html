@@ -453,6 +453,11 @@ body.tab-cli{padding-bottom:0}
 
   <div id="t-mqtt" class="hide">
     <div class="card">
+      <h2>MQTT connections</h2>
+      <div class="f"><label><input type="checkbox" data-k="mqtt.enabled"> Enable MQTT</label>
+        <div class="hint">Turn off to disconnect all brokers while keeping their settings.</div></div>
+    </div>
+    <div class="card">
       <h2>Identity</h2>
       <div class="f"><label>Observer name (origin)</label><input type="text" data-k="mqtt.origin" autocapitalize="off">
         <div class="hint">How this observer identifies itself in published messages; informational only. Blank = node name.</div></div>
@@ -801,6 +806,7 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
     case"password":return"";
     case"wifi.ssid":return w.ssid;case"wifi.pwd":return w.pwd;case"wifi.powersave":return w.powersave;
     case"espnow.channel":return String(w.espnow_channel||1);
+    case"mqtt.enabled":return q.enabled?"on":"off";
     case"mqtt.origin":return q.origin;case"mqtt.iata":return q.iata;
     case"mqtt.status":return q.status?"on":"off";case"mqtt.packets":return q.packets?"on":"off";
     case"mqtt.raw":return q.raw?"on":"off";case"mqtt.tx":return q.tx;case"mqtt.rx":return q.rx?"on":"off";
@@ -1818,16 +1824,16 @@ var CLI_VERBS=[
   ["sensor list","List attached sensors"],
   ["sensor get ","Read one sensor {index}"],
   ["sensor set ","Write one sensor {index} {value}"],
-  ["gps on","Power up the GPS"],
-  ["gps off","Power down the GPS"],
+  ["set gps on","Power up the GPS"],
+  ["set gps off","Power down the GPS"],
   ["gps sync","Set the clock and location from the GPS"],
   ["gps setloc","Copy the current GPS fix into lat/lon"],
   ["gps advert none","Do not include GPS position in adverts"],
   ["gps advert share","Advertise the live GPS position"],
   ["gps advert prefs","Advertise the stored lat/lon"],
-  ["powersaving","Show the power-saving mode"],
-  ["powersaving on","Enable power saving"],
-  ["powersaving off","Disable power saving"],
+  ["get powersaving","Show the power-saving mode"],
+  ["set powersaving on","Enable power saving"],
+  ["set powersaving off","Disable power saving"],
   ["get bluetooth.mac","Show the Bluetooth address mode"],
   ["set bluetooth.mac ","Set address {address|random|random-every-boot|random-after-connect|default}"],
   ["get bluetooth.stealth","Show the independent Bluetooth stealth flag"],
@@ -1889,9 +1895,17 @@ var CLI_KEYS=[
   ["wifi.pwd","WiFi password",0],
   ["wifi.powersave","WiFi power-save mode",0,"none|min|max"],
   ["wifi.status","WiFi connection, IP, RSSI and uptime",1],
+  ["wifi.cli","Browser console",0,"on|off"],
+  ["webui","WiFi settings website",0,"on|off"],
+  ["usb.logging","USB logging",0,"on|off"],
+  ["powersaving","Device power saving",0,"on|off"],
+  ["gps","GPS power",0,"on|off"],
+  ["logging.output","USB and MQTT output selection",0,"off|usb|wifi|both"],
+  ["mqtt.enabled","MQTT master switch (keeps broker settings)",0,"on|off"],
+  ["mqtt.running","Whether MQTT is running",1],
   ["mqtt.origin","Observer name in published messages",0],
   ["mqtt.iata","IATA region code used in topic paths",0],
-  ["mqtt.status","Per-slot connection status",1],
+  ["mqtt.status","Connections / periodic status publication",0,"on|off"],
   ["mqtt.stats","Publish/queue counters",1],
   ["mqtt.presets","Available broker presets",1],
   ["mqtt.config.valid","Whether the MQTT config is usable",1],
@@ -1940,14 +1954,71 @@ var CLI_SLOT=[
 ];
 var CLI_TYPES="req,response,txt_msg,ack,advert,grp_txt,grp_data,anon_req,path,trace,multipart,control,raw_custom".split(",");
 
+// Companion has its own command parser. Offer its settings, not the repeater's
+// ACL, bridge and filesystem commands or stateful USB/TCP chat commands.
+var CLI_COMPANION_VERBS=[
+  ["ver","Firmware version"],
+  ["board","Board and hardware info"],
+  ["memory","Heap and PSRAM free/min/largest block (Full Companion)"],
+  ["get powersaving","Show device power saving"],
+  ["set powersaving on","Enable device power saving"],
+  ["set powersaving off","Disable device power saving"],
+  ["tempradio","Show the temporary radio window (Full Companion)"],
+  ["tempradio ","Temporary radio {freq,bw,sf,cr,minutes} (Full Companion)"],
+  ["normalradio","Restore saved radio settings (Full Companion)"],
+  ["ota status","Show OTA status (OTA-enabled Companion)"],
+  ["start webconfig","Start this portal on the LAN"],
+  ["stop webconfig","Stop this portal"],
+  ["reboot","Restart the node"]
+];
+var CLI_COMPANION_KEYS=[
+  ["name","Node name",0], ["role","Node role",1],
+  ["lat","Advert latitude",0], ["lon","Advert longitude",0],
+  ["radio","Radio parameters {freq,bw,sf,cr}",0], ["freq","Frequency in MHz",1],
+  ["tx","TX power in dBm",0], ["af","Airtime factor",0],
+  ["dutycycle","Duty cycle percent",0], ["rxdelay","RX delay base",0],
+  ["cad","Listen before transmit",0,"on|off"],
+  ["radio.rxgain","Radio RX boosted gain",0,"on|off"],
+  ["radio.fem.rxgain","Front-end module RX gain",0,"on|off"],
+  ["radio.fem.txgain","Front-end module TX gain",0,"on|off"],
+  ["radio.rxps","Configured RX power saving",0,"on|off"],
+  ["powersaving","Device power saving",0,"on|off"],
+  ["usb.logging","USB packet logging (logging-enabled builds)",0,"on|off"],
+  ["display.rotation","Display rotation (0 restores the board default)",0,"0|90|180|270"],
+  ["bluetooth.name","Bluetooth name",0],
+  ["bluetooth.mac","Bluetooth address policy",0,"default|random|random-every-boot|random-after-connect"],
+  ["bluetooth.stealth","Bluetooth stealth",0,"on|off"],
+  ["path.hash.mode","Path hash mode",0,"0|1|2"], ["multi.acks","Extra ACKs",0],
+  ["wifi.ssid","WiFi network name",0], ["wifi.pwd","WiFi password",2],
+  ["wifi.status","WiFi connection, address and signal",1],
+  ["wifi.powersave","WiFi power saving",0,"min|max|none"],
+  ["wifi.cli","Browser console",0,"on|off"],
+  ["webui","WiFi settings website",0,"on|off"],
+  ["gps","GPS power (GPS-equipped builds)",0,"on|off"]
+];
+function cliIsCompanion(){return (st.role||"").toLowerCase()==="companion"}
+function cliKeys(){
+  if(!cliIsCompanion())return CLI_KEYS.filter(function(k){
+    return st.hasMqtt||!(/^(mqtt|snmp|timezone|logging\.output)/.test(k[0]));
+  });
+  var keys=CLI_COMPANION_KEYS.slice();
+  if(st.hasMqtt)CLI_KEYS.forEach(function(k){
+    if(/^(mqtt\.(enabled|running|origin|iata|status|stats|packets|raw|rx|tx|interval|owner|email|ntp)|logging\.output|timezone(\.offset)?|snmp(\.community)?)$/.test(k[0]))
+      keys.push(k);
+  });
+  return keys;
+}
+
 var cli={built:-1,tbl:[],hist:[],hix:-1,draft:"",sug:[],sel:-1,busy:false,shown:false,pwd:false};
 
 // Rebuilt when the slot count changes: `active_slots` decides how many
 // mqttN.* keys actually exist on this board.
 function cliTable(){
-  if(cli.built===st.nslots)return cli.tbl;
-  var t=CLI_VERBS.slice();
-  CLI_KEYS.forEach(function(k){
+  var signature=[st.role,st.nslots,st.hasMqtt,st.caps].join(":");
+  if(cli.built===signature)return cli.tbl;
+  var companion=cliIsCompanion();
+  var t=(companion?CLI_COMPANION_VERBS:CLI_VERBS).slice();
+  cliKeys().forEach(function(k){
     var vals=k[3]?" {"+k[3]+"}":"";
     if(k[2]!==2)t.push(["get "+k[0],k[1]]);
     if(k[2]!==1)t.push(["set "+k[0]+" ",k[1]+vals]);
@@ -1958,11 +2029,12 @@ function cliTable(){
   }
   for(var n=1;n<=st.nslots;n++){
     CLI_SLOT.forEach(function(f){
-      t.push(["get mqtt"+n+"."+f[0],"Slot "+n+" "+f[1]]);
+      if(companion&&f[0]==="filter")return;
+      if(!companion||!(/^(password|token)$/.test(f[0])))t.push(["get mqtt"+n+"."+f[0],"Slot "+n+" "+f[1]]);
       t.push(["set mqtt"+n+"."+f[0]+" ","Slot "+n+" "+f[1]]);
     });
   }
-  cli.tbl=t;cli.built=st.nslots;
+  cli.tbl=t;cli.built=signature;
   return t;
 }
 // Value completions for `set <key> `. Returns null when the key has no enum,
@@ -1975,8 +2047,9 @@ function cliEnum(key){
     return null;
   }
   if(key==="espnow.channel")return(st.caps&32768)?["1","2","3","4","5","6","7","8","9","10","11","12","13"]:null;
-  for(var i=0;i<CLI_KEYS.length;i++){
-    if(CLI_KEYS[i][0]===key)return CLI_KEYS[i][3]?CLI_KEYS[i][3].split("|"):null;
+  var keys=cliKeys();
+  for(var i=0;i<keys.length;i++){
+    if(keys[i][0]===key)return keys[i][3]?keys[i][3].split("|"):null;
   }
   return null;
 }
@@ -2014,13 +2087,14 @@ function cliHelp(){
   cliGap();
   cliEcho("cmd","help");
   cliEcho("rep",
-    "ver / board / clock       identity, firmware and time\n"+
-    "get <key>                 read any setting\n"+
-    "set <key> <value>         change any setting\n"+
-    "advert                    send an advert now\n"+
-    "neighbors                 nodes heard recently\n"+
-    "memory / stats-core       health counters\n"+
-    "get mqtt.status           per-slot broker connections\n"+
+    "ver / board               firmware and hardware\n"+
+    "get <key>                 read a setting\n"+
+    "set <key> <value>         change a setting\n"+
+    "set usb.logging on|off    USB logs\n"+
+    "set powersaving on|off    device power saving\n"+
+    (cliIsCompanion()?"memory                    free memory (Full Companion)\n":
+      "advert / neighbors        mesh activity\nmemory / stats-core       health counters\n")+
+    (st.hasMqtt?"set mqtt.enabled on|off   MQTT master switch\nget mqtt.status           per-slot broker connections\n":"")+
     "reboot                    restart the node");
   cliEcho("sys","Tab completes any prefix ("+cliTable().length+" commands known). "+
     "Paste several lines to run them in sequence. clear empties this window.");

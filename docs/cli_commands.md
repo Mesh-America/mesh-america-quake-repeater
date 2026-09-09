@@ -238,7 +238,7 @@ WiFi SSID, the command starts the open `MeshCore-Setup-XXXX` captive AP at
 <http://192.168.4.1/> instead.
 
 `start webconfig ap` forces captive-AP mode. It will not interrupt an active
-MQTT bridge, so run `set bridge.enabled off` first. Use `stop webconfig` to
+MQTT bridge, so run `set mqtt.enabled off` first. Use `stop webconfig` to
 close either mode for the current boot. (`stop webconfig` does not change a
 saved `webui on`.)
 LAN mode otherwise remains active until reboot. On expanded FULL builds, an
@@ -249,15 +249,19 @@ again without rebooting. Once an SSID is saved, the cutoff no longer applies
 and the selected WiFi/MQTT mode keeps reconnecting. Other setup sessions retain
 their profile's idle timeout.
 
+Every ESP32 build with WebConfig supports the browser command terminal,
+including WiFi Companion and Full Companion. Companions use their own bounded
+configuration commands on the trusted LAN; chat and streaming commands remain
+in the USB/TCP terminal. Repeater and Room Server use the authenticated admin
+parser.
+
 The saved `wifi.cli` setting defaults to `on`. Use `set wifi.cli off` to disable
 the **CLI** tab.
 `get wifi.cli` reports `off`, `on, waiting for WiFi client`, or `on, active`.
 The saved setting becomes active only in station/LAN mode while the WiFi client
 is connected. It is deliberately unavailable on the open setup access point.
-The tab sends one command at a time through the local administrator command
-parser and displays the reply in the browser. It uses remote-administrator
-command permissions, so commands explicitly restricted to a physical serial
-connection remain unavailable.
+The tab displays each reply in the browser. Commands explicitly restricted to
+a physical serial connection remain unavailable.
 Select **Command block** to paste up to 100 commands with one command per line.
 Blank lines are ignored, and every nonblank line must fit the normal 159-byte
 CLI command limit. The browser sends the lines sequentially and waits for each
@@ -307,7 +311,7 @@ USB, BLE, or TCP port 5000 without the terminal-start token: send command
 `get wifi.powersave` or `set wifi.powersave min`. WiFi-only Companions accept
 all three modes. A Full Companion that runs BLE and infrastructure WiFi
 simultaneously rejects `none` because coexistence requires modem sleep.
-Companion device `powersaving` and LoRa `radio.rxps` remain independent. On an
+Companion device power saving and LoRa `radio.rxps` remain independent. On an
 ESP32 Full Companion whose primary mesh radio is ESP-NOW, `max` is also
 unavailable: a station using maximum modem sleep can miss ESP-NOW broadcasts,
 which the access point does not buffer for it. A previously saved conflicting
@@ -754,11 +758,11 @@ set usb.logging off reboot
 the log stream, using separate text commands:
 
 ```text
-powersaving off
+set powersaving off
 set usb.logging on
 ```
 
-Verify with `powersaving` (expect `off`) and `get usb.logging` (expect `on`).
+Verify with `get powersaving` (expect `off`) and `get usb.logging` (expect `on`).
 Both settings are saved; disabling logging later does not restore power
 saving. This works around the [released USB sleep bug](releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled).
 nRF52 does not need this ESP32 workaround.
@@ -785,7 +789,7 @@ required when the USB interface count must change. The exact
 choice, send their reply, and reboot one second later only when needed.
 
 On every ESP32 Full Companion, enter the USB text terminal and use
-`set usb.logging on` (preceded by `powersaving off` on 1.17.1.5) to turn that TTY into a logging-repeater-style plaintext
+`set usb.logging on` (preceded by `set powersaving off` on 1.17.1.5) to turn that TTY into a logging-repeater-style plaintext
 stream. Framed Binary Companion is unavailable on USB while logging is on. The
 TTY remains an input-capable CLI, so `set usb.logging off` works on the same
 TTY. After its reply, logging stops and the TTY remains in the normal ASCII
@@ -799,10 +803,8 @@ frames active on interface `00`; ESP32 resumes the ordinary ASCII/Binary
 switcher after the logging terminal turns logging off. This setting does not
 change the node-storage capture controlled by `log start` and `log stop`.
 
-Unified non-Companion ESP32 FULL USB+WiFi observer builds add one saved
-selector for both output paths. Full Companion builds control USB diagnostics
-with `usb.logging` instead; their text-command parser does not expose
-`logging.output`:
+Companion, Repeater, Room Server, and Sensor builds with both MQTT and USB
+logging provide the same saved selector for both output paths:
 
 ```text
 get logging.output
@@ -816,15 +818,18 @@ set logging.output both
 meshcoretomqtt. `wifi` enables the direct MQTT bridge configured by the
 `wifi.*` and `mqtt.*` commands. `both` intentionally duplicates the radio
 stream to both consumers; do not point both consumers at the same broker unless
-the downstream setup deduplicates messages. Fresh unified FULL installs start
-in `both` mode.
+the downstream setup deduplicates messages. Fresh unified Full infrastructure installs start
+in `both` mode; Full Companion starts with USB logging off. To change only
+MQTT, use `set mqtt.enabled on|off`; `get mqtt.enabled` checks the saved
+switch and `get mqtt.running` checks whether the MQTT service is running.
+Turning MQTT off preserves all broker slots and credentials.
 
-On **1.17.1.5 ESP32**, run `powersaving off` before selecting
+On **1.17.1.5 ESP32**, run `set powersaving off` before selecting
 `set logging.output usb` or `set logging.output both`, since those modes
 enable USB logging. **WiFi/MQTT-only logging does not need this workaround
 while the Repeater/Room Server MQTT bridge is running**; the released code
-already blocks device sleep in that state. Check `get bridge.running`, not
-only `get bridge.enabled`. WiFi modem power saving is a separate setting.
+already blocks device sleep in that state. Check `get mqtt.running`, not
+only `get mqtt.enabled`. WiFi modem power saving is a separate setting.
 
 ### Begin capture of rx log to node storage
 
@@ -1651,9 +1656,7 @@ get clock.sync.status
 **Search terms:** battery saver, device power saving, low power mode.
 
 **Usage:**
-- `powersaving`
-- `powersaving on`
-- `powersaving off`
+- `get powersaving`
 - `set powersaving on`
 - `set powersaving off`
 
@@ -1663,14 +1666,12 @@ get clock.sync.status
 
 **Default:** `on` for fresh Cascade-profile builds and Companion firmware; `off` for other infrastructure profiles
 
-**Note:** Infrastructure sleep depends on the board implementation. The bare
-`powersaving on` command rejects local serial requests or an active USB data
-connection on nRF52 and standalone ESP32; ESP32 bridge builds reject that bare
-enable command. USB power alone does not block a remote enable request.
-The separate `set powersaving on` form saves/applies the preference without
-those guards; it is also the form used by infrastructure WebConfig.
+**Note:** `get powersaving`, `set powersaving on`, and `set powersaving off`
+are shared by Companion and infrastructure. The saved preference controls
+whether power saving is allowed; active USB, logging and network services may
+keep the hardware awake. Actual sleep depends on the board.
 
-For the **1.17.1.5 G3 USB-disconnect report**, use `powersaving off` as the
+For the **1.17.1.5 G3 USB-disconnect report**, use `set powersaving off` as the
 workaround. The released ESP32 sleep code can lose native USB after two
 minutes when the terminal is closed, even with a computer attached. The
 source fix blocks ESP32 light sleep while a native USB host is attached or
@@ -1680,7 +1681,7 @@ The G3 button also wakes the device for at least two minutes. See the
 for verification steps and the distinction between the fix and the published
 binaries.
 
-Companion firmware defaults this setting to `on`. Full Companion accepts the command from its local USB terminal and exposes the same setting in WebConfig. On ESP32, it lowers the CPU clock to 80 MHz, enables idle yielding, and enables the configured GPS duty cycle. USB and each active wireless transport remain available; SenseCAP Indicator Full keeps only its selected BLE or infrastructure-WiFi secondary transport active. `powersaving off` restores the board's normal CPU clock and disables the GPS duty cycle. This device setting is separate from LoRa RXPS (`radio.rxps`) and WiFi modem power save (`wifi.powersave`). Infrastructure WebConfig uses the `set powersaving` form; enabling it can put the node to sleep and make WiFi temporarily unavailable.
+Companion firmware defaults this setting to `on`. Full Companion accepts the command from its local USB terminal and exposes the same setting in WebConfig. On ESP32, it lowers the CPU clock to 80 MHz, enables idle yielding, and enables the configured GPS duty cycle. USB and each active wireless transport remain available; SenseCAP Indicator Full keeps only its selected BLE or infrastructure-WiFi secondary transport active. `set powersaving off` restores the board's normal CPU clock and disables the GPS duty cycle. This device setting is separate from LoRa RXPS (`radio.rxps`) and WiFi modem power save (`wifi.powersave`). Infrastructure uses the same commands; its hardware and active-service sleep guards determine when the node can sleep.
 
 ---
 
@@ -3668,15 +3669,16 @@ clear recent.repeater
 **Search terms:** enable GPS, disable GPS, turn GPS on, turn GPS off.
 
 **Usage:**
-- `gps`
-- `gps <state>`
+- `get gps`
+- `set gps <state>`
 
 **Parameters:**
 - `state`: `on`|`off`
 
 **Default:** `off`
 
-**Note:** Output format:
+**Note:** These command names are shared with GPS-capable Companion builds.
+Companion reports `on` or `off`; infrastructure includes receiver details:
 - `off` when the GPS hardware is disabled
 - `on, {active|deactivated}, {fix|no fix}, {sat count} sats` when the GPS hardware is enabled
 
@@ -3687,7 +3689,7 @@ clear recent.repeater
 - `gps sync`
 
 The GPS must be enabled. When GPS power saving has put an enabled receiver to
-sleep, this command schedules a sync and wakes it; after `gps off`, it reports
+sleep, this command schedules a sync and wakes it; after `set gps off`, it reports
 `gps is off` without scheduling work.
 
 ---
@@ -3804,7 +3806,31 @@ repeater images default to `off`; dedicated bridge images may default to `on`.
 
 **Default:** `tx`
 
-> **Note:** For MQTT bridges, use `mqtt.rx` and `mqtt.tx` instead of `bridge.source`. These provide independent per-direction control and support both RX and TX simultaneously. `bridge.source` still works as a convenience alias for MQTT (setting `bridge.source rx` sets `mqtt.rx on` + `mqtt.tx off`, and vice versa), but `mqtt.rx`/`mqtt.tx` are preferred.
+> **Note:** For MQTT, use `mqtt.rx` and `mqtt.tx` to control each direction independently. Both can be enabled together. Use `mqtt.enabled` as the MQTT master switch; `bridge.*` configures RS232 and ESP-NOW bridges.
+
+---
+
+#### View or change the MQTT master switch
+
+**Search terms:** enable MQTT, disable MQTT, MQTT on, MQTT off, WiFi logging.
+
+**Usage:**
+
+- `get mqtt.enabled`
+- `set mqtt.enabled on`
+- `set mqtt.enabled off`
+- `get mqtt.running`
+- `get mqtt.status`
+
+These commands are the same on MQTT-capable Companion, Repeater, Room Server,
+and Sensor builds. The master switch is saved; turning it off disconnects
+MQTT while keeping broker presets and credentials. Turning it on allows those
+brokers to reconnect. `get mqtt.running` checks the service's runtime state;
+`get mqtt.status` reports individual broker connections. Enabling MQTT does
+not imply that a broker is connected.
+
+USB logging remains independent. On images with both outputs,
+`set logging.output off|usb|wifi|both` selects USB and MQTT together.
 
 ---
 

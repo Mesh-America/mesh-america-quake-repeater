@@ -1,9 +1,10 @@
 # MQTT Bridge Implementation for MeshCore
 
 This document describes the on-device ESP32 MQTT bridge for observer
-infrastructure and MQTT-capable Companions. The text `mqtt.*`, `bridge.*`,
-and `logging.output` commands below apply to infrastructure CommonCLI.
-Full Companion configures MQTT through WebConfig instead; see
+infrastructure and MQTT-capable Companions. Shared controls use the same
+`get` / `set` commands on each role: `usb.logging`, `mqtt.enabled`,
+`logging.output`, and MQTT broker settings. Diagnostic and bridge commands
+that need infrastructure features are identified below. See
 [feature switches by role](docs/role_feature_switches.md). Use the
 [USB web console](https://flasher.meshcore.io/console) for ASCII commands.
 
@@ -25,7 +26,7 @@ check the exact artifact capability manifest.
    MQTT bridge remains stopped while the setup AP owns WiFi and starts normally
    after the reboot.
 4. Verify the connections on the portal's status page or with
-   `get mqtt.status` from the infrastructure CLI. Companion users check the portal.
+   `get mqtt.status` from the CLI on either role.
 
 The setup AP stops after 10 minutes with no connected client. WiFi companion
 builds enable the WebUI by default. Repeater and room-server builds default it
@@ -44,7 +45,7 @@ portal runs until `stop webconfig` or a reboot. To force the captive setup AP,
 first stop the MQTT bridge, then start the portal in AP mode:
 
 ```text
-set bridge.enabled off
+set mqtt.enabled off
 start webconfig ap
 ```
 
@@ -54,7 +55,7 @@ if you did not reboot:
 
 ```text
 stop webconfig
-set bridge.enabled on
+set mqtt.enabled on
 ```
 
 The 1.17.1.5 expanded Full TLora V2.1-1.6 MQTT artifacts include WebConfig,
@@ -69,11 +70,12 @@ LAN page is intentionally unauthenticated; use a trusted WiFi network.
 
 ### CLI setup and fallback
 
-The commands in this section are for MQTT-capable Repeater/Room Server
-infrastructure. Use the USB web console at 115200 baud or an authenticated
-remote login through the Companion app. For Full Companion, use the MQTT
-WebConfig cards; these infrastructure MQTT commands are not accepted by its
-text terminal.
+Use the same MQTT setup commands on MQTT-capable Companions, Repeaters, and
+Room Servers through the USB web console at 115200 baud or the LAN WebConfig
+CLI tab. Infrastructure also accepts an authenticated remote admin login
+through the Companion app. Full Companion also has its TCP terminal on port
+5002. Device identity import, neighbor discovery, and extended diagnostics
+remain specific to the roles that implement them.
 
 **1. Flash the observer firmware to your device**
 
@@ -140,8 +142,9 @@ If this observer is receive-only (e.g., using a PCB antenna in a location where 
 set repeat off
 ```
 
-**8. Reboot to connect**
+**8. Enable MQTT and reboot to connect**
 ```bash
+set mqtt.enabled on
 reboot
 ```
 
@@ -149,7 +152,7 @@ reboot
 ```bash
 get wifi.ssid
 get wifi.status
-get bridge.enabled
+get mqtt.enabled
 get mqtt.rx
 get mqtt.tx
 get mqtt.origin
@@ -645,7 +648,7 @@ On an ESP32 MQTT Companion, the Companion-owned `mesh-wifi` setting is the
 canonical WiFi power-save value. It is exposed in Companion WebConfig and the
 binary Companion protocol. Full Companion also exposes it on the USB terminal
 and TCP port 5002, but rejects `none` because its BLE transport requires modem
-sleep. Changing Companion device `powersaving` does not overwrite this value.
+sleep. Changing Companion device power saving does not overwrite this value.
 
 ### Timezone Commands
 
@@ -678,19 +681,23 @@ These are standard MeshCore commands, not MQTT-specific, but important for obser
 - `set prv.key <64-hex-char-key>` - Restore private key (for migrating identity from another device)
 - `set tx <dBm>` - Set transmit power
 
-### Bridge Commands
+### MQTT enable and logging commands
 
-#### Get Commands
-- `get bridge.source` - Get packet source (rx/tx)
-- `get bridge.enabled` - Get bridge enabled status (on/off)
+These commands are shared by MQTT-capable Companion and infrastructure roles:
 
-#### Set Commands
-- `set bridge.source rx|tx` - Set packet source (rx for received, tx for transmitted)
-- `set bridge.enabled on|off` - Enable/disable bridge
+- `get mqtt.enabled` - Read the saved MQTT master switch.
+- `set mqtt.enabled on|off` - Connect or disconnect MQTT without erasing broker settings.
+- `get mqtt.running` - Check whether the MQTT service is running.
+- `get mqtt.status` - Check individual broker connections.
+- `get usb.logging` / `set usb.logging on|off` - Control USB logging independently.
+- `get logging.output` / `set logging.output off|usb|wifi|both` - Select both outputs on images with USB logging and MQTT.
 
-> **Note:** `bridge.enabled` is the master switch for the whole bridge system. `bridge.source`
-> applies to non-MQTT bridges (RS232, ESP-NOW) only -- for MQTT use `mqtt.rx` and `mqtt.tx`,
-> which control each direction independently.
+For the 1.17.1.5 ESP32 USB sleep workaround, run `set powersaving off` before
+enabling USB logging. Use `get powersaving` to verify it. WiFi-only logging
+does not need this workaround while the infrastructure MQTT service is running.
+
+RS232 and ESP-NOW bridges use `bridge.enabled` and `bridge.source`; those
+are separate from MQTT packet direction controls `mqtt.rx` and `mqtt.tx`.
 
 ### SNMP Commands
 
@@ -719,7 +726,7 @@ be provisioned and managed without the serial CLI. It is started from the CLI
   to log in. If WiFi is **not** configured (`wifi.ssid` empty), it raises the
   setup AP instead (same as first boot).
 - `start webconfig ap` -- force the **setup AP** even when WiFi is configured.
-  The MQTT bridge must be stopped first (`set bridge.enabled off`); the AP owns the
+  The MQTT bridge must be stopped first (`set mqtt.enabled off`); the AP owns the
   radio. Used for re-provisioning in the field.
 - `stop webconfig` -- stop the portal and free its resources. LAN mode runs until
   this is issued; the setup AP also auto-stops after an idle timeout (default 10
@@ -1010,8 +1017,8 @@ reboot
 
 #### No MQTT Messages Appearing
 ```
-get bridge.enabled
-set bridge.enabled on
+get mqtt.enabled
+set mqtt.enabled on
 get mqtt.rx                # Should be "on"
 set mqtt.rx on
 get mqtt.status            # Check per-slot connection status

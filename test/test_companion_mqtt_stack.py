@@ -19,7 +19,7 @@ struct CompanionMqttSetupPortal {
 struct MyMesh {
   void onConfigBatchEnd();
   void syncWiFiPowerSaving();
-  bool _wc_mqtt_dirty, _mqtt_started, _mqtt_configured;
+  bool _wc_mqtt_dirty, _wc_batch_active, _mqtt_started, _mqtt_configured;
   MQTTBridge* _mqtt_bridge;
   MQTTPrefs _mqtt_prefs;
 };
@@ -29,7 +29,7 @@ struct MyMesh {
 def callback_source():
     source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
     start = source.index(CALLBACK)
-    return source[start:source.index("void MyMesh::execCommand", start)]
+    return source[start:source.index("void MyMesh::execAdminCommand", start)]
 
 
 class CompanionMqttStackTests(unittest.TestCase):

@@ -9,7 +9,7 @@ pending -> done result polling, aggregate-success reboot gating, secret masking
 So the browser drives the actual portal JS (wizard, save/poll/reqid, effective
 value handling, reboot overlay, stats, scan) against realistic responses.
 
-/api/cli is the CLI terminal's backend and has no firmware counterpart yet: it
+/api/cli models the firmware browser terminal: it
 is the proposed contract (202 + reqid, streamed per-command results) executed
 against a CommonCLI-shaped interpreter, so the terminal UI can be designed
 against realistic single- and multi-line replies before any of it goes on-device.
@@ -118,6 +118,7 @@ def default_config(setup_mode):
             "powersave": "min",
         },
         "mqtt": {
+            "enabled": False,
             "origin": "" if setup_mode else "MockNode", "iata": "" if setup_mode else "DEN",
             "status": True, "packets": True, "raw": False, "tx": "advert", "rx": True,
             "interval": 5, "timezone": "MST7MDT,M3.2.0,M11.1.0", "timezone_offset": -7,
@@ -130,6 +131,7 @@ def default_config(setup_mode):
         # from /api/config (see config_json) and live only here. Without them
         # the terminal answers "unknown config key" for perfectly real commands.
         "cli": {
+            "usb.logging": False, "wifi.cli": True, "webui": True, "gps": False,
             "radio.watchdog": 0, "int.thresh": 0, "agc.reset.interval": 0,
             "direct.txdelay": 0.0, "multi.acks": 0, "allow.read.only": False,
             "path.hash.mode": 0, "owner.info": "", "guest.password": "",
@@ -211,7 +213,7 @@ class State:
 # set-command application + validation (mirrors the firmware's setters enough
 # to produce realistic per-field OK / Error replies for the UI chips).
 # ---------------------------------------------------------------------------
-BOOL_KEYS = {"cad": ("radio", "cad"), "radio.rxgain": ("radio", "rxgain"),
+BOOL_KEYS = {"mqtt.enabled": ("mqtt", "enabled"), "cad": ("radio", "cad"), "radio.rxgain": ("radio", "rxgain"),
              "powersaving": ("radio", "powersaving"),
              "repeat": ("radio", "repeat"), "mqtt.status": ("mqtt", "status"),
              "mqtt.packets": ("mqtt", "packets"), "mqtt.raw": ("mqtt", "raw"),
@@ -375,6 +377,10 @@ def apply_set(cfg, key, val):
         return apply_slot_set(cfg, int(m.group(1)) - 1, m.group(2), val)
 
     if key in BOOL_KEYS:
+        if key == "usb.logging" and val.endswith(" reboot"):
+            val = val[:-7]
+        if val not in ("on", "off"):
+            return False, "Error: use set %s on|off" % key
         sec, f = BOOL_KEYS[key]
         cfg[sec][f] = (val == "on")
         return True, "OK"
@@ -696,18 +702,10 @@ def run_cli(cfg, line):
         if mode not in ("none", "share", "prefs"):
             return False, "Error, must be none, share or prefs"
         return True, "OK - advert position: %s" % mode
-    if cmd in ("gps on", "gps off"):
-        return True, "OK - GPS %s" % cmd[4:]
     if cmd == "gps sync":
         return True, "OK - clock and location set from GPS"
     if cmd == "gps setloc":
         return True, "OK - lat/lon set from the current fix"
-    if cmd == "gps":
-        return True, "GPS: no fix (0 satellites)"
-    if cmd in ("powersaving on", "powersaving off"):
-        return True, "OK - power saving %s" % cmd[12:]
-    if cmd == "powersaving":
-        return True, "off"
     if cmd.startswith("alert test"):
         if not ST.cfg["cli"]["alert.psk"]:
             return False, "Error: alert channel not configured (set alert.psk or set alert.hashtag)"
@@ -739,6 +737,20 @@ def run_cli(cfg, line):
         return True, "OK - password changed"
     if cmd.startswith("time "):
         return True, "OK - clock set"
+    if cmd == "get logging.output":
+        usb, wifi = cfg["cli"]["usb.logging"], cfg["mqtt"]["enabled"]
+        mode = ("both" if wifi else "usb") if usb else ("wifi" if wifi else "off")
+        return True, "> " + mode
+    if cmd.startswith("set logging.output "):
+        mode = cmd[19:]
+        if mode not in ("off", "usb", "wifi", "both"):
+            return False, "Error: use set logging.output off|usb|wifi|both"
+        cfg["cli"]["usb.logging"] = mode in ("usb", "both")
+        cfg["mqtt"]["enabled"] = mode in ("wifi", "both")
+        return True, "OK - logging.output " + mode
+    if cmd == "get mqtt.running":
+        active = cfg["mqtt"]["enabled"] and any(slot["preset"] != "none" for slot in cfg["mqtt"]["slots"])
+        return True, "> on" if active else "> off"
     if cmd.startswith("get "):
         return cli_get(cfg, cmd[4:].strip())
     if cmd.startswith("set "):

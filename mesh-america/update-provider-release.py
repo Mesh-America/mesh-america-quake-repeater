@@ -452,7 +452,7 @@ def normalize_runtime_companion_metadata(firmware: dict, notes: str) -> str:
                     "CONFIGURATION - Controllable external FEM receive gain is "
                     "a saved setting, not a different hardware image. Change it "
                     "with WebConfig, the Companion protocol, or "
-                    "radio.fem.rxgain on|off where the text CLI is available."
+                    "set radio.fem.rxgain on|off where the text CLI is available."
                 )
                 added_runtime_note = True
             continue
@@ -537,13 +537,18 @@ def normalize_esp32_full_companion_metadata(
         "logging off and uses the ASCII/Binary Companion switcher. BLE, "
         "Wi-Fi Companion on TCP "
         "5000, WebConfig, TCP mOTA seeding on 5001, and the text terminal on "
-        "5002 remain available. Enter the USB text terminal and use set "
+        "5002 remain available. For 1.17.1.5 USB logging, run set powersaving "
+        "off first. Enter the USB text terminal and use set "
         "usb.logging on to turn that TTY into an input-capable plaintext "
         "packet/debug stream. Use set usb.logging off to stop diagnostics; "
         "after its reply, the TTY remains in the normal ASCII terminal, matching "
         "fresh Full firmware. Then use the normal terminal stop token or let a "
         "Companion app send a valid framed probe to select Binary Companion. "
-        "The saved logging choice is restored at boot."
+        "The saved logging choice is restored at boot. On MQTT-capable images, "
+        "set mqtt.enabled on|off controls MQTT while preserving broker settings; "
+        "set logging.output off|usb|wifi|both selects both outputs. The browser "
+        "CLI defaults to on when connected to Wi-Fi; set wifi.cli on|off "
+        "controls it."
     )
     logging_use = (
         "LOGGING USE - USB logging and Binary Companion deliberately do not "
@@ -837,7 +842,7 @@ def append_companion_power_saving_note(notes: str, display_version: str) -> str:
         f"POWER SAVING - {display_version} enables Companion device power saving "
         "by default. On first boot it migrates the saved Companion setting to on "
         "once, repairing devices that carried the regressed off value. A later "
-        "explicit `powersaving off` choice remains persistent. This controls "
+        "explicit `set powersaving off` choice remains persistent. This controls "
         "MCU/GPS idle saving and is separate from LoRa receive power saving "
         "(RXPS). On nRF52, an active USB data-host connection can intentionally "
         "keep the device awake; USB power from a charger alone does not."
@@ -870,7 +875,7 @@ def observer_notes(
         "PROFILE - Unified FULL USB + Wi-Fi observer: uses expanded partitions, "
         "compiles USB packet logging and the on-device Wi-Fi MQTT bridge into one "
         "image, keeps verbose USB debug off, and retains the complete role CLI. "
-        "Use logging.output off|usb|wifi|both to persist the active paths. LoRa "
+        "Use set logging.output off|usb|wifi|both to persist the active paths. LoRa "
         "self-update is enabled. With no saved SSID, the setup AP is available "
         "for 30 minutes per boot and then powers Wi-Fi off; configured Wi-Fi "
         "retains its normal indefinite reconnect behavior."

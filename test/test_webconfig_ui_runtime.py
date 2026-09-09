@@ -114,6 +114,105 @@ class WebConfigUiRuntimeTest(unittest.TestCase):
         self.assertNotIn("data-test-error=", dom)
         return dom
 
+    def test_companion_console_runs_commands_and_uses_role_suggestions(self):
+        status, config = self.setup_values()
+        status.update(mode="lan", cli=True, mqtt=True, active_slots=1,
+                      password_supported=False)
+        prelude = """
+<script>
+(function(){
+  var status=%s,config=%s,submitted=null;
+  function response(value){
+    return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(value)}});
+  }
+  window.fetch=function(path,options){
+    if(path==="/api/status")return response(status);
+    if(path==="/api/config")return response(config);
+    if(path==="/api/presets")return response({presets:[]});
+    if(path==="/api/cli"){
+      submitted=JSON.parse(options.body);
+      return response({state:"running",reqid:submitted.reqid,total:1});
+    }
+    if(path.indexOf("/api/cli/result?")===0)return response({
+      state:"done",reqid:submitted.reqid,results:[{ok:true,reply:"companion-console-test-version"}]
+    });
+    return response({});
+  };
+  window.addEventListener("load",function(){
+    setTimeout(function(){
+      var button=document.querySelector('#tabs button[data-t="cli"]');
+      document.body.setAttribute("data-test-cli-tab",button?"yes":"no");
+      if(!button)return;
+      button.click();
+      document.getElementById("term-in").value="ver";
+      cliSubmit();
+    },75);
+    setTimeout(function(){
+      var table=cliTable().map(function(row){return row[0]});
+      document.body.setAttribute("data-test-suggestions",JSON.stringify(table));
+      document.body.setAttribute("data-test-submitted",submitted?submitted.cmds.join(","):"none");
+      document.body.setAttribute("data-test-reply",document.getElementById("term-out").textContent);
+      document.body.setAttribute("data-test-enum",cliEnum("wifi.cli").join(","));
+      document.body.setAttribute("data-test-busy",String(cli.busy));
+      var master=document.querySelector('[data-k="mqtt.enabled"]');
+      document.body.setAttribute("data-test-mqtt-enabled",master?String(master.checked):"missing");
+      document.body.setAttribute("data-test-mqtt-enum",cliEnum("mqtt.enabled").join(","));
+      cliHelp();
+      document.body.setAttribute("data-test-companion-help",document.getElementById("term-out").textContent);
+      // Switching role must invalidate the cached table even with one slot.
+      st.role="repeater";
+      document.body.setAttribute("data-test-repeater-erase",String(cliTable().some(function(row){return row[0]==="erase"})));
+    },500);
+  });
+})();
+</script>
+""" % (json.dumps(status), json.dumps(config))
+        dom = self.run_page(prelude)
+        self.assertIn('data-test-cli-tab="yes"', dom)
+        self.assertIn('data-test-submitted="ver"', dom)
+        self.assertIn("companion-console-test-version", dom)
+        self.assertIn('data-test-busy="false"', dom)
+        self.assertIn('data-test-enum="on,off"', dom)
+        self.assertIn('data-test-repeater-erase="true"', dom)
+        self.assertIn('data-test-mqtt-enabled="false"', dom)
+        self.assertIn('data-test-mqtt-enum="on,off"', dom)
+        import html
+        help_text = html.unescape(re.search(
+            r'data-test-companion-help="([^"]*)"', dom).group(1))
+        self.assertIn("set mqtt.enabled on|off", help_text)
+        self.assertNotIn("neighbors", help_text)
+        self.assertNotIn("stats-core", help_text)
+        suggestions = json.loads(html.unescape(re.search(
+            r'data-test-suggestions="([^"]*)"', dom).group(1)))
+        for command in ("set powersaving off", "get usb.logging", "set wifi.cli ",
+                        "set mqtt1.preset ", "get name", "get radio"):
+            self.assertIn(command, suggestions)
+        for command in ("erase", "password ", "setperm ", "get prv.key",
+                        "set bridge.enabled ", "get mqtt1.password"):
+            self.assertNotIn(command, suggestions)
+
+    def test_console_stays_hidden_when_disabled_or_on_setup_ap(self):
+        for mode in ("lan", "setup"):
+            with self.subTest(mode=mode):
+                status, config = self.setup_values()
+                status.update(mode=mode, cli=False)
+                prelude = """
+<script>
+(function(){
+  var status=%s,config=%s;
+  window.fetch=function(path){
+    var value=path==="/api/status"?status:path==="/api/config"?config:{state:"done",networks:[]};
+    return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(value)}});
+  };
+  window.addEventListener("load",function(){setTimeout(function(){
+    document.body.setAttribute("data-test-cli-hidden",String(!document.querySelector('#tabs button[data-t="cli"]')));
+  },500)});
+})();
+</script>
+""" % (json.dumps(status), json.dumps(config))
+                dom = self.run_page(prelude)
+                self.assertIn('data-test-cli-hidden="true"', dom)
+
     def run_early_selection_case(self, explicit_password=None):
         status, config = self.setup_values()
 

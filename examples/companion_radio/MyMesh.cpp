@@ -1903,9 +1903,8 @@ void MyMesh::begin(bool has_display, bool radio_available) {
   configureRadioFromPrefs();
 
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
-#if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
-  if (_prefs.wifi_enabled != 0) {
-#endif
+  _mqtt_enabled = CompanionMqttSetupPortal::loadEnabled();
+  // Keep settings available to the USB CLI even when this boot selects BLE.
   applyMQTTDefaults(&_mqtt_prefs);
   _mqtt_configured = CompanionMqttSetupPortal::loadStoredConfig(_mqtt_prefs);
   if (!_mqtt_configured) applyMQTTDefaults(&_mqtt_prefs);
@@ -1913,6 +1912,9 @@ void MyMesh::begin(bool has_display, bool radio_available) {
   // canonical. Keep MQTT reconnects from restoring a stale MQTT-pref value.
   _mqtt_prefs.wifi_power_save = getCompanionWiFiPowerSave();
 
+#if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
+  if (_prefs.wifi_enabled != 0) {
+#endif
   MQTTNodeInfo node_info;
   node_info.node_name = _prefs.node_name;
   node_info.freq = &_prefs.freq;
@@ -2264,6 +2266,46 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (!command || !reply || reply_size == 0) return false;
   while (*command == ' ') command++;
 
+  if (strcmp(command, "get powersaving") == 0 || strcmp(command, "powersaving") == 0) {
+    snprintf(reply, reply_size, "> %s", _prefs.powersaving_enabled ? "on" : "off");
+    return true;
+  }
+  const char* power_value = nullptr;
+  if (strncmp(command, "set powersaving ", 16) == 0) power_value = command + 16;
+  else if (strncmp(command, "powersaving ", 12) == 0) power_value = command + 12;
+  if (power_value) {
+    char result[160] = {};
+    applyAndSavePowerSaving(power_value, result);
+    snprintf(reply, reply_size, "%s", result);
+    return true;
+  }
+
+#if ENV_INCLUDE_GPS == 1
+  if (strcmp(command, "get gps") == 0) {
+    const char* gps = sensors.getSettingByKey("gps");
+    snprintf(reply, reply_size, gps ? "> %s" : "Error: GPS unavailable",
+             gps && gps[0] == '1' ? "on" : "off");
+    return true;
+  }
+  const char* gps_value = nullptr;
+  if (strncmp(command, "set gps ", 8) == 0) gps_value = command + 8;
+  if (gps_value) {
+    if (strcmp(gps_value, "on") != 0 && strcmp(gps_value, "off") != 0) {
+      snprintf(reply, reply_size, "Error: use set gps on|off");
+      return true;
+    }
+    const bool enabled = strcmp(gps_value, "on") == 0;
+    if (!sensors.setSettingValue("gps", enabled ? "1" : "0")) {
+      snprintf(reply, reply_size, "Error: GPS unavailable");
+    } else {
+      _prefs.gps_enabled = enabled ? 1 : 0;
+      snprintf(reply, reply_size, savePrefs() ? "OK - GPS %s (saved)" : "Error: GPS %s but save failed",
+               enabled ? "on" : "off");
+    }
+    return true;
+  }
+#endif
+
 #if defined(ESP32_PLATFORM) && defined(COMPANION_RADIO_FULL)
   if (strcmp(command, "start ota") == 0
       || strcmp(command, "start ota ap") == 0) {
@@ -2296,6 +2338,58 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   }
 #endif
 
+#if MESH_USB_LOGGING_AVAILABLE
+  if (strcmp(command, "get usb.logging") == 0) {
+    snprintf(reply, reply_size, "usb.logging %s; port: %s%s",
+             mesh::isUsbLoggingEnabled() ? "on" : "off",
+             mesh::usbLoggingPortDescription(),
+             mesh::usbLoggingInterfaceRestartRequired()
+                 ? " (reboot required to change USB interfaces)" : "");
+    return true;
+  }
+  if (strncmp(command, "set usb.logging", 15) == 0
+      && (command[15] == 0 || command[15] == ' ' || command[15] == '\t')) {
+    const char* value = command + 15;
+    while (*value == ' ' || *value == '\t') value++;
+    bool enabled = false;
+    bool reboot_if_needed = false;
+    if (!mesh::cli::parseLoggingToggle(value, enabled, reboot_if_needed)) {
+      snprintf(reply, reply_size, "Error: use set usb.logging <on|off> [reboot]");
+    } else {
+      _prefs.usb_logging_enabled = enabled ? 1 : 0;
+      mesh::setUsbLoggingEnabled(enabled);
+      if (!savePrefs()) {
+        snprintf(reply, reply_size, "Error: USB logging changed for this boot but save failed");
+      } else if (!mesh::saveUsbLoggingBootPreference(enabled)) {
+        snprintf(reply, reply_size, "Error: setting saved, but next-boot USB interface state could not be saved");
+      } else if (mesh::usbLoggingInterfaceRestartRequired()) {
+        if (reboot_if_needed) {
+          snprintf(reply, reply_size,
+              "OK - USB logging %s (saved); rebooting to change USB interfaces",
+              enabled ? "on" : "off");
+          _scheduled_reboot_at = futureMillis(1000);
+        } else {
+          snprintf(reply, reply_size,
+              "OK - USB logging %s (saved); reboot required to change USB interfaces",
+              enabled ? "on" : "off");
+        }
+      } else {
+        snprintf(reply, reply_size, "OK - USB logging %s (saved)",
+                 enabled ? "on" : "off");
+      }
+    }
+    return true;
+  }
+#endif
+
+  if (strcmp(command, "get role") == 0) {
+    snprintf(reply, reply_size, "> companion");
+    return true;
+  }
+  if (strcmp(command, "get lat") == 0 || strcmp(command, "get lon") == 0) {
+    snprintf(reply, reply_size, "> %.6f", command[5] == 'a' ? sensors.node_lat : sensors.node_lon);
+    return true;
+  }
   if (strcmp(command, "board") == 0) {
     const char* hardware_name = board.getManufacturerName();
     snprintf(reply, reply_size, "%s",
@@ -2664,6 +2758,76 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 #endif
 
 #ifdef WITH_WEBCONFIG
+  // The same bounded configuration parser serves USB, TCP, framed control and
+  // the browser. Only the caller outside a WebConfig batch owns its save hook.
+#ifdef WITH_MQTT_BRIDGE
+  if (strcmp(command, "get mqtt.enabled") == 0) {
+    snprintf(reply, reply_size, "> %s", _mqtt_enabled ? "on" : "off");
+    return true;
+  }
+  if (strcmp(command, "get mqtt.running") == 0) {
+    snprintf(reply, reply_size, "> %s", isMQTTRunning() ? "on" : "off");
+    return true;
+  }
+  const char* mqtt_value = nullptr;
+  if (strncmp(command, "set mqtt.enabled ", 17) == 0) mqtt_value = command + 17;
+  if (mqtt_value) {
+    if (strcmp(mqtt_value, "on") != 0 && strcmp(mqtt_value, "off") != 0) {
+      snprintf(reply, reply_size, "Error: use set mqtt.enabled on|off");
+    } else if (!CompanionMqttSetupPortal::saveEnabled(strcmp(mqtt_value, "on") == 0)) {
+      snprintf(reply, reply_size, "Error: failed to save MQTT setting");
+    } else {
+      _mqtt_enabled = strcmp(mqtt_value, "on") == 0;
+      if (!_mqtt_enabled) stopMQTT();
+      snprintf(reply, reply_size, "OK - MQTT %s (saved)%s", mqtt_value,
+               _mqtt_enabled && !_mqtt_configured ? "; configure a broker slot to connect" : "");
+    }
+    return true;
+  }
+#if MESH_USB_LOGGING_AVAILABLE
+  if (strcmp(command, "get logging.output") == 0) {
+    snprintf(reply, reply_size, "> %s", mesh::cli::loggingOutputName(
+        mesh::isUsbLoggingEnabled(), _mqtt_enabled));
+    return true;
+  }
+  if (strncmp(command, "set logging.output ", 19) == 0) {
+    bool usb = false, wifi = false;
+    if (!mesh::cli::parseLoggingOutput(command + 19, usb, wifi)) {
+      snprintf(reply, reply_size, "Error: use set logging.output off|usb|wifi|both");
+    } else if (!CompanionMqttSetupPortal::saveEnabled(wifi)) {
+      snprintf(reply, reply_size, "Error: failed to save MQTT setting");
+    } else {
+      _mqtt_enabled = wifi;
+      if (!wifi) stopMQTT();
+      _prefs.usb_logging_enabled = usb ? 1 : 0;
+      mesh::setUsbLoggingEnabled(usb);
+      if (!savePrefs() || !mesh::saveUsbLoggingBootPreference(usb)) {
+        snprintf(reply, reply_size, "Error: logging output changed but USB setting could not be saved");
+      } else {
+        snprintf(reply, reply_size, "OK - logging.output %s (saved)", command + 19);
+      }
+    }
+    return true;
+  }
+#endif
+  if ((strncmp(command, "get ", 4) == 0 || strncmp(command, "set ", 4) == 0)
+      && (strncmp(command + 4, "mqtt", 4) == 0
+          || strncmp(command + 4, "snmp", 4) == 0
+          || strncmp(command + 4, "timezone", 8) == 0)) {
+    char copy[160], result[160] = {};
+    if (strlen(command) >= sizeof(copy)) {
+      snprintf(reply, reply_size, "Error: command too long");
+      return true;
+    }
+    strcpy(copy, command);
+    const bool owns_batch = !_wc_batch_active;
+    if (owns_batch) onConfigBatchStart();
+    execCommand(copy, result);
+    if (owns_batch) onConfigBatchEnd();
+    snprintf(reply, reply_size, "%s", result);
+    return true;
+  }
+#endif
   if (strncmp(command, "get ", 4) == 0) {
     const mesh::cli::StandaloneWiFiKey wifi_key =
         mesh::cli::classifyStandaloneWiFiGet(command + 4);
@@ -2675,14 +2839,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
         formatCompanionWiFiStatus(reply, reply_size);
         return true;
       case mesh::cli::StandaloneWiFiKey::CLI:
-        // Companion WebConfig deliberately has no browser command terminal:
-        // the page is not an authenticated repeater/room-server admin
-        // surface. Do not report the saved global WebConfig preference as
-        // "waiting", because supportsCliTerminal() is false for this role and
-        // /api/cli can therefore never become active. The Full Companion text
-        // CLI remains available over USB and TCP port 5002.
-        snprintf(reply, reply_size,
-                 "Error: browser CLI unavailable; use USB (or TCP 5002 on Full Companion)");
+        WebConfigServer::formatWiFiCliStatus(reply, reply_size);
         return true;
       default:
         break;
@@ -2704,10 +2861,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
             value, reply, reply_size);
         break;
       case mesh::cli::StandaloneWiFiKey::CLI:
-        // See the matching getter above. In particular, do not persist a
-        // preference and claim success for a terminal this role cannot serve.
-        snprintf(reply, reply_size,
-                 "Error: browser CLI unavailable; use USB (or TCP 5002 on Full Companion)");
+        WebConfigServer::setWiFiCliEnabled(value, reply, reply_size);
         return true;
       default:
         break;
@@ -2958,6 +3112,13 @@ static void copyMqttString(char* dest, size_t dest_size, const char* src) {
 }
 
 void MyMesh::serviceMQTT(const char* wifi_ssid, const char* wifi_password) {
+  if (!_mqtt_enabled) {
+    stopMQTT();
+    return;
+  }
+#ifdef WITH_WEBCONFIG
+  if (_wc_batch_active) return;
+#endif
   if (!_mqtt_started) {
     if (strcmp(_mqtt_prefs.wifi_ssid, wifi_ssid ? wifi_ssid : "") != 0) {
       copyMqttString(_mqtt_prefs.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid), wifi_ssid);
@@ -3061,6 +3222,9 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   s.rx_ps_rx_us = _prefs.rx_ps_rx_us;
   s.rx_ps_sleep_us = _prefs.rx_ps_sleep_us;
   s.power_saving = _prefs.powersaving_enabled;
+#ifdef WITH_MQTT_BRIDGE
+  s.mqtt_enabled = _mqtt_enabled;
+#endif
   s.repeat = _prefs.client_repeat != 0;
   s.capabilities = WebConfigServer::CAP_LOCATION | WebConfigServer::CAP_AIRTIME
       | WebConfigServer::CAP_RX_DELAY | WebConfigServer::CAP_POWER_SAVING;
@@ -3172,6 +3336,7 @@ void MyMesh::rebootNow() {
 }
 
 void MyMesh::onConfigBatchStart() {
+  _wc_batch_active = true;
   _wc_mqtt_dirty = false;
 }
 
@@ -3198,10 +3363,95 @@ void MyMesh::onConfigBatchEnd() {
   }
 #endif
   _wc_mqtt_dirty = false;
+  _wc_batch_active = false;
+}
+
+void MyMesh::execAdminCommand(char* cmd, char* reply) {
+  // WebConfig runs this bounded dispatcher on the mesh loop. It must not
+  // enter the stateful USB/TCP terminal, select a recipient, or capture that
+  // terminal's stream. Use remote-call semantics for board-specific commands.
+  reply[0] = 0;
+  if (!cmd || (strlen(cmd) > 2 && cmd[2] == '|')) {
+    strcpy(reply, "Error: enter a plain CLI command");
+    return;
+  }
+  if (handleCommand(cmd, 1, reply)) return;
+  if (strcmp(cmd, "get radio.rxps") == 0 || strcmp(cmd, "get radio.rxps.config") == 0) {
+    if (!radio_driver.supportsRxPowerSaving()) {
+      strcpy(reply, "Error: RX power saving is unsupported on this radio");
+    } else {
+      snprintf(reply, 160, "> %s,level=%u,preamble=%u,rx=%lu,sleep=%lu",
+               _prefs.rx_powersaving_enabled ? "on" : "off",
+               (unsigned)_prefs.rx_ps_level, (unsigned)_prefs.rx_ps_preamble,
+               (unsigned long)_prefs.rx_ps_rx_us, (unsigned long)_prefs.rx_ps_sleep_us);
+    }
+    return;
+  }
+  // The settings form already implements the Companion's MQTT and remaining
+  // configuration setters. Its batch hooks persist/restart MQTT once per batch.
+  execCommand(cmd, reply);
 }
 
 void MyMesh::execCommand(char* cmd, char* reply) {
   reply[0] = 0;
+#ifdef WITH_MQTT_BRIDGE
+  if (cmd && strncmp(cmd, "set mqtt.enabled ", 17) == 0) {
+    handleLocalControlCommand(cmd, reply, 160);
+    return;
+  }
+  if (cmd && strncmp(cmd, "get ", 4) == 0) {
+    const char* key = cmd + 4;
+    const char* value = nullptr;
+    if (strcmp(key, "mqtt.status") == 0) {
+      MQTTBridge::formatMqttStatusReply(reply, 160, &_mqtt_prefs);
+      return;
+    }
+    if (strcmp(key, "mqtt.stats") == 0) {
+      MQTTBridge::formatMqttStatsReply(reply, 160);
+      return;
+    }
+    if (strcmp(key, "mqtt.origin") == 0) value = _mqtt_prefs.mqtt_origin;
+    else if (strcmp(key, "mqtt.iata") == 0) value = _mqtt_prefs.mqtt_iata;
+    else if (strcmp(key, "mqtt.packets") == 0) value = _mqtt_prefs.mqtt_packets_enabled ? "on" : "off";
+    else if (strcmp(key, "mqtt.raw") == 0) value = _mqtt_prefs.mqtt_raw_enabled ? "on" : "off";
+    else if (strcmp(key, "mqtt.rx") == 0) value = _mqtt_prefs.mqtt_rx_enabled ? "on" : "off";
+    else if (strcmp(key, "mqtt.tx") == 0) value = _mqtt_prefs.mqtt_tx_enabled == 2 ? "advert" : _mqtt_prefs.mqtt_tx_enabled ? "on" : "off";
+    else if (strcmp(key, "mqtt.ntp") == 0) value = _mqtt_prefs.mqtt_ntp_server;
+    else if (strcmp(key, "mqtt.owner") == 0) value = _mqtt_prefs.mqtt_owner_public_key;
+    else if (strcmp(key, "mqtt.email") == 0) value = _mqtt_prefs.mqtt_email;
+    else if (strcmp(key, "timezone") == 0) value = _mqtt_prefs.timezone_string;
+    else if (strcmp(key, "snmp") == 0) value = _mqtt_prefs.snmp_enabled ? "on" : "off";
+    else if (strcmp(key, "snmp.community") == 0) value = _mqtt_prefs.snmp_community;
+    else if (strcmp(key, "mqtt.interval") == 0) {
+      snprintf(reply, 160, "> %lu minutes (%lu ms)",
+               (unsigned long)((_mqtt_prefs.mqtt_status_interval + 29999) / 60000),
+               (unsigned long)_mqtt_prefs.mqtt_status_interval);
+      return;
+    } else if (strcmp(key, "timezone.offset") == 0) {
+      snprintf(reply, 160, "> %d", (int)_mqtt_prefs.timezone_offset);
+      return;
+    } else if (strlen(key) >= 7 && strncmp(key, "mqtt", 4) == 0
+               && key[4] >= '1' && key[4] <= '0' + MAX_MQTT_SLOTS && key[5] == '.') {
+      const int slot = key[4] - '1';
+      const char* field = key + 6;
+      if (strcmp(field, "preset") == 0) value = _mqtt_prefs.mqtt_slot_preset[slot];
+      else if (strcmp(field, "server") == 0) value = _mqtt_prefs.mqtt_slot_host[slot];
+      else if (strcmp(field, "username") == 0) value = _mqtt_prefs.mqtt_slot_username[slot];
+      else if (strcmp(field, "topic") == 0) value = _mqtt_prefs.mqtt_slot_topic[slot];
+      else if (strcmp(field, "audience") == 0) value = _mqtt_prefs.mqtt_slot_audience[slot];
+      else if (strcmp(field, "password") == 0) value = _mqtt_prefs.mqtt_slot_password[slot][0] ? "********" : "";
+      else if (strcmp(field, "token") == 0) value = _mqtt_prefs.mqtt_slot_token[slot][0] ? "********" : "";
+      else if (strcmp(field, "port") == 0) {
+        snprintf(reply, 160, "> %u", (unsigned)_mqtt_prefs.mqtt_slot_port[slot]);
+        return;
+      }
+    }
+    if (value) {
+      snprintf(reply, 160, "> %s", value);
+      return;
+    }
+  }
+#endif
   if (handleCadCommand(cmd, reply, 160)) return;
   if (cmd && (strcmp(cmd, "get bluetooth.name") == 0
               || strcmp(cmd, "get ble.name") == 0)) {
@@ -3236,13 +3486,20 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     strcpy(reply, "Error: unsupported command");
     return;
   }
-  char* key = cmd + 4;
-  char* split = strchr(key, ' ');
+  const char* start = cmd + 4;
+  const char* split = strchr(start, ' ');
   if (!split) {
     strcpy(reply, "Error: missing value");
     return;
   }
-  *split = 0;
+  char key[24];
+  const size_t key_len = split - start;
+  if (key_len == 0 || key_len >= sizeof(key)) {
+    strcpy(reply, "Error: unsupported setting");
+    return;
+  }
+  memcpy(key, start, key_len);
+  key[key_len] = 0;
   const char* value = split + 1;
 
   if (strcmp(key, "name") == 0) {
@@ -6294,13 +6551,16 @@ bool MyMesh::applyAndSavePowerSaving(const char* value, char* reply) {
   } else if (strcmp(value, "off") == 0) {
     enabled = false;
   } else {
-    strcpy(reply, "Error: use powersaving on or powersaving off");
+    strcpy(reply, "Error: use set powersaving on|off");
     return false;
   }
 
   _prefs.powersaving_enabled = enabled ? 1 : 0;
   sensors.setPowerSavingEnabled(enabled);
-  savePrefs();
+  if (!savePrefs()) {
+    strcpy(reply, "Error: power saving changed for this boot but save failed");
+    return false;
+  }
   snprintf(reply, 160, "OK - powersaving %s", enabled ? "on" : "off");
   return true;
 }
@@ -7391,15 +7651,6 @@ void MyMesh::handleTerminalCommand(char* command) {
              || strcmp(command, "get powersaving") == 0) {
     terminalOutput().printf("  powersaving %s\r\n",
                   _prefs.powersaving_enabled ? "on" : "off");
-#if MESH_USB_LOGGING_AVAILABLE
-  } else if (strcmp(command, "get usb.logging") == 0) {
-    terminalOutput().printf(
-        "  usb.logging %s; port: %s%s\r\n",
-        mesh::isUsbLoggingEnabled() ? "on" : "off",
-        mesh::usbLoggingPortDescription(),
-        mesh::usbLoggingInterfaceRestartRequired()
-            ? " (reboot required to change USB interfaces)" : "");
-#endif
   } else if (strncmp(command, "powersaving ", 12) == 0) {
     char reply[160];
     applyAndSavePowerSaving(command + 12, reply);
@@ -7493,59 +7744,6 @@ void MyMesh::handleTerminalCommand(char* command) {
     }
   } else if (strncmp(command, "set ", 4) == 0) {
     const char* config = command + 4;
-#if MESH_USB_LOGGING_AVAILABLE
-    if (strncmp(config, "usb.logging", 11) == 0
-        && (config[11] == 0 || config[11] == ' '
-            || config[11] == '\t')) {
-      const char* value = config + 11;
-      while (*value == ' ' || *value == '\t') value++;
-      bool enabled = false;
-      bool reboot_if_needed = false;
-      bool valid = true;
-      if (strcmp(value, "on") == 0) {
-        enabled = true;
-      } else if (strcmp(value, "off") == 0) {
-        enabled = false;
-      } else if (strcmp(value, "on reboot") == 0) {
-        enabled = true;
-        reboot_if_needed = true;
-      } else if (strcmp(value, "off reboot") == 0) {
-        enabled = false;
-        reboot_if_needed = true;
-      } else {
-        valid = false;
-      }
-
-      if (!valid) {
-        terminalOutput().print(
-            "  ERROR: use set usb.logging <on|off> [reboot]\r\n");
-      } else {
-        _prefs.usb_logging_enabled = enabled ? 1 : 0;
-        mesh::setUsbLoggingEnabled(enabled);
-        if (!savePrefs()) {
-          terminalOutput().print(
-              "  ERROR: USB logging changed for this boot but save failed\r\n");
-        } else if (!mesh::saveUsbLoggingBootPreference(enabled)) {
-          terminalOutput().print(
-              "  ERROR: setting saved, but next-boot USB interface state could not be saved\r\n");
-        } else if (mesh::usbLoggingInterfaceRestartRequired()) {
-          if (reboot_if_needed) {
-            terminalOutput().printf(
-                "  OK - USB logging %s (saved); rebooting to change USB interfaces\r\n",
-                enabled ? "on" : "off");
-            _scheduled_reboot_at = futureMillis(1000);
-          } else {
-            terminalOutput().printf(
-                "  OK - USB logging %s (saved); reboot required to change USB interfaces\r\n",
-                enabled ? "on" : "off");
-          }
-        } else {
-          terminalOutput().printf("  OK - USB logging %s (saved)\r\n",
-                                  enabled ? "on" : "off");
-        }
-      }
-    } else
-#endif
     if (strncmp(config, "powersaving ", 12) == 0) {
       char reply[160];
       applyAndSavePowerSaving(config + 12, reply);

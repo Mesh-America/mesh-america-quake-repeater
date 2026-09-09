@@ -44,7 +44,7 @@ CLI rescue instead; wait for that startup window to finish before opening
 the inbox. Exiting a message preview and the WiFi setup page's hold action
 remain available immediately.
 
-The hidden [John reader](../tools/bible/README.md#on-device-reader), opened
+The hidden [John reader](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/bible/README.md#on-device-reader), opened
 by a long press on the radio page, uses the same button hint. It reserves the
 hint before pagination and resumes saved bookmarks at the page containing
 the same text, even after the available page size changes.

@@ -185,6 +185,8 @@ public:
 
   void getNodeSnapshot(WebConfigServer::NodeSnapshot& snapshot) override;
   void execCommand(char* cmd, char* reply) override;
+  bool supportsCliTerminal() const override { return true; }
+  void execAdminCommand(char* cmd, char* reply) override;
   void rebootNow() override;
   void onConfigBatchStart() override;
   void onConfigBatchEnd() override;
@@ -472,10 +474,12 @@ private:
   MQTTBridge* _mqtt_bridge;
   bool _mqtt_configured;
   bool _mqtt_started;
+  bool _mqtt_enabled = true;
 #endif
 #ifdef WITH_WEBCONFIG
   WebConfigServer* _webconfig;
   bool _wc_mqtt_dirty;
+  bool _wc_batch_active = false;
 #endif
   uint32_t pending_login;
   uint32_t pending_status;

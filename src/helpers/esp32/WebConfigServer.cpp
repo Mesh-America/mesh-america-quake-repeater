@@ -1303,7 +1303,7 @@ void WebConfigServer::drainBatch(uint32_t now) {
       }
       if (e.reply[0] == 0) strcpy(e.reply, "(no reply)");
       const bool set_admin_pwd = wcCliEchoesSecret(e.cmd);
-      if (set_admin_pwd) {
+      if (set_admin_pwd && WebConfigBatch::cliPasswordChanged(e.reply)) {
         strcpy(e.reply, "OK");
         _admin_pwd_set = true;
       }
@@ -1817,6 +1817,7 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     MQTTPrefs* obs = static_cast<MQTTPrefs*>(_mqtt_prefs);
     if (obs) {
     JsonObject mqtt = doc.createNestedObject("mqtt");
+    mqtt["enabled"] = node.mqtt_enabled;
     mqtt["origin"] = (const char*)obs->mqtt_origin;
     mqtt["iata"] = (const char*)obs->mqtt_iata;
     mqtt["status"] = (bool)obs->mqtt_status_enabled;

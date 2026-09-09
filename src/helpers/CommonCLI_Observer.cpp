@@ -182,6 +182,17 @@ static void formatMQTTPresetListReply(char* reply, size_t reply_size, int start)
 bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
   bool handled = true;
+  if (strncmp(config, "mqtt.enabled ", 13) == 0) {
+    const char* value = config + 13;
+    if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+      strcpy(reply, "Error: use set mqtt.enabled on|off");
+    } else {
+      char canonical[24];
+      snprintf(canonical, sizeof(canonical), "set bridge.enabled %s", value);
+      handleSetCmd(sender_timestamp, canonical, reply);
+    }
+    return true;
+  }
   const auto restart_observer_bridge = [this]() {
     return mesh::cli::restartBridgeIfEnabled(
         _prefs->bridge_enabled != 0,
@@ -871,6 +882,14 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
   bool handled = true;
+  if (strcmp(config, "mqtt.enabled") == 0) {
+    snprintf(reply, 160, "> %s", _prefs->bridge_enabled ? "on" : "off");
+    return true;
+  }
+  if (strcmp(config, "mqtt.running") == 0) {
+    snprintf(reply, 160, "> %s", _callbacks->isBridgeRunning() ? "on" : "off");
+    return true;
+  }
   if (memcmp(config, "snmp.community", 14) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.snmp_community);
   } else if (memcmp(config, "snmp", 4) == 0 && (config[4] == '\0' || config[4] == '\n' || config[4] == '\r')) {

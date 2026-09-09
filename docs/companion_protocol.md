@@ -309,7 +309,7 @@ WiFi mode `none` because coexistence requires modem sleep. A Full Companion
 using ESP-NOW as its primary mesh radio also rejects `max`, because maximum
 modem sleep can miss broadcasts that the access point cannot buffer. If an
 older image saved a conflicting value, the effective mode is capped to and
-reported as `min`. Device `powersaving` remains independent.
+reported as `min`. Device power saving remains independent.
 
 The SenseCAP Indicator Full profiles run exactly one secondary wireless
 Companion transport per boot. Their active-mode constraints are:

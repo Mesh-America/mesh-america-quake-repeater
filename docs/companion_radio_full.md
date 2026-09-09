@@ -200,9 +200,9 @@ Device power saving is separate from LoRa RXPS. It can be changed in WebConfig
 with the **Device power saving** switch or from the text terminal:
 
 ```text
-powersaving
-powersaving on
-powersaving off
+get powersaving
+set powersaving on
+set powersaving off
 ```
 
 On ESP32, WiFi modem power saving is a third independent setting. Select it in
@@ -221,10 +221,19 @@ start webconfig
 stop webconfig
 ```
 
-Full Companion does not expose the repeater/room-server browser CLI tab, so
-`get/set wifi.cli` explicitly report that the browser terminal is unavailable.
-Its complete Companion text terminal remains available over USB and TCP port
-5002; this does not reduce that command surface.
+ESP32 WiFi Companions with WebConfig, including Full Companion, expose a
+**CLI** tab at the node's LAN address. It defaults to on; use `get wifi.cli`,
+`set wifi.cli on`, or `set wifi.cli off`. Older builds that report the browser
+terminal as unavailable need a firmware update. The open setup AP does not
+expose this tab.
+
+The browser accepts Companion configuration commands, including `get powersaving`,
+`set usb.logging on|off`, WiFi controls, and MQTT settings. `set mqtt.enabled on|off` controls MQTT
+without erasing broker settings; `get mqtt.enabled`, `get mqtt.running`, and
+`get mqtt.status` distinguish the saved switch from current connections.
+`set logging.output off|usb|wifi|both` selects both outputs together. Chat, recipient
+selection, streaming output, and USB MOTA session commands use the complete
+Companion text terminal over USB or TCP port 5002.
 
 On the two primary-ESP-NOW Full targets, the same terminal also provides
 `get espnow.channel` and `set espnow.channel <1-13>`. A channel change is
@@ -270,7 +279,7 @@ after reboot.
 Companion firmware defaults device power saving to on. Version 1.17.1.2 also
 turns it on once when upgrading an older Companion preference file, including
 one written by the short-lived default-off regression. After that one-time
-migration, an explicit `powersaving off` selection remains persistent.
+migration, an explicit `set powersaving off` selection remains persistent.
 
 On ESP32, enabling it lowers the CPU clock to 80 MHz, enables idle yielding,
 and enables the configured GPS duty cycle. Disabling it restores the normal CPU
@@ -471,7 +480,7 @@ terminal with `+++MESHCORE-TERM-START`. For an ESP32 1.17.1.5 USB logging sessio
 run these separate commands:
 
 ```text
-powersaving off
+set powersaving off
 set usb.logging on
 ```
 

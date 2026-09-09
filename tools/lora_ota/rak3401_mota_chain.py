@@ -1673,7 +1673,7 @@ def read_target_transfer_settings(
 ) -> TargetTransferSettings:
     rxps = ota.read_remote_rxps(controller, target_name)
 
-    powersaving_reply = controller.remote_command(target_name, "powersaving")
+    powersaving_reply = controller.remote_command(target_name, "get powersaving")
     powersaving_match = re.fullmatch(
         r"\s*>?\s*(on|off)\s*",
         powersaving_reply,
@@ -1847,7 +1847,7 @@ def enforce_transfer_guardrails(
 ) -> None:
     current = read_target_transfer_settings(controller, target_name)
     if current.powersaving_enabled:
-        reply = controller.remote_command(target_name, "powersaving off")
+        reply = controller.remote_command(target_name, "set powersaving off")
         if re.search(r"\boff\b", reply, re.IGNORECASE) is None:
             raise ota.OtaError(f"target did not disable CPU power saving: {reply}")
     rxps_requested = saved.rxps_enabled if saved is not None else current.rxps_enabled
@@ -1986,7 +1986,7 @@ def restore_transfer_settings(
 
     if verified.powersaving_enabled != saved.powersaving_enabled:
         desired = "on" if saved.powersaving_enabled else "off"
-        reply = controller.remote_command(target_name, f"powersaving {desired}")
+        reply = controller.remote_command(target_name, f"set powersaving {desired}")
         if re.search(rf"\b{desired}\b", reply, re.IGNORECASE) is None:
             raise ota.OtaError(f"target did not restore CPU power saving: {reply}")
 

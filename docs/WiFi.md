@@ -65,7 +65,7 @@ On infrastructure observer builds, MQTT publication and LoRa repetition are sepa
 
 - `set repeat on|off` controls whether an observer repeats eligible LoRa
   packets;
-- `set bridge.enabled on|off` starts or stops the MQTT bridge;
+- `set mqtt.enabled on|off` starts or stops MQTT and preserves broker settings;
 - `set mqtt.rx on|off` controls uplinking of received packets;
 - `set mqtt.tx off|advert|on` controls uplinking of transmitted packets.
 
@@ -158,7 +158,7 @@ get wifi.ssid
 get wifi.status
 get wifi.powersave
 get wifi.cli
-get bridge.enabled
+get mqtt.enabled
 get mqtt.rx
 get mqtt.tx
 get mqtt.status
@@ -177,7 +177,7 @@ This uses the LAN when WiFi is connected. To force the setup AP, the MQTT bridge
 must release WiFi first:
 
 ```text
-set bridge.enabled off
+set mqtt.enabled off
 start webconfig ap
 ```
 
@@ -186,7 +186,7 @@ restart the bridge:
 
 ```text
 stop webconfig
-set bridge.enabled on
+set mqtt.enabled on
 ```
 
 Current MQTT observer artifacts use the expanded FULL partition profile so
@@ -317,7 +317,7 @@ tracking prevents an individual bridge from immediately echoing a packet back.
 If the configured network remains unavailable for two minutes, the companion
 opens its setup AP so the credentials can be repaired. It continues retrying
 the saved network. WiFi modem sleep has its own persisted `wifi.powersave`
-setting and is independent of the Companion device `powersaving` setting. The
+setting and is independent of the Companion device power-saving setting. The
 WiFi card in Companion WebConfig exposes `none`, `min`, and `max`. Fresh
 Cascade-profile builds select `min`; target-default builds select `none`.
 A saved setting takes precedence after an upgrade.
@@ -425,10 +425,10 @@ waits for that connection rather than creating a second one. Stopping MQTT does
 not disable the TCP companion service.
 
 MQTT-capable Full Companions also combine these services. The WebConfig page
-contains MQTT settings; Full Companion has a USB/TCP text terminal, but does
-not expose the infrastructure `mqtt.*`, `bridge.enabled`, or `logging.output`
-commands there. Select `none` for every broker slot and save to disable MQTT;
-restore the desired presets/settings and save to enable it.
+contains MQTT settings, and the USB/TCP and browser terminals accept the same
+`mqtt.*` settings as infrastructure for shared features. Use
+`set mqtt.enabled on|off` to control MQTT without discarding broker settings.
+Use `set logging.output off|usb|wifi|both` to select both outputs together.
 
 ## WebConfig without MQTT
 
@@ -592,13 +592,13 @@ WiFi only, not LoRa transmit power.
 
 `get wifi.status`, `get wifi.ssid`, `get wifi.powersave`, and `get wifi.cli`
 are available on MQTT observers and on FULL non-MQTT repeater/room-server
-builds with WebConfig. ESP32 WiFi Companions expose the first three commands,
-credential setters, and `start webconfig [ap]` through their USB text terminal;
-`get/set wifi.cli` explicitly report that the repeater/room-server browser CLI
-is unavailable. Full Companion instead exposes its complete role-specific text
-terminal on TCP port 5002.
-MQTT commands such as `get mqtt.status` and `set mqtt1.preset ...` still require
-an MQTT observer target. Unknown settings return `Error: unknown setting:
+builds with WebConfig. ESP32 WiFi Companions also expose all four commands,
+credential setters, and `start webconfig [ap]` through their USB text terminal.
+Their browser CLI defaults to on in station/LAN mode.
+Full Companion also exposes its complete role-specific text terminal on TCP
+port 5002, including chat and streaming commands.
+MQTT commands such as `get mqtt.status` and `set mqtt1.preset ...` require
+MQTT code in the image, on Companion or infrastructure. Unknown settings return `Error: unknown setting:
 <name>`. Older firmware that used the discontinued compact CLI can instead
 report `Unsupported in this firmware` when a command was cut for space.
 
@@ -620,7 +620,7 @@ For an MQTT observer:
 
 ```text
 get wifi.status
-get bridge.enabled
+get mqtt.enabled
 get mqtt.status
 get mqtt1.diag
 get mqtt2.diag
@@ -644,5 +644,6 @@ setup AP. Full Companion targets whose primary mesh radio is ESP-NOW use
 b/g/n+LR instead and keep the setup AP, infrastructure station, and mesh on the
 persisted `espnow.channel` (channel 1 by default). Their configured 2.4 GHz
 router and every other primary ESP-NOW node must use that same channel.
-On MQTT-capable Companions, inspect MQTT status in WebConfig; the infrastructure
-MQTT text diagnostic commands above are not Companion terminal commands.
+MQTT-capable Companions also accept `get mqtt.enabled`, `get mqtt.running`,
+and `get mqtt.status` in their USB/TCP and browser terminals. Extended slot
+and NTP diagnostics remain infrastructure features.

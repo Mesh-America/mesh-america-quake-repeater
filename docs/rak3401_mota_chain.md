@@ -359,7 +359,7 @@ ota self
 get bootloader.ver
 get system.watchdog
 get radio.rxps
-powersaving
+get powersaving
 get rxdelay
 get af
 ota config
@@ -381,7 +381,7 @@ For a direct bench link, apply these temporary transfer guardrails to the RAK
 after every bridge reboot:
 
 ```text
-powersaving off
+set powersaving off
 set radio.rxps off
 set rxdelay 0
 ota config hops 0
@@ -394,7 +394,7 @@ firmware's saved airtime wait during this bounded maintenance window. Record
 firmware grants the bounded TempRadio transfer budget without overwriting the
 saved airtime factor.
 
-`powersaving off` is an isolation guardrail, not the fix for the observed
+`set powersaving off` is an isolation guardrail, not the fix for the observed
 failure. The actual source failure was an oversized USB CDC reply; current
 firmware splits those reads. Some historical bridge builds may report RXPS as
 unsupported while already operating continuously. Verify the reported state
@@ -618,7 +618,7 @@ the same RXPS policy as the generic runner.
 The mixed historical chain therefore verifies `radio.rxps off` after every
 bridge reboot; a future all-v1.17.1.5-or-newer SF5/BW250 chain would instead
 keep RXPS on under the qualified level-8/preamble-64 boundary. It also verifies
-`powersaving off` and `rxdelay 0`, plus `af 0` when
+`set powersaving off` and `rxdelay 0`, plus `af 0` when
 `--legacy-full-airtime` was explicitly selected. It restores every original
 value only after the exact endpoint is proven. An interrupted run deliberately
 leaves those transfer guardrails active; rerun the same command with the same

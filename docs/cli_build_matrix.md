@@ -75,7 +75,7 @@ and TLora MQTT profiles to 50. Check the artifact capability manifest and
 | FULL ESP32 USB + WiFi | Uses the matching MQTT target with packet logging on, verbose debug off, and the complete command surface supported by that role and hardware. `get/set logging.output off\|usb\|wifi\|both` selects and persists the active output paths. |
 | FULL ESP32 logging fallback | Uses the matching non-MQTT target only when no WiFi MQTT sibling exists, with debug and packet logging enabled and the complete command surface supported by that role and hardware. Its persistent USB gate also covers output-off operation, avoiding a second FULL ESP-NOW image. |
 | nRF52 dual-CDC Full Companion | Fresh installs expose only interface `00`; it starts as an ASCII terminal and automatically hands a complete `<` frame to framed Companion. The same interface also carries exclusive serial mOTA traffic. Enabling logging and rebooting adds interface `02` for plaintext logs. BLE and source-only LoRa OTA remain available. `get/set usb.logging` persistently controls whether the logging interface is present. |
-| ESP32 single-TTY Full Companion | Every ESP32 Full image starts with the ASCII terminal on its one USB TTY and automatically hands a complete `<` frame to framed Companion. On 1.17.1.5, run `powersaving off` first. `set usb.logging on` switches that TTY to an input-capable plaintext logging terminal and makes framed Companion unavailable on USB; `set usb.logging off` stops logging but leaves the TTY in normal ASCII mode. The terminal stop token or a valid incoming framed probe then performs the ordinary switch to Binary Companion. A saved logging-on setting starts directly in that logging terminal and disables automatic frame detection. BLE, WiFi, and source-only LoRa OTA remain available. ESP32 Full uses Arduino-ESP32 2.x where supported; RC32 and ESP32-C6 keep their board-required Arduino 3.x platform but still expose only one TTY. |
+| ESP32 single-TTY Full Companion | Every ESP32 Full image starts with the ASCII terminal on its one USB TTY and automatically hands a complete `<` frame to framed Companion. On 1.17.1.5, run `set powersaving off` first. `set usb.logging on` switches that TTY to an input-capable plaintext logging terminal and makes framed Companion unavailable on USB; `set usb.logging off` stops logging but leaves the TTY in normal ASCII mode. The terminal stop token or a valid incoming framed probe then performs the ordinary switch to Binary Companion. A saved logging-on setting starts directly in that logging terminal and disables automatic frame detection. BLE, WiFi, and source-only LoRa OTA remain available. ESP32 Full uses Arduino-ESP32 2.x where supported; RC32 and ESP32-C6 keep their board-required Arduino 3.x platform but still expose only one TTY. |
 | `no_external_sensors` | Trims selected optional environmental/ranging drivers and their settings; it does not remove generic I2C, core repeater discovery, routing, or runtime RS-232 commands. RAK3401 and RAK4631 profiles retain the four common INA I2C voltage/current monitors. GPS-preserving RAK nRF52 OTA profiles retain their GPS commands and provider; RAK4631 defaults the bridge to UART 2 because RAK12501/L76K GPS uses UART 1. Legacy target suffixes remain stable for OTA identity compatibility. |
 
 The four retained INA drivers are entries in the optional environmental-sensor
@@ -99,7 +99,7 @@ Bulk and release-matrix commands omit legacy names whose behavior is already
 available from a canonical image:
 
 - Companion `_ps` names are replaced by the ordinary Companion image plus the
-  persisted `powersaving on|off` setting.
+  persisted `set powersaving on|off` setting.
 - Companion `_femoff` names are replaced by the matching controllable-FEM
   image plus `radio.fem.rxgain on|off`. The old names remain explicit build
   targets for compatibility.
@@ -194,9 +194,10 @@ does not exist on that target:
   commands. ESP32 WiFi Companions with WebConfig expose WiFi credentials,
   connection status, WebConfig, and power-save controls from their USB
   text terminal as well as power saving through WebConfig and the binary
-  protocol. The browser CLI tab and `wifi.cli` setting are repeater/room-server
-  features. Full Companion instead exposes its complete role-specific text
-  terminal on TCP port 5002.
+  protocol. All ESP32 WiFi Companions with WebConfig also expose the browser
+  CLI tab and `wifi.cli` switch, enabled by default in station/LAN mode. Older
+  Companion firmware needs an update to support it. Full Companion additionally
+  exposes its complete chat and streaming text terminal on TCP port 5002.
 - MQTT commands require an MQTT observer target.
 - `discover.scopes` requires an MQTT observer with compiled neighbor support;
   it does not independently require PSRAM or the FULL parser.
