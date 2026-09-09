@@ -32,7 +32,7 @@ Readers without the button hint retain the y=14 origin and y=22 message text.
 
 On V4 and other single-button builds using this reader, the home screen says
 `hold button: inbox`. Hold the user button for about 1.2 seconds to open it.
-The bottom of the reader shows `<- 2tap  1tap ->  long press:exit`: double tap
+The bottom of the reader shows `<- 2 tap  1 tap ->  long press: exit`: double tap
 the button for the previous message, tap once for the next, and hold to
 return home. Advancing past the last message also returns home. The hint
 appears even when the inbox is empty and reflows onto additional lines on

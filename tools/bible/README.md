@@ -28,7 +28,7 @@ reader from the radio-settings page:
   while opening or closing the reader.
 
 The header shows the reference and part count. Single-button builds show
-`<- 2tap  1tap ->  long press:exit` at the bottom, matching the message reader.
+`<- 2 tap  1 tap ->  long press: exit` at the bottom, matching the message reader.
 These are taps of the user button. Narrower displays shorten or split the
 hint across lines; touch/joystick builds keep their own controls. The entry
 gesture stays hidden on the radio page. The footer has reserved space in the

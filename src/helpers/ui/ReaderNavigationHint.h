@@ -17,21 +17,21 @@ struct ButtonReaderHintLayout {
 inline ButtonReaderHintLayout makeButtonReaderHintLayout(
     DisplayDriver& text, int line_height, int bottom) {
   ButtonReaderHintLayout layout = {
-      0, line_height, 1, {"<- 2tap  1tap ->  long press:exit", nullptr, nullptr}};
+      0, line_height, 1, {"<- 2 tap  1 tap ->  long press: exit", nullptr, nullptr}};
   if (text.getTextWidth(layout.lines[0]) > text.width()
-      && text.getTextWidth("<-2tap 1tap-> hold:exit") <= text.width()) {
-    layout.lines[0] = "<-2tap 1tap-> hold:exit";
+      && text.getTextWidth("<-2 tap 1 tap-> hold: exit") <= text.width()) {
+    layout.lines[0] = "<-2 tap 1 tap-> hold: exit";
   }
   if (text.getTextWidth(layout.lines[0]) > text.width()) {
     layout.line_count = 2;
-    layout.lines[0] = "<- 2tap  1tap ->";
-    layout.lines[1] = "long press:exit";
+    layout.lines[0] = "<- 2 tap  1 tap ->";
+    layout.lines[1] = "long press: exit";
     if (text.getTextWidth(layout.lines[0]) > text.width()
         || text.getTextWidth(layout.lines[1]) > text.width()) {
       layout.line_count = 3;
-      layout.lines[0] = "<- 2tap";
-      layout.lines[1] = "1tap ->";
-      layout.lines[2] = "hold:exit";
+      layout.lines[0] = "<- 2 tap";
+      layout.lines[1] = "1 tap ->";
+      layout.lines[2] = "hold: exit";
     }
   }
   layout.top = bottom - layout.line_count * line_height;
