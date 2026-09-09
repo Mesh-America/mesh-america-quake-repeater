@@ -94,7 +94,7 @@ class JohnReaderScreen : public UIScreen {
       if (!draw) return;
       char label[32], progress[16];
       const Reference ref = referenceAt(pos.verse);
-      snprintf(label, sizeof(label), "John %u:%u WEB", ref.chapter, ref.verse);
+      snprintf(label, sizeof(label), "John %u:%u", ref.chapter, ref.verse);
       snprintf(progress, sizeof(progress), "%u/%u", page.part, page.parts);
       const int progress_width = _display->getTextWidth(progress);
       if (stacked_header || _display->getTextWidth(label) > width - progress_width - 4)
