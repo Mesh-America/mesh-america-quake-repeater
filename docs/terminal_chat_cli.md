@@ -21,7 +21,10 @@ to <contact-name-or-prefix>
 ```
 
 Replace the placeholders; a bare public key is not a contact card. Import is
-queued for validation, so use `list` to confirm the contact appears. `to`
+queued for signature validation, so use `list` to confirm the contact appears.
+Explicit import works with manual contact addition enabled and bypasses the
+automatic discovery type/hop filters. It still respects contact storage limits;
+a full contact table follows the configured overwrite policy. `to`
 remains selected for subsequent `send`, `path`, `login`, and `cmd` commands
 within this terminal session.
 

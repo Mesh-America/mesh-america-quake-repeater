@@ -222,7 +222,10 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
 
   bool is_new = false; // true = not in contacts[], false = exists in contacts[]
   if (from == NULL) {
-    if (!shouldAutoAddContactType(parser.getType())) {
+    // An explicit local import already passed the normal advert signature
+    // check. Discovery filters apply only to packets received over the air.
+    const bool explicit_import = packet == _pendingLoopback;
+    if (!explicit_import && !shouldAutoAddContactType(parser.getType())) {
       ContactInfo ci;
       populateContactFromAdvert(ci, id, parser, timestamp);
       onDiscoveredContact(ci, true, packet->path_len, packet->path);       // let UI know
@@ -231,7 +234,7 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
 
     // check hop limit for new contacts (0 = no limit, 1 = direct (0 hops), N = up to N-1 hops)
     uint8_t max_hops = getAutoAddMaxHops();
-    if (max_hops > 0 && packet->getPathHashCount() >= max_hops) {
+    if (!explicit_import && max_hops > 0 && packet->getPathHashCount() >= max_hops) {
       ContactInfo ci;
       populateContactFromAdvert(ci, id, parser, timestamp);
       onDiscoveredContact(ci, true, packet->path_len, packet->path);       // let UI know
@@ -722,9 +725,12 @@ uint8_t BaseChatMesh::exportContact(const ContactInfo& contact, uint8_t dest_buf
 }
 
 bool BaseChatMesh::importContact(const uint8_t src_buf[], uint8_t len) {
+  // Do not replace an import awaiting validation or lose its packet allocation.
+  if (_pendingLoopback != NULL || !canMutateContacts()) return false;
   auto pkt = obtainNewPacket();
   if (pkt) {
     if (pkt->readFrom(src_buf, len) && pkt->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
+      pkt->header &= ~PH_ROUTE_MASK;
       pkt->header |= ROUTE_TYPE_FLOOD;   // simulate it being received flood-mode
       getTables()->clear(pkt);  // remove packet hash from table, so we can receive/process it again
       _pendingLoopback = pkt;  // loop-back, as if received over radio
