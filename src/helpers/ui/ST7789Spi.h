@@ -188,7 +188,7 @@ class ST7789Spi : public OLEDDisplay {
 
           for (y = minBoundY; y <= maxBoundY; y++)
           {
-            for(int temp = 0; temp<8;temp++)
+            for(int temp = 0; temp<8 && y*8+temp<displayHeight;temp++)
             {
               //setAddrWindow(minBoundX,y*8+temp,maxBoundX-minBoundX+1,1);
               setAddrWindow(minBoundX,y*8+temp,maxBoundX-minBoundX+1,1);
@@ -213,14 +213,14 @@ class ST7789Spi : public OLEDDisplay {
      #else
 		  set_CS(LOW);
 		  _spi->beginTransaction(_spiSettings);
-		uint8_t x, y;
+		uint16_t x, y;
           for (y = 0; y < _buffheight; y++)
           {
-            for(int temp = 0; temp<8;temp++)
+            for(int temp = 0; temp<8 && y*8+temp<displayHeight;temp++)
             {
               //setAddrWindow(minBoundX,y*8+temp,maxBoundX-minBoundX+1,1);
               //setAddrWindow(minBoundX,y*8+temp,maxBoundX-minBoundX+1,1);
-              setAddrWindow(y*8+temp,0,1,displayWidth);
+              setAddrWindow(0,y*8+temp,displayWidth,1);
               uint32_t const pixbufcount = displayWidth;
               uint16_t *pixbuf = (uint16_t *)rtos_malloc(2 * pixbufcount);
               for (x = 0; x < displayWidth; x++)

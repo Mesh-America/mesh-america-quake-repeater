@@ -4675,7 +4675,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #endif
   } else if (configKeyEquals(config, "bootloader.ver")) {
   #ifdef NRF52_PLATFORM
-      char ver[32];
+      char ver[128]; // preserve preview/fork/build suffixes without truncation
       if (_board->getBootloaderVersion(ver, sizeof(ver))) {
           sprintf(reply, "> %s", ver);
       } else {

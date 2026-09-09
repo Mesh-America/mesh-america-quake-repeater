@@ -7,6 +7,10 @@
 #include <Adafruit_ST7789.h>
 #include <helpers/RefCountedDigitalPin.h>
 
+#ifndef DISPLAY_ROTATION
+  #define DISPLAY_ROTATION 3
+#endif
+
 class ST7789LCDDisplay : public DisplayDriver {
   #if defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
     SPIClass displaySPI;
@@ -18,26 +22,21 @@ class ST7789LCDDisplay : public DisplayDriver {
   uint16_t _color;
   RefCountedDigitalPin* _peripher_power;
 
-#ifdef ST7789_PORTRAIT_PROFILE
-  uint8_t _logical_text_size = 1;
-
-  uint16_t measureTextWidth(const char* str, uint8_t physical_scale);
-  uint8_t selectTextScale(const char* str, uint16_t available_width);
-  void printFitted(const char* str, uint16_t available_width);
-#endif
+  static constexpr int kWidth = (DISPLAY_ROTATION & 1) ? 320 : 240;
+  static constexpr int kHeight = (DISPLAY_ROTATION & 1) ? 240 : 320;
 
   uint8_t effectiveRotation() const;
   bool i2c_probe(TwoWire& wire, uint8_t addr);
 public:
 #ifdef USE_PIN_TFT
-  ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64), 
+  ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(kWidth, kHeight),
       display(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_SDA, PIN_TFT_SCL, PIN_TFT_RST),
       _peripher_power(peripher_power)
   {
     _isOn = false;
   }
 #elif defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
-  ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),
+  ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(kWidth, kHeight),
       displaySPI(HSPI),
       display(&displaySPI, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
       _peripher_power(peripher_power)
@@ -45,7 +44,7 @@ public:
     _isOn = false;
   }
 #else
-  ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64), 
+  ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(kWidth, kHeight),
       display(&SPI, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
       _peripher_power(peripher_power)
   {

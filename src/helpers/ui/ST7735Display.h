@@ -6,20 +6,22 @@
 #include <helpers/RefCountedDigitalPin.h>
 
 class ST7735Display : public DisplayDriver {
+  // One UI coordinate is one pixel on every 160x80 ST7735 panel.
+  static constexpr int kLogicalWidth = 160, kLogicalHeight = 80;
   bool _isOn;
   RefCountedDigitalPin* _peripher_power;
 
   bool i2c_probe(TwoWire& wire, uint8_t addr);
 public:
 #ifdef USE_PIN_TFT
-  ST7735Display(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64), 
+  ST7735Display(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(kLogicalWidth, kLogicalHeight),
     //  display(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_SDA, PIN_TFT_SCL, PIN_TFT_RST),
       _peripher_power(peripher_power)
   {
     _isOn = false;
   }
 #else
-  ST7735Display(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),
+  ST7735Display(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(kLogicalWidth, kLogicalHeight),
     //  display(&SPI1, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
       _peripher_power(peripher_power)
   {

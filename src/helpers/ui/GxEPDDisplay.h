@@ -22,21 +22,26 @@
   #define EINK_MAX_PARTIAL_REFRESH -1
 #endif
 
+#ifndef DISPLAY_ROTATION
+  #define DISPLAY_ROTATION 3
+#endif
+
 class GxEPDDisplay : public DisplayDriver {
 
 #if defined(EINK_DISPLAY_MODEL)
   GxEPD2_BW<EINK_DISPLAY_MODEL, EINK_DISPLAY_MODEL::HEIGHT> display;
-  const float scale_x  = EINK_SCALE_X; 
-  const float scale_y  = EINK_SCALE_Y;
-  const float offset_x = EINK_X_OFFSET;
-  const float offset_y = EINK_Y_OFFSET;
 #else
   GxEPD2_BW<GxEPD2_150_BN, 200> display;
-  const float scale_x  = 1.5625f;
-  const float scale_y  = 1.5625f;
-  const float offset_x = 0;
-  const float offset_y = 10;
 #endif
+#if defined(EINK_DISPLAY_MODEL)
+  using Panel = EINK_DISPLAY_MODEL;
+#else
+  using Panel = GxEPD2_150_BN;
+#endif
+  static constexpr int kWidth = (DISPLAY_ROTATION & 1) ? Panel::HEIGHT : Panel::WIDTH;
+  static constexpr int kHeight = (DISPLAY_ROTATION & 1) ? Panel::WIDTH : Panel::HEIGHT;
+  int _text_ascent = 13;
+  int _line_height = 22;
   bool _init = false;
   bool _isOn = false;
   uint16_t _curr_color;
@@ -47,9 +52,9 @@ class GxEPDDisplay : public DisplayDriver {
 
 public:
 #if defined(EINK_DISPLAY_MODEL)
-  GxEPDDisplay() : DisplayDriver(128, 128), display(EINK_DISPLAY_MODEL(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_BUSY)) {}
+  GxEPDDisplay() : DisplayDriver(kWidth, kHeight), display(EINK_DISPLAY_MODEL(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_BUSY)) {}
 #else
-  GxEPDDisplay() : DisplayDriver(128, 128), display(GxEPD2_150_BN(DISP_CS, DISP_DC, DISP_RST, DISP_BUSY)) {}
+  GxEPDDisplay() : DisplayDriver(kWidth, kHeight), display(GxEPD2_150_BN(DISP_CS, DISP_DC, DISP_RST, DISP_BUSY)) {}
 #endif
 
   bool begin();
@@ -63,6 +68,7 @@ public:
   void clear() override;
   void startFrame(ColorVal bkg = UIColor::window_bkg) override;
   void setTextSize(int sz) override;
+  int textLineHeight() override { return _line_height; }
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char* str) override;

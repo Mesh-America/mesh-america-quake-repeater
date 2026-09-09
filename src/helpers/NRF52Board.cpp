@@ -1,6 +1,7 @@
 #if defined(NRF52_PLATFORM)
 #include "NRF52Board.h"
 #include "PowerManagementUtils.h"
+#include "Nrf52BootloaderVersion.h"
 #include <target.h>
 #ifdef USER_GPIO_CONTROL
 #include "UserGpioPinPolicy.h"
@@ -598,22 +599,15 @@ void NRF52Board::powerOff() {
 }
 
 bool NRF52Board::getBootloaderVersion(char* out, size_t max_len) {
-    static const char BOOTLOADER_MARKER[] = "UF2 Bootloader ";
-    const uint8_t* flash = (const uint8_t*)0x000FB000; // earliest known info.txt location is 0xFB90B, latest is 0xFCC4B
-
-    for (uint32_t i = 0; i < 0x3000 - (sizeof(BOOTLOADER_MARKER) - 1); i++) {
-        if (memcmp(&flash[i], BOOTLOADER_MARKER, sizeof(BOOTLOADER_MARKER) - 1) == 0) {
-            const char* ver = (const char*)&flash[i + sizeof(BOOTLOADER_MARKER) - 1];
-            size_t len = 0;
-            while (len < max_len - 1 && ver[len] != '\0' && ver[len] != ' ' && ver[len] != '\n' && ver[len] != '\r') {
-                out[len] = ver[len];
-                len++;
-            }
-            out[len] = '\0';
-            return len > 0; // bootloader string is non-empty
-        }
-    }
-    return false;
+  if (!out || max_len == 0u) return false;
+  out[0] = 0;
+  mesh::Nrf52BootloaderRegion region;
+  const uint32_t mbr_start = *(const volatile uint32_t*)(uintptr_t)0xFF8u;
+  if (!mesh::nrf52BootloaderRegion(NRF_FICR->CODEPAGESIZE, NRF_FICR->CODESIZE,
+                                  mbr_start, NRF_UICR->NRFFW[0], region)) return false;
+  return mesh::nrf52BootloaderVersion((const uint8_t*)(uintptr_t)region.start,
+                                    region.end - region.start, region.start,
+                                    bootloaderVersion, out, max_len);
 }
 
 bool NRF52Board::startOTAUpdate(const char *id, char reply[], bool force_ap) {

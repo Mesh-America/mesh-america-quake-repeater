@@ -213,8 +213,10 @@ public key, or unique hexadecimal key prefix. The runner reads the controller's
 existing contact table and binds each selection to a full key before remote
 commands, so emoji names need not be typed and later name changes cannot
 redirect the run. Duplicate names, ambiguous prefixes, or the same radio under
-different participant aliases stop with an actionable error. Missing contacts
-must first be imported or discovered; a key alone does not create a contact.
+different participant aliases stop with an actionable error. Missing destination
+and relay contacts must first be imported or discovered. A missing connected
+source can be imported with the confirmation prompt below; a key alone does not
+create a contact.
 
 For a separate source with a managed USB/TCP console, automatic source selection
 reads the physical source's full public key and matches it in the controller's
@@ -236,9 +238,34 @@ the runner does not guess a key from the node name or skip the identity check.
 Source selection does not require the source's current name to match an
 old saved advert, and duplicate/emoji names cannot redirect this lookup. An
 explicit `--source-contact` must identify that same physical source. If its key
-really is missing, import the source contact or advertise/discover it on the
-normal channel first; the normal/TempRadio on-air ACK checks still require the
-contact. The script does not silently create contacts or skip those checks.
+is missing, an interactive run offers:
+
+```text
+Add the connected OTA source to this controller's contacts? [y/N]
+```
+
+This works through both the shell and PowerShell launchers. The runner reads the
+source's existing `card` command over USB/TCP, checks the full key in its contact
+card against the connected source, and shows its name/key before asking. On
+approval it rechecks the source/controller identities and live contact table,
+then uses MeshCore's existing `import_contact` API. Signature validation remains
+with the controller's normal advert importer. For manual-add controllers it can
+approve only that exact source through `add_pending`; it does not enable general
+auto-add. A fresh `reload_contacts` must confirm the full source key before OTA
+continues. No LoRa advertisement or firmware update is required for this import.
+
+The default answer is **No**; `--yes` does not approve adding a contact. A
+noninteractive run stops with instructions to rerun in a terminal. Unsupported
+`card` firmware, malformed/mismatched cards, and unverified imports stop with
+manual-import/discovery guidance. To protect existing contacts, the controller's
+overwrite-oldest policy must be verifiably disabled; otherwise the runner stops
+and shows how to disable that bit without changing other auto-add flags. It does
+not change this policy itself. A full table or rejected import cannot be worked
+around by deleting another contact; an uncertain import is not automatically
+retried. An approved contact remains on the controller for subsequent runs.
+
+The normal/TempRadio on-air ACK checks still run; adding a contact does not prove
+radio reachability or skip those checks.
 When the controller and source are the same TCP Full Companion, use the verified
 `--source-shares-controller` topology; it does not need a contact for itself.
 
@@ -408,14 +435,30 @@ ota self
 ota stats
 ```
 
-The script uses `get bootloader.ver` to distinguish ESP32 from nRF52 and, for
-nRF52, report the installed bootloader version. It then requires `ota self` to
+The script uses `get bootloader.ver` as an optional platform/version hint, not
+as an install gate. It makes one attempt without an interactive retry loop.
+`unknown`, an unsupported/missing command, an unrecognized reply, or a lost reply
+produces a warning and does not by itself block the run. In particular, older
+MeshCore firmware can report `unknown` for the installed signed OTAFIX 2.4.6
+MeshTower V2 SD image because it omits the legacy UF2 version string. Both the
+shell and PowerShell launchers use this same behavior; no application or
+Companion firmware update is required for this host-side workaround. The runner
+also accepts the new `OTAFIX2.4.6` and explicitly labelled `0.11.0 (base)` formats.
+
+The runner still requires `ota self` to
 report `bootloader: apply OK`, `bootloader: QSPI apply OK`, or
 `bootloader: SD apply OK` and checks the
 reported bootloader ABI and codec mask against the selected package. If the
 version command is unavailable on older firmware, the script warns and falls
 back to the legacy `ota self` platform marker. If an nRF52 bootloader lacks
 the required capabilities, install the exact-board OTAFIX bootloader first.
+Positive nRF52 capability markers take precedence over a generic unsupported
+getter response, so it cannot silently skip nRF52 safety checks. Bootloader
+packages still require the independently checked `ota bootloader status` board,
+target, ABI, codec and storage identity; missing version text never bypasses
+package signature checks or the explicit bootloader-install workflow. The
+separate hardware-qualified `rak3401_mota_chain.py` retains its exact deployed
+version restriction; it is not a general OTAFIX 2.4.6 update runner.
 Current firmware also reports `maxblk:2048` near the front of both OTA replies.
 The runner treats a missing marker as the deployed 1 KiB receive limit, rejects
 a ready 2 KiB package for such a target before transfer, and passes the live

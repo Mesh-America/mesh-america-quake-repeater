@@ -19,8 +19,9 @@
 
 // These drivers back physically compact panels where the message-channel
 // selector consumes too much of the useful text area. Do not infer this from
-// DisplayDriver::height(): larger scaled TFTs intentionally expose the same
-// 128x64 logical canvas.
+// DisplayDriver::height(): the 160x80 ST7735 is still physically compact.
+// This footer policy is separate from the runtime small-font cutoff (<160px
+// on both axes); retaining the flag also retains the full message buffer.
 #if defined(DISPLAY_CLASS) \
     && MESHCORE_DISPLAY_TOKEN_JOIN(MESHCORE_SMALL_DISPLAY_CLASS_, DISPLAY_CLASS)
   #define MESHCORE_HAS_SMALL_DISPLAY 1

@@ -1,0 +1,135 @@
+#pragma once
+#include <helpers/CompanionJohn.h>
+#include <helpers/bible/JohnReader.h>
+#if UI_SMALL_MESSAGE_FONT
+#include <helpers/ui/SmallMessageText.h>
+#endif
+
+// Included by UITask.cpp after the task and MyMesh declarations. Only a small
+// cursor/checkpoint object persists; the 2 KiB decode buffer is on demand.
+class JohnReaderScreen : public UIScreen {
+  UITask* _task;
+  DisplayDriver* _display;
+  mesh::bible::ReaderBookmark _bookmark;
+  uint32_t _retry_at = 0;
+  bool _loaded = false;
+
+  __attribute__((noinline)) void process(int direction, bool draw) {
+    using namespace mesh::bible;
+    char scratch[kBlockSize];
+    const char* text = nullptr;
+    Position pos = _bookmark.position();
+    _display->setCompactText(false);
+    _display->setTextSize(1);
+    const int width = _display->width();
+    const int header_height = _display->textLineHeight();
+    // Narrow/rotated panels need separate reference and progress lines.
+    const bool stacked_header = width < _display->getTextWidth("88:88")
+        + _display->getTextWidth("88/88") + 4;
+    const int top = header_height * (stacked_header ? 2 : 1) + 2;
+#if UI_SMALL_MESSAGE_FONT
+    // Share message font selection and metrics, including rotated/tiny panels.
+    mesh::ui::SmallMessageText compact(*_display);
+    const bool small = _display->useSmallMessageFont();
+    DisplayDriver& body = small ? static_cast<DisplayDriver&>(compact) : *_display;
+    const int line_height = small ? compact.lineHeight() : header_height;
+    int rows = small ? compact.lineCount(top) : (_display->height() - top) / line_height;
+#else
+    DisplayDriver& body = *_display;
+    const int line_height = header_height;
+    int rows = (_display->height() - top) / line_height;
+#endif
+    if (rows < 1) rows = 1;
+    auto measure = [&body](const char* line) {
+      char filtered[kReaderLineBytes];
+      body.translateUTF8ToBlocks(filtered, line, sizeof(filtered));
+      return body.getTextWidth(filtered);
+    };
+
+    // At most two lookups: the current verse, then its adjacent verse when
+    // navigation crosses a boundary. No recursive decode or second buffer.
+    for (int pass = 0; pass < 2; ++pass) {
+      const LookupResult result = mesh::readJohnVerse(
+          referenceAt(pos.verse), scratch, sizeof(scratch), text);
+      if (result != LookupResult::Found) {
+        if (draw) {
+          _display->setColor(UIColor::warning_txt);
+          _display->setCursor(0, top);
+          _display->print("John unavailable");
+        } else _task->showAlert("John data error", 1500);
+        return;
+      }
+      memmove(scratch, text, strlen(text) + 1);
+      const ReaderPage page = readerPage(scratch, pos.offset, width, rows, measure);
+      pos.offset = page.start; // clamp stale bookmarks after a layout change
+      if (direction > 0) {
+        if (scratch[page.next]) pos.offset = page.next;
+        else if (pos.verse + 1 < kVerseCount) { ++pos.verse; pos.offset = 0; }
+        direction = 0;
+        continue;
+      }
+      if (direction < 0) {
+        if (page.start) pos.offset = page.previous;
+        else if (pos.verse) { --pos.verse; pos.offset = kBlockSize - 1; }
+        direction = 0;
+        continue;
+      }
+      _bookmark.move(pos, millis());
+      if (!draw) return;
+      char label[32], progress[16];
+      const Reference ref = referenceAt(pos.verse);
+      snprintf(label, sizeof(label), "John %u:%u WEB", ref.chapter, ref.verse);
+      snprintf(progress, sizeof(progress), "%u/%u", page.part, page.parts);
+      const int progress_width = _display->getTextWidth(progress);
+      if (stacked_header || _display->getTextWidth(label) > width - progress_width - 4)
+        snprintf(label, sizeof(label), "%u:%u", ref.chapter, ref.verse);
+      _display->setColor(UIColor::title_txt);
+      _display->drawTextEllipsized(0, 0, stacked_header ? width : width - progress_width - 4, label);
+      _display->drawTextRightAlign(width, stacked_header ? header_height : 0, progress);
+      _display->drawRect(0, top - 2, width, 1);
+      body.setColor(UIColor::primary_txt);
+      uint16_t offset = page.start;
+      for (int row = 0; row < rows && scratch[offset]; ++row) {
+        char line[kReaderLineBytes], filtered[kReaderLineBytes];
+        offset = readerLine(scratch, offset, width, measure, line);
+        body.translateUTF8ToBlocks(filtered, line, sizeof(filtered));
+        body.setCursor(0, top + row * line_height);
+        body.print(filtered);
+      }
+      return;
+    }
+  }
+
+public:
+  JohnReaderScreen(UITask* task, DisplayDriver* display) : _task(task), _display(display) {}
+  void open() {
+    if (!_loaded) {
+      mesh::bible::Position pos;
+      the_mesh.loadJohnBookmark(pos);
+      _bookmark.restore(pos);
+      _loaded = true;
+    }
+  }
+  bool flush() {
+    if (!_bookmark.dirty()) return true;
+    if (!the_mesh.saveJohnBookmark(_bookmark.position())) {
+      _retry_at = millis() + 30000;
+      return false;
+    }
+    _bookmark.saved();
+    _retry_at = 0;
+    return true;
+  }
+  void poll() override {
+    const uint32_t now = millis();
+    if (_bookmark.due(now) && (!_retry_at || int32_t(now - _retry_at) >= 0)) flush();
+  }
+  int render(DisplayDriver&) override { process(0, true); return 5000; }
+  bool handleInput(char c) override {
+    const uint8_t key = static_cast<uint8_t>(c);
+    if (key == KEY_NEXT || key == KEY_RIGHT) { process(1, false); return true; }
+    if (key == KEY_PREV || key == KEY_LEFT) { process(-1, false); return true; }
+    if (key == KEY_ENTER || key == KEY_CANCEL) { _task->closeJohnReader(); return true; }
+    return false;
+  }
+};

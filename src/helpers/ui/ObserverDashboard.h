@@ -54,10 +54,8 @@ inline void applyDarkPalette() {
 }
 
 // ----------------------------------------------------------------- layout ---
-// Logical 128x64 coordinates, as the shared DisplayDriver API expects. The two
-// orientations need separate row pitches: a text row is a fixed 16 physical
-// pixels, which is 3.2 logical units in portrait (y scale 5) but 4.27 in
-// landscape (y scale 3.75), so one shared grid would overlap in landscape.
+// Native panel pixels. Each orientation has its own spacing and graph area;
+// the driver neither stretches coordinates nor silently resizes text.
 
 struct Layout {
   int16_t margin_x;
@@ -74,41 +72,41 @@ struct Layout {
   int16_t graph_h;        // includes the one-unit baseline at the bottom
   int16_t rf_y;
   int16_t status_y;
-  int16_t text_h;         // logical height of one size-1 text row
+  int16_t text_h;         // native height reserved for one size-1 text row
   int16_t max_chars;      // size-1 characters that fit between the margins
   int16_t max_chars_big;  // size-2 characters that fit
 };
 
-// 240x320 panel: x scale 1.875, y scale 5, 12x16 glyphs (24x32 at size 2).
+// 240x320 portrait, normal 6x8 glyph cells (12x16 at explicit size 2).
 constexpr Layout portraitLayout() {
   return Layout{
-      /*margin_x*/ 4,     /*right_x*/ 124,
-      /*header_h*/ 9,     /*header_text_y*/ 1,   /*header_sub_y*/ 5,
-      /*radio_y*/ 11,
-      /*window_y*/ 16,
-      /*headline_y*/ 21,  /*headline_h*/ 7,
-      /*rate_y*/ 29,
-      /*graph_y*/ 34,     /*graph_h*/ 16,
-      /*rf_y*/ 52,
-      /*status_y*/ 57,
-      /*text_h*/ 4,
-      /*max_chars*/ 18,   /*max_chars_big*/ 9};
+      /*margin_x*/ 8,     /*right_x*/ 232,
+      /*header_h*/ 36,    /*header_text_y*/ 6,   /*header_sub_y*/ 20,
+      /*radio_y*/ 48,
+      /*window_y*/ 72,
+      /*headline_y*/ 96,  /*headline_h*/ 20,
+      /*rate_y*/ 128,
+      /*graph_y*/ 156,    /*graph_h*/ 92,
+      /*rf_y*/ 266,
+      /*status_y*/ 290,
+      /*text_h*/ 10,
+      /*max_chars*/ 37,   /*max_chars_big*/ 18};
 }
 
-// 320x240 panel: x scale 2.5, y scale 3.75, 12x16 glyphs (30x40 at size 2).
+// 320x240 landscape with the same normal font, without coordinate scaling.
 constexpr Layout landscapeLayout() {
   return Layout{
-      /*margin_x*/ 4,     /*right_x*/ 124,
-      /*header_h*/ 7,     /*header_text_y*/ 1,   /*header_sub_y*/ -1,
-      /*radio_y*/ 9,
-      /*window_y*/ 14,
-      /*headline_y*/ 19,  /*headline_h*/ 12,
-      /*rate_y*/ 31,
-      /*graph_y*/ 36,     /*graph_h*/ 12,
-      /*rf_y*/ 50,
-      /*status_y*/ 56,
-      /*text_h*/ 5,
-      /*max_chars*/ 25,   /*max_chars_big*/ 10};
+      /*margin_x*/ 10,    /*right_x*/ 310,
+      /*header_h*/ 24,    /*header_text_y*/ 8,   /*header_sub_y*/ -1,
+      /*radio_y*/ 36,
+      /*window_y*/ 58,
+      /*headline_y*/ 80,  /*headline_h*/ 20,
+      /*rate_y*/ 110,
+      /*graph_y*/ 136,    /*graph_h*/ 50,
+      /*rf_y*/ 200,
+      /*status_y*/ 222,
+      /*text_h*/ 10,
+      /*max_chars*/ 50,   /*max_chars_big*/ 25};
 }
 
 inline const Layout& activeLayout() {
@@ -212,11 +210,8 @@ inline void formatRadioStrip(char* out, size_t n, float freq, uint8_t sf, float 
   snprintf(out, n, "%.3f SF%u BW%s", (double)freq, (unsigned)sf, bw_str);
 }
 
-// Trims to a character budget rather than a measured width. The font is fixed
-// width, so the budget is exact - and DisplayDriver::drawTextEllipsized() must
-// not be used here: it trims against getTextWidth(), which reports an
-// over-long string at the portrait driver's *fallback* scale and so stops
-// trimming while the string is still too wide to draw at full size.
+// The normal font is fixed-width, so native layouts have exact character
+// budgets. Also show an ellipsis when the intermediate buffer limits a name.
 inline void fitToChars(char* out, size_t n, const char* src, int max_chars) {
   if (max_chars < 0) max_chars = 0;
   if ((size_t)max_chars > n - 1) max_chars = (int)(n - 1);
@@ -461,13 +456,13 @@ inline void drawRow(DisplayDriver& d, const Layout& l, Row row, const Context& c
 
 inline void drawHeader(DisplayDriver& d, const Layout& l, const Context& ctx) {
   d.setColor(HEADER_BG);
-  d.fillRect(0, 0, 128, l.header_h);
+  d.fillRect(0, 0, d.width(), l.header_h);
   d.setTextSize(1);
 
   RowText t{};
   t.left_color = TEXT;
   t.right_color = HEADER_SUB;
-  snprintf(t.left, sizeof(t.left), "%s", ctx.node_name ? ctx.node_name : "");
+  fitToChars(t.left, sizeof(t.left), ctx.node_name, l.max_chars);
   snprintf(t.right, sizeof(t.right), "%s", ctx.role_label ? ctx.role_label : "");
 
   if (l.header_sub_y < 0) {

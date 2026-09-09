@@ -2,29 +2,7 @@
 
 #include "ST7789Display.h"
 
-#ifndef X_OFFSET
-#define X_OFFSET 0  // No offset needed for landscape
-#endif
-
-#ifndef Y_OFFSET
-#define Y_OFFSET 1  // Vertical offset to prevent top row cutoff
-#endif
-
-#ifdef HELTEC_VISION_MASTER_T190
-  #define SCALE_X  2.5f        // 320 / 128
-  #define SCALE_Y  2.65625f    // 170 / 64
-#else
-  #define SCALE_X  1.875f      // 240 / 128
-  #define SCALE_Y  2.109375f   // 135 / 64
-#endif
-
-#ifdef DISPLAY_SCALE_X
-  #define SCALE_X DISPLAY_SCALE_X
-#endif
-
-#ifdef DISPLAY_SCALE_Y
-  #define SCALE_Y DISPLAY_SCALE_Y
-#endif
+// Native coordinates; controller RAM offsets are handled by ST7789Spi.
 
 // Color scheme
 ColorVal UIColor::window_bkg = OLEDDISPLAY_COLOR::BLACK;
@@ -68,8 +46,9 @@ void ST7789Display::turnOn() {
     digitalWrite(PIN_TFT_VDD_CTL, LOW);
     digitalWrite(PIN_TFT_RST, HIGH);
     
-    // Re-initialize the display
+    // Re-initialize the same native landscape geometry after wake.
     display.init();
+    display.landscapeScreen();
     display.displayOn();
     #ifdef DISPLAY_FLIP_VERTICALLY
     display.flipScreenVertically();
@@ -104,10 +83,11 @@ void ST7789Display::clear() {
 void ST7789Display::startFrame(ColorVal bkg) {
   display.clear();  // TODO: use bkg
   setColor(UIColor::primary_txt);
-  display.setFont(ArialMT_Plain_16);
+  setTextSize(1);
 }
 
 void ST7789Display::setTextSize(int sz) {
+  _line_height = sz == 2 ? 26 : 18;
   switch(sz) {
     case 1 :
       display.setFont(ArialMT_Plain_16);
@@ -127,8 +107,8 @@ void ST7789Display::setColor(ColorVal c) {
 }
 
 void ST7789Display::setCursor(int x, int y) {
-  _x = x*SCALE_X + X_OFFSET;
-  _y = y*SCALE_Y + Y_OFFSET;
+  _x = x;
+  _y = y;
 }
 
 void ST7789Display::print(const char* str) {
@@ -136,55 +116,28 @@ void ST7789Display::print(const char* str) {
 }
 
 void ST7789Display::printWordWrap(const char* str, int max_width) {
-  display.drawStringMaxWidth(_x, _y, max_width*SCALE_X, str);
+  display.drawStringMaxWidth(_x, _y, max_width, str);
 }
 
 void ST7789Display::fillRect(int x, int y, int w, int h) {
-  display.fillRect(x*SCALE_X + X_OFFSET, y*SCALE_Y + Y_OFFSET, w*SCALE_X, h*SCALE_Y);
+  display.fillRect(x, y, w, h);
 }
 
 void ST7789Display::drawRect(int x, int y, int w, int h) {
-  display.drawRect(x*SCALE_X + X_OFFSET, y*SCALE_Y + Y_OFFSET, w*SCALE_X, h*SCALE_Y);
+  display.drawRect(x, y, w, h);
 }
 
 void ST7789Display::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
-  // Calculate the base position in display coordinates
-  uint16_t startX = x * SCALE_X + X_OFFSET;
-  uint16_t startY = y * SCALE_Y + Y_OFFSET;
-  
-  // Width in bytes for bitmap processing
-  uint16_t widthInBytes = (w + 7) / 8;
-  
-  // Process the bitmap row by row
-  for (uint16_t by = 0; by < h; by++) {
-    // Calculate the target y-coordinates for this logical row
-    int y1 = startY + (int)(by * SCALE_Y);
-    int y2 = startY + (int)((by + 1) * SCALE_Y);
-    int block_h = y2 - y1;
-    
-    // Scan across the row bit by bit
-    for (uint16_t bx = 0; bx < w; bx++) {
-      // Calculate the target x-coordinates for this logical column
-      int x1 = startX + (int)(bx * SCALE_X);
-      int x2 = startX + (int)((bx + 1) * SCALE_X);
-      int block_w = x2 - x1;
-      
-      // Get the current bit
-      uint16_t byteOffset = (by * widthInBytes) + (bx / 8);
-      uint8_t bitMask = 0x80 >> (bx & 7);
-      bool bitSet = pgm_read_byte(bits + byteOffset) & bitMask;
-      
-      // If the bit is set, draw a block of pixels
-      if (bitSet) {
-        // Draw the block as a filled rectangle
-        display.fillRect(x1, y1, block_w, block_h);
-      }
-    }
-  }
+  if (!bits || w <= 0 || h <= 0) return;
+  const int stride = (w + 7) / 8;
+  for (int row = 0; row < h; ++row)
+    for (int col = 0; col < w; ++col)
+      if (pgm_read_byte(bits + row * stride + col / 8) & (0x80 >> (col & 7)))
+        display.fillRect(x + col, y + row, 1, 1);
 }
 
 uint16_t ST7789Display::getTextWidth(const char* str) {
-  return display.getStringWidth(str) / SCALE_X;
+  return display.getStringWidth(str);
 }
 
 void ST7789Display::endFrame() {

@@ -88,16 +88,21 @@ public:
 inline void drawSmallMessageBody(DisplayDriver& display, const char* origin,
                                  const char* message, int origin_y = 14,
                                  int bottom = -1) {
-  SmallMessageText text(display);
-  const int message_y = origin_y + text.lineHeight();
+  SmallMessageText compact(display);
+  const bool small = display.useSmallMessageFont();
+  DisplayDriver& text = small ? static_cast<DisplayDriver&>(compact) : display;
+  const int line_height = small ? compact.lineHeight() : display.textLineHeight();
+  const int message_y = origin_y + line_height;
+  if (bottom < 0 || bottom > display.height()) bottom = display.height();
   char translated[161];
   text.translateUTF8ToBlocks(translated, origin, sizeof(translated));
   text.setColor(UIColor::secondary_txt);
   text.drawTextEllipsized(0, origin_y, display.width(), translated);
   text.translateUTF8ToBlocks(translated, message, sizeof(translated));
   text.setColor(UIColor::primary_txt);
-  drawTextWrapped(text, 0, message_y, display.width(), text.lineHeight(),
-                  text.lineCount(message_y, bottom), translated);
+  drawTextWrapped(text, 0, message_y, display.width(), line_height,
+                  small ? compact.lineCount(message_y, bottom)
+                        : (bottom - message_y) / line_height, translated);
 }
 
 }  // namespace ui

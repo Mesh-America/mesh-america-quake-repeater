@@ -38,6 +38,8 @@ bool GxEPDDisplay::begin() {
 #endif
   display.init(115200, true, 2, false);
   display.setRotation(DISPLAY_ROTATION);
+  setDimensions(display.width(), display.height());
+  display.setTextWrap(false);
   setTextSize(1);  // Default to size 1
 
   display.setFullWindow();
@@ -129,6 +131,12 @@ void GxEPDDisplay::setTextSize(int sz) {
       display.setFont(&FreeSans9pt7b);
       break;
   }
+  // GFX uses a baseline; the UI supplies the top of the text line.
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds("Ag", 0, 0, &x1, &y1, &w, &h);
+  _text_ascent = -y1;
+  _line_height = h + 4;
 }
 
 void GxEPDDisplay::setColor(ColorVal c) {
@@ -139,7 +147,7 @@ void GxEPDDisplay::setColor(ColorVal c) {
 void GxEPDDisplay::setCursor(int x, int y) {
   display_crc.update<int>(x);
   display_crc.update<int>(y);
-  display.setCursor((x+offset_x)*scale_x, (y+offset_y)*scale_y);
+  display.setCursor(x, y + _text_ascent);
 }
 
 void GxEPDDisplay::print(const char* str) {
@@ -152,7 +160,7 @@ void GxEPDDisplay::fillRect(int x, int y, int w, int h) {
   display_crc.update<int>(y);
   display_crc.update<int>(w);
   display_crc.update<int>(h);
-  display.fillRect(x*scale_x, y*scale_y, w*scale_x, h*scale_y, _curr_color);
+  display.fillRect(x, y, w, h, _curr_color);
 }
 
 void GxEPDDisplay::drawRect(int x, int y, int w, int h) {
@@ -160,55 +168,24 @@ void GxEPDDisplay::drawRect(int x, int y, int w, int h) {
   display_crc.update<int>(y);
   display_crc.update<int>(w);
   display_crc.update<int>(h);
-  display.drawRect(x*scale_x, y*scale_y, w*scale_x, h*scale_y, _curr_color);
+  display.drawRect(x, y, w, h, _curr_color);
 }
 
 void GxEPDDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
+  if (!bits || w <= 0 || h <= 0) return;
   display_crc.update<int>(x);
   display_crc.update<int>(y);
   display_crc.update<int>(w);
   display_crc.update<int>(h);
-  display_crc.update<uint8_t>(bits, w * h / 8);
-  // Calculate the base position in display coordinates
-  uint16_t startX = x * scale_x;
-  uint16_t startY = y * scale_y;
-  
-  // Width in bytes for bitmap processing
-  uint16_t widthInBytes = (w + 7) / 8;
-  
-  // Process the bitmap row by row
-  for (uint16_t by = 0; by < h; by++) {
-    // Calculate the target y-coordinates for this logical row
-    int y1 = startY + (int)(by * scale_y);
-    int y2 = startY + (int)((by + 1) * scale_y);
-    int block_h = y2 - y1;
-    
-    // Scan across the row bit by bit
-    for (uint16_t bx = 0; bx < w; bx++) {
-      // Calculate the target x-coordinates for this logical column
-      int x1 = startX + (int)(bx * scale_x);
-      int x2 = startX + (int)((bx + 1) * scale_x);
-      int block_w = x2 - x1;
-      
-      // Get the current bit
-      uint16_t byteOffset = (by * widthInBytes) + (bx / 8);
-      uint8_t bitMask = 0x80 >> (bx & 7);
-      bool bitSet = pgm_read_byte(bits + byteOffset) & bitMask;
-      
-      // If the bit is set, draw a block of pixels
-      if (bitSet) {
-        // Draw the block as a filled rectangle
-        display.fillRect(x1, y1, block_w, block_h, _curr_color);
-      }
-    }
-  }
+  display_crc.update<uint8_t>(bits, ((w + 7) / 8) * h);
+  display.drawBitmap(x, y, bits, w, h, _curr_color);
 }
 
 uint16_t GxEPDDisplay::getTextWidth(const char* str) {
   int16_t x1, y1;
   uint16_t w, h;
   display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
-  return ceil((w + 1) / scale_x);
+  return w ? w + 1 : 0;
 }
 
 void GxEPDDisplay::endFrame() {

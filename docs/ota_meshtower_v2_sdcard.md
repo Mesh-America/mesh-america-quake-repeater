@@ -163,6 +163,19 @@ Copy the MID and first 16 image-hash hex digits from `ota bootloader`. Ordinary
 application package. Keep the SD card inserted through the reboot. A later
 `ota status` value of `blup:C8` reports a successful bootloader replacement.
 
+After reboot, `ota bootloader` displays the installed board identity, CRC and
+capabilities. Its `mid` and `hash` fields describe a **currently staged download**,
+not the installed bootloader, so `staged:none mid=- hash=-` is not an install
+failure. `blrc:00` means no retained apply result is available; it does not by
+itself prove either success or failure.
+
+Older MeshCore application firmware can report `get bootloader.ver` as `unknown`
+for OTAFIX 2.4.6 because this bootloader image omits the legacy `UF2 Bootloader`
+text. The updated getter also reads the CRC-validated BLM2 version. For the
+official signed **MeshTower V2 SD 2.4.6** `.mota`, the installed identity is
+`TOWER_V2_OTA`, CRC `5DACDB3D`, ABI `3`, and capabilities `09`. Compare the exact
+board/storage package when interpreting these values; the non-SD image differs.
+
 ## SD card CLI
 
 The SD-backed target provides these CLI commands:

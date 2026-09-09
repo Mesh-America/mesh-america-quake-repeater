@@ -11,15 +11,16 @@ class ST7789Display : public DisplayDriver {
   bool _isOn;
   uint16_t _color;
   int _x=0, _y=0;
+  int _line_height = 18;
 
   bool i2c_probe(TwoWire& wire, uint8_t addr);
 public:
 #if defined(HELTEC_VISION_MASTER_T190)
-  ST7789Display() : DisplayDriver(128, 64), display(&SPI, PIN_TFT_RST, PIN_TFT_DC, PIN_TFT_CS, GEOMETRY_RAWMODE, 320, 170,PIN_TFT_SDA,-1,PIN_TFT_SCL) {_isOn = false;}
+  ST7789Display() : DisplayDriver(320, 170), display(&SPI, PIN_TFT_RST, PIN_TFT_DC, PIN_TFT_CS, GEOMETRY_RAWMODE, 320, 170,PIN_TFT_SDA,-1,PIN_TFT_SCL) {_isOn = false;}
 #elif defined(THINKNODE_M9)
-  ST7789Display() : DisplayDriver(128, 64), display(&SPI, ST7789_RESET, ST7789_RS, ST7789_CS, GEOMETRY_RAWMODE, 320, 240, ST7789_SDA, ST7789_MISO, ST7789_SCK) {_isOn = false;}
+  ST7789Display() : DisplayDriver(320, 240), display(&SPI, ST7789_RESET, ST7789_RS, ST7789_CS, GEOMETRY_RAWMODE, 320, 240, ST7789_SDA, ST7789_MISO, ST7789_SCK) {_isOn = false;}
 #else
-  ST7789Display() : DisplayDriver(128, 64), display(&SPI1, PIN_TFT_RST, PIN_TFT_DC, PIN_TFT_CS, GEOMETRY_RAWMODE, 240, 135) {_isOn = false;}
+  ST7789Display() : DisplayDriver(240, 135), display(&SPI1, PIN_TFT_RST, PIN_TFT_DC, PIN_TFT_CS, GEOMETRY_RAWMODE, 240, 135) {_isOn = false;}
 #endif
   bool begin();
 
@@ -29,6 +30,7 @@ public:
   void clear() override;
   void startFrame(ColorVal bkg = UIColor::window_bkg) override;
   void setTextSize(int sz) override;
+  int textLineHeight() override { return _line_height; }
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char* str) override;
