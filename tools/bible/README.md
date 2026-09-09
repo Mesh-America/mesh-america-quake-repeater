@@ -27,7 +27,12 @@ reader from the radio-settings page:
 - Long press exits to the radio page. It does not invoke early-boot CLI rescue
   while opening or closing the reader.
 
-The header shows the reference and part count; there is no bottom footer.
+The header shows the reference and part count. Single-button builds show
+`<- 2tap  1tap ->  long press:exit` at the bottom, matching the message reader.
+These are taps of the user button. Narrower displays shorten or split the
+hint across lines; touch/joystick builds keep their own controls. The entry
+gesture stays hidden on the radio page. The footer has reserved space in the
+pagination calculation, so text continues on another page when necessary.
 Text wraps at word boundaries without truncation. Both the screen and CLI use
 the same text with plain ASCII quotes, apostrophes, dashes and spaces; wording
 and capitalization are unchanged. Incoming messages are retained without
@@ -39,7 +44,8 @@ Sub-160px displays use the same adaptive font selector as received messages:
 Squeezed Regular 6 on panels at least 128x64 (or 64x128 when rotated), and
 5px Picopixel on smaller panels. The reference and part counter retain their
 normal header font, stacking on narrow rotated screens to avoid overlap. On
-the V4's 128x64 display, six complete 8-pixel-spaced body rows fit, and John
+the V4's 128x64 display, five complete 8-pixel-spaced body rows fit above the
+navigation hint, and John
 3:16 fits on one screen. Wrapping and pagination use the selected font's
 actual character widths and line height. Any panel with either dimension at
 least 160px uses its normal font, including rotated 80x160 panels. Larger display classes, and builds with
@@ -47,7 +53,7 @@ least 160px uses its normal font, including rotated 80x160 panels. Larger displa
 resume at the page containing the same text offset after a font/layout change.
 
 The T096 and other ST7735 boards use native 160x80 coordinates and the normal
-body font (six 10-pixel-spaced rows below the header). The existing color
+body font (five 10-pixel-spaced rows between the header and button hint). The existing color
 framebuffer is reused, with no framebuffer RAM increase. ST7789, ST7789LCD,
 NV3001B and GxEPD displays likewise expose their actual panel dimensions and
 render pixels without coordinate scaling; portrait orientations are retained.
@@ -137,7 +143,8 @@ reports a 2,088-byte frame for verse output, a 16-byte command dispatcher,
 and about 1,720 bytes for the nested decoder calls. Including the terminal
 and main-loop frames, the decode path is approximately **4.3 KiB**, before
 framework/task and interrupt overhead; the nRF52 loop task has an 8 KiB stack.
-The small-font reader's decode/draw function has a 2,480-byte frame on RAK3401
+Before the navigation-hint addition, the small-font reader's decode/draw
+function had a 2,480-byte frame on RAK3401
 and a 2,496-byte frame on V4. Its nested decode path is approximately 4.3 KiB
 on RAK3401 and 4.7 KiB on V4, including the main-loop/UI frames but before
 framework/task and interrupt overhead. The ESP32-S3 V4 terminal's corresponding
@@ -152,9 +159,11 @@ every block boundary, exercise malformed references and corrupted block
 bounds, and verify that unrelated build profiles exclude the data.
 
 Reader tests additionally traverse every part of all 879 verses in both
-directions with regular and adaptive 5px/6px fonts at 128x64, 64x128, 160x80,
+directions, with and without the button hint, using regular and adaptive
+5px/6px fonts at 128x64, 64x128, 160x80,
 240x135, 72x40, 40x72, 128x32, 32x128, 64x48 and 48x64. They compare rendered
-body pixels/text, check active-reader resizing across font thresholds, and cover resume
+body pixels/text separately from the hint, check active-reader resizing across
+font thresholds, and cover resume
 within a verse, book/chapter boundaries, no writes at the start, clearing stale
 bookmarks,
 corruption, I/O failure at each replacement step, timer rollover and bookmark

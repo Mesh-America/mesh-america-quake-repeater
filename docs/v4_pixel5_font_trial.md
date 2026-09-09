@@ -1,14 +1,17 @@
 # Small-screen message fonts
 
 Small-screen Companion builds automatically select a compact font for received
-message text and the channel/sender line, including `Ch 0 Public`. This covers
-SSD1306 and SH1106 OLEDs, ST7735 small TFTs, and the U8g2 T-Echo Card display.
-The shared renderer selects by logical panel dimensions, including rotation:
+message text and the channel/sender line, including `Ch 0 Public`. SSD1306 and
+SH1106 OLEDs and the U8g2 T-Echo Card display use this on panels smaller than
+160 pixels on both axes. ST7735 TFTs now use their native 160x80 dimensions
+and normal font. The shared renderer selects by panel dimensions, including
+rotation:
 
 | Panel size | Font | Capital height | Line spacing |
 | --- | --- | ---: | ---: |
-| At least 128 x 64, or 64 x 128 rotated | Squeezed Regular 6 | 6 pixels | 8 pixels |
+| At least 128 x 64, or 64 x 128 rotated; both axes below 160 | Squeezed Regular 6 | 6 pixels | 8 pixels |
 | Smaller panels, including 72 x 40, 128 x 32 and 64 x 48 | Picopixel | 5 pixels | 7 pixels |
+| Either axis at least 160 | Normal display font | Depends on panel | Depends on panel |
 
 Both fonts allow one pixel for descenders and one blank pixel row between
 lines. Character widths vary: most letters advance by 4 pixels, with narrow
@@ -41,9 +44,14 @@ CLI rescue instead; wait for that startup window to finish before opening
 the inbox. Exiting a message preview and the WiFi setup page's hold action
 remain available immediately.
 
+The hidden [John reader](../tools/bible/README.md#on-device-reader), opened
+by a long press on the radio page, uses the same button hint. It reserves the
+hint before pagination and resumes saved bookmarks at the page containing
+the same text, even after the available page size changes.
+
 Larger display classes keep their existing font. Menus, Bluetooth PINs and WiFi
-setup QR codes keep their normal layout. Small TFTs retain their existing
-logical to physical scaling. The normal OLED font uses 7-pixel letters,
+setup QR codes keep their normal layout. TFT drivers use native panel
+coordinates; the SenseCAP Indicator retains its existing scaling. The normal OLED font uses 7-pixel letters,
 8-pixel line spacing and 6-pixel character advances.
 
 The preview buffer holds a complete 160-byte MeshCore message plus its

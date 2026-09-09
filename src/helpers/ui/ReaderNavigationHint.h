@@ -18,6 +18,10 @@ inline ButtonReaderHintLayout makeButtonReaderHintLayout(
     DisplayDriver& text, int line_height, int bottom) {
   ButtonReaderHintLayout layout = {
       0, line_height, 1, {"<- 2tap  1tap ->  long press:exit", nullptr, nullptr}};
+  if (text.getTextWidth(layout.lines[0]) > text.width()
+      && text.getTextWidth("<-2tap 1tap-> hold:exit") <= text.width()) {
+    layout.lines[0] = "<-2tap 1tap-> hold:exit";
+  }
   if (text.getTextWidth(layout.lines[0]) > text.width()) {
     layout.line_count = 2;
     layout.lines[0] = "<- 2tap  1tap ->";

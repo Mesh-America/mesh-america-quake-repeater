@@ -130,12 +130,14 @@ class CompanionJohnTest(unittest.TestCase):
             self.run_checked([cc, "-Os", *flags, "-c", str(ROOT / "src/helpers/ota/OtaTinf.c"),
                               "-o", str(obj)])
             for small_font in (0, 1):
-                self.run_checked([cxx, "-std=c++11", "-Os", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-                                  *flags, f"-DUI_SMALL_MESSAGE_FONT={small_font}",
-                                  "-I" + str(ROOT / "src"), "-I" + str(FIXTURE),
-                                  str(FIXTURE / "test_reader.cpp"), str(ROOT / "src/helpers/CompanionJohn.cpp"),
-                                  str(obj), "-o", str(binary)])
-                self.run_checked([str(binary)])
+                for button_hint in (0, 1):
+                    self.run_checked([cxx, "-std=c++11", "-Os", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+                                      *flags, f"-DUI_SMALL_MESSAGE_FONT={small_font}",
+                                      f"-DUI_BUTTON_READER_HINT={button_hint}",
+                                      "-I" + str(ROOT / "src"), "-I" + str(FIXTURE),
+                                      str(FIXTURE / "test_reader.cpp"), str(ROOT / "src/helpers/CompanionJohn.cpp"),
+                                      str(obj), "-o", str(binary)])
+                    self.run_checked([str(binary)])
 
     def test_reader_button_routing_and_profile_gate(self):
         ui = (ROOT / "examples/companion_radio/ui-new/UITask.cpp").read_text(encoding="utf-8")
@@ -143,6 +145,8 @@ class CompanionJohnTest(unittest.TestCase):
         self.assertLess(long_press.index("isJohnReaderActive()"), long_press.index("enterCLIRescue()"))
         self.assertLess(long_press.index("isRadioPage()"), long_press.index("enterCLIRescue()"))
         self.assertIn("#if COMPANION_FEATURE_JOHN\n#include \"JohnReaderScreen.h\"", ui)
+        self.assertLess(ui.index("#define UI_BUTTON_READER_HINT 1"),
+                        ui.index('#include "JohnReaderScreen.h"'))
         self.assertIn("&& !isJohnReaderActive()", ui)
         self.assertIn("else if (isJohnReaderActive())", ui)
         self.assertIn("c = handleLongPress(KEY_ENTER);", ui)

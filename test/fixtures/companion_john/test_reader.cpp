@@ -56,12 +56,24 @@ public:
 
 class Display : public DisplayDriver {
   int x = 0, y = 0;
+  ColorVal color = 1;
 public:
   struct Line { int x, y; std::string text; };
   std::vector<Line> lines;
   std::vector<uint8_t> pixels;
   Display(int w, int h) : DisplayDriver(w, h), pixels(w * h, 0) {}
   int bodyY() const { return width() < 64 ? 22 : 12; }
+  int bodyBottom() {
+#if UI_BUTTON_READER_HINT
+    mesh::ui::SmallMessageText compact(*this);
+    const bool small = useSmallMessageFont();
+    DisplayDriver& hint_text = small ? static_cast<DisplayDriver&>(compact) : *this;
+    return mesh::ui::makeButtonReaderHintLayout(hint_text,
+        small ? compact.glyphHeight() : 10, height()).top;
+#else
+    return height();
+#endif
+  }
   void resize(int w, int h) { setDimensions(w, h); pixels.assign(w * h, 0); clear(); }
   bool isOn() override { return true; }
   void turnOn() override {}
@@ -70,7 +82,7 @@ public:
   void startFrame(ColorVal = 0) override { clear(); }
   void endFrame() override {}
   void setTextSize(int) override {}
-  void setColor(ColorVal) override {}
+  void setColor(ColorVal value) override { color = value; }
   void setCursor(int a, int b) override { x = a; y = b; }
   uint16_t getTextWidth(const char* str) override { return strlen(str) * 6; }
   void print(const char* str) override {
@@ -81,7 +93,7 @@ public:
   void fillRect(int a, int b, int w, int h) override {
     assert(a >= 0 && b >= 0 && a + w <= width() && b + h <= height());
     for (int row = b; row < b + h; ++row)
-      for (int col = a; col < a + w; ++col) pixels[row * width() + col] = 1;
+      for (int col = a; col < a + w; ++col) pixels[row * width() + col] = color != 0;
   }
   void drawRect(int a, int b, int w, int h) override {
     assert(a >= 0 && b >= 0 && a + w <= width() && b + h <= height());
@@ -89,13 +101,14 @@ public:
     fillRect(a, b, 1, h); fillRect(a + w - 1, b, 1, h);
   }
   void drawXbm(int, int, const uint8_t*, int, int) override {}
-  std::string body() const {
+  std::string body() {
 #if UI_SMALL_MESSAGE_FONT
     if (useSmallMessageFont())
-      return std::string(pixels.begin() + bodyY() * width(), pixels.end());
+      return std::string(pixels.begin() + bodyY() * width(), pixels.begin() + bodyBottom() * width());
 #endif
     std::string result;
-    for (const auto& line : lines) if (line.y >= bodyY()) result += line.text;
+    for (const auto& line : lines)
+      if (line.y >= bodyY() && line.y < bodyBottom()) result += line.text;
     return result;
   }
   void dump() const {
@@ -163,11 +176,12 @@ int main(int argc, char** argv) {
     if (small) assert(compact.capitalHeight() == dimensions[2]);
     DisplayDriver& expected_text = small ? static_cast<DisplayDriver&>(compact) : expected;
     const int line_height = small ? compact.lineHeight() : 10;
-    const int rows = small ? compact.lineCount(top) : (expected.height() - top) / line_height;
+    const int rows = small ? compact.lineCount(top, expected.bodyBottom())
+                          : (expected.bodyBottom() - top) / line_height;
 #else
     DisplayDriver& expected_text = expected;
     const int line_height = 10;
-    const int rows = (display.height() - top) / line_height;
+    const int rows = (display.bodyBottom() - top) / line_height;
 #endif
     auto measure = [&expected_text](const char* line) { return expected_text.getTextWidth(line); };
     UITask task;
@@ -175,6 +189,32 @@ int main(int argc, char** argv) {
     JohnReaderScreen screen(&task, &display);
     screen.open();
     assert(screen.flush() && the_mesh.saves == 0); // don't create John 1:1
+#if UI_BUTTON_READER_HINT
+    display.clear(); screen.render(display);
+    Display footer(display.width(), display.height());
+    mesh::ui::SmallMessageText hint_compact(footer);
+    const bool small_hint = footer.useSmallMessageFont();
+    DisplayDriver& hint_text = small_hint
+        ? static_cast<DisplayDriver&>(hint_compact) : footer;
+    const auto hint = mesh::ui::makeButtonReaderHintLayout(hint_text,
+        small_hint ? hint_compact.glyphHeight() : 10, footer.height());
+    mesh::ui::drawButtonReaderHint(hint_text, hint);
+    if (small_hint) {
+      // Compare the real reader's hint pixels independently of the body.
+      auto first = footer.pixels.begin() + hint.top * footer.width();
+      assert(std::find(first, footer.pixels.end(), 1) != footer.pixels.end());
+      assert(std::equal(first, footer.pixels.end(),
+                        display.pixels.begin() + hint.top * display.width()));
+    } else {
+      for (const auto& hint_line : footer.lines) {
+        assert(std::any_of(display.lines.begin(), display.lines.end(),
+            [&hint_line](const Display::Line& line) {
+              return line.x == hint_line.x && line.y == hint_line.y
+                  && line.text == hint_line.text;
+            }));
+      }
+    }
+#endif
     std::vector<std::string> expected_pages;
     char scratch[kBlockSize];
     for (uint16_t verse = 0; verse < kVerseCount; ++verse) {
@@ -257,7 +297,8 @@ int main(int argc, char** argv) {
   Display migrated_display(128,64);
   mesh::ui::SmallMessageText compact(migrated_display);
   const auto compact_measure = [&compact](const char* line) { return compact.getTextWidth(line); };
-  const auto compact_page = readerPage(text, legacy.next, 128, compact.lineCount(12), compact_measure);
+  const auto compact_page = readerPage(text, legacy.next, 128,
+      compact.lineCount(12, migrated_display.bodyBottom()), compact_measure);
   assert(compact_page.start <= legacy.next && compact_page.next > legacy.next);
   JohnReaderScreen migrated(&task, &migrated_display);
   migrated.open(); migrated.render(migrated_display); assert(migrated.flush());
@@ -278,7 +319,8 @@ int main(int argc, char** argv) {
     DisplayDriver& new_font = small ? static_cast<DisplayDriver&>(small_font) : changed;
     auto new_measure = [&new_font](const char* line) { return new_font.getTextWidth(line); };
     const auto new_page = readerPage(text, before.offset, changed.width(),
-        small ? small_font.lineCount(changed.bodyY()) : (changed.height() - changed.bodyY()) / 10,
+        small ? small_font.lineCount(changed.bodyY(), changed.bodyBottom())
+              : (changed.bodyBottom() - changed.bodyY()) / 10,
         new_measure);
     assert(new_page.start <= before.offset && new_page.next > before.offset);
     active.render(changed); assert(active.flush());

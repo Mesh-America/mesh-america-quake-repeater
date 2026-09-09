@@ -12,10 +12,6 @@
 #include "../MyMesh.h"
 #include "../CompanionWiFi.h"
 #include "target.h"
-#if COMPANION_FEATURE_JOHN
-#include "JohnReaderScreen.h"
-#include <new>
-#endif
 #include <time.h>
 #ifdef WIFI_SSID
   #include <WiFi.h>
@@ -94,6 +90,11 @@ static uint64_t companionMessageElapsedMillis(uint64_t heard_millis) {
   #define UI_BUTTON_READER_HINT 1
 #else
   #define UI_BUTTON_READER_HINT 0
+#endif
+
+#if COMPANION_FEATURE_JOHN
+#include "JohnReaderScreen.h"
+#include <new>
 #endif
 
 #ifdef COMPANION_EXCLUSIVE_WIFI_BLE

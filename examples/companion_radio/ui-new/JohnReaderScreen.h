@@ -1,7 +1,8 @@
 #pragma once
 #include <helpers/CompanionJohn.h>
 #include <helpers/bible/JohnReader.h>
-#if UI_SMALL_MESSAGE_FONT
+#include <helpers/ui/ReaderNavigationHint.h>
+#if UI_SMALL_MESSAGE_FONT || UI_BUTTON_READER_HINT
 #include <helpers/ui/SmallMessageText.h>
 #endif
 
@@ -27,17 +28,30 @@ class JohnReaderScreen : public UIScreen {
     const bool stacked_header = width < _display->getTextWidth("88:88")
         + _display->getTextWidth("88/88") + 4;
     const int top = header_height * (stacked_header ? 2 : 1) + 2;
-#if UI_SMALL_MESSAGE_FONT
+#if UI_SMALL_MESSAGE_FONT || UI_BUTTON_READER_HINT
     // Share message font selection and metrics, including rotated/tiny panels.
     mesh::ui::SmallMessageText compact(*_display);
+#endif
+    int bottom = _display->height();
+#if UI_BUTTON_READER_HINT
+    // Keep the hint compact on tiny displays even if the body font was
+    // overridden. Reserve it before pagination so no verse text is hidden.
+    const bool small_hint = _display->useSmallMessageFont();
+    DisplayDriver& hint_text = small_hint
+        ? static_cast<DisplayDriver&>(compact) : *_display;
+    const auto hint = mesh::ui::makeButtonReaderHintLayout(hint_text,
+        small_hint ? compact.glyphHeight() : header_height, bottom);
+    bottom = hint.top;
+#endif
+#if UI_SMALL_MESSAGE_FONT
     const bool small = _display->useSmallMessageFont();
     DisplayDriver& body = small ? static_cast<DisplayDriver&>(compact) : *_display;
     const int line_height = small ? compact.lineHeight() : header_height;
-    int rows = small ? compact.lineCount(top) : (_display->height() - top) / line_height;
+    int rows = small ? compact.lineCount(top, bottom) : (bottom - top) / line_height;
 #else
     DisplayDriver& body = *_display;
     const int line_height = header_height;
-    int rows = (_display->height() - top) / line_height;
+    int rows = (bottom - top) / line_height;
 #endif
     if (rows < 1) rows = 1;
     auto measure = [&body](const char* line) {
@@ -53,9 +67,11 @@ class JohnReaderScreen : public UIScreen {
           referenceAt(pos.verse), scratch, sizeof(scratch), text);
       if (result != LookupResult::Found) {
         if (draw) {
-          _display->setColor(UIColor::warning_txt);
-          _display->setCursor(0, top);
-          _display->print("John unavailable");
+          body.setColor(UIColor::warning_txt);
+          body.drawTextEllipsized(0, top, width, "John unavailable");
+#if UI_BUTTON_READER_HINT
+          mesh::ui::drawButtonReaderHint(hint_text, hint);
+#endif
         } else _task->showAlert("John data error", 1500);
         return;
       }
@@ -96,6 +112,9 @@ class JohnReaderScreen : public UIScreen {
         body.setCursor(0, top + row * line_height);
         body.print(filtered);
       }
+#if UI_BUTTON_READER_HINT
+      mesh::ui::drawButtonReaderHint(hint_text, hint);
+#endif
       return;
     }
   }
