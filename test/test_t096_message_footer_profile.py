@@ -78,7 +78,7 @@ class T096MessageFooterProfileTest(unittest.TestCase):
         ui = UI.read_text(encoding="utf-8")
         self.assertIn(
             "#ifndef UI_MESSAGE_CHANNEL_FOOTER\n"
-            "  #if defined(MESHCORE_HAS_SMALL_DISPLAY)\n"
+            "  #if defined(MESHCORE_HAS_SMALL_DISPLAY) || UI_BUTTON_READER_HINT == 1\n"
             "    #define UI_MESSAGE_CHANNEL_FOOTER 0\n"
             "  #else\n"
             "    #define UI_MESSAGE_CHANNEL_FOOTER 1\n"

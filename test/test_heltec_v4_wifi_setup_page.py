@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 
@@ -140,6 +142,60 @@ class HeltecV4WiFiSetupPageTest(unittest.TestCase):
         self.assertIn("the_mesh.startWebConfig(true, web_reply)", loop[start:state_service])
         self.assertNotIn("savePrefs", loop[stop:state_service])
         self.assertNotIn("saveEnabled", loop[stop:state_service])
+
+    def test_reader_exit_wins_over_startup_rescue_but_home_keeps_rescue(self):
+        ui = UI.read_text(encoding="utf-8")
+        start = ui.index("char UITask::handleLongPress(char c) {")
+        end = ui.index("\nchar UITask::handleDoubleClick", start)
+        source = r'''
+#include <cassert>
+#define UI_WIFI_SETUP_HOME_PAGE 1
+unsigned long now = 4000;
+unsigned long millis() { return now; }
+struct Screen {};
+struct HomeScreen : Screen {
+  bool setup = false;
+  bool isWiFiSetupPage() const { return setup; }
+};
+struct Mesh {
+  int rescue_calls = 0;
+  void enterCLIRescue() { ++rescue_calls; }
+} the_mesh;
+struct UITask {
+  Screen* curr;
+  Screen* home;
+  Screen* msg_preview;
+  unsigned long ui_started_at = 0;
+  char handleLongPress(char c);
+};
+''' + ui[start:end] + r'''
+int main() {
+  HomeScreen home;
+  Screen reader;
+  UITask task{&reader, &home, &reader};
+  assert(task.handleLongPress('E') == 'E');
+  assert(the_mesh.rescue_calls == 0);
+  task.curr = &home;
+  assert(task.handleLongPress('E') == 0);
+  assert(the_mesh.rescue_calls == 1);
+  home.setup = true;
+  assert(task.handleLongPress('E') == 'E');
+  assert(the_mesh.rescue_calls == 1);
+  home.setup = false;
+  now = 9000;
+  assert(task.handleLongPress('E') == 'E');
+  task.curr = &reader;
+  assert(task.handleLongPress('E') == 'E');
+  assert(the_mesh.rescue_calls == 1);
+}
+'''
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "reader_hold"
+            subprocess.run(
+                ["c++", "-std=c++17", "-x", "c++", "-", "-o", str(executable)],
+                input=source, text=True, capture_output=True, check=True,
+            )
+            subprocess.run([str(executable)], check=True)
 
 
 if __name__ == "__main__":

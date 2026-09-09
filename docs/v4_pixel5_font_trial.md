@@ -16,13 +16,30 @@ letters taking less space and `M` and `W` taking 6 pixels. Squeezed Regular 6
 is a [public-domain font by Oliver Kraus](https://github.com/olikraus/u8g2/wiki/fntgrpu8g#squeezed_r6).
 Its bitmap data is stored as constants without heap allocation.
 
-On a 128 x 64 OLED, the compact channel/sender line starts at y=14 and message
-text at y=22. Five complete 6px-font rows fit. The software comparison fits
-three representative 160-character messages in those five rows. Capacity
+On a 128 x 64 OLED with the single-button message reader, the compact
+channel/sender line starts at y=8 and message text at y=16. The header uses
+the same small font. Five complete 6px-font rows fit above the navigation
+hint at y=56. The software comparison fits three representative 160-character
+messages in those five rows. Capacity
 depends on the characters; messages with many wide letters can still overflow.
 Text wraps at character boundaries, with `...` on the last line if necessary.
 Unsupported characters appear as `?`. Long channel/sender names are ellipsized
 to stay on their own line. An enabled channel footer reserves its own space.
+Readers without the button hint retain the y=14 origin and y=22 message text.
+
+On V4 and other single-button builds using this reader, the home screen says
+`hold button: inbox`. Hold the user button for about 1.2 seconds to open it.
+The bottom of the reader shows `<- 2tap  1tap ->  long press:exit`: double tap
+the button for the previous message, tap once for the next, and hold to
+return home. Advancing past the last message also returns home. The hint
+appears even when the inbox is empty and reflows onto additional lines on
+narrower screens. It replaces the unusable channel selector on single-button
+builds. These are button taps. Touchscreen and joystick builds retain
+instructions appropriate to their controls. During the first eight
+seconds after startup, holding the button on an ordinary home page enters
+CLI rescue instead; wait for that startup window to finish before opening
+the inbox. Exiting a message preview and the WiFi setup page's hold action
+remain available immediately.
 
 Larger display classes keep their existing font. Menus, Bluetooth PINs and WiFi
 setup QR codes keep their normal layout. Small TFTs retain their existing
@@ -80,8 +97,9 @@ pio test -e native -f test_display_driver -f test_companion_message_history
 
 The native tests exercise both capital heights, automatic font selection,
 160-character messages, complete rows at display edges, long sender lines,
-reserved footers, overflow markers and tiny/rotated screen geometry. The
-additional rendering comparison checks all 95 printable ASCII glyphs in each
+navigation hints, reserved footers, overflow markers and tiny/rotated screen
+geometry. The additional rendering comparison checks all 95 printable ASCII
+glyphs in each
 font, under address/undefined-behavior sanitizers. Picopixel is compared pixel
 for pixel with Adafruit GFX; Squeezed Regular 6 is compared with the upstream
 BDF fixture independently of the converted C++ tables. This needs a cached

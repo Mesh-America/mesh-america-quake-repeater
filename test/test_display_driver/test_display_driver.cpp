@@ -4,6 +4,7 @@
 #include <helpers/ui/CompanionHomeLayout.h>
 #include <helpers/ui/DisplayTextLayout.h>
 #include <helpers/ui/SmallMessageText.h>
+#include <helpers/ui/ReaderNavigationHint.h>
 #include <helpers/ui/WiFiSetupQrDisplay.h>
 #include <helpers/ui/WiFiSetupQrPayload.h>
 
@@ -233,6 +234,51 @@ TEST(SmallMessageText, MessageBodyRespectsReservedFooter) {
   for (const auto& pixel : display.fills) EXPECT_LT(pixel.y, 56);
 }
 
+TEST(SmallMessageText, ButtonHintKeepsFiveMessageRowsWithoutOverlappingText) {
+  TestDisplay display(128, 64);
+  mesh::ui::SmallMessageText text(display);
+  const auto hint = mesh::ui::makeButtonReaderHintLayout(
+      text, text.lineHeight(), display.height());
+  ASSERT_EQ(1, hint.line_count);
+  EXPECT_EQ(56, hint.top);
+  EXPECT_EQ(5, text.lineCount(2 * text.lineHeight(), hint.top));
+
+  mesh::ui::drawSmallMessageBody(display, "Ch 0 Public [4h]:",
+                               std::string(160, 'W').c_str(),
+                               text.lineHeight(), hint.top);
+  ASSERT_FALSE(display.fills.empty());
+  for (const auto& pixel : display.fills) EXPECT_LT(pixel.y, hint.top);
+  display.fills.clear();
+  mesh::ui::drawButtonReaderHint(text, hint);
+  ASSERT_FALSE(display.fills.empty());
+  for (const auto& pixel : display.fills) {
+    EXPECT_GE(pixel.x, 0);
+    EXPECT_LE(pixel.x + pixel.width, display.width());
+    EXPECT_GE(pixel.y, hint.top);
+    EXPECT_LE(pixel.y + pixel.height, display.height());
+  }
+}
+
+TEST(SmallMessageText, ButtonHintReflowsOnTinyAndRotatedScreens) {
+  for (auto dimensions : {std::pair<int, int>{72, 40}, {40, 72},
+                         {128, 32}, {32, 128}, {64, 128}, {128, 64}}) {
+    TestDisplay display(dimensions.first, dimensions.second);
+    mesh::ui::SmallMessageText text(display);
+    const auto hint = mesh::ui::makeButtonReaderHintLayout(
+        text, text.lineHeight(), display.height());
+    for (int row = 0; row < hint.line_count; ++row)
+      EXPECT_LE(text.getTextWidth(hint.lines[row]), display.width());
+    mesh::ui::drawButtonReaderHint(text, hint);
+    ASSERT_FALSE(display.fills.empty());
+    for (const auto& pixel : display.fills) {
+      EXPECT_GE(pixel.x, 0);
+      EXPECT_LE(pixel.x + pixel.width, display.width());
+      EXPECT_GE(pixel.y, hint.top);
+      EXPECT_LE(pixel.y + pixel.height, display.height());
+    }
+  }
+}
+
 TEST(SmallMessageText, Full160CharacterSamplesFitInFiveRows) {
   class RecordingText : public mesh::ui::SmallMessageText {
   public:
@@ -256,6 +302,15 @@ TEST(SmallMessageText, Full160CharacterSamplesFitInFiveRows) {
     RecordingText text(display);
     EXPECT_EQ(5, mesh::ui::drawTextWrapped(text, 0, 22, 128,
         text.lineHeight(), text.lineCount(22), sample));
+    EXPECT_EQ(sample, text.drawn);
+    // The button reader moves its header/origin up to reserve the hint, so
+    // the same complete 160-character text still fits in five body rows.
+    text.drawn.clear();
+    const auto hint = mesh::ui::makeButtonReaderHintLayout(
+        text, text.lineHeight(), display.height());
+    const int message_y = 2 * text.lineHeight();
+    EXPECT_EQ(5, mesh::ui::drawTextWrapped(text, 0, message_y, 128,
+        text.lineHeight(), text.lineCount(message_y, hint.top), sample));
     EXPECT_EQ(sample, text.drawn);
   }
 }

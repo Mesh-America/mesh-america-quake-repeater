@@ -3,6 +3,8 @@
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
 #include <helpers/ui/CompanionHomeLayout.h>
 #include <helpers/ui/CompanionMessageHistory.h>
+#include <helpers/ui/ReaderNavigationHint.h>
+#include <helpers/ui/DisplayTextLayout.h>
 #if UI_SMALL_MESSAGE_FONT == 1
   #include <helpers/ui/SmallMessageText.h>
 #endif
@@ -72,10 +74,22 @@ static uint64_t companionMessageElapsedMillis(uint64_t heard_millis) {
   #define UI_RECENT_LIST_SIZE 4
 #endif
 
-#if UI_HAS_JOYSTICK || UI_HAS_ROTARY_INPUT
+#ifdef HAS_TOUCH
+  #define PRESS_LABEL "tap center"
+  #define SELECT_LABEL "TAP"
+#elif UI_HAS_JOYSTICK || defined(UI_HAS_NAV_INPUT)
   #define PRESS_LABEL "press Enter"
+  #define SELECT_LABEL "ENTER"
 #else
-  #define PRESS_LABEL "long press"
+  #define PRESS_LABEL "hold button"
+  #define SELECT_LABEL "HOLD"
+#endif
+
+#if !defined(HAS_TOUCH) && !UI_HAS_JOYSTICK && !defined(UI_HAS_NAV_INPUT) \
+    && (defined(PIN_USER_BTN) || defined(PIN_USER_BTN_ANA))
+  #define UI_BUTTON_READER_HINT 1
+#else
+  #define UI_BUTTON_READER_HINT 0
 #endif
 
 #ifdef COMPANION_EXCLUSIVE_WIFI_BLE
@@ -278,7 +292,7 @@ static void drawCompanionWiFiSetupPage(DisplayDriver& display) {
     display.drawTextCentered(display.width() / 2, 45, "WIFI SETUP");
     display.setTextSize(2);
     display.setColor(UIColor::secondary_txt);
-    display.drawTextCentered(display.width() / 2, 90, "TAP TO START");
+    display.drawTextCentered(display.width() / 2, 90, SELECT_LABEL " TO START");
   } else {
     display.setTextSize(3);
     display.drawTextCentered(display.width() / 2, 45, "WIFI");
@@ -657,7 +671,7 @@ public:
         display.setColor(UIColor::secondary_txt);
         mesh::ui::drawTextCenteredEllipsized(
             display, layout.info, layout.instruction_y,
-            "tap center: inbox");
+            PRESS_LABEL ": inbox");
 
         #ifdef WIFI_SSID
           if (!isCompanionWiFiEnabled()) {
@@ -713,7 +727,7 @@ public:
         display.setColor(UIColor::secondary_txt);
         display.setTextSize(3);
         mesh::ui::drawTextCenteredEllipsized(
-            display, layout.pairing, layout.pairing_label_y, "TAP");
+            display, layout.pairing, layout.pairing_label_y, SELECT_LABEL);
 #ifdef WIFI_SSID
         if (!isCompanionWiFiEnabled()) {
           strcpy(tmp, "OFF");
@@ -776,7 +790,7 @@ public:
         display.setTextSize(1);
         display.setColor(UIColor::secondary_txt);
         display.drawTextCentered(display.width() / 2, 43,
-                                 "tap center: inbox");
+                                 PRESS_LABEL ": inbox");
 
         #ifdef UI_SHOW_CLOCK
         display.setTextSize(3);
@@ -1206,8 +1220,10 @@ public:
 #ifndef UI_COMPACT_MESSAGE_STATUS
   #define UI_COMPACT_MESSAGE_STATUS 0
 #endif
+// Single-button readers cannot operate the up/down channel selector. Use
+// their footer space for the available navigation controls instead.
 #ifndef UI_MESSAGE_CHANNEL_FOOTER
-  #if defined(MESHCORE_HAS_SMALL_DISPLAY)
+  #if defined(MESHCORE_HAS_SMALL_DISPLAY) || UI_BUTTON_READER_HINT == 1
     #define UI_MESSAGE_CHANNEL_FOOTER 0
   #else
     #define UI_MESSAGE_CHANNEL_FOOTER 1
@@ -1427,19 +1443,42 @@ public:
   }
 
   int render(DisplayDriver& display) override {
-    const mesh::ui::CompanionMessageChromeLayout layout =
+    mesh::ui::CompanionMessageChromeLayout layout =
         mesh::ui::makeCompanionMessageChromeLayout(
             UI_COMPACT_MESSAGE_STATUS == 1);
+    int body_bottom = UI_MESSAGE_CHANNEL_FOOTER == 1
+        ? display.height() - layout.filter_height : display.height();
+    display.setCompactText(layout.compact_text);
+    display.setTextSize(1);
+#if UI_BUTTON_READER_HINT == 1
+  #if UI_SMALL_MESSAGE_FONT == 1
+    mesh::ui::SmallMessageText reader_text(display);
+    // Eight-pixel rows for the header and origin leave five message rows and
+    // a navigation row on a 128x64 V4. Keep the 5px font on tiny panels.
+    const int hint_line_height = reader_text.lineHeight();
+    layout.header_divider_y = hint_line_height - 1;
+    layout.origin_y = hint_line_height;
+    layout.message_y = 2 * hint_line_height;
+  #else
+    DisplayDriver& reader_text = display;
+    const int hint_line_height = layout.message_y - layout.origin_y;
+  #endif
+    const mesh::ui::ButtonReaderHintLayout hint =
+        mesh::ui::makeButtonReaderHintLayout(
+            reader_text, hint_line_height, body_bottom);
+    body_bottom = hint.top;
+    DisplayDriver& header = reader_text;
+#else
+    DisplayDriver& header = display;
+#endif
     char tmp[24];
     int filtered_count = filteredCount();
     if (view_offset >= filtered_count) view_offset = 0;
-    display.setCompactText(layout.compact_text);
-    display.setCursor(0, 0);
-    display.setTextSize(1);
-    display.setColor(UIColor::corp_blue);
+    header.setCursor(0, 0);
+    header.setColor(UIColor::corp_blue);
     snprintf(tmp, sizeof(tmp), display.width() < 100 ? "%d/%d" : "Message %d/%d",
              filtered_count == 0 ? 0 : view_offset + 1, filtered_count);
-    display.print(tmp);
+    header.print(tmp);
 
     const MsgEntry* p = filteredEntry(view_offset);
 
@@ -1447,8 +1486,16 @@ public:
       display.drawRect(0, layout.header_divider_y, display.width(), 1);
       display.setCompactText(false);
       display.setColor(UIColor::secondary_txt);
+#if UI_BUTTON_READER_HINT == 1
+      display.setCompactText(layout.compact_text);
+      reader_text.drawTextEllipsized(0, layout.origin_y, display.width(),
+                                    "No buffered messages");
+      mesh::ui::drawButtonReaderHint(reader_text, hint);
+      display.setCompactText(false);
+#else
       display.drawTextCentered(display.width() / 2, 40,
                                "No buffered messages");
+#endif
       renderChannelFilter(display);
       return 5000;
     }
@@ -1459,17 +1506,15 @@ public:
       char* suffix = strchr(tmp, ' ');
       if (suffix != nullptr) *suffix = 0;
     }
-    display.setCursor(display.width() - display.getTextWidth(tmp) - 2, 0);
-    display.print(tmp);
+    header.setCursor(display.width() - header.getTextWidth(tmp) - 2, 0);
+    header.print(tmp);
 
     display.drawRect(0, layout.header_divider_y, display.width(), 1);
     display.setCompactText(false);
 
 #if UI_SMALL_MESSAGE_FONT == 1
     mesh::ui::drawSmallMessageBody(display, p->origin, p->message,
-        layout.origin_y,
-        UI_MESSAGE_CHANNEL_FOOTER == 1
-            ? display.height() - layout.filter_height : display.height());
+        layout.origin_y, body_bottom);
 #else
     display.setCursor(0, layout.origin_y);
     display.setColor(UIColor::secondary_txt);
@@ -1481,9 +1526,21 @@ public:
     display.setColor(UIColor::primary_txt);
     char filtered_msg[sizeof(p->message)];
     display.translateUTF8ToBlocks(filtered_msg, p->message, sizeof(filtered_msg));
+  #if UI_BUTTON_READER_HINT == 1
+    const int line_height = layout.message_y - layout.origin_y;
+    const int message_rows = (body_bottom - layout.message_y) / line_height;
+    mesh::ui::drawTextWrapped(display, 0, layout.message_y, display.width(),
+                              line_height, message_rows, filtered_msg);
+  #else
     display.printWordWrap(filtered_msg, display.width());
+  #endif
 #endif
 
+#if UI_BUTTON_READER_HINT == 1
+    display.setCompactText(layout.compact_text);
+    mesh::ui::drawButtonReaderHint(reader_text, hint);
+    display.setCompactText(false);
+#endif
     renderChannelFilter(display);
 
 #if AUTO_OFF_MILLIS==0 // probably e-ink
@@ -2067,6 +2124,9 @@ char UITask::checkDisplayOn(char c) {
 }
 
 char UITask::handleLongPress(char c) {
+  // Exit an incoming message preview even during the startup rescue window.
+  // The on-screen reader hint must not unexpectedly enter CLI rescue.
+  if (curr == msg_preview) return c;
 #if UI_WIFI_SETUP_HOME_PAGE == 1
   // A setup AP may focus this page immediately at boot. Its documented HOLD
   // action must win over the otherwise-global early-boot CLI rescue gesture.
