@@ -2,6 +2,15 @@
 #include <helpers/CompanionJohnConfig.h>
 #include <helpers/ota/OtaMemoryPolicy.h>
 
+// The role terminal is also used by WebConfig on WiFi-only Companions. Its
+// parser and reply tracking do not require a physical USB transport.
+#if defined(ENABLE_USB_INTERFACE) \
+    || (defined(ESP32_PLATFORM) && defined(WIFI_SSID) && !defined(WEBCONFIG_DISABLED))
+  #define COMPANION_FEATURE_TEXT_TERMINAL 1
+#else
+  #define COMPANION_FEATURE_TEXT_TERMINAL 0
+#endif
+
 // Features are selected independently so adding a transport or changing an
 // image-size profile cannot accidentally remove unrelated Companion behavior.
 // Keep the legacy umbrella as a compatibility input for existing target files;

@@ -9,6 +9,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WebTerminalStreamTest(unittest.TestCase):
+    def test_terminal_feature_compiles_with_wifi_without_usb(self):
+        for defines, enabled in [
+            (["ESP32_PLATFORM", 'WIFI_SSID="ssid"'], True),
+            (["ESP32_PLATFORM", 'WIFI_SSID="ssid"', "WEBCONFIG_DISABLED"], False),
+            (["NRF52_PLATFORM", "ENABLE_USB_INTERFACE"], True),
+            (["ESP32_PLATFORM"], False),
+        ]:
+            with self.subTest(defines=defines):
+                result = subprocess.run([
+                    "c++", "-E", "-dM", "-x", "c++", "-", "-I" + str(ROOT / "src"),
+                    "-include", str(ROOT / "examples/companion_radio/CompanionFeatures.h"),
+                    *["-D" + value for value in defines],
+                ], input="", text=True, capture_output=True, check=True)
+                self.assertIn("#define COMPANION_FEATURE_TEXT_TERMINAL " + str(int(enabled)),
+                              result.stdout)
+
     def test_growth_drain_failure_and_release(self):
         headers = {
             "Arduino.h": """#pragma once

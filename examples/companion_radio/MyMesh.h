@@ -122,7 +122,7 @@ struct AdvertPath {
 };
 
 class MyMesh : public BaseChatMesh, public DataStoreHost, public UIShutdownGuard
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
              , public ContactVisitor
 #endif
 #ifdef WITH_WEBCONFIG
@@ -187,7 +187,7 @@ public:
   void execCommand(char* cmd, char* reply) override;
   bool supportsCliTerminal() const override { return true; }
   void execAdminCommand(char* cmd, char* reply) override;
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   bool supportsStreamTerminal() const override { return true; }
   bool beginStreamTerminal(Stream& output) override;
   bool ownsStreamTerminal(const Stream& output) const override {
@@ -207,7 +207,7 @@ public:
   bool advert();
   void enterCLIRescue();
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   void enterTerminalMode();
   void exitTerminalMode();
   // Clear state owned by the current text-terminal host without changing the
@@ -281,7 +281,7 @@ protected:
   bool onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_t in_path_len, uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
   void onContactPathUpdated(const ContactInfo &contact) override;
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   void onContactVisit(const ContactInfo& contact) override;
 #endif
   ContactInfo* processAck(const uint8_t *data) override;
@@ -403,7 +403,7 @@ private:
   void formatWiFiPowerSaving(char* reply, size_t reply_size) const;
   void syncWiFiPowerSaving();
 #endif
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   Stream& terminalOutput();
   bool hasTerminalOutput() const { return _terminal_output != NULL; }
   void printTerminalBanner(bool show_binary_stop);
@@ -515,7 +515,7 @@ private:
   bool _iter_start_pending;
   bool _iter_contact_pending;
   bool _cli_rescue;
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   bool _terminal_mode;
   Stream* _terminal_output;
   mesh::TerminalDisplayFilter _terminal_display;
@@ -620,7 +620,7 @@ private:
     uint8_t text_fingerprint[MAX_HASH_SIZE];
     uint8_t retry_key[MAX_HASH_SIZE];
     BaseSerialInterface* reply_route;
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
     bool terminal_origin;
 #endif
   };
@@ -635,7 +635,7 @@ private:
   void expireExpectedAcks();
   AckTableEntry* findPendingTextMessage(
       const uint8_t text_fingerprint[MAX_HASH_SIZE], uint32_t message_timestamp);
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   void rememberTerminalAck(ContactInfo& recipient, const char* text,
                            uint32_t message_timestamp, uint32_t expected_ack,
                            uint32_t est_timeout,

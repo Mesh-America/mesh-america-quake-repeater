@@ -1086,6 +1086,14 @@ void MyMesh::endStreamTerminal(Stream& output) {
     enterUsbTerminalMode();
   }
 }
+#elif defined(WITH_WEBCONFIG)
+bool MyMesh::beginStreamTerminal(Stream& output) {
+  return enterNetworkTerminalMode(output);
+}
+
+void MyMesh::endStreamTerminal(Stream& output) {
+  exitNetworkTerminalMode(output);
+}
 #endif
 
 void halt() {

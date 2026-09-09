@@ -73,6 +73,9 @@ class FirmwareRamTest(unittest.TestCase):
         psram = ram.requirements("ESP32_PLATFORM", {**defines, "BOARD_HAS_PSRAM": 1}, "v4_companion")
         self.assertEqual(plain["required_heap_bytes"] - base["required_heap_bytes"], 6144)
         self.assertEqual(psram["required_heap_bytes"] - base["required_heap_bytes"], 2048)
+        wifi_only = dict(defines)
+        del wifi_only["ENABLE_USB_INTERFACE"]
+        self.assertEqual(ram.requirements("ESP32_PLATFORM", wifi_only, "v4_companion"), plain)
         repeater = ram.requirements("ESP32_PLATFORM", defines, "v4_repeater")
         self.assertNotIn("browser_terminal_session", repeater["components"])
 
@@ -237,7 +240,7 @@ int main() {
         base = ram.requirements("ESP32_PLATFORM", {}, "companion")["required_heap_bytes"]
         flags = {"BLE_PIN_CODE": 1, "WIFI_SSID": "test", "WITH_MQTT_BRIDGE": 1}
         both = ram.requirements("ESP32_PLATFORM", flags, "companion")["required_heap_bytes"]
-        self.assertEqual(both - base, 32768 + 49152 + 24576)
+        self.assertEqual(both - base, 32768 + 49152 + 24576 + 6144)
         flags["COMPANION_EXCLUSIVE_WIFI_BLE"] = 1
         self.assertEqual(ram.requirements("ESP32_PLATFORM", flags, "companion")["required_heap_bytes"], both - 32768)
         self.assertGreater(ram.requirements("NRF52_PLATFORM", {"DISPLAY_CLASS": "ST7735Display"}, "companion")["required_heap_bytes"],

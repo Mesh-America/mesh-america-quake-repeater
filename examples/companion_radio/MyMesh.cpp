@@ -42,7 +42,7 @@
 #endif
 
 #include <helpers/CLICommandUtils.h>
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
 #include <helpers/TracePathHelpers.h>
 #endif
 
@@ -224,7 +224,7 @@ static bool save_filter(const ContactInfo& c);
 // First 16 bytes of SHA-256("#testing"), encoded as base64.
 #define TESTING_GROUP_PSK               "zeXoLPUVZH3LVHp5pPBl0Q=="
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
 static const char* terminalContactTypeName(uint8_t type) {
   if (type == ADV_TYPE_CHAT) return "Chat";
   if (type == ADV_TYPE_REPEATER) return "Repeater";
@@ -708,7 +708,7 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
 #endif
   }
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   if (hasTerminalOutput() && _terminal_display.shouldShowAdvert()) {
     Stream& output = terminalOutput();
     output.printf("\r\nADVERT from -> %s\r\n", contact.name);
@@ -759,7 +759,7 @@ int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
   return max_num;
 }
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
 void MyMesh::onContactVisit(const ContactInfo& contact) {
   if (contact.type == ADV_TYPE_NONE) return;
 
@@ -779,7 +779,7 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
 
   scheduleContactWrite(contact);
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   if (hasTerminalOutput()) {
     terminalOutput().printf("\r\nPATH updated -> %s\r\n> ", contact.name);
   }
@@ -815,7 +815,7 @@ void MyMesh::expireExpectedAcks() {
 
     if (entry.expires_at == now || millisHasNowPassed(entry.expires_at)) {
       if (!hasActiveRetries(entry.retry_key)) {
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
         if (entry.terminal_origin && hasTerminalOutput()) {
           terminalOutput().print("\r\n  ERROR: timed out, no ACK.\r\n> ");
         }
@@ -872,7 +872,7 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
                                    out_frame, 9);
       }
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
       if (expected_ack_table[i].terminal_origin && hasTerminalOutput()) {
         terminalOutput().printf("\r\n  Got ACK! (round trip: %lu ms)\r\n> ",
                                 (unsigned long)trip_time);
@@ -927,7 +927,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
     _serial->writeFrame(frame, 1);
   }
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   if (hasTerminalOutput()) {
     Stream& output = terminalOutput();
     const char* kind = txt_type == TXT_TYPE_CLI_DATA ? "CLI" : "MSG";
@@ -1058,7 +1058,7 @@ void MyMesh::onCommandDataRecv(const ContactInfo &from, mesh::Packet *pkt, uint3
   markConnectionActive(from); // in case this is from a server, and we have a connection
   bool terminal_command_reply = false;
   uint32_t terminal_command_elapsed_millis = 0;
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   terminal_command_reply = _terminal_command.takeReply(
       from.id.pub_key, _ms->getMillis(), terminal_command_elapsed_millis);
   if (terminal_command_reply) _terminal_command_target[0] = 0;
@@ -1127,7 +1127,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
 #endif
   }
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   if (hasTerminalOutput()
       && _terminal_display.shouldShowChannel(is_emergency_channel)) {
     ChannelDetails details;
@@ -1269,18 +1269,18 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
 
   if (pending_login && memcmp(&pending_login, contact.id.pub_key, 4) == 0) { // check for login response
     // yes, is response to pending sendLogin()
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
     const bool terminal_login_response = _terminal_login_pending
         && memcmp(_terminal_login_key, contact.id.pub_key,
                   sizeof(_terminal_login_key)) == 0;
 #endif
     int i = 0;
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
     bool login_success = false;
     bool modern_login = false;
 #endif
     if (len >= 6 && memcmp(&data[4], "OK", 2) == 0) { // legacy Repeater login OK response
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
       login_success = true;
 #endif
       out_frame[i++] = PUSH_CODE_LOGIN_SUCCESS;
@@ -1288,7 +1288,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       memcpy(&out_frame[i], contact.id.pub_key, 6);
       i += 6;                                     // pub_key_prefix
     } else if (len >= 13 && data[4] == RESP_SERVER_LOGIN_OK) { // new login response
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
       login_success = true;
       modern_login = true;
 #endif
@@ -1314,7 +1314,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     // no Binary route. Binary logins retain their exact requester even if a
     // different transport has issued a command in the meantime.
     writePendingSerialFrame(out_frame, i);
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
     if (terminal_login_response) {
       if (hasTerminalOutput()) {
         Stream& output = terminalOutput();
@@ -1474,7 +1474,7 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
   i += path_len >> path_sz;
   out_frame[i++] = (int8_t)(packet->getSNR() * 4); // extra/final SNR (to this node)
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   if (hasTerminalOutput() && _terminal_trace_pending
       && tag == _terminal_trace_tag && auth_code == _terminal_trace_auth) {
     Stream& output = terminalOutput();
@@ -1539,7 +1539,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _iter_total_count = 0;
   _iter_table_revision = 0;
   _cli_rescue = false;
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   _terminal_mode = false;
   _terminal_output = NULL;
   _terminal_recipient_set = false;
@@ -6776,7 +6776,7 @@ void MyMesh::appendRxPowerSavingAdjustmentNote(char* reply, size_t reply_size,
            (unsigned)_prefs.rx_ps_level);
 }
 
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
 Stream& MyMesh::terminalOutput() {
   return _terminal_output != NULL ? *_terminal_output : Serial;
 }
@@ -8468,7 +8468,7 @@ void MyMesh::loop() {
 #ifdef COMPANION_MESH_CLOCK_SYNC
   _clock_sync.loop();
 #endif
-#ifdef ENABLE_USB_INTERFACE
+#if COMPANION_FEATURE_TEXT_TERMINAL
   serviceTerminalLogin();
   serviceTerminalCommand();
   serviceTerminalTrace();

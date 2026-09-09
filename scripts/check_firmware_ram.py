@@ -75,7 +75,7 @@ def requirements(platform, defines, target):
             parts["mqtt_connections_buffers"] = 24576
         if "ENABLE_OTA" in defines:
             parts["ota_source_scratch"] = 8192
-        if (companion and "ENABLE_USB_INTERFACE" in defines and "WIFI_SSID" in defines
+        if (companion and "WIFI_SSID" in defines
                 and "WEBCONFIG_DISABLED" not in defines):
             parts["browser_terminal_session"] = 2048
             if "BOARD_HAS_PSRAM" not in defines:
