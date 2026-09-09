@@ -69,7 +69,8 @@ over the normal binary USB, BLE, or TCP connection:
 | Command | Availability |
 |---|---|
 | `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets` | Local terminal and binary command `0x42` |
-| `erase`, `set freq <MHz>` | Local terminal and binary command `0x42`; stored changes apply on reboot |
+| `erase` | Local terminal and binary command `0x42`; reboot after erasing stored settings |
+| `set freq <MHz>` | Local terminal, binary command `0x42`, and authorized LoRa CLI; reboot to apply |
 | `get prv.key` | Local terminal and binary command `0x42`; requires private key export enabled |
 | `get password` | Reports that Companion has no admin password; infrastructure returns its password locally |
 | `get wifi.pwd`, `get mqttN.password`, `get mqttN.token` | Local terminal and binary command `0x42`; corresponding WiFi/MQTT feature required |
@@ -125,7 +126,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Radio | [`get tx`; `set tx <dbm>`](cli_commands.md#view-or-change-this-nodes-transmit-power) | Board TX-power limits apply | Yes | Yes | Yes |
 | Radio | [`tempradio ...`; `normalradio`](cli_commands.md#change-the-radio-parameters-for-a-set-duration) | Full parser | Yes | Yes | Yes |
 | Radio | [`get/set/del radioat`; `get/set/del tempradioat`](cli_commands.md#schedule-radio-parameter-changes) | Full parser | Yes | Yes | Yes |
-| Radio | [`get freq`; `set freq <mhz>`](cli_commands.md#view-or-change-this-nodes-frequency) | `set` requires a local connection | Yes | Yes | Yes |
+| Radio | [`get freq`; `set freq <mhz>`](cli_commands.md#view-or-change-this-nodes-frequency) | Local or authorized LoRa CLI | Yes | Yes | Yes |
 | Radio | [`get/set radio.rxgain`](cli_commands.md#view-or-change-this-nodes-rx-boosted-gain-mode-sx12xx-and-lr1110-v1141) | Supported radio | Feature | Feature | Feature |
 | Radio | [`get/set radio.fem.rxgain`](cli_commands.md#view-or-change-the-lora-fem-receive-path-gain-state-on-supported-boards) | Controllable LoRa FEM | Feature | Feature | Feature |
 | Radio | [`get/set radio.fem.txgain`](cli_commands.md#view-or-change-the-lora-fem-transmit-path-gain-state-on-supported-boards) | Controllable LoRa FEM | Feature | Feature | Feature |
@@ -291,7 +292,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Radio | [`get tx`; `set tx <dbm>`](cli_commands.md#view-or-change-this-nodes-transmit-power) | Board TX-power limits apply | Yes | Yes | Yes | Yes | Yes |
 | Radio | [`tempradio ...`; `normalradio`](cli_commands.md#change-the-radio-parameters-for-a-set-duration) | Full parser | Yes | Yes | Yes | Yes | Yes |
 | Radio | [`get/set/del radioat`; `get/set/del tempradioat`](cli_commands.md#schedule-radio-parameter-changes) | Full parser | Yes | Yes | Yes | Yes | Yes |
-| Radio | [`get freq`; `set freq <mhz>`](cli_commands.md#view-or-change-this-nodes-frequency) | `set` requires a local connection | Yes | Yes | Yes | Yes | Yes |
+| Radio | [`get freq`; `set freq <mhz>`](cli_commands.md#view-or-change-this-nodes-frequency) | Local or authorized LoRa CLI | Yes | Yes | Yes | Yes | Yes |
 | Radio | [`get/set radio.rxgain`](cli_commands.md#view-or-change-this-nodes-rx-boosted-gain-mode-sx12xx-and-lr1110-v1141) | Supported radio | Feature | Feature | Feature | Feature | Feature |
 | Radio | [`get/set espnow.channel`](cli_commands.md#view-or-change-the-primary-esp-nowwifi-channel) | Primary ESP-NOW mesh radio | Feature | Feature | Feature | Feature | Feature |
 | Radio | [`get/set radio.fem.rxgain`](cli_commands.md#view-or-change-the-lora-fem-receive-path-gain-state-on-supported-boards) | Controllable LoRa FEM | Feature | Feature | Feature | Feature | Feature |

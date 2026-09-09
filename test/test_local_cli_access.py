@@ -12,6 +12,7 @@ PREAMBLE = r'''
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <initializer_list>
 #include <helpers/CLICommandUtils.h>
 #define ESP32 1
 #define WIFI_SSID "test"
@@ -29,7 +30,10 @@ struct Utils {
   }
 };
 }
-struct ContactInfo { bool isRemoteCLIAllowed() const { return true; } };
+struct ContactInfo {
+  bool allowed=true;
+  bool isRemoteCLIAllowed() const { return allowed; }
+};
 struct WiFiSetupPortal {
   static bool loadStoredCredentials(char*,size_t,char* password,size_t size) {
     snprintf(password,size,"wifi-secret");return true;
@@ -82,7 +86,7 @@ struct MyMesh {
   int value=0; int* _ms=&value; int* _radio=&value; int* _mgr=&value;
   uint16_t _err_flags=0;
   bool _radio_available=false, save_ok=true;
-  int resets=0;
+  int resets=0, saves=0;
   bool handleCommand(const char*,uint32_t,char*);
   bool handleDirectCommand(const char*,char*,size_t);
   void onCLICommandRecv(const ContactInfo&,mesh::Packet*,uint32_t,const char*,char*);
@@ -94,7 +98,7 @@ struct MyMesh {
   }
   void stopContactsIterator(){}
   void resetContacts(){++resets;}
-  bool savePrefs(){return save_ok;}
+  bool savePrefs(){++saves;return save_ok;}
   int getTotalAirTime(){return 0;}
   int getReceiveAirTime(){return 0;}
   int getNumSentFlood(){return 0;}
@@ -138,15 +142,30 @@ int main() {
     assert(!strstr(reply,"secret") && !strstr(reply,"token") && !strstr(reply,"A5A5"));
   }
   assert(node.handleCommand("set freq 915.25",0,reply));
-  assert(node._prefs.freq==915.25f);
-  assert(!node.handleCommand("set freq 920",100,reply));
-  node.onCLICommandRecv(ContactInfo{},nullptr,0,"set freq 920",reply);
-  assert(node._prefs.freq==915.25f);
+  assert(node._prefs.freq==915.25f && strstr(reply,"reboot to apply"));
+  assert(node.handleCommand("set freq 920",100,reply));
+  assert(node._prefs.freq==920.0f && strstr(reply,"reboot to apply"));
+  for(uint32_t stamp:{0u,100u}) {
+    reply[0]=0;
+    node.onCLICommandRecv(ContactInfo{},nullptr,stamp,"A7|set freq 921.125",reply);
+    assert(node._prefs.freq==921.125f && !strcmp(reply,"A7|OK - reboot to apply"));
+    assert(node._prefs.bw==125.0f && node._prefs.sf==7 && node._prefs.cr==5);
+    for(const char* bad:{"set freq 149.9","set freq 2500.1","set freq 920oops",
+                         "set freq NaN","set freq inf","set freq 1e3","set freq "}) {
+      const int saves=node.saves;
+      reply[0]=0;
+      node.onCLICommandRecv(ContactInfo{},nullptr,stamp,bad,reply);
+      assert(strstr(reply,"Error") && node._prefs.freq==921.125f && node.saves==saves);
+    }
+  }
+  const int saves=node.saves;
+  node.onCLICommandRecv(ContactInfo{false},nullptr,100,"set freq 930",reply);
+  assert(node._prefs.freq==921.125f && node.saves==saves);
   node.save_ok=false;
-  assert(node.handleCommand("set freq 920",0,reply));
-  assert(node._prefs.freq==915.25f && strstr(reply,"Error"));
-  assert(node.handleCommand("set freq 920oops",0,reply));
-  assert(node._prefs.freq==915.25f && strstr(reply,"Error"));
+  for(uint32_t stamp:{0u,100u}) {
+    assert(node.handleCommand("set freq 920",stamp,reply));
+    assert(node._prefs.freq==921.125f && strstr(reply,"Error"));
+  }
   assert(!node.handleCommand("erase",100,reply));
   node.onCLICommandRecv(ContactInfo{},nullptr,0,"erase",reply);
   assert(node.store.erased==0);
@@ -161,6 +180,66 @@ int main() {
 
 
 class LocalCliAccessTest(unittest.TestCase):
+    def test_infrastructure_frequency_accepts_local_and_lora_callers(self):
+        source = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
+        anchor = source.index('memcmp(config, "freq ", 5)')
+        start = source.rfind('} else if (', 0, anchor) + len('} else ')
+        setter = extract_braced(source[start:], "if (")
+        # The following optional else-if puts its preprocessor guard just
+        # before this branch's closing brace. It is not part of this handler.
+        setter = setter.replace("#ifdef WITH_BRIDGE\n", "")
+        code = r'''
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <cstdint>
+#include <initializer_list>
+#define MAX_LORA_TX_POWER 22
+#include <helpers/CLICommandUtils.h>
+#include <helpers/radiolib/RadioPowerLimits.h>
+struct Prefs {
+  float freq=910.525f,bw=62.5f;
+  uint8_t sf=7,cr=5;
+  int8_t tx_power_dbm=30;
+} prefs;
+Prefs* _prefs=&prefs;
+int saves=0;
+void savePrefs(){++saves;}
+void set(const char* config,uint32_t sender_timestamp,char* reply) {
+''' + setter + r'''
+}
+int main() {
+  char reply[160]={};
+  for(uint32_t stamp:{0u,100u,0xFFFFFFFFu}) {
+    prefs=Prefs{};
+    set("freq 915.25",stamp,reply);
+    assert(prefs.freq==915.25f && prefs.tx_power_dbm==22);
+    assert(strstr(reply,"reboot to apply") && strstr(reply,"TX power limited"));
+    assert(prefs.bw==62.5f && prefs.sf==7 && prefs.cr==5);
+    for(const char* bad:{"freq 149.9","freq 2500.1","freq 920oops",
+                         "freq NaN","freq inf","freq 1e3","freq "}) {
+      const int writes=saves;
+      set(bad,stamp,reply);
+      assert(strstr(reply,"Error") && prefs.freq==915.25f && saves==writes);
+    }
+    for(const char* boundary:{"freq 150","freq 2500"}) {
+      set(boundary,stamp,reply);
+      assert(strstr(reply,"OK - reboot to apply"));
+    }
+  }
+  assert(saves==9);
+}
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "test"
+            result = subprocess.run([
+                "c++", "-std=c++17", "-x", "c++", "-", "-I"+str(ROOT / "src"),
+                "-fsanitize=address,undefined", "-fno-pie", "-no-pie", "-o", str(binary),
+            ], input=code, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+
     def test_infrastructure_password_read_and_browser_transport_limits(self):
         source = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
         getter = extract_braced(source, "void CommonCLI::handleGetCmd(")

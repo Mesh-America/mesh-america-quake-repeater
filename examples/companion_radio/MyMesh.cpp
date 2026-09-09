@@ -7826,15 +7826,8 @@ void MyMesh::handleTerminalCommand(char* command) {
       savePrefs();
       terminalOutput().print("  OK - reboot to apply\r\n");
     } else if (strncmp(config, "freq ", 5) == 0) {
-      float parsed = 0.0f;
-      if (!mesh::cli::parseDecimalStrict(config + 5, parsed)
-          || parsed < 150.0f || parsed > 2500.0f) {
-        terminalOutput().print("  ERROR: frequency must be 150-2500 MHz\r\n");
-      } else {
-        _prefs.freq = parsed;
-        savePrefs();
-        terminalOutput().print("  OK - reboot to apply\r\n");
-      }
+      handleCommand(command, 0, local_reply);
+      terminalOutput().printf("  %s\r\n", local_reply);
     } else if (strncmp(config, "radio.fem.rxgain", 16) == 0
                && (config[16] == 0 || config[16] == ' '
                    || config[16] == '\t')) {
@@ -8067,23 +8060,6 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
     }
     return true;
   }
-  if (strncmp(command, "set freq ", 9) == 0) {
-    float frequency;
-    if (!mesh::cli::parseDecimalStrict(command + 9, frequency)
-        || frequency < 150.0f || frequency > 2500.0f) {
-      snprintf(reply, reply_size, "Error: frequency must be 150-2500 MHz");
-    } else {
-      const float previous = _prefs.freq;
-      _prefs.freq = frequency;
-      if (savePrefs()) {
-        snprintf(reply, reply_size, "OK - reboot to apply");
-      } else {
-        _prefs.freq = previous;
-        snprintf(reply, reply_size, "Error: frequency could not be saved");
-      }
-    }
-    return true;
-  }
   if (strcmp(command, "stats-core") == 0) {
     StatsFormatHelper::formatCoreStats(reply, board, *_ms, _err_flags, _mgr);
     return true;
@@ -8166,6 +8142,24 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
   if (sender_timestamp == 0 && mesh::cli::isUf2ResetCommand(command)) {
     if (!board.rebootToUf2Bootloader()) {
       snprintf(reply, reply_capacity, "ERR: unsupported");
+    }
+    return true;
+  }
+
+  if (strncmp(command, "set freq ", 9) == 0) {
+    float frequency;
+    if (!mesh::cli::parseDecimalStrict(command + 9, frequency)
+        || frequency < 150.0f || frequency > 2500.0f) {
+      snprintf(reply, reply_capacity, "Error: frequency must be 150-2500 MHz");
+    } else {
+      const float previous = _prefs.freq;
+      _prefs.freq = frequency;
+      if (savePrefs()) {
+        snprintf(reply, reply_capacity, "OK - reboot to apply");
+      } else {
+        _prefs.freq = previous;
+        snprintf(reply, reply_capacity, "Error: frequency could not be saved");
+      }
     }
     return true;
   }

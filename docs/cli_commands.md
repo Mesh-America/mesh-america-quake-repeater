@@ -269,11 +269,12 @@ the **CLI** tab.
 The saved setting becomes active only in station/LAN mode while the WiFi client
 is connected. It is deliberately unavailable on the open setup access point.
 The tab displays each reply in the browser, including local diagnostics,
-`get password`, private-key and WiFi/MQTT credential reads, `erase`, and
-`set freq`. Infrastructure `get acl` and raw `log` stream to the requesting
-browser, with backpressure for slow clients. LoRa callers retain their
-restrictions. The bounded `/api/cli` endpoint accepts local maintenance
-commands; use `/api/terminal` for complete ACL and log listings.
+`get password`, private-key and WiFi/MQTT credential reads, and `erase`.
+Infrastructure `get acl` and raw `log` stream to the requesting browser, with
+backpressure for slow clients. These maintenance commands retain their LoRa
+restrictions. `set freq` works both here and through authorized LoRa CLI.
+The bounded `/api/cli` endpoint accepts local maintenance commands; use
+`/api/terminal` for complete ACL and log listings.
 Select **Command block** to paste up to 100 commands with one command per line.
 Blank lines are ignored, and every nonblank line must fit the normal 159-byte
 CLI command limit. The browser sends the lines sequentially and waits for each
@@ -1067,8 +1068,12 @@ automation treats that version as the wire-format capability boundary.
 **Default:** `869.525`
 
 **Note:** Requires reboot to apply
-**Local connection only:** `set freq <frequency>`. USB, browser/TCP/Ethernet
-CLI, and Companion binary command `0x42` can set it; LoRa cannot.
+
+**Connections:** USB, browser/TCP/Ethernet CLI, Companion binary command
+`0x42` (USB/BLE/TCP), and authorized LoRa CLI. `set freq` saves the frequency;
+bandwidth, spreading factor, and coding rate stay as configured. Infrastructure
+roles also clamp transmit power to the board's limit for that frequency. Like
+`set radio`, it requires permission to configure the destination node.
 
 ---
 

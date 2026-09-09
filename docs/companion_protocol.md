@@ -253,11 +253,13 @@ example, `A7|get radio.rxgain`); the reply preserves that prefix.
 
 Direct USB, BLE, WiFi TCP, and Ethernet clients can also use this command for
 `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets`, `erase`,
-`set freq <MHz>`, and `get prv.key` (when private key export is enabled).
+and `get prv.key` (when private key export is enabled).
 WiFi/MQTT builds accept `get wifi.pwd`, `get mqttN.password`, and
 `get mqttN.token`. `get password` reports that Companion has no admin password;
 infrastructure roles return their own admin password on a local CLI connection.
-These privileges do not apply to CLI commands relayed over LoRa. See
+These privileges do not apply to CLI commands relayed over LoRa.
+`set freq <MHz>` works through command `0x42` and authorized LoRa CLI, like
+`set radio`; it saves the frequency and requires reboot to apply. See
 [local maintenance commands](terminal_chat_cli.md#local-maintenance-commands)
 for role differences and the text-terminal equivalents.
 

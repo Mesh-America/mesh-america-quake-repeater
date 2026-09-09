@@ -4027,7 +4027,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "OK");
     }
-  } else if (sender_timestamp == 0 && memcmp(config, "freq ", 5) == 0) {
+  } else if (memcmp(config, "freq ", 5) == 0) {
     float freq = 0.0f;
     if (mesh::cli::parseDecimalStrict(&config[5], freq)
         && freq >= 150.0f && freq <= 2500.0f) {
