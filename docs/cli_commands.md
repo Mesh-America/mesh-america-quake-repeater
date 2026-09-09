@@ -80,7 +80,8 @@ command aliases are listed there explicitly.
 **Usage:**
 - `uf2reset`
 
-**Serial Only:** Yes
+**Local connection only:** USB, direct network CLI, or Companion binary
+command `0x42` where the role supports the command; unavailable over LoRa.
 
 **Note:** Reboots directly into the UF2 bootloader on supported nRF52 boards.
 This includes the Repeater, Room Server, Sensor, Companion, and Terminal Chat
@@ -213,6 +214,7 @@ folder transport.
 - `set webui off`
 - `get webui`
 - `get wifi.ssid`
+- `get wifi.pwd`
 - `get wifi.status`
 - `get wifi.powersave`
 - `get wifi.cli`
@@ -252,8 +254,8 @@ their profile's idle timeout.
 Every ESP32 build with WebConfig supports the browser command terminal,
 including WiFi Companion and Full Companion. Companions use their complete
 USB/TCP terminal on the trusted LAN, including contact import, chat, recipient
-selection, and delayed replies. Repeater and Room Server use the authenticated
-admin parser.
+selection, and delayed replies. Repeater and Room Server use their local CLI
+after admin authentication.
 
 To add a Companion contact, run `import meshcore://<full-contact-card-data>`,
 then `list` to confirm it appears. Get the complete card with `card` on the
@@ -266,8 +268,12 @@ the **CLI** tab.
 `get wifi.cli` reports `off`, `on, waiting for WiFi client`, or `on, active`.
 The saved setting becomes active only in station/LAN mode while the WiFi client
 is connected. It is deliberately unavailable on the open setup access point.
-The tab displays each reply in the browser. Commands explicitly restricted to
-a physical serial connection remain unavailable.
+The tab displays each reply in the browser, including local diagnostics,
+`get password`, private-key and WiFi/MQTT credential reads, `erase`, and
+`set freq`. Infrastructure `get acl` and raw `log` stream to the requesting
+browser, with backpressure for slow clients. LoRa callers retain their
+restrictions. The bounded `/api/cli` endpoint accepts local maintenance
+commands; use `/api/terminal` for complete ACL and log listings.
 Select **Command block** to paste up to 100 commands with one command per line.
 Blank lines are ignored, and every nonblank line must fit the normal 159-byte
 CLI command limit. The browser sends the lines sequentially and waits for each
@@ -302,8 +308,9 @@ ordinary passphrases remain limited to 63 characters. Other 64-character values
 and all longer values are rejected. MQTT observer WiFi passwords retain their
 fixed 63-character limit.
 Power-save changes are applied immediately when WiFi is running and otherwise
-take effect on the next connection. `get wifi.pwd` is intentionally unavailable
-so the standalone password is never returned by the CLI.
+take effect on the next connection. `get wifi.pwd` returns the saved password
+on a local connection. It remains unavailable or masked over LoRa, and the
+configuration form continues to mask stored secrets.
 
 ESP32 WiFi Companion WebConfig exposes the same `wifi.powersave` values in its
 WiFi card. Every ESP32 WiFi Companion with WebConfig exposes the standalone
@@ -314,7 +321,9 @@ restarting the WiFi station, so a TCP client should expect to reconnect at the
 new address; USB password input is masked. Binary Companion clients can use
 USB, BLE, or TCP port 5000 without the terminal-start token: send command
 `0x42` (`CMD_RUN_CLI_COMMAND`) followed by the same CLI text, such as
-`get wifi.powersave` or `set wifi.powersave min`. WiFi-only Companions accept
+`get wifi.powersave`, `get wifi.pwd`, `stats-core`, or `set wifi.powersave min`.
+See [local maintenance commands](terminal_chat_cli.md#local-maintenance-commands)
+for the complete access rules. WiFi-only Companions accept
 all three modes. A Full Companion that runs BLE and infrastructure WiFi
 simultaneously rejects `none` because coexistence requires modem sleep.
 Companion device power saving and LoRa `radio.rxps` remain independent. On an
@@ -378,7 +387,8 @@ remain available.
 **Usage:**
 - `erase`
 
-**Serial Only:** Yes
+**Local connection only:** USB, direct network CLI, or Companion binary
+command `0x42` where the role supports the command; unavailable over LoRa.
 
 **Warning:** _**This is destructive!**_
 
@@ -446,7 +456,8 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 **Usage:** 
 - `stats-core`
 
-**Serial Only:** Yes
+**Local connection only:** USB, direct network CLI, or Companion binary
+command `0x42` where the role supports the command; unavailable over LoRa.
 
 ---
 
@@ -457,7 +468,8 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 
 **Usage:** `stats-radio`
 
-**Serial Only:** Yes
+**Local connection only:** USB, direct network CLI, or Companion binary
+command `0x42` where the role supports the command; unavailable over LoRa.
 
 ---
 
@@ -465,7 +477,8 @@ Elsewhere it replies `Err - neighbors not enabled in this build`. If a
 ### Packet stats - Packet counters: Received, Sent
 **Usage:** `stats-packets`
 
-**Serial Only:** Yes
+**Local connection only:** USB, direct network CLI, or Companion binary
+command `0x42` where the role supports the command; unavailable over LoRa.
 
 ---
 
@@ -855,10 +868,12 @@ only `get mqtt.enabled`. WiFi modem power saving is a separate setting.
 
 ---
 
-### Print the captured log to the serial terminal
+<a id="print-the-captured-log-to-the-serial-terminal"></a>
+### Print the captured log to the requesting terminal
 **Usage:** `log`
 
-**Serial Only:** Yes
+**Local connection only:** USB, direct network CLI, or Companion binary
+command `0x42` where the role supports the command; unavailable over LoRa.
 
 ---
 
@@ -1052,7 +1067,8 @@ automation treats that version as the wire-format capability boundary.
 **Default:** `869.525`
 
 **Note:** Requires reboot to apply
-**Serial Only:** `set freq <frequency>`
+**Local connection only:** `set freq <frequency>`. USB, browser/TCP/Ethernet
+CLI, and Companion binary command `0x42` can set it; LoRa cannot.
 
 ---
 
@@ -1315,16 +1331,18 @@ for the tested XIAO handoff and host-cache caveats.
 **Parameters:**
 - `private_key`: Private key in hex format (64 hex characters)
 
-**Serial Only:**
-- `get prv.key`: Yes
-- `set prv.key`: No
+**Local connection only:** `get prv.key`. Companion also requires
+`ENABLE_PRIVATE_KEY_EXPORT=1`; use binary command `0x42` or the text terminal.
+Infrastructure `set prv.key` retains its administrator access rules.
 
 **Note:** Requires reboot to take effect after setting
 
 ---
 
-#### Change this node's admin password
+<a id="change-this-nodes-admin-password"></a>
+#### View or change this node's admin password
 **Usage:**
+- `get password`
 - `password <new_password>`
 
 **Parameters:**
@@ -1334,7 +1352,12 @@ for the tested XIAO handoff and host-cache caveats.
 
 **Default:** `password`
 
-**Note:** Command reply echoes the updated password for confirmation.
+`get password` returns the current admin password only on a local connection:
+USB, Ethernet, or the authenticated LAN browser CLI. It is rejected over LoRa.
+Companion has no local admin password and reports that explicitly, including
+through binary command `0x42`; this command does not report the Bluetooth PIN.
+
+**Note:** The password setter replies with confirmation.
 
 **Note:** Any node using this password will be added to the admin ACL list.
 
@@ -2804,7 +2827,8 @@ eviction like administrators.
 **Usage:** 
 - `get acl`
 
-**Serial Only:** Yes
+**Local connection only:** USB, direct network CLI, or Companion binary
+command `0x42` where the role supports the command; unavailable over LoRa.
 
 ---
 

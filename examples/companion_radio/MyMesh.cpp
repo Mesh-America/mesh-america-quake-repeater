@@ -8,6 +8,7 @@
 #include <helpers/IdentityGeneration.h>
 #include <helpers/LazyPersistence.h>
 #include <helpers/StorageLayout.h>
+#include <helpers/StatsFormatHelper.h>
 #include <helpers/UsbAsciiBinarySwitch.h>
 #include <helpers/UsbLogging.h>
 #include "helpers/radiolib/RXPowerSaving.h"
@@ -54,8 +55,10 @@
 #include <helpers/MQTTDefaults.h>
 #endif
 
-#ifdef WITH_WEBCONFIG
+#if defined(ESP32) && defined(WIFI_SSID)
 #include <helpers/WiFiSetupPortal.h>
+#endif
+#ifdef WITH_WEBCONFIG
 #include <WiFi.h>
 #include <esp_wifi.h>
 #endif
@@ -1071,7 +1074,8 @@ void MyMesh::onCLICommandRecv(const ContactInfo &from, mesh::Packet *pkt, uint32
                                const char *text, char* reply) {
   markConnectionActive(from); // in case this is from a server, and we have a connection
   if (from.isRemoteCLIAllowed()) {
-    if (!handleCommand(text, sender_timestamp, reply)) {
+    // A timestamp received over the radio must never grant local-console access.
+    if (!handleCommand(text, sender_timestamp ? sender_timestamp : 1, reply)) {
       strcat(reply, "Unknown command");   // reply may have cmd prefix from 'text'
     }
   } else {
@@ -3378,7 +3382,7 @@ void MyMesh::execAdminCommand(char* cmd, char* reply) {
     strcpy(reply, "Error: enter a plain CLI command");
     return;
   }
-  if (handleCommand(cmd, 1, reply)) return;
+  if (handleCommand(cmd, 0, reply)) return;
   if (strcmp(cmd, "get radio.rxps") == 0 || strcmp(cmd, "get radio.rxps.config") == 0) {
     if (!radio_driver.supportsRxPowerSaving()) {
       strcpy(reply, "Error: RX power saving is unsupported on this radio");
@@ -7410,6 +7414,10 @@ void MyMesh::handleTerminalCommand(char* command) {
 #endif
 
   char local_reply[160];
+  if (handleDirectCommand(command, local_reply, sizeof(local_reply))) {
+    terminalOutput().printf("  %s\r\n", local_reply);
+    return;
+  }
 #if COMPANION_FEATURE_USB_MOTA_SOURCE
   const bool usb_mota_owner_transition =
       mesh::isUsbMotaOwnerTransitionCommand(command);
@@ -7880,6 +7888,10 @@ void MyMesh::handleTerminalCommand(char* command) {
                   FIRMWARE_VERSION, (unsigned)FIRMWARE_VER_CODE, FIRMWARE_BUILD_DATE);
   } else if (strcmp(command, "help") == 0) {
     terminalOutput().print("Commands:\r\n");
+    terminalOutput().print("  stats-core / stats-radio / stats-radio-diag / stats-packets\r\n");
+    terminalOutput().print("  get prv.key (when private key export is enabled)\r\n");
+    terminalOutput().print("  get password (this role has no admin password)\r\n");
+    terminalOutput().print("  erase (erase stored settings and identity)\r\n");
     terminalOutput().print("  board\r\n");
     terminalOutput().print("  version\r\n");
     terminalOutput().print("  get storage.layout\r\n");
@@ -7920,7 +7932,7 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().print("  get wifi.powersave\r\n");
     terminalOutput().print("  set wifi.powersave <none|min|max>\r\n");
 #ifdef WITH_WEBCONFIG
-    terminalOutput().print("  get wifi.{ssid|status}\r\n");
+    terminalOutput().print("  get wifi.{ssid|pwd|status}\r\n");
     terminalOutput().print("  set wifi.ssid <network name>\r\n");
     terminalOutput().print("  set wifi.pwd <password>\r\n");
     terminalOutput().print("  get webui\r\n");
@@ -8023,6 +8035,108 @@ static bool isCompanionRadioPrefsCommand(const char* command) {
   return false;
 }
 
+// Called only for directly attached USB/BLE/TCP/browser clients. Commands
+// received over LoRa use handleCommand() with a nonzero sender timestamp.
+bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_size) {
+  if (strcmp(command, "get password") == 0) {
+    snprintf(reply, reply_size, "> (no admin password on Companion)");
+    return true;
+  }
+  if (strcmp(command, "get prv.key") == 0) {
+#if ENABLE_PRIVATE_KEY_EXPORT
+    uint8_t key[PRV_KEY_SIZE];
+    char hex[PRV_KEY_SIZE * 2 + 1];
+    const int length = self_id.writeTo(key, sizeof(key));
+    mesh::Utils::toHex(hex, key, length);
+    snprintf(reply, reply_size, "> %s", hex);
+    memset(key, 0, sizeof(key));
+    memset(hex, 0, sizeof(hex));
+#else
+    snprintf(reply, reply_size, "Error: private key export disabled in this build");
+#endif
+    return true;
+  }
+  if (strcmp(command, "erase") == 0) {
+    if (_store->formatFileSystem()) {
+      stopContactsIterator();
+      resetContacts();
+      mesh::resetLazyPersistenceAfterSuccess(dirty_contacts_expiry, dirty_contacts_failures);
+      snprintf(reply, reply_size, "File system erase: OK");
+    } else {
+      snprintf(reply, reply_size, "File system erase: Err");
+    }
+    return true;
+  }
+  if (strncmp(command, "set freq ", 9) == 0) {
+    float frequency;
+    if (!mesh::cli::parseDecimalStrict(command + 9, frequency)
+        || frequency < 150.0f || frequency > 2500.0f) {
+      snprintf(reply, reply_size, "Error: frequency must be 150-2500 MHz");
+    } else {
+      const float previous = _prefs.freq;
+      _prefs.freq = frequency;
+      if (savePrefs()) {
+        snprintf(reply, reply_size, "OK - reboot to apply");
+      } else {
+        _prefs.freq = previous;
+        snprintf(reply, reply_size, "Error: frequency could not be saved");
+      }
+    }
+    return true;
+  }
+  if (strcmp(command, "stats-core") == 0) {
+    StatsFormatHelper::formatCoreStats(reply, board, *_ms, _err_flags, _mgr);
+    return true;
+  }
+  if (strcmp(command, "stats-radio") == 0) {
+    StatsFormatHelper::formatRadioStats(reply, _radio, radio_driver,
+                                      getTotalAirTime(), getReceiveAirTime());
+    return true;
+  }
+  if (strcmp(command, "stats-radio-diag") == 0) {
+    StatsFormatHelper::formatRadioDiag(reply, _radio, radio_driver, *_ms,
+                                     _err_flags, hasOutbound());
+    return true;
+  }
+  if (strcmp(command, "stats-packets") == 0) {
+    StatsFormatHelper::formatPacketStats(reply, radio_driver, getNumSentFlood(),
+        getNumSentDirect(), getNumRecvFlood(), getNumRecvDirect());
+    return true;
+  }
+#if defined(ESP32) && defined(WIFI_SSID)
+  if (strcmp(command, "get wifi.pwd") == 0) {
+#ifdef WITH_WEBCONFIG
+    WebConfigServer::formatWiFiPassword(reply, reply_size);
+#else
+    char ssid[32] = {}, password[65] = {};
+    if (!WiFiSetupPortal::loadStoredCredentials(ssid, sizeof(ssid), password, sizeof(password))) {
+#ifdef WIFI_PWD
+      snprintf(password, sizeof(password), "%s", WIFI_PWD);
+#endif
+    }
+    snprintf(reply, reply_size, "> %s", password);
+    memset(password, 0, sizeof(password));
+#endif
+    return true;
+  }
+#ifdef WITH_MQTT_BRIDGE
+  if (strncmp(command, "get mqtt", 8) == 0 && command[8] >= '1'
+      && command[8] <= '0' + MAX_MQTT_SLOTS && command[9] == '.') {
+    const int slot = command[8] - '1';
+    const char* field = command + 10;
+    const char* value = nullptr;
+    if (strcmp(field, "password") == 0) value = _mqtt_prefs.mqtt_slot_password[slot];
+    if (strcmp(field, "token") == 0) value = _mqtt_prefs.mqtt_slot_token[slot];
+    if (value) {
+      snprintf(reply, reply_size, "> %s", value);
+      return true;
+    }
+  }
+#endif
+#endif
+  return false;
+}
+
 bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
                            char* reply) {
   if (command == NULL || reply == NULL) return false;
@@ -8038,6 +8152,8 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     command += 3;
     while (*command == ' ' || *command == '\t') command++;
   }
+
+  if (sender_timestamp == 0 && handleDirectCommand(command, reply, reply_capacity)) return true;
 
 #if COMPANION_FEATURE_USB_MOTA_SOURCE
   if (mesh::isUsbMotaOwnerTransitionCommand(command)) {

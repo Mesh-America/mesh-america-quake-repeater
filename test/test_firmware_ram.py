@@ -78,6 +78,10 @@ class FirmwareRamTest(unittest.TestCase):
         self.assertEqual(ram.requirements("ESP32_PLATFORM", wifi_only, "v4_companion"), plain)
         repeater = ram.requirements("ESP32_PLATFORM", defines, "v4_repeater")
         self.assertNotIn("browser_terminal_session", repeater["components"])
+        for role in ("v4_repeater", "v4_room_server"):
+            local = ram.requirements("ESP32_PLATFORM", {**defines, "ADMIN_PASSWORD": "test"}, role)
+            self.assertEqual(local["components"]["browser_terminal_session"], 2048)
+            self.assertEqual(local["components"]["browser_terminal_scrollback"], 4096)
 
     def test_longer_display_previews_reserve_heap_and_contiguous_history(self):
         defines = {"DISPLAY_CLASS": "SSD1306Display", "UI_SMALL_MESSAGE_FONT": 0}

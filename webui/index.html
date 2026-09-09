@@ -1820,8 +1820,7 @@ var CLI_VERBS=[
   ["stats-packets","Per-packet-type counters"],
   ["stats-radio","Radio counters (RSSI, SNR, noise)"],
   ["stats-radio-diag","Extended radio diagnostics"],
-  // Bare `log` is absent: it streams the file to the serial console and stalls
-  // the radio doing it, and hands back only "EOF".
+  ["log","Dump stored packet logs to this connection"],
   ["log start","Start packet logging to the filesystem"],
   ["log stop","Stop packet logging"],
   ["log erase","Delete the stored packet logs"],
@@ -1843,6 +1842,7 @@ var CLI_VERBS=[
   ["get bluetooth.stealth","Show the independent Bluetooth stealth flag"],
   ["set bluetooth.stealth ","Set stealth {on|off}, keeping the address policy"],
   ["password ","Change the admin password {new-password}"],
+  ["get password","Read this node's admin password (local connection)"],
   ["alert test","Send a test alert on the configured channel"],
   ["ota check","Check for a newer build (does not flash)"],
   ["ota update","Download and flash the newer build, then reboot"],
@@ -1864,8 +1864,8 @@ var CLI_KEYS=[
   ["lat","Advert latitude",0],
   ["lon","Advert longitude",0],
   ["public.key","This node's public key",1],
-  // `get acl` is absent: it prints to the serial console and returns nothing.
-  ["prv.key","Restore an identity {64-hex-char-key}",2],
+  ["acl","List client permissions and public keys",1],
+  ["prv.key","Read or restore an identity {128-hex-char-key}",0],
   ["role","Node role",1],
   ["radio","Radio parameters {freq,bw,sf,cr}",0],
   ["freq","Frequency in MHz",0],
@@ -1961,6 +1961,11 @@ var CLI_TYPES="req,response,txt_msg,ack,advert,grp_txt,grp_data,anon_req,path,tr
 // Companion uses its USB/TCP command parser, including its chat session.
 // Repeater ACL and rescue-only filesystem commands belong to other parsers.
 var CLI_COMPANION_VERBS=[
+  ["erase","Erase stored settings and identity"],
+  ["stats-core","Core health counters"],
+  ["stats-radio","Radio counters"],
+  ["stats-radio-diag","Extended radio diagnostics"],
+  ["stats-packets","Packet counters"],
   ["help","List commands supported by this firmware"],
   ["card","Export this node's meshcore:// contact card"],
   ["import ","Add a contact: import meshcore:// followed by the full card"],
@@ -1995,9 +2000,10 @@ var CLI_COMPANION_VERBS=[
   ["reboot","Restart the node"]
 ];
 var CLI_COMPANION_KEYS=[
+  ["prv.key","Read this node's private identity key",1],
   ["name","Node name",0], ["role","Node role",1],
   ["lat","Advert latitude",0], ["lon","Advert longitude",0],
-  ["radio","Radio parameters {freq,bw,sf,cr}",0], ["freq","Frequency in MHz",1],
+  ["radio","Radio parameters {freq,bw,sf,cr}",0], ["freq","Frequency in MHz",0],
   ["tx","TX power in dBm",0], ["af","Airtime factor",0],
   ["dutycycle","Duty cycle percent",0], ["rxdelay","RX delay base",0],
   ["cad","Listen before transmit",0,"on|off"],
@@ -2012,7 +2018,7 @@ var CLI_COMPANION_KEYS=[
   ["bluetooth.mac","Bluetooth address policy",0,"default|random|random-every-boot|random-after-connect"],
   ["bluetooth.stealth","Bluetooth stealth",0,"on|off"],
   ["path.hash.mode","Path hash mode",0,"0|1|2"], ["multi.acks","Extra ACKs",0],
-  ["wifi.ssid","WiFi network name",0], ["wifi.pwd","WiFi password",2],
+  ["wifi.ssid","WiFi network name",0], ["wifi.pwd","WiFi password",0],
   ["wifi.status","WiFi connection, address and signal",1],
   ["wifi.powersave","WiFi power saving",0,"min|max|none"],
   ["wifi.cli","Browser console",0,"on|off"],
@@ -2053,7 +2059,7 @@ function cliTable(){
   for(var n=1;n<=st.nslots;n++){
     CLI_SLOT.forEach(function(f){
       if(companion&&f[0]==="filter")return;
-      if(!companion||!(/^(password|token)$/.test(f[0])))t.push(["get mqtt"+n+"."+f[0],"Slot "+n+" "+f[1]]);
+      t.push(["get mqtt"+n+"."+f[0],"Slot "+n+" "+f[1]]);
       t.push(["set mqtt"+n+"."+f[0]+" ","Slot "+n+" "+f[1]]);
     });
   }
@@ -2107,7 +2113,7 @@ function cliBanner(){
   cliEcho("sys","Type help for a summary, or a prefix and Tab to complete.");
 }
 function cliHelp(){
-  if(st.streamTerminal){if(!cli.busy)cliRun(["help"]);return}
+  if(st.streamTerminal&&cliIsCompanion()){if(!cli.busy)cliRun(["help"]);return}
   cliGap();
   cliEcho("cmd","help");
   cliEcho("rep",
@@ -2437,8 +2443,8 @@ function cliRun(cmds){
   });
 }
 
-// A real Companion terminal: one session owns recipient/login state, and
-// cursor reads continue after a command finishes to show ACKs and RF replies.
+// Stream replies for every role. Companion sessions also own recipient/login
+// state and keep reading after completion to show ACKs and RF replies.
 var cliStream={session:"",seq:0,cursor:0,timer:0,polling:false,out:null,job:null,errors:0};
 function cliStreamReset(){
   clearTimeout(cliStream.timer);
@@ -2450,7 +2456,11 @@ function cliStreamText(text){
   if(!text)return;
   var out=$("#term-out"),atEnd=out.scrollTop+out.clientHeight>=out.scrollHeight-24;
   if(!cliStream.out||!cliStream.out.parentNode)cliStream.out=cliEcho("rep","");
-  cliStream.out.textContent=(cliStream.out.textContent+text.replace(/\r/g,"")).slice(-65536);
+  var combined=cliStream.out.textContent+text.replace(/\r/g,"");
+  // Preserve an explicitly requested raw dump, including files over 64 KiB.
+  // Idle Companion traffic keeps its bounded scrollback.
+  var job=cliStream.job,rawLog=job&&job.cmds[job.index].trim().toLowerCase()==="log";
+  cliStream.out.textContent=rawLog?combined:combined.slice(-65536);
   if(atEnd)out.scrollTop=out.scrollHeight;
 }
 function cliStreamRun(cmds){
@@ -2495,11 +2505,13 @@ function cliStreamPoll(){
     cliStream.errors=0;
     if(r.lost)cliEcho("err","Some terminal output expired while disconnected.");
     cliStreamText(r.output||"");cliStream.cursor=r.cursor;
+    if(r.output&&cliStream.job)cliStream.job.started=Date.now();
     if(r.more){cliStream.timer=setTimeout(cliStreamPoll,0);return}
     var job=cliStream.job;
     if(r.closed){cliStreamReset();return}
     if(job&&r.seq===job.seq&&r.done){
       cliAfter([job.cmds[job.index]],{});
+      cliStream.out=null;
       if(++job.index<job.cmds.length){cliStreamSend();return}
       cliStream.job=null;cliBusy(false);
     }else if(job&&Date.now()-job.started>30000){

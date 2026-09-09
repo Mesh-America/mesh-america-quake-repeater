@@ -245,7 +245,8 @@ persisted and requires a reboot, unlike a WiFi power-save change.
 SSID and password writes return their reply first, then restart the Companion
 WiFi station with the saved credentials. A TCP terminal therefore disconnects
 shortly after either write; reconnect to the IP reported by the new network.
-The password is write-only and is masked while it is entered over USB. It may
+Password entry is masked over USB. `get wifi.pwd` reads the saved password from
+any local connection, including binary command `0x42`; LoRa cannot read it. It may
 be empty for an open network, an ordinary passphrase of up to 63 characters, or
 an exact 64-character hexadecimal WPA/WPA2 PSK. Other 64-character values and
 all longer values are rejected.

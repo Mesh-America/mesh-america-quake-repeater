@@ -4301,6 +4301,24 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 
 void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+  if (strcmp(config, "password") == 0) {
+    if (sender_timestamp == 0) {
+      snprintf(reply, 160, "> %s", _prefs->password);
+    } else {
+      strcpy(reply, "Error: get password requires a local connection");
+    }
+    return;
+  }
+#if defined(ESP_PLATFORM) && defined(ADMIN_PASSWORD) && !defined(WEBCONFIG_DISABLED) && !defined(WITH_MQTT_BRIDGE)
+  if (strcmp(config, "wifi.pwd") == 0) {
+    if (sender_timestamp != 0) {
+      strcpy(reply, "> ******** (local connection only)");
+    } else if (!_callbacks->getWiFiPassword(reply)) {
+      strcpy(reply, "Error: WiFi password unavailable on this build");
+    }
+    return;
+  }
+#endif
   if (strcmp(config, "powersaving") == 0) {
     snprintf(reply, 160, "> %s", _prefs->powersaving_enabled ? "on" : "off");
     return;
@@ -4444,7 +4462,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %d", ((uint32_t) _prefs->advert_interval) * 2);
   } else if (configKeyEquals(config, "guest.password")) {
     sprintf(reply, "> %s", _prefs->guest_password);
-  } else if (sender_timestamp == 0 && configKeyEquals(config, "prv.key")) {  // from serial command line only
+  } else if (sender_timestamp == 0 && configKeyEquals(config, "prv.key")) {  // local connections only
     uint8_t prv_key[PRV_KEY_SIZE];
     int len = _callbacks->getSelfId().writeTo(prv_key, PRV_KEY_SIZE);
     mesh::Utils::toHex(tmp, prv_key, len);

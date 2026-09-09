@@ -135,8 +135,8 @@ public:
     virtual void getNodeSnapshot(NodeSnapshot& snapshot) = 0;
     // Run one CLI command. Called from tick() only (loop task); reply is 160 bytes.
     virtual void execCommand(char* cmd, char* reply) = 0;
-    // Browser terminal commands use remote-admin semantics so serial-only
-    // secrets and destructive maintenance commands remain unavailable.
+    // Authenticated LAN commands have local-console access, like a direct
+    // USB/Ethernet connection. LoRa access is handled separately by each role.
     virtual bool supportsCliTerminal() const { return false; }
     virtual void execAdminCommand(char* cmd, char* reply) {
       execCommand(cmd, reply);
@@ -147,6 +147,7 @@ public:
     virtual bool beginStreamTerminal(Stream& output) { return false; }
     virtual bool ownsStreamTerminal(const Stream& output) const { return false; }
     virtual void runStreamTerminal(char* command) {}
+    virtual bool streamTerminalBusy() const { return false; }
     virtual void endStreamTerminal(Stream& output) {}
     virtual void rebootNow() = 0;
     // Bracket a config batch so bridge restarts triggered by individual
@@ -198,6 +199,7 @@ public:
   static bool setWiFiCliEnabled(const char* value, char* reply,
                                 size_t reply_len);
   static bool formatWiFiSSID(char* reply, size_t reply_len);
+  static bool formatWiFiPassword(char* reply, size_t reply_len);
   static bool formatWiFiStatus(
       char* reply, size_t reply_len,
       const mesh::wifi::CompanionWiFiRuntimeState* companion_runtime = NULL);

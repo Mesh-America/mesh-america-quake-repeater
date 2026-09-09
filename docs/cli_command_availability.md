@@ -9,7 +9,11 @@ sensor, and bridge firmware. Full Companion also has its own ASCII USB/TCP
 terminal; see [feature switches by role](role_feature_switches.md). Companion
 apps use the companion protocol,
 KISS firmware uses framed KISS/TNC commands, and terminal-chat firmware has its
-own interface, so those build roles are not represented here.
+own interface, so those build roles are not represented in the main matrices.
+The Companion section below lists its framed maintenance commands.
+Infrastructure `get password` is available locally in every profile; LoRa
+requests cannot read it. `get acl` and stored packet `log` are infrastructure
+features, not Companion contact or live USB-logging commands.
 
 Build columns mean:
 
@@ -45,7 +49,9 @@ Cell values mean:
 - **No** - the profile does not expose the command.
 - **Feature** - available only when the target compiles the feature or hardware
   named in Scope.
-- **Serial** - available only from the local serial console.
+- **Local** - a direct USB, BLE/binary Companion, TCP/Ethernet, or LAN browser
+  connection, when that transport and command exist on the role; unavailable
+  over LoRa.
 - **Manifest** - available only when the MQTT target defines
   `OTA_MANIFEST_BASE`.
 - **Limited** - the family exists, but the limitation in Scope applies.
@@ -62,6 +68,11 @@ over the normal binary USB, BLE, or TCP connection:
 
 | Command | Availability |
 |---|---|
+| `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets` | Local terminal and binary command `0x42` |
+| `erase`, `set freq <MHz>` | Local terminal and binary command `0x42`; stored changes apply on reboot |
+| `get prv.key` | Local terminal and binary command `0x42`; requires private key export enabled |
+| `get password` | Reports that Companion has no admin password; infrastructure returns its password locally |
+| `get wifi.pwd`, `get mqttN.password`, `get mqttN.token` | Local terminal and binary command `0x42`; corresponding WiFi/MQTT feature required |
 | [`board`](cli_commands.md#show-the-hardware-name) | Every Companion text terminal and command `0x42` |
 | [`version`](cli_commands.md#get-the-version) | Every Companion text terminal and protocol-v14 command `0x42`; returns the untruncated build identity |
 | [`get storage.layout`](cli_commands.md#show-the-storage-layout) | Every Companion text terminal and command `0x42`; reports the running platform's storage layout |
@@ -82,14 +93,14 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 |---|---|---|---|---|---|
 | Operational | [`reboot`](cli_commands.md#reboot-the-node) | All text CLI roles | Yes | Yes | Yes |
 | Operational | [`poweroff`; `shutdown`](cli_commands.md#power-off-the-node) | Board power-off support | Yes | Yes | Yes |
-| Operational | [`uf2reset`](cli_commands.md#enter-the-uf2-bootloader-nrf52-only) | Local serial; supported UF2 boards | Serial | Serial | Serial |
+| Operational | [`uf2reset`](cli_commands.md#enter-the-uf2-bootloader-nrf52-only) | Local connection; supported UF2 boards | Local | Local | Local |
 | Operational | [`clkreboot`](cli_commands.md#reset-the-clock-and-reboot) | All text CLI roles | Yes | Yes | Yes |
 | Operational | [`clock sync`](cli_commands.md#sync-the-clock-with-the-remote-device) | All text CLI roles | Yes | Yes | Yes |
 | Operational | [`clock`](cli_commands.md#display-current-time-in-utc) | All text CLI roles | Yes | Yes | Yes |
 | Operational | [`time <epoch_seconds>`](cli_commands.md#set-the-time-to-a-specific-timestamp) | Clock only moves forward | Yes | Yes | Yes |
 | Operational | [`advert`](cli_commands.md#send-a-flood-advert) | Advert-capable role | Yes | Yes | Yes |
 | Operational | [`advert.zerohop`](cli_commands.md#send-a-zero-hop-advert) | Advert-capable role | Yes | Yes | Yes |
-| Operational | [`erase`](cli_commands.md#erasefactory-reset) | Local serial | Serial | Serial | Serial |
+| Operational | [`erase`](cli_commands.md#erasefactory-reset) | Local connection | Local | Local | Local |
 | Information | [`ver`](cli_commands.md#get-the-version) | All text CLI roles | Yes | Yes | Yes |
 | Information | [`board`](cli_commands.md#show-the-hardware-name) | All text CLI roles | Yes | Yes | Yes |
 | Diagnostics | [`get storage.layout`](cli_commands.md#show-the-storage-layout) | Internal layout and configured QSPI or SD storage | Yes | Yes | Yes |
@@ -101,20 +112,20 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Neighbors | [`discover.neighbors`](cli_commands.md#discover-zero-hop-neighbors) | Repeater; some MQTT room servers | Yes | Yes | Yes |
 | Neighbors | [`discover.scopes`](cli_commands.md#discover-neighbor-scopes-mqtt-observer-neighbors-feature) | MQTT observer with compiled neighbor support | No | No | No |
 | Statistics | [`clear stats`](cli_commands.md#clear-stats) | All full-parser text CLI roles | Yes | Yes | Yes |
-| Statistics | [`stats-core`](cli_commands.md#stats-core) | Local serial | Serial | Serial | Serial |
-| Statistics | [`stats-radio`](cli_commands.md#stats-radio) | Local serial | Serial | Serial | Serial |
-| Statistics | [`stats-radio-diag`](#stats-radio-diag) | Local serial | Serial | Serial | Serial |
-| Statistics | [`stats-packets`](cli_commands.md#stats-packets) | Local serial | Serial | Serial | Serial |
+| Statistics | [`stats-core`](cli_commands.md#stats-core) | Local connection | Local | Local | Local |
+| Statistics | [`stats-radio`](cli_commands.md#stats-radio) | Local connection | Local | Local | Local |
+| Statistics | [`stats-radio-diag`](#stats-radio-diag) | Local connection | Local | Local | Local |
+| Statistics | [`stats-packets`](cli_commands.md#stats-packets) | Local connection | Local | Local | Local |
 | Statistics | [`get telemetry.temp/volt/volt.i2c`; optional GPS history](cli_commands.md#read-repeater-telemetry-history) | Non-STM32 repeater or room server; I2C command requires a detected voltage monitor; GPS requires a provider; remote access requires administrator | Yes | Yes | Yes |
 | Statistics | [`set telemetry.gps`; `get/set/send telemetry.tx`](cli_commands.md#read-repeater-telemetry-history) | Non-STM32 repeater; GPS setting requires a provider; remote access requires administrator | Yes | Yes | Yes |
 | Logging | [`log start`; `log stop`; `log erase`](cli_commands.md#logging) | Storage-backed roles retain data; other roles can return empty data | Yes | Yes | Yes |
-| Logging | [`log`](cli_commands.md#print-the-captured-log-to-the-serial-terminal) | Local serial | Serial | Serial | Serial |
+| Logging | [`log`](cli_commands.md#print-the-captured-log-to-the-serial-terminal) | Local connection | Local | Local | Local |
 | Logging | [`get/set usb.logging`; unified FULL `get/set logging.output`](cli_commands.md#control-live-usb-logging) | Ordinary safe-USB artifacts; CommonCLI USB gate is persistent; unified ESP32 FULL selects off/USB/WiFi/both; nRF52 Full Companion can add a reboot-controlled second CDC | Yes | Yes | No |
 | Radio | [`get radio`; `set radio ...`](cli_commands.md#view-or-change-this-nodes-radio-parameters) | All text CLI roles | Yes | Yes | Yes |
 | Radio | [`get tx`; `set tx <dbm>`](cli_commands.md#view-or-change-this-nodes-transmit-power) | Board TX-power limits apply | Yes | Yes | Yes |
 | Radio | [`tempradio ...`; `normalradio`](cli_commands.md#change-the-radio-parameters-for-a-set-duration) | Full parser | Yes | Yes | Yes |
 | Radio | [`get/set/del radioat`; `get/set/del tempradioat`](cli_commands.md#schedule-radio-parameter-changes) | Full parser | Yes | Yes | Yes |
-| Radio | [`get freq`; `set freq <mhz>`](cli_commands.md#view-or-change-this-nodes-frequency) | `set` is local serial only | Yes | Yes | Yes |
+| Radio | [`get freq`; `set freq <mhz>`](cli_commands.md#view-or-change-this-nodes-frequency) | `set` requires a local connection | Yes | Yes | Yes |
 | Radio | [`get/set radio.rxgain`](cli_commands.md#view-or-change-this-nodes-rx-boosted-gain-mode-sx12xx-and-lr1110-v1141) | Supported radio | Feature | Feature | Feature |
 | Radio | [`get/set radio.fem.rxgain`](cli_commands.md#view-or-change-the-lora-fem-receive-path-gain-state-on-supported-boards) | Controllable LoRa FEM | Feature | Feature | Feature |
 | Radio | [`get/set radio.fem.txgain`](cli_commands.md#view-or-change-the-lora-fem-transmit-path-gain-state-on-supported-boards) | Controllable LoRa FEM | Feature | Feature | Feature |
@@ -122,8 +133,8 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | System | [`get/set name`](cli_commands.md#view-or-change-this-nodes-name) | All text CLI roles | Yes | Yes | Yes |
 | System | [`get/set lat`](cli_commands.md#view-or-change-this-nodes-latitude) | All text CLI roles | Yes | Yes | Yes |
 | System | [`get/set lon`](cli_commands.md#view-or-change-this-nodes-longitude) | All text CLI roles | Yes | Yes | Yes |
-| System | [`get/set prv.key`](cli_commands.md#view-or-change-this-nodes-identity-private-key) | `get` is local serial only | Yes | Yes | Yes |
-| System | [`password <new_password>`](cli_commands.md#change-this-nodes-admin-password) | Administrator | Yes | Yes | Yes |
+| System | [`get/set prv.key`](cli_commands.md#view-or-change-this-nodes-identity-private-key) | `get` requires a local connection | Yes | Yes | Yes |
+| System | [`get password`; `password <new_password>`](cli_commands.md#change-this-nodes-admin-password) | `get` requires a local connection; setter requires administrator | Yes | Yes | Yes |
 | System | [`get/set guest.password`](cli_commands.md#view-or-change-this-nodes-guest-password) | Role with guest administration | Yes | Yes | Yes |
 | System | [`get/set owner.info`](cli_commands.md#view-or-change-this-nodes-owner-info) | All text CLI roles | Yes | Yes | Yes |
 | System | [`get/set adc.multiplier`](cli_commands.md#fine-tune-the-battery-reading) | Board ADC override support | Feature | Feature | Feature |
@@ -164,7 +175,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Routing | [`get/set outpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater remote-client context | Yes | Yes | Yes |
 | Routing | [`get/set altpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater remote-client context | Yes | Yes | Yes |
 | ACL | [`setperm <pubkey> <permissions>`](cli_commands.md#add-update-or-remove-permissions-for-a-companion) | Repeater, room server, or sensor | Yes | Yes | Yes |
-| ACL | [`get acl`](cli_commands.md#view-the-current-acl) | Local serial | Serial | Serial | Serial |
+| ACL | [`get acl`](cli_commands.md#view-the-current-acl) | Local connection | Local | Local | Local |
 | ACL | [`get/set allow.read.only`](cli_commands.md#view-or-change-this-room-servers-read-only-flag) | Room server | Yes | Yes | No |
 | Regions | [`region load`](cli_commands.md#bulk-load-region-lists); [`region save`](cli_commands.md#save-any-changes-to-regions-made-since-reboot) | Role with region storage | Yes | Yes | Yes |
 | Regions | [`region allowf`](cli_commands.md#allow-a-region); [`region denyf`](cli_commands.md#block-a-region) | Role with region storage | Yes | Yes | Yes |
@@ -232,7 +243,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | MQTT | [`get mqtt.ntp.diag`](cli_commands.md#diagnose-ntp-server-connectivity-mqtt-observer-only) | Full MQTT observer | No | No | No |
 | MQTT | [`get/set timezone`; `get/set timezone.offset`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md#timezone-commands) | MQTT observer | No | No | No |
 | MQTT | [`get/set mqtt.analyzer.us`; `get/set mqtt.analyzer.eu`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md#migration-from-old-configuration) | Legacy MQTT aliases | No | No | No |
-| MQTT | [`get/set mqtt.owner`; `get/set mqtt.email`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md#mqtt-shared-commands) | MQTT observer; `get` is local serial only | No | No | No |
+| MQTT | [`get/set mqtt.owner`; `get/set mqtt.email`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md#mqtt-shared-commands) | MQTT observer; `get` requires a local connection | No | No | No |
 | MQTT | [`get mqtt.config.valid`](#mqtt-config-valid) | MQTT observer | No | No | No |
 | SNMP | [`get/set snmp`; `get/set snmp.community`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_SNMP.md#cli-commands) | MQTT target compiled with SNMP | No | No | No |
 | Alerts | [`get/set alert`; `get/set alert.psk`; `get/set alert.hashtag`; `get/set alert.region`; `get/set alert.wifi`; `get/set alert.mqtt`; `get/set alert.interval`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/ALERTS.md#cli) | MQTT observer | No | No | No |
@@ -254,7 +265,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Operational | [`time <epoch_seconds>`](cli_commands.md#set-the-time-to-a-specific-timestamp) | Clock only moves forward | Yes | Yes | Yes | Yes | Yes |
 | Operational | [`advert`](cli_commands.md#send-a-flood-advert) | Advert-capable role | Yes | Yes | Yes | Yes | Yes |
 | Operational | [`advert.zerohop`](cli_commands.md#send-a-zero-hop-advert) | Advert-capable role | Yes | Yes | Yes | Yes | Yes |
-| Operational | [`erase`](cli_commands.md#erasefactory-reset) | Local serial | Serial | Serial | Serial | Serial | Serial |
+| Operational | [`erase`](cli_commands.md#erasefactory-reset) | Local connection | Local | Local | Local | Local | Local |
 | Display | [`get/set display.timeout`; `get/set display.flip`](cli_commands.md#set-mqtt-observer-display-timeout-and-flip) | MQTT observer with display; flip needs a supported driver | No | No | No | Feature | No |
 | Information | [`ver`](cli_commands.md#get-the-version) | All text CLI roles | Yes | Yes | Yes | Yes | Yes |
 | Information | [`board`](cli_commands.md#show-the-hardware-name) | All text CLI roles | Yes | Yes | Yes | Yes | Yes |
@@ -267,20 +278,20 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Neighbors | [`discover.neighbors`](cli_commands.md#discover-zero-hop-neighbors) | Repeater; some MQTT room servers | Yes | Yes | Yes | Yes | Yes |
 | Neighbors | [`discover.scopes`](cli_commands.md#discover-neighbor-scopes-mqtt-observer-neighbors-feature) | MQTT observer with compiled neighbor support | No | No | No | Feature | No |
 | Statistics | [`clear stats`](cli_commands.md#clear-stats) | Full parser | Yes | Yes | Yes | Yes | Yes |
-| Statistics | [`stats-core`](cli_commands.md#stats-core) | Local serial | Serial | Serial | Serial | Serial | Serial |
-| Statistics | [`stats-radio`](cli_commands.md#stats-radio) | Local serial | Serial | Serial | Serial | Serial | Serial |
-| Statistics | [`stats-radio-diag`](#stats-radio-diag) | Local serial | Serial | Serial | Serial | Serial | Serial |
-| Statistics | [`stats-packets`](cli_commands.md#stats-packets) | Local serial | Serial | Serial | Serial | Serial | Serial |
+| Statistics | [`stats-core`](cli_commands.md#stats-core) | Local connection | Local | Local | Local | Local | Local |
+| Statistics | [`stats-radio`](cli_commands.md#stats-radio) | Local connection | Local | Local | Local | Local | Local |
+| Statistics | [`stats-radio-diag`](#stats-radio-diag) | Local connection | Local | Local | Local | Local | Local |
+| Statistics | [`stats-packets`](cli_commands.md#stats-packets) | Local connection | Local | Local | Local | Local | Local |
 | Statistics | [`get telemetry.temp/volt/volt.i2c`; optional GPS history](cli_commands.md#read-repeater-telemetry-history) | Non-STM32 repeater or room server; I2C command requires a detected voltage monitor; GPS requires a provider; remote access requires administrator | Yes | Yes | Yes | Yes | Yes |
 | Statistics | [`set telemetry.gps`; `get/set/send telemetry.tx`](cli_commands.md#read-repeater-telemetry-history) | Non-STM32 repeater; GPS setting requires a provider; remote access requires administrator | Yes | Yes | Yes | Yes | Yes |
 | Logging | [`log start`; `log stop`; `log erase`](cli_commands.md#logging) | Storage-backed roles retain data | Yes | Yes | Yes | Yes | Yes |
-| Logging | [`log`](cli_commands.md#print-the-captured-log-to-the-serial-terminal) | Local serial | Serial | Serial | Serial | Serial | Serial |
+| Logging | [`log`](cli_commands.md#print-the-captured-log-to-the-serial-terminal) | Local connection | Local | Local | Local | Local | Local |
 | Logging | [`get/set usb.logging`; unified FULL `get/set logging.output`](cli_commands.md#control-live-usb-logging) | Ordinary safe-USB artifacts; CommonCLI USB gate is persistent; unified ESP32 FULL selects off/USB/WiFi/both; every ESP32 Full Companion uses an input-capable single-TTY logging terminal with framed USB Companion disabled while logging | Yes | Yes | No | No | Yes |
 | Radio | [`get radio`; `set radio ...`](cli_commands.md#view-or-change-this-nodes-radio-parameters) | All text CLI roles | Yes | Yes | Yes | Yes | Yes |
 | Radio | [`get tx`; `set tx <dbm>`](cli_commands.md#view-or-change-this-nodes-transmit-power) | Board TX-power limits apply | Yes | Yes | Yes | Yes | Yes |
 | Radio | [`tempradio ...`; `normalradio`](cli_commands.md#change-the-radio-parameters-for-a-set-duration) | Full parser | Yes | Yes | Yes | Yes | Yes |
 | Radio | [`get/set/del radioat`; `get/set/del tempradioat`](cli_commands.md#schedule-radio-parameter-changes) | Full parser | Yes | Yes | Yes | Yes | Yes |
-| Radio | [`get freq`; `set freq <mhz>`](cli_commands.md#view-or-change-this-nodes-frequency) | `set` is local serial only | Yes | Yes | Yes | Yes | Yes |
+| Radio | [`get freq`; `set freq <mhz>`](cli_commands.md#view-or-change-this-nodes-frequency) | `set` requires a local connection | Yes | Yes | Yes | Yes | Yes |
 | Radio | [`get/set radio.rxgain`](cli_commands.md#view-or-change-this-nodes-rx-boosted-gain-mode-sx12xx-and-lr1110-v1141) | Supported radio | Feature | Feature | Feature | Feature | Feature |
 | Radio | [`get/set espnow.channel`](cli_commands.md#view-or-change-the-primary-esp-nowwifi-channel) | Primary ESP-NOW mesh radio | Feature | Feature | Feature | Feature | Feature |
 | Radio | [`get/set radio.fem.rxgain`](cli_commands.md#view-or-change-the-lora-fem-receive-path-gain-state-on-supported-boards) | Controllable LoRa FEM | Feature | Feature | Feature | Feature | Feature |
@@ -289,8 +300,8 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | System | [`get/set name`](cli_commands.md#view-or-change-this-nodes-name) | All full-parser text CLI roles | Yes | Yes | Yes | Yes | Yes |
 | System | [`get/set lat`](cli_commands.md#view-or-change-this-nodes-latitude) | All full-parser text CLI roles | Yes | Yes | Yes | Yes | Yes |
 | System | [`get/set lon`](cli_commands.md#view-or-change-this-nodes-longitude) | All full-parser text CLI roles | Yes | Yes | Yes | Yes | Yes |
-| System | [`get/set prv.key`](cli_commands.md#view-or-change-this-nodes-identity-private-key) | `get` is local serial only | Yes | Yes | Yes | Yes | Yes |
-| System | [`password <new_password>`](cli_commands.md#change-this-nodes-admin-password) | Administrator | Yes | Yes | Yes | Yes | Yes |
+| System | [`get/set prv.key`](cli_commands.md#view-or-change-this-nodes-identity-private-key) | `get` requires a local connection | Yes | Yes | Yes | Yes | Yes |
+| System | [`get password`; `password <new_password>`](cli_commands.md#change-this-nodes-admin-password) | `get` requires a local connection; setter requires administrator | Yes | Yes | Yes | Yes | Yes |
 | System | [`get/set guest.password`](cli_commands.md#view-or-change-this-nodes-guest-password) | Role with guest administration | Yes | Yes | Yes | Yes | Yes |
 | System | [`get/set owner.info`](cli_commands.md#view-or-change-this-nodes-owner-info) | Full parser | Yes | Yes | Yes | Yes | Yes |
 | System | [`get/set adc.multiplier`](cli_commands.md#fine-tune-the-battery-reading) | Board ADC override support | Feature | Feature | Feature | Feature | Feature |
@@ -331,7 +342,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Routing | [`get/set outpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater remote-client context | Yes | Yes | Yes | Yes | Yes |
 | Routing | [`get/set altpath`](halo_keymind_settings.md#direct-path-overrides) | Repeater remote-client context | Yes | Yes | Yes | Yes | Yes |
 | ACL | [`setperm <pubkey> <permissions>`](cli_commands.md#add-update-or-remove-permissions-for-a-companion) | Repeater, room server, or sensor | Yes | Yes | Yes | Yes | Yes |
-| ACL | [`get acl`](cli_commands.md#view-the-current-acl) | Local serial | Serial | Serial | Serial | Serial | Serial |
+| ACL | [`get acl`](cli_commands.md#view-the-current-acl) | Local connection | Local | Local | Local | Local | Local |
 | ACL | [`get/set allow.read.only`](cli_commands.md#view-or-change-this-room-servers-read-only-flag) | Room server | Yes | Yes | No | Yes | Yes |
 | Regions | [`region load`](cli_commands.md#bulk-load-region-lists); [`region save`](cli_commands.md#save-any-changes-to-regions-made-since-reboot) | Role with region storage | Yes | Yes | Yes | Yes | Yes |
 | Regions | [`region allowf`](cli_commands.md#allow-a-region); [`region denyf`](cli_commands.md#block-a-region) | Role with region storage | Yes | Yes | Yes | Yes | Yes |
@@ -399,7 +410,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | MQTT | [`get mqtt.ntp.diag`](cli_commands.md#diagnose-ntp-server-connectivity-mqtt-observer-only) | MQTT observer | No | No | No | Yes | No |
 | MQTT | [`get/set timezone`; `get/set timezone.offset`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md#timezone-commands) | MQTT observer | No | No | No | Yes | No |
 | MQTT | [`get/set mqtt.analyzer.us`; `get/set mqtt.analyzer.eu`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md#migration-from-old-configuration) | Legacy MQTT aliases | No | No | No | Yes | No |
-| MQTT | [`get/set mqtt.owner`; `get/set mqtt.email`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md#mqtt-shared-commands) | MQTT observer; `get` is local serial only | No | No | No | Yes | No |
+| MQTT | [`get/set mqtt.owner`; `get/set mqtt.email`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md#mqtt-shared-commands) | MQTT observer; `get` requires a local connection | No | No | No | Yes | No |
 | MQTT | [`get mqtt.config.valid`](#mqtt-config-valid) | MQTT observer | No | No | No | Yes | No |
 | SNMP | [`get/set snmp`; `get/set snmp.community`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_SNMP.md#cli-commands) | MQTT target compiled with SNMP | No | No | No | Feature | No |
 | Alerts | [`get/set alert`; `get/set alert.psk`; `get/set alert.hashtag`; `get/set alert.region`; `get/set alert.wifi`; `get/set alert.mqtt`; `get/set alert.interval`](https://github.com/mikecarper/MeshCore/blob/keymindCascade/ALERTS.md#cli) | MQTT observer | No | No | No | Yes | No |

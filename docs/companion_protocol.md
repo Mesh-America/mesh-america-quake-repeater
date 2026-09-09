@@ -251,6 +251,16 @@ as the normal CLI reply text `Unknown command`, not as an error frame. Clients
 may prefix the CLI text with any two-character correlation tag and `|` (for
 example, `A7|get radio.rxgain`); the reply preserves that prefix.
 
+Direct USB, BLE, WiFi TCP, and Ethernet clients can also use this command for
+`stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets`, `erase`,
+`set freq <MHz>`, and `get prv.key` (when private key export is enabled).
+WiFi/MQTT builds accept `get wifi.pwd`, `get mqttN.password`, and
+`get mqttN.token`. `get password` reports that Companion has no admin password;
+infrastructure roles return their own admin password on a local CLI connection.
+These privileges do not apply to CLI commands relayed over LoRa. See
+[local maintenance commands](terminal_chat_cli.md#local-maintenance-commands)
+for role differences and the text-terminal equivalents.
+
 Full Companion clients can send `version` through this command to receive the
 untruncated build identity, for example `Companion 1.17.1.5-... (protocol 14,
 build 31-Aug-2026)`. This deliberately supplements rather than changes the

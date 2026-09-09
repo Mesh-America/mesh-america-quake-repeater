@@ -239,7 +239,7 @@ static inline bool wcIsDeferredReboot(const char* cmd) {
 // Commands the CLI reaches but the portal cannot honestly serve. Rejected at
 // POST so nothing in the sequence runs, rather than failing halfway with a
 // reply that does not explain itself. Returns the reason, or NULL if fine.
-static const char* wcCliUnavailable(const char* cmd) {
+static const char* wcCliUnavailable(const char* cmd, bool streamed = false) {
   // ESP32Board::startOTAUpdate() does `new AsyncWebServer(80)` with no bind
   // check and answers "Started" regardless. The portal already holds port 80,
   // so from here it can only leak the allocation, inhibit sleep, and lie.
@@ -254,15 +254,10 @@ static const char* wcCliUnavailable(const char* cmd) {
     return "clock sync takes its time from the caller, which a web request has "
            "no way to supply. Use `time <epoch-seconds>` instead.";
   }
-  // Both write their real output to Serial and hand back a stub the terminal
-  // would render as success. Bare `log` also streams a whole file from the loop
-  // task, stalling the mesh and the radio while it does.
-  if (strcmp(cmd, "log") == 0) {
-    return "log writes the packet log to the serial console, not here, and "
-           "blocks the radio while it does. Use `log start` / `log stop`.";
-  }
-  if (strcmp(cmd, "get acl") == 0) {
-    return "get acl writes to the serial console, not here.";
+  // The bounded batch reply cannot hold these listings. The browser terminal
+  // uses /api/terminal, which streams them back to the requesting connection.
+  if (!streamed && (strcmp(cmd, "log") == 0 || strcmp(cmd, "get acl") == 0)) {
+    return "Use /api/terminal for streamed listings.";
   }
   return NULL;
 }
@@ -273,33 +268,9 @@ static inline bool wcCliEchoesSecret(const char* cmd) {
   return strncmp(cmd, "password ", 9) == 0;
 }
 
-// CommonCLI splits its surface by CALLER, not by command: a serial caller
-// (sender_timestamp 0, physical access) reads secrets in plaintext, while a
-// remote one gets "******** (serial only)". Its own comments say so -- "Serial
-// only (WiFi creds grant LAN access); remote sees set/unset".
-//
-// execCommand passes 0, which is what makes `erase`, `stats-*` and `set freq`
-// reachable from the terminal at all. Left alone, that also claims
-// physical-access trust for an HTTP request: `get prv.key` would hand this
-// node's identity to anyone associated with the open setup AP, and `get
-// wifi.pwd` would hand over the operator's network. Reading a secret and
-// writing one are not the same capability -- the wizard has always been able to
-// REPLACE these; nothing in the portal could ever READ them, because
-// /api/config masks them (wcIsSecretKey).
-//
-// So the command surface stays whole and only the READ is masked, restoring the
-// distinction CommonCLI intended for a caller who is not at the serial port.
-// Which commands those are lives in WebConfigKeys.h (wcIsSecretReadCommand),
-// beside the rest of the secret classification and host-tested with it.
-
-// Keep the set/unset signal, which is the useful part and what CommonCLI itself
-// reports remotely; only the value goes. A getter answers "> value".
-static void wcMaskSecretReply(char* reply) {
-  const char* val = reply;
-  if (val[0] == '>' && val[1] == ' ') val += 2;
-  const bool unset = (val[0] == 0 || strcmp(val, "(not set)") == 0);
-  strcpy(reply, unset ? "> (not set)" : "> ******** (serial only)");
-}
+// CLI requests require LAN mode and authentication. Explicit getters have
+// local-connection privileges, including secret reads. The configuration API
+// still masks secrets, and the open setup AP has no CLI endpoint.
 // Reply classification lives in WebConfigBatch.h with the rest of the decisions
 // (WebConfigBatch::cliReplyIsFailure / cliReplyGatesReboot / cliWriteSucceeded),
 // so the shapes CommonCLI actually emits are enumerated in one host-tested place.
@@ -617,6 +588,22 @@ bool WebConfigServer::formatWiFiSSID(char* reply, size_t reply_len) {
   }
 
   snprintf(reply, reply_len, configured ? "> %s" : "> (not configured)", ssid);
+  return true;
+}
+
+bool WebConfigServer::formatWiFiPassword(char* reply, size_t reply_len) {
+  if (!reply || !reply_len) return false;
+  char ssid[33] = {}, password[65] = {};
+  if (!loadStandaloneWiFi(ssid, sizeof(ssid), password, sizeof(password))) {
+    if (_active) {
+      strlcpy(password, _active->_wifi_password, sizeof(password));
+    }
+#ifdef WIFI_PWD
+    else strlcpy(password, WIFI_PWD, sizeof(password));
+#endif
+  }
+  snprintf(reply, reply_len, "> %s", password);
+  memset(password, 0, sizeof(password));
   return true;
 }
 
@@ -1314,7 +1301,6 @@ void WebConfigServer::drainBatch(uint32_t now) {
         strcpy(e.reply, "OK");
         _admin_pwd_set = true;
       }
-      if (wcIsSecretReadCommand(e.cmd)) wcMaskSecretReply(e.reply);
       if (WebConfigBatch::cliReplyGatesReboot(e.cmd)) {
         _batch_all_ok = WebConfigBatch::nextAllOk(
             _batch_all_ok, WebConfigBatch::cliWriteSucceeded(e.reply));
@@ -2166,7 +2152,7 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
 // commands go into the shared deferred slot and tick() drains them.
 //
 // Unlike a save this is not allowlisted. It is restricted to authenticated LAN
-// mode and uses the remote-admin callback, so serial-only secrets stay hidden.
+// mode. Commands use local-connection privileges, just like the USB terminal.
 // ---------------------------------------------------------------------------
 
 // Commands whose CLI handler never returns would take the node down mid-drain,
@@ -2199,6 +2185,13 @@ void WebConfigServer::serviceTerminal(uint32_t now) {
     _terminal->queue.finish();
     return;
   }
+  if (_terminal->running) {
+    if (_cb->streamTerminalBusy()) return;
+    if (_terminal->availableForWrite() < 2) return;
+    _terminal->print("> ");
+    _terminal->queue.finish();
+    _terminal->running = false;
+  }
   if (!_terminal->queue.pending || _batch_state == BATCH_PENDING) return;
   if (!_terminal->attached) {
     if (!_cb->beginStreamTerminal(*_terminal)) {
@@ -2218,7 +2211,17 @@ void WebConfigServer::serviceTerminal(uint32_t now) {
     _terminal->attached = false;
     _terminal->closed = true;
   } else {
-    _cb->runStreamTerminal(command);
+    const char* unavailable = wcCliUnavailable(command, true);
+    if (unavailable) {
+      _terminal->print("Error: ");
+      _terminal->println(unavailable);
+    } else {
+      _cb->runStreamTerminal(command);
+    }
+    if (_cb->streamTerminalBusy()) {
+      _terminal->running = true;
+      return;
+    }
     _terminal->print("> ");
   }
   _terminal->queue.finish();

@@ -185,10 +185,12 @@ class WebConfigUiRuntimeTest(unittest.TestCase):
         suggestions = json.loads(html.unescape(re.search(
             r'data-test-suggestions="([^"]*)"', dom).group(1)))
         for command in ("set powersaving off", "get usb.logging", "set wifi.cli ",
-                        "set mqtt1.preset ", "get name", "get radio"):
+                        "set mqtt1.preset ", "get name", "get radio", "erase",
+                        "get prv.key", "get mqtt1.password", "get wifi.pwd",
+                        "stats-core", "stats-radio", "stats-packets", "set freq "):
             self.assertIn(command, suggestions)
-        for command in ("erase", "password ", "setperm ", "get prv.key",
-                        "set bridge.enabled ", "get mqtt1.password", "set mqtt2.preset "):
+        for command in ("password ", "setperm ", "get acl",
+                        "set bridge.enabled ", "set mqtt2.preset "):
             self.assertNotIn(command, suggestions)
 
     def test_stream_terminal_imports_long_cards_pages_lists_and_receives_late_replies(self):
@@ -249,6 +251,54 @@ class WebConfigUiRuntimeTest(unittest.TestCase):
         self.assertEqual(output.count("Late RF reply and ACK"), 1)
         self.assertIn("firmware help: import, list, to, send", output)
         self.assertIn('data-test-stream-busy="false"', dom)
+
+    def test_streamed_raw_log_keeps_entire_file_and_allows_slow_progress(self):
+        status, config = self.setup_values()
+        status.update(mode="lan", role="Repeater", cli=True, terminal_stream=True,
+                      terminal_max_command=159, password_supported=False)
+        prelude = """
+<script>
+(function(){
+  var status=%s,config=%s,sequence=0,output="",offset=0;
+  var dump="log-start\\n"+"packet-row\\n".repeat(10000)+"log-end\\n   EOF\\n";
+  var now=Date.now;Date.now=function(){return now()+offset};
+  function response(value){return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(value)}})}
+  window.fetch=function(path,options){
+    if(path==="/api/status")return response(status);
+    if(path==="/api/config")return response(config);
+    if(path==="/api/presets")return response({presets:[]});
+    if(path==="/api/terminal"){
+      sequence=JSON.parse(options.body).seq;output=dump;
+      return response({accepted:true});
+    }
+    if(path.indexOf("/api/terminal?")===0){
+      var from=Number(new URLSearchParams(path.split("?")[1]).get("after"));
+      var chunk=output.slice(from,from+3072),cursor=from+chunk.length;
+      offset+=2000; // A complete dump takes over 30 seconds, but keeps progressing.
+      return response({output:chunk,cursor:cursor,seq:sequence,done:cursor>=dump.length,
+                       closed:false,lost:false,more:false});
+    }
+    return response({});
+  };
+  window.addEventListener("load",function(){
+    setTimeout(function(){cliStreamRun(["log"])},75);
+    setTimeout(function(){output+="later-output\\n"},6000);
+    setTimeout(function(){
+      var text=document.getElementById("term-out").textContent;
+      document.body.setAttribute("data-test-complete-log",String(text.includes(dump)));
+      document.body.setAttribute("data-test-later-output",String(text.includes("later-output")));
+      document.body.setAttribute("data-test-log-busy",String(cli.busy));
+      document.body.setAttribute("data-test-log-timeout",String(text.includes("could not be confirmed")));
+    },6800);
+  });
+})();
+</script>
+""" % (json.dumps(status), json.dumps(config))
+        dom = self.run_page(prelude, virtual_time=7000)
+        self.assertIn('data-test-complete-log="true"', dom)
+        self.assertIn('data-test-later-output="true"', dom)
+        self.assertIn('data-test-log-busy="false"', dom)
+        self.assertIn('data-test-log-timeout="false"', dom)
 
     def test_console_stays_hidden_when_disabled_or_on_setup_ap(self):
         for mode in ("lan", "setup"):

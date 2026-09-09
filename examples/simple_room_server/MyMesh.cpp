@@ -1536,6 +1536,9 @@ bool MyMesh::scheduleNormalRadio() {
 }
 
 bool MyMesh::formatFileSystem() {
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  _local_cli_output.cancel();
+#endif
 #if defined(NRF52_PLATFORM)
   return InternalFS.format();
 #elif defined(RP2040_PLATFORM)
@@ -1577,6 +1580,13 @@ void MyMesh::updateFloodAdvertTimer() {
 }
 
 void MyMesh::dumpLogFile() {
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  if (_command_output) {
+    _local_cli_output.startFile(*_command_output,
+                                mesh::openFileRead(_fs, PACKET_LOG_FILE));
+    return;
+  }
+#endif
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   if (hasPendingSerialOutput()) {
     mesh::usbConsolePort().printf("Err - USB output busy\r\n");
@@ -2254,6 +2264,7 @@ void MyMesh::sampleTelemetryHistory() {
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply,
                            int gpio_client_index,
                            uint8_t gpio_path_hash_size) {
+  if (gpio_client_index >= 0 && sender_timestamp == 0) sender_timestamp = 1;
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)
   const uint8_t* gpio_client_key = gpio_client_index >= 0 &&
       gpio_client_index < acl.getNumClients()
@@ -2346,6 +2357,24 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       }
     }
   } else if (sender_timestamp == 0 && strcmp(command, "get acl") == 0) {
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+    if (_command_output) {
+      _local_cli_output.startRows(*_command_output,
+          [](void* context, size_t& row, char* out, size_t capacity) -> size_t {
+            auto& owner = *static_cast<MyMesh*>(context);
+            while (row < static_cast<size_t>(owner.acl.getNumClients())) {
+              auto* client = owner.acl.getClientByIdx(row++);
+              if (!client->permissions) continue;
+              char key[PUB_KEY_SIZE * 2 + 1];
+              mesh::Utils::toHex(key, client->id.pub_key, PUB_KEY_SIZE);
+              return snprintf(out, capacity, "%02X %s\r\n", client->permissions, key);
+            }
+            return 0;
+          }, this, "ACL:\r\n");
+      reply[0] = 0;
+      return;
+    }
+#endif
     mesh::usbConsolePort().printf("ACL:\r\n");
     for (int i = 0; i < acl.getNumClients(); i++) {
       auto c = acl.getClientByIdx(i);
@@ -2415,7 +2444,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   else if (_clock_sync.handleCommand(command, reply)) {
     // handled by the role-independent mesh clock synchronizer
   } else {
-    _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
+    _cli.handleCommand(sender_timestamp, command, reply);
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+    if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
+#endif
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
     if (sender_timestamp == 0 && serial_log_eof_pending
         && strcmp(reply, "   EOF") == 0) reply[0] = 0;
@@ -2428,6 +2460,9 @@ bool MyMesh::saveFilter(ClientInfo* client) {
 }
 
 void MyMesh::loop() {
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  _local_cli_output.service();
+#endif
 #ifdef WITH_MQTT_BRIDGE
   if (bridge) bridge->servicePendingClockCorrection();
 #endif
@@ -2793,6 +2828,9 @@ uint32_t MyMesh::getPowerSaveSleepSeconds(uint32_t max_secs) const {
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
   if (hasPendingOtaApply()) return true;
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  if (_local_cli_output.busy()) return true;
+#endif
 #if defined(WITH_BRIDGE)
   if (bridge && bridge->isRunning()) return true; // bridge needs WiFi radio, can't sleep
 #endif

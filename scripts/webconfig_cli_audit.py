@@ -41,7 +41,8 @@ EXPECTED_FAILURES = {
 
 # Commands that change the node out from under the audit.
 SKIP = {"reboot", "clkreboot", "poweroff", "shutdown", "erase", "start ota",
-        "stop webconfig", "ota update", "start webconfig", "start webconfig ap"}
+        "stop webconfig", "ota update", "start webconfig", "start webconfig ap",
+        "log", "get acl"}  # Listings use /api/terminal, not this bounded API audit.
 
 
 def table():
@@ -80,8 +81,6 @@ NOT_OFFERED = {
     "tls.bundletest",  # TLS debugging, not an operator command
     "start ota",       # binds port 80, which the portal is already using
     "clock sync",      # takes its time from the caller; a web request has none
-    "log",             # streams to Serial and stalls the radio ("log start" is offered)
-    "get acl",         # streams to Serial, returns nothing
 }
 
 
@@ -121,10 +120,9 @@ ROUND_TRIPS = [
     ("set path.hash.mode 2", "get path.hash.mode", "2"),
     ("set mqtt.iata den", "get mqtt.iata", "DEN"),
     ("set radio.rxps 70000 60000", "get radio.rxps", "on,70000,60000"),
-    # Secret reads are masked back down for an HTTP caller, in CommonCLI's own
-    # words for a non-serial one (wcIsSecretReadCommand).
-    ("set guest.password hunter2", "get guest.password", "******** (serial only)"),
-    ("set wifi.pwd hunter2", "get wifi.pwd", "******** (serial only)"),
+    # Explicit authenticated LAN getters have local-connection privileges.
+    ("set guest.password hunter2", "get guest.password", "hunter2"),
+    ("set wifi.pwd hunter2", "get wifi.pwd", "hunter2"),
 ]
 
 

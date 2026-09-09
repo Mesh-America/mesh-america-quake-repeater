@@ -41,6 +41,41 @@ available buffer while unread, the browser reports the missing output.
 USB protocol-switch and USB MOTA ownership commands still apply to the USB
 connection. Use the WiFi MOTA seeder on port 5001 for a host folder over WiFi.
 
+## Local maintenance commands
+
+Local means a connection directly to the node: USB, BLE or WiFi/Ethernet
+Companion protocol, a TCP terminal, or the browser CLI on the LAN. These
+connections can use the following commands when the role and build include
+the corresponding feature:
+
+| Command | Result |
+|---|---|
+| `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets` | Runtime diagnostics |
+| `get prv.key` | Node identity private key; Companion requires private key export enabled in the build |
+| `get password` | Infrastructure admin password; Companion reports that it has no admin password |
+| `set freq <MHz>` | Save the frequency; reboot to apply |
+| `erase` | Erase stored identity and settings; reboot for a fresh node |
+| `get wifi.pwd` | Stored WiFi password on WiFi builds |
+| `get mqttN.password`, `get mqttN.token` | Stored credentials for MQTT slot N |
+| `get acl`, `log` | Infrastructure ACL or captured packet log; these stores do not exist on Companion |
+
+The command text is the same for direct connections. A binary Companion app
+can send `0x42` (`CMD_RUN_CLI_COMMAND`) followed by the ASCII command, without
+switching into terminal mode. The response is `0x1D` (`RESP_CODE_CLI_REPLY`)
+followed by the reply text. For example, payload `42 67 65 74 20 70 61 73 73 77
+6f 72 64` runs `get password`. USB framing remains the normal Companion frame;
+BLE and TCP use their existing Companion transport framing.
+
+Commands relayed to another node using `cmd` travel over LoRa and retain the
+remote restrictions. These local permissions do not add an ACL or packet-log
+store to Companion. Use `list` or the binary contacts operations for Companion
+contacts. Interactive chat commands still use the text terminal or their
+corresponding binary protocol operations.
+
+The browser CLI requires station/LAN mode and `wifi.cli on`. Infrastructure
+uses its admin login; Companion uses the trusted LAN. Configuration forms keep
+password fields masked; explicit local CLI getters return their values.
+
 ## Companion USB mode
 
 An ordinary Companion USB build starts in the normal binary Companion protocol

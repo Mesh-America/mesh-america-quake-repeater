@@ -63,6 +63,11 @@ limits reduce selected Generic E22, Heltec V2, Meshadventurer, T-Beam OTA/MQTT,
 and TLora MQTT profiles to 50. Check the artifact capability manifest and
 [ESP32 memory budget](esp32_memory_budget.md) for the exact target.
 
+See [local maintenance commands](terminal_chat_cli.md#local-maintenance-commands)
+for USB, BLE/binary Companion, TCP/Ethernet, and browser CLI privileges.
+A direct connection can access local diagnostics and explicit credential
+getters; relaying a command over LoRa keeps its remote restrictions.
+
 ## Profile matrix
 
 | Build/profile | Command availability |

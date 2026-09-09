@@ -2396,6 +2396,22 @@ void MyMesh::formatRecentRepeatersReply(char *reply, int page,
 }
 
 void MyMesh::printRecentRepeatersSerial() {
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  if (_command_output) {
+    _local_cli_output.startRows(*_command_output,
+        [](void* context, size_t& row, char* out, size_t capacity) -> size_t {
+          auto& owner = *static_cast<MyMesh*>(context);
+          const auto* tables = static_cast<const SimpleMeshTables*>(owner.getTables());
+          const auto* info = tables ? tables->getRecentRepeaterBySortedIdx(row++) : nullptr;
+          if (!info) return 0;
+          char prefix[MAX_ROUTE_HASH_BYTES * 2 + 1], snr[12];
+          mesh::Utils::toHex(prefix, info->prefix, info->prefix_len);
+          formatLocalSnrX4(snr, sizeof(snr), info->snr_x4);
+          return snprintf(out, capacity, "%s,%s%s\r\n", prefix, snr[0] == '-' ? "" : " ", snr);
+        }, this, "Recent repeaters:\r\n");
+    return;
+  }
+#endif
   const SimpleMeshTables* tables = static_cast<const SimpleMeshTables*>(getTables());
   if (tables == NULL) {
     mesh::usbConsolePort().printf("Error: unsupported\r\n");
@@ -4795,6 +4811,9 @@ bool MyMesh::scheduleNormalRadio() {
 }
 
 bool MyMesh::formatFileSystem() {
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  _local_cli_output.cancel();
+#endif
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   return InternalFS.format();
 #elif defined(RP2040_PLATFORM)
@@ -4845,6 +4864,13 @@ void MyMesh::updateFloodAdvertTimer() {
 }
 
 void MyMesh::dumpLogFile() {
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  if (_command_output) {
+    _local_cli_output.startFile(*_command_output,
+                                mesh::openFileRead(_fs, PACKET_LOG_FILE));
+    return;
+  }
+#endif
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   if (hasPendingSerialOutput()) {
     mesh::usbConsolePort().printf("Err - USB output busy\r\n");
@@ -11100,6 +11126,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
   _gpio_reply_tracker.beginCommand(gpio_client_index, gpio_path_hash_size,
                                    sender == NULL ? NULL : sender->id.pub_key);
 #endif
+  if (sender != nullptr && sender_timestamp == 0) sender_timestamp = 1;
   char* reply_start = reply;
   // Parse the original wire text exactly once, also before region-load mode.
   // Parsing again after stripping a prefix would let nested prefixes bypass
@@ -11537,6 +11564,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
   // Compatibility path for manually defined legacy portable builds. Current
   // release builds use FULL and do not enter this branch.
   _cli.handleCommand(sender_timestamp, command, reply);
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
+#endif
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   if (sender_timestamp == 0 && serial_log_eof_pending
       && strcmp(reply, "   EOF") == 0) reply[0] = 0;
@@ -11780,6 +11810,24 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     printRecentRepeatersSerial();
     reply_start[0] = 0;
   } else if (sender_timestamp == 0 && strcmp(command, "get acl") == 0) {
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+    if (_command_output) {
+      _local_cli_output.startRows(*_command_output,
+          [](void* context, size_t& row, char* out, size_t capacity) -> size_t {
+            auto& owner = *static_cast<MyMesh*>(context);
+            while (row < static_cast<size_t>(owner.acl.getNumClients())) {
+              auto* client = owner.acl.getClientByIdx(row++);
+              if (!client->permissions) continue;
+              char key[PUB_KEY_SIZE * 2 + 1];
+              mesh::Utils::toHex(key, client->id.pub_key, PUB_KEY_SIZE);
+              return snprintf(out, capacity, "%02X %s\r\n", client->permissions, key);
+            }
+            return 0;
+          }, this, "ACL:\r\n");
+      reply[0] = 0;
+      return;
+    }
+#endif
     mesh::usbConsolePort().printf("ACL:\r\n");
     for (int i = 0; i < acl.getNumClients(); i++) {
       auto c = acl.getClientByIdx(i);
@@ -11942,7 +11990,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     strcpy(reply, "Err - neighbors not enabled in this build");
 #endif
   } else{
-    _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
+    _cli.handleCommand(sender_timestamp, command, reply);
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+    if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
+#endif
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
     if (sender_timestamp == 0 && serial_log_eof_pending
         && strcmp(reply, "   EOF") == 0) reply[0] = 0;
@@ -11951,6 +12002,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 }
 
 void MyMesh::loop() {
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  _local_cli_output.service();
+#endif
 #ifdef WITH_MQTT_BRIDGE
   if (mqtt_bridge) mqtt_bridge->servicePendingClockCorrection();
 #endif
@@ -12937,6 +12991,9 @@ bool MyMesh::startNeighborDiscover(char* reply) {
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
   if (hasPendingOtaApply()) return true;
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  if (_local_cli_output.busy()) return true;
+#endif
   if (deferred_cli_command.pending || pending_self_advert || _cli.hasActiveUserGpioTimer()) return true;
 #if defined(WITH_BRIDGE)
   const AbstractBridge* active_bridge = activeBridge();

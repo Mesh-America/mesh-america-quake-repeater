@@ -203,11 +203,15 @@ void loop() {
 
 #ifdef ETHERNET_ENABLED
   ethernet_loop_maintain();
-  if (ethernet_read_line(ethernet_command, sizeof(ethernet_command))) {
+  if (ethernet_take_session_reset() || !ethernet_client.connected()) {
+    the_mesh.cancelLocalOutput(ethernet_client);
+    ethernet_command[0] = 0;
+  }
+  if (!the_mesh.hasPendingLocalOutput() && ethernet_read_line(ethernet_command, sizeof(ethernet_command))) {
     char reply[160];
     reply[0] = 0;
     if (!ethernet_handle_command(ethernet_command, reply)) {
-      the_mesh.handleCommand(0, ethernet_command, reply);
+      the_mesh.handleLocalCommand(ethernet_command, reply, ethernet_client);
     }
     ethernet_send_reply(reply);
     ethernet_command[0] = 0;

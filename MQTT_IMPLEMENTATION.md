@@ -432,6 +432,8 @@ Each slot (1-6) supports the following commands:
 - `get mqttN.audience` - Get JWT audience for slot N (custom slots only)
 - `get mqttN.filter` - Get the slot's packet-type allowlist (`all`, `none`, or numeric CSV)
 
+- `get mqttN.password` / `get mqttN.token` - Read stored slot credentials from a local USB, TCP/Ethernet, or LAN browser CLI; Companion also accepts binary command `0x42`. LoRa callers cannot read their values.
+
 #### Set Commands
 - `set mqttN.preset <name>` - Set slot N to a built-in preset. Use any `name` from [Broker Presets](#broker-presets), which also lists the few presets needing extra setup.
 - `set mqttN.preset custom` - Set slot N to custom broker (configure server/port/username/password)
@@ -605,8 +607,8 @@ These settings apply across all MQTT slots:
 - `get mqtt.neighbors.interval` - Get neighbors publish interval in hours (neighbors-enabled builds)
 - `get mqtt.ntp` - Get effective NTP server hostname
 - `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, LoRa shows a compact `<server> ok|fail` list)
-- `get mqtt.owner` - Get owner public key (serial console only)
-- `get mqtt.email` - Get owner email address (serial console only)
+- `get mqtt.owner` - Get owner public key (local connections only)
+- `get mqtt.email` - Get owner email address (local connections only)
 
 #### Set Commands
 - `set mqtt.origin <name>` - Set device origin name

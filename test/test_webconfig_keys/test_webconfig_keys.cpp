@@ -150,8 +150,9 @@ TEST(WebConfigKeys, EverySecretKeyIsAlsoAllowed) {
 // recognises the serial console and answers secret getters in plaintext. These
 // are the reads that must be masked back down for an HTTP caller.
 
-TEST(WebConfigKeys, MasksEverySecretReadTheCliCanReach) {
+TEST(WebConfigKeys, ClassifiesEverySecretReadTheCliCanReach) {
   const char* masked[] = {
+    "get password",
     "get prv.key",           // this node's identity -- the worst one to leak
     "get wifi.pwd",          // grants the operator's LAN, not just the node
     "get guest.password",
@@ -164,7 +165,7 @@ TEST(WebConfigKeys, MasksEverySecretReadTheCliCanReach) {
   for (const char* c : masked) EXPECT_TRUE(wcIsSecretReadCommand(c)) << c;
 }
 
-TEST(WebConfigKeys, DoesNotMaskReadsThatCarryNoSecret) {
+TEST(WebConfigKeys, DoesNotClassifyPublicReadsAsSecrets) {
   const char* plain[] = {
     "get wifi.ssid", "get mqtt1.username", "get mqtt1.server", "get tx",
     "get public.key",        // public half, safe to read

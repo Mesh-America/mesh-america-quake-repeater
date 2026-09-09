@@ -40,6 +40,7 @@ public:
   char session[24] = {0};
   mesh::TerminalCommandQueue queue;
   bool attached = false;
+  bool running = false;
   bool closed = false;
   uint32_t last_seen = 0;
 
@@ -74,6 +75,14 @@ public:
     const size_t n = _output.read(cursor, out, size, lost);
     xSemaphoreGive(_lock);
     return n;
+  }
+  int availableForWrite() override {
+    if (!ready()) return 0;
+    xSemaphoreTake(_lock, portMAX_DELAY);
+    const uint64_t unread = _output.end() - _acknowledged;
+    const int room = unread < _capacity ? static_cast<int>(_capacity - unread) : 0;
+    xSemaphoreGive(_lock);
+    return room;
   }
   int available() override { return 0; }
   int read() override { return -1; }

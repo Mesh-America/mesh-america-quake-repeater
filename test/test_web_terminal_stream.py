@@ -37,6 +37,7 @@ class Print { public: virtual ~Print() {};
 class Stream: public Print { public:
   virtual int available()=0; virtual int read()=0; virtual int peek()=0;
   virtual void flush()=0;
+  virtual int availableForWrite(){return 0;}
 };
 """,
             "esp_heap_caps.h": """#pragma once
@@ -89,6 +90,19 @@ int main(){
     }
     terminal.readOutput(cursor,chunk,sizeof(chunk),lost);
     assert(result==data && bytes()==4096);
+  }
+  assert(allocated.empty());
+  {
+    WebTerminalStream t;
+    assert(t.availableForWrite()==4096);
+    std::string data(4096,'b');
+    t.write(reinterpret_cast<const uint8_t*>(data.data()),data.size());
+    assert(t.availableForWrite()==0);
+    uint64_t cursor=0;char chunk[1025];bool lost=false;
+    assert(t.readOutput(cursor,chunk,sizeof(chunk),lost)==1024 && !lost);
+    assert(t.availableForWrite()==0); // A read response alone is not an ACK.
+    assert(t.readOutput(cursor,chunk,sizeof(chunk),lost)==1024 && !lost);
+    assert(t.availableForWrite()==1024); // The next cursor acknowledges it.
   }
   assert(allocated.empty());
   psram=false;internal_free=8192;

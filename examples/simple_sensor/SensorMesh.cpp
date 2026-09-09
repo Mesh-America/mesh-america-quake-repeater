@@ -574,6 +574,7 @@ void SensorMesh::onUserGpioTimerCompleted(uint8_t pin, uint8_t state,
 void SensorMesh::handleCommand(uint32_t sender_timestamp, char* command, char* reply,
                                int gpio_client_index,
                                uint8_t gpio_path_hash_size) {
+  if (gpio_client_index >= 0 && sender_timestamp == 0) sender_timestamp = 1;
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)
   const uint8_t* gpio_client_key = gpio_client_index >= 0 &&
       gpio_client_index < acl.getNumClients()

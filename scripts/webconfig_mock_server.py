@@ -358,9 +358,9 @@ def apply_set(cfg, key, val):
         return True, "OK"
 
     if key == "prv.key":
-        # write-only by design: the identity goes in, nothing reads it back
-        if not _hex64(val):
-            return False, "Error: private key must be 64 hex characters"
+        if len(val) != 128 or not all(c in "0123456789abcdefABCDEF" for c in val):
+            return False, "Error: private key must be 128 hex characters"
+        cfg["identity_private_key"] = val
         return True, "OK - identity restored, reboot to apply"
 
     if key == "mqtt.owner":
@@ -518,9 +518,8 @@ CLI_UNAVAILABLE = [
                         "Run it from the serial console, or use `ota update`."),
     ("clock sync", True, "clock sync takes its time from the caller, which a web request "
                          "has no way to supply. Use `time <epoch-seconds>` instead."),
-    ("log", False, "log writes the packet log to the serial console, not here, and "
-                   "blocks the radio while it does. Use `log start` / `log stop`."),
-    ("get acl", False, "get acl writes to the serial console, not here."),
+    ("log", False, "Use /api/terminal for streamed listings."),
+    ("get acl", False, "Use /api/terminal for streamed listings."),
 ]
 
 
@@ -534,17 +533,6 @@ def cli_unavailable(cmd):
 # Failure replies CommonCLI emits that do NOT start with "Err" -- the shapes that
 # made a naive prefix test call them success. Mirrors
 # WebConfigBatch::cliReplyIsFailure.
-def cli_reads_secret(cmd):
-    """Commands that READ a secret. CommonCLI gates these on the caller being
-    the serial console; the portal is not, so the value is masked here the way
-    CommonCLI masks it for remote callers. Mirrors wcCliReadsSecret()."""
-    if not cmd.startswith("get "):
-        return False
-    key = cmd[4:].strip()
-    return key in ("prv.key", "guest.password", "alert.psk", "bridge.secret") \
-        or is_secret_key(key)
-
-
 def cli_reply_is_failure(reply):
     if not reply:
         return False
@@ -560,6 +548,7 @@ GETTERS = {
     "sf": lambda c: str(c["radio"]["sf"]),
     "cr": lambda c: str(c["radio"]["cr"]),
     "public.key": lambda c: "a1b2c3d4" * 8,
+    "prv.key": lambda c: c.get("identity_private_key", "a5" * 64),
     "wifi.status": lambda c: (
         "SSID: %s\nIP: 192.168.1.42\nRSSI: -58 dBm\nUptime: %dm"
         % (c["wifi"]["ssid"] or "(not set)", int(time.time() - ST.start) // 60)),
@@ -613,10 +602,11 @@ def _cli_get_value(cfg, key):
     if key in GETTERS:
         val = GETTERS[key](cfg)
         return (True, val) if val is not None else (False, "Error: unsupported")
+    if key == "password":
+        return True, ADMIN_PASSWORD
     if is_secret_key(key):
-        # The serial console prints these; the portal is reachable over the LAN,
-        # so it masks them the same way /api/config does.
-        return True, SENTINEL if cli_read_key(cfg, key) else "(not set)"
+        # Explicit LAN CLI getters return values; /api/config remains masked.
+        return True, cli_read_key(cfg, key) or "(not set)"
     val = cli_read_key(cfg, key)
     if val is None:
         return False, "??: %s" % key      # CommonCLI::handleGetCmd fallthrough
@@ -1035,10 +1025,6 @@ class Handler(BaseHTTPRequestHandler):
                 if cmd.startswith("password "):
                     reply = "OK"      # never echo the new password back
                     ST.admin_pwd_set = True
-                elif cli_reads_secret(cmd):
-                    val = reply[2:] if reply.startswith("> ") else reply
-                    reply = ("> (not set)" if val in ("", "(not set)")
-                             else "> ******** (serial only)")
             ok = not cli_reply_is_failure(reply)
             # Only writes gate the reboot, and only on the "OK" convention every
             # setter keeps (WebConfigBatch::cliReplyGatesReboot).

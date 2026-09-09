@@ -132,6 +132,10 @@ class MyMesh : public BaseChatMesh, public DataStoreHost, public UIShutdownGuard
 public:
   MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store, AbstractUITask* ui=NULL);
 
+  bool handleLocalCommand(const char* command, char* reply) {
+    return handleCommand(command, 0, reply);
+  }
+
   void begin(bool has_display, bool radio_available = true);
   void activateRadio();
   bool isRadioReady() const { return _radio_available; }
@@ -370,6 +374,7 @@ private:
 
   void checkCLIRescueCmd();
   bool handleCommand(const char* text, uint32_t sender_timestamp, char* reply);
+  bool handleDirectCommand(const char* command, char* reply, size_t reply_size);
   void checkSerialInterface();
   bool applyAndSaveFemRxGain(bool enabled);
   bool applyAndSaveFemTxGain(bool enabled);

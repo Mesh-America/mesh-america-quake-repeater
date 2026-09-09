@@ -598,6 +598,10 @@ public:
     (void)reply;
     return false;
   };
+  virtual bool getWiFiPassword(char* reply) const {
+    (void)reply;
+    return false;
+  };
   virtual bool getWiFiStatus(char* reply) const {
     (void)reply;
     return false;

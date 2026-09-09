@@ -110,6 +110,7 @@
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/StaticPoolPacketManager.h>
 #include <helpers/StatsFormatHelper.h>
+#include <helpers/LocalCliOutput.h>
 #if MESH_ENABLE_TELEMETRY_HISTORY
 #include <helpers/ExternalVoltageHistory.h>
 #include <helpers/TelemetryHistory.h>
@@ -298,6 +299,16 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   };
 
   FILESYSTEM* _fs;
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+#ifdef NRF52_PLATFORM
+  mesh::LocalCliOutput<File> _local_cli_output{File(InternalFS)};
+#else
+  mesh::LocalCliOutput<File> _local_cli_output;
+#endif
+  Stream* _command_output = nullptr;
+  Stream* _web_terminal = nullptr;
+#endif
+
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   File serial_log_dump;
   size_t serial_log_remaining = 0;
@@ -1023,6 +1034,22 @@ public:
   void saveIdentity(const mesh::LocalIdentity& new_id) override;
   void clearStats() override;
 
+#if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
+  void handleLocalCommand(char* command, char* reply, Stream& output) {
+    if (_local_cli_output.busy()) {
+      strcpy(reply, "Err - local listing in progress");
+      return;
+    }
+    _command_output = &output;
+    handleCommand(0, command, reply);
+    _command_output = nullptr;
+  }
+  bool hasPendingLocalOutput() const { return _local_cli_output.busy(); }
+  void cancelLocalOutput(Stream& output) {
+    if (_local_cli_output.owns(output)) _local_cli_output.cancel();
+  }
+#endif
+
   void handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char* command,
                      char* reply, int gpio_client_index = -1,
                      uint8_t gpio_path_hash_size = 1, bool usb_origin = false);
@@ -1351,6 +1378,9 @@ public:
   bool setWebUIEnabled(bool enabled, char* reply) override;
   bool getWebUIStatus(char* reply) const override;
   bool getWiFiSSID(char* reply) const override;
+  bool getWiFiPassword(char* reply) const override {
+    return WebConfigServer::formatWiFiPassword(reply, 160);
+  }
   bool getWiFiStatus(char* reply) const override;
   bool getWiFiPowerSave(char* reply) const override;
   bool getWiFiCLI(char* reply) const override;
@@ -1365,7 +1395,35 @@ public:
   void execCommand(char* cmd, char* reply) override { handleCommand(0, cmd, reply); }
   bool supportsCliTerminal() const override { return true; }
   void execAdminCommand(char* cmd, char* reply) override {
-    handleCommand(1, cmd, reply);
+    if (strcmp(cmd, "get acl") == 0 || strcmp(cmd, "log") == 0
+        || strcmp(cmd, "get recent.repeater") == 0
+        || strcmp(cmd, "get recent.repeaters") == 0) {
+      strcpy(reply, "Error: use /api/terminal for streamed listings");
+      return;
+    }
+    handleCommand(0, cmd, reply);
+  }
+  bool supportsStreamTerminal() const override { return true; }
+  bool beginStreamTerminal(Stream& output) override {
+    if (_web_terminal || _local_cli_output.busy()) return false;
+    _web_terminal = &output;
+    return true;
+  }
+  bool ownsStreamTerminal(const Stream& output) const override {
+    return _web_terminal == &output;
+  }
+  void runStreamTerminal(char* command) override {
+    if (!_web_terminal) return;
+    char reply[160] = {};
+    handleLocalCommand(command, reply, *_web_terminal);
+    if (reply[0]) _web_terminal->println(reply);
+  }
+  bool streamTerminalBusy() const override {
+    return _web_terminal && _local_cli_output.owns(*_web_terminal);
+  }
+  void endStreamTerminal(Stream& output) override {
+    cancelLocalOutput(output);
+    if (_web_terminal == &output) _web_terminal = nullptr;
   }
   void rebootNow() override { _cli.getBoard()->reboot(); }
   void onConfigBatchStart() override {

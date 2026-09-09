@@ -372,7 +372,8 @@ On a `companion_radio_full` build, port 5002 is the same role-specific text
 terminal available over USB, including chat, remote administration, radio and
 power settings, WiFi/WebConfig management, `tempradio`, and the source-only
 `ota` commands. Other
-OTA-enabled Companion builds keep the bounded `ota ...` console. LoRa staging
+OTA-enabled Companion builds expose the same local maintenance commands as
+binary command `0x42`, plus `ota ...` commands. LoRa staging
 and installation on the Full Companion itself remain disabled.
 
 Port 5002 is plaintext and has no independent login gate. Use it only on a
@@ -468,8 +469,8 @@ An inactive status is normal when `webui` is off: run `start webconfig` to
 connect temporarily. Standalone credentials can be changed through WebConfig
 or with the listed CLI commands. Changing the SSID or password stops an active
 WebConfig session; start it again to connect with the new values. Use
-`set wifi.pwd` with no value for an open network. The password is write-only
-and is never returned by `get`. Standalone WiFi accepts ordinary passphrases up
+`set wifi.pwd` with no value for an open network. `get wifi.pwd` returns the saved password on a local connection; LoRa
+callers cannot read it. Standalone WiFi accepts ordinary passphrases up
 to 63 characters and exact 64-character hexadecimal WPA/WPA2 PSKs; other
 64-character values and all longer values are rejected. MQTT observer WiFi
 passwords remain limited to 63 characters by their fixed persisted layout.
@@ -492,8 +493,14 @@ get wifi.cli
 The saved `on` setting becomes active only when the WiFi station client is
 connected and WebConfig is running in LAN mode. It is never exposed on the open
 setup access point. When active, the WebConfig page has a **CLI** tab. Repeater
-and room-server commands use the authenticated administrator parser; commands
-restricted to a physical serial connection remain unavailable there.
+and room-server commands use their local CLI after admin authentication.
+The browser can run `get password`, `get prv.key`, `erase`, `set freq`,
+`stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets`, and explicit
+WiFi/MQTT credential getters. It also streams `get acl` and raw `log` dumps
+back to the browser. Log reads pause for slow clients and resume as output is
+read, using a fixed 160-byte file chunk. A dump snapshots the file length, so
+live logging cannot extend it indefinitely. The browser keeps the complete
+requested dump, including files larger than 64 KiB.
 
 Companion uses the same complete terminal as USB and Full Companion TCP port
 5002, including `card`, `import meshcore://...`, `list`, `to`, messages, remote
@@ -503,7 +510,7 @@ for contact import, terminal ownership, and disconnect behavior.
 
 Type a command at the prompt, or paste multiple lines and confirm the sequence.
 Blank lines and comments are ignored. The device reports the supported batch
-limit. Companion sends each line after the previous command finishes and
+limit. The browser sends each line after the previous command finishes and
 continues polling for incoming text after the sequence. `help` lists the
 device's actual terminal commands; Tab completes command names and settings.
 

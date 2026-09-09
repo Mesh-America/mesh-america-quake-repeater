@@ -1674,7 +1674,7 @@ void halt() {
 /* WIFI TEXT CONSOLE - one client at a time on a dedicated port, separate from
    Binary Companion (5000) and the mOTA seeder (5001). A Full Companion exposes
    the same role CLI here as its USB terminal. Other OTA-enabled Companion
-   builds retain the bounded `ota ...` management console. */
+   builds expose local maintenance commands and `ota ...` commands. */
 #if defined(ESP32) && defined(WIFI_SSID) && defined(ENABLE_OTA)
   #include <helpers/ota/OtaCli.h>          // mesh::ota::handle_ota_command(line, reply, board)
   #include <helpers/esp32/WiFiOtaSeeder.h>
@@ -1701,7 +1701,7 @@ void halt() {
     WIFI_DEBUG_PRINTLN("Full Companion terminal listening on :%d  (nc <ip> %d)",
                        OTA_CONSOLE_TCP_PORT, OTA_CONSOLE_TCP_PORT);
 #else
-    WIFI_DEBUG_PRINTLN("OTA console listening on :%d  (nc <ip> %d, type `ota ...`)",
+    WIFI_DEBUG_PRINTLN("Local CLI and OTA console listening on :%d  (nc <ip> %d)",
                        OTA_CONSOLE_TCP_PORT, OTA_CONSOLE_TCP_PORT);
 #endif
   }
@@ -1767,7 +1767,7 @@ void halt() {
           ota_console_client.stop();
         }
 #else
-        ota_console_client.print("OTA console - type `ota ...`\r\n> ");
+        ota_console_client.print("Local CLI and OTA console - type `version` or `ota status`\r\n> ");
 #endif
       }
       return;
@@ -1810,8 +1810,9 @@ void halt() {
         ota_console_client.print("> ");
 #else
         char reply[160]; reply[0] = 0;
-        if (!mesh::ota::handle_ota_command(ota_console_line, reply, board))
-          strcpy(reply, "only `ota ...` commands are supported on this console");
+        if (!the_mesh.handleLocalCommand(ota_console_line, reply)
+            && !mesh::ota::handle_ota_command(ota_console_line, reply, board))
+          strcpy(reply, "Unknown local or OTA command");
         ota_console_client.print("  -> "); ota_console_client.print(reply); ota_console_client.print("\r\n> ");
 #endif
         ota_console_clear_line();
@@ -2830,7 +2831,7 @@ void loop() {
   serviceCompanionWiFiState();
   if (companion_wifi_requested && companion_wifi_active) {
   #ifdef ENABLE_OTA
-    ota_console_loop();  // service the OTA text console (port 5002)
+    ota_console_loop();  // service the local text console (port 5002)
   #endif
   const unsigned long wifi_now = millis();
   const bool station_channel_ok = mesh::wifi::enforceStationChannel();

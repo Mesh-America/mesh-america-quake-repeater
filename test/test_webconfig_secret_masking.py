@@ -116,6 +116,21 @@ class WebConfigSecretMaskingTest(unittest.TestCase):
         )
         self.assertIn('strcmp(key, "wifi.pwd") == 0', secret_classifier)
 
+    def test_explicit_local_cli_reads_are_not_config_snapshots(self):
+        # Both terminal APIs require the authenticated LAN, and neither applies
+        # the config form's secret masking to an explicit command reply.
+        batch = function_body(self.server, "void WebConfigServer::drainBatch(",
+                              "void WebConfigServer::attachRoutes(")
+        self.assertIn("execAdminCommand(e.cmd, e.reply)", batch)
+        self.assertNotIn("wcMaskSecretReply", batch)
+        for start, end in [
+            ("void WebConfigServer::handleCliPost(", "void WebConfigServer::handleCliResult("),
+            ("bool WebConfigServer::checkTerminalAccess(", "void WebConfigServer::handleTerminalPost("),
+        ]:
+            handler = function_body(self.server, start, end)
+            self.assertIn("_mode != MODE_LAN", handler)
+            self.assertIn("checkAuth(req)", handler)
+
 
 if __name__ == "__main__":
     unittest.main()

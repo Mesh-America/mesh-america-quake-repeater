@@ -30,6 +30,12 @@ static SPIClass ETHERNET_SPI_PORT(NRF_SPIM1, PIN_SPI1_MISO, PIN_SPI1_SCK, PIN_SP
 static EthernetServer ethernet_server(ETHERNET_TCP_PORT);
 static EthernetClient ethernet_client;
 static volatile bool ethernet_running = false;
+static bool ethernet_session_reset = false;
+static bool ethernet_take_session_reset() {
+  const bool changed = ethernet_session_reset;
+  ethernet_session_reset = false;
+  return changed;
+}
 
 // FreeRTOS task: handles hw init, DHCP, and retries in the background
 static void ethernet_task(void* param) {
@@ -107,6 +113,7 @@ static void ethernet_check_client() {
   if (newClient) {
     if (ethernet_client) ethernet_client.stop();
     ethernet_client = newClient;
+    ethernet_session_reset = true;
     IPAddress ip = ethernet_client.remoteIP();
     Serial.printf("ETH: Client connected from %u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
     ethernet_client.println(ETHERNET_CLI_BANNER);
