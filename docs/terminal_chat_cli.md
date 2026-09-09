@@ -2,6 +2,42 @@
 
 Below are the commands you can enter into the Terminal Chat clients:
 
+## Companion WiFi browser terminal
+
+On ESP32 WiFi Companions with WebConfig, open the node's LAN IP address and
+select **CLI**. The browser runs the same commands as the USB terminal and
+Full Companion's TCP terminal on port 5002, including contact import, contact
+selection, messages, remote login/commands, and delayed RF replies. Run `help`
+to list commands compiled into the device. Enable the tab with
+`set wifi.cli on`; the open setup AP does not expose it.
+
+For example, copy the complete `meshcore://...` string from `card` on another
+Companion, then run these commands on the receiving Companion:
+
+```text
+import meshcore://<full-contact-card-data>
+list
+to <contact-name-or-prefix>
+```
+
+Replace the placeholders; a bare public key is not a contact card. Import is
+queued for validation, so use `list` to confirm the contact appears. `to`
+remains selected for subsequent `send`, `path`, `login`, and `cmd` commands
+within this terminal session.
+
+Only one USB, TCP, or browser text terminal owns the session at a time. An
+idle startup USB prompt can be borrowed by WiFi. Use `disconnect` or the
+browser's **disconnect** button to release it. Closing the page releases the
+session; if the connection disappears, it expires after 60 seconds without a
+poll. Long replies page into the browser automatically, and incoming replies
+continue appearing after a command finishes. Terminal scrollback starts at
+4 KiB and can grow to 32 KiB for unread output, preferring PSRAM; it shrinks
+after reading and is freed when the session expires. If output exceeds the
+available buffer while unread, the browser reports the missing output.
+
+USB protocol-switch and USB MOTA ownership commands still apply to the USB
+connection. Use the WiFi MOTA seeder on port 5001 for a host folder over WiFi.
+
 ## Companion USB mode
 
 An ordinary Companion USB build starts in the normal binary Companion protocol

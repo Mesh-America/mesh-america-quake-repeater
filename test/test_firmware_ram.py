@@ -66,6 +66,16 @@ def esp_fixture(path, modern=False, fragmented=False):
 
 
 class FirmwareRamTest(unittest.TestCase):
+    def test_browser_terminal_reserves_internal_session_and_psram_aware_scrollback(self):
+        defines = {"ENABLE_USB_INTERFACE": 1, "WIFI_SSID": "", "DISPLAY_CLASS": "SSD1306Display"}
+        base = ram.requirements("ESP32_PLATFORM", {**defines, "WEBCONFIG_DISABLED": 1}, "v4_companion")
+        plain = ram.requirements("ESP32_PLATFORM", defines, "v4_companion")
+        psram = ram.requirements("ESP32_PLATFORM", {**defines, "BOARD_HAS_PSRAM": 1}, "v4_companion")
+        self.assertEqual(plain["required_heap_bytes"] - base["required_heap_bytes"], 6144)
+        self.assertEqual(psram["required_heap_bytes"] - base["required_heap_bytes"], 2048)
+        repeater = ram.requirements("ESP32_PLATFORM", defines, "v4_repeater")
+        self.assertNotIn("browser_terminal_session", repeater["components"])
+
     def test_longer_display_previews_reserve_heap_and_contiguous_history(self):
         defines = {"DISPLAY_CLASS": "SSD1306Display", "UI_SMALL_MESSAGE_FONT": 0}
         base = ram.requirements("ESP32_PLATFORM", defines, "v4_companion")

@@ -191,6 +191,65 @@ class WebConfigUiRuntimeTest(unittest.TestCase):
                         "set bridge.enabled ", "get mqtt1.password", "set mqtt2.preset "):
             self.assertNotIn(command, suggestions)
 
+    def test_stream_terminal_imports_long_cards_pages_lists_and_receives_late_replies(self):
+        status, config = self.setup_values()
+        status.update(mode="lan", cli=True, terminal_stream=True,
+                      terminal_max_command=541, password_supported=False)
+        prelude = """
+<script>
+(function(){
+  var status=%s,config=%s,commands=[],sequence=0,output="",session="";
+  function response(value){return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(value)}})}
+  window.fetch=function(path,options){
+    if(path==="/api/status")return response(status);
+    if(path==="/api/config")return response(config);
+    if(path==="/api/presets")return response({presets:[]});
+    if(path==="/api/terminal"){
+      var p=JSON.parse(options.body);commands.push(p.command);sequence=p.seq;session=p.session;
+      if(p.command.indexOf("import ")===0){output+="OK - contact import queued\\n";return Promise.reject(new Error("lost POST response"))}
+      if(p.command==="list")for(var i=0;i<350;i++)output+="contact-"+i+" (Repeater)\\n";
+      if(p.command.indexOf("to ")===0)output+="Selected recipient test\\n";
+      if(p.command==="help")output+="firmware help: import, list, to, send\\n";
+      return response({accepted:true});
+    }
+    if(path.indexOf("/api/terminal?")===0){
+      var q=new URLSearchParams(path.split("?")[1]),from=Number(q.get("after")),text=output.slice(from,from+1024);
+      return response({output:text,cursor:from+text.length,seq:sequence,done:true,closed:false,lost:false,more:from+text.length<output.length});
+    }
+    if(path.indexOf("/api/cli")===0)throw new Error("wrong CLI parser");
+    return response({});
+  };
+  window.addEventListener("load",function(){
+    setTimeout(function(){
+      document.querySelector('#tabs button[data-t="cli"]').click();
+      cliStreamRun(["import meshcore://"+"ab".repeat(255),"list","to test"]);
+    },75);
+    setTimeout(function(){output+="Late RF reply and ACK\\n"},300);
+    setTimeout(function(){cliHelp()},550);
+    setTimeout(function(){
+      document.body.setAttribute("data-test-commands",JSON.stringify(commands));
+      document.body.setAttribute("data-test-stream-output",document.getElementById("term-out").textContent);
+      document.body.setAttribute("data-test-stream-busy",String(cli.busy));
+      document.body.setAttribute("data-test-stream-session",session);
+    },1000);
+  });
+})();
+</script>
+""" % (json.dumps(status), json.dumps(config))
+        dom = self.run_page(prelude, virtual_time=1200)
+        import html
+        commands = json.loads(html.unescape(re.search(
+            r'data-test-commands="([^"]*)"', dom).group(1)))
+        self.assertEqual(commands, ["import meshcore://" + "ab" * 255,
+                                    "list", "to test", "help"])
+        output = html.unescape(re.search(
+            r'data-test-stream-output="([^"]*)"', dom).group(1))
+        self.assertIn("contact-0 (Repeater)", output)
+        self.assertIn("contact-349 (Repeater)", output)
+        self.assertEqual(output.count("Late RF reply and ACK"), 1)
+        self.assertIn("firmware help: import, list, to, send", output)
+        self.assertIn('data-test-stream-busy="false"', dom)
+
     def test_console_stays_hidden_when_disabled_or_on_setup_ap(self):
         for mode in ("lan", "setup"):
             with self.subTest(mode=mode):

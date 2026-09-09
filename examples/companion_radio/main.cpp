@@ -137,7 +137,7 @@ MultiSerialInterface interface_manager;
 #endif
 #endif
 
-#if COMPANION_FEATURE_NETWORK_TERMINAL
+#if defined(ENABLE_USB_INTERFACE) && (COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG))
 static bool isNetworkTerminalActive();
 #endif
 
@@ -867,7 +867,7 @@ static void serviceUsbTerminal() {
 #else
           false,
 #endif
-#if COMPANION_FEATURE_NETWORK_TERMINAL
+#if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
           isNetworkTerminalActive()
 #else
           false
@@ -1045,6 +1045,47 @@ static void expireUsbBinaryStartupProbeBeforeDispatch() {
   enterUsbTerminalMode();
 }
 #endif
+#endif
+
+#if defined(ENABLE_USB_INTERFACE) && (COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG))
+static bool isNetworkTerminalActive() {
+  return the_mesh.isAnyNetworkTerminalMode();
+}
+#endif
+
+#if defined(WITH_WEBCONFIG) && defined(ENABLE_USB_INTERFACE)
+static mesh::UsbTcpTerminalHandoff browser_usb_handoff;
+
+bool MyMesh::beginStreamTerminal(Stream& output) {
+  static_assert(mesh::kTerminalCommandCapacity == MAX_TRANS_UNIT * 2 + 32,
+                "Browser and USB/TCP command capacities must match");
+  if (isAnyNetworkTerminalMode()) return false;
+  const bool ascii_selected = isTerminalMode();
+  const bool input_idle = usb_terminal_line_len == 0 && !usb_terminal_discard_line
+#if defined(COMPANION_RADIO_FULL)
+      && !usb_binary_startup_probe.isActive()
+#endif
+      ;
+  if (!browser_usb_handoff.begin(ascii_selected,
+          hasObservableActiveUsbTerminalClient(), input_idle,
+          usb_serial_interface.getCompletedFrameCount())) return false;
+  if (ascii_selected) leaveUsbTerminalMode(false);
+  if (enterNetworkTerminalMode(output)) return true;
+  if (browser_usb_handoff.shouldRestoreAscii(
+          usb_serial_interface.getCompletedFrameCount())) enterUsbTerminalMode();
+  return false;
+}
+
+void MyMesh::endStreamTerminal(Stream& output) {
+  const bool owned = isNetworkTerminalMode(output);
+  exitNetworkTerminalMode(output);
+  if (!owned) {
+    browser_usb_handoff.cancel();
+  } else if (browser_usb_handoff.shouldRestoreAscii(
+                 usb_serial_interface.getCompletedFrameCount())) {
+    enterUsbTerminalMode();
+  }
+}
 #endif
 
 void halt() {
@@ -1639,12 +1680,6 @@ void halt() {
   static bool ota_console_discard_line = false;
 #if COMPANION_FEATURE_NETWORK_TERMINAL && defined(ENABLE_USB_INTERFACE)
   static mesh::UsbTcpTerminalHandoff ota_console_usb_handoff;
-#endif
-
-#if COMPANION_FEATURE_NETWORK_TERMINAL
-  static bool isNetworkTerminalActive() {
-    return the_mesh.isNetworkTerminalMode(ota_console_client);
-  }
 #endif
 
   static void ota_console_clear_line() {

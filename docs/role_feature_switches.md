@@ -39,8 +39,10 @@ The linked console runs in your computer's browser over **USB**. It does not
 need node WiFi or `set webui on`. **WebConfig** is a separate settings website
 served by supported ESP32 images. Both infrastructure and WiFi Companion
 WebConfig include a browser command terminal (`set wifi.cli on`), enabled by
-default on the LAN. Full ESP32 Companion also has a text terminal at TCP port **5002**
-for its complete chat and streaming command surface.
+default on the LAN. The Companion browser CLI uses the same terminal commands
+as USB, including contact import, chat, recipient selection, and streaming
+replies. Full ESP32 Companion also exposes this terminal at TCP port **5002**.
+See the [terminal command guide](terminal_chat_cli.md#companion-wifi-browser-terminal).
 
 ## Which old variant setting should I use?
 

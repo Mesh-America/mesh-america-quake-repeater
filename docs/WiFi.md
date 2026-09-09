@@ -491,23 +491,24 @@ get wifi.cli
 
 The saved `on` setting becomes active only when the WiFi station client is
 connected and WebConfig is running in LAN mode. It is never exposed on the open
-setup access point. When active, the WebConfig page has a **CLI** tab for sending
-commands directly to the repeater or room server. It uses the local
-administrator command parser and displays one reply at a time. The terminal is
-protected by the WebConfig admin login and uses remote-administrator
-permissions, so commands explicitly restricted to a physical serial connection
-remain unavailable.
+setup access point. When active, the WebConfig page has a **CLI** tab. Repeater
+and room-server commands use the authenticated administrator parser; commands
+restricted to a physical serial connection remain unavailable there.
 
-Use **Single command** for the normal prompt, or select **Command block** to
-paste up to 100 commands with one command per line. Blank lines are ignored.
-The browser validates all lines first, then sends one command at a time and
-waits for its reply before sending the next. The block queue is kept in the
-browser only, so closing the page or losing its WiFi connection stops the
-commands that have not yet been sent. Ctrl+Enter or Command+Enter starts a
-block.
+Companion uses the same complete terminal as USB and Full Companion TCP port
+5002, including `card`, `import meshcore://...`, `list`, `to`, messages, remote
+login, and delayed replies. It uses the Companion's trusted LAN. See
+[Companion browser terminal](terminal_chat_cli.md#companion-wifi-browser-terminal)
+for contact import, terminal ownership, and disconnect behavior.
+
+Type a command at the prompt, or paste multiple lines and confirm the sequence.
+Blank lines and comments are ignored. The device reports the supported batch
+limit. Companion sends each line after the previous command finishes and
+continues polling for incoming text after the sequence. `help` lists the
+device's actual terminal commands; Tab completes command names and settings.
 
 The up/down arrow keys recall commands entered during the current browser
-session in single-command mode. Commands available in the terminal still
+session. Commands available in the terminal still
 depend on the firmware role and build profile. Commands such as
 `stop webconfig`, `set wifi.cli off`, WiFi credential changes, and reboot
 operations stop the remaining block and can disconnect the page before it

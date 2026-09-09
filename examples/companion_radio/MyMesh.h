@@ -187,6 +187,15 @@ public:
   void execCommand(char* cmd, char* reply) override;
   bool supportsCliTerminal() const override { return true; }
   void execAdminCommand(char* cmd, char* reply) override;
+#ifdef ENABLE_USB_INTERFACE
+  bool supportsStreamTerminal() const override { return true; }
+  bool beginStreamTerminal(Stream& output) override;
+  bool ownsStreamTerminal(const Stream& output) const override {
+    return isNetworkTerminalMode(output);
+  }
+  void runStreamTerminal(char* command) override { handleTerminalCommand(command); }
+  void endStreamTerminal(Stream& output) override;
+#endif
   void rebootNow() override;
   void onConfigBatchStart() override;
   void onConfigBatchEnd() override;
@@ -206,10 +215,13 @@ public:
   void resetTerminalSession();
   bool isTerminalMode() const { return _terminal_mode; }
   void handleTerminalCommand(char* command);
-#if COMPANION_FEATURE_NETWORK_TERMINAL
+#if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
   bool enterNetworkTerminalMode(Stream& output);
   void exitNetworkTerminalMode(Stream& output);
   bool isNetworkTerminalMode(const Stream& output) const;
+  bool isAnyNetworkTerminalMode() const {
+    return !_terminal_mode && _terminal_output != NULL;
+  }
 #endif
 #endif
 

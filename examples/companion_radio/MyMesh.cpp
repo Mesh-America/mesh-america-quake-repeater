@@ -3370,9 +3370,9 @@ void MyMesh::onConfigBatchEnd() {
 }
 
 void MyMesh::execAdminCommand(char* cmd, char* reply) {
-  // WebConfig runs this bounded dispatcher on the mesh loop. It must not
-  // enter the stateful USB/TCP terminal, select a recipient, or capture that
-  // terminal's stream. Use remote-call semantics for board-specific commands.
+  // The settings-batch API runs independently from the interactive terminal.
+  // The browser CLI uses runStreamTerminal() for the shared USB/TCP session;
+  // a settings batch must not capture or reset that session's stream.
   reply[0] = 0;
   if (!cmd || (strlen(cmd) > 2 && cmd[2] == '|')) {
     strcpy(reply, "Error: enter a plain CLI command");
@@ -6810,7 +6810,7 @@ void MyMesh::printTerminalBanner(bool show_binary_stop) {
   if (show_binary_stop) {
     output.print("  (+++MESHCORE-TERM-STOP returns to Binary mode)\r\n");
   } else {
-    output.print("  (disconnect to close this TCP terminal)\r\n");
+    output.print("  (disconnect to close this network terminal)\r\n");
   }
   output.print("\r\n> ");
 }
@@ -6828,9 +6828,9 @@ void MyMesh::exitTerminalMode() {
   if (_terminal_output == &mesh::usbTerminalPort()) _terminal_output = NULL;
 }
 
-#if COMPANION_FEATURE_NETWORK_TERMINAL
+#if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
 bool MyMesh::enterNetworkTerminalMode(Stream& output) {
-  if (_terminal_mode) return false;
+  if (_terminal_mode || (_terminal_output != NULL && _terminal_output != &output)) return false;
   _terminal_output = &output;
   resetTerminalSession();
   printTerminalBanner(false);
@@ -7983,7 +7983,7 @@ void MyMesh::handleTerminalCommand(char* command) {
     if (_terminal_mode) {
       terminalOutput().print("  +++MESHCORE-TERM-STOP\r\n");
     } else {
-      terminalOutput().print("  disconnect (closes the TCP terminal)\r\n");
+      terminalOutput().print("  disconnect (closes the network terminal)\r\n");
     }
   } else if (handleCommand(command, 0, local_reply)) {
     // Fill the same safe shared-command surface for getters (`get name`,

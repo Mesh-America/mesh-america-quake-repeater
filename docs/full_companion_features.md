@@ -31,7 +31,10 @@ Companion mode, send this line once and wait for the terminal banner:
 ```
 
 Run `help`, `board`, and `version` to inspect the device. On ESP32 you can
-alternatively connect to its text terminal with `nc DEVICE_IP 5002`.
+alternatively open the node's LAN address and select **CLI**, or connect with
+`nc DEVICE_IP 5002`. Both use the same terminal commands as USB, including
+`import meshcore://...`, `list`, `to`, and `send`. Use `disconnect` to release
+a browser/TCP session. See [the terminal guide](terminal_chat_cli.md).
 When finished, send `+++MESHCORE-TERM-STOP`, close the terminal, and reconnect
 your Companion app. These are local text commands; an app's custom-variable
 editor does not necessarily forward them.

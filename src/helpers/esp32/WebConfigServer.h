@@ -29,6 +29,7 @@
 #include <freertos/semphr.h>
 #include <helpers/CompanionWiFiStatus.h>
 #include <helpers/WebConfigBatch.h>
+#include <helpers/TerminalSession.h>
 #include <helpers/WiFiPowerSave.h>
 #include <helpers/WiFiReconnectPolicy.h>
 #include <helpers/ui/DisplayBuildFlags.h>
@@ -36,6 +37,7 @@
 class AsyncWebServer;
 class AsyncWebServerRequest;
 class DNSServer;
+class WebTerminalStream;
 
 #ifndef WEBCONFIG_AP_IDLE_TIMEOUT_MS
   #if defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
@@ -139,6 +141,13 @@ public:
     virtual void execAdminCommand(char* cmd, char* reply) {
       execCommand(cmd, reply);
     }
+    // Companion's browser uses the same stateful Stream terminal as USB/TCP.
+    // All session callbacks run on the mesh loop, never the HTTP task.
+    virtual bool supportsStreamTerminal() const { return false; }
+    virtual bool beginStreamTerminal(Stream& output) { return false; }
+    virtual bool ownsStreamTerminal(const Stream& output) const { return false; }
+    virtual void runStreamTerminal(char* command) {}
+    virtual void endStreamTerminal(Stream& output) {}
     virtual void rebootNow() = 0;
     // Bracket a config batch so bridge restarts triggered by individual
     // `set` handlers can be coalesced into one.
@@ -296,6 +305,7 @@ private:
   uint32_t _setup_wifi_handoff_deadline = 0;
   char _setup_wifi_handoff_ip[16] = {0};
   BatchEntry _batch[MAX_BATCH];
+  WebTerminalStream* _terminal = NULL;
 
   // LAN-mode session (single slot; new login evicts the old session)
   char _session_token[33] = {0};
@@ -330,6 +340,8 @@ private:
   void detachRoutes();
   uint32_t handlerRefCount() const;
   void drainBatch(uint32_t now);
+  void serviceTerminal(uint32_t now);
+  void closeTerminal();
   void serviceSetupWiFiHandoff(uint32_t now);
   void finishBatch(uint32_t now);
   void finalizeTeardown();
@@ -347,6 +359,9 @@ private:
   void handleConfigResult(AsyncWebServerRequest* req);
   void handleCliPost(AsyncWebServerRequest* req);
   void handleCliResult(AsyncWebServerRequest* req);
+  void handleTerminalPost(AsyncWebServerRequest* req);
+  void handleTerminalOutput(AsyncWebServerRequest* req);
+  bool checkTerminalAccess(AsyncWebServerRequest* req);
   void handleStats(AsyncWebServerRequest* req);
   void handleScan(AsyncWebServerRequest* req);
   void handlePresets(AsyncWebServerRequest* req);

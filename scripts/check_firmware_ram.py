@@ -75,6 +75,13 @@ def requirements(platform, defines, target):
             parts["mqtt_connections_buffers"] = 24576
         if "ENABLE_OTA" in defines:
             parts["ota_source_scratch"] = 8192
+        if (companion and "ENABLE_USB_INTERFACE" in defines and "WIFI_SSID" in defines
+                and "WEBCONFIG_DISABLED" not in defines):
+            parts["browser_terminal_session"] = 2048
+            if "BOARD_HAS_PSRAM" not in defines:
+                # Larger replies grow on demand only while preserving 32 KiB
+                # of free internal heap, and shrink after the browser reads.
+                parts["browser_terminal_scrollback"] = 4096
         if not companion:
             parts["neighbor_history"] = integer(defines, "MAX_RECENT_REPEATERS", 50) * 12
     else:

@@ -561,6 +561,8 @@ body.tab-cli{padding-bottom:0}
           <button type="button" class="hide" id="term-setup" onmousedown="event.preventDefault()"
                   onclick="showWizard()">&larr; setup</button>
           <button type="button" onmousedown="event.preventDefault()" onclick="cliHelp()">help</button>
+          <button type="button" class="hide" id="term-disconnect" onmousedown="event.preventDefault()"
+                  onclick="if(!cli.busy)cliRun(['disconnect'])">disconnect</button>
           <button type="button" onmousedown="event.preventDefault()" onclick="cliClear()">clear</button>
         </div>
         <div class="term-out" id="term-out"></div>
@@ -737,6 +739,8 @@ function boot(){
     // (active_slots: 2 without PSRAM, 5 with). Fall back to the runtime array
     // size for older firmware that doesn't report it.
     st.mode=s.mode;st.authed=s.auth;st.hasMqtt=!!s.mqtt;st.hasCli=!!s.cli;
+    st.streamTerminal=!!s.terminal_stream;st.terminalMax=s.terminal_max_command||541;
+    $("#term-disconnect").classList.toggle("hide",!st.streamTerminal);
     st.wifiPsk64=!!s.wifi_psk64;
     st.passwordSupported=!!s.password_supported;st.needsPassword=!!s.needs_password;
     st.radioOptional=!!s.radio_optional;
@@ -1954,9 +1958,28 @@ var CLI_SLOT=[
 ];
 var CLI_TYPES="req,response,txt_msg,ack,advert,grp_txt,grp_data,anon_req,path,trace,multipart,control,raw_custom".split(",");
 
-// Companion has its own command parser. Offer its settings, not the repeater's
-// ACL, bridge and filesystem commands or stateful USB/TCP chat commands.
+// Companion uses its USB/TCP command parser, including its chat session.
+// Repeater ACL and rescue-only filesystem commands belong to other parsers.
 var CLI_COMPANION_VERBS=[
+  ["help","List commands supported by this firmware"],
+  ["card","Export this node's meshcore:// contact card"],
+  ["import ","Add a contact: import meshcore:// followed by the full card"],
+  ["list","List contacts"], ["list ","List the first N contacts"],
+  ["to","Show selected recipient"], ["to ","Select a contact by name or name prefix"],
+  ["path","Show the selected contact's path"], ["path ","Set path: direct, clear, or hop prefixes"],
+  ["reset path","Clear the selected contact's path"],
+  ["send ","Send a direct message to the selected contact"],
+  ["login ","Log into the selected repeater or room with its admin password"],
+  ["cmd ","Run a remote command on the selected contact"],
+  ["trace","Trace the selected contact"], ["trace ","Trace a contact or raw path"],
+  ["channels","List channels"], ["channel ","Send: channel <name-or-slot> <text>"],
+  ["public ","Send a message to channel 0"],
+  ["show","Show terminal receive filters"], ["show ","Set adverts, channels, or emergency output on/off"],
+  ["clock","Show node time"], ["time ","Set time in epoch seconds"],
+  ["advert","Send an advertisement"],
+  ["start ota","Start WiFi firmware update (Full Companion: port 8080)"],
+  ["stop ota","Stop WiFi firmware update"],
+  ["disconnect","Close the browser or TCP terminal session"],
   ["ver","Firmware version"],
   ["board","Board and hardware info"],
   ["memory","Heap and PSRAM free/min/largest block (Full Companion)"],
@@ -2069,7 +2092,7 @@ function cliEcho(cls,text){
   return d;
 }
 function cliGap(){var d=cliEcho("gap","");return d}
-function cliClear(){$("#term-out").innerHTML="";cliBanner();$("#term-in").focus()}
+function cliClear(){$("#term-out").innerHTML="";cliStream.out=null;cliBanner();$("#term-in").focus()}
 function cliBanner(){
   cliEcho("sys","MeshCore "+shortVer());
   cliEcho("sys",(st.role||"")+" * "+(st.board||"")+
@@ -2084,6 +2107,7 @@ function cliBanner(){
   cliEcho("sys","Type help for a summary, or a prefix and Tab to complete.");
 }
 function cliHelp(){
+  if(st.streamTerminal){if(!cli.busy)cliRun(["help"]);return}
   cliGap();
   cliEcho("cmd","help");
   cliEcho("rep",
@@ -2393,6 +2417,7 @@ function cliBusy(on){
   if(!on&&window.matchMedia("(pointer:fine)").matches)$("#term-in").focus();
 }
 function cliRun(cmds){
+  if(st.streamTerminal){cliStreamRun(cmds);return}
   cliBusy(true);
   cliGap();
   var reqid=mkReqId();
@@ -2411,6 +2436,91 @@ function cliRun(cmds){
     cliPoll(reqid,cmds,0,status,0,0);
   });
 }
+
+// A real Companion terminal: one session owns recipient/login state, and
+// cursor reads continue after a command finishes to show ACKs and RF replies.
+var cliStream={session:"",seq:0,cursor:0,timer:0,polling:false,out:null,job:null,errors:0};
+function cliStreamReset(){
+  clearTimeout(cliStream.timer);
+  cliStream.session="";cliStream.seq=0;cliStream.cursor=0;
+  cliStream.job=null;cliStream.out=null;cliStream.errors=0;
+  cliBusy(false);
+}
+function cliStreamText(text){
+  if(!text)return;
+  var out=$("#term-out"),atEnd=out.scrollTop+out.clientHeight>=out.scrollHeight-24;
+  if(!cliStream.out||!cliStream.out.parentNode)cliStream.out=cliEcho("rep","");
+  cliStream.out.textContent=(cliStream.out.textContent+text.replace(/\r/g,"")).slice(-65536);
+  if(atEnd)out.scrollTop=out.scrollHeight;
+}
+function cliStreamRun(cmds){
+  if(cli.busy)return;
+  if(cmds.some(function(c){return new TextEncoder().encode(c).length>st.terminalMax})){
+    cliEcho("err","Command exceeds "+st.terminalMax+" bytes; nothing was sent.");return;
+  }
+  if(!cliStream.session)cliStream.session=mkReqId();
+  cliBusy(true);
+  cliStream.job={cmds:cmds.slice(),index:0,seq:0,started:Date.now()};
+  cliStreamSend();
+}
+function cliStreamSend(){
+  var job=cliStream.job,session=cliStream.session;
+  var command=job.cmds[job.index];
+  job.seq=++cliStream.seq;job.started=Date.now();
+  cliEcho("cmd",/^login\s/i.test(command)?"login ********":command);
+  cliStream.out=null;
+  post("/api/terminal",{session:session,seq:job.seq,command:command}).then(function(){
+    if(cliStream.session===session)cliStreamPoll();
+  }).catch(function(e){
+    if(cliStream.session!==session)return;
+    if(e.status>=400&&e.status<500||e.status===503){
+      cliEcho("err",e.message||"Command rejected.");
+      if(e.status===400){cliStream.seq--;cliStream.job=null;cliBusy(false)}
+      else cliStreamReset();
+      return;
+    }
+    // The POST may have arrived. Poll its sequence; never resend a chat message.
+    cliStreamPoll();
+  });
+}
+function cliStreamPoll(){
+  clearTimeout(cliStream.timer);
+  if(!cliStream.session||cliStream.polling)return;
+  var session=cliStream.session;
+  cliStream.polling=true;
+  api("/api/terminal?session="+encodeURIComponent(session)+"&after="+cliStream.cursor,{timeout:5000})
+  .then(function(r){
+    cliStream.polling=false;
+    if(cliStream.session!==session){cliStreamPoll();return}
+    cliStream.errors=0;
+    if(r.lost)cliEcho("err","Some terminal output expired while disconnected.");
+    cliStreamText(r.output||"");cliStream.cursor=r.cursor;
+    if(r.more){cliStream.timer=setTimeout(cliStreamPoll,0);return}
+    var job=cliStream.job;
+    if(r.closed){cliStreamReset();return}
+    if(job&&r.seq===job.seq&&r.done){
+      cliAfter([job.cmds[job.index]],{});
+      if(++job.index<job.cmds.length){cliStreamSend();return}
+      cliStream.job=null;cliBusy(false);
+    }else if(job&&Date.now()-job.started>30000){
+      cliEcho("err","Command completion could not be confirmed. Check the node before trying again.");
+      cliStreamReset();return;
+    }
+    cliStream.timer=setTimeout(cliStreamPoll,cliStream.job?100:400);
+  }).catch(function(e){
+    cliStream.polling=false;
+    if(cliStream.session!==session){cliStreamPoll();return}
+    if(e.status===401||e.status===403||e.status===404||++cliStream.errors>20){
+      cliEcho("err",e.message||"Terminal disconnected.");cliStreamReset();return;
+    }
+    cliStream.timer=setTimeout(cliStreamPoll,700);
+  });
+}
+window.addEventListener("pagehide",function(){
+  if(!cliStream.session)return;
+  fetch("/api/terminal",{method:"POST",keepalive:true,headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:cliStream.session,seq:cliStream.seq+1,command:"disconnect"})}).catch(function(){});
+});
 function cliEnd(status,msg){
   cliBusy(false);
   status.className="err";status.textContent=msg;

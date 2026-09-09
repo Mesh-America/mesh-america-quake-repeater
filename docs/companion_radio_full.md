@@ -231,9 +231,12 @@ The browser accepts Companion configuration commands, including `get powersaving
 `set usb.logging on|off`, WiFi controls, and MQTT settings. `set mqtt.enabled on|off` controls MQTT
 without erasing broker settings; `get mqtt.enabled`, `get mqtt.running`, and
 `get mqtt.status` distinguish the saved switch from current connections.
-`set logging.output off|usb|wifi|both` selects both outputs together. Chat, recipient
-selection, streaming output, and USB MOTA session commands use the complete
-Companion text terminal over USB or TCP port 5002.
+`set logging.output off|usb|wifi|both` selects both outputs together. The browser
+also uses the complete Companion terminal for `card`, `import meshcore://...`,
+`list`, `to`, `send`, `login`, `cmd`, and delayed replies, with the same syntax
+as USB and TCP port 5002. See the [terminal command guide](terminal_chat_cli.md)
+for contact import and session ownership. USB MOTA session commands require
+the USB connection; WiFi host folders use port 5001.
 
 On the two primary-ESP-NOW Full targets, the same terminal also provides
 `get espnow.channel` and `set espnow.channel <1-13>`. A channel change is

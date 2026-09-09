@@ -28,6 +28,9 @@ static_assert(sizeof(WEBCONFIG_AP_PREFIX) <= 28,
 #endif
 
 #include "WebConfigHtml.h"
+#include "WebTerminalStream.h"
+#include <helpers/CLICommandUtils.h>
+#include <new>
 #include "helpers/CLICommandUtils.h"
 #include "helpers/UsbLogging.h"
 #include "helpers/WebConfigKeys.h"
@@ -392,6 +395,7 @@ WebConfigServer::WebConfigServer(Callbacks* callbacks, void* mqtt_prefs, bool ow
 
 WebConfigServer::~WebConfigServer() {
   detachRoutes();
+  closeTerminal();
   if (_mux) vSemaphoreDelete(_mux);
 }
 
@@ -964,6 +968,7 @@ void WebConfigServer::requestStop() {
 }
 
 void WebConfigServer::finalizeTeardown() {
+  closeTerminal();
   // Async requests keep a pointer to their server until disconnect. Retain the
   // listener and route table for the firmware lifetime; only detach and reclaim
   // the per-session state.
@@ -1027,6 +1032,8 @@ void WebConfigServer::tick(uint32_t now) {
     return;
   }
   if (_mode == MODE_OFF) return;
+
+  serviceTerminal(now);
 
   // A primary ESP-NOW radio and its WiFi station cannot remain on different
   // channels. Reject a router-driven channel move (for example a CSA) and put
@@ -1540,6 +1547,12 @@ void WebConfigServer::registerRoutes() {
     dispatchRequest(r, &WebConfigServer::handleCliPost);
   },
               NULL, collectBody);
+  _server->on("/api/terminal", HTTP_GET, [](AsyncWebServerRequest* r) {
+    dispatchRequest(r, &WebConfigServer::handleTerminalOutput);
+  });
+  _server->on("/api/terminal", HTTP_POST, [](AsyncWebServerRequest* r) {
+    dispatchRequest(r, &WebConfigServer::handleTerminalPost);
+  }, NULL, collectBody);
   _server->on("/api/stats", HTTP_GET, [](AsyncWebServerRequest* r) {
     dispatchRequest(r, &WebConfigServer::handleStats);
   });
@@ -1692,6 +1705,8 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   doc["wifi_psk64"] = (_mqtt_prefs == NULL || !_owns_wifi);
   doc["cli"] = _cli_enabled && _mode == MODE_LAN
       && WiFi.status() == WL_CONNECTED && _cb->supportsCliTerminal();
+  doc["terminal_stream"] = _cb->supportsStreamTerminal();
+  doc["terminal_max_command"] = mesh::kTerminalCommandCapacity - 1;
   doc["capabilities"] = node.capabilities;
   // Commands the terminal may submit at once. The CLI shares the config
   // batch's fixed slot, so the cap is MAX_BATCH -- reported rather than
@@ -2160,6 +2175,168 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
 // path once the operator has read the results. The rest (clkreboot, poweroff,
 // ota update) do real work on the way down and cannot be faked, so they run
 // normally and the connection drops -- the UI warns before sending them.
+void WebConfigServer::closeTerminal() {
+  if (!_terminal) return;
+  if (_terminal->attached) _cb->endStreamTerminal(*_terminal);
+  delete _terminal;
+  _terminal = NULL;
+}
+
+void WebConfigServer::serviceTerminal(uint32_t now) {
+  WCLock lock(_mux);
+  if (!_terminal) return;
+  if (now - _terminal->last_seen > (_terminal->closed ? 5000UL : 60000UL)) {
+    closeTerminal();
+    return;
+  }
+  if (_terminal->closed) return;
+  if (_mode != MODE_LAN || !_cli_enabled || WiFi.status() != WL_CONNECTED
+      || (_terminal->attached && !_cb->ownsStreamTerminal(*_terminal))) {
+    _terminal->println("\r\nERROR: terminal disconnected");
+    if (_terminal->attached) _cb->endStreamTerminal(*_terminal);
+    _terminal->attached = false;
+    _terminal->closed = true;
+    _terminal->queue.finish();
+    return;
+  }
+  if (!_terminal->queue.pending || _batch_state == BATCH_PENDING) return;
+  if (!_terminal->attached) {
+    if (!_cb->beginStreamTerminal(*_terminal)) {
+      _terminal->println("ERROR: another USB or TCP client owns the terminal; close it and retry");
+      _terminal->closed = true;
+      _terminal->queue.finish();
+      return;
+    }
+    _terminal->attached = true;
+  }
+  char* command = _terminal->queue.command;
+  while (*command == ' ' || *command == '\t') ++command;
+  mesh::cli::normalizeCommandVerb(command);
+  if (strcmp(command, "disconnect") == 0) {
+    _terminal->println("  OK - disconnecting");
+    _cb->endStreamTerminal(*_terminal);
+    _terminal->attached = false;
+    _terminal->closed = true;
+  } else {
+    _cb->runStreamTerminal(command);
+    _terminal->print("> ");
+  }
+  _terminal->queue.finish();
+}
+
+bool WebConfigServer::checkTerminalAccess(AsyncWebServerRequest* req) {
+  if (_mode != MODE_LAN || !_cli_enabled) {
+    req->send(403, "application/json", "{\"error\":\"terminal requires LAN mode and wifi.cli on\"}");
+    return false;
+  }
+  if (!_cb->supportsStreamTerminal()) {
+    req->send(404, "application/json", "{\"error\":\"stream terminal unavailable\"}");
+    return false;
+  }
+  if (!checkAuth(req)) {
+    req->send(401, "application/json", "{\"error\":\"auth\"}");
+    return false;
+  }
+  return true;
+}
+
+void WebConfigServer::handleTerminalPost(AsyncWebServerRequest* req) {
+  if (!checkTerminalAccess(req)) return;
+  if (!req->_tempObject || req->contentLength() > MAX_BODY) {
+    req->send(413, "application/json", "{\"error\":\"body too large\"}");
+    return;
+  }
+  DynamicJsonDocument doc(2048);
+  if (deserializeJson(doc, static_cast<const char*>(req->_tempObject))) {
+    req->send(400, "application/json", "{\"error\":\"bad json\"}");
+    return;
+  }
+  const char* session = doc["session"] | "";
+  JsonString command = doc["command"].as<JsonString>();
+  if (!wcIsValidReqId(session) || !doc["seq"].is<uint32_t>() || command.isNull()) {
+    req->send(400, "application/json", "{\"error\":\"invalid session or command\"}");
+    return;
+  }
+  const uint32_t sequence = doc["seq"].as<uint32_t>();
+  if (!sequence || !mesh::TerminalCommandQueue::valid(command.c_str(), command.size())) {
+    req->send(400, "application/json", "{\"error\":\"command must be one line, at most 541 bytes\"}");
+    return;
+  }
+  WCLock lock(_mux);
+  if (_terminal && strcmp(session, _terminal->session) != 0) {
+    if (!_terminal->closed || _terminal->attached) {
+      req->send(409, "application/json", "{\"error\":\"another browser owns the terminal\"}");
+      return;
+    }
+    delete _terminal;
+    _terminal = NULL;
+  }
+  if (!_terminal) {
+    // A vanished session must never silently start over and resend a message.
+    if (sequence != 1) {
+      req->send(409, "application/json", "{\"error\":\"terminal session expired\"}");
+      return;
+    }
+    _terminal = new (std::nothrow) WebTerminalStream;
+    if (!_terminal || !_terminal->ready()) {
+      delete _terminal;
+      _terminal = NULL;
+      req->send(503, "application/json", "{\"error\":\"not enough free memory for terminal\"}");
+      return;
+    }
+    strlcpy(_terminal->session, session, sizeof(_terminal->session));
+  }
+  if (_terminal->closed) {
+    req->send(409, "application/json", "{\"error\":\"terminal session closed\"}");
+    return;
+  }
+  const auto result = _terminal->queue.submit(sequence, command.c_str(), command.size());
+  if (result != mesh::TerminalCommandQueue::Accepted
+      && result != mesh::TerminalCommandQueue::Replay) {
+    const bool invalid = result == mesh::TerminalCommandQueue::Invalid;
+    req->send(invalid ? 400 : 409, "application/json", invalid
+        ? "{\"error\":\"command must be one line, at most 541 bytes\"}"
+        : "{\"error\":\"terminal busy or command out of order\"}");
+    return;
+  }
+  _terminal->last_seen = millis();
+  req->send(202, "application/json", "{\"accepted\":true}");
+}
+
+void WebConfigServer::handleTerminalOutput(AsyncWebServerRequest* req) {
+  if (!checkTerminalAccess(req)) return;
+  const String session = req->hasParam("session") ? req->getParam("session")->value() : "";
+  const String after = req->hasParam("after") ? req->getParam("after")->value() : "0";
+  if (!wcIsValidReqId(session.c_str()) || !after.length() || after.length() > 16
+      || strspn(after.c_str(), "0123456789") != after.length()) {
+    req->send(400, "application/json", "{\"error\":\"invalid session or cursor\"}");
+    return;
+  }
+  WCLock lock(_mux);
+  if (!_terminal || session != _terminal->session) {
+    req->send(404, "application/json", "{\"error\":\"terminal session expired\"}");
+    return;
+  }
+  uint64_t cursor = strtoull(after.c_str(), NULL, 10);
+  char output[1025];
+  bool lost = false;
+  const size_t n = _terminal->readOutput(cursor, output, sizeof(output), lost);
+  _terminal->last_seen = millis();
+  DynamicJsonDocument doc(1536);
+  doc["output"] = output;
+  doc["cursor"] = cursor;
+  doc["lost"] = lost;
+  // A page may end a few bytes early to keep UTF-8 intact.
+  doc["more"] = n >= sizeof(output) - 4;
+  doc["seq"] = _terminal->queue.sequence;
+  doc["done"] = !_terminal->queue.pending;
+  doc["closed"] = _terminal->closed;
+  AsyncResponseStream* response = req->beginResponseStream("application/json");
+  response->addHeader("Cache-Control", "no-store");
+  serializeJson(doc, *response);
+  req->send(response);
+}
+
 void WebConfigServer::handleCliPost(AsyncWebServerRequest* req) {
   if (_mode != MODE_LAN) {
     req->send(403, "application/json",

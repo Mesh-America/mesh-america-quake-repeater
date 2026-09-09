@@ -250,10 +250,16 @@ and the selected WiFi/MQTT mode keeps reconnecting. Other setup sessions retain
 their profile's idle timeout.
 
 Every ESP32 build with WebConfig supports the browser command terminal,
-including WiFi Companion and Full Companion. Companions use their own bounded
-configuration commands on the trusted LAN; chat and streaming commands remain
-in the USB/TCP terminal. Repeater and Room Server use the authenticated admin
-parser.
+including WiFi Companion and Full Companion. Companions use their complete
+USB/TCP terminal on the trusted LAN, including contact import, chat, recipient
+selection, and delayed replies. Repeater and Room Server use the authenticated
+admin parser.
+
+To add a Companion contact, run `import meshcore://<full-contact-card-data>`,
+then `list` to confirm it appears. Get the complete card with `card` on the
+other Companion. A public key alone is insufficient. See the
+[terminal command guide](terminal_chat_cli.md#companion-wifi-browser-terminal)
+for `to`, `send`, `login`, and `cmd` examples and session ownership.
 
 The saved `wifi.cli` setting defaults to `on`. Use `set wifi.cli off` to disable
 the **CLI** tab.
