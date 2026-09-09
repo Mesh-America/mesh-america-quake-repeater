@@ -681,6 +681,22 @@ uint8_t ota_hop_limit();
 void ota_set_context_storage(void* owner, OtaContext* (*acquire)(void*),
                              void (*release)(void*));
 void ota_release_context_if_idle(bool temporary_radio_active);
+
+// Loop helper for roles whose LoRa OTA only runs under the temporary radio
+// profile (repeater, room server, sensor). Nothing else acquires the context
+// on their behalf: without this, serving and announcing would stop the moment
+// the context was released, because only CLI entry points acquire. Holding it
+// for the temp-radio window keeps behaviour identical to a permanent context,
+// and the node is outside that window nearly all the time, which is where the
+// saving comes from. Not for the Companion, whose context is borrowed from the
+// offline message queue and must only be taken on explicit host demand.
+inline void ota_service_temp_radio_context(bool temporary_radio_active) {
+  if (temporary_radio_active) {
+    ota_acquire_context(nullptr, 0);   // failure is reported at the CLI entry points
+  } else {
+    ota_release_context_if_idle(false);
+  }
+}
 #endif
 
 } // namespace ota

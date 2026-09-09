@@ -12036,10 +12036,7 @@ void MyMesh::loop() {
   processDeferredCliCommand();
   servicePostMeshLoop();
 #if defined(ENABLE_OTA) && OTA_DYNAMIC_CONTEXT
-  // Hand the OTA workspace back once no transfer, apply or folder link needs
-  // it. A repeater is idle almost all of its life, so this is where the bulk
-  // of the saving actually lands.
-  mesh::ota::ota_release_context_if_idle(isTempRadioActive());
+  mesh::ota::ota_service_temp_radio_context(isTempRadioActive());
 #endif
 }
 
