@@ -187,9 +187,9 @@ private:
     // disconnect_count (which also counts dropped live sessions) and from the
     // publish error counter, which cannot move at all while a slot is down.
     uint32_t connect_failures;
-    // connect()/reconnect() calls that returned an error, so no attempt started and
-    // no event will arrive. Written only by the bridge task; reported summed with
-    // connect_failures.
+    // connect() calls on a stopped client that returned an error, so no attempt
+    // started and no event will arrive. Written only by the bridge task; reported
+    // summed with connect_failures.
     uint32_t start_failures;
     unsigned long first_disconnect_time; // millis() of first disconnect after boot
 
