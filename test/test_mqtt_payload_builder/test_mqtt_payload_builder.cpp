@@ -158,6 +158,23 @@ TEST(MQTTPayloadBuilder, StatusReportsConnectFailuresAndBreakerOnlyWhenNonZero) 
   EXPECT_FALSE(healthy_stats["mqtt_slots_breaker"].is<JsonVariant>());
 }
 
+// Zero counters with nothing else supplied must not create an empty stats object.
+TEST(MQTTPayloadBuilder, StatusOmitsStatsWhenOnlyZeroCountersSupplied) {
+  JsonDocument scratch;
+  char buffer[768];
+  MQTTConnHealth health;
+  health.connect_failures = 0;
+  health.slots_breaker = 0;
+
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health), 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["stats"].is<JsonVariant>());
+}
+
 // The outage key doubles as the "something is down" flag, so its absence has to be
 // meaningful: a fully healthy board must not emit it.
 TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {

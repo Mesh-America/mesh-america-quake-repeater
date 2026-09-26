@@ -65,7 +65,7 @@ int MQTTPayloadBuilder::buildStatusMessage(
 
   const bool has_conn_health = conn_health.slots_up >= 0 || conn_health.slots_total >= 0 ||
       conn_health.worst_outage_secs >= 0 || conn_health.heap_largest >= 0 ||
-      conn_health.connect_failures >= 0 || conn_health.slots_breaker >= 0;
+      conn_health.connect_failures > 0 || conn_health.slots_breaker > 0;
 
   if (battery_mv >= 0 || uptime_secs >= 0 || errors >= 0 || queue_len >= 0 ||
       noise_floor > -999 || tx_air_secs >= 0 || rx_air_secs >= 0 || recv_errors >= 0 ||

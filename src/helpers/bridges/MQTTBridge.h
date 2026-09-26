@@ -286,6 +286,11 @@ private:
   // _slot_reconfigure_pending; a single-byte volatile store/load is atomic.
   volatile bool _status_publish_pending[RUNTIME_MQTT_SLOTS];
 
+  // Set by the bridge task before connect()/reconnect(), so a failure the event task
+  // delivers before that call returns is still seen; cleared by the attempt's outcome
+  // or a deliberate stop. A disconnect that finds it set is a connect failure.
+  volatile bool _slot_attempt_pending[RUNTIME_MQTT_SLOTS];
+
   // CLI-requested forced NTP sync, marshalled onto the MQTT task (Core 0).
   // All NTP I/O must run on Core 0; the CLI thread
   // (Core 1) sets _ntp_force_requested and blocks in requestForcedNtpSync()
