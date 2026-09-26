@@ -222,11 +222,11 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
   char buffer[kStatusJsonBufferSize];
   MQTTConnHealth health;
   health.slots_up = 0;
-  health.slots_total = 5;              // PSRAM slot cap, the widest configuration
+  health.slots_total = 6;              // RUNTIME_MQTT_SLOTS on PSRAM, the widest
   health.worst_outage_secs = 4294967;  // millis() rollover / 1000, the widest value
   health.heap_largest = 8388608;
   health.connect_failures = 2147483647;
-  health.slots_breaker = 5;
+  health.slots_breaker = 6;
 
   int len = MQTTPayloadBuilder::buildStatusMessage(
       scratch, origin.c_str(), origin_id.c_str(), model.c_str(), firmware.c_str(),

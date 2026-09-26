@@ -187,6 +187,10 @@ private:
     // disconnect_count (which also counts dropped live sessions) and from the
     // publish error counter, which cannot move at all while a slot is down.
     uint32_t connect_failures;
+    // connect()/reconnect() calls that returned an error, so no attempt started and
+    // no event will arrive. Written only by the bridge task; reported summed with
+    // connect_failures.
+    uint32_t start_failures;
     unsigned long first_disconnect_time; // millis() of first disconnect after boot
 
     // Current-outage timer (used by AlertReporter to fire faults after a sustained
@@ -288,7 +292,7 @@ private:
 
   // Set by the bridge task before connect()/reconnect(), so a failure the event task
   // delivers before that call returns is still seen; cleared by the attempt's outcome
-  // or a deliberate stop. A disconnect that finds it set is a connect failure.
+  // (including an ignored late CONNECTED) or a deliberate stop.
   volatile bool _slot_attempt_pending[RUNTIME_MQTT_SLOTS];
 
   // CLI-requested forced NTP sync, marshalled onto the MQTT task (Core 0).
@@ -381,8 +385,9 @@ private:
   // _device_id[65], _board_model[64], _firmware_version[64] and a 63-byte client version):
   // measured 762/768 before the connection-health fields existed. Overflow is silent —
   // serializeComplete() returns 0 and the bridge publishes only len>0, so status stops
-  // entirely. Raised to 1024, which costs no extra RAM here because status serializes into
-  // the shared scratch buffer. See the worst-case test in test_mqtt_payload_builder.
+  // entirely. Raised to 1024: no extra RAM while status serializes into the shared scratch
+  // buffer, but +256 B of bridge-task stack in the fallback used if the PSRAM allocation
+  // failed. See the worst-case test in test_mqtt_payload_builder.
   static const size_t STATUS_JSON_BUFFER_SIZE = 1024;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");

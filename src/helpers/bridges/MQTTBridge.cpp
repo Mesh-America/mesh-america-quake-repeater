@@ -584,16 +584,17 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
   replyAppendf(buf, bufsize, &pos, "> mqtt%d: %s", slot_index + 1, state);
   if (slot.disconnect_count > 0) {
     replyAppendf(buf, bufsize, &pos, ", dc:%lu", (unsigned long)slot.disconnect_count);
-    // cf: attempts that never reached onConnect. A slot retrying into a heap that
-    // cannot satisfy the TLS allocation moves only this counter — dc rises with it,
-    // but the publish counters cannot move at all while the slot is down.
-    if (slot.connect_failures > 0) {
-      replyAppendf(buf, bufsize, &pos, ", cf:%lu", (unsigned long)slot.connect_failures);
-    }
     if (slot.first_disconnect_time > 0) {
       unsigned long first_disc_age_sec = (millis() - slot.first_disconnect_time) / 1000;
       replyAppendf(buf, bufsize, &pos, ", first_disc:%lus", first_disc_age_sec);
     }
+  }
+  // cf: attempts that never reached onConnect, plus starts that failed outright. A
+  // slot retrying into a heap that cannot satisfy the TLS allocation moves only this;
+  // the publish counters cannot move at all while the slot is down.
+  const uint32_t cf = slot.connect_failures + slot.start_failures;
+  if (cf > 0) {
+    replyAppendf(buf, bufsize, &pos, ", cf:%lu", (unsigned long)cf);
   }
 
   // Connected with no errors: nothing more to say about the connection.
@@ -1728,6 +1729,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
       MQTT_DEBUG_PRINTLN("MQTT%d ignoring late CONNECTED (state=%s, gen=%lu, enabled=%d)",
                          index + 1, clientStateName(st),
                          (unsigned long)_slots[index].generation, (int)_slots[index].enabled);
+      _slot_attempt_pending[index] = false;  // still the end of that attempt
       return;
     }
     MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
@@ -1766,8 +1768,9 @@ bool MQTTBridge::ensureSlotClient(int index) {
   slot.client->onDisconnect([this, index](bool sessionPresent) {
     MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
     // Ended an attempt that never reached onConnect. A deliberate stop clears the flag
-    // first, so cancelling an attempt is not counted as a failure.
-    if (_slot_attempt_pending[index]) {
+    // first; a bounced live session is still marked connected until this handler runs,
+    // so its late DISCONNECTED after a timed-out softDisconnect() is not counted either.
+    if (_slot_attempt_pending[index] && !_slots[index].connected) {
       _slot_attempt_pending[index] = false;
       _slots[index].connect_failures++;
     }
@@ -2524,6 +2527,7 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
     slot.applied_token_expires_at = slot.token_expires_at;
   } else {
     _slot_attempt_pending[index] = false;
+    slot.start_failures++;
   }
   return r;
 }
@@ -3199,7 +3203,7 @@ MQTTConnHealth MQTTBridge::collectConnHealth() const {
     const MQTTSlot& slot = _slots[i];
     if (!slot.enabled) continue;   // "none" slots are not an outage, they are unconfigured
     health.slots_total++;
-    connect_failures += slot.connect_failures;
+    connect_failures += slot.connect_failures + slot.start_failures;
     if (slot.circuit_breaker_tripped) breaker_slots++;
     if (slot.connected) {
       health.slots_up++;
