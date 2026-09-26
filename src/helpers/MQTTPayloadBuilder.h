@@ -17,6 +17,8 @@
 // heap alone does not — an 85 KB-free board sat unable to connect for hours.
 // A low value with all slots up is normal, not a fault: established sessions
 // already hold their buffers. It means only that the next slot to ask will fail.
+// Sampled at status-publish time, not at the attempt, so it is a trend, not a
+// per-attempt reading.
 struct MQTTConnHealth {
   int slots_up = -1;             // -1 = not supplied, field omitted
   int slots_total = -1;          // enabled slots, whether or not they connect
