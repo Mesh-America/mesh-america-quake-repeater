@@ -21,12 +21,12 @@
 // per-attempt reading.
 struct MQTTConnHealth {
   int slots_up = -1;             // -1 = not supplied, field omitted
-  int slots_total = -1;          // enabled slots, whether or not they connect
-  int worst_outage_secs = -1;    // longest current outage; -1 = nothing is down
+  int slots_total = -1;          // enabled, fully configured slots, connected or not
+  int worst_outage_secs = -1;    // longest timed outage; -1 = none timed (see below)
   int heap_largest = -1;         // largest free internal block, bytes
-  // Attempts that ended without reaching onConnect, summed across slots. A slot
-  // stuck retrying moves this while its publish counters stay frozen, which is
-  // what separates "actively failing" from "idle and quiet".
+  // Attempts that ended without reaching onConnect, summed across all slots since
+  // boot. A slot stuck retrying moves this while its publish counters stay frozen,
+  // which is what separates "actively failing" from "idle and quiet".
   int connect_failures = -1;
   // Slots parked by the circuit breaker. Materially worse than a retrying slot:
   // the breaker only probes every 30 minutes, so recovery is far slower.

@@ -88,7 +88,7 @@ int MQTTPayloadBuilder::buildStatusMessage(
     if (conn_health.slots_total >= 0) stats["mqtt_slots_total"] = conn_health.slots_total;
     // Emitted only during an outage of known duration, so the steady-state payload
     // does not grow. Presence implies a slot is down, but absence does NOT imply
-    // health: a slot that has never connected since boot has no outage start time.
+    // health: a slot has no outage start time until its first attempt ends.
     // `mqtt_slots_up < mqtt_slots_total` is the signal to alert on; this is detail.
     if (conn_health.worst_outage_secs >= 0) {
       stats["mqtt_outage_secs"] = conn_health.worst_outage_secs;
