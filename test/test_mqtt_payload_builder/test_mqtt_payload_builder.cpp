@@ -118,6 +118,46 @@ TEST(MQTTPayloadBuilder, StatusReportsConnectionHealthWhenSupplied) {
   EXPECT_EQ(16116, stats["heap_largest"].as<int>());
 }
 
+TEST(MQTTPayloadBuilder, StatusReportsConnectFailuresAndBreakerOnlyWhenNonZero) {
+  JsonDocument scratch;
+  char buffer[1024];
+  MQTTConnHealth health;
+  health.slots_up = 1;
+  health.slots_total = 3;
+  health.connect_failures = 57;
+  health.slots_breaker = 1;
+
+  int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health);
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  EXPECT_EQ(57, stats["mqtt_connect_failures"].as<int>());
+  EXPECT_EQ(1, stats["mqtt_slots_breaker"].as<int>());
+
+  // A healthy board must not carry either key: zero connect failures and zero
+  // tripped breakers are the normal case, and the steady-state payload is
+  // already close to the buffer bound.
+  MQTTConnHealth healthy;
+  healthy.slots_up = 3;
+  healthy.slots_total = 3;
+  healthy.connect_failures = 0;
+  healthy.slots_breaker = 0;
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, healthy), 0);
+  JsonDocument healthy_parsed;
+  ASSERT_FALSE(deserializeJson(healthy_parsed, buffer));
+  JsonObject healthy_stats = healthy_parsed["stats"].as<JsonObject>();
+  EXPECT_FALSE(healthy_stats["mqtt_connect_failures"].is<JsonVariant>());
+  EXPECT_FALSE(healthy_stats["mqtt_slots_breaker"].is<JsonVariant>());
+}
+
 // The outage key doubles as the "something is down" flag, so its absence has to be
 // meaningful: a fully healthy board must not emit it.
 TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {
@@ -168,6 +208,8 @@ TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer
   health.slots_total = 5;              // PSRAM slot cap, the widest configuration
   health.worst_outage_secs = 4294967;  // millis() rollover / 1000, the widest value
   health.heap_largest = 8388608;
+  health.connect_failures = 2147483647;
+  health.slots_breaker = 5;
 
   int len = MQTTPayloadBuilder::buildStatusMessage(
       scratch, origin.c_str(), origin_id.c_str(), model.c_str(), firmware.c_str(),
