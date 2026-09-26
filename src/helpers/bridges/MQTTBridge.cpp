@@ -584,6 +584,12 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
   replyAppendf(buf, bufsize, &pos, "> mqtt%d: %s", slot_index + 1, state);
   if (slot.disconnect_count > 0) {
     replyAppendf(buf, bufsize, &pos, ", dc:%lu", (unsigned long)slot.disconnect_count);
+    // cf: attempts that never reached onConnect. A slot retrying into a heap that
+    // cannot satisfy the TLS allocation moves only this counter — dc rises with it,
+    // but the publish counters cannot move at all while the slot is down.
+    if (slot.connect_failures > 0) {
+      replyAppendf(buf, bufsize, &pos, ", cf:%lu", (unsigned long)slot.connect_failures);
+    }
     if (slot.first_disconnect_time > 0) {
       unsigned long first_disc_age_sec = (millis() - slot.first_disconnect_time) / 1000;
       replyAppendf(buf, bufsize, &pos, ", first_disc:%lus", first_disc_age_sec);
@@ -1757,6 +1763,11 @@ bool MQTTBridge::ensureSlotClient(int index) {
   });
   slot.client->onDisconnect([this, index](bool sessionPresent) {
     MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
+    // An event while an attempt is in flight ended one that never reached onConnect.
+    // Stopped/quarantined late events and soft-disconnects are not Starting.
+    if (mqttClientStateHasAttemptInFlight(_slots[index].client_state)) {
+      _slots[index].connect_failures++;
+    }
     // Only a live client's disconnect is news. One arriving for a client we
     // already stopped (or quarantined) must not resurrect its state.
     if (clientStateIsLive(_slots[index].client_state)) {
@@ -3174,11 +3185,15 @@ MQTTConnHealth MQTTBridge::collectConnHealth() const {
   const unsigned long now = millis();
   unsigned long worst_outage_ms = 0;
   bool any_outage_timed = false;
+  uint32_t connect_failures = 0;
+  int breaker_slots = 0;
 
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     const MQTTSlot& slot = _slots[i];
     if (!slot.enabled) continue;   // "none" slots are not an outage, they are unconfigured
     health.slots_total++;
+    connect_failures += slot.connect_failures;
+    if (slot.circuit_breaker_tripped) breaker_slots++;
     if (slot.connected) {
       health.slots_up++;
       continue;
@@ -3198,6 +3213,11 @@ MQTTConnHealth MQTTBridge::collectConnHealth() const {
   if (any_outage_timed) {
     health.worst_outage_secs = static_cast<int>(worst_outage_ms / 1000UL);
   }
+  // Clamp: the payload field is int, and these are lifetime counters.
+  health.connect_failures = connect_failures > static_cast<uint32_t>(INT32_MAX)
+                                ? INT32_MAX
+                                : static_cast<int>(connect_failures);
+  health.slots_breaker = breaker_slots;
   health.heap_largest = static_cast<int>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   return health;
 }

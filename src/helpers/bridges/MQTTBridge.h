@@ -183,6 +183,10 @@ private:
     uint8_t last_connack_code;
     unsigned long last_error_time;  // millis() of last error
     uint32_t disconnect_count;      // Number of disconnect callbacks since boot
+    // Attempts that ended without ever reaching onConnect. Distinct from
+    // disconnect_count (which also counts dropped live sessions) and from the
+    // publish error counter, which cannot move at all while a slot is down.
+    uint32_t connect_failures;
     unsigned long first_disconnect_time; // millis() of first disconnect after boot
 
     // Current-outage timer (used by AlertReporter to fire faults after a sustained
