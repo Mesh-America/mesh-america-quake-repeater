@@ -36,6 +36,16 @@ static int buildRepresentativePacket(JsonDocument& scratch, const char* directio
       path_hash_size, 64, buffer, buffer_size);
 }
 
+static int buildPacketWithMetrics(JsonDocument& scratch, const char* direction,
+                                 float snr, int rssi, float score,
+                                 char* buffer, size_t buffer_size) {
+  return MQTTPayloadBuilder::buildPacketMessage(
+      scratch, "DEN Repeater", "0123456789ABCDEF", kTimestamp, direction,
+      "12:34:56", "18/07/2026", 42, 4, "D", 20, "A0B1C2D3",
+      snr, rssi, score, "89ABCDEF01234567", nullptr, 0, 0, 64,
+      buffer, buffer_size);
+}
+
 TEST(MQTTPayloadBuilder, MinimalStatusHasExactRequiredContract) {
   JsonDocument scratch;
   char buffer[768];
@@ -166,6 +176,72 @@ TEST(MQTTPayloadBuilder, RxPacketOmitsUnknownNanScore) {
   ASSERT_FALSE(deserializeJson(parsed, buffer));
   EXPECT_TRUE(parsed["SNR"].is<const char*>());
   EXPECT_TRUE(parsed["RSSI"].is<const char*>());
+  EXPECT_FALSE(parsed["score"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, RxPacketOmitsUnknownSnrAndRssi) {
+  JsonDocument scratch;
+  char buffer[2048];
+  int len = buildPacketWithMetrics(
+      scratch, "rx", NAN, MQTT_RSSI_UNKNOWN, NAN, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["SNR"].is<JsonVariant>());
+  EXPECT_FALSE(parsed["RSSI"].is<JsonVariant>());
+  EXPECT_FALSE(parsed["score"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, RxPacketFormatsRealSnrAndRssi) {
+  JsonDocument scratch;
+  char buffer[2048];
+  int len = buildPacketWithMetrics(
+      scratch, "rx", 7.25f, -93, NAN, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("7.2", parsed["SNR"].as<const char*>());
+  EXPECT_STREQ("-93", parsed["RSSI"].as<const char*>());
+  EXPECT_FALSE(parsed["score"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, RxPacketOmitsOnlyUnknownMetric) {
+  // SNR unknown, RSSI real: only the SNR key is omitted.
+  JsonDocument scratch;
+  char buffer[2048];
+  int len = buildPacketWithMetrics(
+      scratch, "rx", NAN, -93, NAN, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["SNR"].is<JsonVariant>());
+  EXPECT_STREQ("-93", parsed["RSSI"].as<const char*>());
+
+  // RSSI unknown, SNR real: only the RSSI key is omitted.
+  len = buildPacketWithMetrics(
+      scratch, "rx", 7.25f, MQTT_RSSI_UNKNOWN, NAN, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  parsed.clear();
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("7.2", parsed["SNR"].as<const char*>());
+  EXPECT_FALSE(parsed["RSSI"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, TxPacketOmitsSnrRssiAndScoreWithRealValues) {
+  JsonDocument scratch;
+  char buffer[2048];
+  int len = buildPacketWithMetrics(
+      scratch, "tx", 7.25f, -93, 0.5f, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["SNR"].is<JsonVariant>());
+  EXPECT_FALSE(parsed["RSSI"].is<JsonVariant>());
   EXPECT_FALSE(parsed["score"].is<JsonVariant>());
 }
 
