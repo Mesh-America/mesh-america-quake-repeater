@@ -373,13 +373,13 @@ void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
   if (b->_filtered_packets > 0) {
     replyAppendf(buf, bufsize, &pos, " filt=%lu", b->_filtered_packets);
   }
-  // down=<n>: enabled slots that are not connected. Without this the reply cannot
+  // down=<n>: ready slots that are not connected. Without this the reply cannot
   // show an outage at all — sN= counts publishes, and a slot that never connects
   // never publishes, so its ok freezes and its err stays 0 for the whole outage.
   // Omitted while zero, like filt=, so a healthy node's reply keeps its length.
   int down = 0;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (b->_slots[i].enabled && !b->_slots[i].connected) down++;
+    if (b->_slots[i].enabled && !b->_slots[i].connected && b->isSlotReady(i)) down++;
   }
   if (down > 0) {
     replyAppendf(buf, bufsize, &pos, " down=%d", down);
@@ -589,13 +589,6 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
       replyAppendf(buf, bufsize, &pos, ", first_disc:%lus", first_disc_age_sec);
     }
   }
-  // cf: attempts that never reached onConnect, plus starts that failed outright. A
-  // slot retrying into a heap that cannot satisfy the TLS allocation moves only this;
-  // the publish counters cannot move at all while the slot is down.
-  const uint32_t cf = slot.connect_failures + slot.start_failures;
-  if (cf > 0) {
-    replyAppendf(buf, bufsize, &pos, ", cf:%lu", (unsigned long)cf);
-  }
 
   // Connected with no errors: nothing more to say about the connection.
   if (slot.connected && slot.last_error_time == 0) {
@@ -641,6 +634,14 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
     }
   } else if (!slot.connected) {
     replyAppendf(buf, bufsize, &pos, ", no error info");
+  }
+  // cf: attempts that never reached onConnect, plus starts that failed outright. A
+  // slot retrying into a heap that cannot satisfy the TLS allocation moves only this;
+  // the publish counters cannot move at all while the slot is down.
+  // After the error tail so a clamped reply loses this count, not the error detail.
+  const uint32_t cf = slot.connect_failures + slot.start_failures;
+  if (cf > 0) {
+    replyAppendf(buf, bufsize, &pos, ", cf:%lu", (unsigned long)cf);
   }
 
   // Appended last so it never displaces connection diagnostics. replyAppendf
@@ -2528,7 +2529,8 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
     // is the point at which a freshly minted token becomes the one in use.
     slot.applied_token_expires_at = slot.token_expires_at;
   } else {
-    _slot_attempt_pending[index] = was_pending;
+    // A failed start leaves nothing in flight; a rejected reconnect leaves the prior one.
+    _slot_attempt_pending[index] = starting ? false : was_pending;
     // A failed start (buffer/task allocation, config) means no attempt could begin.
     // reconnect() on a started client returns ESP_FAIL while one is already in
     // progress, which is not a failure (seen on hardware after a reconfigure).
@@ -3206,19 +3208,21 @@ MQTTConnHealth MQTTBridge::collectConnHealth() const {
 
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     const MQTTSlot& slot = _slots[i];
-    if (!slot.enabled) continue;   // "none" slots are not an outage, they are unconfigured
-    health.slots_total++;
+    // Summed before the skip so disabling a slot never makes the total go backwards.
     connect_failures += slot.connect_failures + slot.start_failures;
+    // Unconfigured slots and slots waiting on a token/IATA/credential are not outages.
+    if (!slot.enabled || !isSlotReady(i)) continue;
+    health.slots_total++;
     if (slot.circuit_breaker_tripped) breaker_slots++;
     if (slot.connected) {
       health.slots_up++;
       continue;
     }
-    // A slot that has never connected since boot has no outage start time. It still
-    // counts against slots_up, which is why that pair — not this duration — is the
-    // signal to alert on.
+    // The outage clock starts at a slot's first DISCONNECTED, so a slot that has not yet
+    // finished its first attempt has no start time. It still counts against slots_up,
+    // which is why that pair — not this duration — is the signal to alert on.
     if (slot.current_outage_started_ms != 0) {
-      const unsigned long outage_ms = now - slot.current_outage_started_ms;  // wrap-safe
+      const unsigned long outage_ms = now - slot.current_outage_started_ms;  // wrap-safe under 49.7 days
       if (!any_outage_timed || outage_ms > worst_outage_ms) {
         worst_outage_ms = outage_ms;
         any_outage_timed = true;
