@@ -209,8 +209,8 @@ int MQTTMessageBuilder::buildPacketJSON(
     packet_type, route_str,
     packet->payload_len,
     raw_hex,
-    12.5f, // SNR - using reasonable default
-    -65,   // RSSI - using reasonable default
+    NAN,   // SNR - unknown on this reconstruction-less fallback path
+    MQTT_RSSI_UNKNOWN, // RSSI - unknown on this reconstruction-less fallback path
     NAN,   // score - unknown on this reconstruction-less fallback path
     hash_str,
     has_path ? packet->path : nullptr,
