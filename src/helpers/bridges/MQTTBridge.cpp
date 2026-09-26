@@ -2512,8 +2512,10 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
   }
 
   esp_err_t r;
+  const bool was_pending = _slot_attempt_pending[index];
+  const bool starting = !slot.client->isStarted();
   _slot_attempt_pending[index] = true;
-  if (!slot.client->isStarted()) {
+  if (starting) {
     MQTT_DEBUG_PRINTLN("MQTT%d start (client was stopped)", index + 1);
     r = slot.client->connect();
   } else {
@@ -2526,8 +2528,11 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
     // is the point at which a freshly minted token becomes the one in use.
     slot.applied_token_expires_at = slot.token_expires_at;
   } else {
-    _slot_attempt_pending[index] = false;
-    slot.start_failures++;
+    _slot_attempt_pending[index] = was_pending;
+    // A failed start (buffer/task allocation, config) means no attempt could begin.
+    // reconnect() on a started client returns ESP_FAIL while one is already in
+    // progress, which is not a failure (seen on hardware after a reconfigure).
+    if (starting) slot.start_failures++;
   }
   return r;
 }
