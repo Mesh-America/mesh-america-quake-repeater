@@ -366,9 +366,15 @@ private:
   // internal heap. On non-PSRAM: inline in the class object so the allocation doesn't
   // interleave with large TLS buffers at startup.
   static const size_t PUBLISH_JSON_BUFFER_SIZE = 2048;
-  // Status keeps its own smaller ceiling: raising it would change which oversized
-  // status documents get published instead of dropped.
-  static const size_t STATUS_JSON_BUFFER_SIZE = 768;
+  // Status keeps its own smaller ceiling: raising it changes which oversized status
+  // documents get published instead of dropped. 768 left only 6 bytes spare at the real
+  // field maxima (_origin[32] of quotes, which isValidName permits and JSON doubles, plus
+  // _device_id[65], _board_model[64], _firmware_version[64] and a 63-byte client version):
+  // measured 762/768 before the connection-health fields existed. Overflow is silent —
+  // serializeComplete() returns 0 and the bridge publishes only len>0, so status stops
+  // entirely. Raised to 1024, which costs no extra RAM here because status serializes into
+  // the shared scratch buffer. See the worst-case test in test_mqtt_payload_builder.
+  static const size_t STATUS_JSON_BUFFER_SIZE = 1024;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
   #if defined(BOARD_HAS_PSRAM)

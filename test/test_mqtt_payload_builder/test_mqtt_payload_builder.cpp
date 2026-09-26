@@ -146,30 +146,43 @@ TEST(MQTTPayloadBuilder, StatusOmitsOutageKeyWhenEverySlotIsUp) {
 // and MQTTBridge publishes only a positive length — so overflowing STATUS_JSON_BUFFER_SIZE
 // silently stops status publication altogether. That is the same class of blindness this
 // field set exists to fix, so the worst realistic payload must fit with margin.
+// Field widths are the real MQTTBridge maxima, not plausible-looking strings:
+//   _origin[32] _device_id[65] _firmware_version[64] _board_model[64]
+// and client_version is snprintf("meshcore/%s", _firmware_version) into char[64].
+// isValidName() rejects [ ] / \ : , ? * but ALLOWS '"', so a node name of 31 quotes
+// is legal and every one escapes to two bytes — that is the true worst case for the
+// only free-text field an operator controls.
 TEST(MQTTPayloadBuilder, WorstCaseStatusWithConnectionHealthFitsProductionBuffer) {
-  constexpr size_t kStatusJsonBufferSize = 768;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  constexpr size_t kStatusJsonBufferSize = 1024;  // MQTTBridge::STATUS_JSON_BUFFER_SIZE
+  const std::string origin(31, '"');                 // _origin[32], worst-case escaping
+  const std::string origin_id(64, 'A');              // _device_id[65]
+  const std::string model(63, 'M');                  // _board_model[64]
+  const std::string firmware(63, 'F');               // _firmware_version[64]
+  const std::string client_version(63, 'C');         // char client_version[64]
+  const std::string radio("9999.999999,1000.0,12,8");
+
   JsonDocument scratch;
   char buffer[kStatusJsonBufferSize];
   MQTTConnHealth health;
   health.slots_up = 0;
   health.slots_total = 5;              // PSRAM slot cap, the widest configuration
-  health.worst_outage_secs = 999999;
-  health.heap_largest = 4194304;
+  health.worst_outage_secs = 4294967;  // millis() rollover / 1000, the widest value
+  health.heap_largest = 8388608;
 
   int len = MQTTPayloadBuilder::buildStatusMessage(
-      scratch,
-      "A Repeater With A Deliberately Long Node Name",
-      "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",  // 64-char device id
-      "Heltec Wireless Tracker V1.1", "v1.17.0-observer-dev.12",
-      "915.000000,62.5,7,5", "MeshCore 1.17.0", "online", kTimestamp,
+      scratch, origin.c_str(), origin_id.c_str(), model.c_str(), firmware.c_str(),
+      radio.c_str(), client_version.c_str(), "online", kTimestamp,
       buffer, sizeof(buffer),
-      4200, 8640000, 65535, 6, -128, 999999, 999999, 65535, 4194304, 999999, 999999,
+      4200, 2147483, 2147483647, 6, -128, 2147483, 2147483, 2147483647,
+      8388608, 2147483647, 2147483647,
       "off", health);
 
-  ASSERT_GT(len, 0) << "worst-case status payload overflowed the production buffer; "
-                       "status publication would stop silently";
+  ASSERT_GT(len, 0) << "worst-case status payload overflowed the " << kStatusJsonBufferSize
+                    << "-byte production buffer; serializeComplete() returns 0 and the "
+                       "bridge publishes only len>0, so ALL status publication would "
+                       "stop silently";
   EXPECT_LT(static_cast<size_t>(len), kStatusJsonBufferSize - 32)
-      << "less than 32 bytes of headroom left in the status buffer";
+      << "less than 32 bytes of headroom left in the status buffer (len=" << len << ")";
 }
 
 TEST(MQTTPayloadBuilder, StatusOmissionSentinelsRemainOmitted) {
