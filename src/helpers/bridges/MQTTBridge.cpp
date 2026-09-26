@@ -772,6 +772,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
     _slot_reconfigure_pending[i] = false;
     _slot_force_jwt_mint[i] = false;
     _status_publish_pending[i] = false;
+    _slot_attempt_pending[i] = false;
   }
 
   // Reset CLI-requested forced NTP sync handshake (bridge object is reused across restarts)
@@ -1730,6 +1731,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
       return;
     }
     MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
+    _slot_attempt_pending[index] = false;
     _slots[index].client_state = ClientState::Connected;
     _slots[index].connected = true;
     _slot_force_jwt_mint[index] = false;
@@ -1763,9 +1765,10 @@ bool MQTTBridge::ensureSlotClient(int index) {
   });
   slot.client->onDisconnect([this, index](bool sessionPresent) {
     MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
-    // An event while an attempt is in flight ended one that never reached onConnect.
-    // Stopped/quarantined late events and soft-disconnects are not Starting.
-    if (mqttClientStateHasAttemptInFlight(_slots[index].client_state)) {
+    // Ended an attempt that never reached onConnect. A deliberate stop clears the flag
+    // first, so cancelling an attempt is not counted as a failure.
+    if (_slot_attempt_pending[index]) {
+      _slot_attempt_pending[index] = false;
       _slots[index].connect_failures++;
     }
     // Only a live client's disconnect is news. One arriving for a client we
@@ -2411,6 +2414,7 @@ void MQTTBridge::closeLiveClientForLinkTransition(int index) {
 // the rest of the boot.
 void MQTTBridge::stopSlotClient(int index) {
   MQTTSlot& slot = _slots[index];
+  _slot_attempt_pending[index] = false;
   const esp_err_t r = slot.client->disconnect();
 
   // What the SDK's results actually mean here (mqtt_client.h documents
@@ -2505,6 +2509,7 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
   }
 
   esp_err_t r;
+  _slot_attempt_pending[index] = true;
   if (!slot.client->isStarted()) {
     MQTT_DEBUG_PRINTLN("MQTT%d start (client was stopped)", index + 1);
     r = slot.client->connect();
@@ -2517,6 +2522,8 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
     // The attempt carries whatever credential is configured right now, so this
     // is the point at which a freshly minted token becomes the one in use.
     slot.applied_token_expires_at = slot.token_expires_at;
+  } else {
+    _slot_attempt_pending[index] = false;
   }
   return r;
 }
