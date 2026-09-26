@@ -7,6 +7,11 @@
 // Mesh-independent JSON serialization core for MQTT publication payloads.
 // MQTTMessageBuilder keeps the firmware-facing API and delegates these three
 // deterministic contracts here so they can be exercised by native tests.
+
+// RSSI sentinel for "no radio measurement": far outside the small negative ints
+// a radio actually reports, so a real reading can never collide with it.
+static const int MQTT_RSSI_UNKNOWN = INT16_MIN;
+
 class MQTTPayloadBuilder {
 public:
   static int buildStatusMessage(
