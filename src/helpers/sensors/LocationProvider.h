@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Mesh.h"
+#include <stddef.h>
+#include <stdio.h>
 
 #ifndef GPS_POWERSAVING_ON_DURATION_SECS
 #define GPS_POWERSAVING_ON_DURATION_SECS (10UL * 60UL)
@@ -78,4 +80,14 @@ public:
     virtual bool isEnabled() = 0;
     virtual void setPinEn(int pin_en) { (void)pin_en; }
     virtual int getPinEn() { return -1; }
+
+    // Format compact diagnostics in the caller-provided buffer. Providers that
+    // have more information (for example UART counters) can override this.
+    virtual void formatDiagnostics(char* out, size_t out_size) {
+        if (out_size == 0) return;
+        snprintf(out, out_size, "en:%u sat:%ld fix:%u",
+            isEnabled() ? 1U : 0U,
+            satellitesCount(),
+            isValid() ? 1U : 0U);
+    }
 };

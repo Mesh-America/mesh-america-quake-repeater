@@ -236,6 +236,16 @@ public:
   // is not open. Defaults to the stricter data-connection signal on boards
   // that cannot distinguish a computer from USB power.
   virtual bool isUsbHostConnected() { return isUsbDataConnected(); }
+  // True while a board can identify an active battery-charging source.
+  virtual bool isChargerActive() { return false; }
+
+  // Optional, source-specific power detection. Boards that can distinguish a USB
+  // supply from a solar charger override these; defaults keep every other board
+  // unaffected (the generic CLI prints "n/a" when a capability is absent).
+  virtual bool hasUsbPowerDetect() const { return false; }
+  virtual bool isUsbPowered() { return false; }
+  virtual bool hasSolarChargerDetect() const { return false; }
+  virtual bool isSolarChargerActive() { return false; }
   virtual uint16_t getBootVoltage() { return 0; }
   virtual bool getWakeLpcompSupported() const { return false; }
   virtual uint32_t getResetReason() const { return 0; }
