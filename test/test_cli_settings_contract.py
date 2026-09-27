@@ -191,6 +191,7 @@ class CLISettingsContractTest(unittest.TestCase):
             'contact.cache', 'contact.cache.timing',  # Contact-storage diagnostics
             'display.wifi',                          # Connection/display status
             'flash.health',                          # Read-only flash health diagnostics
+            'key.backup.transport',                  # Identity-backup transport capability
             'mqtt', 'mqtt.running',                  # MQTT connection status
             'password', 'prv.key',                   # Local secret/identity reads
             'pwrmgt.bootreason', 'role',             # Boot/build facts

@@ -38,6 +38,12 @@ struct RadioProfileCLI {
   void appendSavedPreamble(char*, size_t, uint8_t, float) {}
   void appendPrimaryChirpWarning(char*, size_t, uint8_t, float, uint16_t) const {}
 };
+namespace companion {
+// Retry settings have their own test harness; this one exercises local/remote
+// dispatch around that branch of the production command handler.
+template <typename Prefs, typename Save, typename Cancel>
+bool handleRetryCommand(Prefs&, const char*, char*, size_t, Save, Cancel) { return false; }
+}
 struct Packet {};
 void resetLazyPersistenceAfterSuccess(unsigned& when, uint8_t& failures) { when=0; failures=0; }
 struct Utils {
@@ -125,6 +131,7 @@ struct MyMesh {
     return false;
   }
   void stopContactsIterator(){}
+  void cancelAllFloodRetries(){}
   void resetContacts(){++resets;}
   bool savePrefs(){++saves;return save_ok;}
   int getTotalAirTime(){return 0;}
