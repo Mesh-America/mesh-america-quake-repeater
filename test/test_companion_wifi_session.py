@@ -51,6 +51,10 @@ struct MyMesh {
   BaseSerialInterface* command_radio_reply_route = nullptr;
   BaseSerialInterface* binary_trace_reply_route = nullptr;
   BaseSerialInterface* sign_data_reply_route = nullptr;
+  BaseSerialInterface* private_key_backup_route = nullptr;
+  unsigned long private_key_backup_deadline = 0;
+  char private_key_backup_nonce[17] = {};
+  uint8_t private_key_backup_sender[6] = {};
   struct Ack { BaseSerialInterface* reply_route; bool radio_retry; };
   Ack expected_ack_table[EXPECTED_ACK_TABLE_SIZE] = {};
   void cancelSerialResponseStream() {
@@ -85,6 +89,10 @@ int main() {
     the_mesh.command_radio_reply_route = owner;
     the_mesh.binary_trace_reply_route = owner;
     the_mesh.sign_data_reply_route = owner;
+    the_mesh.private_key_backup_route = owner;
+    the_mesh.private_key_backup_deadline = 1234;
+    memcpy(the_mesh.private_key_backup_nonce, "0123456789abcdef", 17);
+    memset(the_mesh.private_key_backup_sender, 0x5A, 6);
     for (unsigned i = 0; i < EXPECTED_ACK_TABLE_SIZE; ++i) {
       the_mesh.expected_ack_table[i] = {routes[i % 3], true};
     }
@@ -104,6 +112,15 @@ int main() {
     assert(the_mesh.command_radio_reply_route == (cancelled ? nullptr : owner));
     assert(the_mesh.binary_trace_reply_route == (cancelled ? nullptr : owner));
     assert(the_mesh.sign_data_reply_route == (cancelled ? nullptr : owner));
+    assert(the_mesh.private_key_backup_route == (cancelled ? nullptr : owner));
+    assert(the_mesh.private_key_backup_deadline == (cancelled ? 0UL : 1234UL));
+    const char empty_nonce[17] = {};
+    const uint8_t empty_sender[6] = {};
+    assert(memcmp(the_mesh.private_key_backup_nonce,
+                  cancelled ? empty_nonce : "0123456789abcdef", 17) == 0);
+    const uint8_t original_sender[6] = {0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A};
+    assert(memcmp(the_mesh.private_key_backup_sender,
+                  cancelled ? empty_sender : original_sender, 6) == 0);
     assert(!interface_manager.isReplyRouteFor(&wifi_interface));
     if (!cancelled) assert(interface_manager.isReplyRouteFor(owner));
     for (unsigned i = 0; i < EXPECTED_ACK_TABLE_SIZE; ++i) {
