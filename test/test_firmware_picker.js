@@ -1068,6 +1068,8 @@ const expandedEsp32 = currentCatalog.profiles.find(profile =>
 assert(expandedEsp32);
 assert(picker.installSteps(expandedEsp32, 'bin').some(step =>
   step.includes('exact board/role migration ZIP')));
+assert(picker.installSteps(expandedEsp32, 'merged-bin').some(step =>
+  step.includes('get storage.layout')));
 assert.strictEqual(
   picker.migrationReleaseUrl(expandedEsp32, expandedEsp32.files[0]),
   'https://github.com/mikecarper/MeshCore/releases/tag/utility-' +

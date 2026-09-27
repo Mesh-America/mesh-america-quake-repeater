@@ -33,6 +33,9 @@ from the published firmware assets.
       exact board and role migration ZIP is listed, follow its included README
       for a supported Wi-Fi or LoRa route. USB installation uses the matching
       merged image instead. An app-only .bin cannot change the partition table.
+      If the installed firmware supports it, run <code>get storage.layout</code>
+      to see the live flash size and OTA slots. Firmware version alone does not
+      prove the installed layout.
     </p>
   </div>
 
@@ -241,7 +244,12 @@ Use the exact-board merged image over USB, or a supported exact board and role
 staged migration ZIP from the [utility release](https://github.com/mikecarper/MeshCore/releases/tag/utility-v1.17.1.7-halo-keymind-cascade-dev-2d03e098).
 Read that ZIP's README before choosing the Wi-Fi or LoRa route. Do not send a
 loose app-only Full `.bin` directly to an older layout: the running application
-cannot move its own active and inactive partitions.
+cannot move its own active and inactive partitions. Run
+[`get storage.layout`](cli_commands.md#show-the-storage-layout) on the installed
+firmware if available. It reports the live partition table; a version-based
+guess cannot confirm the installed layout. See the
+[partition lookup guide](esp32_partition_catalog.md) when the old firmware lacks
+that command.
 
 Current `full-usb-wifi` profiles use one binary for no external output, USB
 packet logging/USB-connected MQTT, direct WiFi MQTT, or both. The picker shows
