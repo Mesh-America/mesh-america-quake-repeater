@@ -792,9 +792,9 @@ def release_tag_for_identity(identity: str, args: argparse.Namespace) -> str:
 def file_type_and_title(path: Path, device_type: str) -> tuple[str, str]:
     lowered = path.name.lower()
     if lowered.endswith("-merged.bin"):
-        return "flash-wipe", "Full install (bootloader + firmware)"
+        return "flash-wipe", "USB full install (bootloader + partitions + app)"
     if path.suffix.lower() == ".bin" and device_type == "esp32":
-        return "flash-update", "Update (app only)"
+        return "flash-update", "App update (matching partition layout only)"
     if path.suffix.lower() == ".zip" and device_type == "nrf52":
         return "flash", "Serial DFU package"
     if path.suffix.lower() == ".uf2":
@@ -846,8 +846,9 @@ def partition_warning(identities: list[str]) -> str | None:
     return (
         "PARTITION - This target fits its generated app partition but is larger "
         "than the legacy 1,310,720-byte portable app ceiling. If the device has "
-        "an older or smaller partition table, flash the matching merged image "
-        "once before using app-only updates."
+        "an older or smaller partition table, install the matching merged image "
+        "over USB or use a supported exact board and role migration ZIP before "
+        "app-only updates."
     )
 
 
@@ -856,6 +857,42 @@ def append_partition_warning(notes: str, identities: list[str]) -> str:
     if warning is None or warning in notes:
         return notes
     return notes + "\n\n" + warning
+
+
+def append_esp32_full_migration_guidance(
+    notes: str,
+    identities: list[str],
+    role: str,
+    repo: str,
+    utility_tag: str,
+) -> str:
+    """Explain both supported layout-change routes on infrastructure Full entries."""
+    if role not in {"repeater", "roomServer", "sensor"} or not any(
+        marker in identity.lower()
+        for identity in identities
+        for marker in ("-full-logging-ota", "-full-usb-wifi-ota", "-full-ota")
+    ):
+        return notes
+    utility_url = (
+        f"https://github.com/{repo}/releases/tag/{quote(utility_tag, safe='')}"
+    )
+    paragraph = (
+        "MIGRATION - If the installed ESP32 has an older or smaller partition "
+        "layout, do not send this loose app-only .bin over Wi-Fi or LoRa OTA. "
+        "Either install the matching merged .bin over USB, or check "
+        f"{utility_url} for an exact board and role migration ZIP and follow "
+        "its included README. Back up identity, configuration, keys, and radio "
+        "settings first; a staged partition-table write can require cable "
+        "recovery after power loss. Use the ZIP's included Full application "
+        "after its bridge, then keep future app-only updates on the same target "
+        "and partition signature."
+    )
+    paragraphs = [
+        item for item in notes.split("\n\n")
+        if not item.startswith("MIGRATION - ")
+    ]
+    paragraphs.append(paragraph)
+    return "\n\n".join(paragraphs)
 
 
 def append_companion_power_saving_note(notes: str, display_version: str) -> str:
@@ -916,9 +953,10 @@ def observer_notes(
         role_paragraph,
         profile_paragraph,
         (
-            "INSTALL - Flash Full install (the merged bootloader + firmware image) "
-            "over USB once to install the expanded partition table. Routine upgrades "
-            "can then use Update (the app-only image) while that layout remains installed."
+            "INSTALL - Flash the merged bootloader, partition table, and app image "
+            "over USB for a new Full layout, or use a supported exact board and "
+            "role migration ZIP. Routine app-only upgrades then require the same "
+            "target and compatible layout."
         ),
     ]
     warning = partition_warning(identities)
@@ -1054,6 +1092,14 @@ def update_catalog(catalog: dict, release_files: dict[str, list[Path]], args: ar
                 notes,
                 resolved_identities,
             )
+            if device_type == "esp32":
+                notes = append_esp32_full_migration_guidance(
+                    notes,
+                    resolved_identities,
+                    firmware["role"],
+                    args.repo,
+                    args.utility_tag,
+                )
 
             if firmware["role"].startswith("companion"):
                 notes = append_companion_power_saving_note(notes, display_version)
