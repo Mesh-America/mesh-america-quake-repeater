@@ -1063,6 +1063,20 @@ const currentCatalog = picker.buildCatalog([
 ], currentControls);
 assert.strictEqual(currentCatalog.rows.length, currentAssets.length);
 assert(currentCatalog.profiles.every(profile => profile.controls && profile.chipFamily !== 'unknown'));
+const expandedEsp32 = currentCatalog.profiles.find(profile =>
+  profile.target === 'Ebyte_EoRa-S3_Repeater-full-logging');
+assert(expandedEsp32);
+assert(picker.installSteps(expandedEsp32, 'bin').some(step =>
+  step.includes('exact board/role migration ZIP')));
+assert.strictEqual(
+  picker.migrationReleaseUrl(expandedEsp32, expandedEsp32.files[0]),
+  'https://github.com/mikecarper/MeshCore/releases/tag/utility-' +
+    currentControls.familyTag);
+const ordinaryEsp32 = currentCatalog.profiles.find(profile =>
+  profile.target === 'Ebyte_EoRa-S3_Repeater');
+assert(ordinaryEsp32);
+assert.strictEqual(
+  picker.migrationReleaseUrl(ordinaryEsp32, ordinaryEsp32.files[0]), '');
 const ikokaNormal = currentCatalog.profiles.find(profile =>
   profile.target === 'ikoka_stick_nrf_30dbm_repeater');
 assert(!currentCatalog.profiles.some(profile =>

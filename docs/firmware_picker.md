@@ -27,6 +27,13 @@ from the published firmware assets.
       <strong>Full install / layout migration (merged .bin)</strong>. Narrower profiles
       remain available when their reduced transport or feature set is intentional.
     </p>
+    <p>
+      Upgrading an existing ESP32 infrastructure node from a smaller partition
+      layout? The selected Full result links to the utility release. If an
+      exact board and role migration ZIP is listed, follow its included README
+      for a supported Wi-Fi or LoRa route. USB installation uses the matching
+      merged image instead. An app-only .bin cannot change the partition table.
+    </p>
   </div>
 
   <p class="firmware-picker-order-note">
@@ -229,9 +236,12 @@ and CLI. Standard profiles remain useful for boards without a FULL build, for
 an intentionally narrower transport, or when retaining an existing compatible
 partition layout.
 
-Changing between standard and FULL ESP32 layouts requires the exact-board
-merged image over USB. A running application cannot safely move its own active
-and inactive partitions.
+Changing between standard and FULL ESP32 layouts requires a partition migration.
+Use the exact-board merged image over USB, or a supported exact board and role
+staged migration ZIP from the [utility release](https://github.com/mikecarper/MeshCore/releases/tag/utility-v1.17.1.7-halo-keymind-cascade-dev-2d03e098).
+Read that ZIP's README before choosing the Wi-Fi or LoRa route. Do not send a
+loose app-only Full `.bin` directly to an older layout: the running application
+cannot move its own active and inactive partitions.
 
 Current `full-usb-wifi` profiles use one binary for no external output, USB
 packet logging/USB-connected MQTT, direct WiFi MQTT, or both. The picker shows
@@ -353,12 +363,16 @@ See the [two-profile setup guide](radio_profiles.md#companion-messages-on-both-p
 | --- | --- |
 | <code>-merged.bin</code> | Erase/fresh install, recovery, role migration, or partition-profile change on ESP32 over USB |
 | Non-merged <code>.bin</code> | Update an existing same-board, same-role, same-partition installation |
-| <code>.zip</code> | Native nRF52 Serial DFU update package; it is not an extra archive |
+| <code>*-migration.zip</code> | Exact ESP32 board and role staged partition migration; follow its included README for Wi-Fi or LoRa steps |
+| Other <code>.zip</code> firmware shown by the picker | Native nRF52 Serial DFU update package; it is not an extra archive |
 | <code>.uf2</code> | UF2 bootloader drag-and-drop install or update |
 | <code>.hex</code> | Erase/recovery flash with a supported wired programmer |
 
 Never send a merged ESP32 image through browser OTA or LoRa OTA. Back up the
-node configuration and verify every filename suffix before flashing.
+node identity, configuration, keys, and radio settings, and verify every
+filename suffix before flashing. A staged migration writes the partition table;
+power loss during that write can require cable recovery. The package README
+states what each route preserves and which older layouts it accepts.
 
 ## LoRa OTA and OTAFIX
 
@@ -420,15 +434,14 @@ search for deployed devices that still use that mOTA identity; it is not shown
 as a second recommended configuration.
 
 Some normal ESP32 roles begin in the legacy 1.25 MiB dual-OTA layout but have
-a canonical Full image with a larger partition table. Their Full image keeps
-the ordinary target identity for future mOTA updates, but the first install is
-always its exact `-merged.bin` over USB: LoRa mOTA intentionally rejects a
-package whose partition signature differs from the running layout. During this
-transition the portable artifact remains published for already-installed
-nodes. The current migration set is LilyGo T3S3 SX1262/SX1276 repeater and
-room-server roles, Station G2 repeater and room-server roles, and ThinkNode M2
-repeater and room-server roles. Station G2 moves to two 6.25 MiB slots;
-the 4 MiB T3S3 and ThinkNode M2 boards move to two 1984 KiB slots.
+a Full image with larger slots. The 1.17.1.7 utility release contains 94 exact
+board and role migration ZIPs. Each package checks its source layout and target
+identity, contains the bridge and Full application files for its supported
+routes, and documents what saved data it preserves. Use the package's own Full
+application after the bridge; do not substitute a loose Full image with a
+different target ID. If no exact package exists, use the matching merged USB
+image. Once migrated, routine app-only updates still need the same target and
+partition signature.
 
 ## Maintaining the runtime directions
 
