@@ -93,9 +93,6 @@ static const uint8_t OTA_BL_PROFILE_INTERNAL_BOOT_UPDATE =
 static const uint8_t OTA_BL_PROFILE_QSPI_BOOT_UPDATE =
     OTA_BL_STORAGE_STAGE_CEILING | OTA_BL_STORAGE_QSPI |
     OTA_BL_STORAGE_BOOT_UPDATE;
-static const uint8_t OTA_BL_PROFILE_RAK_AUTO =
-    OTA_BL_STORAGE_STAGE_CEILING | OTA_BL_STORAGE_QSPI |
-    OTA_BL_STORAGE_HEADER_W25;
 // A successor must retain both application update paths used by qualified
 // external stores: bit 0 CODEC_FULL and bit 2 CODEC_DETOOLS_INPLACE.
 static const uint16_t OTA_BL_REQUIRED_APP_CODEC_MASK = 0x0005u;

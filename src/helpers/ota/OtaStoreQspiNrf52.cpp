@@ -4,10 +4,6 @@
 
 #include "OtaByteIO.h"
 #include "OtaFlashLayout_nrf52.h"
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-  #include "OtaBootloaderUpdate.h"
-  #include "OtaSelf.h"
-#endif
 #include "hal/nrf_gpio.h"
 #include "hal/nrf_qspi.h"
 #include "nrf.h"
@@ -889,9 +885,8 @@ uint32_t OtaStoreQspiNrf52::capacity() const {
   return result;
 }
 
-bool OtaStoreQspiNrf52::plan_layout(bool is_full, uint32_t image_size,
-                                    uint32_t payload_off, uint32_t payload_size,
-                                    bool is_bootloader) {
+bool OtaStoreQspiNrf52::plan_layout(bool, uint32_t image_size, uint32_t,
+                                    uint32_t payload_size, bool) {
   // This is the start of a new manifest admission attempt. Clear diagnostics
   // left by the normal empty-store reopen probe, then latch the first error
   // from this attempt until the operator reads it or starts another attempt.
@@ -900,25 +895,6 @@ bool OtaStoreQspiNrf52::plan_layout(bool is_full, uint32_t image_size,
   _stage = OtaQspiStage::IDLE;
   const uint32_t app_base = mota_nrf52_app_base();
   const uint32_t app_ceiling = mota_nrf52_application_ceiling();
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-  if (is_bootloader) {
-    SelfFwInfo fi;
-    if (!is_full || image_size != OTA_BOOT_IMAGE_SIZE ||
-        payload_size != OTA_BOOT_IMAGE_SIZE || payload_off != 365u ||
-        ota_nrf52_effective_stage_ceiling() != MOTA_NRF52_APP_END ||
-        !ota_self_firmware(fi) ||
-        !ota_bootloader_scratch_headroom_valid(
-            fi.valid, app_base, fi.image_len, MOTA_NRF52_SHARED_BOOT_STAGE_START) ||
-        !ota_bootloader_live_bank_preserves_scratch(
-            app_base, fi.image_len, MOTA_NRF52_SHARED_BOOT_STAGE_START)) {
-      fail("recovery scratch is unavailable");
-      releaseFlash();
-      return false;
-    }
-  }
-#else
-  (void)is_full; (void)payload_off; (void)is_bootloader;
-#endif
   if (image_size == 0 || payload_size == 0 || app_base >= app_ceiling ||
       image_size > app_ceiling - app_base) {
     fail("image exceeds nRF52 application region");
