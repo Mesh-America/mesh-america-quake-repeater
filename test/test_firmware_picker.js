@@ -1065,19 +1065,16 @@ assert.strictEqual(currentCatalog.rows.length, currentAssets.length);
 assert(currentCatalog.profiles.every(profile => profile.controls && profile.chipFamily !== 'unknown'));
 const ikokaNormal = currentCatalog.profiles.find(profile =>
   profile.target === 'ikoka_stick_nrf_30dbm_repeater');
-const ikokaLean = currentCatalog.profiles.find(profile =>
-  profile.target === 'ikoka_stick_nrf_30dbm_repeater_lora_ota_no_external_sensors');
+assert(!currentCatalog.profiles.some(profile =>
+  profile.target === 'ikoka_stick_nrf_30dbm_repeater_lora_ota_no_external_sensors'));
 assert.strictEqual(ikokaNormal.ota, 'lora-receiver');
 assert.strictEqual(ikokaNormal.logging, 'usb-runtime');
 assert.deepStrictEqual(ikokaNormal.loggingModes, ['none', 'usb']);
 assert.deepStrictEqual(picker.runtimeDirections(ikokaNormal, {logging: 'usb'})[0].actions[0].commands,
   ['set usb.logging on']);
-assert.strictEqual(ikokaLean.ota, 'lora-receiver');
-assert.strictEqual(ikokaLean.logging, 'none');
-assert.deepStrictEqual(ikokaLean.loggingModes, ['none']);
 const ikokaUrl = 'https://example.com/firmware_picker/?chipFamily=nrf52&hardwareFamily=ikoka_stick_nrf_30dbm&hardware=ikoka_stick_nrf_30dbm&role=repeater&variant=default&install=zip&chipAuto=1';
 const ikokaRelease = release(currentControls.familyTag, '2026-09-13T00:00:00Z',
-  [ikokaNormal, ikokaLean].map(profile => {
+  [ikokaNormal].map(profile => {
     const source = currentControls.profiles[profile.target].loggingSource;
     const tag = currentControls.familyTag.replace(/-[0-9a-f]{8}$/, '-' + source.slice(0, 8));
     return asset(profile.target + '-ota-' + tag + '.zip');
@@ -1090,7 +1087,8 @@ assert.deepStrictEqual(ikokaCatalog.profiles.filter(profile =>
   ['ikoka_stick_nrf_30dbm_repeater']);
 const mismatchedIkoka = picker.buildCatalog([
   release(currentControls.familyTag, '2026-09-13T00:00:00Z', [
-    asset('ikoka_stick_nrf_30dbm_repeater-ota-' + currentControls.familyTag + '.zip'),
+    asset('ikoka_stick_nrf_30dbm_repeater-ota-' +
+      currentControls.familyTag.replace(/-[0-9a-f]{8}$/, '-306feebe') + '.zip'),
   ]),
 ], currentControls).profiles[0];
 assert.strictEqual(mismatchedIkoka.logging, 'none', 'Logging metadata must match the published build source');
@@ -1099,7 +1097,10 @@ assert(capacityProfiles.length > 0, 'Regeneration must preserve capacity directi
 for (const profile of capacityProfiles) {
   assert(picker.installSteps(profile, profile.installKinds[0]).includes(profile.controls.memoryNote), profile.target);
 }
-const currentObserver = currentCatalog.profiles.find(profile => profile.target === observer.target);
+const currentObserver = currentCatalog.profiles.find(profile =>
+  profile.controls && profile.controls.mqtt &&
+  profile.controls.loggingModes && profile.controls.loggingModes.includes('both'));
+assert(currentObserver);
 assert.deepStrictEqual(picker.runtimeDirections(currentObserver, {logging: 'usb'})[0].actions[0].commands,
   ['set logging.output usb', 'get logging.output']);
 const combinedControlData = JSON.parse(JSON.stringify(currentControls));

@@ -1,80 +1,19 @@
 # Mesh America provider catalogs
 
-Both active provider catalogs now use **1.17.1.5 USA Cascade**, published from
-original firmware commit `26303793`, with **52 memory-corrected entries** from
-`aa20e927`. All 11 release profiles that failed the RAM budget have replacements;
-all 43 nRF52 Full Companions use shared mOTA/queue storage. Wireless Paper Full
-now uses source `1e4d1e16`, restoring 350 contacts and 40 channels with 256
-message slots normally, or 128 while mOTA borrows the other half. The other six
-corrected ESP32 Full profiles use 150 contacts and keep their 256-message queue; read
-the entry notes and export contacts before upgrading if you exceed that limit.
-The release audit also covers 43 supplemental Full repeater profiles available
-on GitHub and in the firmware picker. The catalogs retain their canonical
-selection and cover **94 device cards, 540 selectable
-entries, 539 unique firmware profiles, and 1,078 unique firmware files**.
-One Full Companion image is listed under two compatible device/accessory cards.
-The MQTT simulation environment is a laboratory target and is not a device
-choice. Entries without a qualified replacement in this OTA-required release
-are omitted; no download silently points to an older firmware release.
-
-## Stable provider URLs
-
-The `v1.16.0` text in these filenames is part of the existing provider URL,
-not the firmware version. Keep these URLs in Mesh America; they now load
-1.17.1.5 choices.
+The two active provider catalogs select the 1.17.1.7 USA Cascade release family. Each lists 536 unique qualified firmware profiles across 103 hardware cards; one compatible profile appears under two cards. Both catalogs use the same binaries. The logging catalog remains a separate stable provider URL for existing Mesh America installations.
 
 ```text
 Provider name: Keymind Cascade
 Catalog URL:   https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade/mesh-america/keymind-cascade-v1.16.0-provider.json
-```
 
-```text
 Provider name: Keymind Cascade Logging
 Catalog URL:   https://raw.githubusercontent.com/mikecarper/MeshCore/keymindCascade/mesh-america/keymind-cascade-logging-v1.16.0-provider.json
 ```
 
-## Logging and former variants
+The `v1.16.0` part of those filenames is a stable provider URL, not the firmware version. Both JSON files contain exact 1.17.1.7 asset URLs, including the separate Companion, repeater and room server, utility, LoRa OTA, and Full ESP32 release pages.
 
-Both catalogs now select from the same canonical firmware set. Logging,
-power-saving, and controllable gain variants are runtime settings; selecting
-the logging provider does not itself change the device's saved settings.
-Each entry includes the appropriate commands, update methods, hardware
-requirements, and its actual GitHub release page.
+Four 256 KiB STM32WL USB Companion images (RAK 3x72, Tiny Relay, Wio-E5 Mini, and Wio-E5) omit packet diagnostics to preserve their 32 KiB LittleFS layout. Their USB Companion transport remains available. Their entries say so explicitly. Other logging controls follow each exact image's capability manifest.
 
-- **Full Companion:** ESP32 uses `set usb.logging on` / `set usb.logging off`;
-  nRF52 uses `set usb.logging on reboot` / `set usb.logging off reboot` for its
-  optional second USB port. On 1.17.1.5 ESP32, run `set powersaving off` first.
-- **Shared controls:** All roles use `get usb.logging` / `set usb.logging on|off`
-  for live USB logs. MQTT-capable images use `set mqtt.enabled on|off` without
-  erasing broker slots. Images with both outputs use
-  `set logging.output off|usb|wifi|both`. Check `get mqtt.running` and
-  `get mqtt.status`; configure brokers with `set mqtt1.preset` and related
-  settings or WebConfig. RS232/ESP-NOW bridges use `bridge.enabled` separately.
-- Open the [USB web console](https://flasher.meshcore.io/console) at 115200 baud.
-  Full Companion and infrastructure start in ASCII mode. Download-only board
-  entries retain their external programming requirements.
+See the [1.17.1.7 release guide](../docs/releases/1.17.1.7.md) and [firmware picker](../docs/firmware_picker.md). ESP32 partition migration packages are on the utility release page. nRF52 application images require a matching OTAFIX bootloader when the installed bootloader is not already compatible.
 
-See [feature switches by role](../docs/role_feature_switches.md), the
-[release guide](../docs/releases/1.17.1.5.md), and the
-[old-variant map](../docs/releases/1.17.1.5-variant-map.tsv).
-For nRF52 OTAFIX installations use the exact board/storage profile from
-[OTAFIX 2.4.6](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6).
-
-## Catalog maintenance
-
-The 1.17.1.5 catalog download URLs were reconciled with `release-plan.json`
-and each group's qualified `TARGET-MANIFEST.json`, then verified against the
-published GitHub assets. Preserve the exact tag for each file: Companion,
-Repeater/Room Server, Sensor, LoRa OTA, and expanded Full profiles are on
-separate release pages. Do not update these catalogs by replacing version
-strings alone.
-
-The older `update-provider-release.py`, `update-logging-provider-release.py`,
-and PowerShell generator target earlier flat release directories and tag
-layouts. Their default routing is not sufficient for the five-page 1.17.1.5
-staging layout. Before using them for another release, reconcile canonical
-aliases, omitted targets, runtime feature descriptions, and release-group
-routing against that release's manifests.
-
-Files ending in `provider-backup.json` are historical backups and intentionally
-retain their original versions. They are not the active provider URLs above.
+Catalogs are generated from the staged release manifest, with every asset URL checked against the staged file and tag. Historical `provider-backup.json` files are retained unchanged.

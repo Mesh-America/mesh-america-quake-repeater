@@ -296,10 +296,8 @@ def normalize_reduced_profile_metadata(
         paragraphs.append(paragraph)
 
     if not profile_found:
-        raise ValueError(
-            "reduced LoRa OTA catalog entry has no Compact LoRa OTA profile: "
-            + ", ".join(identities)
-        )
+        paragraphs.append(REDUCED_PROFILE_DESCRIPTION)
+        paragraphs.extend(reduced_profile_special_notes(identities))
     return "\n\n".join(paragraphs)
 
 
@@ -715,6 +713,29 @@ def resolve_release_identity(
         for identity in logging_candidates:
             if identity in release_files:
                 return identity, "observer_mqtt" in identity.lower()
+
+    # The canonical matrix may replace a portable, ESP-NOW, or observer
+    # sibling with one expanded Full image for that board and role.
+    for candidate in candidates:
+        base = re.sub(r"-(?:full-usb-wifi-ota|full-logging-ota|full-ota|ota|logging)$", "", candidate)
+        base = re.sub(r"_lora_ota_no_external_sensors$", "", base)
+        base = re.sub(r"_bridge_espnow_?$", "", base)
+        base = re.sub(r"_observer_mqtt$", "", base)
+        bases = (base, base + "_") if not base.endswith("_") else (base, base.rstrip("_"))
+        preferred = tuple(name for variant in bases for name in (
+            f"{variant}_observer_mqtt-full-usb-wifi-ota",
+            f"{variant}-full-usb-wifi-ota",
+            f"{variant}-full-logging-ota",
+            variant + "-ota",
+            variant,
+        ))
+        if not any(marker in candidate.lower() for marker in
+                   ("full", "lora_ota", "bridge_espnow", "observer_mqtt")):
+            preferred = tuple(name for variant in bases for name in (variant, variant + "-ota")) \
+                + tuple(name for name in preferred if name not in bases)
+        for identity in preferred:
+            if identity in release_files:
+                return identity, identity.endswith("-full-usb-wifi-ota")
 
     raise ValueError(f"no new release artifact matches catalog target {old_identity!r}")
 
