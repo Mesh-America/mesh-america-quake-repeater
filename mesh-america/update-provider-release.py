@@ -879,6 +879,8 @@ def append_esp32_full_migration_guidance(
     paragraph = (
         "MIGRATION - If the installed ESP32 has an older or smaller partition "
         "layout, do not send this loose app-only .bin over Wi-Fi or LoRa OTA. "
+        "If supported, run get storage.layout on the installed firmware to "
+        "inspect the live partition table; version alone cannot prove layout. "
         "Either install the matching merged .bin over USB, or check "
         f"{utility_url} for an exact board and role migration ZIP and follow "
         "its included README. Back up identity, configuration, keys, and radio "
