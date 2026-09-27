@@ -88,7 +88,14 @@ int main() {
   for (unsigned n=0;n<256;++n) {
     MyMesh idle;uint8_t data[256]={};
     idle.onContactResponse(contact,data,n);
-    assert(idle.serial.frames.empty() && idle.clears==0);idle.checkGuards();
+    const bool unsolicited=n>=4 && n+2<=MAX_FRAME_SIZE;
+    assert(idle.serial.frames.size()==(unsolicited ? 1U : 0U) && idle.clears==0);
+    if (unsolicited) {
+      const auto& frame=idle.serial.frames[0];
+      assert(frame.size()==n+2 && frame[0]==PUSH_CODE_BINARY_RESPONSE);
+      assert(frame[1]==0 && memcmp(frame.data()+2,data,n)==0);
+    }
+    idle.checkGuards();
     for (bool control:{false,true}) {
       MyMesh value;mesh::Packet packet;packet.payload_len=n;
       if (control) value.onControlDataRecv(&packet);else value.onRawDataRecv(&packet);

@@ -1531,6 +1531,24 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     i += (len - 4);
     writePendingSerialFrame(out_frame, i);
     clearPendingReqs();
+  } else {
+    // Forward unsolicited responses, including pushed telemetry, to the app.
+    // Pending requests above retain their captured reply route.
+    // A matching tag with no response body is malformed, not an unsolicited
+    // push, and must not escape through the app's generic response path.
+    if (len == 4 && ((pending_telemetry && tag == pending_telemetry)
+                     || (pending_req && tag == pending_req))) {
+      clearPendingReqs();
+      return;
+    }
+    if (_serial != NULL && _serial->isConnected() && len <= MAX_FRAME_SIZE - 2) {
+      int i = 0;
+      out_frame[i++] = PUSH_CODE_BINARY_RESPONSE;
+      out_frame[i++] = 0; // reserved
+      memcpy(&out_frame[i], data, len);
+      i += len;
+      _serial->writeFrame(out_frame, i);
+    }
   }
 }
 
