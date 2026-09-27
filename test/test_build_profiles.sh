@@ -996,8 +996,9 @@ for constrained_companion in \
     Tiny_Relay_companion_radio_usb \
     wio-e5-mini_companion_radio_usb \
     wio-e5_companion_radio_usb; do
-  uses_merged_standard_usb_logging "$constrained_companion" \
-    || fail "$constrained_companion omitted merged packet logging"
+  if uses_merged_standard_usb_logging "$constrained_companion"; then
+    fail "$constrained_companion exceeded its 256 KiB flash with packet logging"
+  fi
   is_logging_size_constrained_target "$constrained_companion" \
     || fail "$constrained_companion enabled oversized verbose mesh diagnostics"
 done
