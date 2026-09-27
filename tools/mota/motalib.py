@@ -108,11 +108,15 @@ BOOT_STORAGE_SD = 0x01
 BOOT_STORAGE_STAGE_CEILING = 0x02
 XIAO_BOOT_STORAGE_QSPI = 0x04
 XIAO_BOOT_STORAGE_UPDATE = 0x08
-BOOT_STORAGE_KNOWN = 0x0F
+BOOT_STORAGE_KNOWN = 0x1F
+BOOT_STORAGE_HEADER_W25 = 0x10
 BOOT_STORAGE_SD_UPDATE = BOOT_STORAGE_SD | XIAO_BOOT_STORAGE_UPDATE
 BOOT_STORAGE_QSPI_UPDATE = (BOOT_STORAGE_STAGE_CEILING | XIAO_BOOT_STORAGE_QSPI |
                             XIAO_BOOT_STORAGE_UPDATE)
 BOOT_STORAGE_INTERNAL_UPDATE = BOOT_STORAGE_STAGE_CEILING | XIAO_BOOT_STORAGE_UPDATE
+BOOT_STORAGE_RAK_AUTO_RECOVERY = (BOOT_STORAGE_STAGE_CEILING |
+                                  XIAO_BOOT_STORAGE_QSPI |
+                                  BOOT_STORAGE_HEADER_W25)
 BOOT_REQUIRED_APP_CODEC_MASK = ((1 << CODEC_FULL) |
                                 (1 << CODEC_DETOOLS_INPLACE))
 
@@ -136,6 +140,13 @@ INTERNAL_BOOTLOADER_IDENTITIES = (
     (0x239A0029, "3401_DFU"),
     (0x239A0029, "4631_DFU"),
     (0x239A0029, "RTAG_DFU"),
+)
+
+# These adaptive loaders do not self-update. Their exact MeshCore application
+# authenticates a format-3 package and uses the MBR to replace the bootloader.
+RAK_AUTO_RECOVERY_IDENTITIES = (
+    (0x239A0029, "3401_AUTO_DFU"),
+    (0x239A0029, "4631_AUTO_DFU"),
 )
 
 # MeshTower V2 has both a lean internal-store application and an exact SD-store
@@ -696,7 +707,7 @@ def audit_bootloader_target_inventory(application_target_ids=()) -> dict:
     identities = (
         (XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
         (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU"),
-    ) + INTERNAL_BOOTLOADER_IDENTITIES
+    ) + INTERNAL_BOOTLOADER_IDENTITIES + RAK_AUTO_RECOVERY_IDENTITIES
     app_ids = set(application_target_ids)
     targets = {}
     for identity in identities:
@@ -714,6 +725,7 @@ def audit_bootloader_target_inventory(application_target_ids=()) -> dict:
 
 def bootloader_identity_is_buildable(board_id: int, device_name: str) -> bool:
     return ((board_id, device_name) in INTERNAL_BOOTLOADER_IDENTITIES or
+            (board_id, device_name) in RAK_AUTO_RECOVERY_IDENTITIES or
             (board_id, device_name) in (
                 (XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
                 (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU")))
@@ -743,6 +755,8 @@ def bootloader_qualified_storage_profiles(board_id: int, device_name: str):
         return (BOOT_STORAGE_INTERNAL_UPDATE, BOOT_STORAGE_SD_UPDATE)
     if identity in INTERNAL_BOOTLOADER_IDENTITIES:
         return (BOOT_STORAGE_INTERNAL_UPDATE,)
+    if identity in RAK_AUTO_RECOVERY_IDENTITIES:
+        return (BOOT_STORAGE_RAK_AUTO_RECOVERY,)
     return None
 
 
@@ -819,7 +833,7 @@ def parse_xiao_bootloader_identity(image: bytes) -> Optional[XiaoBootloaderIdent
 
 
 def bootloader_caps_storage(image: bytes) -> Optional[int]:
-    """Return the one exact supported self-update storage marker, or None."""
+    """Return one exact qualified self-update or app-owned recovery marker."""
     found = None
     valid_count = 0
     for off in range(0, len(image) - 16 + 1, 4):
@@ -827,16 +841,22 @@ def bootloader_caps_storage(image: bytes) -> Optional[int]:
             continue
         abi, codecs = struct.unpack_from("<HH", image, off + 8)
         storage = image[off + 12]
-        if (abi < BOOT_FORMAT_VER or abi == 0xFFFF or
+        if (abi < (APP_FORMAT_VER if storage == BOOT_STORAGE_RAK_AUTO_RECOVERY
+                   else BOOT_FORMAT_VER) or abi == 0xFFFF or
                 codecs & BOOT_REQUIRED_APP_CODEC_MASK != BOOT_REQUIRED_APP_CODEC_MASK or
-                storage & ~BOOT_STORAGE_KNOWN or image[off + 13:off + 16] != b"\0\0\0" or
-                not storage & XIAO_BOOT_STORAGE_UPDATE):
+                storage & ~BOOT_STORAGE_KNOWN or
+                (storage & BOOT_STORAGE_HEADER_W25 and
+                 storage != BOOT_STORAGE_RAK_AUTO_RECOVERY) or
+                image[off + 13:off + 16] != b"\0\0\0" or
+                (not storage & XIAO_BOOT_STORAGE_UPDATE and
+                 storage != BOOT_STORAGE_RAK_AUTO_RECOVERY)):
             continue
         valid_count += 1
         if valid_count != 1:
             return None
         if storage in (BOOT_STORAGE_SD_UPDATE, BOOT_STORAGE_QSPI_UPDATE,
-                       BOOT_STORAGE_INTERNAL_UPDATE):
+                       BOOT_STORAGE_INTERNAL_UPDATE,
+                       BOOT_STORAGE_RAK_AUTO_RECOVERY):
             found = storage
     return found if valid_count == 1 else None
 
@@ -875,7 +895,7 @@ def validate_bootloader_image(image: bytes, target_id: Optional[int] = None,
     actual_storage = bootloader_caps_storage(image)
     if actual_storage not in expected_storage:
         expected = "/".join(f"0x{value:02X}" for value in expected_storage)
-        raise ValueError(f"bootloader lacks exact ABI 3 self-update capabilities {expected}")
+        raise ValueError(f"bootloader lacks exact qualified update/recovery capabilities {expected}")
     expected_platform = bootloader_qualified_platform_profile(
         identity.board_id, identity.device_name)
     if expected_platform is not None:

@@ -32,6 +32,17 @@
   #endif
 #endif
 
+#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
+  #if !defined(NRF52_PLATFORM) || !defined(OTA_RAK_AUTO_STORE) || \
+      !defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || !defined(OTA_FLASH_STORE) || \
+      !defined(OTA_QSPI_STORE)
+    #error "RAK application recovery requires the adaptive nRF52 shared-slot profile"
+  #endif
+  #if !defined(RAK_3401) && !defined(RAK_4631)
+    #error "RAK application recovery is restricted to the two qualified RAK profiles"
+  #endif
+#endif
+
 #if defined(OTA_SD_BOOTLOADER_UPDATE)
   #if !defined(NRF52_PLATFORM) || !defined(OTA_SD_STORE)
     #error "OTA_SD_BOOTLOADER_UPDATE requires nRF52 SD staging"
@@ -512,17 +523,19 @@ inline bool ota_bootloader_caps_marker_parse(const uint8_t raw[16],
 
 inline bool ota_bootloader_caps_from_image(const uint8_t* image, size_t image_size,
                                             uint8_t exact_storage_flags,
-                                            OtaBootloaderCapsMarker& out) {
+                                            OtaBootloaderCapsMarker& out,
+                                            bool require_boot_update = true) {
   out = OtaBootloaderCapsMarker();
   if (!image || exact_storage_flags == 0) return false;
   uint8_t valid_count = 0;
   for (size_t off = 0; off + 16u <= image_size; off += 4u) {
     OtaBootloaderCapsMarker parsed;
     if (!ota_bootloader_caps_marker_parse(image + off, parsed) ||
-        parsed.apply_abi < MOTA_BOOT_FORMAT_VER ||
+        parsed.apply_abi < (require_boot_update ? MOTA_BOOT_FORMAT_VER : MOTA_APP_FORMAT_VER) ||
         (parsed.codec_mask & OTA_BL_REQUIRED_APP_CODEC_MASK) !=
             OTA_BL_REQUIRED_APP_CODEC_MASK ||
-        (parsed.storage_flags & OTA_BL_STORAGE_BOOT_UPDATE) == 0) continue;
+        ((parsed.storage_flags & OTA_BL_STORAGE_BOOT_UPDATE) != 0u) !=
+            require_boot_update) continue;
     if (++valid_count != 1u) return false; // privileged marker identity must be unambiguous
     if (parsed.storage_flags != exact_storage_flags) continue;
     out = parsed;
@@ -556,7 +569,8 @@ inline bool ota_bootloader_external_crc_ok(
 template <typename Store>
 inline bool ota_bootloader_external_image_metadata(
     Store& store, uint32_t payload_off, uint8_t exact_storage_flags,
-    OtaBootloaderIdentity& candidate, OtaBootloaderCapsMarker& caps) {
+    OtaBootloaderIdentity& candidate, OtaBootloaderCapsMarker& caps,
+    bool require_boot_update = true) {
   candidate = OtaBootloaderIdentity();
   caps = OtaBootloaderCapsMarker();
   if (exact_storage_flags == 0u) return false;
@@ -576,10 +590,11 @@ inline bool ota_bootloader_external_image_metadata(
       if ((absolute & 3u) == 0u && local + 16u <= len) {
         OtaBootloaderCapsMarker parsed;
         if (ota_bootloader_caps_marker_parse(buf + local, parsed) &&
-            parsed.apply_abi >= MOTA_BOOT_FORMAT_VER &&
+            parsed.apply_abi >= (require_boot_update ? MOTA_BOOT_FORMAT_VER : MOTA_APP_FORMAT_VER) &&
             (parsed.codec_mask & OTA_BL_REQUIRED_APP_CODEC_MASK) ==
                 OTA_BL_REQUIRED_APP_CODEC_MASK &&
-            (parsed.storage_flags & OTA_BL_STORAGE_BOOT_UPDATE) != 0u) {
+            ((parsed.storage_flags & OTA_BL_STORAGE_BOOT_UPDATE) != 0u) ==
+                require_boot_update) {
           if (++valid_caps != 1u) return false;
           if (parsed.storage_flags == exact_storage_flags) caps = parsed;
         }
