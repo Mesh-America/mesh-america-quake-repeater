@@ -1744,11 +1744,25 @@ for the tested XIAO handoff and host-cache caveats.
 - `set prv.key <private_key>`
 
 **Parameters:**
-- `private_key`: Private key in hex format (64 hex characters)
+- `private_key`: MeshCore expanded private key in hex format (128 hex characters)
 
 **Local connection only:** `get prv.key`. Companion also requires
 `ENABLE_PRIVATE_KEY_EXPORT=1`; use binary command `0x42` or the text terminal.
 Infrastructure `set prv.key` retains its administrator access rules.
+
+Infrastructure repeaters with `ENABLE_PRIVATE_KEY_EXPORT=1` also support
+`backup prv.key <16-hex-nonce>` for authenticated remote administrators. It
+returns `KEYBACKUP <nonce> <128-hex-private-key>` only as an end-to-end encrypted
+direct CLI reply. This separate command does not make `get prv.key` remotely
+available. Treat the reply as a secret: clients must not put it in chat history
+or debug logs and should encrypt any saved backup. An administrator password
+alone is not a safe backup-file encryption key. Firmware does not retain this
+reply in its remote CLI retry cache.
+Companion firmware must advertise `get key.backup.transport` as
+`ephemeral-routed-v1` before the phone requests it; that build delivers the
+reply only to the live attached client that requested it, without offline
+queuing or terminal echo.
+Older Companion firmware is not a safe transport for this backup flow.
 
 **Note:** Requires reboot to take effect after setting
 

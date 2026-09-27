@@ -9,6 +9,7 @@
 #endif
 
 #include <Arduino.h> // needed for PlatformIO
+#include <ctype.h>
 #ifdef ENABLE_WIFI_INTERFACE
 #include <WiFi.h>
 #endif
@@ -1027,6 +1028,31 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   }
   memcpy(&out_frame[i], text, tlen);
   i += tlen;
+  const char* sensitive_reply = text;
+  if (isxdigit((unsigned char)text[0]) && isxdigit((unsigned char)text[1])
+      && text[2] == '|') sensitive_reply += 3;
+  if (txt_type == TXT_TYPE_CLI_DATA
+      && strncmp(sensitive_reply, "KEYBACKUP ", 10) == 0) {
+    // Identity exports must never enter the normal offline message queue or
+    // text terminal (both retain/echo plaintext). Deliver once to a live
+    // directly attached app; if that link is gone the requester can retry.
+    const bool expected = strlen(sensitive_reply) == 10 + 16 + 1 + PRV_KEY_SIZE * 2
+        && private_key_backup_route != NULL
+        && _serial->isReplyRouteAvailable(private_key_backup_route)
+        && !millisHasNowPassed(private_key_backup_deadline)
+        && memcmp(from.id.pub_key, private_key_backup_sender, 6) == 0
+        && strncmp(sensitive_reply + 10, private_key_backup_nonce, 16) == 0
+        && sensitive_reply[26] == ' ';
+    if (expected) {
+      _serial->writeFrameToRoute(private_key_backup_route, out_frame, i);
+    }
+    private_key_backup_route = NULL;
+    private_key_backup_deadline = 0;
+    memset(private_key_backup_nonce, 0, sizeof(private_key_backup_nonce));
+    memset(private_key_backup_sender, 0, sizeof(private_key_backup_sender));
+    memset(out_frame, 0, i);
+    return;
+  }
   const bool queued = addToOfflineQueue(out_frame, i);
 
   if (_serial->isConnected()) {
@@ -4392,6 +4418,12 @@ void MyMesh::cancelSerialResponseStream() {
 
 void MyMesh::cancelSerialOperationsForRoute(BaseSerialInterface* route) {
   if (route == NULL) return;
+  if (private_key_backup_route == route) {
+    private_key_backup_route = NULL;
+    private_key_backup_deadline = 0;
+    memset(private_key_backup_nonce, 0, sizeof(private_key_backup_nonce));
+    memset(private_key_backup_sender, 0, sizeof(private_key_backup_sender));
+  }
   if (pending_serial_reply_route == route) clearPendingReqs();
   if (command_radio_reply_route == route) cancelPendingRadioParamApply();
   if (binary_trace_reply_route == route) clearBinaryTraceReply();
@@ -4583,6 +4615,15 @@ void MyMesh::handleCmdFrame(size_t len) {
       if (result == MSG_SEND_FAILED) {
         writeErrFrame(ERR_CODE_TABLE_FULL);
       } else {
+        if ((txt_type == TXT_TYPE_CLI_DATA || txt_type == TXT_TYPE_CLI_COMMAND)
+            && strncmp(text, "backup prv.key ", 15) == 0
+            && strlen(text + 15) == 16) {
+          private_key_backup_route = _serial->captureReplyRoute();
+          private_key_backup_deadline = futureMillis(120000);
+          memcpy(private_key_backup_nonce, text + 15, 16);
+          private_key_backup_nonce[16] = 0;
+          memcpy(private_key_backup_sender, recipient->id.pub_key, 6);
+        }
         if (replacement_entry != NULL) {
           // The newest successfully-queued submission wins. Keep the older
           // entry intact if composition, validation, or queueing failed.
@@ -8656,6 +8697,10 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
 #if defined(MESH_SOAK_DIAGNOSTICS)
   if (mesh::hil::handleSoakCommand(command, reply, reply_size)) return true;
 #endif
+  if (strcmp(command, "get key.backup.transport") == 0) {
+    snprintf(reply, reply_size, "ephemeral-routed-v1");
+    return true;
+  }
   if (strcmp(command, "get password") == 0) {
     snprintf(reply, reply_size, "> (no admin password on Companion)");
     return true;

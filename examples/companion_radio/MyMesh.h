@@ -548,6 +548,10 @@ private:
   uint32_t pending_req;   // pending _BINARY_REQ
   BaseSerialInterface* pending_serial_reply_route;
   unsigned long pending_serial_reply_deadline;
+  BaseSerialInterface* private_key_backup_route = nullptr;
+  unsigned long private_key_backup_deadline = 0;
+  char private_key_backup_nonce[17] = {};
+  uint8_t private_key_backup_sender[6] = {};
   BaseSerialInterface *_serial;
   mesh::companion::MotaSourceControl* _mota_source_control;
   AbstractUITask* _ui;

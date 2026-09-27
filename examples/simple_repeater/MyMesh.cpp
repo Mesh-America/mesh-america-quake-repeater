@@ -3248,9 +3248,16 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
   const bool arms_primary_radio = primary_radio_mutation_generation != primary_mutation_before;
   const bool arms_secondary_radio = _cli.radioProfiles().replyMutationGeneration() != secondary_mutation_before;
   const bool arms_temp_radio = arms_primary_radio || arms_secondary_radio;
-  remote_cli_reply_cache.remember(deferred_cli_command.client_pub_key,
-                                  deferred_cli_command.request_id,
-                                  command_fingerprint, reply, arms_temp_radio);
+  const char* parsed_command = deferred_cli_command.command;
+  if (strlen(parsed_command) > 3 && parsed_command[2] == '|') parsed_command += 3;
+  const bool private_key_backup = strncmp(parsed_command, "backup prv.key ", 15) == 0;
+  // A private identity must never be retained in the retry cache. A retry
+  // re-runs the admin/identity checks and creates a fresh encrypted reply.
+  if (!private_key_backup) {
+    remote_cli_reply_cache.remember(deferred_cli_command.client_pub_key,
+                                    deferred_cli_command.request_id,
+                                    command_fingerprint, reply, arms_temp_radio);
+  }
   // Route changes made by this command must apply to its acknowledgement too.
   // Resolve the full authenticated key again: compaction may have moved it or
   // reused its old slot. Only a removed sender needs the pre-command fallback.
@@ -3277,6 +3284,7 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
       finishRadioReply(false);
     }
   }
+  if (private_key_backup) memset(reply, 0, MAX_PACKET_PAYLOAD - 5);
   clearDeferredCliCommand();
 }
 
@@ -11763,6 +11771,41 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       strcpy(reply, "Err - not permitted");
       return;
     }
+  }
+
+  if (strncmp(command, "backup prv.key", 14) == 0
+      && (command[14] == 0 || command[14] == ' ')) {
+#if ENABLE_PRIVATE_KEY_EXPORT
+    // Remote backup is deliberately a separate admin-only command. The
+    // ordinary `get prv.key` remains local-only. The CLI reply is a direct
+    // end-to-end encrypted packet addressed to the authenticated admin.
+    const char* nonce = command + 14;
+    while (*nonce == ' ') nonce++;
+    bool valid_nonce = strlen(nonce) == 16;
+    for (size_t i = 0; valid_nonce && i < 16; ++i) {
+      valid_nonce = isxdigit((unsigned char)nonce[i]) != 0;
+    }
+    if (sender == NULL || sender_timestamp == 0 || !sender->isAdmin()) {
+      strcpy(reply, "Err - remote admin required");
+    } else if (!valid_nonce) {
+      strcpy(reply, "Err - use: backup prv.key <16-hex-nonce>");
+    } else {
+      uint8_t key[PRV_KEY_SIZE];
+      char hex[PRV_KEY_SIZE * 2 + 1];
+      const int length = self_id.writeTo(key, sizeof(key));
+      if (length == PRV_KEY_SIZE) {
+        mesh::Utils::toHex(hex, key, length);
+        snprintf(reply, 160, "KEYBACKUP %.16s %s", nonce, hex);
+      } else {
+        strcpy(reply, "Err - identity export failed");
+      }
+      memset(key, 0, sizeof(key));
+      memset(hex, 0, sizeof(hex));
+    }
+#else
+    strcpy(reply, "Err - private key export disabled in this build");
+#endif
+    return;
   }
 
   // handle ACL related commands
