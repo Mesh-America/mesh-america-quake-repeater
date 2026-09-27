@@ -18,7 +18,6 @@
     #include "OtaSelf.h"              // SelfFwInfo / ota_self_firmware (running-image base_hash gate)
   #endif
 #elif defined(NRF52_PLATFORM)
-  #include <SHA256.h>
   #include "OtaVerify.h"
   #include "OtaSelf.h"
   #include "OtaFlashLayout_nrf52.h"
@@ -27,9 +26,7 @@
   #include "nrf.h"
   #include "nrf_soc.h"
   #include "nrf_sdm.h"
-  #include "nrf_mbr.h"
   #include "../nrf52/SoftDeviceState.h"
-  #include <stdlib.h>
   #if defined(OTA_SD_STORE)
     #include "OtaStoreSdNrf52.h"
   #endif
@@ -471,31 +468,6 @@ static OtaStoreFlashNrf52* g_nrf52_apply_store = nullptr;
 #if defined(OTA_QSPI_STORE)
 static uint8_t g_nrf52_qspi_handoff = GPREGRET2_OTA_STAGE_QSPI;
 #endif
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-// Set only after the exact-board signed image has been copied to the internal
-// source and independently hashed there. Mesh drains the LoRa reply first.
-static bool g_rak_recovery_ready = false;
-static uint8_t g_rak_recovery_hash[32] = {0};
-
-static bool ota_rak_recovery_source_hash_matches() {
-  SHA256 sha;
-  const uint8_t* image = (const uint8_t*)(uintptr_t)MOTA_NRF52_SHARED_BOOT_STAGE_START;
-  for (uint32_t off = 0; off < OTA_BOOT_IMAGE_SIZE; off += 512u)
-    sha.update(image + off, 512u);
-  uint8_t hash[32];
-  sha.finalize(hash, sizeof(hash));
-  return memcmp(hash, g_rak_recovery_hash, sizeof(hash)) == 0;
-}
-
-static bool ota_rak_mbr_addresses_ready() {
-  const uint32_t mbr_boot = *(const volatile uint32_t*)(uintptr_t)MBR_BOOTLOADER_ADDR;
-  const uint32_t mbr_params = *(const volatile uint32_t*)(uintptr_t)MBR_PARAM_PAGE_ADDR;
-  const uint32_t boot = mbr_boot == UINT32_MAX ? NRF_UICR->NRFFW[0] : mbr_boot;
-  const uint32_t params = mbr_params == UINT32_MAX ? NRF_UICR->NRFFW[1] : mbr_params;
-  return boot == OTA_BOOT_IMAGE_START &&
-         params == OTA_BOOT_IMAGE_START + OTA_BOOT_IMAGE_SIZE;
-}
-#endif
 
 static void ota_nrf52_set_reset_handoff(uint8_t request, uint8_t source) {
   uint8_t sd_en = 0;
@@ -568,40 +540,6 @@ void ota_reboot_to_apply() {                   // public: set the apply magic + 
 }
 
 void ota_reboot_to_bootloader_update() {
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-  if (g_rak_recovery_ready) {
-    // COPY_BL succeeds by resetting directly into the new bootloader. Never
-    // hand 0x6B to an older adaptive loader: it cannot consume this package.
-    if (!ota_rak_mbr_addresses_ready() ||
-        !ota_rak_recovery_source_hash_matches()) {
-      g_rak_recovery_ready = false;
-      ota_nrf52_set_reset_handoff(0u, GPREGRET2_RAK_RECOVERY_FAILED);
-      NVIC_SystemReset();
-      return;
-    }
-    uint8_t sd_enabled = 0;
-    if (mesh_nrf52::softdeviceIsEnabled(sd_enabled) != NRF_SUCCESS ||
-        (sd_enabled && sd_softdevice_disable() != NRF_SUCCESS)) {
-      g_rak_recovery_ready = false;
-      ota_nrf52_set_reset_handoff(0u, GPREGRET2_RAK_RECOVERY_FAILED);
-      NVIC_SystemReset();
-      return;
-    }
-    sd_mbr_command_t command = {};
-    command.command = SD_MBR_COMMAND_COPY_BL;
-    command.params.copy_bl.bl_src =
-        (uint32_t*)(uintptr_t)MOTA_NRF52_SHARED_BOOT_STAGE_START;
-    command.params.copy_bl.bl_len = OTA_BOOT_IMAGE_SIZE / sizeof(uint32_t);
-    NRF_POWER->GPREGRET = 0u;
-    NRF_POWER->GPREGRET2 = 0u;
-    (void)sd_mbr_command(&command); // success never returns
-    g_rak_recovery_ready = false;
-    NRF_POWER->GPREGRET = 0u;
-    NRF_POWER->GPREGRET2 = GPREGRET2_RAK_RECOVERY_FAILED;
-    NVIC_SystemReset();
-    return;
-  }
-#endif
   uint8_t source = GPREGRET2_OTA_STAGE_QSPI;
 #if defined(OTA_INTERNAL_BOOTLOADER_UPDATE)
   source = GPREGRET2_OTA_STAGE_EXPANDED;
@@ -1075,127 +1013,6 @@ static const char* ota_bootloader_continuity_error(OtaBootloaderContinuityGate g
     default: return "boot continuity mismatch";
   }
 }
-
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-bool ota_prepare_rak_bootloader_recovery(OtaStore& store, bool internal,
-                                         const SignerAllowlist& allow,
-                                         const OtaBootloaderIdentity& installed,
-                                         const uint8_t actual_mid[4],
-                                         const uint8_t operator_mid[4],
-                                         const uint8_t operator_hash8[8],
-                                         ApplyState& st, char* msg) {
-  st = ApplyState();
-  g_rak_recovery_ready = false;
-  const uint32_t total = store.staged_size();
-  uint8_t header[8], manifest[MOTA_MFL];
-  MotaManifest m;
-  if (total != MOTA_NRF52_BOOT_CONTAINER_SIZE ||
-      !store.read(0, header, sizeof(header)) ||
-      memcmp(header, MOTA_MAGIC, sizeof(MOTA_MAGIC)) != 0 ||
-      rd_u32le(header + 4) != total ||
-      !store.read(8, manifest, sizeof(manifest)) ||
-      !mota_parse_manifest(manifest, sizeof(manifest), m)) {
-    strcpy(msg, "recovery bootloader container is invalid"); return false;
-  }
-  if (ota_bootloader_confirmation_gate(m, installed, actual_mid, operator_mid,
-                                       operator_hash8) != OTA_BOOT_CONFIRM_OK) {
-    strcpy(msg, "recovery bootloader identity/MID/hash confirmation failed"); return false;
-  }
-  const OtaBlCaps current = ota_bootloader_app_caps();
-  const uint8_t rak_flags = OTA_BL_PROFILE_RAK_AUTO;
-  if (!current.present || current.storage_flags != rak_flags ||
-      current.apply_abi < MOTA_APP_FORMAT_VER ||
-      (current.codec_mask & OTA_BL_REQUIRED_APP_CODEC_MASK) !=
-          OTA_BL_REQUIRED_APP_CODEC_MASK) {
-    strcpy(msg, "installed bootloader is not the adaptive RAK OTAFIX profile"); return false;
-  }
-  SelfFwInfo fi;
-  const uint32_t app_base = mota_nrf52_app_base();
-  if (!ota_self_firmware(fi) ||
-      !ota_bootloader_scratch_headroom_valid(
-          fi.valid, app_base, fi.image_len, MOTA_NRF52_SHARED_BOOT_STAGE_START) ||
-      !ota_bootloader_live_bank_preserves_scratch(
-          app_base, fi.image_len, MOTA_NRF52_SHARED_BOOT_STAGE_START) ||
-      ota_nrf52_effective_stage_ceiling() != MOTA_NRF52_APP_END ||
-      !ota_rak_mbr_addresses_ready()) {
-    strcpy(msg, "running app/settings or MBR do not preserve bootloader scratch"); return false;
-  }
-  if (internal) {
-    OtaStoreFlashNrf52& flash = static_cast<OtaStoreFlashNrf52&>(store);
-    if (flash.write_start() != MOTA_NRF52_SHARED_BOOT_STAGE_START ||
-        !flash.data() || flash.is_hybrid()) {
-      strcpy(msg, "internal recovery container placement is invalid"); return false;
-    }
-  }
-  const uint32_t payload_off = 8u + MOTA_MFL + (uint32_t)m.block_count * 4u;
-  if (payload_off != 365u || payload_off + OTA_BOOT_IMAGE_SIZE + 5u != total) {
-    strcpy(msg, "recovery payload layout is invalid"); return false;
-  }
-
-  mesh::Identity signer(m.signer_pubkey);
-  if (!signer.verify(m.signature, m.manifest_start, (int)m.signed_len) ||
-      !allow.contains(m.signer_pubkey)) {
-    strcpy(msg, "recovery bootloader signer is not trusted"); return false;
-  }
-  const VerifyResult verified = ota_verify(store, allow, manifest);
-  st.manifest_ok = verified.parsed;
-  st.sig_ok = verified.sig_ok;
-  st.trusted = verified.trusted;
-  st.image_size = m.image_size;
-  memcpy(st.image_hash, m.image_hash, sizeof(st.image_hash));
-  if (!verified.auto_appliable() || !verified.container_hash_ok) {
-    strcpy(msg, "recovery bootloader package failed full verification"); return false;
-  }
-  uint8_t vectors[8];
-  OtaBootloaderIdentity candidate;
-  OtaBootloaderCapsMarker candidate_caps;
-  if (!store.read(payload_off, vectors, sizeof(vectors)) ||
-      !ota_bootloader_vector_sane(vectors) ||
-      !ota_bootloader_external_image_metadata(
-          store, payload_off, rak_flags, candidate, candidate_caps, false) ||
-      !ota_bootloader_identity_matches(installed, candidate) ||
-      candidate_caps.apply_abi < current.apply_abi ||
-      (candidate_caps.codec_mask & current.codec_mask) != current.codec_mask) {
-    strcpy(msg, "recovery candidate identity/capabilities/CRC mismatch"); return false;
-  }
-  const OtaBootloaderContinuityGate continuity = ota_bootloader_continuity_gate(
-      installed, candidate, m.fw_version, OTA_BOOT_CONTINUITY_FAMILY_S140,
-      ota_runtime_softdevice_fwid(), app_base, OTA_BOOT_CONTINUITY_LAYOUT_ABI);
-  if (continuity != OTA_BOOT_CONTINUITY_OK) {
-    strncpy(msg, ota_bootloader_continuity_error(continuity), 96);
-    msg[95] = 0; return false;
-  }
-
-  uint8_t* page = static_cast<uint8_t*>(malloc(MOTA_NRF52_FLASH_PAGE));
-  if (!page) { strcpy(msg, "not enough RAM for recovery copy"); return false; }
-  bool copied = true;
-  for (uint32_t off = 0; off < OTA_BOOT_IMAGE_SIZE; off += MOTA_NRF52_FLASH_PAGE) {
-    const uint32_t dest = MOTA_NRF52_SHARED_BOOT_STAGE_START + off;
-    // Internal packages overlap the destination by 365 bytes. Read the next
-    // complete source page before erasing the lower destination page.
-    if (!store.read(payload_off + off, page, MOTA_NRF52_FLASH_PAGE) ||
-        flash_nrf5x_write(dest, page, MOTA_NRF52_FLASH_PAGE) < 0) {
-      copied = false; break;
-    }
-    flash_nrf5x_flush();
-    if (memcmp((const void*)(uintptr_t)dest, page, MOTA_NRF52_FLASH_PAGE) != 0) {
-      copied = false; break;
-    }
-  }
-  free(page);
-  if (!copied) {
-    strcpy(msg, "recovery scratch copy/readback failed; bootloader unchanged"); return false;
-  }
-  memcpy(g_rak_recovery_hash, m.image_hash, sizeof(g_rak_recovery_hash));
-  if (!ota_rak_recovery_source_hash_matches()) {
-    strcpy(msg, "recovery scratch hash mismatch; bootloader unchanged"); return false;
-  }
-  st.slot_ok = true;
-  g_rak_recovery_ready = true;
-  strcpy(msg, "signed bootloader copied and verified; MBR install follows this reply");
-  return true;
-}
-#endif
 
 #if defined(OTA_SD_BOOTLOADER_UPDATE)
 static bool external_bootloader_approve(OtaStoreSdNrf52& store,

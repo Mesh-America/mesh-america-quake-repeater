@@ -4,7 +4,6 @@
 
 #include "OtaSelf.h"
 #include "OtaBlInfo.h"
-#include "OtaBootloaderUpdate.h"
 #include "MotaContainer.h"
 #include "OtaDebug.h"
 #include "OtaByteIO.h"           // align_down / rd_u32le (flash-page geometry + header read)
@@ -155,11 +154,7 @@ bool OtaStoreFlashNrf52::plan_layout(bool is_full, uint32_t image_size,
 #if defined(OTA_INTERNAL_BOOTLOADER_UPDATE)
   if (!is_full || image_size != 40u * 1024u || payload_size != 40u * 1024u ||
       payload_off != 365u || total64 != MOTA_NRF52_BOOT_CONTAINER_SIZE ||
-      !(ota_bootloader_self_update_caps_valid(ota_bootloader_update_caps())
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-        || ota_bootloader_app_caps().storage_flags == OTA_BL_PROFILE_RAK_AUTO
-#endif
-        ))
+      !ota_bootloader_self_update_caps_valid(ota_bootloader_update_caps()))
     return false;
 
   // This is the release-blocking no-EndF gate: package kind is known before
@@ -170,12 +165,7 @@ bool OtaStoreFlashNrf52::plan_layout(bool is_full, uint32_t image_size,
   const uint32_t app_base = mota_nrf52_app_base();
   if (!ota_self_firmware(fi) || !fi.valid || fi.image_len > UINT32_MAX - app_base ||
       !mota_nrf52_shared_boot_stage_plan(
-          (uint32_t)total64, app_base, true, app_base + fi.image_len, start)
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-      || !ota_bootloader_live_bank_preserves_scratch(
-          app_base, fi.image_len, MOTA_NRF52_SHARED_BOOT_STAGE_START)
-#endif
-      )
+          (uint32_t)total64, app_base, true, app_base + fi.image_len, start))
     return false;
   _planned_bootloader = true;
   _planned_total = (uint32_t)total64;
@@ -355,12 +345,7 @@ bool OtaStoreFlashNrf52::begin(uint32_t total_size) {
         !ota_self_firmware(fi) || !fi.valid || fi.image_len > UINT32_MAX - app_base ||
         !mota_nrf52_shared_boot_stage_plan(
             total_size, app_base, true, app_base + fi.image_len, checked_start) ||
-        checked_start != planned_start
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-        || !ota_bootloader_live_bank_preserves_scratch(
-            app_base, fi.image_len, MOTA_NRF52_SHARED_BOOT_STAGE_START)
-#endif
-        )
+        checked_start != planned_start)
       return false;
     app_end = app_base + fi.image_len;
 #else
@@ -612,19 +597,10 @@ bool OtaStoreFlashNrf52::reopenFor(const uint8_t* want_mid, uint32_t expected_ta
     if (bootloader) {
 #if defined(OTA_INTERNAL_BOOTLOADER_UPDATE)
       SelfFwInfo fi;
-      if (!(ota_bootloader_self_update_caps_valid(ota_bootloader_update_caps())
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-            || ota_bootloader_app_caps().storage_flags == OTA_BL_PROFILE_RAK_AUTO
-#endif
-            ) ||
+      if (!ota_bootloader_self_update_caps_valid(ota_bootloader_update_caps()) ||
           !ota_self_firmware(fi) || !fi.valid || fi.image_len > UINT32_MAX - app_base ||
           !mota_nrf52_shared_boot_stage_plan(
-              total, app_base, true, app_base + fi.image_len, want) || want != start
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-          || !ota_bootloader_live_bank_preserves_scratch(
-              app_base, fi.image_len, MOTA_NRF52_SHARED_BOOT_STAGE_START)
-#endif
-          )
+              total, app_base, true, app_base + fi.image_len, want) || want != start)
         continue;
 #else
       continue;

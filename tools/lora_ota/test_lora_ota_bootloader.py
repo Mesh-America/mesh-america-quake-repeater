@@ -21,7 +21,7 @@ import lora_ota as ota
 from test_lora_ota import firmware, mota_blob, prepare_args, target, VERSION_NEW
 
 
-def boot_blob(*, storage=0x0A, version=0x0117010D, rak_name="3401_AUTO_DFU"):
+def boot_blob(*, storage=0x0A, version=0x0117010D):
     """Build a signed test-only candidate using the canonical reference builder."""
     ml = ota.bootloader_library()
     board, name, app_base = 0x239A0029, "3401_DFU", ml.NRF52_APP_BASE_S140_V6
@@ -30,12 +30,9 @@ def boot_blob(*, storage=0x0A, version=0x0117010D, rak_name="3401_AUTO_DFU"):
         name = ml.XIAO_BOOT_DEVICE_NAME.rstrip(b"\0").decode("ascii")
     elif storage == 0x09:
         board, name = 0x239A0071, "TOWER_V2_OTA"
-    elif storage == 0x16:
-        board, name = 0x239A0029, rak_name
     image = bytearray(b"\xff" * ml.XIAO_BOOT_IMAGE_SIZE)
     struct.pack_into("<II", image, 0, 0x20040000, ml.XIAO_BOOT_IMAGE_START + 0x101)
-    struct.pack_into("<8sHHB3x", image, 0x80, ml.XIAO_BOOT_CAPS_MAGIC,
-                     2 if storage == 0x16 else 3, 5, storage)
+    struct.pack_into("<8sHHB3x", image, 0x80, ml.XIAO_BOOT_CAPS_MAGIC, 3, 5, storage)
     offset = ml.BOOT_CANDIDATE_MANIFEST_OFFSET
     struct.pack_into(
         "<8sHHIII16sI", image, offset, ml.XIAO_BOOT_MANIFEST_MAGIC,
@@ -62,8 +59,7 @@ def boot_blob(*, storage=0x0A, version=0x0117010D, rak_name="3401_AUTO_DFU"):
 
 def boot_target(package):
     return replace(
-        target(platform="nrf52", boot_codecs=5),
-        bootloader_abi=2 if package.bootloader_storage == 0x16 else 3,
+        target(platform="nrf52", boot_codecs=5), bootloader_abi=3,
         boot_target_id=package.target_id, boot_hw_id=package.hw_id,
         boot_storage=package.bootloader_storage,
         nrf_sd=package.bootloader_storage == 9,
@@ -86,30 +82,10 @@ class BootloaderStagingTests(unittest.TestCase):
         self.assertEqual(package.payload_size, 40960)
 
     def test_all_supported_storage_profiles(self):
-        for storage in (10, 14, 9, 22):
+        for storage in (10, 14, 9):
             with self.subTest(storage=storage):
                 package = ota.parse_mota(boot_blob(storage=storage))
                 self.assertEqual(ota.compatible_mota(package, boot_target(package)), (True, ""))
-
-    def test_adaptive_rak_recovery_accepts_internal_and_nor_storage(self):
-        for name in ("3401_AUTO_DFU", "4631_AUTO_DFU"):
-            package = ota.parse_mota(boot_blob(storage=0x16, rak_name=name))
-            for external in (False, True):
-                live = replace(boot_target(package), nrf_qspi=external)
-                self.assertEqual(ota.compatible_mota(package, live), (True, ""))
-            live = replace(boot_target(package), bootloader_abi=1)
-            self.assertFalse(ota.compatible_mota(package, live)[0])
-
-    def test_adaptive_rak_bootloader_status_uses_app_owned_recovery(self):
-        controller = mock.Mock()
-        controller.remote_command.return_value = (
-            "BL board=239A0029 target=D04AB3AB name=3401_AUTO_DFU "
-            "crc=12345678 abi=2 caps=16 | staged:none mid=- hash=-"
-        )
-        live = replace(target(platform="nrf52", boot_codecs=5), bootloader_abi=2)
-        result = ota.query_bootloader_target(controller, live)
-        self.assertEqual(result.boot_target_id, 0xD04AB3AB)
-        self.assertEqual(result.boot_storage, 0x16)
 
     def test_malformed_bootloaders_fail_closed(self):
         for offset in (9, 10, 11, 27, 28, 105, 137, 201, 205, 600):

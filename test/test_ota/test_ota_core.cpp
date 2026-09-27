@@ -278,26 +278,6 @@ TEST(OtaBootPackage, CandidateContinuityEnvelopeHasOneCanonicalFinalOffset) {
       store, 0, OTA_BL_PROFILE_SD_BOOT_UPDATE, identity, caps));
   EXPECT_EQ(identity.manifest_offset, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET);
 
-  // Adaptive RAK recovery is authenticated by the application, so its
-  // candidate retains ABI 2 and the exact 0x16 application capability marker.
-  auto rak_recovery = canonical;
-  rak_recovery[0x400u + 8u] = MOTA_APP_FORMAT_VER;
-  rak_recovery[0x400u + 12u] = OTA_BL_STORAGE_STAGE_CEILING |
-                                 OTA_BL_STORAGE_QSPI |
-                                 OTA_BL_STORAGE_HEADER_W25;
-  wr_u32le(rak_recovery.data() + OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 40u,
-           0u);
-  wr_u32le(rak_recovery.data() + OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 40u,
-           ota_boot_image_crc32(rak_recovery.data(), rak_recovery.size(),
-                                OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 40u));
-  ASSERT_TRUE(store.begin((uint32_t)rak_recovery.size()));
-  ASSERT_TRUE(store.write(0, rak_recovery.data(), (uint32_t)rak_recovery.size()));
-  EXPECT_TRUE(ota_bootloader_external_image_metadata(
-      store, 0, rak_recovery[0x400u + 12u], identity, caps, false));
-  EXPECT_EQ(caps.apply_abi, MOTA_APP_FORMAT_VER);
-  EXPECT_FALSE(ota_bootloader_external_image_metadata(
-      store, 0, rak_recovery[0x400u + 12u], identity, caps));
-
   // A second CRC-valid base identity still counts when its adjacent BLM2
   // extension is only half present. These coupled values are the fixed point
   // for this deterministic image. Counting continuity first would wrongly
@@ -828,20 +808,6 @@ TEST(OtaBootPackage, LegacyAndCurrentBootloadersHaveSeparateCapabilityViews) {
   app = ota_bl_app_caps_scan(image, sizeof(image));
   update = ota_bl_update_caps_scan_aligned(image, sizeof(image), internal_profile);
   EXPECT_TRUE(app.present);
-  EXPECT_FALSE(update.present);
-
-  // Adaptive RAK ABI-2 advertises application OTA and the recovery storage
-  // layout, while its bootloader still cannot self-update.
-  const uint8_t adaptive_marker[16] = {
-      'M','O','T','A','B','L','D','R', 2,0, 5,0,
-      OTA_BL_PROFILE_RAK_AUTO, 0,0,0};
-  memset(image, 0xFF, sizeof(image));
-  memcpy(image + 4, adaptive_marker, sizeof(adaptive_marker));
-  app = ota_bl_app_caps_scan(image, sizeof(image));
-  update = ota_bl_update_caps_scan_aligned(
-      image, sizeof(image), OTA_BL_PROFILE_RAK_AUTO);
-  ASSERT_TRUE(app.present);
-  EXPECT_EQ(app.storage_flags, OTA_BL_PROFILE_RAK_AUTO);
   EXPECT_FALSE(update.present);
 
   // A valid marker for another storage profile is visible diagnostically but

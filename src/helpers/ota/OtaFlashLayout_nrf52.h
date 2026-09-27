@@ -52,7 +52,6 @@ static const uint32_t MOTA_NRF52_FLASH_PAGE = 4096u;
 static const uint32_t MOTA_NRF52_CONTAINER_MIN_SIZE = 8u + 197u + 5u;
 static const uint8_t  GPREGRET_OTA_APPLY    = 0x6Au;        // distinct from DFU magics 0x57/0x4E/0xA8
 static const uint8_t  GPREGRET_OTA_BOOTLOADER_UPDATE = 0x6Bu;
-static const uint8_t  GPREGRET2_RAK_RECOVERY_FAILED = 0xCEu;
 static const uint8_t  GPREGRET2_OTA_STAGE_LEGACY   = 0xD4u;
 static const uint8_t  GPREGRET2_OTA_STAGE_EXPANDED = 0xEDu;
 static const uint8_t  GPREGRET2_OTA_STAGE_QSPI     = 0x51u;

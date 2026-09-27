@@ -1328,12 +1328,12 @@ def _xiao_bootloader_image(board_id=ml.XIAO_BOOT_BOARD_ID_BASE,
 
 def _generic_bootloader_image(board_id=0x239A0029, device_name="3401_DFU",
                               storage=ml.BOOT_STORAGE_INTERNAL_UPDATE,
-                              boot_version=0x0117010D, apply_abi=ml.BOOT_FORMAT_VER):
+                              boot_version=0x0117010D):
     import zlib
     image = bytearray(b"\xff" * ml.XIAO_BOOT_IMAGE_SIZE)
     struct.pack_into("<II", image, 0, 0x20040000, ml.XIAO_BOOT_IMAGE_START + 0x101)
     struct.pack_into("<8sHHB3x", image, 0x80, ml.XIAO_BOOT_CAPS_MAGIC,
-                     apply_abi, ml.BOOT_REQUIRED_APP_CODEC_MASK,
+                     ml.BOOT_FORMAT_VER, ml.BOOT_REQUIRED_APP_CODEC_MASK,
                      storage)
     name = device_name.encode("ascii").ljust(16, b"\0")
     off = ml.BOOT_CANDIDATE_MANIFEST_OFFSET
@@ -1575,36 +1575,6 @@ def test_generic_internal_bootloader_build_parse_and_strict_contract():
         pass
 
 
-def test_adaptive_rak_recovery_bootloader_packages_are_exact():
-    priv = Ed25519PrivateKey.generate()
-    for board_id, name in ml.RAK_AUTO_RECOVERY_IDENTITIES:
-        image = _generic_bootloader_image(
-            board_id=board_id, device_name=name,
-            storage=ml.BOOT_STORAGE_RAK_AUTO_RECOVERY,
-            apply_abi=ml.APP_FORMAT_VER)
-        identity = ml.validate_bootloader_image(image)
-        target = ml.bootloader_target_id(board_id, name)
-        manifest = ml.build_manifest(
-            target_id=target, fw_version=identity.boot_version,
-            image_size=len(image), payload=image, block_size=1024,
-            image_hash=ml.mh32(image), codec_id=ml.CODEC_FULL,
-            is_full=True, sign_priv=priv, bootloader=True)
-        parsed = ml.parse_container(ml.build_container(manifest, image))
-        assert ml.verify(parsed, expect_pub=ml.ed25519_public_bytes(priv)) == []
-        assert parsed.manifest.target_id == target
-        assert ml.bootloader_caps_storage(image) == ml.BOOT_STORAGE_RAK_AUTO_RECOVERY
-
-        for wrong in (ml.BOOT_STORAGE_INTERNAL_UPDATE,
-                      ml.BOOT_STORAGE_QSPI_UPDATE):
-            invalid = _generic_bootloader_image(
-                board_id=board_id, device_name=name, storage=wrong)
-            try:
-                ml.validate_bootloader_image(invalid)
-                assert False, "adaptive recovery accepted wrong loader capabilities"
-            except ValueError:
-                pass
-
-
 def test_gat562_internal_bootloader_profile_is_exact():
     priv = Ed25519PrivateKey.generate()
     image = _generic_bootloader_image(device_name="GAT562_DFU")
@@ -1702,9 +1672,7 @@ def test_bootloader_build_inventory_is_unique_and_disjoint_from_app_targets():
         for value in re.findall(r"\{ 0x([0-9a-fA-F]{8}),", target_header)
     }
     audited = ml.audit_bootloader_target_inventory(app_targets)
-    assert len(audited) == len(expected) + 4  # two adaptive RAKs and two XIAOs
-    assert audited[0xD04AB3AB] == (0x239A0029, "3401_AUTO_DFU")
-    assert audited[0xFEEAFD1B] == (0x239A0029, "4631_AUTO_DFU")
+    assert len(audited) == len(expected) + 2  # generic internal plus two legacy XIAOs
 
     # Generic parsing remains useful for inspecting a future candidate, but a
     # signing/build call fails closed until its exact identity is qualified.
@@ -1726,7 +1694,7 @@ def test_qualified_bootloader_platform_and_storage_profiles_are_exact():
     qualified = (
         (ml.XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
         (ml.XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU"),
-    ) + ml.INTERNAL_BOOTLOADER_IDENTITIES + ml.RAK_AUTO_RECOVERY_IDENTITIES
+    ) + ml.INTERNAL_BOOTLOADER_IDENTITIES
     for board_id, device_name in qualified:
         family, fwid, app_base, layout_abi = \
             ml.bootloader_qualified_platform_profile(board_id, device_name)

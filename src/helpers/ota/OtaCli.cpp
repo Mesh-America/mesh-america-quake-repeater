@@ -400,16 +400,10 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
         const OtaBootloaderIdentity& bid = c.bootloaderIdentity();
         installable = h->flags == (MFLAG_FULL | MFLAG_SIGNED | MFLAG_BOOTLOADER) &&
                       h->codec == CODEC_FULL && bid.present && bid.crc_ok &&
-                      h->target_id == ota_bootloader_target_id(bid);
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-        installable = installable &&
-            list_bl.storage_flags == OTA_BL_PROFILE_RAK_AUTO &&
-            (c.fetch_store.usesExternal() || c.fetch_store.usesInternal());
-#else
-        installable = installable && ota_bootloader_self_update_caps_valid(list_bl_update);
+                      h->target_id == ota_bootloader_target_id(bid) &&
+                      ota_bootloader_self_update_caps_valid(list_bl_update);
 #if defined(OTA_SD_BOOTLOADER_UPDATE)
         installable = installable && list_sd_headroom;
-#endif
 #endif
 #endif
         fit = installable ? "yours" : "bootloader unsupported";
@@ -547,11 +541,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     (defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
      defined(OTA_SD_BOOTLOADER_UPDATE))
         const OtaBootloaderIdentity& bid = c.bootloaderIdentity();
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-        const OtaBlCaps& bl = c.bootloaderAppCaps();
-#else
         const OtaBlCaps& bl = c.bootloaderUpdateCaps();
-#endif
         if (selflags != (MFLAG_FULL | MFLAG_SIGNED | MFLAG_BOOTLOADER) ||
             selcodec != CODEC_FULL) {
           strcpy(reply, "ERR malformed bootloader catalog row; capture it to folder for inspection");
@@ -561,17 +551,10 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
           strcpy(reply, "ERR bootloader package does not match this installed bootloader identity");
           return true;
         }
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-        if (bl.storage_flags != OTA_BL_PROFILE_RAK_AUTO) {
-          strcpy(reply, "ERR installed bootloader is not the adaptive RAK profile");
-          return true;
-        }
-#else
         if (!ota_bootloader_self_update_caps_valid(bl)) {
           strcpy(reply, "ERR installed bootloader lacks safe LoRa bootloader-update support");
           return true;
         }
-#endif
 #if defined(OTA_SD_BOOTLOADER_UPDATE)
         SelfFwInfo sd_self;
         if (!ota_self_firmware(sd_self) ||
@@ -596,21 +579,13 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
         return true;
       }
 #if defined(NRF52_PLATFORM)
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-      const OtaBlCaps& bl = c.bootloaderAppCaps();
-#else
       const OtaBlCaps& bl = selboot ? c.bootloaderUpdateCaps()
                                     : c.bootloaderAppCaps();
-#endif
       if (!bl.present) {
         strcpy(reply, "ERR bootloader has no mOTA apply support; update it over USB first");
         return true;
       }
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-      const uint8_t need_abi = MOTA_APP_FORMAT_VER;
-#else
       const uint8_t need_abi = selboot ? MOTA_BOOT_FORMAT_VER : MOTA_APP_FORMAT_VER;
-#endif
       if (bl.apply_abi < need_abi || selcodec >= 16 || !(bl.codec_mask & (1u << selcodec))) {
         snprintf(reply, 160, "ERR bootloader cannot apply mOTA ABI %u codec %u (has abi=%u codecs=0x%x)",
                  need_abi, (unsigned)selcodec, bl.apply_abi, bl.codec_mask);
@@ -883,27 +858,16 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     (defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
      defined(OTA_SD_BOOTLOADER_UPDATE))
     const OtaBootloaderIdentity& bid = c.bootloaderIdentity();
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-    const OtaBlCaps& bl = c.bootloaderAppCaps();
-#else
     const OtaBlCaps& bl = c.bootloaderUpdateCaps();
-#endif
     if (*rest == 0 || strcmp(rest, "status") == 0) {
       if (!bid.present || !bid.crc_ok) {
         strcpy(reply, "Bootloader update unavailable: installed embedded manifest/CRC is invalid");
         return true;
       }
-#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
-      if (bl.storage_flags != OTA_BL_PROFILE_RAK_AUTO) {
-        strcpy(reply, "Bootloader recovery unavailable: installed loader is not adaptive RAK OTAFIX");
-        return true;
-      }
-#else
       if (!ota_bootloader_self_update_caps_valid(bl)) {
         strcpy(reply, "Bootloader update unavailable: installed bootloader supports application OTA only");
         return true;
       }
-#endif
       MotaManifest staged;
       char midhx[9] = "-", hashhx[17] = "-";
       const bool ready = c.manager.fetchState() == OtaManager::COMPLETE &&
