@@ -149,7 +149,7 @@ MIN_MESHCLI_VERSION = (1, 6, 0)
 # Tested format-3 inspect/verify/serve support. Keep automatic repairs pinned;
 # neither a package nor a moving branch may choose code to install on the host.
 MOTATOOL_REPAIR_REPOSITORY = "https://github.com/mikecarper/motatool.git"
-MOTATOOL_REPAIR_REVISION = "8c38369e7d35ad50cf74261869676d52dd24adf7"
+MOTATOOL_REPAIR_REVISION = "beff192aec341077f6d9d4b4938e47323775b9eb"
 MOTATOOL_REPAIR_TIMEOUT_SECONDS = 60 * 60
 # The pinned lockfile, not motatool's older package-level rust-version: zeroize
 # needs edition 2024 (1.85), and idna_adapter/ICU 2.2 require Rust 1.86.
@@ -1085,11 +1085,15 @@ def compatible_mota(info: MotaInfo, target: TargetInfo) -> tuple[bool, str]:
                 f"bootloader target {info.target_id:08X} hw={info.hw_id}, need "
                 f"{target.boot_target_id:08X} hw={target.boot_hw_id}"
             )
-        if target.bootloader_abi is None or target.bootloader_abi < 3:
-            return False, "bootloader self-update requires installed ABI 3 or newer"
+        recovery = (target.boot_storage == 0x16 and
+                    info.bootloader_storage == 0x16)
+        if target.bootloader_abi is None or target.bootloader_abi < (2 if recovery else 3):
+            return False, "bootloader install requires a capable installed OTAFIX profile"
         if target.bootloader_codecs != 0x5:
             return False, "bootloader self-update requires FULL|INPLACE codecs 0x5"
-        expected_storage = 0x09 if target.nrf_sd else 0x0E if target.nrf_qspi else 0x0A
+        expected_storage = (0x16 if recovery else
+                            0x09 if target.nrf_sd else
+                            0x0E if target.nrf_qspi else 0x0A)
         if (
             target.boot_storage != expected_storage
             or info.bootloader_storage != expected_storage
@@ -2765,7 +2769,7 @@ def query_bootloader_target(
     if match is None:
         raise OtaError(
             f"destination cannot stage a bootloader update: {reply}; "
-            "requires exact-board ABI-3 self-update bootloader and capable application"
+            "requires an exact-board update or adaptive RAK recovery application"
         )
     board, target_id, name, _crc, abi, caps = match.groups()
     library = bootloader_library()
@@ -2779,7 +2783,9 @@ def query_bootloader_target(
         raise OtaError(f"invalid destination bootloader identity: {exc}") from exc
     if derived_target != int(target_id, 16):
         raise OtaError("destination bootloader board/name does not match its target ID")
-    if int(abi) < 3 or int(abi) != target.bootloader_abi:
+    recovery = int(caps, 16) == 0x16 and (int(board, 16), name) in \
+        library.RAK_AUTO_RECOVERY_IDENTITIES
+    if int(abi) < (2 if recovery else 3) or int(abi) != target.bootloader_abi:
         raise OtaError("destination reports inconsistent or unsupported bootloader ABI")
     return replace(
         target, boot_target_id=derived_target, boot_hw_id=hw_id,

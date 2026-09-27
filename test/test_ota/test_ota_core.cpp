@@ -278,6 +278,26 @@ TEST(OtaBootPackage, CandidateContinuityEnvelopeHasOneCanonicalFinalOffset) {
       store, 0, OTA_BL_PROFILE_SD_BOOT_UPDATE, identity, caps));
   EXPECT_EQ(identity.manifest_offset, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET);
 
+  // Adaptive RAK recovery is authenticated by the application, so its
+  // candidate retains ABI 2 and the exact 0x16 application capability marker.
+  auto rak_recovery = canonical;
+  rak_recovery[0x400u + 8u] = MOTA_APP_FORMAT_VER;
+  rak_recovery[0x400u + 12u] = OTA_BL_STORAGE_STAGE_CEILING |
+                                 OTA_BL_STORAGE_QSPI |
+                                 OTA_BL_STORAGE_HEADER_W25;
+  wr_u32le(rak_recovery.data() + OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 40u,
+           0u);
+  wr_u32le(rak_recovery.data() + OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 40u,
+           ota_boot_image_crc32(rak_recovery.data(), rak_recovery.size(),
+                                OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 40u));
+  ASSERT_TRUE(store.begin((uint32_t)rak_recovery.size()));
+  ASSERT_TRUE(store.write(0, rak_recovery.data(), (uint32_t)rak_recovery.size()));
+  EXPECT_TRUE(ota_bootloader_external_image_metadata(
+      store, 0, rak_recovery[0x400u + 12u], identity, caps, false));
+  EXPECT_EQ(caps.apply_abi, MOTA_APP_FORMAT_VER);
+  EXPECT_FALSE(ota_bootloader_external_image_metadata(
+      store, 0, rak_recovery[0x400u + 12u], identity, caps));
+
   // A second CRC-valid base identity still counts when its adjacent BLM2
   // extension is only half present. These coupled values are the fixed point
   // for this deterministic image. Counting continuity first would wrongly

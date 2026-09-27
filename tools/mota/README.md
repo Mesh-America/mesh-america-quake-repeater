@@ -63,9 +63,11 @@ targeting a deployed receiver that predates the extended transport descriptor.
 Passing `bootloader=True` is a deliberately narrow reference-only path: it
 requires a nonzero version, a signed exact 40 KiB OTAFIX region, 1024-byte
 blocks, full codec, zero base hash, a sane vector table, an exact embedded
-manifest/CRC identity, and an ABI-3 marker retaining both application codecs
-(`FULL|INPLACE`, mask `0x0005`), the selected storage, and boot-update
-capabilities. Deployed XIAO packages retain their
+manifest/CRC identity, and a marker retaining both application codecs
+(`FULL|INPLACE`, mask `0x0005`). Self-update profiles require ABI 3 and the
+exact boot-update storage capability. The two adaptive RAK recovery profiles
+use ABI 2 and exact `0x16` application capabilities; their MeshCore
+application verifies and copies the image through the MBR. Deployed XIAO packages retain their
 `XIAO_BL_28860044`/`XIAO_BL_28860045` IDs. Generic packages derive the padded
 `NRF_BL_<BOARD_ID>_<DEVICE_NAME>` ID and collision-checked wire target from the
 full embedded manifest pair. Parsing and `verify()` repeat those gates; magic
@@ -76,7 +78,8 @@ builder accepts only identities in the qualified inventory. That inventory
 currently covers the shared-internal nRF52840 targets, the two deployed XIAO
 raw-QSPI identities, and the exact MeshTower V2 identity whose candidate
 marker may select either its internal (`0x0A`) or microSD (`0x09`) application
-layout. The test suite verifies those boot target IDs are unique and disjoint
+layout, plus the two exact adaptive RAK identities (`3401_AUTO_DFU` and
+`4631_AUTO_DFU`). The test suite verifies those boot target IDs are unique and disjoint
 from the generated application target table.
 
 This library does not authorize a device update. A capable node will only arm
