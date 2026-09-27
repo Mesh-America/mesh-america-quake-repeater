@@ -15,6 +15,8 @@
 namespace mesh {
 namespace ota {
 
+class OtaStore;
+
 struct ApplyState {
   bool     manifest_ok = false;
   bool     sig_ok = false;
@@ -123,6 +125,19 @@ bool ota_prepare_bootloader_update_nrf52(OtaStoreQspiNrf52& store,
 #if defined(NRF52_PLATFORM) && defined(OTA_FLASH_STORE) && \
     defined(OTA_INTERNAL_BOOTLOADER_UPDATE)
 bool ota_prepare_bootloader_update_nrf52(OtaStoreFlashNrf52& store,
+                                         const SignerAllowlist& allow,
+                                         const OtaBootloaderIdentity& installed,
+                                         const uint8_t actual_mid[4],
+                                         const uint8_t operator_mid[4],
+                                         const uint8_t operator_hash8[8],
+                                         ApplyState& st, char* msg);
+#endif
+
+#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
+// Application-owned recovery for adaptive RAK loaders lacking BOOT_UPDATE.
+// Copies a verified full bootloader from either active store into internal
+// scratch; deferred commit invokes Nordic's MBR after the LoRa reply drains.
+bool ota_prepare_rak_bootloader_recovery(OtaStore& store, bool internal,
                                          const SignerAllowlist& allow,
                                          const OtaBootloaderIdentity& installed,
                                          const uint8_t actual_mid[4],

@@ -359,6 +359,19 @@ struct OtaContext {
     }
     const OtaBootloaderIdentity& installed = bootloaderIdentity();
 #if defined(OTA_RAK_AUTO_STORE)
+#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
+    if (!fetch_store.usesInternal() && !fetch_store.usesExternal()) {
+      strncpy(msg, fetch_store.selectionReason(), 96);
+      msg[95] = 0; return false;
+    }
+    const bool internal = fetch_store.usesInternal();
+    OtaStore& recovery_store = internal
+        ? static_cast<OtaStore&>(fetch_store.internalStore())
+        : static_cast<OtaStore&>(fetch_store.externalStore());
+    bool ok = ota_prepare_rak_bootloader_recovery(
+        recovery_store, internal, allow, installed,
+        manager.fetchManifestId(), operator_mid, operator_hash8, apply_st, msg);
+#else
     if (!fetch_store.usesInternal()) {
       strncpy(msg, "bootloader LoRa update needs the internal OTAFIX profile", 96);
       msg[95] = 0; return false;
@@ -366,6 +379,7 @@ struct OtaContext {
     bool ok = ota_prepare_bootloader_update_nrf52(
         fetch_store.internalStore(), allow, installed, manager.fetchManifestId(), operator_mid,
         operator_hash8, apply_st, msg);
+#endif
 #else
     bool ok = ota_prepare_bootloader_update_nrf52(
         fetch_store, allow, installed, manager.fetchManifestId(), operator_mid,
@@ -704,8 +718,15 @@ struct OtaContext {
     (defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
      defined(OTA_SD_BOOTLOADER_UPDATE))
 #if defined(OTA_RAK_AUTO_STORE)
+#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
+    manager.set_accept_bootloader(
+        (fetch_store.usesInternal() || fetch_store.usesExternal()) &&
+        bootloaderIdentity().crc_ok &&
+        bootloaderAppCaps().storage_flags == OTA_BL_PROFILE_RAK_AUTO);
+#else
     manager.set_accept_bootloader(fetch_store.usesInternal() &&
         ota_bootloader_self_update_caps_valid(ota_bootloader_update_caps()));
+#endif
 #else
     manager.set_accept_bootloader(true);
 #endif
