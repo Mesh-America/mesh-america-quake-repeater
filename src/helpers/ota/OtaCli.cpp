@@ -883,7 +883,11 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     (defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
      defined(OTA_SD_BOOTLOADER_UPDATE))
     const OtaBootloaderIdentity& bid = c.bootloaderIdentity();
+#if defined(OTA_RAK_BOOTLOADER_RECOVERY)
+    const OtaBlCaps& bl = c.bootloaderAppCaps();
+#else
     const OtaBlCaps& bl = c.bootloaderUpdateCaps();
+#endif
     if (*rest == 0 || strcmp(rest, "status") == 0) {
       if (!bid.present || !bid.crc_ok) {
         strcpy(reply, "Bootloader update unavailable: installed embedded manifest/CRC is invalid");

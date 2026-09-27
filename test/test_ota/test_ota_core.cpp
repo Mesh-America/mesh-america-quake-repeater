@@ -830,6 +830,20 @@ TEST(OtaBootPackage, LegacyAndCurrentBootloadersHaveSeparateCapabilityViews) {
   EXPECT_TRUE(app.present);
   EXPECT_FALSE(update.present);
 
+  // Adaptive RAK ABI-2 advertises application OTA and the recovery storage
+  // layout, while its bootloader still cannot self-update.
+  const uint8_t adaptive_marker[16] = {
+      'M','O','T','A','B','L','D','R', 2,0, 5,0,
+      OTA_BL_PROFILE_RAK_AUTO, 0,0,0};
+  memset(image, 0xFF, sizeof(image));
+  memcpy(image + 4, adaptive_marker, sizeof(adaptive_marker));
+  app = ota_bl_app_caps_scan(image, sizeof(image));
+  update = ota_bl_update_caps_scan_aligned(
+      image, sizeof(image), OTA_BL_PROFILE_RAK_AUTO);
+  ASSERT_TRUE(app.present);
+  EXPECT_EQ(app.storage_flags, OTA_BL_PROFILE_RAK_AUTO);
+  EXPECT_FALSE(update.present);
+
   // A valid marker for another storage profile is visible diagnostically but
   // cannot authorize an internal-flash bootloader replacement.
   memset(image, 0xFF, sizeof(image));
