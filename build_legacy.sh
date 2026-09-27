@@ -2693,6 +2693,16 @@ apply_debug_overrides() {
 uses_merged_standard_usb_logging() {
   local env_name=$1
 
+  # The four 256 KiB STM32WL USB Companions exceed their 32 KiB LittleFS
+  # boundary when packet diagnostics are linked. Keep their framed USB
+  # Companion transport and storage layout intact.
+  case "$env_name" in
+    RAK_3x72_companion_radio_usb|Tiny_Relay_companion_radio_usb|\
+    wio-e5-mini_companion_radio_usb|wio-e5_companion_radio_usb)
+      return 1
+      ;;
+  esac
+
   # These profiles either own Serial for framed traffic, deliberately trade
   # logging for OTA space, or provide their own logging contract. Keep those
   # contracts unchanged.

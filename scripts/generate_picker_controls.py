@@ -51,7 +51,7 @@ def capacity_note(reductions, defines):
     return ' '.join(notes)
 
 
-def runtime_metadata(manifest, mqtt):
+def runtime_metadata(manifest, mqtt, release_source=None):
     """Keep picker choices tied to capabilities proven in this exact image."""
     capabilities = set(manifest['capabilities'])
     verified = {check['capability'] for check in manifest.get('verification', [])
@@ -68,7 +68,7 @@ def runtime_metadata(manifest, mqtt):
     if {'logging.usb.packets', 'logging.usb.control'} <= packaged:
         result['loggingModes'] = ['none', 'usb', 'wifi', 'both'] if mqtt else ['none', 'usb']
         result['loggingControl'] = 'logging.output' if mqtt else 'usb.logging'
-        result['loggingSource'] = manifest['source_commit']
+        result['loggingSource'] = manifest.get('source_commit', release_source)
     if 'companion.dedicated_usb_logging' in verified:
         result['dedicatedUsbLogging'] = True
     return result
@@ -121,7 +121,7 @@ def generate(stage, config):
                 'snmp': enabled('WITH_SNMP'),
                 'updateMethods': manifest.get('ota_update_methods', []),
             }
-            controls.update(runtime_metadata(manifest, controls['mqtt']))
+            controls.update(runtime_metadata(manifest, controls['mqtt'], plan['source']))
             if manifest.get('ota_update_requirements'):
                 controls['updateRequirements'] = manifest['ota_update_requirements']
             note = capacity_note(manifest.get('reductions', []), defines)
