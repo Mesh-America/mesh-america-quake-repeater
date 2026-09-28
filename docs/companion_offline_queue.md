@@ -16,7 +16,7 @@ A reboot clears it.
 | nRF52840 with more than 300 contacts but no contact cache | 208 ordinary frames plus a separate 15-DM queue |
 | nRF52 Full Companion with the memory correction | 256 normally; 128 while mOTA owns shared storage |
 | RP2040 | 256 |
-| STM32 | 16 |
+| STM32 | 16 (one-key DM holding is omitted on flash-constrained STM32WL builds) |
 | Known constrained classic ESP32 target override | 128 |
 | Meshadventurer Full Companion | 16 |
 | Constrained Full ESP32 fallback | 16 |

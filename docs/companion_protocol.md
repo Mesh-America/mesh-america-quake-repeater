@@ -270,6 +270,10 @@ refusal, and the sender pushes `0x91` plus the full rejecting key to a
 connected app, then stops further introductions for that peer until reboot.
 Directly attached clients may use `get dm.one_key` or `set dm.one_key on|off`;
 `get dm.held` reports the number of held DMs. `on` auto-accepts verified senders.
+The flash-constrained STM32WL Companion builds omit one-key DM support to
+preserve their existing filesystem boundary; these commands report
+`Error: one-key DMs unsupported on this build` there. Ordinary contact-based
+private messages remain available.
 A recipient running older firmware still
 needs the sender contact before it can decrypt a normal DM. This flow uses
 a second radio packet for the initial DM; `RESP_CODE_SENT` includes that

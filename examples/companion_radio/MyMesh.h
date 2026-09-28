@@ -84,6 +84,16 @@
 #define MAX_CONTACTS 100
 #endif
 
+// STM32WL Companion images have only 224 KiB of application flash. Keep their
+// existing filesystem boundary; larger targets retain the one-key DM feature.
+#ifndef MESH_ENABLE_ONE_KEY_DM
+#if defined(STM32_PLATFORM)
+#define MESH_ENABLE_ONE_KEY_DM 0
+#else
+#define MESH_ENABLE_ONE_KEY_DM 1
+#endif
+#endif
+
 #if defined(NRF52_PLATFORM) && MAX_CONTACTS > 300 \
     && !defined(OTA_SHARED_COMPANION_QUEUE) && MESH_CONTACT_CACHE
 #define ONE_KEY_DM_SHARED_OFFLINE_QUEUE 1
@@ -335,11 +345,13 @@ protected:
   void onContactVisit(const ContactInfo& contact) override;
 #endif
   ContactInfo* processAck(const uint8_t *data) override;
+#if MESH_ENABLE_ONE_KEY_DM
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
                       const mesh::Identity& sender, uint8_t* data,
                       size_t len) override;
   bool onAddressedTextPacket(mesh::Packet* packet, uint8_t src_hash,
                              const uint8_t* mac_and_data, size_t len) override;
+#endif
   void queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt, uint32_t sender_timestamp,
                     const uint8_t *extra, int extra_len, const char *text,
                     bool terminal_command_reply=false,
@@ -708,6 +720,7 @@ private:
   };
   #define EXPECTED_ACK_TABLE_SIZE 8
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table
+#if MESH_ENABLE_ONE_KEY_DM
   // A recent ACK proves that peer can decrypt our normal text packets. Retry
   // attempts still send the introduction in case its contact was later erased.
   static constexpr uint8_t ONE_KEY_PEERS = 8;
@@ -755,6 +768,7 @@ private:
   void rememberDeliveredOneKeyDM(const uint8_t* pub_key,
                                  const uint8_t id[ONE_KEY_DM_ID_SIZE]);
   void releaseHeldOneKeyDMs();
+#endif
   mesh::LogicalMessageCache<ROOM_MESSAGE_TIMESTAMP_CACHE_SIZE> room_message_timestamps;
   int next_ack_idx;
   unsigned long next_ack_expiry;
