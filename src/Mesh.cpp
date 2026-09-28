@@ -1074,8 +1074,9 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
           // scan contacts DB, for all matching hashes of 'src_hash' (max 4 matches supported ATM)
           int num = searchPeersByHash(&src_hash);
           // for each matching contact, try to decrypt data
-          bool found = false;
-          for (int j = 0; j < num; j++) {
+          bool found = pkt->getPayloadType() == PAYLOAD_TYPE_TXT_MSG &&
+              onAddressedTextPacket(pkt, src_hash, macAndData, pkt->payload_len - i);
+          for (int j = 0; j < num && !found; j++) {
             uint8_t secret[PUB_KEY_SIZE];
             getPeerSharedSecret(secret, j);
 

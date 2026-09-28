@@ -87,6 +87,11 @@
 #ifndef OFFLINE_QUEUE_SIZE
 #if defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
 #define OFFLINE_QUEUE_SIZE 512
+#elif defined(NRF52_PLATFORM) && MAX_CONTACTS > 300 \
+    && !defined(OTA_SHARED_COMPANION_QUEUE)
+// Large nRF52 contact tables and the 15-DM consent queue need a smaller
+// ordinary offline queue to preserve the runtime heap safety margin.
+#define OFFLINE_QUEUE_SIZE 208
 #elif defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM) \
     || defined(RP2040_PLATFORM)
 #define OFFLINE_QUEUE_SIZE 256
@@ -320,6 +325,8 @@ protected:
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
                       const mesh::Identity& sender, uint8_t* data,
                       size_t len) override;
+  bool onAddressedTextPacket(mesh::Packet* packet, uint8_t src_hash,
+                             const uint8_t* mac_and_data, size_t len) override;
   void queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt, uint32_t sender_timestamp,
                     const uint8_t *extra, int extra_len, const char *text,
                     bool terminal_command_reply=false,
@@ -686,13 +693,49 @@ private:
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table
   // A recent ACK proves that peer can decrypt our normal text packets. Retry
   // attempts still send the introduction in case its contact was later erased.
-  static constexpr uint8_t ONE_KEY_ACKED_PEERS = 8;
-  uint8_t one_key_acked_keys[ONE_KEY_ACKED_PEERS][PUB_KEY_SIZE] = {};
-  uint8_t one_key_acked_count = 0;
-  uint8_t one_key_acked_next = 0;
+  static constexpr uint8_t ONE_KEY_PEERS = 8;
+  struct OneKeyPeerState {
+    uint8_t pub_key[PUB_KEY_SIZE];
+    uint32_t intro_tag;
+    uint8_t status;  // 0: pending, 1: acknowledged, 2: rejected
+  };
+  OneKeyPeerState one_key_peers[ONE_KEY_PEERS] = {};
+  uint8_t one_key_peer_count = 0;
+  uint8_t one_key_peer_next = 0;
   bool hasOneKeyAck(const ContactInfo& contact) const;
+  bool hasOneKeyReject(const ContactInfo& contact) const;
+  void rememberOneKeyIntro(const ContactInfo& contact, uint32_t tag);
   void rememberOneKeyAck(const ContactInfo& contact);
+  bool rememberOneKeyReject(const ContactInfo& contact, uint32_t tag);
   uint32_t sendOneKeyIntroduction(const ContactInfo& contact);
+
+  static constexpr uint8_t MAX_HELD_ONE_KEY_DMS = 15;
+  static constexpr uint8_t ONE_KEY_DM_ID_SIZE = 8;
+  uint8_t verified_pending_keys[MAX_HELD_ONE_KEY_DMS][PUB_KEY_SIZE] = {};
+  uint8_t verified_pending_count = 0;
+  struct HeldOneKeyDM {
+    uint8_t sender_key[PUB_KEY_SIZE];
+    uint8_t id[ONE_KEY_DM_ID_SIZE];
+    mesh::Packet packet;
+  };
+  HeldOneKeyDM held_dms[MAX_HELD_ONE_KEY_DMS];
+  uint8_t held_dm_count = 0;
+  struct DeliveredOneKeyDM {
+    uint8_t sender_key[PUB_KEY_SIZE];
+    uint8_t id[ONE_KEY_DM_ID_SIZE];
+  };
+  DeliveredOneKeyDM delivered_dms[MAX_HELD_ONE_KEY_DMS] = {};
+  uint8_t delivered_dm_count = 0;
+  uint8_t delivered_dm_next = 0;
+  void rememberVerifiedPendingSender(const uint8_t* pub_key);
+  void forgetVerifiedPendingSender(const uint8_t* pub_key);
+  static void makeOneKeyDMId(uint8_t id[ONE_KEY_DM_ID_SIZE], uint32_t timestamp,
+                             const char* text);
+  bool wasDeliveredOneKeyDM(const uint8_t* pub_key,
+                            const uint8_t id[ONE_KEY_DM_ID_SIZE]) const;
+  void rememberDeliveredOneKeyDM(const uint8_t* pub_key,
+                                 const uint8_t id[ONE_KEY_DM_ID_SIZE]);
+  void releaseHeldOneKeyDMs();
   mesh::LogicalMessageCache<ROOM_MESSAGE_TIMESTAMP_CACHE_SIZE> room_message_timestamps;
   int next_ack_idx;
   unsigned long next_ack_expiry;

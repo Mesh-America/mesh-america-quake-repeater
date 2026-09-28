@@ -1040,6 +1040,13 @@ bool DataStore::loadPrefsInt(const char *filename,
 #if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
         327,
 #endif
+        231,  // One-key DM consent policy, appended after flood retry controls
+#ifdef TBEAM_1W
+        238,
+#endif
+#if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        328,
+#endif
     };
     const uint32_t prefs_size = file.size();
     bool known_size = false;
@@ -1179,6 +1186,8 @@ bool DataStore::loadPrefsInt(const char *filename,
                       sizeof(loaded_prefs.flood_retry_group_max_path));
     readOptionalField(&loaded_prefs.flood_retry_advert_enabled,
                       sizeof(loaded_prefs.flood_retry_advert_enabled));
+    readOptionalField(&loaded_prefs.one_key_dm_enabled,
+                      sizeof(loaded_prefs.one_key_dm_enabled));
 
     // Any bytes left over form only part of a historically appended field.
     // Preserve the file and defaults rather than treating that tail as EOF.
@@ -1337,6 +1346,8 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
         sizeof(_prefs.flood_retry_group_max_path)) == sizeof(_prefs.flood_retry_group_max_path);
     success = success && file.write((uint8_t *)&_prefs.flood_retry_advert_enabled,
         sizeof(_prefs.flood_retry_advert_enabled)) == sizeof(_prefs.flood_retry_advert_enabled);
+    success = success && file.write((uint8_t *)&_prefs.one_key_dm_enabled,
+        sizeof(_prefs.one_key_dm_enabled)) == sizeof(_prefs.one_key_dm_enabled);
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
     success = file.commit(success);

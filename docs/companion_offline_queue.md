@@ -11,7 +11,8 @@ A reboot clears it.
 | --- | ---: |
 | ESP32 with configured PSRAM | 512 |
 | ESP32 without PSRAM | 256 |
-| nRF52840 | 256 |
+| nRF52840 with at most 300 contact slots | 256 |
+| nRF52840 with more than 300 contact slots (non-shared queue) | 208 |
 | nRF52 Full Companion with the memory correction | 256 normally; 128 while mOTA owns shared storage |
 | RP2040 | 256 |
 | STM32 | 16 |
@@ -44,7 +45,9 @@ Full profiles require at least 72 KiB of heap space at link time; OLED and
 headless profiles use their own [memory budgets](firmware_memory_budget.md).
 
 Standard, logging, MQTT, and Cascade build overlays retain the selected target
-capacity; they do not silently shrink the queue.
+capacity. The high-contact nRF52 default above is the exception: it reserves
+RAM for the separate 15-entry consent-pending DM queue. A target's explicit
+`OFFLINE_QUEUE_SIZE` still takes precedence.
 
 Each queue slot currently costs 177 bytes. A 256-frame queue reserves 45,312
 bytes, while a 512-frame queue reserves 90,624 bytes. There is no 256-frame

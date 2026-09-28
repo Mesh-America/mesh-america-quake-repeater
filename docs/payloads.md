@@ -247,12 +247,19 @@ without a broadcast advert. The ciphertext contains:
 
 The signed bytes are the recipient's full public key followed by the tag,
 marker, and NUL-terminated name. The recipient verifies that signature against
-the 32-byte sender key in the anonymous request header before creating a chat
-contact. A receiver that does not implement `DMK1` ignores the introduction;
+the 32-byte sender key in the anonymous request header before offering a chat
+contact for manual acceptance, or auto-adding it if `dm.one_key` is enabled.
+A receiver that does not implement `DMK1` ignores the introduction;
 the following normal text packet still works when it already has the sender's
-key. The recipient's manual advert auto-add setting does not suppress a
-verified, addressed `DMK1` introduction. The sender's full public key remains
+key. The recipient's manual advert auto-add setting does not suppress the
+synthetic advert for a verified, addressed `DMK1` introduction. The sender's
+full public key remains
 visible in the radio packet header, as with other anonymous requests.
+
+With `dm.one_key` off, the recipient replies with an encrypted `DMR1` response:
+the original 4-byte tag, ASCII `DMR1`, then its 64-byte Ed25519 signature
+over the sender's full key followed by that tag and marker. Only a matching
+pending introduction and verified signature stops repeat introductions.
 
 ### Room server login
 

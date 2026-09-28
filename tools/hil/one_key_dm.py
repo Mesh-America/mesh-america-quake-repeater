@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise a private DM when only its sender knows the recipient's key.
+"""Exercise manual acceptance of a one-key private DM.
 
 This test changes the two radios' contact lists and transmits one LoRa DM.
-It leaves the recipient's offline message queue untouched. Use two nearby
+It consumes the recipient's deferred DM from the offline queue. Use two nearby
 Companion USB radios on the same radio profile, with no other client attached.
 """
 
@@ -79,14 +79,23 @@ class Link:
         frame = self.request(bytes([30]) + key, (1, 3))
         return frame if frame[0] == 3 else None
 
+    def cli(self, command: str) -> str:
+        return self.request(bytes([0x42]) + command.encode(), (0x1D,))[1:].decode()
+
 
 def run(sender_port: str, recipient_port: str, reset_contact: bool,
         zero_hop: bool, invalid_signature_first: bool) -> dict:
     sender = Link(sender_port)
     recipient = Link(recipient_port)
+    prior_dm_setting = None
     try:
         sender_key, sender_info = sender.start()
         recipient_key, recipient_info = recipient.start()
+        prior_dm_setting = recipient.cli("get dm.one_key")
+        if prior_dm_setting not in ("> on", "> off"):
+            raise RuntimeError("recipient did not report its one-key DM policy")
+        if not recipient.cli("set dm.one_key off").endswith("dm.one_key off"):
+            raise RuntimeError("recipient could not enable manual DM acceptance")
         radio_fields = ("frequency_khz", "bandwidth_hz", "spreading_factor", "coding_rate")
         if any(sender_info[field] != recipient_info[field] for field in radio_fields):
             raise RuntimeError("radios do not use the same frequency, bandwidth, SF, and CR")
@@ -136,14 +145,40 @@ def run(sender_port: str, recipient_port: str, reset_contact: bool,
         sent = sender.request(message, (6,), seconds=20)
         expected_ack = sent[2:6]
         timeout_ms = struct.unpack("<I", sent[6:10])[0]
+        offered = None
+        rejected = False
         until = time.monotonic() + min(timeout_ms / 1000 + 5, 120)
         while time.monotonic() < until:
             for link in (sender, recipient):
                 link.read(0.1)
-            confirmed = any(
-                frame[0] == 0x82 and frame[1:5] == expected_ack
-                for frame in sender.pushes
-            )
+            offered = next((frame for frame in recipient.pushes
+                            if frame[0] == 0x8A and frame[1:33] == sender_key), None)
+            rejected = any(frame[0] == 0x91 and frame[1:33] == recipient_key
+                           for frame in sender.pushes)
+            if offered and rejected:
+                break
+
+        if offered is None or not rejected:
+            raise AssertionError("signed introduction did not produce advert and refusal")
+        if recipient.contact(sender_key) is not None:
+            raise AssertionError("recipient added sender without acceptance")
+        if any(frame[0] == 0x83 for frame in recipient.pushes):
+            raise AssertionError("recipient delivered DM before acceptance")
+
+        # The text follows the introduction on air. Ensure it is actually in
+        # the holding queue before accepting, not merely delivered afterward.
+        until = time.monotonic() + min(timeout_ms / 1000 + 5, 120)
+        while time.monotonic() < until and recipient.cli("get dm.held") != "> 1":
+            time.sleep(0.5)
+        if recipient.cli("get dm.held") != "> 1":
+            raise AssertionError("no decryptable DM was held before acceptance")
+        recipient.request(bytes([9]) + offered[1:], (0,))
+        until = time.monotonic() + min(timeout_ms / 1000 + 5, 120)
+        while time.monotonic() < until:
+            for link in (sender, recipient):
+                link.read(0.1)
+            confirmed = any(frame[0] == 0x82 and frame[1:5] == expected_ack
+                            for frame in sender.pushes)
             waiting = any(frame[0] == 0x83 for frame in recipient.pushes)
             if confirmed and waiting:
                 break
@@ -153,6 +188,8 @@ def run(sender_port: str, recipient_port: str, reset_contact: bool,
         )
         waiting = any(frame[0] == 0x83 for frame in recipient.pushes)
         learned = recipient.contact(sender_key) is not None
+        queued = recipient.request(bytes([10]), (7, 10, 16))
+        replayed = queued[0] in (7, 16) and text in queued
         result = {
             "sender_prefix": sender_key[:6].hex(),
             "recipient_prefix": recipient_key[:6].hex(),
@@ -160,14 +197,22 @@ def run(sender_port: str, recipient_port: str, reset_contact: bool,
             "ack_confirmed": confirmed,
             "recipient_message_waiting": waiting,
             "recipient_learned_sender": learned,
+            "synthetic_advert_offered": offered is not None,
+            "signed_refusal_received": rejected,
+            "held_message_replayed": replayed,
             "timeout_ms": timeout_ms,
         }
         if invalid_signature_first:
             result["invalid_signature_rejected"] = True
-        if not (confirmed and waiting and learned):
+        if not (confirmed and waiting and learned and replayed):
             raise AssertionError(json.dumps(result, sort_keys=True))
         return result
     finally:
+        if prior_dm_setting == "> on":
+            try:
+                recipient.cli("set dm.one_key on")
+            except Exception:
+                pass
         sender.close()
         recipient.close()
 

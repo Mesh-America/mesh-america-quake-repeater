@@ -106,6 +106,8 @@ public:
   uint8_t flood_retry_max_path = 1;
   uint8_t flood_retry_group_max_path = 0xFF;
   uint8_t flood_retry_advert_enabled = 1;
+  // Appended persisted field: old preferences images default to consent required.
+  uint8_t one_key_dm_enabled = 0;
 
 private:
   class RadioPrefs : public CommonRadioPrefs {

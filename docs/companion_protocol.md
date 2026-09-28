@@ -255,19 +255,28 @@ that the recipient can decrypt normal DMs, so subsequent first attempts omit
 the extra packet until the sender reboots or the small recent-ACK cache is
 replaced.
 
-The receiving Companion verifies the introduction signature and adds the
-sender as a chat contact even when advert auto-add is off. It emits the usual
-`PUSH_CODE_NEW_ADVERT` contact frame before the normal private-message frame,
-so existing clients can associate the six-byte message prefix with the full
-key. A recipient running older firmware still needs the sender contact before
-it can decrypt a normal DM. This flow uses a second radio packet for the
-initial DM; `RESP_CODE_SENT` includes that scheduling delay in its timeout.
+The receiving Companion verifies the introduction signature. By default,
+`dm.one_key` is `off`: the sender is offered to the app as a synthetic
+`PUSH_CODE_NEW_ADVERT` (`0x8A`) but is not added as a contact. The app/user
+accepts through the normal add-contact command. Up to 15 verified, decryptable
+plain DMs are held in RAM and delivered after acceptance; the oldest rolls
+off first. The queue is lost on reboot. On high-contact nRF52 builds, the
+ordinary offline queue is 208 frames (previously 256) to retain the runtime
+heap margin for this separate 15-DM queue. The device sends a signed `DMR1`
+refusal, and the sender pushes `0x91` plus the full rejecting key to a
+connected app, then stops further introductions for that peer until reboot.
+Directly attached clients may use `get dm.one_key` or `set dm.one_key on|off`;
+`get dm.held` reports the number of held DMs. `on` auto-accepts verified senders.
+A recipient running older firmware still
+needs the sender contact before it can decrypt a normal DM. This flow uses
+a second radio packet for the initial DM; `RESP_CODE_SENT` includes that
+scheduling delay in its timeout.
 
 For a two-radio regression test, run `tools/hil/one_key_dm.py` with the USB
 serial paths for `--sender` and `--recipient`. `--reset-contact` removes the
 sender from recipient contacts, and `--zero-hop` sets the sender's route to
-zero hop when the devices are nearby. The test checks contact creation,
-message waiting, and the matching ACK without draining the offline queue.
+zero hop when the devices are nearby. The test checks the synthetic advert,
+refusal, manual acceptance, held-message delivery, and matching ACK.
 `--invalid-signature-first` also checks that a decryptable introduction with
 an invalid Ed25519 signature does not add a contact.
 
@@ -977,13 +986,14 @@ Byte values are authoritative; names are aliases. When reading firmware source, 
 | `0x87` | `PUSH_CODE_STATUS_RESPONSE` | Server status response. |
 | `0x88` | `PUSH_CODE_LOG_RX_DATA` | Radio receive log data. |
 | `0x89` | `PUSH_CODE_TRACE_DATA` | Completed trace data. |
-| `0x8A` | `PUSH_CODE_NEW_ADVERT` | Newly stored contact advertisement. |
+| `0x8A` | `PUSH_CODE_NEW_ADVERT` | New advert; a verified one-key DM may use this as an addable synthetic advert without storing the contact. |
 | `0x8B` | `PUSH_CODE_TELEMETRY_RESPONSE` | Telemetry response. |
 | `0x8C` | `PUSH_CODE_BINARY_RESPONSE` | Binary request response. |
 | `0x8D` | `PUSH_CODE_PATH_DISCOVERY_RESPONSE` | Path-discovery response. |
 | `0x8E` | `PUSH_CODE_CONTROL_DATA` | Control/discovery data. |
 | `0x8F` | `PUSH_CODE_CONTACT_DELETED` | Oldest contact was deleted while making room. |
 | `0x90` | `PUSH_CODE_CONTACTS_FULL` | Contact storage is full. |
+| `0x91` | `PUSH_CODE_ONE_KEY_DM_REJECTED` | One-key DM refused; bytes 1–32 contain the refusing contact's full public key. |
 
 ### Parsing Responses
 
