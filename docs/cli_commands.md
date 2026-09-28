@@ -1191,6 +1191,10 @@ capacity. Remote use follows the existing administrator-command permissions.
 
 **Default:** `869.618,62.5,8,5`
 
+`get radio` returns exactly four comma-separated fields for compatibility with
+existing Companion apps. On dual-radio builds, use `get radio2` and
+`get radio.timing` for profile and timing diagnostics.
+
 **Note:** Requires reboot to apply. If RXPS is enabled and the saved minimum
 level/preamble cannot safely cover the new radio timing, the command reply
 reports the effective level and preamble, or `RXPS continuous-fast` when no
