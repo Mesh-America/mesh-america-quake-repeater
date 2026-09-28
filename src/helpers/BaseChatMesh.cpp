@@ -289,7 +289,14 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
 
 int BaseChatMesh::searchPeersByHash(const uint8_t* hash) {
   int n = 0;
-  for (int i = 0; i < num_contacts && n < MAX_SEARCH_RESULTS; i++) {
+  // A matching transient slot may have the same identity as an accepted contact.
+  // Try persistent contacts first so the transient slot cannot swallow their DMs.
+  for (int i = MAX_ANON_CONTACTS; i < num_contacts && n < MAX_SEARCH_RESULTS; i++) {
+    if (contacts[i].id.isHashMatch(hash)) {
+      matching_peer_indexes[n++] = i;
+    }
+  }
+  for (int i = 0; i < MAX_ANON_CONTACTS && n < MAX_SEARCH_RESULTS; i++) {
     if (contacts[i].id.isHashMatch(hash)) {
       matching_peer_indexes[n++] = i;  // store the INDEXES of matching contacts (for subsequent 'peer' methods)
     }

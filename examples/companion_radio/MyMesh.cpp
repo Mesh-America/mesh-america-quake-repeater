@@ -220,8 +220,10 @@ static constexpr uint8_t DEFAULT_FEM_RX_GAIN = 1;
 // The encrypted body of an ANON_REQ starts with its usual four-byte tag.
 // A distinct marker after that tag prevents a contact introduction from being
 // mistaken for a login or another anonymous request.
+#if MESH_ENABLE_ONE_KEY_DM
 static constexpr uint8_t ONE_KEY_INTRO_MARKER[] = {'D', 'M', 'K', '1'};
 static constexpr uint8_t ONE_KEY_REJECT_MARKER[] = {'D', 'M', 'R', '1'};
+#endif
 
 static bool save_filter(const ContactInfo& c);
 
@@ -1022,7 +1024,9 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
 
       // NOTE: the same ACK can be received multiple times!
       ContactInfo* contact = expected_ack_table[i].contact;
+#if MESH_ENABLE_ONE_KEY_DM
       if (contact != NULL && contact->type == ADV_TYPE_CHAT) rememberOneKeyAck(*contact);
+#endif
       clearExpectedAck(expected_ack_table[i]);
       expireExpectedAcks();
       return contact;
@@ -1031,6 +1035,7 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
   return checkConnectionsAck(data);
 }
 
+#if MESH_ENABLE_ONE_KEY_DM
 bool MyMesh::hasOneKeyAck(const ContactInfo& contact) const {
   for (uint8_t i = 0; i < one_key_peer_count; ++i) {
     if (one_key_peers[i].status == 1 &&
@@ -1397,6 +1402,7 @@ void MyMesh::releaseHeldOneKeyDMs() {
 #endif
   }
 }
+#endif // MESH_ENABLE_ONE_KEY_DM
 
 void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt,
                           uint32_t sender_timestamp, const uint8_t *extra,
@@ -1594,6 +1600,7 @@ bool MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
 
 void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                            const char *text) {
+#if MESH_ENABLE_ONE_KEY_DM
   uint8_t dm_id[ONE_KEY_DM_ID_SIZE];
   makeOneKeyDMId(dm_id, sender_timestamp, text);
   if (wasDeliveredOneKeyDM(from.id.pub_key, dm_id)) return;
@@ -1617,12 +1624,15 @@ void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t 
       break;
     }
   }
+#endif
   markConnectionActive(from); // in case this is from a server, and we have a connection
   // BaseChatMesh updates lastmod immediately before this callback.
   scheduleContactWrite(from);
   queueMessage(from, TXT_TYPE_PLAIN, pkt, sender_timestamp, NULL, 0, text);
+#if MESH_ENABLE_ONE_KEY_DM
 #if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
   if (replaced_held_dm) rememberDeliveredOneKeyDM(from.id.pub_key, dm_id);
+#endif
 #endif
 }
 
@@ -1837,6 +1847,7 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
   if (data == NULL || len < 4) return;
 
+#if MESH_ENABLE_ONE_KEY_DM
   // Decryption returns block-aligned plaintext including zero padding.
   if (len >= 4 + sizeof(ONE_KEY_REJECT_MARKER) + SIGNATURE_SIZE &&
       len < 4 + sizeof(ONE_KEY_REJECT_MARKER) + SIGNATURE_SIZE + CIPHER_BLOCK_SIZE &&
@@ -1855,6 +1866,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     }
     return;
   }
+#endif
 
   uint32_t tag;
   memcpy(&tag, data, 4);
@@ -5069,6 +5081,7 @@ void MyMesh::handleCmdFrame(size_t len) {
           msg_timestamp = getRTCClock()->getCurrentTimeUnique();
         }
         replacement_entry = findPendingTextMessage(text_fingerprint, msg_timestamp);
+#if MESH_ENABLE_ONE_KEY_DM
         if (recipient->type == ADV_TYPE_CHAT
             && !hasOneKeyReject(*recipient)
             && (attempt != 0 || !hasOneKeyAck(*recipient))
@@ -5076,6 +5089,7 @@ void MyMesh::handleCmdFrame(size_t len) {
             && (attempt <= 3 || tlen <= MAX_TEXT_LEN - 2)) {
           one_key_delay = sendOneKeyIntroduction(*recipient);
         }
+#endif
         result = sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout,
                              packet_retry_key, NULL, text_fingerprint, one_key_delay);
         if (result != MSG_SEND_FAILED && is_room_post) {
@@ -9168,6 +9182,7 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
 #if defined(MESH_SOAK_DIAGNOSTICS)
   if (mesh::hil::handleSoakCommand(command, reply, reply_size)) return true;
 #endif
+#if MESH_ENABLE_ONE_KEY_DM
   if (strcmp(command, "get dm.one_key") == 0) {
     snprintf(reply, reply_size, "> %s", _prefs.one_key_dm_enabled == 1 ? "on" : "off");
     return true;
@@ -9192,6 +9207,13 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
     }
     return true;
   }
+#else
+  if (strcmp(command, "get dm.one_key") == 0 || strcmp(command, "get dm.held") == 0 ||
+      strncmp(command, "set dm.one_key ", 15) == 0) {
+    snprintf(reply, reply_size, "Error: one-key DMs unsupported on this build");
+    return true;
+  }
+#endif
   if (strcmp(command, "get key.backup.transport") == 0) {
     snprintf(reply, reply_size, "ephemeral-routed-v1");
     return true;
@@ -9929,7 +9951,9 @@ void MyMesh::loop() {
 #endif
   }
   servicePendingRadioParamApply();
+#if MESH_ENABLE_ONE_KEY_DM
   if (held_dm_count != 0 || verified_pending_count != 0) releaseHeldOneKeyDMs();
+#endif
 
   // is there are pending dirty contacts write needed?
   if (isContactWriteDue()) {
