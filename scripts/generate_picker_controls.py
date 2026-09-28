@@ -9,7 +9,20 @@ import json
 import re
 from pathlib import Path
 
+from package_esp32_partition_migration import BOARDS
+
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def partition_migrations():
+    """Use the packager's exact board/role lookup, not guessed ZIP slugs."""
+    result = {}
+    for package, spec in BOARDS.items():
+        target = spec['target']
+        if target in result:
+            raise ValueError('Ambiguous partition migration target: ' + target)
+        result[target] = package
+    return result
 
 
 def capacity_note(reductions, defines):
@@ -141,7 +154,8 @@ def generate(stage, config):
                     raise ValueError('Conflicting target metadata: ' + target)
                 profiles[target] = controls
     family = next(g['tag'] for g in plan['groups'] if g['key'] == 'companion')
-    return {'familyTag': family, 'source': plan['source'], 'profiles': profiles}
+    return {'familyTag': family, 'source': plan['source'], 'profiles': profiles,
+            'partitionMigrations': partition_migrations()}
 
 
 if __name__ == '__main__':

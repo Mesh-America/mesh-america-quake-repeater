@@ -1134,6 +1134,110 @@ assert.strictEqual(commands(combinedDirections).filter(command => command === 's
 assert.strictEqual(commands(combinedDirections).filter(command => command === 'set bridge.enabled on').length, 1);
 console.log('current release metadata and capacity directions tests passed');
 
+// Partition expansion uses the packager's lookup and published utility assets,
+// not hardware labels or guessed slugs (several historical names differ).
+const migrationFamily = currentControls.familyTag;
+const utilityTag = 'utility-' + migrationFamily;
+const utilityUrl = 'https://github.com/mikecarper/MeshCore/releases/tag/' + utilityTag;
+function migrationZip(packageName, tag = migrationFamily) {
+  const name = packageName + '-' + tag + '-migration.zip';
+  return {...asset(name), browser_download_url:
+    'https://github.com/mikecarper/MeshCore/releases/download/utility-' + tag + '/' + name};
+}
+const migrationAssets = Object.values(currentControls.partitionMigrations).map(name => migrationZip(name));
+function migrationCatalog(assets = migrationAssets, metadata = currentControls, utilityOverrides = {}) {
+  return picker.buildCatalog([
+    release(migrationFamily, '2026-09-13T00:00:00Z', currentAssets),
+    release(utilityTag, '2026-09-13T00:00:01Z', assets, utilityOverrides),
+  ], metadata);
+}
+const withMigrations = migrationCatalog();
+assert.strictEqual(withMigrations.rows.length, currentCatalog.rows.length,
+  'Migration ZIPs must not become firmware/Serial DFU choices');
+const g2Target = 'Station_G2_repeater_observer_mqtt-full-usb-wifi';
+function g2MigrationLink(catalog) {
+  const profile = catalog.profiles.find(item => item.target === g2Target);
+  return picker.migrationLink(profile, profile.files[0]);
+}
+const directG2Link = {
+  url: migrationZip('station-g2-repeater').browser_download_url,
+  label: 'Download exact partition-expansion ZIP',
+};
+const fallbackMigrationLink = {
+  url: utilityUrl, label: 'Check partition-expansion availability',
+};
+assert.deepStrictEqual(g2MigrationLink(withMigrations), directG2Link);
+const g2PickerUrl = 'https://mikecarper.github.io/MeshCore/firmware_picker/' +
+  '?chipFamily=esp32&hardwareFamily=Station_G2&hardware=Station_G2&role=repeater&mode=espnow&install=bin&chipAuto=1';
+const g2Selection = picker.selectionFromUrl(g2PickerUrl, withMigrations.profiles);
+assert.deepStrictEqual(g2Selection.unavailable, []);
+const g2Selected = withMigrations.profiles.filter(profile =>
+  picker.profileMatchesFacets(profile, g2Selection.filters));
+assert.deepStrictEqual(g2Selected.map(profile => profile.target), [g2Target]);
+assert.deepStrictEqual(picker.migrationLink(g2Selected[0], g2Selected[0].files[0]), directG2Link);
+
+// Exercise every row in the packager lookup, even recipes whose canonical
+// image lives only inside its ZIP rather than the ordinary firmware matrix.
+for (const [target, packageName] of Object.entries(currentControls.partitionMigrations)) {
+  for (const suffix of ['-full-logging', '-full-usb-wifi']) {
+    const fullTarget = target + suffix;
+    const profile = Object.assign(picker.parseTargetProfile(fullTarget), {
+      releaseFamily: migrationFamily, controls: {platform: 'ESP32_PLATFORM'},
+      files: [{releaseUrl: 'https://github.com/mikecarper/MeshCore/releases/tag/' + migrationFamily}],
+    });
+    profile.migrationPackage = picker.migrationPackageForProfile(profile, currentControls.partitionMigrations);
+    profile.migrationAsset = picker.migrationAssetForProfile(profile, migrationAssets.map(item => ({
+      name: item.name, url: item.browser_download_url, releaseTag: utilityTag, releaseUrl: utilityUrl,
+    })));
+    assert.strictEqual(profile.migrationPackage, packageName, fullTarget);
+    assert.strictEqual(picker.migrationLink(profile, profile.files[0]).url,
+      migrationZip(packageName).browser_download_url, fullTarget);
+  }
+}
+const currentMigrationProfiles = withMigrations.profiles.filter(profile => profile.migrationPackage);
+assert(currentMigrationProfiles.length > 0);
+for (const profile of currentMigrationProfiles) {
+  assert(profile.migrationAsset, profile.target);
+  assert.strictEqual(picker.migrationLink(profile, profile.files[0]).url,
+    migrationZip(profile.migrationPackage).browser_download_url, profile.target);
+}
+assert.strictEqual(picker.migrationLink(ordinaryEsp32, ordinaryEsp32.files[0]), null);
+assert.strictEqual(picker.migrationLink(ikokaNormal, ikokaNormal.files[0]), null);
+const unmappedVariant = withMigrations.profiles.find(profile =>
+  profile.target === 'Station_G3_ESP32_r2_repeater_observer_mqtt-full-usb-wifi');
+assert(unmappedVariant);
+assert.deepStrictEqual(picker.migrationLink(unmappedVariant, unmappedVariant.files[0]), fallbackMigrationLink,
+  'An unlisted board revision must not borrow another board recipe');
+
+const noG2Assets = migrationAssets.filter(item => item.name !== migrationZip('station-g2-repeater').name);
+assert.deepStrictEqual(g2MigrationLink(migrationCatalog(noG2Assets)), fallbackMigrationLink,
+  'Room-server and logging-hardware packages must not stand in for G2 repeater');
+assert.deepStrictEqual(g2MigrationLink(migrationCatalog([
+  ...noG2Assets, migrationZip('station-g2-repeater', family),
+])), fallbackMigrationLink, 'A ZIP for another release is not a match');
+assert.deepStrictEqual(g2MigrationLink(migrationCatalog(migrationAssets, currentControls,
+  {tag_name: 'utility-' + family})), fallbackMigrationLink, 'Ignore other release families');
+assert.deepStrictEqual(g2MigrationLink(migrationCatalog(migrationAssets, currentControls,
+  {tag_name: 'logging-' + migrationFamily})), fallbackMigrationLink, 'Require the utility page');
+assert.deepStrictEqual(g2MigrationLink(migrationCatalog([
+  ...migrationAssets, migrationZip('station-g2-repeater'),
+])), fallbackMigrationLink, 'Duplicate matches must fail closed');
+for (const badUrl of ['javascript:alert(1)', 'https://example.com/download.zip',
+  migrationZip('station-g2-repeater').browser_download_url.replace('/mikecarper/', '/someone-else/'),
+  migrationZip('station-g2-room-server').browser_download_url]) {
+  assert.deepStrictEqual(g2MigrationLink(migrationCatalog([
+    ...noG2Assets, {...migrationZip('station-g2-repeater'), browser_download_url: badUrl},
+  ])), fallbackMigrationLink, badUrl);
+}
+assert.deepStrictEqual(g2MigrationLink(migrationCatalog(migrationAssets, currentControls,
+  {html_url: utilityUrl.replace('/mikecarper/', '/someone-else/')})), fallbackMigrationLink);
+assert.deepStrictEqual(g2MigrationLink(migrationCatalog(migrationAssets,
+  {...currentControls, partitionMigrations: undefined})), fallbackMigrationLink,
+  'Older controls without a lookup retain a clearly labeled fallback');
+assert.strictEqual(g2MigrationLink(migrationCatalog(migrationAssets,
+  {...currentControls, familyTag: family})), null, 'Stale controls must not supply a migration');
+console.log('exact partition-expansion links passed for all ' + migrationAssets.length + ' lookup recipes');
+
 assert.strictEqual(nrf.chipFamily, 'nrf52');
 assert.strictEqual(mqttCompanion.chipFamily, 'esp32');
 assert.deepStrictEqual(picker.facetValues(controlled.profiles, {chipFamily: 'nrf52'}, 'hardwareFamily'), ['RAK_4631']);

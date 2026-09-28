@@ -17,7 +17,7 @@ The picker reads public release metadata from GitHub. It does not upload device
 information. Hardware names, target names, and download links come directly
 from the published firmware assets.
 
-<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.7-runtime-1" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
+<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.7-runtime-2" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
   <div class="firmware-picker-intro" role="note">
     <strong>Current release set</strong>
     <p data-role="release-set">Loading release information...</p>
@@ -29,9 +29,11 @@ from the published firmware assets.
     </p>
     <p>
       Upgrading an existing ESP32 infrastructure node from a smaller partition
-      layout? The selected Full result links to the utility release. If an
-      exact board and role migration ZIP is listed, follow its included README
-      for a supported Wi-Fi or LoRa route. USB installation uses the matching
+      layout? The selected Full result links directly to its exact board and
+      role partition-expansion ZIP when published. Follow its included README
+      to check the installed OTA target and source layout for a supported Wi-Fi
+      or LoRa route. If no unique matching ZIP is available, the picker links
+      to the utility release to check availability. USB installation uses the matching
       merged image instead. An app-only .bin cannot change the partition table.
       If the installed firmware supports it, run <code>get storage.layout</code>
       to see the live flash size and OTA slots. Firmware version alone does not
@@ -480,6 +482,14 @@ python3 scripts/generate_picker_controls.py \
 
 Refresh the `data-controls-url` version query when publishing the generated
 metadata so browsers fetch the new release's controls.
+
+The generated `partitionMigrations` lookup comes from `BOARDS` in
+`scripts/package_esp32_partition_migration.py`, the same exact board/role table
+used to build the migration packages. Expanded ESP32 Full results use this
+lookup (including canonical board/role recipes for Observer profiles), then
+require one matching published ZIP in the same release family's utility page.
+Hardware variants and roles remain distinct. Unlisted targets, missing or
+ambiguous assets, and stale metadata never produce a guessed download link.
 
 For the downloadable version, save the release family's public GitHub release
 objects as a JSON array, then package the same picker UI and controls:
