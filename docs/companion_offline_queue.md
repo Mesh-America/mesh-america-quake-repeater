@@ -12,7 +12,8 @@ A reboot clears it.
 | ESP32 with configured PSRAM | 512 |
 | ESP32 without PSRAM | 256 |
 | nRF52840 with at most 300 contact slots | 256 |
-| nRF52840 with more than 300 contact slots (non-shared queue) | 208 |
+| nRF52840 with more than 300 contacts and the contact cache (non-mOTA-shared queue) | 256 total: up to 15 held DMs use slots until accepted |
+| nRF52840 with more than 300 contacts but no contact cache | 208 ordinary frames plus a separate 15-DM queue |
 | nRF52 Full Companion with the memory correction | 256 normally; 128 while mOTA owns shared storage |
 | RP2040 | 256 |
 | STM32 | 16 |
@@ -45,9 +46,15 @@ Full profiles require at least 72 KiB of heap space at link time; OLED and
 headless profiles use their own [memory budgets](firmware_memory_budget.md).
 
 Standard, logging, MQTT, and Cascade build overlays retain the selected target
-capacity. The high-contact nRF52 default above is the exception: it reserves
-RAM for the separate 15-entry consent-pending DM queue. A target's explicit
-`OFFLINE_QUEUE_SIZE` still takes precedence.
+capacity. On cache-enabled high-contact nRF52 Companions, including the RAK4631
+USB and BLE profiles, ordinary messages and consent-pending DMs share one
+256-frame RAM pool. With no held DMs, all 256 slots are available to ordinary
+messages; with 15 held DMs, up to 241 are. The app sees only ordinary messages
+until a sender is accepted. The oldest held DM rolls off when a sixteenth
+decryptable DM arrives. The shared pool is still volatile and clears on reboot.
+Uncached high-contact profiles keep the conservative 208-frame default and
+separate held queue. An explicit target `OFFLINE_QUEUE_SIZE` still takes
+precedence.
 
 Each queue slot currently costs 177 bytes. A 256-frame queue reserves 45,312
 bytes, while a 512-frame queue reserves 90,624 bytes. There is no 256-frame

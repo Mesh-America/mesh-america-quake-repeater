@@ -260,9 +260,12 @@ The receiving Companion verifies the introduction signature. By default,
 `PUSH_CODE_NEW_ADVERT` (`0x8A`) but is not added as a contact. The app/user
 accepts through the normal add-contact command. Up to 15 verified, decryptable
 plain DMs are held in RAM and delivered after acceptance; the oldest rolls
-off first. The queue is lost on reboot. On high-contact nRF52 builds, the
-ordinary offline queue is 208 frames (previously 256) to retain the runtime
-heap margin for this separate 15-DM queue. The device sends a signed `DMR1`
+off first. The queue is lost on reboot. Cache-enabled high-contact nRF52
+Companions share a 256-frame pool between ordinary offline messages and up to
+15 held DMs, so ordinary capacity is 256 when none are held and 241 when all
+15 are held. The held frames are not exposed by ordinary message sync before
+acceptance. Uncached high-contact nRF52 builds retain 208 ordinary frames and
+a separate held queue. The device sends a signed `DMR1`
 refusal, and the sender pushes `0x91` plus the full rejecting key to a
 connected app, then stops further introductions for that peer until reboot.
 Directly attached clients may use `get dm.one_key` or `set dm.one_key on|off`;

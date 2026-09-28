@@ -84,13 +84,18 @@
 #define MAX_CONTACTS 100
 #endif
 
+#if defined(NRF52_PLATFORM) && MAX_CONTACTS > 300 \
+    && !defined(OTA_SHARED_COMPANION_QUEUE) && MESH_CONTACT_CACHE
+#define ONE_KEY_DM_SHARED_OFFLINE_QUEUE 1
+#else
+#define ONE_KEY_DM_SHARED_OFFLINE_QUEUE 0
+#endif
+
 #ifndef OFFLINE_QUEUE_SIZE
 #if defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
 #define OFFLINE_QUEUE_SIZE 512
 #elif defined(NRF52_PLATFORM) && MAX_CONTACTS > 300 \
-    && !defined(OTA_SHARED_COMPANION_QUEUE)
-// Large nRF52 contact tables and the 15-DM consent queue need a smaller
-// ordinary offline queue to preserve the runtime heap safety margin.
+    && !defined(OTA_SHARED_COMPANION_QUEUE) && !ONE_KEY_DM_SHARED_OFFLINE_QUEUE
 #define OFFLINE_QUEUE_SIZE 208
 #elif defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM) \
     || defined(RP2040_PLATFORM)
@@ -101,6 +106,9 @@
 #endif
 
 static_assert(OFFLINE_QUEUE_SIZE > 0, "OFFLINE_QUEUE_SIZE must be positive");
+#if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
+static_assert(OFFLINE_QUEUE_SIZE >= 15, "Shared DM queue needs 15 frame slots");
+#endif
 
 #ifndef ROOM_MESSAGE_TIMESTAMP_CACHE_SIZE
 #define ROOM_MESSAGE_TIMESTAMP_CACHE_SIZE 16
@@ -112,6 +120,11 @@ static_assert(OFFLINE_QUEUE_SIZE > 0, "OFFLINE_QUEUE_SIZE must be positive");
 
 #include <helpers/BaseChatMesh.h>
 #include <helpers/TransportKeyStore.h>
+
+#if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
+static_assert(MAX_TEXT_LEN + 12 <= MAX_FRAME_SIZE,
+              "A held plain DM must fit in one offline frame");
+#endif
 
 /* -------------------------------------------------------------------------------------- */
 
@@ -655,6 +668,10 @@ private:
     bool isChannelMsg() const;
   };
   Frame& offlineQueueFrameAt(int logical_index);
+#if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
+  Frame& heldDMFrameAt(uint8_t index);
+  void removeHeldOneKeyDM(uint8_t index);
+#endif
   void initializeOfflineQueue();
   int offline_queue_len;
   int offline_queue_head;
@@ -716,7 +733,9 @@ private:
   struct HeldOneKeyDM {
     uint8_t sender_key[PUB_KEY_SIZE];
     uint8_t id[ONE_KEY_DM_ID_SIZE];
+#if !ONE_KEY_DM_SHARED_OFFLINE_QUEUE
     mesh::Packet packet;
+#endif
   };
   HeldOneKeyDM held_dms[MAX_HELD_ONE_KEY_DMS];
   uint8_t held_dm_count = 0;
