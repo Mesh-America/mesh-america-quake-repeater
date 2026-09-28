@@ -1,16 +1,29 @@
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
 SPEC = importlib.util.spec_from_file_location('picker_controls', ROOT / 'scripts/generate_picker_controls.py')
 GENERATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GENERATOR)
 
 
 class PickerControlsTests(unittest.TestCase):
+    def test_partition_migrations_follow_the_complete_packager_lookup(self):
+        expected = {spec['target']: package
+                    for package, spec in GENERATOR.BOARDS.items()}
+        self.assertEqual(len(expected), len(GENERATOR.BOARDS))
+        self.assertEqual(GENERATOR.partition_migrations(), expected)
+        checked_in = json.loads((ROOT / 'docs/_data/firmware_controls.json').read_text())
+        self.assertEqual(checked_in['partitionMigrations'], expected)
+        self.assertEqual(expected['Station_G2_repeater'], 'station-g2-repeater')
+        self.assertEqual(expected['Station_G2_logging_repeater'], 'station-g2-logging-repeater')
+        self.assertEqual(expected['nibble_zero_connect_room_server_'], 'nibble-zero-room-server')
+
     def test_runtime_metadata_uses_verified_image_capabilities(self):
         source = 'a' * 40
         manifest = dict(source_commit=source,
@@ -51,6 +64,7 @@ class PickerControlsTests(unittest.TestCase):
             (stage / 'companion/TARGET-MANIFEST.json').write_text(json.dumps([manifest]))
             config = [('env:sample', [('build_flags', list(flags))])]
             result = GENERATOR.generate(stage, config)
+        self.assertEqual(result['partitionMigrations'], GENERATOR.partition_migrations())
         return result['profiles']['sample_companion_radio_full']
 
     def test_compiled_capacity_overrides_unreduced_config_and_binds_repair_source(self):
