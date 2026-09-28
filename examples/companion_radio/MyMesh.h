@@ -317,6 +317,9 @@ protected:
   void onContactVisit(const ContactInfo& contact) override;
 #endif
   ContactInfo* processAck(const uint8_t *data) override;
+  void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
+                      const mesh::Identity& sender, uint8_t* data,
+                      size_t len) override;
   void queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt, uint32_t sender_timestamp,
                     const uint8_t *extra, int extra_len, const char *text,
                     bool terminal_command_reply=false,
@@ -681,6 +684,15 @@ private:
   };
   #define EXPECTED_ACK_TABLE_SIZE 8
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table
+  // A recent ACK proves that peer can decrypt our normal text packets. Retry
+  // attempts still send the introduction in case its contact was later erased.
+  static constexpr uint8_t ONE_KEY_ACKED_PEERS = 8;
+  uint8_t one_key_acked_keys[ONE_KEY_ACKED_PEERS][PUB_KEY_SIZE] = {};
+  uint8_t one_key_acked_count = 0;
+  uint8_t one_key_acked_next = 0;
+  bool hasOneKeyAck(const ContactInfo& contact) const;
+  void rememberOneKeyAck(const ContactInfo& contact);
+  uint32_t sendOneKeyIntroduction(const ContactInfo& contact);
   mesh::LogicalMessageCache<ROOM_MESSAGE_TIMESTAMP_CACHE_SIZE> room_message_timestamps;
   int next_ack_idx;
   unsigned long next_ack_expiry;
