@@ -199,7 +199,8 @@ public:
   int  sendMessage(const ContactInfo& recipient, uint32_t timestamp, uint8_t attempt, const char* text,
                    uint32_t& expected_ack, uint32_t& est_timeout, uint8_t* packet_hash = NULL,
                    const uint8_t* replace_retry_key = NULL,
-                   const uint8_t* message_retry_key = NULL);
+                   const uint8_t* message_retry_key = NULL,
+                   uint32_t delay_millis = 0);
   int  sendCommandData(const ContactInfo& recipient, uint32_t timestamp,
                        uint8_t attempt, uint8_t txt_type, const char* text,
                        uint32_t& est_timeout,

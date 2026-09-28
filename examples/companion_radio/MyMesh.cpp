@@ -217,6 +217,11 @@ static constexpr uint8_t DEFAULT_FEM_RX_GAIN = 1;
 #define CONTACT_PAGE_WRITE_GAP          100
 #define EXPECTED_ACK_RETRY_RECHECK_MILLIS 1000
 
+// The encrypted body of an ANON_REQ starts with its usual four-byte tag.
+// A distinct marker after that tag prevents a contact introduction from being
+// mistaken for a login or another anonymous request.
+static constexpr uint8_t ONE_KEY_INTRO_MARKER[] = {'D', 'M', 'K', '1'};
+
 static bool save_filter(const ContactInfo& c);
 
 #ifndef DEFAULT_MULTI_ACKS
@@ -990,12 +995,115 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
 
       // NOTE: the same ACK can be received multiple times!
       ContactInfo* contact = expected_ack_table[i].contact;
+      if (contact != NULL && contact->type == ADV_TYPE_CHAT) rememberOneKeyAck(*contact);
       clearExpectedAck(expected_ack_table[i]);
       expireExpectedAcks();
       return contact;
     }
   }
   return checkConnectionsAck(data);
+}
+
+bool MyMesh::hasOneKeyAck(const ContactInfo& contact) const {
+  for (uint8_t i = 0; i < one_key_acked_count; ++i) {
+    if (memcmp(one_key_acked_keys[i], contact.id.pub_key, PUB_KEY_SIZE) == 0) return true;
+  }
+  return false;
+}
+
+void MyMesh::rememberOneKeyAck(const ContactInfo& contact) {
+  if (hasOneKeyAck(contact)) return;
+  memcpy(one_key_acked_keys[one_key_acked_next], contact.id.pub_key, PUB_KEY_SIZE);
+  if (one_key_acked_count < ONE_KEY_ACKED_PEERS) ++one_key_acked_count;
+  one_key_acked_next = (one_key_acked_next + 1) % ONE_KEY_ACKED_PEERS;
+}
+
+uint32_t MyMesh::sendOneKeyIntroduction(const ContactInfo& contact) {
+  // ANON_REQ carries the sender's full key in its outer header. It therefore
+  // reaches a recipient that cannot yet decrypt a normal text packet, while
+  // old Companion firmware simply ignores this unfamiliar request body.
+  uint8_t body[4 + sizeof(ONE_KEY_INTRO_MARKER) + 32 + SIGNATURE_SIZE];
+  const uint32_t tag = getRTCClock()->getCurrentTimeUnique();
+  memcpy(body, &tag, sizeof(tag));
+  memcpy(body + 4, ONE_KEY_INTRO_MARKER, sizeof(ONE_KEY_INTRO_MARKER));
+  char fallback_name[20];
+  snprintf(fallback_name, sizeof(fallback_name), "Unknown %02X%02X%02X",
+           self_id.pub_key[0], self_id.pub_key[1], self_id.pub_key[2]);
+  const char* name = _prefs.node_name[0] ? _prefs.node_name : fallback_name;
+  const size_t name_len = strnlen(name, 31);
+  memcpy(body + 4 + sizeof(ONE_KEY_INTRO_MARKER), name, name_len);
+  body[4 + sizeof(ONE_KEY_INTRO_MARKER) + name_len] = 0;
+  const size_t signed_body_len = 4 + sizeof(ONE_KEY_INTRO_MARKER) + name_len + 1;
+  uint8_t signed_message[PUB_KEY_SIZE + 4 + sizeof(ONE_KEY_INTRO_MARKER) + 32];
+  memcpy(signed_message, contact.id.pub_key, PUB_KEY_SIZE);
+  memcpy(signed_message + PUB_KEY_SIZE, body, signed_body_len);
+  self_id.sign(body + signed_body_len, signed_message,
+               PUB_KEY_SIZE + signed_body_len);
+
+  mesh::Packet* intro = createAnonDatagram(
+      PAYLOAD_TYPE_ANON_REQ, self_id, contact.id,
+      contact.getSharedSecret(self_id), body,
+      signed_body_len + SIGNATURE_SIZE);
+  if (intro == NULL) return 0;
+  const uint32_t airtime = getTransmitAirtime(intro);
+  uint32_t delay;
+  bool sent;
+  if (contact.out_path_len == OUT_PATH_UNKNOWN) {
+    delay = calcFloodTimeoutMillisFor(airtime) / 2;
+    sent = sendFloodScoped(contact, intro);
+  } else {
+    const uint32_t hops = (contact.out_path_len & 63) + 1;
+    delay = (airtime * 3 + 500) * hops;
+    sent = sendDirect(intro, contact.getPath(), contact.out_path_len);
+  }
+  // Scheduling the text after the introduction also lets the ordinary text
+  // path work on older recipients which already know this sender.
+  return sent ? delay : 0;
+}
+
+void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
+                            const mesh::Identity& sender, uint8_t* data,
+                            size_t len) {
+  (void)secret;
+  if (packet->getPayloadType() != PAYLOAD_TYPE_ANON_REQ
+      || len < 4 + sizeof(ONE_KEY_INTRO_MARKER) + 2 + SIGNATURE_SIZE
+      || memcmp(data + 4, ONE_KEY_INTRO_MARKER,
+                sizeof(ONE_KEY_INTRO_MARKER)) != 0
+      || !canMutateContacts()) return;
+
+  const char* name = reinterpret_cast<const char*>(data + 4 + sizeof(ONE_KEY_INTRO_MARKER));
+  const size_t available = min(size_t(32), len - 4 - sizeof(ONE_KEY_INTRO_MARKER) - SIGNATURE_SIZE);
+  const char* end = static_cast<const char*>(memchr(name, 0, available));
+  if (end == NULL || end == name || size_t(end - name) >= sizeof(ContactInfo::name)) return;
+  const size_t signed_body_len = 4 + sizeof(ONE_KEY_INTRO_MARKER) + size_t(end - name) + 1;
+  if (signed_body_len + SIGNATURE_SIZE > len) return;
+  uint8_t signed_message[PUB_KEY_SIZE + 4 + sizeof(ONE_KEY_INTRO_MARKER) + 32];
+  memcpy(signed_message, self_id.pub_key, PUB_KEY_SIZE);
+  memcpy(signed_message + PUB_KEY_SIZE, data, signed_body_len);
+  if (!sender.verify(data + signed_body_len, signed_message,
+                     PUB_KEY_SIZE + signed_body_len)) return;
+  if (lookupPersistentContactByPubKey(sender.pub_key, PUB_KEY_SIZE) != NULL) return;
+
+  ContactInfo contact;
+  memcpy(contact.id.pub_key, sender.pub_key, PUB_KEY_SIZE);
+  StrHelper::strncpy(contact.name, name, sizeof(contact.name));
+  contact.type = ADV_TYPE_CHAT;
+  contact.out_path_len = OUT_PATH_UNKNOWN;
+  contact.lastmod = getRTCClock()->getCurrentTime();
+  if (!addContact(contact)) {
+    onContactsFull();
+    return;
+  }
+  ContactInfo* added = lookupPersistentContactByPubKey(sender.pub_key, PUB_KEY_SIZE);
+  if (added == NULL || !scheduleContactWrite(*added)) {
+    if (added != NULL) removeContact(*added);
+    return;
+  }
+  // A prior anonymous service request may occupy a transient slot for this
+  // key. Remove it so regular text lookup finds the durable contact first.
+  ContactInfo* transient = lookupTransientContactByPubKey(sender.pub_key, PUB_KEY_SIZE);
+  if (transient != NULL) clearTransientContact(*transient);
+  onDiscoveredContact(*added, true, OUT_PATH_UNKNOWN, NULL);
 }
 
 void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt,
@@ -4605,6 +4713,7 @@ void MyMesh::handleCmdFrame(size_t len) {
 
       int result;
       uint32_t expected_ack;
+      uint32_t one_key_delay = 0;
       if (txt_type == TXT_TYPE_CLI_DATA || txt_type == TXT_TYPE_CLI_COMMAND) {
         const uint32_t logical_request_id = msg_timestamp;
         msg_timestamp = getRTCClock()->getCurrentTimeUnique(); // Use node's RTC instead of app timestamp to avoid tripping replay protection
@@ -4623,8 +4732,14 @@ void MyMesh::handleCmdFrame(size_t len) {
           msg_timestamp = getRTCClock()->getCurrentTimeUnique();
         }
         replacement_entry = findPendingTextMessage(text_fingerprint, msg_timestamp);
+        if (recipient->type == ADV_TYPE_CHAT
+            && (attempt != 0 || !hasOneKeyAck(*recipient))
+            && tlen <= MAX_TEXT_LEN
+            && (attempt <= 3 || tlen <= MAX_TEXT_LEN - 2)) {
+          one_key_delay = sendOneKeyIntroduction(*recipient);
+        }
         result = sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout,
-                             packet_retry_key, NULL, text_fingerprint);
+                             packet_retry_key, NULL, text_fingerprint, one_key_delay);
         if (result != MSG_SEND_FAILED && is_room_post) {
           room_message_timestamps.remember(text_fingerprint, app_timestamp,
                                            msg_timestamp);
@@ -4655,7 +4770,7 @@ void MyMesh::handleCmdFrame(size_t len) {
           // ownership lives in Mesh and ends only on an ACK, retry completion,
           // or a successfully queued semantic replacement.
           clearExpectedAck(entry, false);
-          entry.msg_sent = _ms->getMillis(); // add to circular table
+          entry.msg_sent = _ms->getMillis() + one_key_delay; // scheduled radio send
           entry.expires_at = futureMillis(est_timeout);
           entry.ack = expected_ack;
           entry.message_timestamp = msg_timestamp;

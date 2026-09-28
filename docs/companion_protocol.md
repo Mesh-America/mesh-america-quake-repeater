@@ -242,6 +242,35 @@ catalog; bytes `0x2C`-`0x31` are parked and `0x35` is unused.
 The sections below detail the most common frames. Refer to the source named
 above for command bodies that are not expanded here.
 
+### Private text when only the sender knows the recipient
+
+Clients continue to send an ordinary `CMD_SEND_TXT_MSG` (`0x02`) with
+`TXT_TYPE_PLAIN`; no client protocol change is needed. For a chat contact
+without a recent confirmed DM, Companion firmware first sends a signed,
+encrypted [one-key introduction](payloads.md#companion-one-key-dm-introduction)
+that includes its full public key, then queues the normal private text after
+the introduction. It sends the introduction again on an application retry,
+which recovers if the recipient removed the sender contact. An ACK confirms
+that the recipient can decrypt normal DMs, so subsequent first attempts omit
+the extra packet until the sender reboots or the small recent-ACK cache is
+replaced.
+
+The receiving Companion verifies the introduction signature and adds the
+sender as a chat contact even when advert auto-add is off. It emits the usual
+`PUSH_CODE_NEW_ADVERT` contact frame before the normal private-message frame,
+so existing clients can associate the six-byte message prefix with the full
+key. A recipient running older firmware still needs the sender contact before
+it can decrypt a normal DM. This flow uses a second radio packet for the
+initial DM; `RESP_CODE_SENT` includes that scheduling delay in its timeout.
+
+For a two-radio regression test, run `tools/hil/one_key_dm.py` with the USB
+serial paths for `--sender` and `--recipient`. `--reset-contact` removes the
+sender from recipient contacts, and `--zero-hop` sets the sender's route to
+zero hop when the devices are nearby. The test checks contact creation,
+message waiting, and the matching ACK without draining the offline queue.
+`--invalid-signature-first` also checks that a decryptable introduction with
+an invalid Ed25519 signature does not add a contact.
+
 `CMD_RUN_CLI_COMMAND` is followed by the local CLI text without a terminating
 NUL. The device returns `RESP_CODE_CLI_REPLY` (`0x1D`) followed by the reply
 text. This is separate from sending a remote on-air CLI command with
