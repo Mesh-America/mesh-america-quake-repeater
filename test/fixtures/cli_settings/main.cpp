@@ -16,7 +16,10 @@ struct RadioProfileCLI {
   }
   bool savePrimaryPreamble(uint16_t) { return true; }
   void appendPreamble(char*, size_t) {}
-  void appendSavedPreamble(char*, size_t, uint8_t, float) {}
+  void appendSavedPreamble(char* reply, size_t capacity, uint8_t, float) {
+    const size_t used = strlen(reply);
+    if (used < capacity) snprintf(reply + used, capacity - used, ",preamble=16 (auto)");
+  }
   mutable unsigned warning_calls = 0;
   mutable uint8_t warning_sf = 0;
   mutable float warning_bw = 0;
@@ -138,6 +141,9 @@ int main() {
     assert(cli._radio_profiles.warning_calls==1 && cli._radio_profiles.warning_sf==8);
     assert(cli._radio_profiles.warning_bw==125 && cli._radio_profiles.warning_preamble==0);
     cli.call(sender,"get radio",reply);
+    // The official app requires exactly four comma-separated radio fields.
+    // Simulate the production preamble suffix above to catch regressions.
+    assert(!strcmp(reply,"> 916.000,125.000,8,6"));
     float freq=0,bw=0; int sf=0,cr=0;
     assert(sscanf(reply,"> %f,%f,%d,%d",&freq,&bw,&sf,&cr)==4);
     assert(freq==916 && bw==125 && sf==8 && cr==6);

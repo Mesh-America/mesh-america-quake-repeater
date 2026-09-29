@@ -289,7 +289,14 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
 
 int BaseChatMesh::searchPeersByHash(const uint8_t* hash) {
   int n = 0;
-  for (int i = 0; i < num_contacts && n < MAX_SEARCH_RESULTS; i++) {
+  // A matching transient slot may have the same identity as an accepted contact.
+  // Try persistent contacts first so the transient slot cannot swallow their DMs.
+  for (int i = MAX_ANON_CONTACTS; i < num_contacts && n < MAX_SEARCH_RESULTS; i++) {
+    if (contacts[i].id.isHashMatch(hash)) {
+      matching_peer_indexes[n++] = i;
+    }
+  }
+  for (int i = 0; i < MAX_ANON_CONTACTS && n < MAX_SEARCH_RESULTS; i++) {
     if (contacts[i].id.isHashMatch(hash)) {
       matching_peer_indexes[n++] = i;  // store the INDEXES of matching contacts (for subsequent 'peer' methods)
     }
@@ -314,6 +321,9 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
   }
 
   ContactInfo& from = contacts[i];
+
+  // A transient service peer is not an accepted chat contact.
+  if (type == PAYLOAD_TYPE_TXT_MSG && from.type == ADV_TYPE_NONE) return;
 
   if (type == PAYLOAD_TYPE_TXT_MSG && len > 5) {
     uint32_t sender_timestamp;
@@ -570,7 +580,8 @@ mesh::Packet* BaseChatMesh::composeMsgPacket(const ContactInfo& recipient, uint3
 int BaseChatMesh::sendMessage(const ContactInfo& recipient, uint32_t timestamp, uint8_t attempt, const char* text,
                               uint32_t& expected_ack, uint32_t& est_timeout, uint8_t* packet_hash,
                               const uint8_t* replace_retry_key,
-                              const uint8_t* message_retry_key) {
+                              const uint8_t* message_retry_key,
+                              uint32_t delay_millis) {
   mesh::Packet* pkt = composeMsgPacket(recipient, timestamp, attempt, text, expected_ack);
   if (pkt == NULL) return MSG_SEND_FAILED;
   if (packet_hash != NULL) {
@@ -588,12 +599,12 @@ int BaseChatMesh::sendMessage(const ContactInfo& recipient, uint32_t timestamp, 
   int rc;
   bool sent;
   if (recipient.out_path_len == OUT_PATH_UNKNOWN) {
-    sent = sendFloodScoped(recipient, pkt);
-    est_timeout = calcFloodTimeoutMillisFor(t);
+    sent = sendFloodScoped(recipient, pkt, delay_millis);
+    est_timeout = delay_millis + calcFloodTimeoutMillisFor(t);
     rc = MSG_SEND_SENT_FLOOD;
   } else {
-    sent = sendDirect(pkt, recipient.getPath(), recipient.out_path_len);
-    est_timeout = calcDirectTimeoutMillisFor(t, recipient.out_path_len);
+    sent = sendDirect(pkt, recipient.getPath(), recipient.out_path_len, delay_millis);
+    est_timeout = delay_millis + calcDirectTimeoutMillisFor(t, recipient.out_path_len);
     rc = MSG_SEND_SENT_DIRECT;
   }
   if (!sent) {

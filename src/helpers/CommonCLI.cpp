@@ -4853,8 +4853,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     char freq[16], bw[16];
     strcpy(freq, StrHelper::ftoa(_prefs->freq));
     strcpy(bw, StrHelper::ftoa3(_prefs->bw));
+    // The official app parses this reply as exactly four CSV fields.
     sprintf(reply, "> %s,%s,%d,%d", freq, bw, (uint32_t)_prefs->sf, (uint32_t)_prefs->cr);
-    _radio_profiles.appendSavedPreamble(reply, 160, _prefs->sf, _prefs->bw);
   } else if (configKeyEquals(config, "rxdelay")) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->rx_delay_base));
   } else if (configKeyEquals(config, "txdelay")) {

@@ -500,6 +500,11 @@ protected:
   */
   virtual void onAnonDataRecv(Packet* packet, const uint8_t* secret, const Identity& sender, uint8_t* data, size_t len) { }
 
+  // Gives an application a chance to retain addressed text from a verified
+  // sender that is not yet in the persistent peer table.
+  virtual bool onAddressedTextPacket(Packet* packet, uint8_t src_hash,
+                                     const uint8_t* mac_and_data, size_t len) { return false; }
+
   /**
    * \brief  A path TO 'sender' has been received. (also with optional 'extra' data encoded)
    *         NOTE: these can be received multiple times (per sender), via different routes
