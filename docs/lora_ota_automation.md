@@ -665,6 +665,31 @@ matched repeater list in [the nRF52 QSPI guide](ota_nrf52_qspi.md).
 
 ## 6. Add intermediate relays
 
+The runner automatically checks `ota config` on the destination, managed source,
+and each OTA-enabled relay before confirmation. The declared `--relay` count is
+the minimum required OTA reach: one relay requires at least one hop, not the
+direct-only `hops=0`. After the radio rehearsal passes, it rechecks the original
+policies and temporarily raises only limits below that minimum. Higher existing
+limits remain unchanged. Every change needs exact readback; a lost setter reply
+is reconciled by reading the policy, not blindly repeating the write.
+
+The original limits are restored after the download, before installation can
+reboot the destination, and cleanup also attempts restoration after an error or
+Ctrl-C. A serial seeder is stopped before the source text CLI is used. The
+private, password-free `ota-hop-settings.json` recovery file is flushed before
+any hop write. Hop limits are persisted by firmware: if the host loses power or
+a radio becomes unreachable, use that file's original values once the correct
+radio channel is reachable. Unexpected external policy changes are not overwritten.
+
+For a route containing additional, undeclared repeaters, add `--ota-hops N`
+(0..8, at least the declared relay count). This is a minimum, not a command to
+reduce larger limits. It does not discover or switch undeclared repeaters;
+all participating radios still need overlapping TempRadio windows. Direct runs
+without relays or a positive explicit minimum leave hop policies untouched.
+Explicitly non-OTA relays remain opaque forwarders; unsupported/ambiguous policy
+replies, authentication failures and timeouts on OTA participants stop the run.
+No signer, install-security or forwarding-filter checks are bypassed.
+
 List relays from farthest to nearest so each command is sent before its route
 moves to TempRadio. A bare relay name uses the destination password; use
 `NAME=PASSWORD` when it differs:
@@ -929,7 +954,8 @@ download without replacing it.
 The working directory is created before a managed source can be changed, then
 retained and printed at exit. It contains the exact
 served mOTA, `motatool-serve.log`, extracted build inputs when needed, and
-`controller-radio.txt`. A managed source also gets a protected
+`controller-radio.txt`, plus `ota-hop-settings.json` when OTA reach needed a
+temporary increase. A managed source also gets a protected
 `source-rxps-settings.json` containing its exact original preference and
 idempotent restore command. Its contents and directory entry are flushed before
 RXPS is disabled. When the destination

@@ -7252,6 +7252,7 @@ class Rak3401KnownUnsafeReleaseTests(unittest.TestCase):
             reboot_wait=90,
             relay=[],
             debug=False,
+            ota_hops=3,
         )
         step = mock.Mock(
             number=1,
@@ -7278,6 +7279,7 @@ class Rak3401KnownUnsafeReleaseTests(unittest.TestCase):
                     )
                 command = nested.call_args.args[0]
                 self.assertEqual(command.count("--debug"), int(enabled))
+                self.assertEqual(command[command.index("--ota-hops") + 1], "3")
                 self.assertEqual(command[1], target_key)
                 self.assertEqual(command[command.index("--relay") + 1], f"{relay_key}=relay-password")
 
