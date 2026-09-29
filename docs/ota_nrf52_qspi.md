@@ -145,7 +145,7 @@ bootloader pairs are not interchangeable.
 
 ### Header-only W25Q16 wiring for the unified RAK images
 
-The unified RAK repeater images and matching OTAFIX 2.4.8 adaptive bootloaders
+The unified RAK repeater images and matching OTAFIX 2.4.10 compatible bootloaders
 also support a W25Q16 through the RAK19007 2.54 mm headers. This arrangement
 does not need an IO-connector interposer or underside SPI solder points:
 
