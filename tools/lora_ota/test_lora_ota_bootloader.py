@@ -105,10 +105,16 @@ class BootloaderStagingTests(unittest.TestCase):
             dict(platform="esp32"), dict(boot_target_id=None),
             dict(boot_target_id=self.package.target_id ^ 1), dict(boot_hw_id="wrong"),
             dict(bootloader_abi=2), dict(bootloader_codecs=4),
-            dict(boot_storage=14), dict(nrf_qspi=True), dict(max_block_size=512),
+            dict(boot_storage=14), dict(max_block_size=512),
         ):
             with self.subTest(change=change):
                 self.assertFalse(ota.compatible_mota(self.package, replace(live, **change))[0])
+
+    def test_internal_rak_bootloader_allows_qspi_application_storage(self):
+        # The application may stage OTA data in QSPI while the bootloader
+        # update itself remains an exact-board internal-flash package.
+        live = replace(boot_target(self.package), nrf_qspi=True)
+        self.assertEqual(ota.compatible_mota(self.package, live), (True, ""))
 
     def test_stage_only_is_required_even_with_yes(self):
         args = argparse.Namespace(no_install=False, yes=True)

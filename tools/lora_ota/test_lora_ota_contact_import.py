@@ -14,6 +14,7 @@ from test_lora_ota_source_identity import banner, connection
 SOURCE = "a5" * 32
 TARGET = "b6" * 32
 CONTROLLER = "c7" * 32
+RELAY = "d8" * 32
 NAME = "Source \U0001f4e1"
 
 
@@ -103,6 +104,16 @@ class ContactImportTests(unittest.TestCase):
 
     def bind(self):
         ota.bind_contact_selectors(self.controller, self.args)
+
+    def test_relay_public_key_binds_existing_contact(self):
+        self.args.relay_values = [(RELAY.upper(), "relay-password")]
+        self.args.source_shares_controller = True
+        self.controller._run.side_effect = [[
+            {**self.before, RELAY: entry(RELAY, "Relay renamed later")}
+        ]]
+        self.bind()
+        self.assertEqual(self.args.relay_values, [(RELAY, "relay-password")])
+        self.controller._execute.assert_not_called()
 
     def test_approved_import_verified_then_continue_with_full_key(self):
         self.bind()
