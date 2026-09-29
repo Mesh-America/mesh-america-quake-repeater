@@ -144,6 +144,8 @@ INSTALL_RECONCILE_WAIT_SECONDS = 20
 DEFAULT_RELAY_TX_DELAY = 0.3
 RELAY_TIMING_COMMANDS_PER_RELAY = 12
 RELAY_TIMING_RECOVERY_FILE = "relay-timing-settings.json"
+OTA_HOPS_RECOVERY_FILE = "ota-hop-settings.json"
+OTA_MAX_HOPS = 8
 TARGET_RXPS_RECOVERY_FILE = "target-rxps-settings.json"
 SOURCE_RXPS_RECOVERY_FILE = "source-rxps-settings.json"
 MIN_MESHCLI_VERSION = (1, 6, 0)
@@ -304,6 +306,19 @@ class RelayTimingSettings:
     password: str
     rxdelay: float
     txdelay: float
+
+
+@dataclass(frozen=True)
+class OtaHopSettings:
+    name: str
+    password: str | None
+    local_source: bool
+    original: int
+    minimum: int
+
+    @property
+    def transfer(self) -> int:
+        return max(self.original, self.minimum)
 
 
 @dataclass(frozen=True)
@@ -1614,6 +1629,13 @@ def reply_matches_command(command_text: str, reply: str) -> bool:
         )
     if command == "ota stats":
         return text.startswith("OTA | fw ") or is_unknown or needs_temp
+    if command == "ota config":
+        return (
+            lowered.startswith("ota config:") or is_unknown or is_error
+            or re.search(r"\bota (?:is )?not included\b", lowered) is not None
+        )
+    if command.startswith("ota config hops "):
+        return lowered.startswith("ok ota reach = ") or is_unknown or is_error
     if command == "get bootloader.ver":
         try:
             parse_bootloader_version_reply(text)
@@ -2986,6 +3008,11 @@ def recommended_temp_radio_minutes(
         0 if args.source_already_temp or args.source_shares_controller else 30
     )
     final_reply_count = (4 + relays) if include_install else 1
+    hop_restore_seconds = 0
+    if relays or (getattr(args, "ota_hops", None) or 0) > 0:
+        # A policy restore needs a current read, absolute setter, and readback
+        # on each remote participant plus the local source CLI.
+        hop_restore_seconds = 3 * ((1 + relays) * args.reply_timeout + 30)
     required_seconds = (
         remote_setup_seconds
         + source_setup_seconds
@@ -2996,6 +3023,7 @@ def recommended_temp_radio_minutes(
         + adaptive_poll_ceiling(args.poll_seconds)
         + args.reply_timeout * final_reply_count
         + relays * RELAY_TIMING_COMMANDS_PER_RELAY * args.reply_timeout
+        + hop_restore_seconds
     )
     return required_seconds // 60 + 1
 
@@ -4336,6 +4364,167 @@ def parse_delay_reply(reply: str, label: str) -> float:
     return float(match.group(1))
 
 
+def parse_ota_hops(reply: str, label: str) -> int:
+    # A local serial terminal may include a welcome banner and command echo.
+    # Only the actual config line is authoritative, never another dotted or
+    # numeric value from that surrounding output.
+    lines = re.findall(r"(?mi)^[ \t]*(?:>[ \t]*)?ota config:[^\r\n]*", reply)
+    if len(lines) == 1:
+        values = re.findall(r"(?<!\S)hops=([^\s]+)", lines[0])
+        if len(values) == 1 and re.fullmatch(r"[0-8]", values[0]):
+            return int(values[0])
+    raise OtaError(f"could not read {label} OTA hop limit: {reply}")
+
+
+def ota_hops_command(
+    controller: Controller,
+    args: argparse.Namespace,
+    saved: OtaHopSettings,
+    command: str,
+    *,
+    retry: bool = True,
+) -> str:
+    if saved.local_source:
+        return source_cli_command(args, command, bounded=True, retry=retry)
+
+    def once() -> str:
+        return controller.remote_command(
+            saved.name, command, password=saved.password, retry=False,
+            operation_timeout=TEMP_RADIO_PREFLIGHT_OPERATION_TIMEOUT_SECONDS,
+        )
+
+    if retry:
+        return retry_transmission_bounded(once, f"{command!r} on {saved.name}")
+    return once()
+
+
+def read_ota_hops(
+    controller: Controller, args: argparse.Namespace, saved: OtaHopSettings,
+) -> int:
+    return parse_ota_hops(ota_hops_command(controller, args, saved, "ota config"), saved.name)
+
+
+def prepare_ota_hop_settings(
+    controller: Controller, args: argparse.Namespace,
+) -> list[OtaHopSettings]:
+    """Read every policy before confirmation; never guess an unknown value."""
+    minimum = max(len(args.relay_values), getattr(args, "ota_hops", None) or 0)
+    if minimum == 0:
+        return []  # Preserve direct-run behavior and existing user policy.
+    if minimum > OTA_MAX_HOPS:
+        raise OtaError(f"OTA supports at most {OTA_MAX_HOPS} relay hops")
+    if not has_managed_source_cli(args):
+        raise OtaError(
+            "automatic OTA hop setup requires a managed source CLI; supply "
+            "--source-cli-serial or --source-cli-tcp instead of --source-already-temp"
+        )
+    source_name = (
+        getattr(args, "shared_source_public_key", None)
+        or getattr(args, "source_contact_value", None) or "OTA source"
+    )
+    participants = [
+        OtaHopSettings(source_name, None, True, 0, minimum),
+        OtaHopSettings(args.target, None, False, 0, minimum),
+        *(OtaHopSettings(name, password, False, 0, minimum)
+          for name, password in args.relay_values),
+    ]
+    result = []
+    for index, participant in enumerate(participants):
+        reply = ota_hops_command(controller, args, participant, "ota config")
+        # Non-OTA repeaters can forward OTA opaquely. Skip only an explicit
+        # absence of the build feature. An unknown command alone does not
+        # establish that this firmware has no OTA receive/forward policy.
+        if index >= 2 and re.fullmatch(
+            r"\s*(?:LoRa\s+)?OTA (?:is )?not included in this build"
+            r"(?:[;.:!][^\r\n]*)?\s*",
+            reply, re.IGNORECASE,
+        ):
+            print(f"[hops] {participant.name}: opaque relay; no OTA policy to change")
+            continue
+        result.append(replace(participant, original=parse_ota_hops(reply, participant.name)))
+    return result
+
+
+def set_ota_hops_verified(
+    controller: Controller, args: argparse.Namespace, saved: OtaHopSettings, value: int,
+) -> None:
+    try:
+        reply = ota_hops_command(
+            controller, args, saved, f"ota config hops {value}", retry=False,
+        )
+    except TransmissionError:
+        # A missing acknowledgement is not permission to send another write.
+        # The absolute, idempotent setting is reconciled by an exact readback.
+        reply = None
+    if reply is not None and not re.fullmatch(
+        rf"\s*(?:>[ \t]*)?OK OTA reach = {value} hops? \(saved\)"
+        r"(?: - direct only)?\s*", reply, re.IGNORECASE,
+    ):
+        # Serial replies can carry a banner. Find exactly one complete ACK
+        # line, rather than accepting an OK from an unrelated command.
+        ack = re.findall(
+            rf"(?mi)^[ \t]*(?:>[ \t]*)?OK OTA reach = {value} hops? \(saved\)"
+            r"(?: - direct only)?[ \t]*\r?$", reply,
+        )
+        if len(ack) != 1:
+            raise OtaError(f"{saved.name} refused OTA hop limit {value}: {reply}")
+    if read_ota_hops(controller, args, saved) != value:
+        raise OtaError(f"{saved.name} OTA hop limit did not read back as {value}")
+
+
+def apply_ota_hop_settings(
+    controller: Controller, args: argparse.Namespace, settings: list[OtaHopSettings],
+    owned: list[OtaHopSettings], work_dir: Path,
+) -> None:
+    if not settings:
+        return
+    # Rehearsal/preparation can take minutes. Validate ALL snapshots again
+    # before the first write, so another operator's change is not overwritten.
+    for saved in settings:
+        if read_ota_hops(controller, args, saved) != saved.original:
+            raise OtaError(
+                f"{saved.name} OTA hop limit changed during preparation; "
+                "leaving the external setting unchanged"
+            )
+    changes = [saved for saved in settings if saved.transfer != saved.original]
+    if changes:
+        path = write_private_recovery_file(work_dir / OTA_HOPS_RECOVERY_FILE, json.dumps({
+            "nodes": [{
+                "name": saved.name, "local_source": saved.local_source,
+                "original_hops": saved.original, "transfer_hops": saved.transfer,
+                "restore_command": f"ota config hops {saved.original}",
+            } for saved in changes],
+            "source_endpoint": {
+                "serial": getattr(args, "source_cli_serial", None) or getattr(args, "source_serial", None),
+                "tcp": getattr(args, "source_cli_tcp", None),
+            },
+        }, indent=2) + "\n")
+        print(f"[hops] recovery settings: {path}")
+    for saved in changes:
+        owned.append(saved)  # Own cleanup BEFORE a possibly lost mutation.
+        set_ota_hops_verified(controller, args, saved, saved.transfer)
+        print(f"[hops] {saved.name}: temporarily {saved.original} -> {saved.transfer} (verified)")
+
+
+def restore_ota_hop_settings(
+    controller: Controller, args: argparse.Namespace, owned: list[OtaHopSettings],
+) -> None:
+    errors = []
+    for saved in reversed(owned.copy()):
+        try:
+            current = read_ota_hops(controller, args, saved)
+            if current != saved.original:
+                if current != saved.transfer:
+                    raise OtaError("OTA hop limit changed externally; leaving it unchanged")
+                set_ota_hops_verified(controller, args, saved, saved.original)
+            owned.remove(saved)  # Retire ownership only after exact readback.
+            print(f"[hops] {saved.name}: original {saved.original} restored")
+        except (OtaError, OSError) as exc:
+            errors.append(f"{saved.name}: {exc}")
+    if errors:
+        raise OtaError("could not restore OTA hop settings: " + "; ".join(errors))
+
+
 def read_relay_timing(
     controller: Controller,
     relay_name: str,
@@ -4494,6 +4683,9 @@ def confirm_update(
             f"  relay timing: rxdelay 0, "
             f"txdelay {format_decimal(args.relay_txdelay)} (saved/restored)"
         )
+    for saved in getattr(args, "ota_hop_settings", []):
+        action = "unchanged" if saved.original == saved.transfer else "temporary; saved/restored"
+        print(f"  OTA hops    : {saved.name}: {saved.original} -> {saved.transfer} ({action})")
     print(f"  action      : {'stage only' if args.no_install else 'install and reboot'}")
     current_version = (
         parse_version(target.current_version) if target.current_version else None
@@ -7199,6 +7391,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional relay name/key/unique key prefix, farthest-to-nearest; repeat as needed",
     )
     parser.add_argument(
+        "--ota-hops", type=int, metavar="MINIMUM",
+        help=("minimum OTA reach for undeclared additional hops (0..8); otherwise "
+              "infer from --relay count; only raise lower limits and restore afterward"),
+    )
+    parser.add_argument(
         "--source-contact",
         metavar="NAME_OR_KEY",
         help=(
@@ -7387,6 +7584,10 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         parser.error(f"--temp-radio: {exc}")
     if not math.isfinite(args.relay_txdelay) or not 0.0 <= args.relay_txdelay <= 2.0:
         parser.error("--relay-txdelay must be between 0 and 2")
+    if len(args.relay) > OTA_MAX_HOPS:
+        parser.error(f"at most {OTA_MAX_HOPS} --relay nodes are supported")
+    if args.ota_hops is not None and not len(args.relay) <= args.ota_hops <= OTA_MAX_HOPS:
+        parser.error("--ota-hops must be 0..8 and at least the declared --relay count")
     clear_manifest = args.clear_completed_manifest
     clear_body_hash = args.clear_completed_on_body_hash
     if bool(clear_manifest) != bool(clear_body_hash):
@@ -8269,6 +8470,7 @@ def main(
     armed_relay_values: list[tuple[str, str]] = []
     relay_public_keys: dict[str, str] = {}
     relay_timing_settings: list[RelayTimingSettings] = []
+    owned_ota_hop_settings: list[OtaHopSettings] = []
     password = args.password or os.environ.get("MESHCORE_ADMIN_PASSWORD", "")
     temp_command = f"tempradio {args.temp_radio}"
 
@@ -8464,6 +8666,7 @@ def main(
             target_rxps_profile = None
         args.target_rxps_saved = target_rxps_saved
         args.target_rxps_profile = target_rxps_profile
+        args.ota_hop_settings = prepare_ota_hop_settings(controller, args)
         confirm_update(args, target, package)
 
         freq, bandwidth, sf, cr, _minutes = args.temp_values
@@ -8481,6 +8684,9 @@ def main(
             target,
             original_radio,
             temp_radio,
+        )
+        apply_ota_hop_settings(
+            controller, args, args.ota_hop_settings, owned_ota_hop_settings, work_dir,
         )
 
         # Package generation above belongs on a workstation/build VM; a
@@ -8638,6 +8844,13 @@ def main(
         seeder.start()
         find_and_start_pull(controller, args, package, seeder)
         monitor_download(controller, args, package, seeder)
+        # A serial source is exclusively owned by motatool. Release that
+        # ownership before trying to restore its policy through the text CLI.
+        seeder.stop()
+        seeder = None
+        # Transfer is complete; restore while every participant is still on
+        # the same tuple, before installation can reboot the destination.
+        restore_ota_hop_settings(controller, args, owned_ota_hop_settings)
 
         if args.no_install:
             report_staged_update(controller, args, package)
@@ -8677,8 +8890,6 @@ def main(
                         controller, args.target, target_rxps_saved
                     )
                 target_rxps_changed = False
-            seeder.stop()
-            seeder = None
             if source_temp_owned and (
                 not args.leave_controller_radio
                 or not args.source_shares_controller
@@ -8721,9 +8932,7 @@ def main(
             relay_public_keys,
         )
 
-        # Stop seeding before returning the controller to its ordinary channel.
-        seeder.stop()
-        seeder = None
+        # Seeding already stopped before policy restoration and installation.
         if source_temp_owned and (
             not args.leave_controller_radio
             or not args.source_shares_controller
@@ -8808,6 +9017,11 @@ def main(
                             file=sys.stderr,
                         )
                 if controller_changed:
+                    if owned_ota_hop_settings:
+                        try:
+                            restore_ota_hop_settings(controller, args, owned_ota_hop_settings)
+                        except (OtaError, OSError) as exc:
+                            print(f"WARNING: {exc}; retrying after radio restore", file=sys.stderr)
                     if relay_timing_settings:
                         try:
                             restore_relay_timings(controller, relay_timing_settings)
@@ -8929,6 +9143,15 @@ def main(
                         "leave RXPS off and return the source to its normal "
                         "radio before restoring it manually with "
                         f"{recovery_hint}: {exc}",
+                        file=sys.stderr,
+                    )
+            if owned_ota_hop_settings and controller is not None:
+                try:
+                    restore_ota_hop_settings(controller, args, owned_ota_hop_settings)
+                except (OtaError, OSError) as exc:
+                    print(
+                        f"CRITICAL: {exc}; use {work_dir / OTA_HOPS_RECOVERY_FILE} "
+                        "after checking the current policy and radio channel",
                         file=sys.stderr,
                     )
             if not source_rxps_changed:

@@ -2408,6 +2408,11 @@ def run_step(
         ])
     if args.debug:
         command.append("--debug")
+    # The outer runner's destination policy alone cannot make a direct-only
+    # source/relay transport an indirect route. Carry the reach into the
+    # generic runner's temporary, saved/restored participant policy as well.
+    if getattr(args, "ota_hops", None) is not None:
+        command.extend(["--ota-hops", str(max(args.ota_hops, len(relays)))])
     for relay_key, relay_password in relays:
         command.extend(["--relay", f"{relay_key}={relay_password}"])
     result = ota.main(command, controller_override=controller)
