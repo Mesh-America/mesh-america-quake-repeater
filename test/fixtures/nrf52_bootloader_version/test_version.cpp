@@ -77,7 +77,8 @@ int main(int argc, char** argv) {
       bytes.assign(std::istreambuf_iterator<char>(file), {});
     }
     char output[128];
-    if (!nrf52BootloaderVersion(bytes.data(), bytes.size(), 0xf4000, 0, output, sizeof(output))) return 3;
+    const uint32_t start = argc > 2 ? (uint32_t)std::stoul(argv[2], nullptr, 0) : 0xf4000;
+    if (!nrf52BootloaderVersion(bytes.data(), bytes.size(), start, 0, output, sizeof(output))) return 3;
     std::cout << output << '\n';
     return 0;
   }
@@ -98,13 +99,40 @@ int main(int argc, char** argv) {
   // long release/preview/fork/build versions that the old 32-byte buffer cut.
   const char* versions[] = {"0.6.4", "0.9.2", "0.11.0-OTAFIX2.4.2", "0.11.0-OTAFIX2.4.6",
     "0.11.0-OTAFIX2.4.6-preview.12", "0.11.0-OTAFIX2.4.3-dirty-test-version-0x02040401",
-    "v0.9.2-Seeed", "0.8.2+build.abcdef", "0.6.1_RAK4631"};
+    "v0.9.2-Seeed", "0.8.2+build.abcdef", "0.6.1_RAK4631",
+    // Embedded values from manufacturer images, not filename versions.
+    "0.3.2-109-gd6b28e6", "0.4.1-13-g5e6690e-dirty", "0.4.2", "0.4.3", "0.4.4", "0.4.5",
+    "0.9.0-2-g836c8dc-dirty", "0.6.2-26-g949425a-dirty", "0.6.1",
+    "0.9.2-29-g6a9a6a3", "0.6.1-2-g1224915", "0.9.2-dirty", "0.6.4-dirty", "1.00",
+    "0.7.0-22-g277a0c8", "0.9.1-5-g488711a", "0.10.0-18-gb93789f", "0.9.2-31-g990aa7f-dirty"};
   for (const char* version : versions) {
     for (size_t offset : {0x100u, 0x101u, 0x102u, 0x103u, 0x6ff0u, 0x7000u, 0x9e00u}) {
       auto bytes = image(); text(bytes, offset, version); expect(bytes, version);
     }
   }
   auto bytes = image();
+  for (const char* bad : {"1", "1.", "1..00", "1.00.", "1.00..0", "v.1.00"}) {
+    bytes = image(); text(bytes, 0x100, bad); expect(bytes, nullptr);
+  }
+  bytes = image();
+  const std::string stock_boundary = "UF2 Bootloader 1.00\n";
+  memcpy(bytes.data() + bytes.size() - stock_boundary.size(),
+         stock_boundary.data(), stock_boundary.size());
+  expect(bytes, "1.00"); // two-component record ending at the region boundary
+  bytes.back() = '0'; expect(bytes, nullptr); // still require an in-bounds terminator
+  bytes = image(); text(bytes, 0x100, "1.00");
+  char stock_tiny[4];
+  assert(!nrf52BootloaderVersion(bytes.data(), bytes.size(), 0xf4000, 0,
+                                 stock_tiny, sizeof(stock_tiny)) && stock_tiny[0] == 0);
+  bytes = image(); text(bytes, 0x100, "1.00"); text(bytes, 0x8000, "1.01");
+  expect(bytes, nullptr); // conflicting two-component records remain unknown
+  bytes = image(); standalone(bytes, 0x100, "1.00"); expect(bytes, nullptr);
+  bytes = image(); standalone(bytes, 0x100, "v1.00"); expect(bytes, nullptr);
+  // A generic regex must not pick a dependency version as the bootloader.
+  for (const char* library : {"TinyUSB 0.12.0", "nrfx 2.0.0", "SoftDevice 7.3.0",
+                             "v0.9.2", "0.6.4", "1.00"}) {
+    bytes = image(); standalone(bytes, 0x100, library); expect(bytes, nullptr);
+  }
   // OTAFIX 2.4.9 and later board images use a standalone INFO_UF2 value.
   // Search only the first 40 KiB of the identified bootloader region.
   for (const char* version : {"v0.11.0-OTAFIX2.4.9", "v0.11.0-OTAFIX2.4.10",

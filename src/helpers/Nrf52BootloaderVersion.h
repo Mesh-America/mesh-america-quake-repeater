@@ -50,13 +50,17 @@ inline bool nrf52BootVersionChar(uint8_t c) {
 
 // Return the complete token, never a truncated (and possibly different) version.
 // An embedded marker literal with no actual version is not an INFO_UF2 record.
+// Some Seeed stock bootloaders declare two components (e.g. "1.00"). Preserve
+// those bytes; adding a synthetic patch number would misreport their version.
 inline size_t nrf52BootVersionTokenSize(const uint8_t* token, size_t available) {
   size_t pos = available && token[0] == 'v' ? 1u : 0u;
   for (unsigned component = 0; component < 3u; ++component) {
     const size_t begin = pos;
     while (pos < available && token[pos] >= '0' && token[pos] <= '9') ++pos;
     if (pos == begin) return 0;
-    if (component != 2u && (pos >= available || token[pos++] != '.')) return 0;
+    if (component == 2u) break;
+    if (component == 1u && (pos >= available || token[pos] != '.')) break;
+    if (pos >= available || token[pos++] != '.') return 0;
   }
   size_t n = 0;
   for (; n < available && n <= 127u; ++n) {

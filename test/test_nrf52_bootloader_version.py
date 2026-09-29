@@ -1,8 +1,12 @@
-"""Compile the real version reader; optionally verify pinned OTAFIX releases."""
+"""Compile the real reader; optionally verify pinned stock/OTAFIX artifacts."""
 import hashlib
+import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -10,9 +14,66 @@ import unittest
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "test/fixtures/nrf52_bootloader_version"
+SPEC = importlib.util.spec_from_file_location("nrf52_stock_artifacts", FIXTURES / "stock_artifacts.py")
+STOCK = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(STOCK)
 
 
 class BootloaderVersionTest(unittest.TestCase):
+    def test_stock_artifact_manifest(self):
+        records = json.loads((FIXTURES / "stock_images.json").read_text())["artifacts"]
+        self.assertEqual(len(records), 26)
+        self.assertEqual(len({record["image_sha256"] for record in records}), len(records))
+        for record in records:
+            with self.subTest(source=record["url"]):
+                self.assertRegex(record["sha256"], r"^[0-9a-f]{64}$")
+                self.assertRegex(record["image_sha256"], r"^[0-9a-f]{64}$")
+                self.assertRegex(record["version"], r"^\d+\.\d+(?:\.\d+)?(?:[-_+].+)?$")
+                self.assertIn(record["format"], ("hex", "uf2", "dfu"))
+                self.assertEqual(record["start"], "0xf4000")
+                self.assertEqual(record["size"], 40960)
+                self.assertEqual(Path(record["file"]).name, record["file"])
+
+    def test_stock_artifact_decoders(self):
+        record = {"start": "0xf4000", "size": 40960, "format": "hex"}
+        def ihex(address, kind, payload):
+            data = bytes((len(payload), address >> 8, address & 255, kind)) + payload
+            return ":" + (data + bytes((-sum(data) & 255,))).hex() + "\n"
+        raw = (ihex(0, 4, b"\x00\x0f") + ihex(0x4000, 0, b"abcd") +
+               ihex(0, 1, b"")).encode()
+        self.assertEqual(STOCK.bootloader_image(raw, record)[:8], b"abcd\xff\xff\xff\xff")
+        with self.assertRaises(ValueError):
+            STOCK.bootloader_image(raw.replace(b"61626364", b"61626365"), record)
+        with self.assertRaises(ValueError):
+            STOCK.bootloader_image(raw.split(b":00000001")[0], record)
+        conflict = (ihex(0, 4, b"\x00\x0f") + ihex(0x4000, 0, b"a") +
+                    ihex(0x4000, 0, b"b") + ihex(0, 1, b"")).encode()
+        with self.assertRaises(ValueError):
+            STOCK.bootloader_image(conflict, record)
+        record["format"] = "uf2"
+        block = bytearray(512)
+        struct.pack_into("<IIIIIIII", block, 0, 0x0a324655, 0x9e5d5157,
+                         0x2000, 0xf4000, 4, 0, 1, 0xada52840)
+        block[32:36] = b"abcd"
+        struct.pack_into("<I", block, 508, 0x0ab16f30)
+        self.assertEqual(STOCK.bootloader_image(block, record)[:4], b"abcd")
+        struct.pack_into("<I", block, 8, 0x2001)
+        self.assertEqual(STOCK.bootloader_image(block, record), b"\xff" * 40960)
+        struct.pack_into("<I", block, 8, 0x2000)
+        struct.pack_into("<I", block, 12, 0x26000)  # application-only UF2
+        self.assertEqual(STOCK.bootloader_image(block, record), b"\xff" * 40960)
+        block[-1] ^= 1
+        with self.assertRaises(ValueError):
+            STOCK.bootloader_image(block, record)
+        record["format"] = "dfu"
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w") as archive:
+            archive.writestr("manifest.json", json.dumps({"manifest": {"softdevice_bootloader": {
+                "sd_size": 2, "bl_size": 4, "bin_file": "sd_bl.bin"}}}))
+            archive.writestr("sd_bl.bin", b"SDabcd")
+        self.assertEqual(STOCK.bootloader_image(archive_bytes.getvalue(), record)[:4], b"abcd")
+
     def test_firmware_uses_shared_reader(self):
         board = (ROOT / "src/helpers/NRF52Board.cpp").read_text()
         getter = board.split("bool NRF52Board::getBootloaderVersion(", 1)[1].split("\n}", 1)[0]
@@ -41,6 +102,23 @@ class BootloaderVersionTest(unittest.TestCase):
             result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("native cases passed", result.stdout)
+            # Optional manufacturer downloads: exact hashes, normalized layout,
+            # and exact reported versions, not merely a dotted-number regex.
+            stock_cache = os.environ.get("MESHCORE_STOCK_BOOTLOADER_CACHE")
+            if stock_cache:
+                records = json.loads((FIXTURES / "stock_images.json").read_text())["artifacts"]
+                for record in records:
+                    with self.subTest(stock_image=record["url"]):
+                        raw = (Path(stock_cache) / record["file"]).read_bytes()
+                        self.assertEqual(hashlib.sha256(raw).hexdigest(), record["sha256"])
+                        payload = STOCK.bootloader_image(raw, record)
+                        self.assertEqual(hashlib.sha256(payload).hexdigest(), record["image_sha256"])
+                        result = subprocess.run([str(exe), "--hex", record["start"]],
+                                                input=payload.hex(), capture_output=True,
+                                                text=True, timeout=20)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertEqual(result.stdout.strip(), record["version"])
+                print(f"Verified version reader against {len(records)} distinct manufacturer bootloader images")
             # Optional local/release artifacts; never downloaded or flashed by
             # this test. Each must be a raw bootloader image starting at F4000.
             for path in os.environ.get("MESHCORE_BOOTLOADER_IMAGES", "").split(os.pathsep):
@@ -48,7 +126,7 @@ class BootloaderVersionTest(unittest.TestCase):
                     with self.subTest(image=path):
                         result = subprocess.run([str(exe), path], check=True, capture_output=True,
                                                 text=True, timeout=20)
-                        self.assertRegex(result.stdout, r"\d+\.\d+\.\d+")
+                        self.assertRegex(result.stdout, r"\d+\.\d+(?:\.\d+)?")
             release = os.environ.get("MESHCORE_BOOTLOADER_MOTA_ZIP")
             if release:
                 self.assertEqual(hashlib.sha256(Path(release).read_bytes()).hexdigest(),

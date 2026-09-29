@@ -4740,9 +4740,10 @@ selected by the MBR/UICR boot address and bounded by the chip's flash geometry;
 it does not search application firmware or staged update files.
 
 The reader preserves a complete Adafruit/UF2 version string, including OTAFIX,
-preview, and vendor/build suffixes. If that string is absent or ambiguous, it
-uses the existing whole-image CRC and unique BLMF/BLM2 validation to read the
-embedded OTAFIX version (for example, `> OTAFIX2.4.6`). Some current release
+preview, and vendor/build suffixes. Manufacturer two-component versions such as
+Seeed's `1.00` are preserved without inventing a patch number. If that string is
+absent or ambiguous, it uses the existing whole-image CRC and unique BLMF/BLM2
+validation to read the embedded OTAFIX version (for example, `> OTAFIX2.4.6`). Some current release
 images, including MeshTower V2 SD 2.4.6, omit the UF2 text entirely. As a last
 OTAFIX-specific fallback, it accepts one unambiguous standalone version token
 such as `v0.11.0-OTAFIX2.4.9` from only the first 40 KiB of the identified
@@ -4757,6 +4758,9 @@ version field shared by every third-party bootloader. This is diagnostic only:
 displaying a version neither grants OTA capability nor bypasses install checks.
 The fix is in MeshCore application firmware; installing another bootloader alone
 does not update an older application's version reader.
+
+See the [stock bootloader audit](bootloader_version_stock_audit.md) for tested
+manufacturer images and the boards still requiring untouched factory dumps.
 
 ---
 

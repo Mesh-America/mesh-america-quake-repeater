@@ -1,0 +1,266 @@
+{
+  "audit_date": "2026-09-29",
+  "artifacts": [
+    {
+      "file": "88e0b86aa24eefc6c6c85ba2bbaf9908271100be.hex",
+      "url": "https://raw.githubusercontent.com/Xinyuan-LilyGO/T-Impulse-Plus/main/bootloader/%28%E4%BF%AE%E6%94%B9%E5%90%AF%E5%8A%A8%E6%97%B6%E9%97%B4%E4%B8%BA700ms%29t_impulse_plus_nrf52840_bootloader-0.9.2-dirty_s140_6.1.1_202508251059.hex",
+      "sha256": "b370eea5b238fecf4dd162a190a35e18129a3b23adbf27450ab1147c5d3b5572",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "3bd7d638548bfc08d20898521aa0c2647ecb226d07296ad4c6b63bb7914aa6aa",
+      "version": "0.9.2-dirty"
+    },
+    {
+      "file": "a60a6b39854ea6bc69e75acad47524181ab53b28.hex",
+      "url": "https://raw.githubusercontent.com/Xinyuan-LilyGO/T-Impulse-Plus/main/bootloader/deprecated/t_impulse_plus_nrf52840_bootloader-0.9.2-dirty_s140_6.1.1_202507211712.hex",
+      "sha256": "71fc6319904641d4d60300abaca57d7c187fb215b8f02db954fb1807bd67e99a",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "d047b1f9f23a7aae48118b1da777f0f0053c044667cc4c42f2d8c01331b2e5b6",
+      "version": "0.9.2-dirty"
+    },
+    {
+      "file": "5605ef4a7f53eb32e428b6fdfd83a251e2291012.hex",
+      "url": "https://raw.githubusercontent.com/Seeed-Studio/Seeed-Tracker-T1000-E-for-LoRaWAN-dev-board/main/firmware/t1000_e_bootloader_1th_ota_uf2.hex",
+      "sha256": "fdca62eace7dee87265a0f6c567a4a8ab6889bf1f8ff6dc7cef4c1b368309cd3",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "dd1599f1885a5bab04e46e81e95197574a877bf427e420b39f7353f47f93a8e2",
+      "version": "1.00"
+    },
+    {
+      "file": "f2e0a8e78eeaf9357eac6d85d8a05ba0eac485f8.hex",
+      "url": "https://raw.githubusercontent.com/HelTecAutomation/Heltec_nRF52/main/bootloader/HT-n5262/HT-n5262_bootloader-0.9.0_s140_6.1.1.hex",
+      "sha256": "b0eb140afac57633208ace8a98908e8c90149a38c1b0b62cf65e0ec48acea1b7",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "8618c2d91d855afab573d4e9e7efcdc61d80242faa7b9e74f403a81e744abe16",
+      "version": "0.9.0-2-g836c8dc-dirty"
+    },
+    {
+      "file": "1aa29101857a9b3973fe51028ea7c7a2df97f497.hex",
+      "url": "https://raw.githubusercontent.com/Xinyuan-LilyGO/T-Echo-Lite/main/bootloader/t-echo_lite_nrf52840_bootloader-0.9.2-dirty_s140_6.1.1_202411271344.hex",
+      "sha256": "278a059c0288d919a166373da6241f36a53b33518c915f380878daee7b0a09e8",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "911bd9a317c3b69c8db1406dae2857410d8e608b256a9c06b5d351d90da63995",
+      "version": "0.9.2-dirty"
+    },
+    {
+      "file": "153c400ac21ab646231871b6f15a3be25316178a.hex",
+      "url": "https://raw.githubusercontent.com/RAKWireless/WisBlock/master/bootloader/RAK4630/Latest/WisCore_RAK4631_Bootloader/wiscore_rak4631_board_bootloader-0.4.3.hex",
+      "sha256": "e537340f695523b80c36c3cba6b74ae9b25c2d5047cf195eea19535b7171c356",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "6cbfa569a05cbd232dabe4a654abe9c04b7a03ab457615028d28f2d1329e58d2",
+      "version": "0.4.3"
+    },
+    {
+      "file": "c59a5156a0ec065fa9e56faf1da124297080014c.hex",
+      "url": "https://raw.githubusercontent.com/RAKWireless/WisBlock/master/bootloader/RAK4630/Latest/wiscore_rak4631_board_bootloader-0.4.4.hex",
+      "sha256": "29635d90eccd181ce206bfa10aa0ca92b9cff61735a6205321efe241e0f1298a",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "34d59ed3c584b973ced76917cc9c7a7bc979f0b71865055729dc9a8326dc326b",
+      "version": "0.4.4"
+    },
+    {
+      "file": "9fe7f40ac0344b8db514ea6770f8bf65ad8b08da.hex",
+      "url": "https://raw.githubusercontent.com/RAKWireless/WisBlock/master/bootloader/RAK4630/Old/V0.3.2/RAK4630_bootloader.hex",
+      "sha256": "5c44ea2eb151c20c2cb5a63ca3ff4c4d10ae11b29f97812fb7a21167de7acb44",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "f345e1b2b85c88c32b3b1ad95d3330fd1d9bcf2ee0df25289c3e2f0d5fb3228d",
+      "version": "0.3.2-109-gd6b28e6"
+    },
+    {
+      "file": "f33019e13e85f424f850a418a0c6628a5f7c864f.hex",
+      "url": "https://raw.githubusercontent.com/RAKWireless/WisBlock/master/bootloader/RAK4630/Old/V0.4.1/RAK4630_bootloader-0.4.1.hex",
+      "sha256": "3f317b2d05c8c65a98a5de306c7055078426ed5398dabb99ed1d2af93c270579",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "15003850514750f2606c9edb91ed81bf636d75a47d0961f3a8644847be2a9ef7",
+      "version": "0.4.1-13-g5e6690e-dirty"
+    },
+    {
+      "file": "c7c4a3c3468da4cc3680ca38caf6c5212e953c3f.hex",
+      "url": "https://raw.githubusercontent.com/RAKWireless/WisBlock/master/bootloader/RAK4630/Old/V0.4.2/WisCore_RAK4631_Board_Bootloader.hex",
+      "sha256": "44013dd02aa5335cbeb85a6b838408dc34b267e8d732965ab4c62730fa81b9a1",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "c77b8a4de1c33bedcb96d28cfa68d5a1c510e7cd886cfc62e6d07fbf2126ccea",
+      "version": "0.4.2"
+    },
+    {
+      "file": "f7dab5b353598db337a0e83416eab51895706a6a.hex",
+      "url": "https://raw.githubusercontent.com/Xinyuan-LilyGO/T-Echo/main/bootloader/lilygo_techo_bootloader-0.6.1_s140_6.1.1.hex",
+      "sha256": "0f19e2a83ab76ead26e729f9c6ee5e5db6b8c6e45e6ed47b01d648d531f2418b",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "f5f3a732241590d49a355b78d12aee4952115d773796f8e40e86ff1cf0fbcc50",
+      "version": "0.6.1-2-g1224915"
+    },
+    {
+      "file": "25900da2245a7a727e22e6c3e6f727e1e83c0508.hex",
+      "url": "https://raw.githubusercontent.com/Seeed-Studio/Adafruit_nRF52_Arduino/master/bootloader/Seeed_Wio_Tracker_1110/Seeed_Wio_Tracker_1110_bootloader-0.6.2_s140_6.1.1.hex",
+      "sha256": "ed8c28b406a40e1d8a79e9ffe4d93a7f1aa388dba0459c912f91ad6d67fef0c3",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "a1f8e7d932801e6f50818182cfd3536e610df8ff83bc7582ac8a6fdd4fd24121",
+      "version": "0.6.2-26-g949425a-dirty"
+    },
+    {
+      "file": "b63bd32af33a6f1392483e3d7915016f8d871410.hex",
+      "url": "https://raw.githubusercontent.com/Seeed-Studio/Adafruit_nRF52_Arduino/master/bootloader/Seeed_XIAO_nRF52840/Seeed_XIAO_nRF52840_bootloader-0.6.2_s140_7.3.0.hex",
+      "sha256": "c79c8cf75ebb7abfa53b02fd3584aa9a5aeb8dc1b073f674f4fa162225630c6c",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "77941feb9ea9d99acaeb1f815a905e23f618381390d40f38374a894505e6798f",
+      "version": "0.6.1"
+    },
+    {
+      "file": "fced8e3e3c0cacc89db9a2ba5c00ceb97345ab9b.hex",
+      "url": "https://raw.githubusercontent.com/Seeed-Studio/Adafruit_nRF52_Arduino/master/bootloader/Seeed_XIAO_nRF52840_Plus/Seeed_XIAO_nRF52840_Plus_bootloader-0.6.2_s140_7.3.0.hex",
+      "sha256": "6bd76f49e1dfa839d0084b9af5563115df2ee438f1980327dd4364792475048b",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "caf05e859193001ef745d21ae71b218f2f23a0ed995a4adc69debcdb31e35ba8",
+      "version": "0.9.2-29-g6a9a6a3"
+    },
+    {
+      "file": "6341509efdc55c5fc04b1423ca81afdd9e4673d8.hex",
+      "url": "https://raw.githubusercontent.com/Seeed-Studio/Adafruit_nRF52_Arduino/master/bootloader/Seeed_XIAO_nRF52840_Sense/Seeed_XIAO_nRF52840_Sense_bootloader-0.6.2_s140_7.3.0.hex",
+      "sha256": "ac654c6cab225a933278c8be09b92b41bc4c044d064bd8c9c3314c1c4a0cc8c8",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "894f2e6df7663fcc5c398e210db7f2e7f21d3da53036e0a11576909c849f78fb",
+      "version": "0.6.1"
+    },
+    {
+      "file": "3c2e9de75c21b7f50ef7a99710c33df51cf7d337.hex",
+      "url": "https://raw.githubusercontent.com/Seeed-Studio/Adafruit_nRF52_Arduino/master/bootloader/Seeed_XIAO_nRF52840_Sense_Plus/Seeed_XIAO_nRF52840_Sense_Plus_bootloader-0.6.2_s140_7.3.0.hex",
+      "sha256": "b401776e6586f6065c46187d190dfa4acf9f7897a7d7c5f12a34662dff405e64",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "b19bd74a743a8311b12a07ae5cc17f28966d6e61b66f93f2afb2ceb52c5240d2",
+      "version": "0.9.2-29-g6a9a6a3"
+    },
+    {
+      "file": "9f030583154e432000b1cae8a18a411cac9db146.hex",
+      "url": "https://raw.githubusercontent.com/Xinyuan-LilyGO/T-Echo-Card/main/bootloader/T-Echo-Card%20bootloader/deprecated/%28%E5%88%A0%E9%99%A4%E5%90%AF%E5%8A%A8%E6%97%B6%E9%97%B4%29t_echo_card_nrf52840_bootloader-0.9.2-dirty_s140_6.1.1.hex",
+      "sha256": "f54ce5e646f35257491a250712aefc3b1402e4526af5b5ed356bd395b918c364",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "5f9ccec2c1cb7cf85d4271f0a3c472a64d40458bf1e05779daf3d49b81e1fe98",
+      "version": "0.9.2-dirty"
+    },
+    {
+      "file": "291209d1108f1f61e5096edd64f633920556ef7f.hex",
+      "url": "https://raw.githubusercontent.com/Xinyuan-LilyGO/T-Echo-Card/main/bootloader/T-Echo-Card%20bootloader/deprecated/t_echo_card_nrf52840_bootloader-0.9.2-dirty_s140_6.1.1_202510090919.hex",
+      "sha256": "6a7a64dc2b9337dfb76f6eeb2de3eaeeab7b953d46754afe5297ec0b1f78785f",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "17a6c1b72aaed448aa94a09aee36dbfb75343c559a2e84df849e476eee01d430",
+      "version": "0.9.2-dirty"
+    },
+    {
+      "file": "8c1a827f68e388cc067ba58542123db70e339f2a.hex",
+      "url": "https://raw.githubusercontent.com/Xinyuan-LilyGO/T-Echo-Card/main/bootloader/T-Echo-Card%20bootloader/t_echo_card_nrf52840_bootloader-0.9.2-dirty_s140_6.1.1_202608131146.hex",
+      "sha256": "c6b8025cb855d15fb06cbaba24d460a12bfc87b22df10667fb88d9ff13c5941e",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "efd403e7d211534a019467e9c39781bf49d4252fbb4850e8bb21fdc7895dab12",
+      "version": "0.9.2-dirty"
+    },
+    {
+      "file": "meshtiny.uf2",
+      "url": "https://dl.mtoolstec.com/meshtiny/bootloader.uf2",
+      "sha256": "7bdbb6eedaca1cf62d4479bb23b612964e838f6c06a6e67113ec9edde0244aee",
+      "format": "uf2",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "8c666e29d64d4875b7f076574454e9ac99fc2e5eb25af06500ad05ee245d6440",
+      "version": "0.4.5"
+    },
+    {
+      "file": "nano-g2.zip",
+      "url": "https://wiki.bqvoy.com/meshtastic/nano_g2_ultra/nano_g2_nrf52840_bootloader-0.6.4_s140_6.1.1.hex.zip",
+      "sha256": "8f10154689f8e922062ace1fe2177513ca846c166b9a3eaa48e76387dc459f5d",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "c0607db64762d2b3203fcb13f3abed9adde1ec0f6ce2f5f204291f940511c5a5",
+      "version": "0.6.4-dirty",
+      "member": "nano_g2_nrf52840_bootloader-0.6.4_s140_6.1.1.hex"
+    },
+    {
+      "file": "wio-l1.zip",
+      "url": "https://files.seeedstudio.com/wiki/SenseCAP/Meshtastic/adafruit/wio_tracker_l1_bootloader-0.10.0_s140_7.3.0.zip",
+      "sha256": "6d8fab06f8fd146653b93196ebb86203e336d74bb7f06d1dabc89f31d23783d1",
+      "format": "dfu",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "4e9c4b9a9d610ccb7c7e9f16757eb51bedeeb2b30b438d5c1ad07a852f2a24b4",
+      "version": "0.7.0-22-g277a0c8"
+    },
+    {
+      "file": "t1000-e.zip",
+      "url": "https://files.seeedstudio.com/wiki/SenseCAP/lorahub/t1000_e_bootloader-0.9.1-5-g488711a_s140_7.3.0.zip",
+      "sha256": "87c4ba0721be16cca9b784ccb70ea41103100767978431ba47c692d2644bdccc",
+      "format": "dfu",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "9f286a5c8c634a65e4f6d5b63c35eeb1466f900de9abb58ae109e67a82092562",
+      "version": "0.9.1-5-g488711a"
+    },
+    {
+      "file": "meshtracker-x1.zip",
+      "url": "https://files.seeedstudio.com/wiki/SenseCAP/Meshcore/MeshTrackerX1/Bootloader.zip",
+      "sha256": "69c246a8f29bc2ce7d1448581076be97a7232e8b548279ee6e1ec3a0d77f9e0c",
+      "format": "dfu",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "082eb4cd2cd3db971b9bf4b659c220473cdf13b9400de6fac84b0b1fd62dc005",
+      "version": "0.10.0-18-gb93789f"
+    },
+    {
+      "file": "r1-neo.hex",
+      "url": "https://github.com/muzi-works/Adafruit_nRF52_Bootloader/releases/download/0.9.2/r1_neo_board_bootloader-0.9.2-31-g990aa7f-dirty_s140_6.1.1.hex",
+      "sha256": "54f77f1e2c6cf5675aec9730cff27087f3f838d7f7075dba5a266e6e0ac355ff",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "8bfe28094a824f08bf703bf3ccc929e0b21b0b37f94ccee3fbd89413b4eedfeb",
+      "version": "0.9.2-31-g990aa7f-dirty"
+    },
+    {
+      "file": "t114-vendor.hex",
+      "url": "https://resource.heltec.cn/download/Mesh_Node_T114/firmware/HT-n5262-bootloader-20240709.hex",
+      "sha256": "e950057bebc4beddafdf30955b2d473c4cc26ed008858cf114c613ba0c6c8f88",
+      "format": "hex",
+      "start": "0xf4000",
+      "size": 40960,
+      "image_sha256": "906fbbe787e18b789a695ae8bec6a5c31320f6948a656344c30bde0eaca1afbd",
+      "version": "0.9.0-2-g836c8dc-dirty"
+    }
+  ]
+}
