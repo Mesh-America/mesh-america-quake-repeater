@@ -6888,6 +6888,64 @@ class Rak3401ExtractionCacheTests(unittest.TestCase):
 
 
 class Rak3401KnownUnsafeReleaseTests(unittest.TestCase):
+    def test_chain_preflight_uses_public_key_for_emoji_named_target(self) -> None:
+        target_key = "37ea80c102ed" + "ab" * 26
+        contact_name = "#Calloway 1W Rptr \U0001f4e1"
+        controller = mock.Mock()
+        controller._run.return_value = [{target_key: {
+            "public_key": target_key, "adv_name": contact_name, "type": 2,
+        }}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                mock.patch.dict(os.environ, {"MESHCORE_ADMIN_PASSWORD": "test-password"}),
+                mock.patch.object(
+                    rak_chain, "validate_args",
+                    side_effect=lambda args, _parser: setattr(args, "temp_values", (909.95, 250, 5, 5, 120)),
+                ),
+                mock.patch.object(rak_chain, "locate_bundle", return_value=root / "bundle"),
+                mock.patch.object(rak_chain, "require_bundle_work_separation"),
+                mock.patch.object(rak_chain, "snapshot_verified_bundle", return_value=root / "snapshot"),
+                mock.patch.object(rak_chain, "parse_chain", return_value=([mock.Mock()], b"final")),
+                mock.patch.object(rak_chain, "verify_motatool"),
+                mock.patch.object(rak_chain, "require_live_release_safe"),
+                mock.patch.object(rak_chain, "require_meshcli_version"),
+                mock.patch.object(rak_chain.ota, "preflight_source_cli"),
+                mock.patch.object(rak_chain.ota, "Controller", return_value=controller),
+                mock.patch.object(rak_chain.ota, "verify_shared_source_identity"),
+                mock.patch.object(rak_chain, "query_live_target", return_value=mock.Mock()) as query,
+                mock.patch.object(rak_chain, "find_resume_index", return_value=0),
+                mock.patch.object(rak_chain, "require_rescue_capability_before_next_transition") as rescue,
+                mock.patch.object(rak_chain, "confirm_chain") as confirm,
+            ):
+                result = rak_chain.main([
+                    "--bundle", str(root / "bundle"),
+                    "--work-dir", str(root / "work"),
+                    "--controller-tcp", "192.0.2.8",
+                    "--target-key", target_key[:12],
+                    "--preflight-only",
+                ])
+        self.assertEqual(result, 0)
+        self.assertEqual(query.call_args.args[2], target_key)
+        self.assertEqual(rescue.call_args.args[1], target_key)
+        self.assertEqual(confirm.call_args.args[1:3], (contact_name, target_key))
+        controller.remote_command.assert_not_called()
+
+    def test_chain_binds_emoji_named_relay_to_public_key(self) -> None:
+        target_key = "37ea80c102ed" + "ab" * 26
+        relay_key = "3ee21f453f8f" + "cd" * 26
+        controller = mock.Mock()
+        controller._run.return_value = [{
+            target_key: {"public_key": target_key, "adv_name": "target", "type": 2},
+            relay_key: {"public_key": relay_key, "adv_name": "Relay \U0001f4e1", "type": 2},
+        }]
+        with contextlib.redirect_stdout(io.StringIO()):
+            relays = rak_chain.bind_relay_keys(
+                controller, target_key, [f"{relay_key[:12]}=relay-password"], "default"
+            )
+        self.assertEqual(relays, [(relay_key, "relay-password")])
+        controller.remote_command.assert_not_called()
+
     @staticmethod
     def live_chain_args() -> argparse.Namespace:
         return argparse.Namespace(
@@ -7068,6 +7126,8 @@ class Rak3401KnownUnsafeReleaseTests(unittest.TestCase):
             package=mock.Mock(manifest_id="1234ABCD"),
         )
         controller = mock.Mock()
+        target_key = "37ea80c102ed" + "ab" * 26
+        relay_key = "3ee21f453f8f" + "cd" * 26
 
         for enabled in (False, True):
             with self.subTest(debug=enabled), tempfile.TemporaryDirectory() as directory:
@@ -7075,15 +7135,18 @@ class Rak3401KnownUnsafeReleaseTests(unittest.TestCase):
                 with mock.patch.object(rak_chain.ota, "main", return_value=0) as nested:
                     rak_chain.run_step(
                         args,
-                        "remote",
+                        target_key,
                         step,
                         None,
                         bytes.fromhex("0011223344556677"),
                         Path(directory),
                         controller,
+                        [(relay_key, "relay-password")],
                     )
                 command = nested.call_args.args[0]
                 self.assertEqual(command.count("--debug"), int(enabled))
+                self.assertEqual(command[1], target_key)
+                self.assertEqual(command[command.index("--relay") + 1], f"{relay_key}=relay-password")
 
     def test_live_chain_is_blocked_after_failed_physical_step_6(self) -> None:
         self.assertEqual(rak_chain.KNOWN_UNSAFE_STEP, 6)
