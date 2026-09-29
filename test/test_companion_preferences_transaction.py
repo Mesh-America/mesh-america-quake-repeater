@@ -53,6 +53,7 @@ int main(int argc,char** argv){
  original.interference_threshold=8;original.agc_reset_interval=15;original.tz_offset=-7;
  original.flood_retry_attempts=4;original.flood_retry_max_path=3;
  original.flood_retry_group_max_path=2;original.flood_retry_advert_enabled=0;
+ original.one_key_dm_enabled=1;
 #ifdef TBEAM_1W
  strcpy(original.fan_mode,"on");original.fan_lo=33;original.fan_hi=42;
 #endif
@@ -88,6 +89,7 @@ int main(int argc,char** argv){
    assert(loaded.interference_threshold==8&&loaded.agc_reset_interval==15&&loaded.tz_offset==-7);
    assert(loaded.flood_retry_attempts==4&&loaded.flood_retry_max_path==3);
    assert(loaded.flood_retry_group_max_path==2&&loaded.flood_retry_advert_enabled==0);
+   assert(loaded.one_key_dm_enabled==1);
 #ifdef TBEAM_1W
    assert(!strcmp(loaded.fan_mode,"on")&&loaded.fan_lo==33&&loaded.fan_hi==42);
 #endif
@@ -172,6 +174,7 @@ int main(int argc,char** argv){
    assert(loaded.interference_threshold==0&&loaded.agc_reset_interval==0&&loaded.tz_offset==0);
    assert(loaded.flood_retry_attempts==15&&loaded.flood_retry_max_path==1);
    assert(loaded.flood_retry_group_max_path==0xff&&loaded.flood_retry_advert_enabled==1);
+   assert(loaded.one_key_dm_enabled==0);
    assert(loaded.freq==original.freq&&loaded.ble_pin==original.ble_pin);
  } else if(scenario==6){
    DataStore legacy;legacy.fs.files["/new_prefs"]=disk;
@@ -186,6 +189,15 @@ int main(int argc,char** argv){
    assert(legacy.loadPrefs(loaded,lat,lon));
    assert(loaded.flood_retry_attempts==15&&loaded.flood_retry_max_path==1);
    assert(loaded.flood_retry_group_max_path==0xff&&loaded.flood_retry_advert_enabled==1);
+   assert(loaded.one_key_dm_enabled==0);
+ } else if(scenario==7){
+   // Pre-consent image: all earlier settings survive with default-off consent.
+   DataStore legacy;legacy.fs.files["/new_prefs"]=disk;
+   legacy.fs.files["/new_prefs"].resize(disk.size()-1);
+   CompanionNodePrefs loaded;double lat=0,lon=0;
+   assert(legacy.loadPrefs(loaded,lat,lon));
+   assert(loaded.flood_retry_advert_enabled==0);
+   assert(loaded.one_key_dm_enabled==0);
  } else if(scenario==4){
    DataStore legacy;legacy.fs.files["/node_prefs"]=disk;
    legacy.fs.fail_write_after=17;
@@ -273,7 +285,7 @@ inline char* utoa(unsigned int value,char* output,int base){
                         str(ROOT / 'src/helpers/TxtDataHelpers.cpp'),
                         '-o', str(binary)], capture_output=True, text=True)
                     self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
-                    for scenario in range(7):
+                    for scenario in range(8):
                         with self.subTest(scenario=scenario):
                             run = subprocess.run([str(binary), str(scenario)], capture_output=True, text=True)
                             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

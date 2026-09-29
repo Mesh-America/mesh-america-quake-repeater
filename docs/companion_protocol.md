@@ -242,6 +242,51 @@ catalog; bytes `0x2C`-`0x31` are parked and `0x35` is unused.
 The sections below detail the most common frames. Refer to the source named
 above for command bodies that are not expanded here.
 
+### Private text when only the sender knows the recipient
+
+Clients continue to send an ordinary `CMD_SEND_TXT_MSG` (`0x02`) with
+`TXT_TYPE_PLAIN`; no client protocol change is needed. For a chat contact
+without a recent confirmed DM, Companion firmware first sends a signed,
+encrypted [one-key introduction](payloads.md#companion-one-key-dm-introduction)
+that includes its full public key, then queues the normal private text after
+the introduction. It sends the introduction again on an application retry,
+which recovers if the recipient removed the sender contact. An ACK confirms
+that the recipient can decrypt normal DMs, so subsequent first attempts omit
+the extra packet until the sender reboots or the small recent-ACK cache is
+replaced.
+
+The receiving Companion verifies the introduction signature. By default,
+`dm.one_key` is `off`: the sender is offered to the app as a synthetic
+`PUSH_CODE_NEW_ADVERT` (`0x8A`) but is not added as a contact. The app/user
+accepts through the normal add-contact command. Up to 15 verified, decryptable
+plain DMs are held in RAM and delivered after acceptance; the oldest rolls
+off first. The queue is lost on reboot. Cache-enabled high-contact nRF52
+Companions share a 256-frame pool between ordinary offline messages and up to
+15 held DMs, so ordinary capacity is 256 when none are held and 241 when all
+15 are held. The held frames are not exposed by ordinary message sync before
+acceptance. Uncached high-contact nRF52 builds retain 208 ordinary frames and
+a separate held queue. The device sends a signed `DMR1`
+refusal, and the sender pushes `0x91` plus the full rejecting key to a
+connected app, then stops further introductions for that peer until reboot.
+Directly attached clients may use `get dm.one_key` or `set dm.one_key on|off`;
+`get dm.held` reports the number of held DMs. `on` auto-accepts verified senders.
+The flash-constrained STM32WL Companion builds omit one-key DM support to
+preserve their existing filesystem boundary; these commands report
+`Error: one-key DMs unsupported on this build` there. Ordinary contact-based
+private messages remain available.
+A recipient running older firmware still
+needs the sender contact before it can decrypt a normal DM. This flow uses
+a second radio packet for the initial DM; `RESP_CODE_SENT` includes that
+scheduling delay in its timeout.
+
+For a two-radio regression test, run `tools/hil/one_key_dm.py` with the USB
+serial paths for `--sender` and `--recipient`. `--reset-contact` removes the
+sender from recipient contacts, and `--zero-hop` sets the sender's route to
+zero hop when the devices are nearby. The test checks the synthetic advert,
+refusal, manual acceptance, held-message delivery, and matching ACK.
+`--invalid-signature-first` also checks that a decryptable introduction with
+an invalid Ed25519 signature does not add a contact.
+
 `CMD_RUN_CLI_COMMAND` is followed by the local CLI text without a terminating
 NUL. The device returns `RESP_CODE_CLI_REPLY` (`0x1D`) followed by the reply
 text. This is separate from sending a remote on-air CLI command with
@@ -948,13 +993,14 @@ Byte values are authoritative; names are aliases. When reading firmware source, 
 | `0x87` | `PUSH_CODE_STATUS_RESPONSE` | Server status response. |
 | `0x88` | `PUSH_CODE_LOG_RX_DATA` | Radio receive log data. |
 | `0x89` | `PUSH_CODE_TRACE_DATA` | Completed trace data. |
-| `0x8A` | `PUSH_CODE_NEW_ADVERT` | Newly stored contact advertisement. |
+| `0x8A` | `PUSH_CODE_NEW_ADVERT` | New advert; a verified one-key DM may use this as an addable synthetic advert without storing the contact. |
 | `0x8B` | `PUSH_CODE_TELEMETRY_RESPONSE` | Telemetry response. |
 | `0x8C` | `PUSH_CODE_BINARY_RESPONSE` | Binary request response. |
 | `0x8D` | `PUSH_CODE_PATH_DISCOVERY_RESPONSE` | Path-discovery response. |
 | `0x8E` | `PUSH_CODE_CONTROL_DATA` | Control/discovery data. |
 | `0x8F` | `PUSH_CODE_CONTACT_DELETED` | Oldest contact was deleted while making room. |
 | `0x90` | `PUSH_CODE_CONTACTS_FULL` | Contact storage is full. |
+| `0x91` | `PUSH_CODE_ONE_KEY_DM_REJECTED` | One-key DM refused; bytes 1–32 contain the refusing contact's full public key. |
 
 ### Parsing Responses
 
