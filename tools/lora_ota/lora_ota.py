@@ -1089,12 +1089,19 @@ def compatible_mota(info: MotaInfo, target: TargetInfo) -> tuple[bool, str]:
             return False, "bootloader self-update requires installed ABI 3 or newer"
         if target.bootloader_codecs != 0x5:
             return False, "bootloader self-update requires FULL|INPLACE codecs 0x5"
-        expected_storage = 0x09 if target.nrf_sd else 0x0E if target.nrf_qspi else 0x0A
+        adaptive_bootloader = target.boot_hw_id in (
+            "NRF_BL_239A0029_3401_AUTO_DFU", "NRF_BL_239A0029_4631_AUTO_DFU",
+        )
+        internal_rak_bootloader = target.boot_hw_id in (
+            "NRF_BL_239A0029_3401_DFU", "NRF_BL_239A0029_4631_DFU",
+        )
+        expected_storage = (0x0A if internal_rak_bootloader else 0x1E if adaptive_bootloader else
+                            0x09 if target.nrf_sd else 0x0E if target.nrf_qspi else 0x0A)
         if (
             target.boot_storage != expected_storage
             or info.bootloader_storage != expected_storage
         ):
-            return False, "bootloader package, installed capabilities, and application storage differ"
+            return False, "bootloader package and installed capabilities differ"
         if info.block_size > target.max_block_size:
             return False, f"bootloader block exceeds destination maxblk:{target.max_block_size}"
         return True, ""

@@ -1257,9 +1257,7 @@ bool ota_prepare_bootloader_update_nrf52(OtaStoreFlashNrf52& store,
   }
 
   const OtaBlCaps current_caps = ota_bootloader_update_caps();
-  if (!ota_bootloader_self_update_caps_valid(current_caps) ||
-      current_caps.storage_flags != (OTA_BL_STORAGE_STAGE_CEILING |
-                                     OTA_BL_STORAGE_BOOT_UPDATE)) {
+  if (!ota_bootloader_self_update_caps_valid(current_caps)) {
     strcpy(msg, "installed bootloader cannot safely self-update from internal flash"); return false;
   }
 
@@ -1303,10 +1301,23 @@ bool ota_prepare_bootloader_update_nrf52(OtaStoreFlashNrf52& store,
       !ota_bootloader_identity_matches(installed, candidate) ||
       !ota_bootloader_caps_from_image(
           image, OTA_BOOT_IMAGE_SIZE,
-          OTA_BL_STORAGE_STAGE_CEILING | OTA_BL_STORAGE_BOOT_UPDATE,
+          current_caps.storage_flags,
           candidate_caps)) {
     strcpy(msg, "candidate bootloader identity/capability/CRC mismatch"); return false;
   }
+  if (current_caps.storage_flags == OTA_BL_PROFILE_RAK_AUTO_BOOT_UPDATE &&
+      (!ota_bootloader_supports_hybrid(ota_ram_caps_scan_aligned(image, OTA_BOOT_IMAGE_SIZE)) ||
+       ota_boot_rd32(image) > MOTA_NRF52_HYBRID_RAM_START)) {
+    strcpy(msg, "candidate adaptive bootloader must retain the hybrid RAM arena"); return false;
+  }
+#if defined(OTA_RAK_AUTO_STORE)
+  const uint8_t optional_storage = ota_bl_optional_app_storage(
+      (const uint8_t*)(uintptr_t)MOTA_NRF52_BL_START, OTA_BOOT_IMAGE_SIZE);
+  if (optional_storage != 0 &&
+      ota_bl_optional_app_storage(image, OTA_BOOT_IMAGE_SIZE) != optional_storage) {
+    strcpy(msg, "candidate must retain optional RAK application storage"); return false;
+  }
+#endif
   const OtaBootloaderContinuityGate continuity = ota_bootloader_continuity_gate(
       installed, candidate, m.fw_version, OTA_BOOT_CONTINUITY_FAMILY_S140,
       ota_runtime_softdevice_fwid(), mota_nrf52_app_base(),

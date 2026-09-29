@@ -360,7 +360,7 @@ struct OtaContext {
     const OtaBootloaderIdentity& installed = bootloaderIdentity();
 #if defined(OTA_RAK_AUTO_STORE)
     if (!fetch_store.usesInternal()) {
-      strncpy(msg, "bootloader LoRa update needs the internal OTAFIX profile", 96);
+      strncpy(msg, "bootloader package must be staged in internal flash", 96);
       msg[95] = 0; return false;
     }
     bool ok = ota_prepare_bootloader_update_nrf52(
@@ -704,7 +704,7 @@ struct OtaContext {
     (defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
      defined(OTA_SD_BOOTLOADER_UPDATE))
 #if defined(OTA_RAK_AUTO_STORE)
-    manager.set_accept_bootloader(fetch_store.usesInternal() &&
+    manager.set_accept_bootloader(
         ota_bootloader_self_update_caps_valid(ota_bootloader_update_caps()));
 #else
     manager.set_accept_bootloader(true);

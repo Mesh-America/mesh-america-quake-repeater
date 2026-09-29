@@ -763,6 +763,31 @@ TEST(OtaHybridHandoff, EncodesExactGeometryAndRejectsCorruption) {
       MOTA_NRF52_FLASH_PAGE, ram, hash));
 }
 
+TEST(OtaBootPackage, OptionalRakApplicationStoragePreservesLegacyBootUpdateContract) {
+  uint8_t image[128] = {};
+  const uint8_t boot[16] = {'M','O','T','A','B','L','D','R', 3,0,5,0,0x0A,0,0,0};
+  const uint8_t bundle[32] = {
+    'M','O','T','A','R','A','M','A',1,0,72,0,0,0,1,0,
+    'M','O','T','A','S','T','O','R',1,0,16,0,0x14,0,0,0,
+  };
+  memcpy(image, boot, sizeof(boot));
+  memcpy(image + 32, bundle, sizeof(bundle));
+  EXPECT_EQ(ota_bl_app_caps_scan(image, sizeof(image)).storage_flags, 0x1Eu);
+  EXPECT_EQ(ota_bl_app_caps_scan(image, sizeof(image)).optional_app_storage, 0x14u);
+  EXPECT_EQ(ota_bl_update_caps_scan_aligned(image, sizeof(image), 0x0A).storage_flags, 0x0Au);
+  for (unsigned byte : {32u, 40u, 42u, 46u, 48u, 56u, 58u, 60u, 63u}) {
+    image[byte] ^= 1;
+    EXPECT_EQ(ota_bl_app_caps_scan(image, sizeof(image)).storage_flags, 0x0Au);
+    image[byte] ^= 1;
+  }
+  memcpy(image + 80, bundle, sizeof(bundle));
+  EXPECT_EQ(ota_bl_optional_app_storage(image, sizeof(image)), 0u);
+  memset(image + 80, 0, sizeof(bundle));
+  memset(image + 48, 0, 16); // genuine old board has no optional record
+  EXPECT_EQ(ota_bl_app_caps_scan(image, sizeof(image)).storage_flags, 0x0Au);
+  EXPECT_TRUE(ota_bl_update_caps_scan_aligned(image, sizeof(image), 0x0A).present);
+}
+
 TEST(OtaBootPackage, LegacyAndCurrentBootloadersHaveSeparateCapabilityViews) {
   const uint8_t internal_profile = OTA_BL_PROFILE_INTERNAL_BOOT_UPDATE;
   const uint8_t legacy_marker[16] = {

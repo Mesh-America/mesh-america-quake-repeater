@@ -1500,7 +1500,7 @@ def test_xiao_bootloader_caps_rejects_malformed_or_unaligned_markers():
     malformed_decoy = bytearray(caps())
     struct.pack_into("<8sHHB3s", malformed_decoy, 24,
                      ml.XIAO_BOOT_CAPS_MAGIC, ml.BOOT_FORMAT_VER,
-                     ml.BOOT_REQUIRED_APP_CODEC_MASK, 0x1C, b"\0\0\0")
+                     ml.BOOT_REQUIRED_APP_CODEC_MASK, 0x2C, b"\0\0\0")
     assert ml.bootloader_caps_storage(bytes(malformed_decoy)) == \
            ml.BOOT_STORAGE_QSPI_UPDATE
 
@@ -1672,7 +1672,9 @@ def test_bootloader_build_inventory_is_unique_and_disjoint_from_app_targets():
         for value in re.findall(r"\{ 0x([0-9a-fA-F]{8}),", target_header)
     }
     audited = ml.audit_bootloader_target_inventory(app_targets)
-    assert len(audited) == len(expected) + 2  # generic internal plus two legacy XIAOs
+    assert len(audited) == len(expected) + 4  # internal, two XIAOs, two adaptive RAKs
+    assert audited[0xD04AB3AB] == (0x239A0029, "3401_AUTO_DFU")
+    assert audited[0xFEEAFD1B] == (0x239A0029, "4631_AUTO_DFU")
 
     # Generic parsing remains useful for inspecting a future candidate, but a
     # signing/build call fails closed until its exact identity is qualified.
@@ -1760,6 +1762,57 @@ def test_qualified_bootloader_platform_and_storage_profiles_are_exact():
             assert False, "qualified identity accepted wrong storage profile"
         except ValueError:
             pass
+
+
+def test_adaptive_bootloader_preserves_update_and_hybrid_capabilities():
+    for name in ("3401_AUTO_DFU", "4631_AUTO_DFU"):
+        image = _generic_bootloader_image(
+            device_name=name, storage=ml.BOOT_STORAGE_RAK_AUTO_UPDATE)
+        marker = b"MOTARAMA" + struct.pack("<HHI", 1, 72, 65536)
+        def add_ram(data):
+            struct.pack_into("<I", data, 0, 0x20030000)
+            data[0x90:0xA0] = marker
+        image = _rewrite_boot_image(image, add_ram)
+        assert ml.validate_bootloader_image(image).device_name == name
+        assert ml.bootloader_caps_storage(image) == 0x1E
+        mutations = (
+            lambda data: data.__setitem__(slice(0x90, 0xA0), b"\xff" * 16),
+            lambda data: data.__setitem__(slice(0xA0, 0xB0), marker),
+            lambda data: struct.pack_into("<I", data, 0, 0x20040000),
+            lambda data: data.__setitem__(0x8C, 0x16),
+            lambda data: data.__setitem__(0x88, 2),
+        )
+        for mutate in mutations:
+            try:
+                ml.validate_bootloader_image(_rewrite_boot_image(image, mutate))
+                assert False, "invalid adaptive successor was accepted"
+            except ValueError:
+                pass
+
+
+def test_compatible_rak_keeps_legacy_contract_and_optional_application_storage():
+    marker = b"MOTARAMA" + struct.pack("<HHI", 1, 72, 65536)
+    optional = b"MOTASTOR" + struct.pack("<HHB3x", 1, 16, 0x14)
+    for name in ("3401_DFU", "4631_DFU"):
+        def add_storage(data):
+            struct.pack_into("<I", data, 0, 0x20030000)
+            data[0x90:0xB0] = marker + optional
+        image = _rewrite_boot_image(_generic_bootloader_image(device_name=name), add_storage)
+        assert ml.validate_bootloader_image(image).device_name == name
+        assert ml.bootloader_caps_storage(image) == 0x0A
+        assert ml.bootloader_optional_app_storage(image) == 0x14
+        for mutate in (
+            lambda raw: raw.__setitem__(0xAC, 0x04),
+            lambda raw: raw.__setitem__(0xAD, 1),
+            lambda raw: raw.__setitem__(slice(0xB0, 0xC0), optional),
+            lambda raw: raw.__setitem__(slice(0x90, 0xA0), b"\xff" * 16),
+            lambda raw: struct.pack_into("<I", raw, 0, 0x20040000),
+        ):
+            try:
+                ml.validate_bootloader_image(_rewrite_boot_image(image, mutate))
+                assert False, "malformed optional application storage accepted"
+            except ValueError:
+                pass
 
 
 def test_bootloader_builder_rejects_wrong_identity_geometry_and_continuity():

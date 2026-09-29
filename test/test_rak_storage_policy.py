@@ -25,6 +25,14 @@ int main() {
   const auto Q = RakStorageChoice::Qspi;
   const auto U = RakStorageChoice::Unsafe;
   for (bool rak3401 : {false, true}) {
+    const char* board = rak3401 ? "3401_DFU" : "4631_DFU";
+    assert(rak_storage_choice(0, true, true, board, rak3401, true) == I);
+    assert(rak_storage_choice(2, true, true, board, rak3401, true) == Q);
+    assert(rak_storage_choice(2, true, true, board, rak3401, false) == U);
+    assert(rak_storage_choice(1, true, true, board, rak3401, true) == (rak3401 ? U : Q));
+    assert(rak_storage_choice(3, true, true, board, rak3401, true) == U);
+    assert(rak_storage_choice(2, true, true,
+        rak3401 ? "4631_DFU" : "3401_DFU", rak3401, true) == U);
     assert(rak_storage_choice(0, false, false, nullptr, rak3401) == I);
     assert(rak_storage_choice(0, true, false, nullptr, rak3401) == U);
     assert(rak_storage_choice(0, true, true,

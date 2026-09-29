@@ -28,6 +28,7 @@ struct OtaBlCaps {
   uint16_t apply_abi = 0;    // max .mota format_ver the bootloader can apply
   uint16_t codec_mask = 0;   // bit i set => can apply codec_id i (in-place delta = bit 2)
   uint8_t  storage_flags = 0; // OTA_BL_STORAGE_* capability bits
+  uint8_t  optional_app_storage = 0; // separate MOTASTOR record, never a boot-update backend
 };
 
 // Independent marker for the reset-retained hybrid source. Keep this separate
@@ -93,6 +94,8 @@ static const uint8_t OTA_BL_PROFILE_INTERNAL_BOOT_UPDATE =
 static const uint8_t OTA_BL_PROFILE_QSPI_BOOT_UPDATE =
     OTA_BL_STORAGE_STAGE_CEILING | OTA_BL_STORAGE_QSPI |
     OTA_BL_STORAGE_BOOT_UPDATE;
+static const uint8_t OTA_BL_PROFILE_RAK_AUTO_BOOT_UPDATE =
+    OTA_BL_PROFILE_QSPI_BOOT_UPDATE | OTA_BL_STORAGE_HEADER_W25;
 // A successor must retain both application update paths used by qualified
 // external stores: bit 0 CODEC_FULL and bit 2 CODEC_DETOOLS_INPLACE.
 static const uint16_t OTA_BL_REQUIRED_APP_CODEC_MASK = 0x0005u;
@@ -116,10 +119,15 @@ inline uint8_t ota_bootloader_update_storage_flags() {
 
 inline bool ota_bootloader_self_update_caps_valid(const OtaBlCaps& c) {
   const uint8_t required = ota_bootloader_update_storage_flags();
+  const bool profile_ok = c.storage_flags == required
+#if defined(OTA_INTERNAL_BOOTLOADER_UPDATE) && defined(OTA_RAK_AUTO_STORE)
+      || c.storage_flags == OTA_BL_PROFILE_RAK_AUTO_BOOT_UPDATE
+#endif
+      ;
   return required != 0 && c.present && c.apply_abi >= 3u &&
          (c.codec_mask & OTA_BL_REQUIRED_APP_CODEC_MASK) ==
              OTA_BL_REQUIRED_APP_CODEC_MASK &&
-         c.storage_flags == required;
+         profile_ok;
 }
 
 // Prefer a continuity-capable marker over a numerically newer legacy-looking candidate. Bootloader
@@ -209,8 +217,30 @@ inline OtaBlCaps ota_bl_legacy_app_caps_scan_halfword(const uint8_t* bytes,
   return c;
 }
 
+// Unified RAK loaders preserve the deployed board's privileged MOTABLDR=0x0A
+// contract. A separate record advertises optional APPLICATION storage. It is
+// adjacent to the unchanged, unique 64 KiB RAM marker and grants no new
+// bootloader staging backend.
+inline uint8_t ota_bl_optional_app_storage(const uint8_t* bytes, size_t len) {
+  static const uint8_t record[32] = {
+    'M', 'O', 'T', 'A', 'R', 'A', 'M', 'A', 1, 0, 72, 0, 0, 0, 1, 0,
+    'M', 'O', 'T', 'A', 'S', 'T', 'O', 'R', 1, 0, 16, 0, 0x14, 0, 0, 0,
+  };
+  if (!bytes || !ota_bootloader_supports_hybrid(ota_ram_caps_scan_aligned(bytes, len))) return 0;
+  unsigned matches = 0;
+  for (size_t off = 0; off + sizeof(record) <= len; off += 4) {
+    if (memcmp(bytes + off, record, sizeof(record)) == 0 && ++matches > 1) return 0;
+  }
+  return matches == 1 ? OTA_BL_STORAGE_QSPI | OTA_BL_STORAGE_HEADER_W25 : 0;
+}
+
 inline OtaBlCaps ota_bl_app_caps_scan(const uint8_t* bytes, size_t len) {
-  const OtaBlCaps aligned = ota_bl_caps_scan_aligned(bytes, len, false);
+  OtaBlCaps aligned = ota_bl_caps_scan_aligned(bytes, len, false);
+  if (aligned.present && aligned.apply_abi >= 3 &&
+      aligned.storage_flags == OTA_BL_PROFILE_INTERNAL_BOOT_UPDATE) {
+    aligned.optional_app_storage = ota_bl_optional_app_storage(bytes, len);
+    aligned.storage_flags |= aligned.optional_app_storage;
+  }
   if (aligned.present) return aligned;
   return ota_bl_legacy_app_caps_scan_halfword(bytes, len);
 }
@@ -255,8 +285,15 @@ inline OtaBlCaps ota_bootloader_update_caps() {
      defined(OTA_SD_BOOTLOADER_UPDATE))
   const uint8_t* lo = (const uint8_t*)(uintptr_t)MOTA_NRF52_BL_START;
   const uint8_t* hi = (const uint8_t*)(uintptr_t)MOTA_NRF52_BL_END;
+#if defined(OTA_INTERNAL_BOOTLOADER_UPDATE) && defined(OTA_RAK_AUTO_STORE)
+  // Unified RAK applications support the existing internal board identity as
+  // well as the adaptive successor. Both require one privileged marker.
+  const OtaBlCaps caps = ota_bl_caps_scan_aligned(lo, (size_t)(hi - lo), true);
+  return ota_bootloader_self_update_caps_valid(caps) ? caps : OtaBlCaps();
+#else
   return ota_bl_update_caps_scan_aligned(
       lo, (size_t)(hi - lo), ota_bootloader_update_storage_flags());
+#endif
 #else
   return OtaBlCaps();
 #endif

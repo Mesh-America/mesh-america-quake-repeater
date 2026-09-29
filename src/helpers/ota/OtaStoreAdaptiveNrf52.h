@@ -14,12 +14,14 @@ namespace mesh {
 namespace ota {
 
 // One RAK application image supports the board's internal OTA store and its
-// explicitly matched external NOR. Selection is fixed for the lifetime of an
-// app boot; no staged container is ever moved between backends.
+// explicitly matched external NOR. Application placement follows the detected
+// hardware. Bootloader packages always use internal flash; select the backend
+// before begin(), never move a partially fetched container between stores.
 class OtaStoreAdaptiveNrf52 : public OtaStore {
   enum Mode : uint8_t { UNSELECTED, INTERNAL_MODE, QSPI_MODE, UNSAFE };
   mutable Mode _mode = UNSELECTED;
   mutable const char* _reason = "not probed";
+  bool _bootloader_store = false;
   // Only one backend is usable for a given board/bootloader pairing. Sharing
   // their two flash-page buffers saves 8 KiB of scarce nRF52840 runtime RAM.
   union StoreStorage {
@@ -37,6 +39,26 @@ class OtaStoreAdaptiveNrf52 : public OtaStore {
   void activateExternal() const {
     new (&_storage.external) OtaStoreQspiNrf52();
     _mode = QSPI_MODE;
+  }
+
+  bool selectBootloader() {
+    if (!ota_bootloader_self_update_caps_valid(ota_bootloader_update_caps())) return false;
+    if (_mode != INTERNAL_MODE) {
+      if (_mode == QSPI_MODE) _storage.external.~OtaStoreQspiNrf52();
+      activateInternal();
+    }
+    _bootloader_store = true;
+    _reason = "bootloader package in internal flash";
+    return true;
+  }
+
+  void selectApplication() {
+    if (_bootloader_store) {
+      _storage.internal.~OtaStoreFlashNrf52();
+      _mode = UNSELECTED;
+      _bootloader_store = false;
+    }
+    select();
   }
 
   void select() const {
@@ -66,7 +88,8 @@ class OtaStoreAdaptiveNrf52 : public OtaStore {
 #endif
     const RakStorageChoice choice = rak_storage_choice(
         detected, qspi_bootloader, identity_valid,
-        identity_valid ? identity.device_name : nullptr, rak3401);
+        identity_valid ? identity.device_name : nullptr, rak3401,
+        caps.optional_app_storage == (OTA_BL_STORAGE_QSPI | OTA_BL_STORAGE_HEADER_W25));
     if (choice == RakStorageChoice::Internal) {
       activateInternal();
       _reason = detected == 0u ? "no external NOR" :
@@ -138,12 +161,31 @@ public:
   }
   bool finalize() override { OtaStore* s = active(); return s && s->finalize(); }
   void checkpoint() override { OtaStore* s = active(); if (s) s->checkpoint(); }
-  bool reopen() override { OtaStore* s = active(); return s && s->reopen(); }
+  bool reopen() override { return reopenFor(nullptr, 0u); }
   bool reopenFor(const uint8_t* mid, uint32_t target) override {
-    OtaStore* s = active(); return s && s->reopenFor(mid, target);
+    selectApplication();
+    OtaStore* s = active();
+    if (s && s->reopenFor(mid, target)) return true;
+    // Only an explicit MID pull may resume privileged data. Automatic resume
+    // stays on the application backend. Validate kind before adopting this
+    // alternative store; the manager repeats all manifest and block checks.
+    if (!mid || _mode == INTERNAL_MODE || !selectBootloader()) return false;
+    uint8_t raw[MOTA_MFL];
+    MotaManifest manifest;
+    if (_storage.internal.reopenFor(mid, target) &&
+        _storage.internal.read(8u, raw, sizeof(raw)) &&
+        mota_parse_manifest(raw, sizeof(raw), manifest) && manifest.is_bootloader())
+      return true;
+    selectApplication();
+    return false;
   }
   bool plan_layout(bool full, uint32_t image, uint32_t payload_off,
                    uint32_t payload_size, bool bootloader) override {
+    if (bootloader) {
+      if (!selectBootloader()) return false;
+    } else {
+      selectApplication();
+    }
     OtaStore* s = active();
     return s && s->plan_layout(full, image, payload_off, payload_size, bootloader);
   }
