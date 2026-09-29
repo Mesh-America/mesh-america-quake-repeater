@@ -359,6 +359,9 @@ class FormatTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(argparse.ArgumentTypeError, "bandwidth must be"):
             ota.parse_temp_radio("909.950,200,5,5,120")
+        self.assertEqual(ota.parse_temp_radio("909.950,250,5,5,20")[-1], 20)
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "at least 20 minutes"):
+            ota.parse_temp_radio("909.950,250,5,5,19")
 
     def test_ota_runners_use_the_same_lab_tuple(self) -> None:
         generic = ota.build_parser().parse_args(["release.mota", "remote"])
@@ -3847,6 +3850,11 @@ class TempRadioPreflightTests(unittest.TestCase):
                 if source_active():
                     if failure == "temp_source_tuple":
                         return "TempRadio active: 908.000,250.00,5,5 170s left"
+                    if failure == "source_status_preamble":
+                        return (
+                            "  -> TempRadio active: 909.950,250.00,5,5 170s left"
+                            ",preamble=128; timing self-test pending\r\n> "
+                        )
                     return "  -> TempRadio active: 909.950,250.00,5,5 170s left\r\n> "
                 return "TempRadio inactive\r\n> "
             if command == "normalradio":
@@ -3942,6 +3950,55 @@ class TempRadioPreflightTests(unittest.TestCase):
                 "TempRadio inactive\r\n"
                 "TempRadio active: 909.950,250.00,5,5 170s left\r\n> "
             )
+
+    def test_source_temp_radio_status_with_optional_preamble(self) -> None:
+        expected = ota.RadioSettings(909.5, 500.0, 5, 5, False)
+        cases = (
+            ("TempRadio active: 909.500,500.00,5,5 168s left", "active"),
+            (
+                "TempRadio active: 909.500,500.00,5,5 168s left,preamble=128",
+                "active",
+            ),
+            (
+                "TempRadio active: 909.500,500.00,5,5 168s left,preamble=128"
+                "; WARN recommended preamble: radio=128; switch=7000us",
+                "active",
+            ),
+            ("TempRadio pending: 909.500,500.00,5,5", "pending"),
+            (
+                "TempRadio pending: 909.500,500.00,5,5,preamble=128"
+                "; timing self-test pending",
+                "pending",
+            ),
+        )
+        for reply, state in cases:
+            with self.subTest(reply=reply):
+                self.assertEqual(
+                    ota.parse_source_temp_radio_status(f"  -> {reply}\r\n> "),
+                    (state, expected),
+                )
+        for reply in (
+            "TempRadio active: 909.500,500.00,5,5 168s left,preamble=",
+            "TempRadio active: 909.500,500.00,5,5 168s left,preamble=fast",
+            "TempRadio active: 909.500,500.00,5,5 168s left,unknown=128",
+        ):
+            with self.subTest(reply=reply), self.assertRaisesRegex(
+                ota.OtaError, "invalid TempRadio status"
+            ):
+                ota.parse_source_temp_radio_status(reply)
+
+    def test_rehearsal_accepts_source_status_with_preamble(self) -> None:
+        controller, source_calls, _clock, state, error = self.run_rehearsal(
+            failure="source_status_preamble",
+            capture_error=True,
+        )
+        self.assertIsNone(error)
+        self.assertTrue(controller.all_nodes_normal())
+        self.assertFalse(bool(state["active"]))
+        self.assertGreaterEqual(
+            sum(command == "tempradio" for command, _ in source_calls),
+            2,
+        )
 
     def test_optional_source_command_never_hides_transport_or_silence(self) -> None:
         args = self.args()
@@ -5101,6 +5158,30 @@ class ReliabilityTests(unittest.TestCase):
         reply = controller._remote_command_once("remote", "ota status", "secret")
         self.assertTrue(reply.startswith("OTA |"))
 
+    def test_remote_relay_command_uses_bound_public_key(self) -> None:
+        controller = object.__new__(ota.Controller)
+        controller.reply_timeout = 20
+        controller._authenticated_targets = set()
+        key = "d8" * 32
+        observed: list[str] = []
+
+        def run_marked(commands: list[str], _label: str, _marker: str):
+            observed.extend(commands)
+            return (
+                [{"adv_name": "Renamed relay", "public_key": key},
+                 {"login_success": True}],
+                [{"txt_type": 1, "text": "OK", "pubkey_prefix": key[:12]}],
+            )
+
+        controller._run_marked = run_marked
+        self.assertEqual(
+            controller._remote_command_once(key, "get rxdelay", "relay-password"),
+            "OK",
+        )
+        self.assertEqual(observed[:2], ["contact_info", key])
+        self.assertEqual(observed[2:5], ["login", key, "relay-password"])
+        self.assertEqual(observed[8:11], ["cmd", key, "get rxdelay"])
+
     def test_matching_admin_reply_recovers_lost_login_acknowledgement(self) -> None:
         controller = object.__new__(ota.Controller)
         controller.reply_timeout = 20
@@ -5832,26 +5913,78 @@ class ReliabilityTests(unittest.TestCase):
                 package, None, old_hash,
             )
 
-    def test_temp_window_includes_setup_and_discovery_budget(self) -> None:
+    def test_temp_window_budget_is_advisory_with_a_relay(self) -> None:
         parser = ota.build_parser()
         default_args = parser.parse_args([
             "release.mota", "remote",
             "--controller-serial", "/dev/controller",
             "--source-serial", "/dev/source",
+            "--relay", "a" * 64,
         ])
-        ota.validate_args(default_args, parser)
+        warning = io.StringIO()
+        with contextlib.redirect_stderr(warning):
+            ota.validate_args(default_args, parser)
+        self.assertEqual(default_args.temp_values[4], 120)
+        self.assertIn("Continuing", warning.getvalue())
+        self.assertIn("minutes covers the combined worst-case", warning.getvalue())
+        self.assertGreater(ota.recommended_temp_radio_minutes(default_args), 120)
 
         args = parser.parse_args([
             "release.mota", "remote",
             "--controller-serial", "/dev/controller",
             "--source-serial", "/dev/source",
-            "--temp-radio", "909.950,250,5,5,114",
+            "--temp-radio", "909.950,250,5,5,120",
+            "--temp-radio-minutes", "30",
         ])
-        with (
-            contextlib.redirect_stderr(io.StringIO()),
-            self.assertRaises(SystemExit),
-        ):
+        with contextlib.redirect_stderr(io.StringIO()):
             ota.validate_args(args, parser)
+        self.assertEqual(args.temp_radio, "909.950,250,5,5,30")
+        self.assertEqual(args.temp_values, (909.95, 250.0, 5, 5, 30))
+
+        invalid = parser.parse_args([
+            "release.mota", "remote", "--controller-serial", "/dev/controller",
+            "--source-serial", "/dev/source", "--temp-radio-minutes", "0",
+        ])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            ota.validate_args(invalid, parser)
+
+        for option in (
+            ["--temp-radio-minutes", "19"],
+            ["--temp-radio", "909.5,500,5,5,19"],
+        ):
+            below_minimum = parser.parse_args([
+                "release.mota", "remote", "--controller-serial", "/dev/controller",
+                "--source-serial", "/dev/source", *option,
+            ])
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error), self.assertRaises(SystemExit):
+                ota.validate_args(below_minimum, parser)
+            self.assertIn("20 minutes", error.getvalue())
+
+    def test_chain_temp_window_can_override_only_minutes(self) -> None:
+        parser = rak_chain.build_parser()
+        args = parser.parse_args([
+            "--source-serial", "/dev/source", "--relay", "a" * 64,
+            "--temp-radio-minutes", "30",
+        ])
+        warning = io.StringIO()
+        with contextlib.redirect_stderr(warning):
+            rak_chain.validate_args(args, parser)
+        self.assertEqual(args.temp_radio, "909.5,500,5,5,30")
+        self.assertEqual(args.temp_values[4], 30)
+        self.assertIn("Continuing", warning.getvalue())
+
+        for option in (
+            ["--temp-radio-minutes", "19"],
+            ["--temp-radio", "909.5,500,5,5,19"],
+        ):
+            below_minimum = parser.parse_args([
+                "--source-serial", "/dev/source", *option,
+            ])
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error), self.assertRaises(SystemExit):
+                rak_chain.validate_args(below_minimum, parser)
+            self.assertIn("20 minutes", error.getvalue())
 
     def test_stage_cleanup_shortens_target_and_relays(self) -> None:
         class Controller:

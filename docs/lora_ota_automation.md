@@ -479,6 +479,13 @@ The lab test default is 909.5 MHz, 500 kHz bandwidth, SF5, and CR5. The frequenc
 North American example: choose a legal frequency supported by every
 participating radio and appropriate to your location. Older radios that do not
 support SF5 require a complete replacement tuple passed with `--temp-radio`.
+The fifth value is the TempRadio window in minutes. To change only that value,
+pass `--temp-radio-minutes 90`; this works with `--relay` and keeps the chosen
+frequency, bandwidth, SF, and CR. The hard minimum is 20 minutes. The 120-minute
+default and the runner's worst-case timeout estimate are guidance. A window
+below the estimate prints a warning and continues; the radio lease can expire
+before a slow OTA finishes.
+The separate three-minute path rehearsal and its identity checks still run.
 
 Before that long window is allowed, the live runner performs a mandatory
 independent three-minute rehearsal. Its exact normal-channel `ota status` and

@@ -65,8 +65,9 @@ LEGACY_TARGET_MAX_BLOCK_SIZE = 1024
 MOTA_MAX_BLOCK_SIZE = 2048
 # Lab/HIL OTA tests use one explicit tuple on every participating radio.
 # This is a bench default, not a regional or production firmware preset.
-# Override --temp-radio only when the hardware or local rules require it.
+# Use --temp-radio for the tuple and --temp-radio-minutes for only its window.
 DEFAULT_LAB_TEMP_RADIO = "909.5,500,5,5,120"
+MIN_TEMP_RADIO_WINDOW_MINUTES = 20
 TRANSMISSION_RETRY_LIMIT = 3
 TRANSMISSION_RETRY_WINDOW_SECONDS = 90
 TRANSMISSION_RETRY_DELAY_SECONDS = 2
@@ -2951,13 +2952,66 @@ def parse_temp_radio(value: str) -> tuple[float, float, int, int, int]:
         7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125.0, 250.0, 500.0,
     )
     bandwidth_valid = any(abs(bandwidth - allowed) <= 0.001 for allowed in valid_bandwidths)
-    if not 150 <= freq <= 2500 or not 5 <= sf <= 12 or not 5 <= cr <= 8 or minutes <= 0:
+    if not 150 <= freq <= 2500 or not 5 <= sf <= 12 or not 5 <= cr <= 8 or not 1 <= minutes <= 10080:
         raise argparse.ArgumentTypeError("invalid TempRadio range")
+    if minutes < MIN_TEMP_RADIO_WINDOW_MINUTES:
+        raise argparse.ArgumentTypeError(
+            f"TempRadio window must be at least {MIN_TEMP_RADIO_WINDOW_MINUTES} minutes"
+        )
     if not bandwidth_valid:
         raise argparse.ArgumentTypeError(
             "bandwidth must be one of 7.8,10.4,15.6,20.8,31.25,41.7,62.5,125,250,500"
         )
     return freq, bandwidth, sf, cr, minutes
+
+
+def set_temp_radio_minutes(args: argparse.Namespace) -> None:
+    """Override only the lease length while retaining the selected radio tuple."""
+    minutes = getattr(args, "temp_radio_minutes", None)
+    if minutes is not None:
+        if minutes < MIN_TEMP_RADIO_WINDOW_MINUTES or minutes > 10080:
+            raise argparse.ArgumentTypeError(
+                f"TempRadio window must be at least {MIN_TEMP_RADIO_WINDOW_MINUTES} minutes (maximum 10080)"
+            )
+        args.temp_radio = args.temp_radio.rsplit(",", 1)[0] + f",{minutes}"
+
+
+def recommended_temp_radio_minutes(
+    args: argparse.Namespace, *, include_install: bool = True,
+) -> int:
+    """Worst-case timeout budget, offered as guidance rather than a lease minimum."""
+    relays = len(args.relay)
+    remote_setup_seconds = (1 + relays) * args.reply_timeout
+    source_setup_seconds = (
+        0 if args.source_already_temp or args.source_shares_controller else 30
+    )
+    final_reply_count = (4 + relays) if include_install else 1
+    required_seconds = (
+        remote_setup_seconds
+        + source_setup_seconds
+        + TEMP_RADIO_SWITCH_DELAY_SECONDS
+        + args.seeder_start_wait
+        + args.discovery_timeout
+        + args.transfer_timeout_minutes * 60
+        + adaptive_poll_ceiling(args.poll_seconds)
+        + args.reply_timeout * final_reply_count
+        + relays * RELAY_TIMING_COMMANDS_PER_RELAY * args.reply_timeout
+    )
+    return required_seconds // 60 + 1
+
+
+def warn_short_temp_radio_window(
+    args: argparse.Namespace, *, include_install: bool = True,
+) -> None:
+    recommended = recommended_temp_radio_minutes(args, include_install=include_install)
+    selected = args.temp_values[4]
+    if selected < recommended:
+        print(
+            f"warning: TempRadio window is {selected} minutes; {recommended} minutes "
+            "covers the combined worst-case setup, discovery, transfer, and "
+            "final checks. Continuing; the lease may expire before OTA completes.",
+            file=sys.stderr,
+        )
 
 
 def parse_source_terminal_banner(value: str) -> tuple[str, str]:
@@ -5339,10 +5393,13 @@ def parse_source_temp_radio_status(
         text,
         re.IGNORECASE,
     )
+    # Newer firmware adds the wire preamble and optional semicolon-delimited
+    # timing diagnostics; older firmware ends immediately after the tuple.
     active_matches = re.findall(
         prefix + r"TempRadio (active|pending):\s*"
         r"([0-9]+(?:\.[0-9]+)?),([0-9]+(?:\.[0-9]+)?),"
-        r"(\d+),(\d+)(?:\s+\d+s left)?" + suffix,
+        r"(\d+),(\d+)(?:\s+\d+s left)?"
+        r"(?:,preamble=\d+)?(?:;[^\n;]+)*" + suffix,
         text,
         re.IGNORECASE,
     )
@@ -7162,7 +7219,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--temp-radio", default=DEFAULT_LAB_TEMP_RADIO,
-        help="frequency,bw,sf,cr,minutes",
+        help="frequency,bw,sf,cr,window-minutes (minimum 20m; default 120m)",
+    )
+    parser.add_argument(
+        "--temp-radio-minutes", type=int, metavar="MINUTES",
+        help="change only the TempRadio window (minimum 20m); keeps frequency,bw,sf,cr",
     )
     parser.add_argument(
         "--base", type=Path,
@@ -7320,6 +7381,7 @@ def serial_paths_match(first: str, second: str) -> bool:
 
 def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     try:
+        set_temp_radio_minutes(args)
         args.temp_values = parse_temp_radio(args.temp_radio)
     except argparse.ArgumentTypeError as exc:
         parser.error(f"--temp-radio: {exc}")
@@ -7448,35 +7510,7 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if not args.prepare_only:
-        remote_setup_seconds = (1 + len(args.relay)) * args.reply_timeout
-        source_setup_seconds = (
-            0 if args.source_already_temp or args.source_shares_controller else 30
-        )
-        final_reply_count = 1 if args.no_install else 4 + len(args.relay)
-        relay_timing_seconds = (
-            len(args.relay)
-            * RELAY_TIMING_COMMANDS_PER_RELAY
-            * args.reply_timeout
-        )
-        required_temp_seconds = (
-            remote_setup_seconds
-            + source_setup_seconds
-            + TEMP_RADIO_SWITCH_DELAY_SECONDS
-            + args.seeder_start_wait
-            + args.discovery_timeout
-            + args.transfer_timeout_minutes * 60
-            + adaptive_poll_ceiling(args.poll_seconds)
-            + args.reply_timeout * final_reply_count
-            + relay_timing_seconds
-        )
-        temp_seconds = args.temp_values[4] * 60
-        if required_temp_seconds >= temp_seconds:
-            minimum_minutes = required_temp_seconds // 60 + 1
-            parser.error(
-                f"TempRadio must last at least {minimum_minutes} minutes for "
-                "remote setup, seeder startup, discovery, transfer, and one "
-                "final poll plus install checks"
-            )
+        warn_short_temp_radio_window(args, include_install=not args.no_install)
 
 
 def require_command(command: str, label: str) -> None:

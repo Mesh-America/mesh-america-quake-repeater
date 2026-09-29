@@ -2472,7 +2472,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=ota.DEFAULT_RELAY_TX_DELAY,
         help="temporary flood txdelay for managed intermediate relays",
     )
-    parser.add_argument("--temp-radio", default=ota.DEFAULT_LAB_TEMP_RADIO)
+    parser.add_argument(
+        "--temp-radio", default=ota.DEFAULT_LAB_TEMP_RADIO,
+        help="frequency,bw,sf,cr,window-minutes (minimum 20m; default 120m)",
+    )
+    parser.add_argument(
+        "--temp-radio-minutes", type=int, metavar="MINUTES",
+        help="change only the TempRadio window (minimum 20m); keeps frequency,bw,sf,cr",
+    )
     parser.add_argument(
         "--ota-hops",
         type=int,
@@ -2586,26 +2593,13 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     if not 0 <= args.ota_hops <= 8:
         parser.error("--ota-hops must be from 0 through 8")
     try:
+        ota.set_temp_radio_minutes(args)
         temp_values = ota.parse_temp_radio(args.temp_radio)
     except argparse.ArgumentTypeError as exc:
         parser.error(f"--temp-radio: {exc}")
     args.temp_values = temp_values
-    remote_setup_seconds = (1 + len(args.relay)) * args.reply_timeout
-    required_seconds = (
-        remote_setup_seconds
-        + (0 if args.source_already_temp or args.source_shares_controller else 30)
-        + ota.TEMP_RADIO_SWITCH_DELAY_SECONDS
-        + args.seeder_start_wait
-        + args.discovery_timeout
-        + args.transfer_timeout_minutes * 60
-        + ota.adaptive_poll_ceiling(args.poll_seconds)
-        + args.reply_timeout * (4 + len(args.relay))
-        + len(args.relay) * ota.RELAY_TIMING_COMMANDS_PER_RELAY * args.reply_timeout
-    )
-    if not args.verify_only and temp_values[4] * 60 <= required_seconds:
-        parser.error(
-            "TempRadio window is too short for the selected relay count and timeouts"
-        )
+    if not (args.verify_only or args.preflight_only):
+        ota.warn_short_temp_radio_window(args)
 
 
 def confirm_chain(
