@@ -1291,3 +1291,77 @@ const escapedShare = picker.selectionFromUrl('https://example.com/?role=%3Cscrip
 assert.deepStrictEqual(escapedShare.filters, {});
 assert.deepStrictEqual(escapedShare.unavailable, ['role=<script>']);
 console.log('shareable picker URL tests passed');
+
+// One choice carries OTA, feature set and sensor/storage tradeoffs together.
+// Every existing profile remains reachable and resolves to its original files.
+for (const candidateCatalog of [catalog, controlled, currentCatalog, chipCatalog, withMigrations]) {
+  for (const profile of candidateCatalog.profiles) {
+    const context = {
+      hardwareFamily: profile.hardwareFamily, hardware: profile.hardware,
+      role: profile.role, mode: profile.mode, install: profile.installKinds[0],
+    };
+    const choices = picker.firmwareProfileChoices(candidateCatalog.profiles, context);
+    const value = picker.firmwareProfileValue(profile);
+    const choice = choices.find(item => item.value === value);
+    assert(choice, profile.target);
+    assert.deepStrictEqual(choice.filters, {
+      ota: profile.ota, feature: profile.feature, variant: profile.variant,
+    });
+    assert.deepStrictEqual(picker.firmwareProfileFilters(value), choice.filters);
+    const chosen = Object.assign({}, context, choice.filters);
+    const matches = candidateCatalog.profiles.filter(item => picker.profileMatchesFacets(item, chosen));
+    assert(matches.includes(profile), profile.target);
+    assert(picker.resolveProfileAssets(matches, context.install)
+      .some(item => item.profile === profile), profile.target);
+    const linked = picker.selectionFromUrl(picker.selectionUrl(shareBase, chosen, true), candidateCatalog.profiles);
+    assert.deepStrictEqual(linked.unavailable, [], profile.target);
+    assert.strictEqual(picker.firmwareProfileValue(linked.filters), value, profile.target);
+    assert.strictEqual(new Set(choices.map(item => item.value)).size, choices.length);
+  }
+}
+
+const compactChoice = picker.firmwareProfileChoices(catalog.profiles, {
+  hardware: 'Station_G2', role: 'repeater',
+}).find(item => item.filters.variant === 'no-external-sensors');
+assert(compactChoice);
+assert.strictEqual(compactChoice.label, 'Receives LoRa OTA - Reduced optional sensors');
+assert.strictEqual(compactChoice.filters.ota, 'lora-receiver');
+assert(!compactChoice.label.includes('No I2C'));
+const fullChoice = picker.firmwareProfileChoices(catalog.profiles, {
+  hardware: 'Station_G2', role: 'companion',
+})[0];
+assert.strictEqual(fullChoice.label, 'Full - LoRa OTA source only');
+assert.strictEqual(fullChoice.filters.ota, 'lora-source');
+assert.strictEqual(fullChoice.filters.feature, 'full');
+assert.strictEqual(picker.firmwareProfileLabel({ota: 'lora-receiver', feature: 'full', variant: 'default'}),
+  'Full - Receives LoRa OTA');
+assert(picker.firmwareProfileLabel({ota: 'lora-receiver', feature: 'standard', variant: 'w25q16'})
+  .includes('External storage board (W25Q16)'));
+
+// A combined profile can be replaced in one click even when its former
+// OTA/feature/variant facets have narrowed the catalog to a different image.
+const replacementChoices = picker.firmwareProfileChoices(catalog.profiles, {
+  hardware: 'Station_G2', role: 'repeater',
+  ota: 'none', feature: 'standard', variant: 'default',
+});
+assert(replacementChoices.some(item => item.value === compactChoice.value));
+assert.deepStrictEqual(picker.firmwareProfileFilters(''), {ota: '', feature: '', variant: ''});
+assert.strictEqual(picker.firmwareProfileValue({}), '');
+for (const invalid of ['invalid', '{}', '["none"]', '["none",false,"default"]']) {
+  assert.strictEqual(picker.firmwareProfileFilters(invalid), null);
+}
+
+// Legacy partial links keep a visible selection without guessing a sensor
+// recipe, Full layout or OTA capability that the link did not request.
+for (const partial of [{ota: 'lora-receiver'}, {feature: 'standard'}, {variant: 'no-external-sensors'}]) {
+  const context = Object.assign({hardware: 'Station_G2', role: 'repeater'}, partial);
+  const value = picker.firmwareProfileValue(context);
+  const selected = picker.firmwareProfileChoices(catalog.profiles, context).find(item => item.value === value);
+  assert(selected);
+  assert(selected.label.includes('other profile choices open'));
+  for (const field of picker.PROFILE_FIELDS) assert.strictEqual(selected.filters[field], partial[field] || '');
+}
+assert(!picker.firmwareProfileChoices(catalog.profiles, {
+  hardware: 'Station_G2', role: 'repeater', variant: 'missing',
+}).some(item => item.filters.variant === 'missing'));
+console.log('combined firmware profile choices and legacy links passed');
