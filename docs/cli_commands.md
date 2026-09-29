@@ -4744,8 +4744,12 @@ preview, and vendor/build suffixes. If that string is absent or ambiguous, it
 uses the existing whole-image CRC and unique BLMF/BLM2 validation to read the
 embedded OTAFIX version (for example, `> OTAFIX2.4.6`). Some current release
 images, including MeshTower V2 SD 2.4.6, omit the UF2 text entirely. As a last
-fallback, the Adafruit core's startup-captured version is explicitly labelled
-`(base)`; it cannot identify an OTAFIX/fork revision.
+OTAFIX-specific fallback, it accepts one unambiguous standalone version token
+such as `v0.11.0-OTAFIX2.4.9` from only the first 40 KiB of the identified
+bootloader region. A corrupt canonical bootloader manifest cannot be bypassed
+by that printable token. The Adafruit core's startup-captured version remains
+the final fallback and is explicitly labelled `(base)`; it cannot identify an
+OTAFIX/fork revision.
 
 `unknown` remains possible for a bootloader exposing none of these version
 sources, invalid geometry/vectors, or unresolved ambiguity. There is no universal

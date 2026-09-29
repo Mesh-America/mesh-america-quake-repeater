@@ -68,6 +68,37 @@ inline size_t nrf52BootVersionTokenSize(const uint8_t* token, size_t available) 
   return 0; // unterminated or too long
 }
 
+inline bool nrf52BootDecimalComponent(const uint8_t* token, size_t length, size_t& pos) {
+  const size_t begin = pos;
+  while (pos < length && token[pos] >= '0' && token[pos] <= '9') ++pos;
+  return pos != begin;
+}
+
+// Recent OTAFIX images embed the INFO_UF2 version value without the older
+// "UF2 Bootloader " label. Match only that explicit version shape, not an
+// arbitrary dotted number or a SoftDevice/application string.
+inline bool nrf52BootStandaloneOtafixToken(const uint8_t* token, size_t length) {
+  if (!token || length == 0u || token[0] != 'v') return false;
+  size_t pos = 1u;
+  for (unsigned component = 0; component < 3u; ++component) {
+    if (!nrf52BootDecimalComponent(token, length, pos)) return false;
+    if (component != 2u && (pos >= length || token[pos++] != '.')) return false;
+  }
+  static const char marker[] = "-OTAFIX";
+  const size_t marker_size = sizeof(marker) - 1u;
+  if (length - pos < marker_size || memcmp(token + pos, marker, marker_size) != 0)
+    return false;
+  pos += marker_size;
+  if (!nrf52BootDecimalComponent(token, length, pos) ||
+      pos >= length || token[pos++] != '.' ||
+      !nrf52BootDecimalComponent(token, length, pos)) return false;
+  if (pos < length && token[pos] == '.') {
+    ++pos;
+    if (!nrf52BootDecimalComponent(token, length, pos)) return false;
+  }
+  return pos == length || token[pos] == '-' || token[pos] == '+' || token[pos] == '_';
+}
+
 inline bool nrf52BootloaderVersion(const uint8_t* image, size_t size,
                                    uint32_t start, uint32_t cached_base_version,
                                    char* out, size_t capacity) {
@@ -121,6 +152,53 @@ inline bool nrf52BootloaderVersion(const uint8_t* image, size_t size,
     return false;
   }
   if (conflicting) return false;
+
+  // Only as a fallback, inspect at most the first 40 KiB of the already
+  // identified bootloader region. A unique standalone OTAFIX version is useful
+  // on boards whose installed image lacks a reader-recognized BLMF identity.
+  // If a canonical identity is present but corrupt, do not let its printable
+  // version string make that image look healthy.
+  bool allow_standalone = true;
+  if (size == ota::OTA_BOOT_IMAGE_SIZE) {
+    const size_t offset = ota::OTA_BOOT_CANDIDATE_MANIFEST_OFFSET;
+    const bool magic0 = ota::ota_boot_rd32(image + offset) == ota::OTA_BOOT_MANIFEST_MAGIC0;
+    const bool magic1 = ota::ota_boot_rd32(image + offset + 4u) == ota::OTA_BOOT_MANIFEST_MAGIC1;
+    if (magic0 || magic1) {
+      ota::OtaBootloaderIdentity continuity;
+      allow_standalone =
+          magic0 && magic1 &&
+          ota::ota_boot_rd16(image + offset + 8u) == ota::OTA_BOOT_MANIFEST_VERSION &&
+          ota::ota_boot_rd16(image + offset + 10u) == ota::OTA_BOOT_MANIFEST_SIZE &&
+          ota::ota_boot_rd32(image + offset + 12u) == ota::OTA_BOOT_IMAGE_START &&
+          ota::ota_boot_rd32(image + offset + 16u) == ota::OTA_BOOT_IMAGE_SIZE &&
+          ota::ota_bootloader_board_id_valid(ota::ota_boot_rd32(image + offset + 20u)) &&
+          ota::ota_boot_image_crc32(image, size, offset + 40u) ==
+              ota::ota_boot_rd32(image + offset + 40u) &&
+          ota::ota_bootloader_continuity_parse(image + offset, size - offset,
+                                                continuity) &&
+          continuity.continuity_present;
+    }
+  }
+  const size_t scan_size = size < ota::OTA_BOOT_IMAGE_SIZE ? size : ota::OTA_BOOT_IMAGE_SIZE;
+  const uint8_t* standalone = nullptr;
+  size_t standalone_size = 0;
+  for (size_t offset = 0; allow_standalone && offset < scan_size; ++offset) {
+    if (image[offset] != 'v' ||
+        (offset != 0u && nrf52BootVersionChar(image[offset - 1u]))) continue;
+    const uint8_t* token = image + offset;
+    const size_t length = nrf52BootVersionTokenSize(token, scan_size - offset);
+    if (length == 0u || !nrf52BootStandaloneOtafixToken(token, length)) continue;
+    if (standalone &&
+        (length != standalone_size || memcmp(standalone, token, length) != 0)) return false;
+    standalone = token;
+    standalone_size = length;
+  }
+  if (standalone) {
+    if (standalone_size >= capacity) return false;
+    memcpy(out, standalone, standalone_size);
+    out[standalone_size] = 0;
+    return true;
+  }
 
   // Adafruit's core captures TIMER2->CC[0] at startup, before the timer can
   // be reused. This is only a base version (no OTAFIX/fork suffix). Never read

@@ -26,6 +26,11 @@ static void text(std::vector<uint8_t>& bytes, size_t offset, const std::string& 
   assert(offset + line.size() <= bytes.size());
   memcpy(bytes.data() + offset, line.data(), line.size());
 }
+static void standalone(std::vector<uint8_t>& bytes, size_t offset, const std::string& version) {
+  const std::string line = version + " s140 6.1.1\r\n";
+  assert(offset + line.size() <= bytes.size());
+  memcpy(bytes.data() + offset, line.data(), line.size());
+}
 static void refreshManifestCrc(std::vector<uint8_t>& bytes) {
   const size_t crc_offset = OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 40;
   put32(bytes, crc_offset, ota_boot_image_crc32(bytes.data(), bytes.size(), crc_offset));
@@ -99,7 +104,55 @@ int main(int argc, char** argv) {
       auto bytes = image(); text(bytes, offset, version); expect(bytes, version);
     }
   }
-  auto bytes = image(); text(bytes, 0x100, "0.11.0"); text(bytes, 0x8000, "0.11.0");
+  auto bytes = image();
+  // OTAFIX 2.4.9 and later board images use a standalone INFO_UF2 value.
+  // Search only the first 40 KiB of the identified bootloader region.
+  for (const char* version : {"v0.11.0-OTAFIX2.4.9", "v0.11.0-OTAFIX2.4.10",
+                              "v0.9.2-OTAFIX2.2-BP1.3", "v0.11.0-OTAFIX2.4.9-preview.1"}) {
+    for (size_t offset : {0x100u, 0x8000u, 0x98fbu, 0x9c9du}) {
+      auto bytes = image(); standalone(bytes, offset, version); expect(bytes, version);
+    }
+  }
+  bytes = image(); standalone(bytes, 0x100, "v0.11.0-OTAFIX2.4.9");
+  standalone(bytes, 0x8000, "v0.11.0-OTAFIX2.4.9");
+  expect(bytes, "v0.11.0-OTAFIX2.4.9"); // identical copies are harmless
+  standalone(bytes, 0x8000, "v0.11.0-OTAFIX2.4.10"); expect(bytes, nullptr);
+  bytes = image(); standalone(bytes, 0x100, "v0.11.0-OTAFIX2.4.9");
+  char small[8];
+  assert(!nrf52BootloaderVersion(bytes.data(), bytes.size(), 0xf4000, 0,
+                                 small, sizeof(small)) && small[0] == 0);
+  for (const char* bad : {"v0.11-OTAFIX2.4.9", "v0.11.0-OTAFIX2.x.9",
+                          "v0.11.0-OTAFIX2.4.9junk", "v0.11.0-OTAFIX2.4.",
+                          "v0.11.0-OTAFIX", "v0.11.0-notOTAFIX2.4.9"}) {
+    bytes = image(); standalone(bytes, 0x100, bad); expect(bytes, nullptr);
+  }
+  bytes = image(); standalone(bytes, 0x100, "v0.11.0-OTAFIX2.4.9");
+  put32(bytes, 4, 0x27001); expect(bytes, nullptr); // reject application vectors
+  bytes = image(); standalone(bytes, 0x100, "v0.11.0-OTAFIX2.4.9");
+  manifest(bytes, 0x020406ff); expect(bytes, "OTAFIX2.4.6"); // validated metadata wins
+  bytes[0x300] ^= 1; expect(bytes, nullptr); // never mask a corrupt manifest CRC
+  bytes = image(); standalone(bytes, 0x100, "v0.11.0-OTAFIX2.4.9");
+  manifest(bytes, 0x020409ff);
+  put32(bytes, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 20, OTA_XIAO_BOARD_ID_BASE);
+  memset(bytes.data() + OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 24, 0, 16);
+  memcpy(bytes.data() + OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 24, "SCAP_DFU", 8);
+  refreshManifestCrc(bytes);
+  OtaBootloaderIdentity unexpected_board;
+  assert(!ota_bootloader_identity_from_image(bytes.data(), bytes.size(), unexpected_board));
+  expect(bytes, "v0.11.0-OTAFIX2.4.9"); // diagnostic fallback for an unexpected board name
+  bytes = image(); standalone(bytes, 0x100, "v0.11.0-OTAFIX2.4.9");
+  manifest(bytes, 0x020409ff);
+  put16(bytes, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 8, 0);
+  refreshManifestCrc(bytes); expect(bytes, nullptr); // malformed BLMF is not a fallback
+  bytes = image(); standalone(bytes, 0x100, "v0.11.0-OTAFIX2.4.9");
+  manifest(bytes, 0x020409ff);
+  put16(bytes, OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 52, 0);
+  refreshManifestCrc(bytes); expect(bytes, nullptr); // malformed BLM2 is not a fallback
+  bytes = image(0xe000, 0xf0000);
+  standalone(bytes, 0xb000, "v0.11.0-OTAFIX2.4.9"); expect(bytes, nullptr, 0xf0000);
+  standalone(bytes, 0x9800, "v0.11.0-OTAFIX2.4.9");
+  expect(bytes, "v0.11.0-OTAFIX2.4.9", 0xf0000);
+  bytes = image(); text(bytes, 0x100, "0.11.0"); text(bytes, 0x8000, "0.11.0");
   expect(bytes, "0.11.0"); // identical copies are harmless
   text(bytes, 0x8000, "0.12.0"); expect(bytes, nullptr, 0xf4000, 0xb00);
   bytes = image(); memcpy(bytes.data() + 0x100, "UF2 Bootloader ", 15);

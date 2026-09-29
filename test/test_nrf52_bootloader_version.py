@@ -1,4 +1,4 @@
-"""Compile the real version reader; optionally verify the pinned 2.4.6 release."""
+"""Compile the real version reader; optionally verify pinned OTAFIX releases."""
 import hashlib
 import os
 from pathlib import Path
@@ -77,6 +77,32 @@ class BootloaderVersionTest(unittest.TestCase):
                             if name == sd_name:
                                 self.assertEqual(result.stdout.strip(), "OTAFIX2.4.6")
                     print(f"Verified version reader against {len(names)} signed OTAFIX 2.4.6 release images")
+
+            release_249 = os.environ.get("MESHCORE_BOOTLOADER_MOTA_249_ZIP")
+            if release_249:
+                self.assertEqual(hashlib.sha256(Path(release_249).read_bytes()).hexdigest(),
+                                 "6fd7d799873ba6016d37679d9ef3610e62105c2477b49a71933eec12756e625c",
+                                 "unexpected 2.4.9 release archive")
+                with zipfile.ZipFile(release_249) as archive:
+                    names = [name for name in archive.namelist() if name.endswith(".mota")]
+                    self.assertEqual(len(names), 27)
+                    for name in names:
+                        with self.subTest(release_image=name):
+                            # The pinned bundle holds one exact 40 KiB full image per
+                            # board. Isolate the native reader without making this
+                            # test depend on package capability-policy changes.
+                            container = archive.read(name)
+                            self.assertEqual(len(container), 41330)
+                            payload = container[-5 - 40960:-5]
+                            result = subprocess.run([str(exe), "--hex"], input=payload.hex(),
+                                                    capture_output=True, text=True, timeout=20)
+                            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                            self.assertIn("OTAFIX2.4.9", result.stdout)
+                            if "sensecap_solar_p1" in name:
+                                self.assertEqual(result.stdout.strip(), "v0.11.0-OTAFIX2.4.9")
+                            if "wiscore_rak4631_board_bootloader" in name:
+                                self.assertEqual(result.stdout.strip(), "OTAFIX2.4.9")
+                    print(f"Verified version reader against {len(names)} OTAFIX 2.4.9 board images")
 
 
 if __name__ == "__main__":
