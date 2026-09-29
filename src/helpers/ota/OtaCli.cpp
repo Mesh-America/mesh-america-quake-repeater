@@ -597,11 +597,14 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
         return true;
       }
 #elif defined(OTA_RAK_AUTO_STORE)
-      if (c.fetch_store.usesExternal() && !(bl.storage_flags & OTA_BL_STORAGE_QSPI)) {
+      // Bootloader packages passed their separate privileged checks above and
+      // select internal staging when their manifest arrives. The currently
+      // selected application backend must not veto that transition.
+      if (!selboot && c.fetch_store.usesExternal() && !(bl.storage_flags & OTA_BL_STORAGE_QSPI)) {
         strcpy(reply, "ERR bootloader cannot apply from detected QSPI storage");
         return true;
       }
-      if (!c.fetch_store.usesExternal() && !c.fetch_store.usesInternal()) {
+      if (!selboot && !c.fetch_store.usesExternal() && !c.fetch_store.usesInternal()) {
         snprintf(reply, 160, "ERR OTA storage unsafe: %s", c.fetch_store.selectionReason());
         return true;
       }
