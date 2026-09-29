@@ -14,6 +14,9 @@
 * **agessaman Observer - ESP32 Integrated MQTT observation.** Send directly from the node to the observer api endpoint.
 * **IoTThinks PowerSaving - Broader power-saving controls.** Integrates device sleep, LoRa receive duty cycling, WiFi modem-sleep policies, and GPS acquisition/cache schedules across supported roles. These controls are independently configurable; actual savings depend on hardware and workload.
 
+Get the correct firmware file here for your hardware:
+**https://mikecarper.github.io/MeshCore/firmware_picker/**
+
 ---
 
 ## About MeshCore
