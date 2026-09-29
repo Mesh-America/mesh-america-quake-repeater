@@ -2,7 +2,7 @@
 
 Each result now includes **Restore your settings after flashing**. Its commands
 follow the selected logging mode and the exact image's verified role/hardware
-controls. Select On, Off, or Check to view and copy the commands; Companion
+controls. Click On, Off, or Check to view and copy the commands; Companion
 MQTT and GPS show their app/WebConfig steps instead. See
 [feature switches by role](role_feature_switches.md) for the full reference.
 The [USB web console](https://flasher.meshcore.io/console) works with the
@@ -12,6 +12,9 @@ Pick the choices in any order. Every selection narrows all the other controls
 to firmware combinations that were actually built in the current release set.
 The optional chip-family filter (ESP32, nRF52, RP2040, or STM32) can narrow the
 hardware list first. You can skip it: picking hardware fills it in automatically.
+Chip family and hardware are the only dropdowns. All remaining choices use
+buttons. **Firmware profile** combines OTA support, Full/standard, and sensor
+or storage differences in one choice.
 
 The picker reads public release metadata from GitHub. It does not upload device
 information. Hardware names, target names, and download links come directly
@@ -66,12 +69,12 @@ from the published firmware assets.
       </select>
     </div>
 
-    <div class="firmware-picker-control firmware-picker-select-control" data-role="hardware-variant-control" hidden>
-      <label for="firmware-picker-hardware">Hardware variant</label>
-      <select id="firmware-picker-hardware" data-field="hardware" disabled>
-        <option value="">Choose hardware first</option>
-      </select>
-    </div>
+    <fieldset class="firmware-picker-control firmware-picker-radio-control firmware-picker-wide" data-radio-field="hardware" data-role="hardware-variant-control" disabled hidden>
+      <legend>Hardware variant</legend>
+      <div class="firmware-picker-radio-options" data-field="hardware">
+        Choose hardware first
+      </div>
+    </fieldset>
 
     <fieldset class="firmware-picker-control firmware-picker-radio-control firmware-picker-wide" data-radio-field="install" disabled>
       <legend>Install operation</legend>
@@ -94,33 +97,20 @@ from the published firmware assets.
       </div>
     </fieldset>
 
-    <fieldset class="firmware-picker-control firmware-picker-radio-control" data-radio-field="ota" disabled>
-      <legend>OTA capability</legend>
-      <div class="firmware-picker-radio-options" data-field="ota">
-        Loading OTA choices...
+    <fieldset class="firmware-picker-control firmware-picker-radio-control firmware-picker-wide" data-radio-field="firmwareProfile" aria-describedby="firmware-picker-profile-help" disabled>
+      <legend>Firmware profile</legend>
+      <p id="firmware-picker-profile-help" class="firmware-picker-control-help">Each button combines OTA support with the feature, sensor, and storage choices for that image. Reduced optional sensors means fewer environmental/ranging drivers; I2C and supported board peripherals remain available.</p>
+      <div class="firmware-picker-radio-options" data-field="firmwareProfile">
+        Loading firmware profiles...
       </div>
     </fieldset>
 
-    <div class="firmware-picker-control firmware-picker-select-control">
-      <label for="firmware-picker-mode">Connection / bridge mode</label>
-      <select id="firmware-picker-mode" data-field="mode" disabled>
-        <option value="">Loading modes...</option>
-      </select>
-    </div>
-
-    <fieldset class="firmware-picker-control firmware-picker-radio-control" data-radio-field="feature" disabled>
-      <legend>Feature profile</legend>
-      <div class="firmware-picker-radio-options" data-field="feature">
-        Loading profiles...
+    <fieldset class="firmware-picker-control firmware-picker-radio-control firmware-picker-wide" data-radio-field="mode" disabled>
+      <legend>Connection / bridge mode</legend>
+      <div class="firmware-picker-radio-options" data-field="mode">
+        Loading modes...
       </div>
     </fieldset>
-
-    <div class="firmware-picker-control firmware-picker-select-control">
-      <label for="firmware-picker-variant">Firmware variant</label>
-      <select id="firmware-picker-variant" data-field="variant" disabled>
-        <option value="">Loading variants...</option>
-      </select>
-    </div>
 
     <div class="firmware-picker-form-actions firmware-picker-wide">
       <button type="reset" data-action="clear" disabled>Clear all choices</button>
@@ -174,7 +164,8 @@ from the published firmware assets.
 | Wi-Fi MQTT observer | Firmware connects directly to MQTT over Wi-Fi; this is not USB logging |
 | USB logging + Wi-Fi MQTT | Unified FULL image sends to both paths; avoid two publishers aimed at the same broker unless messages are deduplicated |
 | No logging | Normal standalone operation without the dedicated logging/MQTT profile |
-| Receives LoRa OTA | Repeater, room server, or sensor image that can stage an exact matching update received over LoRa |
+| Receives LoRa OTA | Repeater, room server, or sensor image that can stage an exact matching update received over LoRa; any sensor/storage tradeoff appears on the same Firmware profile button |
+| Receives LoRa OTA - Reduced optional sensors | Compact OTA image that omits selected optional environmental/ranging drivers while retaining generic I2C and supported board peripherals |
 | LoRa OTA source only | Full Companion serving a host-supplied update to another node without self-installing it |
 
 Connection and bridge choices depend on the selected role. Companion firmware
@@ -223,7 +214,10 @@ preselects that board, role, OTA capability, and storage profile.
 
 The query parameters are `chipFamily`, `hardwareFamily`, `hardware`, `role`,
 `logging`, `ota`, `mode`, `feature`, `variant`, and `install`. Values use the
-picker's internal identifiers rather than the displayed labels. The generated
+picker's internal identifiers rather than the displayed labels. One Firmware
+profile button sets `ota`, `feature`, and `variant` together. Existing links
+with only some of those choices still work and show their partial selection.
+The generated
 link also records `chipAuto` so automatic chip-family selection or an explicit
 **Any** choice behaves the same after reopening. Existing section anchors and
 unrelated query parameters are preserved.
@@ -397,16 +391,15 @@ bootloader-update UF2 for the application image being installed.
 
 ## Hardware and variant names
 
-Hardware families with multiple released targets get a second hardware-variant
-menu. It separates revisions, display type, expansion kit, radio/PA layout,
-pin map, and other physical differences without crowding the first menu. The
-firmware-variant menu separately exposes choices that still require different
-code or wiring, such as serial port or the legacy `no_external_sensors` target
-suffix. For RAK3401 and RAK4631, the picker labels that compact LoRa OTA option
-**Internal storage (no external storage board)**. Its result details explain
-the omitted optional environmental/ranging sensor drivers; the reduction does
-not disable generic I2C or unrelated board-integrated peripherals. Other boards
-retain the **Reduced optional environmental/ranging drivers** label.
+Hardware families with multiple released targets get **Hardware variant**
+buttons. They separate revisions, display type, expansion kit, radio/PA layout,
+pin map, and other physical differences without crowding the Hardware dropdown.
+**Firmware profile** buttons combine OTA support, Full/standard, and choices
+that need a different image or wiring, such as serial port or external storage.
+The legacy `no_external_sensors` profile is labeled **Receives LoRa OTA -
+Reduced optional sensors** on the same button. On RAK3401 and RAK4631 this
+compact profile uses internal storage without an external storage board. The
+reduction does not disable generic I2C or unrelated board-integrated peripherals.
 Reduced RAK3401 and RAK4631 targets retain INA219/INA226/INA260/INA3221 as
 voltage/current entries in the optional sensor table. They are not the only I2C
 users: the SSD1306 OLED, supported autodiscovered RTCs, and RAK12500 GPS remain
