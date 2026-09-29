@@ -385,6 +385,13 @@ LoRa update still needs an exact target identity,
 compatible partition signature, matching radio settings, and the correct
 update package.
 
+nRF52 results include **Latest nRF52 OTAFIX bootloader**, linking to the
+[latest OTAFIX release](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/latest).
+The link follows the current stable release automatically. Choose the package
+for the exact board and storage setup; application UF2 and DFU files do not
+install a bootloader. Follow the release's migration instructions if the
+installed version needs a recovery bridge.
+
 nRF52 LoRa OTA requires an OTAFIX bootloader built for the exact board and
 storage layout. Select the hardware-matched HEX, Serial DFU ZIP, or
 bootloader-update UF2 for the application image being installed.
