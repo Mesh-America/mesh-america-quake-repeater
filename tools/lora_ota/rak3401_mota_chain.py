@@ -1541,9 +1541,28 @@ def resolve_target_by_key(
         )
     full_key, contact = matches[0]
     name = contact.get("adv_name")
-    if contact.get("type") != 2 or not isinstance(name, str) or not name:
-        raise ota.OtaError("target key does not identify a named repeater contact")
-    return name, full_key
+    if contact.get("type") != 2:
+        raise ota.OtaError("target key does not identify a repeater contact")
+    return name if isinstance(name, str) and name else f"[{full_key[:12]}]", full_key
+
+
+def bind_relay_keys(
+    controller: ota.Controller,
+    target_key: str,
+    relay_specs: list[str],
+    default_password: str,
+) -> list[tuple[str, str]]:
+    """Resolve relays locally before the chain sends any remote command."""
+    if not relay_specs:
+        return []
+    selectors = SimpleNamespace(
+        target=target_key,
+        relay_values=[ota.parse_relay(value, default_password) for value in relay_specs],
+        source_contact_value=None,
+        source_shares_controller=True,  # bind only destination and relays here
+    )
+    ota.bind_contact_selectors(controller, selectors)
+    return selectors.relay_values
 
 
 def source_namespace(args: argparse.Namespace) -> SimpleNamespace:
@@ -2352,6 +2371,7 @@ def run_step(
     expected_body_hash: bytes,
     work_dir: Path,
     controller: ota.Controller,
+    relays: list[tuple[str, str]],
 ) -> None:
     command = [
         str(step.path),
@@ -2388,8 +2408,8 @@ def run_step(
         ])
     if args.debug:
         command.append("--debug")
-    for relay in args.relay:
-        command.extend(["--relay", relay])
+    for relay_key, relay_password in relays:
+        command.extend(["--relay", f"{relay_key}={relay_password}"])
     result = ota.main(command, controller_override=controller)
     if result != 0:
         raise ota.OtaError(f"chain step {step.number} exited with status {result}")
@@ -2443,8 +2463,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--relay",
         action="append",
         default=[],
-        metavar="NAME[=PASSWORD]",
-        help="intermediate relay, farthest-to-nearest; repeat for each relay",
+        metavar="NAME_OR_KEY[=PASSWORD]",
+        help="intermediate relay name, full public key, or unique key prefix; farthest-to-nearest",
     )
     parser.add_argument(
         "--relay-txdelay",
@@ -2723,13 +2743,16 @@ def main(argv: list[str] | None = None) -> int:
         ota.preflight_source_cli(source_args)
         controller = ota.Controller(controller_namespace(args), password)
         ota.verify_shared_source_identity(controller, source_args)
-        target_name, full_key = resolve_target_by_key(controller, args.target_key)
-        target = query_live_target(controller, args, target_name)
+        target_name, target_key = resolve_target_by_key(controller, args.target_key)
+        relays = bind_relay_keys(controller, target_key, args.relay, password)
+        # The name is only for the operator's plan. Keep every remote command
+        # and nested transfer pinned to the full key, including after renames.
+        target = query_live_target(controller, args, target_key)
         first_index = find_resume_index(target, steps, final_body_hash)
         require_rescue_capability_before_next_transition(
-            controller, target_name, first_index, len(steps)
+            controller, target_key, first_index, len(steps)
         )
-        confirm_chain(args, target_name, full_key, target, first_index, steps)
+        confirm_chain(args, target_name, target_key, target, first_index, steps)
         if args.preflight_only:
             return 0
 
@@ -2738,26 +2761,24 @@ def main(argv: list[str] | None = None) -> int:
             transfer_path = work_dir / TRANSFER_SETTINGS_FILE
             if transfer_path.exists():
                 transfer_settings = load_or_capture_transfer_settings(
-                    controller, target_name, full_key, work_dir
+                    controller, target_key, target_key, work_dir
                 )
                 restore_and_retire_transfer_settings(
-                    controller, target_name, transfer_settings, work_dir
+                    controller, target_key, transfer_settings, work_dir
                 )
             if not args.keep_watchdog_off:
-                enabled = controller.remote_command(target_name, "set system.watchdog on")
+                enabled = controller.remote_command(target_key, "set system.watchdog on")
                 if not enabled.lower().startswith("ok - system watchdog enabled"):
                     raise ota.OtaError(f"could not enable system watchdog: {enabled}")
-                require_watchdog_state(controller, target_name, "on")
+                require_watchdog_state(controller, target_key, "on")
             print("RAK3401 already matches the verified final endpoint.")
             return 0
 
         transfer_settings = load_or_capture_transfer_settings(
-            controller, target_name, full_key, work_dir
+            controller, target_key, target_key, work_dir
         )
         participant_args = source_namespace(args)
-        participant_args.relay_values = [
-            ota.parse_relay(value, password) for value in args.relay
-        ]
+        participant_args.relay_values = relays
         participant_versions = ota.read_lora_ota_participant_versions(
             controller, participant_args, target
         )
@@ -2773,10 +2794,10 @@ def main(argv: list[str] | None = None) -> int:
                 participant_versions
             )
 
-        prepare_watchdog(controller, target_name)
+        prepare_watchdog(controller, target_key)
         enforce_transfer_guardrails(
             controller,
-            target_name,
+            target_key,
             saved=transfer_settings,
             current_version=target.current_version,
             temp_values=args.temp_values,
@@ -2785,13 +2806,13 @@ def main(argv: list[str] | None = None) -> int:
             ),
             legacy_full_airtime=args.legacy_full_airtime,
         )
-        enforce_ota_hops(controller, target_name, args.ota_hops)
+        enforce_ota_hops(controller, target_key, args.ota_hops)
         for index in range(first_index, len(steps)):
             step = steps[index]
-            resolved_name, current_key = resolve_target_by_key(controller, args.target_key)
-            if current_key != full_key or resolved_name != target_name:
+            _current_name, current_key = resolve_target_by_key(controller, args.target_key)
+            if current_key != target_key:
                 raise ota.OtaError("target contact identity changed during the chain")
-            target = query_live_target(controller, args, target_name)
+            target = query_live_target(controller, args, target_key)
             current_index = find_resume_index(target, steps, final_body_hash)
             if current_index > index:
                 print(f"[chain] step {step.number:02d} is already installed; continuing")
@@ -2800,10 +2821,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ota.OtaError(
                     f"live target is at chain index {current_index}, expected {index}"
                 )
-            require_watchdog_state(controller, target_name, "off")
+            require_watchdog_state(controller, target_key, "off")
             enforce_transfer_guardrails(
                 controller,
-                target_name,
+                target_key,
                 saved=transfer_settings,
                 current_version=target.current_version,
                 temp_values=args.temp_values,
@@ -2812,7 +2833,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 legacy_full_airtime=args.legacy_full_airtime,
             )
-            enforce_ota_hops(controller, target_name, args.ota_hops)
+            enforce_ota_hops(controller, target_key, args.ota_hops)
             print(
                 f"\n[chain] step {step.number:02d}/{len(steps)}: "
                 f"{step.from_version} -> {step.to_version}"
@@ -2820,11 +2841,11 @@ def main(argv: list[str] | None = None) -> int:
             previous_step = steps[index - 1] if index > 0 else None
             expected_hash = expected_hash_after(steps, final_body_hash, index)
             run_step(
-                args, target_name, step, previous_step, expected_hash,
-                work_dir, controller
+                args, target_key, step, previous_step, expected_hash,
+                work_dir, controller, relays
             )
 
-            target = query_live_target(controller, args, target_name)
+            target = query_live_target(controller, args, target_key)
             if target.base_hash != expected_hash:
                 raise ota.OtaError(
                     f"step {step.number} returned body hash {target.base_hash.hex().upper()}, "
@@ -2850,25 +2871,25 @@ def main(argv: list[str] | None = None) -> int:
                     f"not the EndF chain version {step.to_version}"
                 )
             require_rescue_capability_before_next_transition(
-                controller, target_name, index + 1, len(steps)
+                controller, target_key, index + 1, len(steps)
             )
-            clear_completed_download(controller, target_name, step)
-            require_watchdog_state(controller, target_name, "off")
+            clear_completed_download(controller, target_key, step)
+            require_watchdog_state(controller, target_key, "off")
             append_progress(work_dir, step, target.base_hash)
             print(f"[chain] step {step.number:02d} verified")
 
-        final_target = query_live_target(controller, args, target_name)
+        final_target = query_live_target(controller, args, target_key)
         if find_resume_index(final_target, steps, final_body_hash) != len(steps):
             raise ota.OtaError("final target identity did not match the release endpoint")
         restore_persisted_source_rxps(work_dir, source_args)
         restore_and_retire_transfer_settings(
-            controller, target_name, transfer_settings, work_dir
+            controller, target_key, transfer_settings, work_dir
         )
         if not args.keep_watchdog_off:
-            enabled = controller.remote_command(target_name, "set system.watchdog on")
+            enabled = controller.remote_command(target_key, "set system.watchdog on")
             if not enabled.lower().startswith("ok - system watchdog enabled"):
                 raise ota.OtaError(f"could not enable system watchdog: {enabled}")
-            require_watchdog_state(controller, target_name, "on")
+            require_watchdog_state(controller, target_key, "on")
             print(f"[watchdog] re-enabled after verified step {len(steps)} boot")
         print(
             f"RAK3401 update complete: {final_target.current_version} "

@@ -209,6 +209,15 @@ python3 tools/lora_ota/rak3401_mota_chain.py \
   --yes
 ```
 
+`--target-key` accepts a full contact public key or a unique hexadecimal prefix
+of at least eight characters, such as the 12-character prefix shown by
+`meshcli lc`. The chain resolves it against the controller's saved contacts
+and uses the full key for every remote command and transfer step. Emoji or a
+later change in the repeater's display name does not affect selection. Each
+`--relay` can likewise use a full key or unique prefix instead of a name.
+The target still must be a repeater contact with the exact hardware, firmware,
+and bootloader required by this chain.
+
 Keep the work directory. Rerunning the same command resumes only when the live
 EndF body hash matches an exact chain node. Never manually skip a package.
 `--legacy-full-airtime` temporarily sets the destination airtime factor to
