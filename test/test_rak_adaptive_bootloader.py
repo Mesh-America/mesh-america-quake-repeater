@@ -10,6 +10,49 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AdaptiveBootloaderTest(unittest.TestCase):
+    def test_cli_uses_application_storage_gate_only_for_applications(self):
+        cli = (ROOT / "src/helpers/ota/OtaCli.cpp").read_text()
+        error = cli.index('ERR bootloader cannot apply from detected QSPI storage')
+        start = cli.rfind('#elif defined(OTA_RAK_AUTO_STORE)', 0, error)
+        end = cli.index('#elif defined(OTA_QSPI_STORE)', error)
+        gate = cli[cli.index('\n', start) + 1:end]
+        source = r'''
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <cstdint>
+constexpr uint8_t OTA_BL_STORAGE_QSPI = 4;
+struct Store {
+  int mode;
+  bool usesExternal() { return mode == 1; }
+  bool usesInternal() { return mode == 0; }
+  const char* selectionReason() { return "unsafe wiring"; }
+};
+bool rejected(bool selboot, int mode, uint8_t flags) {
+  struct { Store fetch_store; } c = {{mode}};
+  struct { uint8_t storage_flags; } bl = {flags};
+  char reply[160];
+''' + gate + r'''
+  return false;
+}
+int main() {
+  // The CLI has already required exact identity and privileged boot caps.
+  assert(!rejected(true, 1, 0x0A));  // canonical bootloader, external app store
+  assert(!rejected(true, 0, 0x0A));
+  assert(!rejected(true, 2, 0x0A));  // optional NOR is irrelevant to internal boot staging
+  assert(rejected(false, 1, 0x0A)); // app still needs the external capability
+  assert(rejected(false, 2, 0x1E)); // unsafe application store remains rejected
+  assert(!rejected(false, 1, 0x1E));
+  assert(!rejected(false, 0, 0x0A));
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "cli.cpp").write_text(source)
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path / "cli.cpp"), "-o", str(path / "cli")], check=True)
+            subprocess.run([str(path / "cli")], check=True)
+
     def test_storage_switch_and_manual_resume(self):
         header = (ROOT / "src/helpers/ota/OtaStoreAdaptiveNrf52.h").read_text()
         body = header[header.index("class OtaStoreAdaptiveNrf52"):
