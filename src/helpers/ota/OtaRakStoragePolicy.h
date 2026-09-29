@@ -15,11 +15,14 @@ inline RakStorageChoice rak_storage_choice(uint8_t detected,
                                            bool qspi_bootloader,
                                            bool identity_valid,
                                            const char* device_name,
-                                           bool rak3401) {
+                                           bool rak3401,
+                                           bool optional_app_storage = false) {
   if (detected > 3u || detected == 3u) return RakStorageChoice::Unsafe;
   const char* auto_name = rak3401 ? "3401_AUTO_DFU" : "4631_AUTO_DFU";
+  const char* board_name = rak3401 ? "3401_DFU" : "4631_DFU";
   const bool merged_bootloader = identity_valid && device_name &&
-                                 strcmp(device_name, auto_name) == 0;
+      (strcmp(device_name, auto_name) == 0 ||
+       (optional_app_storage && strcmp(device_name, board_name) == 0));
   if (detected == 0u) return !qspi_bootloader || merged_bootloader
                              ? RakStorageChoice::Internal : RakStorageChoice::Unsafe;
   if (!qspi_bootloader) return RakStorageChoice::Internal;

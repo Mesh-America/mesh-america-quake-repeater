@@ -108,11 +108,17 @@ BOOT_STORAGE_SD = 0x01
 BOOT_STORAGE_STAGE_CEILING = 0x02
 XIAO_BOOT_STORAGE_QSPI = 0x04
 XIAO_BOOT_STORAGE_UPDATE = 0x08
-BOOT_STORAGE_KNOWN = 0x0F
+BOOT_STORAGE_HEADER_W25 = 0x10
+BOOT_STORAGE_KNOWN = 0x1F
 BOOT_STORAGE_SD_UPDATE = BOOT_STORAGE_SD | XIAO_BOOT_STORAGE_UPDATE
 BOOT_STORAGE_QSPI_UPDATE = (BOOT_STORAGE_STAGE_CEILING | XIAO_BOOT_STORAGE_QSPI |
                             XIAO_BOOT_STORAGE_UPDATE)
 BOOT_STORAGE_INTERNAL_UPDATE = BOOT_STORAGE_STAGE_CEILING | XIAO_BOOT_STORAGE_UPDATE
+BOOT_STORAGE_RAK_AUTO_UPDATE = BOOT_STORAGE_QSPI_UPDATE | BOOT_STORAGE_HEADER_W25
+RAK_AUTO_BOOTLOADER_IDENTITIES = (
+    (0x239A0029, "3401_AUTO_DFU"),
+    (0x239A0029, "4631_AUTO_DFU"),
+)
 BOOT_REQUIRED_APP_CODEC_MASK = ((1 << CODEC_FULL) |
                                 (1 << CODEC_DETOOLS_INPLACE))
 
@@ -696,7 +702,7 @@ def audit_bootloader_target_inventory(application_target_ids=()) -> dict:
     identities = (
         (XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
         (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU"),
-    ) + INTERNAL_BOOTLOADER_IDENTITIES
+    ) + INTERNAL_BOOTLOADER_IDENTITIES + RAK_AUTO_BOOTLOADER_IDENTITIES
     app_ids = set(application_target_ids)
     targets = {}
     for identity in identities:
@@ -714,6 +720,7 @@ def audit_bootloader_target_inventory(application_target_ids=()) -> dict:
 
 def bootloader_identity_is_buildable(board_id: int, device_name: str) -> bool:
     return ((board_id, device_name) in INTERNAL_BOOTLOADER_IDENTITIES or
+            (board_id, device_name) in RAK_AUTO_BOOTLOADER_IDENTITIES or
             (board_id, device_name) in (
                 (XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
                 (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU")))
@@ -734,6 +741,8 @@ def bootloader_qualified_platform_profile(board_id: int, device_name: str):
 def bootloader_qualified_storage_profiles(board_id: int, device_name: str):
     """Return the exact allowed capability-marker profiles for one identity."""
     identity = (board_id, device_name)
+    if identity in RAK_AUTO_BOOTLOADER_IDENTITIES:
+        return (BOOT_STORAGE_RAK_AUTO_UPDATE,)
     if identity in ((XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
                     (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU")):
         return (BOOT_STORAGE_QSPI_UPDATE,)
@@ -836,13 +845,26 @@ def bootloader_caps_storage(image: bytes) -> Optional[int]:
         if valid_count != 1:
             return None
         if storage in (BOOT_STORAGE_SD_UPDATE, BOOT_STORAGE_QSPI_UPDATE,
-                       BOOT_STORAGE_INTERNAL_UPDATE):
+                       BOOT_STORAGE_INTERNAL_UPDATE, BOOT_STORAGE_RAK_AUTO_UPDATE):
             found = storage
     return found if valid_count == 1 else None
 
 
 def xiao_bootloader_caps_ok(image: bytes) -> bool:
     return bootloader_caps_storage(image) == BOOT_STORAGE_QSPI_UPDATE
+
+
+def bootloader_optional_app_storage(image: bytes) -> int:
+    record = (b"MOTARAMA" + struct.pack("<HHI", 1, 72, 65536) +
+              b"MOTASTOR" + struct.pack("<HHBBBB", 1, 16, 0x14, 0, 0, 0))
+    offsets = [off for off in range(0, len(image) - 7, 4)
+               if image[off:off + 8] == b"MOTASTOR"]
+    if not offsets:
+        return 0
+    if (len(offsets) != 1 or offsets[0] < 16 or
+            image[offsets[0] - 16:offsets[0] + 16] != record):
+        raise ValueError("optional RAK application storage marker is invalid or ambiguous")
+    return 0x14
 
 
 def validate_bootloader_image(image: bytes, target_id: Optional[int] = None,
@@ -876,6 +898,17 @@ def validate_bootloader_image(image: bytes, target_id: Optional[int] = None,
     if actual_storage not in expected_storage:
         expected = "/".join(f"0x{value:02X}" for value in expected_storage)
         raise ValueError(f"bootloader lacks exact ABI 3 self-update capabilities {expected}")
+    optional_storage = bootloader_optional_app_storage(image)
+    if optional_storage and (actual_storage != BOOT_STORAGE_INTERNAL_UPDATE or
+            identity.board_id != 0x239A0029 or
+            identity.device_name not in ("3401_DFU", "4631_DFU")):
+        raise ValueError("optional RAK application storage requires the deployed board identity")
+    if actual_storage == BOOT_STORAGE_RAK_AUTO_UPDATE or optional_storage:
+        ram_marker = b"MOTARAMA" + struct.pack("<HHI", 1, 72, 65536)
+        count = sum(image[off:off + 16] == ram_marker
+                    for off in range(0, len(image) - 15, 4))
+        if count != 1 or struct.unpack_from("<I", image)[0] > 0x20030000:
+            raise ValueError("adaptive bootloader must retain its 64 KiB hybrid RAM arena")
     expected_platform = bootloader_qualified_platform_profile(
         identity.board_id, identity.device_name)
     if expected_platform is not None:
