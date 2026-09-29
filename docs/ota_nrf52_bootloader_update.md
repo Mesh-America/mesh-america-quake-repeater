@@ -16,14 +16,19 @@ be replaced with the exact ABI-3 self-update-capable OTAFIX build over USB/BLE
 DFU or SWD. MeshTower SD also requires the BLM2 retained-auth version to be
 provisioned locally before either application or bootloader OTA.
 
-The adaptive RAK3401 and RAK4631 OTAFIX 2.4.8 profiles support application
-full and delta updates, but not bootloader self-update. Their running
-bootloader protects `0xF4000..0x100000` with the nRF52840 ACL before starting
+The released adaptive RAK3401 and RAK4631 OTAFIX 2.4.8/2.4.9 profiles support
+application full and delta updates, but not bootloader self-update over LoRa.
+USB UF2 and local Bluetooth/serial Legacy DFU bootloader updates still work.
+Their running bootloader protects `0xF4000..0x100000` with the nRF52840 ACL before starting
 MeshCore. This includes the MBR parameter page at `0xFE000`, so an application
 cannot initiate `COPY_BL` even after verifying a signed bootloader package.
 Hardware testing on a RAK3401 confirmed the MBR SVC enters a bus fault and
-leaves the installed bootloader unchanged. Migrate these profiles with their
-exact-board UF2 or local DFU package; do not offer a bootloader mOTA for them.
+leaves the installed bootloader unchanged. For new RAK installations use the
+normal [OTAFIX 2.4.10](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/v0.11.0-OTAFIX2.4.10)
+compatible `*_auto` bootloader. Existing standard `3401_DFU` / `4631_DFU`
+devices can receive its signed bootloader `.mota` over LoRa. Devices already
+running `3401_AUTO_DFU` / `4631_AUTO_DFU` need the matching 2.4.10 recovery
+bridge installed locally before switching to the normal image.
 
 ## Storage layouts
 
