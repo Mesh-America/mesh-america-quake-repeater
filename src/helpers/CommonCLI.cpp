@@ -11,6 +11,9 @@
 #include "AdvertDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch()
 #include "sensors/EnvironmentI2CConfig.h"
+#if defined(NRF52_POWER_MANAGEMENT)
+#include "NRF52VoltagePolicy.h"
+#endif
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
 #include "AtomicFileWriter.h"
 #elif defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
@@ -3325,6 +3328,9 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
 
 void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+#if defined(NRF52_POWER_MANAGEMENT)
+  if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
+#endif
   // Infrastructure roles dispatch here rather than through CommonRadioPrefs.
   if (strncmp(config, "path.hash.mode", 14) == 0
       && (config[14] == 0 || config[14] == ' ' || config[14] == '\t')) {
@@ -4631,6 +4637,9 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 
 void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+#if defined(NRF52_POWER_MANAGEMENT)
+  if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
+#endif
   if (strcmp(config, "password") == 0) {
     if (sender_timestamp == 0) {
       snprintf(reply, 160, "> %s", _prefs->password);

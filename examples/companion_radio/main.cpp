@@ -197,6 +197,9 @@ static bool isNetworkTerminalActive();
   #else
     #if defined(EXTRAFS)
       #include "ResilientInternalExtraFS.h"
+      extern "C" struct lfs_config* meshNrf52VoltagePrimaryFsConfig() {
+        return ResilientInternalExtraFS::primaryConfig();
+      }
       extern "C" uint32_t __flash_arduino_end[];
       ResilientInternalExtraFS ExtraFS(0xD4000, 0x19000, 128);
       DataStore store(InternalFS, ExtraFS, rtc_clock);

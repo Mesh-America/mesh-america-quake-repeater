@@ -1,6 +1,7 @@
 #if defined(NRF52_PLATFORM)
 #include "NRF52Board.h"
 #include "PowerManagementUtils.h"
+#include "NRF52VoltagePolicy.h"
 #include "Nrf52BootloaderVersion.h"
 #include "nrf52/SoftDeviceState.h"
 #include <target.h>
@@ -142,6 +143,38 @@ void NRF52Board::begin() {
   #endif
 }
 
+void NRF52Board::loop() {
+#ifdef NRF52_POWER_MANAGEMENT
+  if (!mesh::power::voltagePolicySupported()) return;
+  static uint32_t last_check = 0;
+  static uint8_t low_count = 0;
+  static uint16_t last_threshold = 0;
+  const uint16_t threshold = mesh::power::configuredCutoff();
+  const uint32_t now = millis();
+  if (threshold != last_threshold) {
+    last_threshold = threshold;
+    low_count = 0;
+    last_check = now;
+  }
+  if (threshold == 0 || now - last_check < 30000UL) return;
+  last_check = now;
+  if (isExternalPowered()) {
+    low_count = 0;
+    return;
+  }
+  low_count = mesh::power::nextLowVoltageCount(
+      low_count, getBattMilliVolts(), threshold, false);
+  if (low_count >= 3) initiateShutdown(SHUTDOWN_REASON_LOW_VOLTAGE);
+#endif
+}
+
+#ifdef NRF52_POWER_MANAGEMENT
+uint16_t NRF52Board::calibrateBatteryMillivolts(uint16_t raw_mv) const {
+  return mesh::power::calibratedMillivolts(
+      raw_mv, mesh::power::configuredAdcPermille());
+}
+#endif
+
 #if NRF52_WATCHDOG_TIMEOUT_SECONDS > 0
 static void reloadWatchdogChannels() {
   // Ordinarily only RR0 is enabled. If a bootloader left the watchdog running
@@ -277,20 +310,26 @@ bool NRF52Board::checkBootVoltage(const PowerMgtConfig* config) {
   }
   boot_voltage_mv = mesh::power::medianVoltage(samples[0], samples[1], samples[2]);
   
-  if (config->voltage_bootlock == 0) return true;  // Protection disabled
-
-  // Skip check if externally powered
-  if (isExternalPowered()) {
-    MESH_DEBUG_PRINTLN("PWRMGT: Boot check skipped (external power)");
-    return true;
+  const bool external = isExternalPowered();
+  // Loading the policy still accesses flash. Keep a hard floor ahead of it
+  // for boards whose compiled policy enables boot protection.
+  const uint16_t preflight = config->voltage_bootlock == 0 ? 0
+      : mesh::power::MIN_CUSTOM_MV;
+  if (mesh::power::shouldBootLock(boot_voltage_mv, preflight, external)) {
+    initiateShutdown(SHUTDOWN_REASON_BOOT_PROTECT);
+    return false;
   }
 
-  MESH_DEBUG_PRINTLN("PWRMGT: Boot voltage = %u mV (threshold = %u mV)",
-      boot_voltage_mv, config->voltage_bootlock);
+  mesh::power::loadVoltagePolicyAtBoot(config->voltage_bootlock);
+  boot_voltage_mv = calibrateBatteryMillivolts(boot_voltage_mv);
+  const uint16_t threshold = mesh::power::configuredBootlock();
+  if (threshold == 0 || external) return true;
 
-  // Only trigger shutdown if reading is valid (>1000mV) AND below threshold
-  // This prevents spurious shutdowns on ADC glitches or uninitialized reads
-  if (mesh::power::shouldBootLock(boot_voltage_mv, config->voltage_bootlock, false)) {
+  MESH_DEBUG_PRINTLN("PWRMGT: Boot voltage = %u mV (threshold = %u mV)",
+      boot_voltage_mv, threshold);
+
+  // Only valid ADC readings (>1000 mV) can initiate protective shutdown.
+  if (mesh::power::shouldBootLock(boot_voltage_mv, threshold, false)) {
     MESH_DEBUG_PRINTLN("PWRMGT: Boot voltage too low - entering protective shutdown");
 
     initiateShutdown(SHUTDOWN_REASON_BOOT_PROTECT);

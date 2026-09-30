@@ -4,6 +4,9 @@
 #endif
 #include <Arduino.h>
 #include <helpers/TxtDataHelpers.h>
+#if defined(NRF52_POWER_MANAGEMENT)
+#include <helpers/NRF52VoltagePolicy.h>
+#endif
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
 #include <helpers/ui/RadioProfileDisplayPage.h>
 #include <helpers/ui/RadioProfileSystemStatus.h>
@@ -287,6 +290,9 @@ void UITask::renderBatteryIndicator(uint16_t batteryMilliVolts) {
   const int minMilliVolts = BATT_MIN_MILLIVOLTS;
   const int maxMilliVolts = BATT_MAX_MILLIVOLTS;
   int batteryPercentage = ((batteryMilliVolts - minMilliVolts) * 100) / (maxMilliVolts - minMilliVolts);
+#if defined(NRF52_POWER_MANAGEMENT)
+  batteryPercentage = mesh::power::configuredBatteryPercent(batteryMilliVolts);
+#endif
   if (batteryPercentage < 0) batteryPercentage = 0; // Clamp to 0%
   if (batteryPercentage > 100) batteryPercentage = 100; // Clamp to 100%
 
@@ -498,7 +504,13 @@ void UITask::userLedHandler() {
   }
 
   if (cur_time > next_batt_check) {   // battery reads are not free, keep them rare
-    low_batt = _board->getBattMilliVolts() < LOW_BATT_MILLIVOLTS;
+    uint16_t low_batt_mv = LOW_BATT_MILLIVOLTS;
+#if defined(NRF52_POWER_MANAGEMENT)
+    low_batt_mv = mesh::power::remapBatteryWarningMillivolts(
+        LOW_BATT_MILLIVOLTS, BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS,
+        mesh::power::configuredEmpty(), mesh::power::configuredFull());
+#endif
+    low_batt = _board->getBattMilliVolts() < low_batt_mv;
     next_batt_check = cur_time + 60000;
   }
 
