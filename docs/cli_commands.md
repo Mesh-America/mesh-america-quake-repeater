@@ -4824,6 +4824,13 @@ lock, and running cutoff off. `lifepo4` uses 2700 mV = 0%, 3550 mV = 100%,
 values and allows endpoint overrides. These percentages are simple voltage
 estimates; they are not an accurate state-of-charge measurement under load.
 
+**WARNING: SELECTING LIFEPO4 DOES NOT CHANGE ANY BOARD'S CHARGING CIRCUIT. A
+4.2 V LI-ION CHARGER WILL STILL CHARGE TOWARD 4.2 V AND CAN DESTROY A LIFEPO4
+CELL. USE A LIFEPO4-COMPATIBLE CHARGER OR DISABLE/ISOLATE ON-BOARD CHARGING
+BEFORE CONNECTING A LIFEPO4 CELL.** Check the charging hardware on every board
+before using this profile; firmware battery-profile and cutoff settings cannot
+make a Li-ion charger safe for LiFePO4.
+
 ```text
 get battery.profile
 set battery.profile lifepo4
@@ -4847,6 +4854,10 @@ For a RAK3401/RAK13302 LiFePO₄ cell:
 ```text
 set battery.profile lifepo4
 ```
+
+For example, the
+[RAK19007 base-board datasheet](https://docs.rakwireless.com/product-categories/wisblock/rak19007/datasheet/)
+specifies 4.2 V charging for a Li-ion battery. The profile does not change it.
 
 The 2.7 V cutoff is a cell-protection choice, not a guarantee of 1 W RF
 output. The [RAK13302 datasheet](https://docs.rakwireless.com/product-categories/wisblock/rak13302/datasheet-vd/)

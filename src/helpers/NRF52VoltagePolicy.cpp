@@ -244,6 +244,11 @@ bool handleVoltagePolicyCommand(const char* command, char* reply,
     }
     if (!save(boot, low, empty, full, adc_permille, next))
       snprintf(reply, reply_capacity, "Error: battery profile could not be saved");
+    else if (next == LIFEPO4)
+      snprintf(reply, reply_capacity,
+               "OK - lifepo4 saved; reboot. "
+               "WARNING: PROFILE DOES NOT CHANGE CHARGERS. "
+               "A 4.2V CHARGER STILL CHARGES TO 4.2V AND CAN DESTROY LIFEPO4 CELLS.");
     else snprintf(reply, reply_capacity, "OK - %s profile saved; reboot for bootlock", value);
     return true;
   }
