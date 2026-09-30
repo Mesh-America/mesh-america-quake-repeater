@@ -43,7 +43,9 @@ TEST(NotificationParsing, ValidatesTheActualBuzzerTableAndRtttlSyntax) {
   for(auto text:{"abc","x:d=8,o=3,b=120:c","x:d=8,o=5,b=0:c","x:d=8,o=8,b=120:c",
       "x:d=3,o=5,b=120:c","x:d=8,o=5,b=120:b#7","x:d=8,o=5,b=120:c,",
       "x:d=8,o=5,b=120:c..","x:d=8,o=5,b=120:c8","x:d=8,o=5,b=120:p#",
-      "x:d=8,o=5,b=120:c+","x:d=8,o=5,b=120:c, d"})EXPECT_FALSE(soundDuration(text,ms))<<text;
+      "x:d=8,o=5,b=120:c+","x:d=8,o=5,b=120:c, d","x:d=8,o=04,b=120:c",
+      "x:d=8,o=5,b=120:c04","x:d=8,o=5,b=120:c007","x:d=08,o=5,b=120:c",
+      "x:d=8,o=5,b=120:04c"})EXPECT_FALSE(soundDuration(text,ms))<<text;
 }
 TEST_F(Notifications, ExecutesExactBoundaryPulsesAndReturnsOutputsOff) {
   EXPECT_EQ("OK",cmd("set notify.led all 50,300,40,20,500"));
