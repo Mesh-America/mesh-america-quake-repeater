@@ -3197,9 +3197,9 @@ void setup() {
   sensors.begin();
 
 #if ENV_INCLUDE_GPS == 1
-  // Device power saving applies a 10-minute awake, 5-minute sleep GPS cycle.
+  // Device power saving applies a 10-minute awake, 30-minute sleep GPS cycle.
   if (sensors.getLocationProvider() != NULL) {
-    sensors.getLocationProvider()->setPowerSavingProfile(600, 300);
+    sensors.getLocationProvider()->setPowerSavingProfile(600, 1800);
     sensors.setPowerSavingEnabled(
         the_mesh.getNodePrefs()->powersaving_enabled != 0);
   }
