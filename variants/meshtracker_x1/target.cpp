@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "target.h"
 #include <helpers/sensors/MicroNMEALocationProvider.h>
+#include <helpers/sensors/AirohaSleep.h>
 
 MeshTrackerX1Board board;
 
@@ -35,28 +36,20 @@ void MeshTrackerX1SensorManager::armGpsPowerSavingCycle() {
 void MeshTrackerX1SensorManager::start_gps() {
   if (gps_active) return;
   gps_active = true;
-  // this init sequence comes from seeed examples and deals with all gps pins
-  pinMode(GPS_EN, OUTPUT);
   digitalWrite(GPS_EN, HIGH);
   delay(10);
-  pinMode(GPS_VRTC_EN, OUTPUT);
-  digitalWrite(GPS_VRTC_EN, HIGH);
-  delay(10);
-
-  pinMode(GPS_RESET, OUTPUT);
-  digitalWrite(GPS_RESET, HIGH);
-  delay(10);
-  digitalWrite(GPS_RESET, LOW);
-
-  pinMode(GPS_SLEEP_INT, OUTPUT);
-  digitalWrite(GPS_SLEEP_INT, HIGH);
-  pinMode(GPS_RTC_INT, OUTPUT);
+  // Resume from RTC backup without resetting retained ephemeris data.
+  digitalWrite(GPS_RTC_INT, HIGH);
+  delay(5);
   digitalWrite(GPS_RTC_INT, LOW);
-  _nmea->begin();
   armGpsPowerSavingCycle();
 }
 
 void MeshTrackerX1SensorManager::sleep_gps() {
+  stop_gps();
+}
+
+void MeshTrackerX1SensorManager::stop_gps() {
   if (!gps_active) return;
   gps_active = false;
   if (powersaving_enabled && _nmea->getGPSPowerSaving()) {
@@ -64,22 +57,10 @@ void MeshTrackerX1SensorManager::sleep_gps() {
     _nmea->setNextGPSOff(0);
     _nmea->setNextWake();
   }
-  _nmea->stop();
-  digitalWrite(GPS_VRTC_EN, HIGH);   // keep RTC alive for faster fix on wake
-  digitalWrite(GPS_EN, LOW);
-  digitalWrite(GPS_RESET, LOW);
-  digitalWrite(GPS_SLEEP_INT, HIGH);
+  digitalWrite(GPS_VRTC_EN, HIGH);  // keep RTC powered for faster fix on wake
   digitalWrite(GPS_RTC_INT, LOW);
-}
-
-void MeshTrackerX1SensorManager::stop_gps() {
-  gps_active = false;
-  _nmea->stop();
-  digitalWrite(GPS_VRTC_EN, LOW);
+  airohaEnterSleep(_nmea);
   digitalWrite(GPS_EN, LOW);
-  digitalWrite(GPS_RESET, LOW);
-  digitalWrite(GPS_SLEEP_INT, HIGH);
-  digitalWrite(GPS_RTC_INT, LOW);
 }
 
 bool MeshTrackerX1SensorManager::begin() {
@@ -90,6 +71,14 @@ bool MeshTrackerX1SensorManager::begin() {
   pinMode(GPS_RESET, OUTPUT);
   pinMode(GPS_SLEEP_INT, OUTPUT);
   pinMode(GPS_RTC_INT, OUTPUT);
+  digitalWrite(GPS_VRTC_EN, HIGH);
+  digitalWrite(GPS_EN, HIGH);
+  digitalWrite(GPS_RTC_INT, LOW);
+  digitalWrite(GPS_RESET, HIGH);
+  delay(10);
+  digitalWrite(GPS_RESET, LOW);
+  // Preserve the existing default-off behavior after initial setup.
+  gps_active = true;
   stop_gps();
 
   // init SPA06-003 barometer

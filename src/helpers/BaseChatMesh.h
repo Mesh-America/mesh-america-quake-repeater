@@ -16,7 +16,7 @@ static_assert(MAX_CORRELATED_CLI_TEXT_LEN <= MAX_TEXT_LEN,
 
 #include "ContactInfo.h"
 
-#define MAX_SEARCH_RESULTS   8
+#define MAX_SEARCH_RESULTS   24
 
 #define MSG_SEND_FAILED       0
 #define MSG_SEND_SENT_FLOOD   1

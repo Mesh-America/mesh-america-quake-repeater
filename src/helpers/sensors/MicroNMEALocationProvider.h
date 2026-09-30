@@ -198,8 +198,32 @@ public :
         return timestamp <= 0x7FFFFFFFUL ? static_cast<long>(timestamp) : 0;
     } 
 
+    void drain() override { while (_gps_serial->available()) _gps_serial->read(); }
+
+    const char* getSentence() const { return nmea.getSentence(); }
+
     void sendSentence(const char *sentence) override {
         nmea.sendSentence(*_gps_serial, sentence);
+    }
+
+    bool waitFor(const char* prefix, uint32_t timeout_ms) override {
+        size_t plen = strlen(prefix);
+        uint32_t timeout = millis() + timeout_ms;
+        while ((int32_t)(millis() - timeout) < 0) {
+            if (_gps_serial->available()) {
+                char c = _gps_serial->read();
+                #ifdef GPS_NMEA_DEBUG
+                if (mesh::isUsbLoggingEnabled()) mesh::usbLoggingPort().print(c);
+                #endif
+                // MicroNMEA also returns true for a complete sentence with a
+                // bad checksum. A damaged ACK must not confirm GPS sleep.
+                if (nmea.process(c) && MicroNMEA::testChecksum(nmea.getSentence())
+                    && strncmp(nmea.getSentence(), prefix, plen) == 0) return true;
+            } else {
+                yield();
+            }
+        }
+        return false;
     }
 
     void loop() override {
