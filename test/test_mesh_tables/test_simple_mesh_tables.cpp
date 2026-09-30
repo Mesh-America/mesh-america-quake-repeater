@@ -417,6 +417,30 @@ TEST(SimpleMeshTables, CooperativeRecentCursorTraverses2048Rows) {
     EXPECT_EQ(nullptr, t.getNextRecentRepeaterBySortKey(&cursor, cursor_index, cursor_index));
 }
 
+TEST(SimpleMeshTables, LegacyOtaDirectCacheTurnoverEvictsStaleHashWithoutFlooding) {
+    SimpleMeshTables table;
+    auto stale = makeFloodPacket(0x44);
+    stale.header = ROUTE_TYPE_FLOOD | (PAYLOAD_TYPE_OTA << PH_TYPE_SHIFT);
+    table.markSeen(&stale);
+    ASSERT_TRUE(table.wasSeen(&stale));
+    int received = 0;
+    for (unsigned i = 0; i < 192; ++i) {
+        if (i % 6 == 0) continue; // 32 lost frames; remaining 160 replace the FIFO
+        const uint8_t raw[] = {0x32, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+                               (uint8_t)i, (uint8_t)(i >> 8)};
+        Packet packet;
+        ASSERT_TRUE(packet.readFrom(raw, sizeof(raw)));
+        ASSERT_TRUE(packet.isRouteDirect());
+        ASSERT_EQ(PAYLOAD_TYPE_OTA, packet.getPayloadType());
+        ASSERT_EQ(0, packet.getPathHashCount());
+        ASSERT_EQ(0, packet.payload[0]); // unknown opcode; no manager state mutation
+        table.markSeen(&packet);
+        ++received;
+    }
+    EXPECT_EQ(MAX_PACKET_HASHES, received);
+    EXPECT_FALSE(table.wasSeen(&stale));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

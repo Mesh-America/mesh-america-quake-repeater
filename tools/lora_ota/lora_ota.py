@@ -146,6 +146,11 @@ RELAY_TIMING_COMMANDS_PER_RELAY = 12
 RELAY_TIMING_RECOVERY_FILE = "relay-timing-settings.json"
 OTA_HOPS_RECOVERY_FILE = "ota-hop-settings.json"
 OTA_MAX_HOPS = 8
+# The deployed SimpleMeshTables FIFO holds 160 hashes. These short, direct
+# (never forwarded) unknown-OTA frames provide 20% loss headroom. This is an
+# explicit, best-effort legacy workaround, not an acknowledgement of reception.
+LEGACY_OTA_CACHE_FRAMES = 192
+LEGACY_OTA_CACHE_ROUNDS = 2
 TARGET_RXPS_RECOVERY_FILE = "target-rxps-settings.json"
 SOURCE_RXPS_RECOVERY_FILE = "source-rxps-settings.json"
 MIN_MESHCLI_VERSION = (1, 6, 0)
@@ -188,6 +193,10 @@ class BootloaderCryptoError(OtaError):
 
 class TransmissionError(OtaError):
     """A command may not have reached its destination or returned a reply."""
+
+
+class TempRadioPathUnproven(TransmissionError):
+    """The temporary path failed, but its short leases returned cleanly."""
 
 
 class TransmissionStopped(OtaError):
@@ -2116,6 +2125,19 @@ class Controller:
                 )
         raise OtaError("meshcli did not return the controller radio settings")
 
+    def send_legacy_ota_cache_probe(self, packet: bytes, timeout: float) -> None:
+        marker = f"OTA_CACHE_{secrets.token_hex(8)}"
+        result = self._execute(
+            ["send_raw", packet.hex(), "echo", marker],
+            "legacy OTA cache turnover", timeout=timeout,
+        )
+        # meshcli 1.6.3 prints no JSON on send_raw success, only on failure.
+        # A marker proves the command completed; it is NOT an on-air ACK.
+        output = result.stdout + "\n" + result.stderr
+        if (result.returncode != 0 or marker not in result.stdout
+                or re.search(r"error|unknown command|unsupported|invalid", output, re.I)):
+            raise OtaError("legacy OTA cache probe was not accepted by the companion")
+
     def get_public_key(self, timeout: float | None = None) -> str:
         objects = (
             self._run(["infos"], "read controller identity")
@@ -3040,6 +3062,82 @@ def warn_short_temp_radio_window(
             "final checks. Continuing; the lease may expire before OTA completes.",
             file=sys.stderr,
         )
+
+
+def prompt_for_125khz_temp_radio(
+    args: argparse.Namespace, *, after_failed_rehearsal: bool = False,
+) -> bool:
+    """Offer the interactive 125-kHz SF5-to-SF7 path rehearsal ladder."""
+    if (
+        args.temp_values[1] != 250
+        or args.prepare_only
+        or args.yes
+        or not sys.stdin.isatty()
+    ):
+        return False
+    if after_failed_rehearsal:
+        question = (
+            "The 250 kHz rehearsal could not prove the temporary path, but "
+            "all short leases expired and the normal path was verified. "
+            "Try 125 kHz at SF5, then SF6 and SF7 if needed, with a fresh "
+            "three-minute rehearsal and confirmation at each step? [y/N] "
+        )
+    else:
+        question = (
+            "Try TempRadio at 125 kHz SF5, then SF6 and SF7 if needed "
+            "(confirming each setting before rehearsal and transfer)? [y/N] "
+        )
+    try:
+        approved = input(question).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+    if not approved:
+        return False
+    freq, _bandwidth, _sf, cr, minutes = args.temp_values
+    args.temp_values = (freq, 125.0, 5, cr, minutes)
+    args.temp_radio = (
+        f"{format_decimal(freq)},125,5,{cr},{minutes}"
+    )
+    print(
+        f"[preflight] selected {args.temp_radio}; the transfer window remains "
+        f"{minutes} minutes"
+    )
+    warn_short_temp_radio_window(args, include_install=not args.no_install)
+    return True
+
+
+def prompt_for_next_125khz_sf(args: argparse.Namespace) -> bool:
+    """Advance one SF only after a cleanly returned failed path rehearsal."""
+    freq, bandwidth, sf, cr, minutes = args.temp_values
+    if (
+        bandwidth != 125
+        or sf not in (5, 6)
+        or args.prepare_only
+        or args.yes
+        or not sys.stdin.isatty()
+    ):
+        return False
+    next_sf = sf + 1
+    try:
+        approved = input(
+            f"125 kHz SF{sf} could not prove the temporary path. All short "
+            f"leases expired and the normal path was verified. Try a fresh "
+            f"three-minute rehearsal at SF{next_sf}? [y/N] "
+        ).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+    if not approved:
+        return False
+    args.temp_values = (freq, bandwidth, next_sf, cr, minutes)
+    args.temp_radio = (
+        f"{format_decimal(freq)},125,{next_sf},{cr},{minutes}"
+    )
+    print(
+        f"[preflight] selected {args.temp_radio}; the transfer window remains "
+        f"{minutes} minutes"
+    )
+    warn_short_temp_radio_window(args, include_install=not args.no_install)
+    return True
 
 
 def parse_source_terminal_banner(value: str) -> tuple[str, str]:
@@ -4662,6 +4760,8 @@ def confirm_update(
         print(f"  boot target : {package.target_id:08X}; stage only, explicit install required")
         print("  boot safety : destination rechecks trust, continuity and upgrade-only policy at manual install")
     print(f"  TempRadio   : {args.temp_radio}")
+    if getattr(args, "legacy_relay_dedup_workaround", False):
+        print("  legacy retry: up to 2 x 192 short, non-forwarded TempRadio frames on manifest timeout")
     saved_rxps = getattr(args, "target_rxps_saved", None)
     rxps_profile = getattr(args, "target_rxps_profile", None)
     if isinstance(saved_rxps, RxpsSettings) and saved_rxps.enabled:
@@ -5004,6 +5104,90 @@ def find_and_start_pull(
     )
 
 
+def recover_legacy_manifest_timeout(
+    controller: Controller,
+    args: argparse.Namespace,
+    package: MotaInfo,
+    seeder: SeederProcess | None,
+    status: str,
+    deadline: float,
+    attempt: int,
+) -> bool:
+    """Bounded, opt-in turnover of a directly reachable legacy relay's FIFO.
+
+    Only restart this exact MID after a confirmed manifest timeout with no
+    blocks. Never clear a partial/ready image, reboot a node, change a package,
+    or infer that an unacknowledged LoRa packet actually arrived.
+    """
+    if (not getattr(args, "legacy_relay_dedup_workaround", False)
+            or attempt >= LEGACY_OTA_CACHE_ROUNDS
+            or download_manifest_id(status) != package.manifest_id
+            or not re.search(r"download: failed \(manifest timeout\) 0/0\b", status, re.I)):
+        return False
+    relays = getattr(args, "relay_values", [])
+    if len(relays) != 1 or not getattr(args, "source_shares_controller", False):
+        raise OtaError("legacy cache workaround requires one relay and a shared source/controller")
+    relay, _password = relays[0]
+    contacts = controller._run(["contact_info", relay], "check direct legacy relay route", timeout=5)
+    matching = [c for c in contacts if contact_matches_selector(c, relay)]
+    if (len(matching) != 1 or matching[0].get("out_path_len") != 0
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", relay)):
+        raise OtaError("legacy cache workaround requires the relay's full key and a direct (0-hop) contact route")
+    expected = RadioSettings(*args.temp_values[:4], False)
+    frame_prefix = bytes((0x32, 0, 0))  # OTA (0x0c), DIRECT, no path, unknown opcode 0
+    nonce = secrets.token_bytes(8)
+    spacing = max(0.25, 4 * lora_airtime_seconds(
+        len(frame_prefix) + len(nonce) + 2, expected.bandwidth,
+        expected.spreading_factor, expected.coding_rate, preamble_symbols=32,
+    ))
+    print(f"[legacy] manifest timeout: bounded cache turnover {attempt + 1}/{LEGACY_OTA_CACHE_ROUNDS}; "
+          f"{LEGACY_OTA_CACHE_FRAMES} short direct frames, no relay reboot or package changes")
+    for index in range(LEGACY_OTA_CACHE_FRAMES):
+        ensure_seeder_running(seeder, "during legacy manifest recovery")
+        if index % 16 == 0:
+            # Use the existing binary controller connection, not the serial
+            # source that motatool owns. Fail closed on missing lease telemetry.
+            objects = controller._run(["cli", "tempradio"], "check legacy recovery TempRadio", timeout=5)
+            replies = [o["text"] for o in objects if isinstance(o.get("text"), str)]
+            if len(replies) != 1:
+                raise OtaError("cannot prove local TempRadio lease for legacy recovery")
+            state = parse_source_temp_radio_status(replies[0])
+            remaining = re.search(r"\b(\d+)s left\b", replies[0])
+            needed = 16 * (5 + spacing) + 10
+            if (state is None or state[0] != "active" or not expected.matches(state[1])
+                    or remaining is None or int(remaining[1]) < needed
+                    or deadline - time.monotonic() < needed):
+                raise OtaError("insufficient verified TempRadio/transfer time for legacy recovery")
+        controller.send_legacy_ota_cache_probe(
+            frame_prefix + nonce + struct.pack("<H", index),
+            timeout=min(5.0, max(0.1, deadline - time.monotonic())),
+        )
+        time.sleep(spacing)
+    # Radio admission is not delivery. Re-read the exact session before any
+    # restart; an externally changed or completed session is never discarded.
+    current = remote_command_with_seeder(controller, args.target, "ota status", seeder,
+                                         "after legacy cache turnover")
+    if download_manifest_id(current) != package.manifest_id:
+        raise OtaError("destination session changed during legacy recovery")
+    if not re.search(r"download: failed \(manifest timeout\) 0/0\b", current, re.I):
+        require_package_session(current, package)
+        return True
+    if time.monotonic() >= deadline:
+        raise OtaError("transfer deadline expired during legacy recovery; no pull resent")
+    try:
+        reply = controller.remote_command(args.target,
+                                          f"ota pull {package.manifest_id} flash", retry=False)
+    except TransmissionError:
+        reply = remote_command_with_seeder(controller, args.target, "ota status", seeder,
+                                           "resolving legacy recovery pull")
+        require_package_session(reply, package)
+    else:
+        if not re.match(rf"OK (?:pulling|resuming) mid={package.manifest_id}\b", reply, re.I):
+            raise OtaError(f"legacy recovery pull was not confirmed: {reply}")
+    print("[legacy] retried the same manifest; normal verification and transfer deadline remain in force")
+    return True
+
+
 def monitor_download(
     controller: Controller,
     args: argparse.Namespace,
@@ -5011,6 +5195,7 @@ def monitor_download(
     seeder: SeederProcess | None = None,
 ) -> str:
     deadline = time.monotonic() + args.transfer_timeout_minutes * 60
+    legacy_recoveries = 0
     poll_seconds = float(args.poll_seconds)
     # A status command is ordinary half-duplex LoRa traffic. Asking immediately
     # after `ota pull` can occupy the link for a full reply timeout and was
@@ -5065,6 +5250,12 @@ def monitor_download(
                     controller, args.target, "ota status", seeder,
                     "during transfer",
                 )
+                if recover_legacy_manifest_timeout(
+                    controller, args, package, seeder, status, deadline, legacy_recoveries
+                ):
+                    legacy_recoveries += 1
+                    last_progress = time.monotonic()
+                    continue
                 require_package_session(status, package)
                 if "ready to install" in status.lower():
                     return status
@@ -5088,6 +5279,12 @@ def monitor_download(
             controller, args.target, "ota status", seeder, "during transfer"
         )
         query_seconds = time.monotonic() - query_started
+        if recover_legacy_manifest_timeout(
+            controller, args, package, seeder, status, deadline, legacy_recoveries
+        ):
+            legacy_recoveries += 1
+            time.sleep(min(first_wait, max(0.0, deadline - time.monotonic())))
+            continue
         require_package_session(status, package)
         lowered = status.lower()
         if "ready to install" in lowered:
@@ -5855,6 +6052,7 @@ def run_temp_radio_preflight(
     controller_may_need_restore = False
     natural_expiry_waited = False
     normal_proven = False
+    normal_return_needed_recovery = False
     earliest_lease_expiry: float | None = None
     latest_lease_expiry: float | None = None
     primary_error: BaseException | None = None
@@ -6513,7 +6711,12 @@ def run_temp_radio_preflight(
             )
         prove_controller_identity("on TempRadio", deadline=proof_deadline)
         prove_source_identity("on TempRadio", deadline=proof_deadline)
-        prove_remote_identities("on TempRadio", deadline=proof_deadline)
+        try:
+            prove_remote_identities("on TempRadio", deadline=proof_deadline)
+        except TransmissionError as exc:
+            # The caller may offer a narrower bandwidth only after this
+            # rehearsal's finally block owns expiry and proves normal return.
+            raise TempRadioPathUnproven(str(exc)) from exc
         temp_proof_deadline("temporary path proof completion")
 
         if not shared_controller:
@@ -6587,6 +6790,7 @@ def run_temp_radio_preflight(
                 except (OtaError, OSError) as exc:
                     first_normal_error = exc
                 if first_normal_error is not None:
+                    normal_return_needed_recovery = True
                     recovery_error: BaseException | None = None
                     try:
                         recover_participants_on_temp()
@@ -6632,6 +6836,13 @@ def run_temp_radio_preflight(
             raise OtaError(
                 f"three-minute TempRadio rehearsal failed: {primary_error}; "
                 "cleanup also failed: " + "; ".join(cleanup_errors)
+            ) from primary_error
+        if isinstance(primary_error, TempRadioPathUnproven) and (
+            not normal_proven or normal_return_needed_recovery
+        ):
+            raise OtaError(
+                "temporary path proof failed and normal return required "
+                "recovery; no in-run bandwidth retry is safe"
             ) from primary_error
         raise primary_error
     if cleanup_errors:
@@ -7396,6 +7607,12 @@ def build_parser() -> argparse.ArgumentParser:
               "infer from --relay count; only raise lower limits and restore afterward"),
     )
     parser.add_argument(
+        "--legacy-relay-dedup-workaround", action="store_true",
+        help=("on exact 0/0 manifest timeout, try up to two 192-frame direct cache turnovers; "
+              "requires one directly reachable relay and --source-shares-controller; "
+              "adds airtime, never reboots, does not fix legacy block retries"),
+    )
+    parser.add_argument(
         "--source-contact",
         metavar="NAME_OR_KEY",
         help=(
@@ -7588,6 +7805,12 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         parser.error(f"at most {OTA_MAX_HOPS} --relay nodes are supported")
     if args.ota_hops is not None and not len(args.relay) <= args.ota_hops <= OTA_MAX_HOPS:
         parser.error("--ota-hops must be 0..8 and at least the declared --relay count")
+    if args.legacy_relay_dedup_workaround and (
+        len(args.relay) != 1 or not args.source_shares_controller
+        or args.ota_hops not in (None, 1)
+    ):
+        parser.error("--legacy-relay-dedup-workaround requires one --relay, "
+                     "--source-shares-controller, and no additional OTA hops")
     clear_manifest = args.clear_completed_manifest
     clear_body_hash = args.clear_completed_on_body_hash
     if bool(clear_manifest) != bool(clear_body_hash):
@@ -8664,6 +8887,23 @@ def main(
             or not 1 <= target_rxps_saved.level <= 10
         ):
             target_rxps_profile = None
+        # Let an interactive operator choose the narrower tuple before the
+        # update plan and any TempRadio lease are committed.
+        if prompt_for_125khz_temp_radio(args):
+            temp_command = f"tempradio {args.temp_radio}"
+            target_rxps_profile = select_rxps_temp_profile(
+                target.current_version,
+                args.temp_values,
+                all_participants_support_adaptive_preamble=(
+                    all_participants_support_adaptive_preamble
+                ),
+            )
+            if (
+                target_rxps_saved is None
+                or target_rxps_saved.level is None
+                or not 1 <= target_rxps_saved.level <= 10
+            ):
+                target_rxps_profile = None
         args.target_rxps_saved = target_rxps_saved
         args.target_rxps_profile = target_rxps_profile
         args.ota_hop_settings = prepare_ota_hop_settings(controller, args)
@@ -8678,13 +8918,44 @@ def main(
         # long TempRadio window, relay timing, seeding, pull, or install can be
         # mutated. The rehearsal owns only independent three-minute leases and
         # proves their natural return before handing control back to this run.
-        run_temp_radio_preflight(
-            controller,
-            args,
-            target,
-            original_radio,
-            temp_radio,
-        )
+        while True:
+            try:
+                run_temp_radio_preflight(
+                    controller, args, target, original_radio, temp_radio,
+                )
+                break
+            except TempRadioPathUnproven:
+                # The typed failure is emitted only after short-lease expiry
+                # and an unrecovered exact normal-path proof. Never reuse a
+                # live lease or silently change the approved radio plan.
+                if args.temp_values[1] == 250:
+                    retry = prompt_for_125khz_temp_radio(
+                        args, after_failed_rehearsal=True,
+                    )
+                else:
+                    retry = prompt_for_next_125khz_sf(args)
+                if not retry:
+                    raise
+                temp_command = f"tempradio {args.temp_radio}"
+                target_rxps_profile = select_rxps_temp_profile(
+                    target.current_version,
+                    args.temp_values,
+                    all_participants_support_adaptive_preamble=(
+                        all_participants_support_adaptive_preamble
+                    ),
+                )
+                if (
+                    target_rxps_saved is None
+                    or target_rxps_saved.level is None
+                    or not 1 <= target_rxps_saved.level <= 10
+                ):
+                    target_rxps_profile = None
+                args.target_rxps_profile = target_rxps_profile
+                freq, bandwidth, sf, cr, _minutes = args.temp_values
+                temp_radio = RadioSettings(
+                    freq, bandwidth, sf, cr, original_radio.repeat
+                )
+                confirm_update(args, target, package)
         apply_ota_hop_settings(
             controller, args, args.ota_hop_settings, owned_ota_hop_settings, work_dir,
         )

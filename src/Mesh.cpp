@@ -235,6 +235,7 @@ uint8_t Mesh::getOtaHopLimit() const { return ota::ota_hop_limit(); }
 #endif
 
 void Mesh::begin() {
+  resetOtaForwardCache();
   if (auto* limiter = getFloodAdvertLimiter()) limiter->reset();
   _active_direct_retry_count = 0;
   _active_flood_retry_count = 0;
@@ -315,6 +316,7 @@ void Mesh::loop() {
   const auto* p = _radio->profiles();
   if (p && (_retry_radio_generations[0] != p->generation[0]
       || _retry_radio_generations[1] != p->generation[1] || _retry_cross_mode != p->cross)) {
+    resetOtaForwardCache();
     // A changed session is not a failed radio link. Retire its ownership
     // without recording a failed final echo, and promptly return queued storage.
     for (int i = 0; i < TOTAL_DIRECT_RETRY_SLOTS; ++i) {
@@ -347,6 +349,7 @@ void Mesh::loop() {
     _retry_radio_generations[1] = p->generation[1];
     _retry_cross_mode = p->cross;
   }
+  if (_ota_forward_active && !isAnyTempRadioActive()) resetOtaForwardCache();
   Dispatcher::loop();
   serviceLoopMaintenance();
 #if defined(ENABLE_OTA) && defined(ESP32_PLATFORM) && \
@@ -594,6 +597,67 @@ void Mesh::resetOtaRelayBackoff() {
   }
   _ota_relay_decay_at = 0;
   _ota_relay_backoff_level = 0;
+}
+
+void Mesh::resetOtaForwardCache() {
+  memset(_ota_forwarded, 0, sizeof(_ota_forwarded));
+  _ota_forward_next = 0;
+  _ota_forward_active = false;
+}
+
+bool Mesh::allowOtaForwardRetry(const Packet* packet) {
+  // A deferred copy already owns the retry. Never fill the queue with more
+  // identical copies while CAD, airtime limits or relay timing delay it.
+  for (int i = 0; i < _mgr->getOutboundTotal(); ++i) {
+    const Packet* pending = _mgr->getOutboundByIdx(i);
+    if (pending && pending->getPayloadType() == PAYLOAD_TYPE_OTA
+        && pending->radio_profile == packet->radio_profile
+        && pending->payload_len == packet->payload_len
+        && memcmp(pending->payload, packet->payload, packet->payload_len) == 0) return false;
+  }
+  uint8_t hash[MAX_HASH_SIZE];
+  packet->calculatePacketHash(hash);
+  const uint32_t now = _ms->getMillis();
+  const uint32_t airtime = _radio->getProfileAirtime(
+      packet->radio_profile, packet->getRawLength(), packet->tx_cr);
+  const uint32_t quiet = airtime > 500 ? airtime * 2 : 1000;
+  for (const auto& entry : _ota_forwarded) {
+    if (!entry.valid || entry.profile != packet->radio_profile
+        || memcmp(entry.hash, hash, sizeof(hash)) != 0) continue;
+    // Age out route history as well, so a genuinely changed (longer) route
+    // cannot be pinned forever. Normal hop limits still bound old echoes.
+    const uint32_t age = now - entry.forwarded_at;
+    const uint32_t expiry = quiet > 7500 ? quiet * 4 : 30000;
+    if (age >= expiry) return true;
+    // A longer path within this window is a downstream echo. Suppressed
+    // echoes must not refresh the timer and starve the next genuine retry.
+    if (packet->getPathHashCount() > entry.min_hops) return false;
+    return age >= quiet;
+  }
+  return true;
+}
+
+void Mesh::rememberOtaForward(const Packet* packet) {
+  _ota_forward_active = true;
+  uint8_t hash[MAX_HASH_SIZE];
+  packet->calculatePacketHash(hash);
+  OtaForwardEntry* entry = nullptr;
+  for (auto& candidate : _ota_forwarded) {
+    if (candidate.valid && candidate.profile == packet->radio_profile
+        && memcmp(candidate.hash, hash, sizeof(hash)) == 0) {
+      entry = &candidate;
+      break;
+    }
+  }
+  if (!entry) {
+    entry = &_ota_forwarded[_ota_forward_next];
+    _ota_forward_next = (_ota_forward_next + 1) % 16;
+  }
+  memcpy(entry->hash, hash, sizeof(hash));
+  entry->forwarded_at = _ms->getMillis();
+  entry->min_hops = packet->getPathHashCount();
+  entry->profile = packet->radio_profile;
+  entry->valid = true;
 }
 
 void Mesh::observeOtaRequestPressure(const mesh::Packet* packet) {
@@ -887,6 +951,12 @@ uint8_t Mesh::getExtraAckTransmitCount() const {
 }
 
 void Mesh::onSendComplete(Packet* packet) {
+  // Profile selection/copying happens after sendOtaFlood(). Remember the
+  // actual transmitting profile as well, including locally injected OTA.
+  if (packet && packet->getPayloadType() == PAYLOAD_TYPE_OTA
+      && packet->isRouteFlood() && packet->getPathHashCount() == 0) {
+    rememberOtaForward(packet);
+  }
   watchForwardedAdvertEcho(packet);
   armDirectRetryOnSendComplete(packet);
   armFloodRetryOnSendComplete(packet);
@@ -1315,10 +1385,10 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       // relay it. 0 = only directly-received OTA. Runtime-tunable via `ota config hops`.
       if (n > getOtaHopLimit()) break;
 #endif
-      // ALWAYS process every accepted copy: OTA handlers are idempotent, and "eventually reliable" retries
-      // deliberately re-send IDENTICAL requests - if we gated processing on hasSeen(), the dedup would
-      // suppress those retries and the transfer could never recover from a lost reply. hasSeen() is used
-      // ONLY to avoid re-flooding the same packet more than once.
+      // ALWAYS process accepted copies locally. The ordinary seen FIFO has no
+      // expiry, so forwarding uses the bounded OTA retry cache below instead.
+      // Otherwise identical manifest/data requests AND replies can get stuck
+      // at a relay forever after just one lost transmission.
       bool seen = _tables->wasSeen(pkt);
       if (!seen) _tables->markSeen(pkt);
       const bool primary_ota = isPrimaryOtaTraffic(pkt->payload, pkt->payload_len);
@@ -1339,13 +1409,14 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       // Re-flood discovery at background priority, but keep an active transfer primary at every relay hop.
       // The free-pool reserve still sheds periodic discovery under pressure; requested transfer packets are
       // protected from that background-only gate. Ordinary hop and forwarding policy remain authoritative.
-      if (!terminal_ota && !seen && pkt->isRouteFlood() && !pkt->isMarkedDoNotRetransmit()
+      if (!terminal_ota && pkt->isRouteFlood() && !pkt->isMarkedDoNotRetransmit()
 #if defined(ENABLE_OTA)
           && n < getOtaHopLimit()
 #endif
           && (n + 1) * pkt->getPathHashSize() <= MAX_PATH_SIZE
           && (primary_ota || _mgr->getFreeCount() > OTA_FWD_MIN_FREE)
-          && allowPacketForward(pkt)) {
+          && allowPacketForward(pkt) && allowOtaForwardRetry(pkt)) {
+        rememberOtaForward(pkt);  // record incoming hop count, before appending ourselves
         self_id.copyHashTo(&pkt->path[n * pkt->getPathHashSize()], pkt->getPathHashSize());
         pkt->setPathHashCount(n + 1);
         action = ACTION_RETRANSMIT_DELAYED(ota_priority, getOtaRetransmitDelay(pkt));
@@ -2989,6 +3060,7 @@ bool Mesh::sendOtaFlood(Packet* packet, uint32_t delay_millis) {
   packet->header &= ~PH_ROUTE_MASK;
   packet->header |= ROUTE_TYPE_FLOOD;
   packet->setPathHashSizeAndCount(1, 0);
+  rememberOtaForward(packet);  // downstream echoes of our own OTA must not be relayed
   _tables->markSeen(packet);   // mark as sent, in case it floods back to us
   return sendPacket(packet, otaTrafficPriority(packet->payload, packet->payload_len), delay_millis);
 }

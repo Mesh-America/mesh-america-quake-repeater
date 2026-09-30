@@ -528,6 +528,109 @@ TEST(RepeaterTransport, OtaTransferRelaysAsPrimaryTrafficWithoutOtaManager) {
   EXPECT_EQ(1, request.getPathHashCount());
 }
 
+class OtaRelayRetryTest : public testing::Test {
+ protected:
+  TraceTestClock clock;
+  TraceTestRTC rtc;
+  TraceTestRNG rng;
+  TraceTestRadio radio;
+  ForwardingTestTables tables;
+  StaticPoolPacketManager manager{12};
+  TraceTestMesh node{radio, clock, rng, rtc, manager, tables};
+  void SetUp() override {
+    node.begin();
+    node.forwardFloods = true;
+    node.tempRadioActive = true;
+  }
+  mesh::DispatcherAction receive(const mesh::Packet& original) {
+    auto copy = original; // forwarding appends a hop to its owned packet
+    return node.receivePacket(&copy);
+  }
+};
+
+TEST_F(OtaRelayRetryTest, LostRequestsAndResponsesCanCrossRelayAgain) {
+  for (uint8_t type : {mesh::ota::OTA_GET_MANIFEST, mesh::ota::OTA_MANIFEST,
+                       mesh::ota::OTA_REQ, mesh::ota::OTA_DATA, mesh::ota::OTA_PROOF,
+                       mesh::ota::OTA_ADV, mesh::ota::OTA_QUERY, mesh::ota::OTA_HAVE}) {
+    auto packet = makeFloodPacket(PAYLOAD_TYPE_OTA);
+    packet.payload[0] = type;
+    ASSERT_NE(ACTION_RELEASE, receive(packet));
+    // The general FIFO still reports seen, even after arbitrary elapsed time.
+    ASSERT_TRUE(tables.seen);
+    EXPECT_EQ(ACTION_RELEASE, receive(packet));
+    clock.now += 999;
+    EXPECT_EQ(ACTION_RELEASE, receive(packet));
+    clock.now += 1;
+    EXPECT_NE(ACTION_RELEASE, receive(packet));
+  }
+}
+
+TEST_F(OtaRelayRetryTest, DownstreamEchoDoesNotRefreshOrReopenRetryWindow) {
+  auto packet = makeOtaManifestFragment(3);
+  ASSERT_NE(ACTION_RELEASE, receive(packet));
+  auto echo = packet;
+  echo.setPathHashCount(1);
+  clock.now = 800;
+  EXPECT_EQ(ACTION_RELEASE, receive(echo));
+  clock.now = 1000;
+  EXPECT_NE(ACTION_RELEASE, receive(packet));
+  clock.now = 10000;
+  EXPECT_EQ(ACTION_RELEASE, receive(echo));
+  clock.now = 31000;
+  EXPECT_NE(ACTION_RELEASE, receive(echo)); // expired route history permits a new longer route
+}
+
+TEST_F(OtaRelayRetryTest, QueuedCopySuppressesRetriesUntilItLeavesQueue) {
+  auto packet = makeOtaManifestFragment(3);
+  ASSERT_NE(ACTION_RELEASE, receive(packet));
+  auto* pending = node.obtainNewPacket();
+  *pending = packet;
+  ASSERT_TRUE(manager.queueOutbound(pending, 0, 60000));
+  clock.now = 10000;
+  EXPECT_EQ(ACTION_RELEASE, receive(packet));
+  node.releasePacket(manager.removeOutboundByIdx(0));
+  EXPECT_NE(ACTION_RELEASE, receive(packet));
+}
+
+TEST_F(OtaRelayRetryTest, TimerWrapAndRadioSessionResetDoNotStrandRetries) {
+  auto packet = makeOtaManifestFragment(3);
+  clock.now = 0xfffffe00u;
+  ASSERT_NE(ACTION_RELEASE, receive(packet));
+  clock.now = 487;
+  EXPECT_EQ(ACTION_RELEASE, receive(packet));
+  clock.now = 488;
+  EXPECT_NE(ACTION_RELEASE, receive(packet));
+  node.tempRadioActive = false;
+  node.loop();
+  EXPECT_EQ(ACTION_RELEASE, receive(packet));
+  node.tempRadioActive = true;
+  EXPECT_NE(ACTION_RELEASE, receive(packet));
+}
+
+TEST_F(OtaRelayRetryTest, RetryNeverBypassesForwardingOrReceiveFilter) {
+  auto packet = makeOtaManifestFragment(3);
+  ASSERT_NE(ACTION_RELEASE, receive(packet));
+  clock.now = 2000;
+  node.forwardFloods = false;
+  EXPECT_EQ(ACTION_RELEASE, receive(packet));
+  node.forwardFloods = true;
+  node.rejectFloods = true;
+  EXPECT_EQ(ACTION_RELEASE, receive(packet));
+  node.rejectFloods = false;
+  EXPECT_NE(ACTION_RELEASE, receive(packet));
+}
+
+TEST_F(OtaRelayRetryTest, OriginEchoIsSuppressedOnActualTransmitProfile) {
+  auto packet = makeOtaManifestFragment(3);
+  packet.radio_profile = 1;
+  node.completePacketSend(&packet);
+  packet.setPathHashCount(1);
+  clock.now = 2000;
+  EXPECT_EQ(ACTION_RELEASE, receive(packet));
+  packet.radio_profile = 0;
+  EXPECT_NE(ACTION_RELEASE, receive(packet)); // independent radio path
+}
+
 TEST(RepeaterTransport, OtaDiscoveryRelayKeepsCollisionJitter) {
   TraceTestClock clock;
   TraceTestRTC rtc;

@@ -485,6 +485,19 @@ frequency, bandwidth, SF, and CR. The hard minimum is 20 minutes. The 120-minute
 default and the runner's worst-case timeout estimate are guidance. A window
 below the estimate prints a warning and continues; the radio lease can expire
 before a slow OTA finishes.
+For an interactive run configured at 250 kHz, the runner offers a 125-kHz path
+rehearsal at SF5 before the final update confirmation. If a 250-kHz rehearsal
+cannot prove the temporary path but every short lease expires and the exact
+normal path returns without active recovery, it offers the same 125-kHz SF5
+start. If the 125-kHz SF5 path fails in that same cleanly returned way, the
+operator can approve a fresh SF6 rehearsal, then SF7 if SF6 fails. Each change
+prints the revised plan and requires confirmation before its rehearsal; the
+long transfer uses only the setting that passes. The selected long-window
+duration is unchanged, and each attempt repeats the full short rehearsal.
+`--yes` and non-interactive runs never change bandwidth or spreading factor
+automatically. To start directly at 125 kHz SF5 without a prompt, pass
+`--temp-radio 909.5,125,5,5,150` (choose a legal frequency and an appropriate
+window for the actual route).
 The separate three-minute path rehearsal and its identity checks still run.
 
 Before that long window is allowed, the live runner performs a mandatory
@@ -919,6 +932,37 @@ only when they come from the intended contact and fit the command. A ready
 status for another manifest ID is an error, never permission to install it.
 
 ## Transmission loss and retries
+
+### Legacy relay manifest workaround
+
+The deployed `2d03e098` firmware uses the ordinary 160-entry, non-expiring packet
+hash FIFO for OTA forwarding. Identical manifest requests **and replies** can
+therefore be suppressed after packet loss, even while CLI commands work.
+The firmware fix replaces that forwarding decision with a small timed OTA
+cache, suppresses downstream echoes and already-queued copies, and keeps
+TempRadio, hop limits and forwarding filters authoritative. It applies to
+discovery, manifest and block traffic, including opaque OTA relays.
+
+Until the relay is updated, add `--legacy-relay-dedup-workaround` to the same
+runner command. This is opt-in because it adds airtime. It requires
+`--source-shares-controller`, exactly one `--relay`, a saved **direct (zero-hop)**
+route to that relay, and no extra `--ota-hops` beyond one. After an exact
+`download: failed (manifest timeout) 0/0` for the requested MID, it sends up to
+192 unique 13-byte **direct, non-forwarded** OTA no-operation/unknown-opcode
+frames on the verified TempRadio channel. These replace legacy FIFO entries;
+192 gives some loss headroom over 160 entries, not proof of reception. Then
+it rechecks the destination and requests the same signed package once. A lost
+pull reply is reconciled using status, not blindly replayed.
+
+There are at most two recovery rounds within the original transfer deadline.
+Each round adds 2,496 origin Mesh bytes plus LoRa overhead, normally roughly
+a minute at 125 kHz/SF7 before command/status latency. The companion's local
+queue acceptance is not an RF acknowledgement. Recovery stops on insufficient
+verified lease time, wrong radio settings, command errors, or changed session.
+It never reboots a relay, cancels a partial image, changes package bytes, or
+bypasses signature/install checks. It does **not** fix later block-retry
+stalls on old firmware or relays beyond the controller's direct radio reach;
+the firmware update is the permanent fix.
 
 Read-only and replay-safe transmissions retry up to three times. Three retries
 or 90 seconds, whichever comes first, opens a 10-second stop-or-continue
