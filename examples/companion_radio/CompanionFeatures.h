@@ -2,6 +2,16 @@
 #include <helpers/CompanionReaderConfig.h>
 #include <helpers/ota/OtaMemoryPolicy.h>
 
+// STM32WL has only 224 KiB of application flash. Keep its established image
+// within that boundary; larger targets provide the programmable alert engine.
+#ifndef COMPANION_FEATURE_NOTIFICATIONS
+  #if defined(STM32_PLATFORM)
+    #define COMPANION_FEATURE_NOTIFICATIONS 0
+  #else
+    #define COMPANION_FEATURE_NOTIFICATIONS 1
+  #endif
+#endif
+
 // The role terminal is also used by WebConfig on WiFi-only Companions. Its
 // parser and reply tracking do not require a physical USB transport.
 #if defined(ENABLE_USB_INTERFACE) \

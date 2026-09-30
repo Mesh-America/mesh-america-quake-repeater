@@ -1,4 +1,5 @@
 #include <helpers/ui/DisplayPowerSettings.h>
+#include "NotificationSettingsFile.h"
 #include "MyMesh.h"
 #include <helpers/CompanionTxRoutingCLI.h>
 #include "CompanionBluetooth.h"
@@ -1482,17 +1483,29 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   }
 #endif
 
+#if COMPANION_FEATURE_NOTIFICATIONS
+  const bool plain_notification = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
+  const bool remote_notification = plain_notification
+      && _notifications.remoteMessage(from.id.pub_key, text, millis(), sender_timestamp);
+  const bool notification_managed = remote_notification || (plain_notification
+      && _notifications.message(from.id.pub_key, nullptr, _serial->isConnected(), millis()));
+  if (_ui) _ui->setMessageNotificationOverride(notification_managed, _notifications.overridesScreen());
+#else
+  const bool notification_managed = false;
+#endif
+
 #ifdef DISPLAY_CLASS
   // we only want to show text messages on display, not cli data
   bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
   if (should_display && _ui) {
     _ui->newMsg(path_len, from.name, text, offline_queue_len,
                 -1, nullptr, queued ? offline_queue_len - 1 : -1);
-    if (!_serial->isConnected()) {
+    if (!notification_managed && !_serial->isConnected()) {
       _ui->notify(UIEventType::contactMessage);
     }
   }
 #endif
+  if (_ui) _ui->setMessageNotificationOverride(false);
 }
 
 static uint16_t emergencyClientRepeatKey(const mesh::Packet* packet) {
@@ -1700,13 +1713,19 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   i += tlen;
   const bool queued = addToOfflineQueue(out_frame, i);
 
+#if COMPANION_FEATURE_NOTIFICATIONS
+  const bool notification_managed = _notifications.message(nullptr, channel.secret, _serial->isConnected(), millis());
+  if (_ui) _ui->setMessageNotificationOverride(notification_managed, _notifications.overridesScreen());
+#else
+  const bool notification_managed = false;
+#endif
   if (_serial->isConnected()) {
     uint8_t frame[1];
-    frame[0] = PUSH_CODE_MSG_WAITING; // send push 'tickle'
+    frame[0] = PUSH_CODE_MSG_WAITING;
     _serial->writeFrame(frame, 1);
   } else {
 #ifdef DISPLAY_CLASS
-    if (_ui) _ui->notify(UIEventType::channelMessage);
+    if (_ui && !notification_managed) _ui->notify(UIEventType::channelMessage);
 #endif
   }
 
@@ -1735,6 +1754,8 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
                 channel_idx, channel_name, queued ? offline_queue_len - 1 : -1);
   }
 #endif
+
+  if (_ui) _ui->setMessageNotificationOverride(false);
 
   if (pkt->isRouteFlood() && is_emergency_channel) {
     bool zero_path = pkt->getPathHashCount() == 0;
@@ -2378,6 +2399,18 @@ void MyMesh::begin(bool has_display, bool radio_available) {
       false
 #endif
   );
+
+#if COMPANION_FEATURE_NOTIFICATIONS
+  auto& notification_settings = _notifications.settings();
+  FILESYSTEM* notification_fs = _store->getPrimaryFS();
+  if (!(mesh::notify::readSettings(notification_fs, "/notify_prefs", notification_settings)
+      && _notifications.validSettings(notification_settings))) {
+    if (!(mesh::notify::readSettings(notification_fs, "/notify_prefs.bak", notification_settings)
+        && _notifications.validSettings(notification_settings)))
+      notification_settings = mesh::notify::Settings();
+  }
+
+  #endif
 
   // load persisted prefs
   const bool prefs_ready =
@@ -9028,6 +9061,13 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().print("  memory\r\n");
 #endif
     terminalOutput().print("  get display.rotation\r\n");
+  #if COMPANION_FEATURE_NOTIFICATIONS
+    terminalOutput().print("  get notify / get notify.rules / get notify.gpio.pins\r\n");
+    terminalOutput().print("  set notify.{sound|vibration|led|screen|gpio} on|off\r\n");
+    terminalOutput().print("  set notify.<output> <all|contact:key|room:key|channel:slot> <pattern>\r\n");
+    terminalOutput().print("  set notify.remote <contact:key|room:key> on|off (!notify, max 15s, no GPIO)\r\n");
+    terminalOutput().print("  notify.test <target> / notify.stop / notify.delete <target>\r\n");
+  #endif
     terminalOutput().print("  get display.inbox\r\n");
     terminalOutput().print("  set display.inbox <history|pending|unread>\r\n");
     terminalOutput().print("  set display.rotation <0|90|180|270>\r\n");
@@ -9338,6 +9378,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     command = profile_command;
   }
   if (sender_timestamp == 0 && handleDirectCommand(command, reply, reply_capacity)) return true;
+  if (handleNotificationCommand(command, reply, reply_capacity)) return true;
 
   if (mesh::companion::handleRetryCommand(
           _prefs, command, reply, reply_capacity,
@@ -9868,6 +9909,15 @@ void MyMesh::checkSerialInterface() {
 }
 
 void MyMesh::loop() {
+#if COMPANION_FEATURE_NOTIFICATIONS
+  _notifications.loop(millis(), _serial->isConnected());
+#if defined(PIN_USER_BTN) && defined(USER_BTN_PRESSED)
+  const bool notification_button_down = digitalRead(PIN_USER_BTN) == USER_BTN_PRESSED;
+  if (notification_button_down && !_notification_button_down) _notifications.button();
+  _notification_button_down = notification_button_down;
+#endif
+#endif
+
   _radio_profiles.loop();
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
   if (_mqtt_bridge) _mqtt_bridge->servicePendingClockCorrection();
@@ -9971,7 +10021,15 @@ void MyMesh::loop() {
   }
 
 #ifdef DISPLAY_CLASS
-  if (_ui) _ui->setHasConnection(_serial->isConnected());
+  if (_ui) {
+    _ui->setHasConnection(_serial->isConnected());
+  #if COMPANION_FEATURE_NOTIFICATIONS
+    const auto& notifications = _notifications.settings();
+    _ui->setNotificationOutputs(notifications.enabled ? notifications.outputs : 31);
+    _ui->setNotificationLedOwnership(_notifications.ownsLed());
+    if (notifications.enabled && !(notifications.outputs & mesh::notify::Led)) pulse(mesh::notify::Led, false, -1);
+  #endif
+  }
 #endif
 }
 
@@ -9992,6 +10050,9 @@ bool MyMesh::advert() {
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
+#if COMPANION_FEATURE_NOTIFICATIONS
+  if (_notifications.active()) return true;
+#endif
   if (isDualRadioActive()) return true;
   if (_radio_available
       && (radio_driver.isWatchdogObserving()

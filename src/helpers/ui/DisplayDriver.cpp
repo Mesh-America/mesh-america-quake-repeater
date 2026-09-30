@@ -3,12 +3,14 @@
 
 bool DisplayDriver::servicePower(bool usb_power, bool app_connected, bool pairing) {
   _power_policy.update(mesh::ui::displayPowerPrefs(), usb_power, app_connected, pairing, millis());
-  const bool changed = isOn() != _power_policy.on();
-  if (changed) { if (_power_policy.on()) turnOn(); else turnOff(); }
+  const bool desired = _notification_power < 0 ? _power_policy.on() : _notification_power != 0;
+  const bool changed = isOn() != desired;
+  if (changed) { if (desired) turnOn(); else turnOff(); }
   return changed;
 }
 
 bool DisplayDriver::wake(mesh::ui::DisplayWake reason) {
+  if (_notification_power >= 0) return false;
   if (!_power_policy.wake(reason, millis())) return false;
   if (_power_policy.on() && !isOn()) turnOn();
   return true;

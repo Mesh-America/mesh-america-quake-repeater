@@ -882,6 +882,11 @@ build flag is needed.
 
 ## Set display modes and timeouts
 
+Companion message sound, vibration, LED, screen and GPIO rules have separate
+CLI controls. See the [notification builder and CLI reference](notifications.md),
+including per-contact/channel rules, trusted-contact/room `!notify` permission,
+and USB test controls.
+
 Display-equipped Companions, repeaters, room servers, and sensors have four
 saved settings. The WebConfig **Display** card exposes the same controls:
 

@@ -35,6 +35,10 @@ protected:
   MultiSerialInterface* _interfaceManager;
   UIShutdownGuard* _shutdownGuard;
   bool _connected;
+  bool _message_notification_override = false;
+  bool _message_notification_screen_override = false;
+  bool _notification_led_owned = false;
+  uint8_t _notification_outputs = 31;
 
   AbstractUITask(mesh::MainBoard* board, MultiSerialInterface* interfaceManager)
       : _board(board), _interfaceManager(interfaceManager),
@@ -49,9 +53,21 @@ protected:
 
 
 
-  bool shouldWakeDisplayForMessage() const { return !hasConnection(); }
+  bool shouldWakeDisplayForMessage() const {
+    return (_notification_outputs & 8) && !_message_notification_screen_override && !hasConnection();
+  }
 
 public:
+  void setMessageNotificationOverride(bool managed, bool screen = false) {
+    _message_notification_override = managed;
+    _message_notification_screen_override = managed && screen;
+  }
+  void setNotificationLedOwnership(bool owned) { _notification_led_owned = owned; }
+  void setNotificationOutputs(uint8_t outputs) { _notification_outputs = outputs; }
+  virtual uint8_t notificationCapabilities() const { return 0; }
+  virtual void notificationVibration(bool on) { (void)on; }
+  virtual void notificationMelody(const char* text) { (void)text; }
+  virtual void notificationScreen(int8_t mode) { (void)mode; }
   void setShutdownGuard(UIShutdownGuard* guard) { _shutdownGuard = guard; }
   void setHasConnection(bool connected) { _connected = connected; }
   bool hasConnection() const { return _interfaceManager->isConnected(); }

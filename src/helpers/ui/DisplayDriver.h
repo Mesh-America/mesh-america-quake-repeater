@@ -17,6 +17,7 @@ public:
 class DisplayDriver {
   int _w, _h;
   mesh::ui::DisplayPowerPolicy _power_policy;
+  int8_t _notification_power = -1;
 protected:
   DisplayDriver(int w, int h) { _w = w; _h = h; }
   void setDimensions(int w, int h) { _w = w; _h = h; }
@@ -58,6 +59,11 @@ public:
   bool servicePower(bool usb_power, bool app_connected = false, bool pairing = false);
   bool wake(mesh::ui::DisplayWake reason);
   void dismiss();
+  void notificationPower(int8_t mode) {
+    _notification_power = mode;
+    if (mode == 1) turnOn();
+    else if (mode == 0) turnOff();
+  }
   virtual void clear() = 0;
   virtual void startFrame(ColorVal bkg = UIColor::window_bkg) = 0;
   virtual void setTextSize(int sz) = 0;

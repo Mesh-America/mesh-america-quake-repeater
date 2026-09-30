@@ -127,6 +127,8 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
 #ifdef HAS_DRV2605
   vibration.begin();
   vibration.quiet(_node_prefs->vibe_quiet);
+#elif defined(PIN_VIBRATION)
+  vibration.begin();
 #endif
 
   // Initialize digital button if available
@@ -208,7 +210,7 @@ bool UITask::shouldPlayMessageTone() const {
 
 void UITask::notify(UIEventType t) {
 #if defined(PIN_BUZZER)
-switch(t){
+if (_notification_outputs & mesh::notify::Sound) switch(t){
   case UIEventType::contactMessage:
     // gemini's pick
     if (shouldPlayMessageTone()) {
@@ -255,8 +257,8 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
   (void)channel_name;
   _msgcount = msgcount;
 
-#ifdef HAS_DRV2605
-  vibration.trigger();   // vibrate even while the app is connected (honors quiet + cooldown)
+#if defined(HAS_DRV2605) || defined(PIN_VIBRATION)
+  if (!_message_notification_override && (_notification_outputs & mesh::notify::Vibration)) vibration.trigger();
 #endif
 
   if (path_len == 0xFF) {
@@ -459,6 +461,7 @@ static void statusLedWheel(uint8_t pos) {   // smooth hue sweep, 0..255
 #endif
 
 void UITask::userLedHandler() {
+  if (_notification_led_owned || !(_notification_outputs & mesh::notify::Led)) return;
 #ifdef STATUS_LED_RGB
   static bool booted = false;
   static bool flourish_active = false;
@@ -647,6 +650,9 @@ void UITask::servicePairingState() {
 }
 
 void UITask::loop() {
+#ifdef PIN_VIBRATION
+  vibration.loop();
+#endif
   servicePairingState();
 
   #ifdef PIN_USER_BTN
@@ -686,6 +692,7 @@ void UITask::loop() {
 }
 
 void UITask::handleButtonAnyPress() {
+  the_mesh.notificationButton();
   MESH_DEBUG_PRINTLN("UITask: any press triggered");
   // called on any button press before other events, to wake up the display quickly
   // do not refresh the display here, as it may block the button handler
@@ -749,6 +756,8 @@ void UITask::handleButtonTriplePress() {
   _node_prefs->vibe_quiet = (mode & 1) ? 1 : 0;
   buzzer.quiet(_node_prefs->buzzer_quiet);
   vibration.quiet(_node_prefs->vibe_quiet);
+  the_mesh.setNotificationOutputMute(mesh::notify::Sound, _node_prefs->buzzer_quiet);
+  the_mesh.setNotificationOutputMute(mesh::notify::Vibration, _node_prefs->vibe_quiet);
   // audible/tactile confirmation of the new mode (no screen on some boards)
   if (!_node_prefs->buzzer_quiet) notify(UIEventType::ack);
   if (!_node_prefs->vibe_quiet) vibration.trigger(true);
@@ -770,6 +779,7 @@ void UITask::handleButtonTriplePress() {
       sprintf(_alert, "Buzzer: OFF");
     }
     _node_prefs->buzzer_quiet = buzzer.isQuiet();
+    the_mesh.setNotificationOutputMute(mesh::notify::Sound, _node_prefs->buzzer_quiet);
     the_mesh.savePrefs();
     _need_refresh = true;
 #endif
@@ -805,4 +815,37 @@ void UITask::handleButtonLongPress() {
   } else {
     shutdown();
   }
+}
+
+
+uint8_t UITask::notificationCapabilities() const {
+  uint8_t bits = 0;
+#ifdef PIN_BUZZER
+  bits |= mesh::notify::Sound;
+#endif
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+  bits |= mesh::notify::Vibration;
+#endif
+#ifdef MESHCORE_HAS_REAL_DISPLAY
+  if (_display) bits |= mesh::notify::Screen;
+#endif
+  return bits;
+}
+void UITask::notificationMelody(const char* text) {
+#ifdef PIN_BUZZER
+  if (text) buzzer.playNotification(text); else buzzer.stop();
+#endif
+}
+void UITask::notificationScreen(int8_t mode) {
+  if (!_display) return;
+  _display->notificationPower(mode);
+  _need_refresh = true;
+}
+void UITask::notificationVibration(bool on) {
+#ifdef HAS_DRV2605
+  vibration.pulse(on);
+#elif defined(PIN_VIBRATION)
+  vibration.stop();
+  digitalWrite(PIN_VIBRATION, on ? HIGH : LOW);
+#endif
 }

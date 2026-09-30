@@ -1,5 +1,10 @@
 # Full Companion
 
+Configure message alerts with the [Companion notification builder](notifications.md).
+It generates CLI rules for contacts, rooms and channels, previews patterns, and
+can apply/test them over USB. Trusted contacts and rooms can send `!notify`
+strings with no GPIO and a 15-second playback limit.
+
 For runtime on/off commands and board exceptions, see
 [feature switches by role](role_feature_switches.md). Open the
 [USB web console](https://flasher.meshcore.io/console) for the default ASCII terminal.
