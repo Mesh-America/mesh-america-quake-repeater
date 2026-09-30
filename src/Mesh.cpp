@@ -349,7 +349,8 @@ void Mesh::loop() {
     _retry_radio_generations[1] = p->generation[1];
     _retry_cross_mode = p->cross;
   }
-  if (_ota_forward_active && !isAnyTempRadioActive()) resetOtaForwardCache();
+  // Slot zero is filled first after each reset and remains valid until reset.
+  if (_ota_forwarded[0].valid && !isAnyTempRadioActive()) resetOtaForwardCache();
   Dispatcher::loop();
   serviceLoopMaintenance();
 #if defined(ENABLE_OTA) && defined(ESP32_PLATFORM) && \
@@ -602,7 +603,14 @@ void Mesh::resetOtaRelayBackoff() {
 void Mesh::resetOtaForwardCache() {
   memset(_ota_forwarded, 0, sizeof(_ota_forwarded));
   _ota_forward_next = 0;
-  _ota_forward_active = false;
+}
+
+Mesh::OtaForwardEntry* Mesh::findOtaForwardEntry(const uint8_t* hash, uint8_t profile) {
+  for (auto& entry : _ota_forwarded) {
+    if (entry.valid && entry.profile == profile
+        && memcmp(entry.hash, hash, sizeof(entry.hash)) == 0) return &entry;
+  }
+  return nullptr;
 }
 
 bool Mesh::allowOtaForwardRetry(const Packet* packet) {
@@ -617,38 +625,27 @@ bool Mesh::allowOtaForwardRetry(const Packet* packet) {
   }
   uint8_t hash[MAX_HASH_SIZE];
   packet->calculatePacketHash(hash);
-  const uint32_t now = _ms->getMillis();
   const uint32_t airtime = _radio->getProfileAirtime(
       packet->radio_profile, packet->getRawLength(), packet->tx_cr);
   const uint32_t quiet = airtime > 500 ? airtime * 2 : 1000;
-  for (const auto& entry : _ota_forwarded) {
-    if (!entry.valid || entry.profile != packet->radio_profile
-        || memcmp(entry.hash, hash, sizeof(hash)) != 0) continue;
+  const auto* entry = findOtaForwardEntry(hash, packet->radio_profile);
+  if (entry) {
     // Age out route history as well, so a genuinely changed (longer) route
     // cannot be pinned forever. Normal hop limits still bound old echoes.
-    const uint32_t age = now - entry.forwarded_at;
-    const uint32_t expiry = quiet > 7500 ? quiet * 4 : 30000;
-    if (age >= expiry) return true;
+    const uint32_t age = _ms->getMillis() - entry->forwarded_at;
+    if (age >= 30000 && age >= quiet * 4) return true;
     // A longer path within this window is a downstream echo. Suppressed
     // echoes must not refresh the timer and starve the next genuine retry.
-    if (packet->getPathHashCount() > entry.min_hops) return false;
+    if (packet->getPathHashCount() > entry->min_hops) return false;
     return age >= quiet;
   }
   return true;
 }
 
 void Mesh::rememberOtaForward(const Packet* packet) {
-  _ota_forward_active = true;
   uint8_t hash[MAX_HASH_SIZE];
   packet->calculatePacketHash(hash);
-  OtaForwardEntry* entry = nullptr;
-  for (auto& candidate : _ota_forwarded) {
-    if (candidate.valid && candidate.profile == packet->radio_profile
-        && memcmp(candidate.hash, hash, sizeof(hash)) == 0) {
-      entry = &candidate;
-      break;
-    }
-  }
+  OtaForwardEntry* entry = findOtaForwardEntry(hash, packet->radio_profile);
   if (!entry) {
     entry = &_ota_forwarded[_ota_forward_next];
     _ota_forward_next = (_ota_forward_next + 1) % 16;
