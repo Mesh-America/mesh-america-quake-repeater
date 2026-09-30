@@ -157,8 +157,8 @@ class Mesh : public Dispatcher {
   };
   OtaForwardEntry _ota_forwarded[16] = {};
   uint8_t _ota_forward_next = 0;
-  bool _ota_forward_active = false;
   bool allowOtaForwardRetry(const Packet* packet);
+  OtaForwardEntry* findOtaForwardEntry(const uint8_t* hash, uint8_t profile);
   void rememberOtaForward(const Packet* packet);
   void resetOtaForwardCache();
 
