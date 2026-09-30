@@ -154,15 +154,11 @@ public:
     if (_in_flight != 0) return 0;
     if (_state == RESPONSE_WAIT_ACK) {
       // The full Content-Length has now been acknowledged. ESPAsyncWebServer
-      // otherwise performs a graceful active close for every response, and
-      // this IDF 4.4 stack retains malloc-backed TCP PCBs in TIME_WAIT for about
-      // two minutes. Repeated WebConfig loads consume scarce internal heap and
-      // can also prevent AsyncTCP from retiring close events, wedging both
-      // infrastructure WiFi and ESP-NOW. Abort only after the final ACK so the
-      // peer has the complete page, while freeing this PCB immediately. Keep
-      // RESPONSE_WAIT_ACK: abort synchronously dispatches disconnect and the
-      // request's scoped owner then destroys this response.
-      if (client) client->abort();
+      // otherwise performs a graceful active close for every response. Keep
+      // the graceful close here too: browsers can report a complete,
+      // Content-Length-delimited response as a failed transfer when the peer
+      // force-aborts the TCP PCB immediately after the final ACK.
+      if (client) client->close();
       return 0;
     }
     return queueNext(request);
@@ -1651,6 +1647,31 @@ void WebConfigServer::handleRoot(AsyncWebServerRequest* req) {
   req->send(res);
 }
 
+static bool webConfigClientAcceptsBrotli(AsyncWebServerRequest* req) {
+  if (!req || !req->hasHeader("Accept-Encoding")) return false;
+  String encodings = req->getHeader("Accept-Encoding")->value();
+  encodings.toLowerCase();
+  int start = 0;
+  while (start < encodings.length()) {
+    int end = encodings.indexOf(',', start);
+    if (end < 0) end = encodings.length();
+    String item = encodings.substring(start, end);
+    item.trim();
+    int semi = item.indexOf(';');
+    String coding = semi < 0 ? item : item.substring(0, semi);
+    coding.trim();
+    if (coding == "br") {
+      if (semi < 0) return true;
+      String params = item.substring(semi + 1);
+      params.trim();
+      int qpos = params.indexOf("q=");
+      return qpos < 0 || params.substring(qpos + 2).toFloat() > 0.0f;
+    }
+    start = end + 1;
+  }
+  return false;
+}
+
 void WebConfigServer::handleUi(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
   _last_activity = millis();
@@ -1664,14 +1685,22 @@ void WebConfigServer::handleUi(AsyncWebServerRequest* req) {
     req->send(res);
     return;
   }
-  AsyncWebServerResponse* res =
-      new WebConfigPacedProgmemResponse("text/html; charset=utf-8",
-                                       WEBCONFIG_HTML_BR,
-                                       WEBCONFIG_HTML_BR_LEN);
-  // Keep exactly one whole-page asset in flash. Brotli is decoded by the
-  // browser; the ESP32 only streams these precompressed bytes.
-  res->addHeader("Content-Encoding", "br");
-  res->addHeader("Cache-Control", "public, max-age=31536000, immutable");
+  AsyncWebServerResponse* res = nullptr;
+  if (webConfigClientAcceptsBrotli(req)) {
+    res = new WebConfigPacedProgmemResponse("text/html; charset=utf-8",
+                                             WEBCONFIG_HTML_BR,
+                                             WEBCONFIG_HTML_BR_LEN);
+    // Brotli is decoded by the browser; the ESP32 only streams these
+    // precompressed bytes.
+    res->addHeader("Content-Encoding", "br");
+    res->addHeader("Cache-Control", "public, max-age=31536000, immutable");
+  } else {
+    // Never send Brotli to clients that did not advertise support for it.
+    res = new WebConfigPacedProgmemResponse("text/html; charset=utf-8",
+                                             WEBCONFIG_HTML_RAW,
+                                             WEBCONFIG_HTML_RAW_LEN);
+    res->addHeader("Cache-Control", "no-cache");
+  }
   req->send(res);
 }
 

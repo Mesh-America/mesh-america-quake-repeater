@@ -12,6 +12,7 @@
 #
 # Output: src/helpers/esp32/WebConfigHtml.h
 #   WEBCONFIG_HTML_LOADER[] - small bootstrap page (PROGMEM)
+#   WEBCONFIG_HTML_RAW[]    - complete stripped page (PROGMEM)
 #   WEBCONFIG_HTML_BR[]     - complete Brotli-compressed page (PROGMEM)
 #   WEBCONFIG_HTML_ETAG     - quoted strong ETag for the loader page
 #
@@ -124,6 +125,8 @@ def main():
     lines.append('const char WEBCONFIG_HTML_VERSION[] = "%s";' % version)
     lines.append("const uint16_t WEBCONFIG_HTML_LOADER_LEN = %d;" % len(loader_bytes))
     append_byte_array(lines, "WEBCONFIG_HTML_LOADER", loader_bytes)
+    lines.append("")
+    append_byte_array(lines, "WEBCONFIG_HTML_RAW", raw)
     lines.append("")
     append_byte_array(lines, "WEBCONFIG_HTML_BR", br)
     lines.append("")
