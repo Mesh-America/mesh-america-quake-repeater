@@ -81,6 +81,11 @@ void setup() {
   external_watchdog.begin();
 #endif
 
+#if defined(MESH_DEBUG) && defined(NRF52_PLATFORM)
+  // Allow the USB console to settle before printing boot diagnostics.
+  delay(5000);
+#endif
+
 #ifdef DISPLAY_CLASS
   if (display.begin()) {
     display.turnOff();
