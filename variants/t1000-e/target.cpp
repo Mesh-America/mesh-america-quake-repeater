@@ -4,6 +4,7 @@
 #include <helpers/UsbLogging.h>
 #include <helpers/radiolib/Nrf52BufferedRadioHal.h>
 #include <helpers/sensors/MicroNMEALocationProvider.h>
+#include <helpers/sensors/AirohaSleep.h>
 
 T1000eBoard board;
 
@@ -103,46 +104,17 @@ void T1000SensorManager::armGpsPowerSavingCycle() {
 void T1000SensorManager::start_gps() {
   if (gps_active) return;
   gps_active = true;
-  //_nmea->begin();
-  // this init sequence should be better 
-  // comes from seeed examples and deals with all gps pins
-  pinMode(GPS_EN, OUTPUT);
   digitalWrite(GPS_EN, HIGH);
   delay(10);
-  pinMode(GPS_VRTC_EN, OUTPUT);
-  digitalWrite(GPS_VRTC_EN, HIGH);
-  delay(10);
-       
-  pinMode(GPS_RESET, OUTPUT);
-  digitalWrite(GPS_RESET, HIGH);
-  delay(10);
-  digitalWrite(GPS_RESET, LOW);
-       
-  pinMode(GPS_SLEEP_INT, OUTPUT);
-  digitalWrite(GPS_SLEEP_INT, HIGH);
-  pinMode(GPS_RTC_INT, OUTPUT);
+  // Resume from RTC backup without resetting retained ephemeris data.
+  digitalWrite(GPS_RTC_INT, HIGH);
+  delay(5);
   digitalWrite(GPS_RTC_INT, LOW);
-  pinMode(GPS_RESETB, INPUT_PULLUP);
   armGpsPowerSavingCycle();
 }
 
 void T1000SensorManager::sleep_gps() {
-  if (!gps_active) return;
-  gps_active = false;
-  if (powersaving_enabled && _nmea->getGPSPowerSaving()) {
-    _nmea->stopTimeSync();
-    _nmea->setNextGPSOff(0);
-    _nmea->setNextWake();
-  }
-
-  digitalWrite(GPS_VRTC_EN, HIGH);
-  digitalWrite(GPS_EN, LOW);
-  digitalWrite(GPS_RESET, HIGH);
-  digitalWrite(GPS_SLEEP_INT, HIGH);
-  digitalWrite(GPS_RTC_INT, LOW);
-  pinMode(GPS_RESETB, OUTPUT);
-  digitalWrite(GPS_RESETB, LOW);
-  //_nmea->stop();
+  stop_gps();
 }
 
 void T1000SensorManager::stop_gps() {
@@ -154,14 +126,10 @@ void T1000SensorManager::stop_gps() {
     _nmea->setNextWake();
   }
 
-  digitalWrite(GPS_VRTC_EN, LOW);
-  digitalWrite(GPS_EN, LOW);
-  digitalWrite(GPS_RESET, HIGH);
-  digitalWrite(GPS_SLEEP_INT, HIGH);
+  digitalWrite(GPS_VRTC_EN, HIGH);  // keep RTC powered for faster fix on wake
   digitalWrite(GPS_RTC_INT, LOW);
-  pinMode(GPS_RESETB, OUTPUT);
-  digitalWrite(GPS_RESETB, LOW);
-  //_nmea->stop();
+  airohaEnterSleep(_nmea);         // save ephemeris before cutting GPS VCC
+  digitalWrite(GPS_EN, LOW);
 }
 
 
@@ -173,7 +141,15 @@ bool T1000SensorManager::begin() {
   pinMode(GPS_RESET, OUTPUT);
   pinMode(GPS_SLEEP_INT, OUTPUT);
   pinMode(GPS_RTC_INT, OUTPUT);
-  pinMode(GPS_RESETB, OUTPUT);
+  pinMode(GPS_RESETB, INPUT_PULLUP);
+  digitalWrite(GPS_VRTC_EN, HIGH);
+  digitalWrite(GPS_EN, HIGH);
+  digitalWrite(GPS_SLEEP_INT, LOW);
+  digitalWrite(GPS_RTC_INT, LOW);
+  digitalWrite(GPS_RESET, HIGH);
+  delay(10);
+  digitalWrite(GPS_RESET, LOW);
+  // Preserve the existing default-off behavior after initial setup.
   gps_active = true;
   stop_gps();
   return true;
@@ -217,7 +193,6 @@ void T1000SensorManager::loop() {
       node_lon = ((double)_nmea->getLongitude())/1000000.;
       node_altitude = ((double)_nmea->getAltitude()) / 1000.0;
       processGpsTelemetryFix(node_lat, node_lon, node_altitude, now);
-      //Serial.printf("lat %f lon %f\r\n", _lat, _lon);
     }
     next_gps_update = now + getGpsUpdateIntervalMillis();
   }

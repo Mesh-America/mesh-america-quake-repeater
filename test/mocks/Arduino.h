@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <ctype.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
