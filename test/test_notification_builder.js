@@ -28,6 +28,41 @@ assert.equal(builder.notificationText(longPost).length, 151);
 assert.throws(() => builder.notificationText({...longPost, kind: "room"}), /150 characters for a room post/);
 assert.throws(() => builder.commands({...builder.EXAMPLES.food, remote: "on"}));
 assert.throws(() => builder.commands({...vip, id: "1234"}));
+// Local examples must play before choosing a recipient. Saved rules still need a key.
+assert.equal(builder.parseOutputs(builder.EXAMPLES.vip).notes.length, 4);
+assert.throws(() => builder.commands(builder.EXAMPLES.vip), /full 64-digit/);
+assert.throws(() => builder.parseOutputs({...vip, gpio: "64:50,50"}), /GPIO needs/);
+assert.throws(() => builder.parseOutputs({...vip, screen: "invalid"}), /Screen must/);
+// Verify the actual PCM file sent to the browser: note pitch, rests, and one cycle.
+const wav = builder.melodyWav("test:d=4,o=5,b=120:a,p,a6");
+const waveView = new DataView(wav.buffer), rate = waveView.getUint32(24, true);
+assert.equal(new TextDecoder().decode(wav.slice(0, 4)), "RIFF");
+assert.equal(new TextDecoder().decode(wav.slice(8, 12)), "WAVE");
+assert.equal(new TextDecoder().decode(wav.slice(36, 40)), "data");
+assert.equal(waveView.getUint32(4, true), wav.length - 8);
+assert.equal(waveView.getUint16(20, true), 1); // PCM
+assert.equal(waveView.getUint16(22, true), 1); // Mono
+assert.equal(waveView.getUint16(34, true), 16);
+assert.equal(waveView.getUint32(40, true), rate * 1.5 * 2);
+assert.equal(wav.length, 44 + rate * 1.5 * 2);
+function samples(from, to) {
+  return Array.from({length: Math.round((to - from) * rate)}, (_, i) => waveView.getInt16(44 + (Math.round(from * rate) + i) * 2, true));
+}
+function frequency(values) {
+  const crossings = values.slice(1).filter((sample, i) => sample > 0 && values[i] <= 0).length;
+  return crossings * rate / values.length;
+}
+const firstNote = samples(0.01, 0.49), lastNote = samples(1.01, 1.49);
+assert.ok(Math.abs(frequency(firstNote) - 880) < 3);
+assert.ok(Math.abs(frequency(lastNote) - 1760) < 3);
+assert.ok(Math.sqrt(firstNote.reduce((sum, sample) => sum + sample * sample, 0) / firstNote.length) > 6000);
+assert.ok(samples(0.5, 1).every(sample => sample === 0));
+assert.equal(waveView.getInt16(44, true), 0);
+assert.equal(waveView.getInt16(wav.length - 2, true), 0);
+assert.equal(builder.melodyWav("off").length, 44);
+assert.equal(builder.melodyWav("inherit").length, 44);
+assert.throws(() => builder.melodyWav("invalid"));
+console.log("Sound preview: audible PCM, note pitch, silence, duration, and recipient-free examples passed");
 const encoded = builder.encodeCommand("notify.stop", "A7");
 assert.equal(encoded[0], 60);assert.equal(encoded[3], 0x42);
 assert.equal(new TextDecoder().decode(encoded.slice(4)), "A7|notify.stop");
