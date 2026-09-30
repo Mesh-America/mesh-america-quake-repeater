@@ -70,8 +70,12 @@ stop policy. USB testing uses Binary Companion mode at 115200 baud.
     <h2>Preview one cycle</h2>
     <div class="notification-indicators"><span data-indicator="vibration" data-on="false">Vibration</span><span data-indicator="led" data-on="false">LED</span><span data-indicator="gpio" data-on="false">GPIO</span><span data-indicator="screen" data-on="false">Screen</span></div>
     <p data-role="preview-time" aria-live="off">Ready</p>
+    <p data-role="preview-sound" aria-live="polite">Ready to play the melody</p>
+    <audio data-role="preview-audio" preload="none"></audio>
     <button type="button" data-action="preview">Preview with sound</button>
     <button type="button" data-action="preview-stop">Stop preview</button>
+    <p>The melody plays on this device. No contact or room key is needed to
+    preview an example. Sound set to off or inherit plays no melody here.</p>
     <p>Timing here is a visual approximation. Firmware schedules outputs using
     millisecond timestamps without blocking radio work; loop and hardware
     latency can delay an edge. A haptic motor also takes time to start/stop.</p>
