@@ -62,6 +62,15 @@ assert.equal(waveView.getInt16(wav.length - 2, true), 0);
 assert.equal(builder.melodyWav("off").length, 44);
 assert.equal(builder.melodyWav("inherit").length, 44);
 assert.throws(() => builder.melodyWav("invalid"));
+// The browser warmup must preserve every sample, including the opening notes.
+const warmedWav = builder.melodyWav("test:d=4,o=5,b=120:a,p,a6", 1000);
+const leadBytes = rate * 2;
+assert.equal(warmedWav.length, wav.length + leadBytes);
+assert.ok(warmedWav.slice(44, 44 + leadBytes).every(byte => byte === 0));
+assert.deepEqual(warmedWav.slice(44 + leadBytes), wav.slice(44));
+assert.equal(new DataView(warmedWav.buffer).getUint32(40, true), warmedWav.length - 44);
+assert.equal(builder.melodyWav("off", 1000).length, 44);
+for (const lead of [-1, 2001, 0.5, NaN]) assert.throws(() => builder.melodyWav("off", lead));
 console.log("Sound preview: audible PCM, note pitch, silence, duration, and recipient-free examples passed");
 const encoded = builder.encodeCommand("notify.stop", "A7");
 assert.equal(encoded[0], 60);assert.equal(encoded[3], 0x42);

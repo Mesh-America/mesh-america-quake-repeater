@@ -74,7 +74,8 @@ stop policy. USB testing uses Binary Companion mode at 115200 baud.
     <audio data-role="preview-audio" preload="none"></audio>
     <button type="button" data-action="preview">Preview with sound</button>
     <button type="button" data-action="preview-stop">Stop preview</button>
-    <p>The melody plays on this device. No contact or room key is needed to
+    <p>The melody plays on this device after a one-second audio warmup, then
+    the timer and output indicators start together. No contact or room key is needed to
     preview an example. Sound set to off or inherit plays no melody here.</p>
     <p>Timing here is a visual approximation. Firmware schedules outputs using
     millisecond timestamps without blocking radio work; loop and hardware
