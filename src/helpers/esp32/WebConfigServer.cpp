@@ -1647,7 +1647,8 @@ void WebConfigServer::handleRoot(AsyncWebServerRequest* req) {
   req->send(res);
 }
 
-static bool webConfigClientAcceptsBrotli(AsyncWebServerRequest* req) {
+static bool webConfigClientAcceptsEncoding(AsyncWebServerRequest* req,
+                                           const char* wanted) {
   if (!req || !req->hasHeader("Accept-Encoding")) return false;
   String encodings = req->getHeader("Accept-Encoding")->value();
   encodings.toLowerCase();
@@ -1660,7 +1661,7 @@ static bool webConfigClientAcceptsBrotli(AsyncWebServerRequest* req) {
     int semi = item.indexOf(';');
     String coding = semi < 0 ? item : item.substring(0, semi);
     coding.trim();
-    if (coding == "br") {
+    if (coding == wanted || coding == "*") {
       if (semi < 0) return true;
       String params = item.substring(semi + 1);
       params.trim();
@@ -1686,7 +1687,7 @@ void WebConfigServer::handleUi(AsyncWebServerRequest* req) {
     return;
   }
   AsyncWebServerResponse* res = nullptr;
-  if (webConfigClientAcceptsBrotli(req)) {
+  if (webConfigClientAcceptsEncoding(req, "br")) {
     res = new WebConfigPacedProgmemResponse("text/html; charset=utf-8",
                                              WEBCONFIG_HTML_BR,
                                              WEBCONFIG_HTML_BR_LEN);
@@ -1694,12 +1695,16 @@ void WebConfigServer::handleUi(AsyncWebServerRequest* req) {
     // precompressed bytes.
     res->addHeader("Content-Encoding", "br");
     res->addHeader("Cache-Control", "public, max-age=31536000, immutable");
-  } else {
-    // Never send Brotli to clients that did not advertise support for it.
+  } else if (webConfigClientAcceptsEncoding(req, "gzip")) {
     res = new WebConfigPacedProgmemResponse("text/html; charset=utf-8",
-                                             WEBCONFIG_HTML_RAW,
-                                             WEBCONFIG_HTML_RAW_LEN);
+                                             WEBCONFIG_HTML_GZ,
+                                             WEBCONFIG_HTML_GZ_LEN);
+    res->addHeader("Content-Encoding", "gzip");
     res->addHeader("Cache-Control", "no-cache");
+  } else {
+    req->send(406, "text/plain",
+              "WebConfig requires Brotli or gzip support");
+    return;
   }
   req->send(res);
 }
