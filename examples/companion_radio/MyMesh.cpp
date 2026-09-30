@@ -23,6 +23,9 @@
 #include <helpers/StatsFormatHelper.h>
 #include <helpers/UsbAsciiBinarySwitch.h>
 #include <helpers/UsbLogging.h>
+#if defined(NRF52_POWER_MANAGEMENT)
+#include <helpers/NRF52VoltagePolicy.h>
+#endif
 #if defined(NRF52_PLATFORM)
 #include <helpers/nrf52/RamFallbackFileSystem.h>
 #endif
@@ -9315,6 +9318,11 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     command += 3;
     while (*command == ' ' || *command == '\t') command++;
   }
+
+#if defined(NRF52_POWER_MANAGEMENT)
+  if (mesh::power::handleVoltagePolicyCommand(command, reply,
+                                               reply_capacity)) return true;
+#endif
 
   if (_radio_profiles.handle(command, reply, reply_capacity, sender_timestamp != 0)) return true;
   if (!strncmp(command, "set tempradio ", 14)) command += 4;

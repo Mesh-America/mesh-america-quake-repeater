@@ -1836,7 +1836,13 @@ through binary command `0x42`; this command does not report the Bluetooth PIN.
 
 **Default:** `0.0` (value defined by board)
 
-**Note:** Returns "Error: unsupported by this board" if hardware doesn't support it
+**Note:** On nRF52 boards with power management and a boot-voltage setting,
+this is a saved *relative* calibration: `1.000` keeps the board conversion,
+`1.050` raises all reported battery millivolts by 5%, and `0` resets to
+`1.000`. The allowed range is `0.500`–`1.500`. This affects boot protection,
+running cutoff, telemetry, battery alerts, and percentage. Calibrate against a
+voltmeter before enabling a low cutoff. Other boards retain their existing
+board-specific multiplier behavior, or return unsupported.
 
 ---
 
@@ -4787,6 +4793,70 @@ manufacturer images and the boards still requiring untouched factory dumps.
 **Usage:** `get pwrmgt.bootmv`
 
 **Note:** Returns an error on boards without power management support.
+
+---
+
+#### Configure nRF52 battery protection
+**Usage:** `get pwrmgt.bootlock`, `set pwrmgt.bootlock <2500-4200>`
+
+**Usage:** `get pwrmgt.cutoff`, `set pwrmgt.cutoff <off|2500-4200>`
+
+Values are battery millivolts and are saved in internal storage. The boot lock
+defaults to each board's compiled threshold and takes effect on the next boot.
+Boards whose compiled boot lock is disabled also accept `set pwrmgt.bootlock off`.
+The running cutoff
+defaults to `off`; when enabled, three valid low readings at 30-second
+intervals shut the node down. Both checks are bypassed while externally
+powered. A nonzero cutoff cannot exceed the boot lock, and the boot lock
+cannot be disabled while a cutoff is active. A fixed 2000 mV pre-check
+protects flash on boards with a nonzero compiled boot lock before the saved
+setting can be loaded. In the `custom` profile, the lower limit for the boot
+lock and running cutoff is 2000 mV. Firmware warns when any saved voltage is
+below 2500 mV; that experimental range may brown out the board or interrupt
+flash writes. These commands are available on nRF52 boards with
+`NRF52_POWER_MANAGEMENT` and a boot-voltage configuration, in roles with a
+text CLI. The KISS modem has no text CLI for changing these settings.
+
+`battery.profile` selects saved voltage-to-percentage endpoints and protection
+settings. `liion` uses 3000 mV = 0%, 4200 mV = 100%, the board's original boot
+lock, and running cutoff off. `lifepo4` uses 2700 mV = 0%, 3550 mV = 100%,
+2900 mV boot lock, and 2700 mV running cutoff. `custom` starts with the current
+values and allows endpoint overrides. These percentages are simple voltage
+estimates; they are not an accurate state-of-charge measurement under load.
+
+```text
+get battery.profile
+set battery.profile lifepo4
+set battery.profile liion
+set battery.profile custom
+get battery.empty
+set battery.empty 2700
+get battery.full
+set battery.full 3550
+get adc.multiplier
+set adc.multiplier 1.050
+```
+
+The custom empty/full endpoints may be 2000–4200 mV and must be at least 100 mV
+apart. Setting either endpoint automatically selects `custom`; boot lock and
+cutoff remain separately adjustable. `get pwrmgt.bootlock` and
+`get pwrmgt.cutoff` show the values in force after selecting a profile.
+
+For a RAK3401/RAK13302 LiFePO₄ cell:
+
+```text
+set battery.profile lifepo4
+```
+
+The 2.7 V cutoff is a cell-protection choice, not a guarantee of 1 W RF
+output. The [RAK13302 datasheet](https://docs.rakwireless.com/product-categories/wisblock/rak13302/datasheet-vd/)
+specifies 3.0 V minimum at VBAT and lists 5 V / 1 A peak for 30 dBm output.
+Use a cutoff at or above 3.0 V if keeping the radio within its published
+battery-input range matters; verify the actual voltage under transmit load.
+
+The shutdown wake comparator has a separate fixed hardware reference. Changing
+these millivolt settings does not change that wake threshold; a unit may need
+to charge above it or have USB power restored before it wakes.
 
 ---
 

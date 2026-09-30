@@ -39,7 +39,7 @@ public:
     adcvalue = analogRead(PIN_VBAT_READ);
     digitalWrite(6, 0);
 
-    return (uint16_t)((float)adcvalue * MV_LSB * 4.9);
+    return calibrateBatteryMillivolts((uint16_t)((float)adcvalue * MV_LSB * 4.9));
   }
 
   const char* getManufacturerName() const override {
