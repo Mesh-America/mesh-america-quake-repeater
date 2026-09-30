@@ -84,7 +84,7 @@ stop policy. USB testing uses Binary Companion mode at 115200 baud.
     <pre><code data-role="dm"></code></pre>
     <p>The recipient must first grant your contact or room permission. Send the string
     as an ordinary DM or room post; it contains no GPIO action. Long patterns may need
-    shortening to fit a 159-character message.</p>
+    shortening to fit 159 characters for a DM, or 150 for a room post.</p>
   </section>
   <section class="notification-card">
     <h2>Try it on your device</h2>

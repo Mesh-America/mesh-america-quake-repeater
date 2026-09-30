@@ -143,6 +143,9 @@ struct MyMesh {
   bool hasOutbound(){return false;}
   void markConnectionActive(const ContactInfo&){}
   void queueMessage(const ContactInfo&,int,mesh::Packet*,uint32_t,const void*,int,const char*){}
+  // This harness exercises radio/local identity dispatch. Notification parsing
+  // and permissions run against the real controller in their native suite.
+  bool handleNotificationCommand(const char*,char*,size_t){return false;}
 };
 '''
 

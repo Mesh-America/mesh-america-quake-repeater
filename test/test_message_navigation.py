@@ -46,6 +46,7 @@ struct StrHelper {
 };
 struct ChannelDetails { char name[32]; };
 struct Mesh {
+  bool notificationButton() { return false; }
   bool dual_radio_active=false;
   bool isDualRadioActive() const { return dual_radio_active; }
   bool getChannel(int channel,ChannelDetails& details) const {

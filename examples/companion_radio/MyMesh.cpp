@@ -2413,7 +2413,7 @@ void MyMesh::begin(bool has_display, bool radio_available) {
       notification_settings = mesh::notify::Settings();
   }
 
-  #endif
+#endif
 
   // load persisted prefs
   const bool prefs_ready =
