@@ -39,7 +39,7 @@ public:
     raw = raw / BATTERY_SAMPLES;
 
     // ADC_MULTIPLIER is the voltage divider ratio
-    return (raw * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
+    return calibrateBatteryMillivolts((raw * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096);
   }
 
   const char* getManufacturerName() const override {

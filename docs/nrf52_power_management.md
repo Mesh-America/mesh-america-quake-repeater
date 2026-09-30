@@ -190,6 +190,13 @@ Power management status can be queried via the CLI:
 | `get pwrmgt.bootreason` | Returns reset and shutdown reason strings                             |
 | `get pwrmgt.bootmv`     | Returns boot voltage in millivolts                                    |
 
+Boards with nRF52 power management and a text CLI also support saved
+`pwrmgt.bootlock`, `pwrmgt.cutoff`, `battery.profile`, `battery.empty`,
+`battery.full`, and relative `adc.multiplier` settings. See the
+[CLI reference](cli_commands.md#configure-nrf52-battery-protection) for their
+ranges, board-specific defaults, and wake behavior. KISS builds honor a saved
+policy if one exists, but have no text CLI for changing it.
+
 On boards without power management enabled, `get pwrmgt.source` and
 `get pwrmgt.bootmv` return:
 ```
@@ -212,11 +219,10 @@ DEBUG: PWRMGT: Boot voltage = 3450 mV (threshold = 3300 mV)
 DEBUG: PWRMGT: LPCOMP wake configured (AIN7, ref=3/8 VDD)
 ```
 
-## Phase 2 (Planned)
+## Further power-management work (Planned)
 
-- Runtime voltage monitoring
-- Voltage state machine (Normal -> Warning -> Critical -> Shutdown)
-- Configurable thresholds
+- A voltage state machine (Normal -> Warning -> Critical -> Shutdown)
+- Configurable wake comparator thresholds
 - Load shedding callbacks for power reduction
 - Deep sleep integration
 - Scheduled wake-up

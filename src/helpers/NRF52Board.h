@@ -56,6 +56,7 @@ public:
 #endif
       {}
   virtual void begin();
+  void loop() override;
   // Feed the hardware main-loop watchdog. The first call starts it, so normal
   // setup (including filesystem mount and radio initialization) is not timed.
   // A loop blocked forever in SoftDevice-backed flash I/O will stop feeding it
@@ -77,6 +78,11 @@ public:
   bool isExternalPowered() override;
   bool isUsbDataConnected() override;
   bool isUsbHostConnected() override;
+
+#ifdef NRF52_POWER_MANAGEMENT
+  // Relative to each board's built-in ADC conversion; 1.000 is unchanged.
+  uint16_t calibrateBatteryMillivolts(uint16_t raw_mv) const;
+#endif
 
   void attachDynamicPrefs(KeyValueStore* prefs) { (void)prefs; }  // no-op
 

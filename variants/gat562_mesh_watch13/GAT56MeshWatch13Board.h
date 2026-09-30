@@ -26,7 +26,7 @@ public:
     }
     raw = raw / BATTERY_SAMPLES;
 
-    return (ADC_MULTIPLIER * raw) / 4096;
+    return calibrateBatteryMillivolts((ADC_MULTIPLIER * raw) / 4096);
   }
 
   const char* getManufacturerName() const override {
