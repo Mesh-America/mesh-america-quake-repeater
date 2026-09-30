@@ -3,6 +3,50 @@
 const assert = require("assert");
 const picker = require("../docs/_javascript/firmware_picker.js");
 
+const bootloaderManifest = require("../docs/_data/bootloader_manifest.json");
+const bootloaderCatalog = picker.buildBootloaderCatalog(bootloaderManifest);
+assert.strictEqual(bootloaderCatalog.profiles.length, 24);
+for (const profile of bootloaderCatalog.profiles) {
+  for (const hardware of profile.meshcoreHardware) {
+    assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, hardware, "nrf52").id, profile.id);
+    assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, hardware, "esp32"), null);
+    assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, hardware, "rp2040"), null);
+  }
+}
+assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "Heltec_t096", "nrf52").id, "heltec_t096");
+assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "Heltec_t114", "nrf52").id, "heltec_t114");
+assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "Heltec_tower_v2_sdcard", "nrf52").storage, "sd");
+assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "Heltec_tower_v2", "nrf52").storage, "internal");
+assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "RAK_3401", "nrf52").storage, "adaptive");
+assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "RAK_4631", "nrf52").id, "wiscore_rak4631_auto");
+assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "ThinkNode_M8", "nrf52"), null);
+const nextBootloaderTag = "v0.11.0-OTAFIX2.4.11";
+const nextBootloaderRelease = {
+  tag_name: nextBootloaderTag, draft: false, prerelease: false,
+  html_url: "https://github.com/" + bootloaderManifest.repository + "/releases/tag/" + nextBootloaderTag,
+  assets: bootloaderManifest.profiles.flatMap(function (profile) {
+    return Object.values(profile.files).map(function (file) {
+      return { name: file.name.replace(bootloaderManifest.tag, nextBootloaderTag),
+        browser_download_url: file.url.replaceAll(bootloaderManifest.tag, nextBootloaderTag),
+        size: file.size, digest: "sha256:" + file.sha256 };
+    });
+  }),
+};
+const nextBootloaderCatalog = picker.buildBootloaderCatalog(bootloaderManifest, nextBootloaderRelease);
+assert.strictEqual(nextBootloaderCatalog.version, "2.4.11");
+assert(picker.bootloaderForHardware(nextBootloaderCatalog, "t1000e", "nrf52").files.uf2.url.includes(nextBootloaderTag));
+const ambiguousBootloader = structuredClone(nextBootloaderRelease);
+ambiguousBootloader.assets.push(ambiguousBootloader.assets.find(a => a.name.startsWith("update-heltec_t096_")));
+assert.strictEqual(picker.bootloaderForHardware(picker.buildBootloaderCatalog(bootloaderManifest, ambiguousBootloader), "Heltec_t096", "nrf52"), null);
+const badBootloader = structuredClone(nextBootloaderRelease);
+badBootloader.assets.find(a => a.name.startsWith("update-heltec_t096_")).browser_download_url = "https://example.com/wrong.uf2";
+assert.strictEqual(picker.bootloaderForHardware(picker.buildBootloaderCatalog(bootloaderManifest, badBootloader), "Heltec_t096", "nrf52"), null);
+const ambiguousMapping = structuredClone(bootloaderManifest);
+ambiguousMapping.profiles[1].meshcoreHardware.push(ambiguousMapping.profiles[0].meshcoreHardware[0]);
+assert.throws(() => picker.buildBootloaderCatalog(ambiguousMapping), /Ambiguous bootloader hardware/);
+assert.throws(() => picker.buildBootloaderCatalog(bootloaderManifest, Object.assign({}, nextBootloaderRelease, {prerelease: true})), /stable OTAFIX/);
+console.log("exact bootloader downloads, storage variants, chip gating, latest version and unsafe catalog rejection passed");
+
 const family = "v2.0.0-dev-abcd1234";
 
 function asset(name, size) {

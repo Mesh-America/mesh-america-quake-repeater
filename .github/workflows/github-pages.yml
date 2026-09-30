@@ -25,12 +25,14 @@ jobs:
 
       - name: Build
         env:
+          GH_TOKEN: ${{ github.token }}
           MKDOCS_SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
           MKDOCS_REPO_NAME: ${{ github.repository }}
           MKDOCS_REPO_URL: https://github.com/${{ github.repository }}/
           MKDOCS_EDIT_URI: edit/${{ github.ref_name }}/docs/
         run: |
           pip install mkdocs-material
+          python scripts/sync_bootloader_manifest.py
           mkdocs build
 
       - name: Deploy to GitHub Pages

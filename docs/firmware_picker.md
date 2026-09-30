@@ -20,14 +20,10 @@ The picker reads public release metadata from GitHub. It does not upload device
 information. Hardware names, target names, and download links come directly
 from the published firmware assets.
 
-<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.7-runtime-2" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
+<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.7-runtime-2" data-bootloaders-url="../_data/bootloader_manifest.json?v=20260929-1" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
   <div class="firmware-picker-intro" role="note">
     <strong>Current release set</strong>
     <p data-role="release-set">Loading release information...</p>
-    <div class="firmware-picker-actions">
-      <a href="https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/latest">Download latest nRF52 OTAFIX bootloader</a>
-    </div>
-    <p>Choose the bootloader package for your exact board and storage setup. This link always opens the latest stable OTAFIX release.</p>
     <p>
       For a new installation, choose the exact board and role, prefer a
       <strong>FULL / complete profile</strong> when it is available, and select
@@ -123,6 +119,11 @@ from the published firmware assets.
       <p data-role="link-status" aria-live="polite"></p>
     </div>
   </form>
+
+  <section class="firmware-picker-result" data-role="bootloader" aria-live="polite" hidden>
+    <h2 data-role="bootloader-title">nRF52 bootloader</h2>
+    <div data-role="bootloader-content"></div>
+  </section>
 
   <div class="firmware-picker-status" data-role="status" aria-live="polite">
     Loading the current firmware catalog...
@@ -389,12 +390,20 @@ LoRa update still needs an exact target identity,
 compatible partition signature, matching radio settings, and the correct
 update package.
 
-nRF52 results include **Latest nRF52 OTAFIX bootloader**, linking to the
-[latest OTAFIX release](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/latest).
-The link follows the current stable release automatically. Choose the package
-for the exact board and storage setup; application UF2 and DFU files do not
-install a bootloader. Follow the release's migration instructions if the
-installed version needs a recovery bridge.
+Selecting an nRF52 board shows its direct **Bootloader UF2**, **Bootloader DFU
+ZIP**, and **Bootloader HEX (SWD)** downloads, when an exact published profile
+is available. ESP32 and other chip families do not show this section. The web
+picker checks the latest stable OTAFIX release; the downloadable picker
+includes the bootloader release named in its saved catalog. If a board has no
+verified mapping or a file is missing, the picker explains that instead of
+offering another board's bootloader. MeshTower internal and microSD remain
+separate; RAK3401 and RAK4631 each use their adaptive storage bootloader.
+
+Board mappings and file names, URLs, sizes and SHA-256 hashes come from
+`bootloader-manifest.json` in the
+[OTAFIX release](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/latest).
+Application UF2 and DFU files do not install a bootloader. Follow the bootloader
+release's migration instructions if the installed version needs a recovery bridge.
 
 nRF52 LoRa OTA requires an OTAFIX bootloader built for the exact board and
 storage layout. Select the hardware-matched HEX, Serial DFU ZIP, or
