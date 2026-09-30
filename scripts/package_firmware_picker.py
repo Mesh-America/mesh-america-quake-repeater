@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def package(releases, controls):
+def package(releases, controls, bootloaders=None):
     if not any(r['tag_name'] == controls['familyTag'] for r in releases):
         raise ValueError('Controls must match the supplied release family')
     # Retain only data used by the picker; never embed authentication or API metadata.
@@ -21,7 +21,9 @@ def package(releases, controls):
     markdown = (ROOT / 'docs/firmware_picker.md').read_text()
     form = markdown[markdown.index('<div class="firmware-picker"'):markdown.index('\n## What the choices mean')]
     form = form.replace('Loading release information...', 'Loading embedded release information...')
-    payload = json.dumps({'releases': compact, 'controls': controls}).replace('<', '\\u003c')
+    if bootloaders is None:
+        bootloaders = json.loads((ROOT / 'docs/_data/bootloader_manifest.json').read_text(encoding='ascii'))
+    payload = json.dumps({'releases': compact, 'controls': controls, 'bootloaders': bootloaders}).replace('<', '\\u003c')
     css = (ROOT / 'docs/_stylesheets/firmware_picker.css').read_text()
     js = (ROOT / 'docs/_javascript/firmware_picker.js').read_text()
     title = html.escape('MeshCore firmware picker - ' + controls['familyTag'])
