@@ -1,6 +1,6 @@
 ## Halo Keymind Cascade Branch Changes over Stock
 
-* **Two LoRa radio settings on one device.** Alternate rx & tx between two frequencies and/or modulation settings. Choose transmission profiles per contact or channel, enable or isolate crossover traffic, schedule profiles, and use a temporary update profile alongside the normal network. Includes timing calibration and separate R2 screen pages. These are time-shared profiles on one transceiver.
+* **Two parallel LoRa radio settings on one device at the same time.** Alternate rx & tx between two frequencies and/or modulation settings. Choose transmission profiles per contact or channel, enable or isolate crossover traffic, schedule profiles, and use a temporary update profile alongside the normal network. Includes timing calibration and separate R2 screen pages. These are time-shared profiles on one transceiver.
 * **Firmware updates over LoRa.** Update repeaters/rooms/sensors over LoRa.
 * **Repeater forwarding policies.** Actions include dropping, rate limiting, assigning scopes, selecting retries, and controlling forwarding priority. Separate policies cover ordinary radio forwarding, bridges, and profile crossover.
 * **Flood retries that account for network topology.** Configure retry counts, path limits, packet-type limits, target prefixes, ignored repeaters, and channel-specific eligibility. Bridge buckets keep retrying until traffic is heard on the intended sides of a relay or the retry budget expires. Qualifying echoes cancel unnecessary attempts.
