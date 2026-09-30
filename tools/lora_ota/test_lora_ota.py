@@ -3673,6 +3673,12 @@ class TempRadioPreflightTests(unittest.TestCase):
                 return "OK - normal radio restore scheduled"
             if command == "get public.key":
                 key = TempRadioPreflightTests.NODE_KEYS[name]
+                if (
+                    self.failure == "temp_remote_unreachable"
+                    and on_temp
+                    and name == "remote"
+                ):
+                    raise ota.TransmissionError("no matching CLI reply")
                 if self.failure == "temp_remote_identity" and on_temp and name == "far":
                     return "> " + "44" * 32
                 if self.failure == "normal_remote_identity" and not on_temp and self.scheduled_temp and name == "remote":
@@ -4542,6 +4548,98 @@ class TempRadioPreflightTests(unittest.TestCase):
         pull.assert_not_called()
         install.assert_not_called()
 
+    def test_temporary_path_timeout_allows_retry_only_after_clean_return(self) -> None:
+        controller, _calls, clock, source_state, error = self.run_rehearsal(
+            failure="temp_remote_unreachable", capture_error=True,
+        )
+        self.assertIsInstance(error, ota.TempRadioPathUnproven)
+        self.assertGreaterEqual(
+            clock.now,
+            ota.TEMP_RADIO_PREFLIGHT_MINUTES * 60
+            + ota.TEMP_RADIO_PREFLIGHT_MARGIN_SECONDS,
+        )
+        self.assertFalse(bool(source_state["active"]))
+        self.assertTrue(controller.radio.matches(self.NORMAL))
+        self.assertTrue(controller.all_nodes_normal())
+
+    def test_operator_reconfirms_each_125khz_sf_before_rehearsal(self) -> None:
+        image = firmware(b"bandwidth retry" * 300, VERSION_NEW)
+        package = ota.parse_mota(mota_blob(image))
+        controller = mock.Mock()
+        controller.get_radio.return_value = self.NORMAL
+        controller.get_clock.return_value = int(ota.time.time()) + 1
+        saved = ota.RxpsSettings(False, 18205, 20423, 8, 16)
+        with tempfile.TemporaryDirectory() as directory:
+            argv = [
+                "release.mota", "remote",
+                "--controller-serial", "/dev/controller",
+                "--source-serial", "/dev/source",
+                "--password", "secret",
+                "--work-dir", str(Path(directory) / "work"),
+                "--temp-radio", "909.5,250,7,5,120",
+            ]
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(ota, "preflight_inputs"))
+                stack.enter_context(mock.patch.object(ota, "bind_contact_selectors"))
+                stack.enter_context(mock.patch.object(ota, "preflight_source_cli"))
+                stack.enter_context(mock.patch.object(
+                    ota, "ensure_source_clock_gate_safe",
+                    return_value=(1_800_000_000, 1_800_000_059),
+                ))
+                stack.enter_context(mock.patch.object(ota, "read_source_rxps", return_value=saved))
+                stack.enter_context(mock.patch.object(ota, "query_target", return_value=target()))
+                stack.enter_context(mock.patch.object(
+                    ota, "prepare_package",
+                    return_value=(Path("release.mota"), package, None),
+                ))
+                stack.enter_context(mock.patch.object(
+                    ota, "read_lora_ota_participant_versions",
+                    return_value={"destination": VERSION_NEW},
+                ))
+                stack.enter_context(mock.patch.object(
+                    ota, "read_remote_rxps",
+                    return_value=ota.RxpsSettings(False, 18205, 20423, 8, 16),
+                ))
+                confirm = stack.enter_context(mock.patch.object(ota, "confirm_update"))
+                rehearsal = stack.enter_context(mock.patch.object(
+                    ota, "run_temp_radio_preflight",
+                    side_effect=[
+                        ota.TempRadioPathUnproven("temporary path unavailable"),
+                        ota.TempRadioPathUnproven("SF5 path unavailable"),
+                        ota.TempRadioPathUnproven("SF6 path unavailable"),
+                        None,
+                    ],
+                ))
+                disable_source = stack.enter_context(mock.patch.object(ota, "disable_source_rxps"))
+                arm_target = stack.enter_context(mock.patch.object(
+                    ota, "arm_target_temp_radio",
+                    side_effect=ota.OtaError("stop before long lease"),
+                ))
+                stack.enter_context(mock.patch.object(
+                    ota, "switch_controller_to_temp_radio",
+                    side_effect=ota.OtaError("mock cleanup cannot switch"),
+                ))
+                stack.enter_context(mock.patch.object(
+                    ota.sys, "stdin", mock.Mock(isatty=lambda: True),
+                ))
+                prompts = stack.enter_context(mock.patch(
+                    "builtins.input", side_effect=["n", "y", "y", "y"],
+                ))
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                result = ota.main(argv, controller_override=controller)
+
+        self.assertEqual(result, 2)
+        self.assertEqual(prompts.call_count, 4)
+        self.assertEqual(confirm.call_count, 4)
+        self.assertEqual(
+            [(call.args[-1].bandwidth, call.args[-1].spreading_factor)
+             for call in rehearsal.call_args_list],
+            [(250.0, 7), (125.0, 5), (125.0, 6), (125.0, 7)],
+        )
+        self.assertEqual(arm_target.call_args.args[2], "tempradio 909.5,125,7,5,120")
+        disable_source.assert_called_once()
+
     def test_schedule_appearing_during_baseline_blocks_every_mutation(
         self,
     ) -> None:
@@ -4686,6 +4784,106 @@ class TempRadioPreflightTests(unittest.TestCase):
             ota.scheduled_temp_radio_command(
                 self.args(), 1_800_000_120, 1_800_000_120
             )
+
+
+class TempRadioBandwidthPromptTests(unittest.TestCase):
+    @staticmethod
+    def args() -> argparse.Namespace:
+        return argparse.Namespace(
+            temp_values=(909.5, 250.0, 7, 5, 120),
+            temp_radio="909.5,250,7,5,120",
+            prepare_only=False,
+            yes=False,
+            no_install=True,
+        )
+
+    def test_operator_can_select_125_before_rehearsal(self) -> None:
+        args = self.args()
+        with (
+            mock.patch.object(ota.sys, "stdin", mock.Mock(isatty=lambda: True)),
+            mock.patch("builtins.input", return_value="y") as prompt,
+            mock.patch.object(ota, "warn_short_temp_radio_window") as warning,
+        ):
+            self.assertTrue(ota.prompt_for_125khz_temp_radio(args))
+        self.assertEqual(args.temp_values, (909.5, 125.0, 5, 5, 120))
+        self.assertEqual(args.temp_radio, "909.5,125,5,5,120")
+        self.assertIn("SF5, then SF6 and SF7", prompt.call_args.args[0])
+        warning.assert_called_once_with(args, include_install=False)
+
+    def test_failed_rehearsal_prompt_requires_fresh_explicit_choice(self) -> None:
+        args = self.args()
+        with (
+            mock.patch.object(ota.sys, "stdin", mock.Mock(isatty=lambda: True)),
+            mock.patch("builtins.input", return_value="yes") as prompt,
+            mock.patch.object(ota, "warn_short_temp_radio_window"),
+        ):
+            self.assertTrue(ota.prompt_for_125khz_temp_radio(
+                args, after_failed_rehearsal=True,
+            ))
+        self.assertIn("all short leases expired", prompt.call_args.args[0])
+        self.assertEqual(args.temp_values[1:3], (125.0, 5))
+        self.assertFalse(ota.prompt_for_125khz_temp_radio(args))
+
+    def test_125khz_ladder_stops_after_sf7(self) -> None:
+        args = self.args()
+        args.temp_values = (909.5, 125.0, 5, 5, 120)
+        args.temp_radio = "909.5,125,5,5,120"
+        with (
+            mock.patch.object(ota.sys, "stdin", mock.Mock(isatty=lambda: True)),
+            mock.patch("builtins.input", side_effect=["y", "yes"]) as prompt,
+            mock.patch.object(ota, "warn_short_temp_radio_window") as warning,
+        ):
+            self.assertTrue(ota.prompt_for_next_125khz_sf(args))
+            self.assertEqual(args.temp_values[2], 6)
+            self.assertEqual(args.temp_radio, "909.5,125,6,5,120")
+            self.assertTrue(ota.prompt_for_next_125khz_sf(args))
+            self.assertEqual(args.temp_values[2], 7)
+            self.assertEqual(args.temp_radio, "909.5,125,7,5,120")
+            self.assertFalse(ota.prompt_for_next_125khz_sf(args))
+        self.assertEqual(prompt.call_count, 2)
+        self.assertEqual(warning.call_count, 2)
+
+    def test_125khz_ladder_requires_interactive_approval(self) -> None:
+        for is_tty, yes, answer in (
+            (False, False, "y"),
+            (True, True, "y"),
+            (True, False, "n"),
+        ):
+            with self.subTest(is_tty=is_tty, yes=yes, answer=answer):
+                args = self.args()
+                args.temp_values = (909.5, 125.0, 5, 5, 120)
+                args.temp_radio = "909.5,125,5,5,120"
+                args.yes = yes
+                with (
+                    mock.patch.object(
+                        ota.sys, "stdin", mock.Mock(isatty=lambda: is_tty),
+                    ),
+                    mock.patch("builtins.input", return_value=answer) as prompt,
+                ):
+                    self.assertFalse(ota.prompt_for_next_125khz_sf(args))
+                self.assertEqual(args.temp_values[2], 5)
+                if not is_tty or yes:
+                    prompt.assert_not_called()
+
+    def test_noninteractive_or_declined_offer_keeps_original_tuple(self) -> None:
+        for is_tty, yes, answer in (
+            (False, False, "y"),
+            (True, True, "y"),
+            (True, False, "n"),
+        ):
+            with self.subTest(is_tty=is_tty, yes=yes, answer=answer):
+                args = self.args()
+                args.yes = yes
+                with (
+                    mock.patch.object(
+                        ota.sys, "stdin", mock.Mock(isatty=lambda: is_tty),
+                    ),
+                    mock.patch("builtins.input", return_value=answer) as prompt,
+                ):
+                    self.assertFalse(ota.prompt_for_125khz_temp_radio(args))
+                self.assertEqual(args.temp_values[1], 250.0)
+                if not is_tty or yes:
+                    prompt.assert_not_called()
 
 
 class ReliabilityTests(unittest.TestCase):

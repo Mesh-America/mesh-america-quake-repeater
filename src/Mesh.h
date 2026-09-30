@@ -145,6 +145,23 @@ class Mesh : public Dispatcher {
     bool valid;
   };
 
+  // OTA retries deliberately reuse their payload/hash. Keep a small, timed
+  // forwarding cache instead of letting the ordinary FIFO suppress them for
+  // an entire transfer. 16 * 16 bytes; no per-packet allocation.
+  struct OtaForwardEntry {
+    uint8_t hash[MAX_HASH_SIZE];
+    uint32_t forwarded_at;
+    uint8_t min_hops;
+    uint8_t profile;
+    bool valid;
+  };
+  OtaForwardEntry _ota_forwarded[16] = {};
+  uint8_t _ota_forward_next = 0;
+  bool _ota_forward_active = false;
+  bool allowOtaForwardRetry(const Packet* packet);
+  void rememberOtaForward(const Packet* packet);
+  void resetOtaForwardCache();
+
   RTCClock* _rtc;
   RNG* _rng;
   MeshTables* _tables;
