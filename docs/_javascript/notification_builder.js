@@ -75,7 +75,10 @@
     for (const name of ["vibration", "sound", "led", "screen"]) if (config[name] !== "inherit") parts.push(name + "=" + config[name]);
     for (const name of ["repeat", "gap"]) parts.push(name + "=" + config[name]);
     const text = "!notify " + parts.join(" ");
-    if (text.length > 159) throw new Error("Notification text exceeds 159 characters. Shorten the patterns or melody.");
+    // Room forwarding reserves an author prefix and currently stores 150 text
+    // characters. Reject before a truncated post could lose a field's value.
+    const maximum = config.kind === "room" ? 150 : 159;
+    if (text.length > maximum) throw new Error("Notification text exceeds " + maximum + " characters for " + (config.kind === "room" ? "a room post" : "a DM") + ". Shorten the patterns or melody.");
     return text;
   }
   function level(pattern, elapsed) {

@@ -5,9 +5,7 @@
 #include "Nrf52BootloaderVersion.h"
 #include "nrf52/SoftDeviceState.h"
 #include <target.h>
-#ifdef USER_GPIO_CONTROL
 #include "UserGpioPinPolicy.h"
-#endif
 
 #include <bluefruit.h>
 #include "ble_gap.h"
@@ -52,7 +50,6 @@ static void format_ota_reply(char reply[]) {
           mac_addr[2], mac_addr[1], mac_addr[0]);
 }
 
-#ifdef USER_GPIO_CONTROL
 namespace {
 
 bool isExposedNrf52UserGpio(uint8_t pin) {
@@ -86,10 +83,10 @@ bool isExposedNrf52UserGpio(uint8_t pin) {
 }
 
 } // namespace
-#endif
 
 bool NRF52Board::isUserGpioAvailable(uint8_t pin) const {
-#ifdef USER_GPIO_CONTROL
+  // This board approval query also serves Companion alert outputs. CommonCLI's
+  // separate USER_GPIO_CONTROL flag still controls its GPIO command exposure.
   if (pin >= PINS_COUNT || digitalPinToPinName(pin) == 0xFF) return false;
 #if defined(RAK_3401) || defined(RAK_4631)
   // Sensor startup can toggle these WisBlock slot pins while detecting GPS,
@@ -97,10 +94,6 @@ bool NRF52Board::isUserGpioAvailable(uint8_t pin) const {
   if (pin == WB_IO2 || pin == WB_IO4 || pin == WB_IO5) return false;
 #endif
   return isExposedNrf52UserGpio(pin) && !UserGpioPinPolicy::isFirmwareReserved(pin);
-#else
-  (void)pin;
-  return false;
-#endif
 }
 
 bool NRF52Board::rebootToUf2Bootloader() {
