@@ -26,6 +26,7 @@ public:
   void loop();        // no-op, the DRV2605 plays effects autonomously
   bool isVibrating();
   void stop();        // stop vibration immediately
+  void pulse(bool on); // continuous RTP amplitude for scheduled ms pulses
   void quiet(bool q) { _quiet = q; }
   bool isQuiet() const { return _quiet; }
 

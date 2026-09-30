@@ -26,6 +26,7 @@
 
 #include "DataStore.h"
 #include <helpers/RadioProfileCLI.h>
+#include <helpers/CompanionNotificationPolicy.h>
 #include "NodePrefs.h"
 
 #if defined(ESP32_PLATFORM) && defined(WIFI_SSID) && !defined(WEBCONFIG_DISABLED)
@@ -161,6 +162,9 @@ struct DiscoveredNode {
 #endif
 
 class MyMesh : public BaseChatMesh, public DataStoreHost, public UIShutdownGuard
+#if COMPANION_FEATURE_NOTIFICATIONS
+             , public mesh::notify::Sink, public mesh::notify::Store
+#endif
 #if COMPANION_FEATURE_TEXT_TERMINAL
              , public ContactVisitor
 #endif
@@ -246,6 +250,20 @@ public:
 #endif
 
   void loop();
+  #if COMPANION_FEATURE_NOTIFICATIONS
+  uint8_t capabilities() const override;
+  bool gpioAvailable(uint8_t pin) const override;
+  void pulse(mesh::notify::Output output, bool on, int8_t pin) override;
+  void melody(const char* text) override;
+  void screen(int8_t mode) override;
+  bool save(const mesh::notify::Settings& settings) override;
+  bool notificationButton() { return _notifications.button(); }
+  void setNotificationOutputMute(mesh::notify::Output output, bool muted);
+  #else
+  bool notificationButton() { return false; }
+  void setNotificationOutputMute(mesh::notify::Output, bool) {}
+  #endif
+  bool handleNotificationCommand(const char* command, char* reply, size_t size);
   void handleCmdFrame(size_t len);
   bool advert();
   void enterCLIRescue();
@@ -560,6 +578,10 @@ private:
   mesh::RadioProfileCLI _radio_profiles;
   uint16_t _temp_radio_preamble = 0;
   CompanionNodePrefs _prefs;
+  #if COMPANION_FEATURE_NOTIFICATIONS
+  mesh::notify::Controller _notifications{*this, *this};
+  bool _notification_button_down = false;
+  #endif
 #ifdef COMPANION_MESH_CLOCK_SYNC
   ArduinoMillis _clock_sync_millis;
   ClientACL _clock_sync_acl;

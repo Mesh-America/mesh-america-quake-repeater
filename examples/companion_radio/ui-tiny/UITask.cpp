@@ -33,6 +33,8 @@
 
 namespace {
 
+constexpr unsigned SCREEN_SENSOR_BUFFER_BYTES = 200;
+
 mesh::ui::RadioProfileSystemStatus radioProfileSystemStatus(
     const CompanionNodePrefs& prefs) {
   mesh::ui::RadioProfileSystemStatus status;
@@ -221,7 +223,7 @@ class HomeScreen : public UIScreen {
 public:
   HomeScreen(UITask* task, mesh::RTCClock* rtc, SensorManager* sensors, CompanionNodePrefs* node_prefs)
      : _task(task), _rtc(rtc), _sensors(sensors), _node_prefs(node_prefs), _page(0),
-       _shutdown_init(false), sensors_lpp(200) {
+       _shutdown_init(false), sensors_lpp(SCREEN_SENSOR_BUFFER_BYTES) {
     resetRadioProfileDisplayPage();
   }
 
@@ -616,6 +618,18 @@ public:
 };
 #endif
 
+#if defined(MESH_COMPANION_SCREEN_STARTUP_BYTES)
+// This UI allocates three small screens, one sensor buffer, and no history
+// table. Check the concrete objects instead of borrowing ui-new's allowance.
+static_assert(sizeof(SplashScreen) + sizeof(HomeScreen)
+#if UI_SMALL_MESSAGE_FONT == 1
+                  + sizeof(TinyMessageScreen)
+#endif
+                  + SCREEN_SENSOR_BUFFER_BYTES + 4 * 16
+              <= MESH_COMPANION_SCREEN_STARTUP_BYTES,
+              "Increase MESH_COMPANION_SCREEN_STARTUP_BYTES and its RAM budget");
+#endif
+
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNodePrefs* node_prefs) {
   _display = display;
   _sensors = sensors;
@@ -645,7 +659,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
   buzzer.startup();
 #endif
 
-#ifdef PIN_VIBRATION
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.begin();
 #endif
 
@@ -667,7 +681,7 @@ void UITask::showAlert(const char* text, int duration_millis) {
 
 void UITask::notify(UIEventType t) {
 #if defined(PIN_BUZZER)
-switch(t){
+if (_notification_outputs & mesh::notify::Sound) switch(t){
   case UIEventType::contactMessage:
     // gemini's pick
     buzzer.play("MsgRcv3:d=4,o=6,b=200:32e,32g,32b,16c7");
@@ -688,7 +702,7 @@ switch(t){
 
 #ifdef PIN_VIBRATION
   // Trigger vibration for all UI events except none
-  if (t != UIEventType::none) {
+  if ((_notification_outputs & mesh::notify::Vibration) && t != UIEventType::none) {
     vibration.trigger();
   }
 #endif
@@ -729,6 +743,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
 }
 
 void UITask::userLedHandler() {
+  if (_notification_led_owned || !(_notification_outputs & mesh::notify::Led)) return;
 #ifdef PIN_STATUS_LED
   int cur_time = millis();
   if (cur_time > next_led_change) {
@@ -979,7 +994,7 @@ void UITask::loop() {
 #endif
   }
 
-#ifdef PIN_VIBRATION
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.loop();
 #endif
 
@@ -1011,6 +1026,7 @@ void UITask::loop() {
 }
 
 char UITask::checkDisplayOn(char c) {
+  the_mesh.notificationButton();
   if (_display != NULL) {
     const bool was_on = _display->isOn();
     _display->wake(mesh::ui::DisplayWake::Button);
@@ -1090,8 +1106,42 @@ void UITask::toggleBuzzer() {
       buzzer.quiet(true);
     }
     _node_prefs->buzzer_quiet = buzzer.isQuiet();
+    the_mesh.setNotificationOutputMute(mesh::notify::Sound, _node_prefs->buzzer_quiet);
     the_mesh.savePrefs();
     showAlert(buzzer.isQuiet() ? "Buzzer: OFF" : "Buzzer: ON", 800);
     _next_refresh = 0;  // trigger refresh
   #endif
+}
+
+
+uint8_t UITask::notificationCapabilities() const {
+  uint8_t bits = 0;
+#ifdef PIN_BUZZER
+  bits |= mesh::notify::Sound;
+#endif
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+  bits |= mesh::notify::Vibration;
+#endif
+#ifdef MESHCORE_HAS_REAL_DISPLAY
+  if (_display) bits |= mesh::notify::Screen;
+#endif
+  return bits;
+}
+void UITask::notificationMelody(const char* text) {
+#ifdef PIN_BUZZER
+  if (text) buzzer.playNotification(text); else buzzer.stop();
+#endif
+}
+void UITask::notificationScreen(int8_t mode) {
+  if (!_display) return;
+  _display->notificationPower(mode);
+  _next_refresh = 0;
+}
+void UITask::notificationVibration(bool on) {
+#ifdef HAS_DRV2605
+  vibration.pulse(on);
+#elif defined(PIN_VIBRATION)
+  vibration.stop();
+  digitalWrite(PIN_VIBRATION, on ? HIGH : LOW);
+#endif
 }

@@ -16,6 +16,8 @@
 
 #ifdef HAS_DRV2605
   #include <helpers/ui/DRV2605Vibration.h>
+#elif defined(PIN_VIBRATION)
+  #include <helpers/ui/GenericVibration.h>
 #endif
 
 class UITask : public AbstractUITask {
@@ -26,6 +28,8 @@ class UITask : public AbstractUITask {
 #endif
 #ifdef HAS_DRV2605
   DRV2605Vibration vibration;
+#elif defined(PIN_VIBRATION)
+  GenericVibration vibration;
 #endif
   unsigned long _next_refresh;
   CompanionNodePrefs* _node_prefs;
@@ -103,6 +107,10 @@ public:
               const char* channel_name = nullptr,
               int queue_index = -1) override;
   void notify(UIEventType t = UIEventType::none) override;
+  uint8_t notificationCapabilities() const override;
+  void notificationVibration(bool on) override;
+  void notificationMelody(const char* text) override;
+  void notificationScreen(int8_t mode) override;
   void loop() override;
 
   void shutdown(bool restart = false);

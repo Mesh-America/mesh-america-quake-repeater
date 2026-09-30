@@ -26,6 +26,7 @@ void DRV2605Vibration::trigger(bool force) {
   unsigned long now = millis();
   if (!force && _last_trigger != 0 && now - _last_trigger < VIBRATION_TIMEOUT) return;
   _last_trigger = now;
+  drv.setMode(DRV2605_MODE_INTTRIG);
   drv.setWaveform(0, DRV2605_EFFECT);
   drv.setWaveform(1, 0);   // pause
   drv.setWaveform(2, DRV2605_EFFECT);
@@ -42,6 +43,12 @@ bool DRV2605Vibration::isVibrating() {
 
 void DRV2605Vibration::stop() {
   if (_ready) drv.stop();
+}
+
+void DRV2605Vibration::pulse(bool on) {
+  if (!_ready) return;
+  drv.setMode(DRV2605_MODE_REALTIME);
+  drv.setRealtimeValue(on ? 100 : 0);
 }
 
 #endif // ifdef HAS_DRV2605
