@@ -79,19 +79,24 @@ inline bool soundDuration(const char* p,uint32_t& total) {
   while(*p && *p!=':') { if(!((*p>='a'&&*p<='z')||(*p>='A'&&*p<='Z')||(*p>='0'&&*p<='9')||*p=='_')||++name>12) return false; ++p; }
   if(!name||*p++!=':'||strncmp(p,"d=",2)) return false;
   p+=2; uint32_t d,o,b;
-  if(!number(p,d,32)||!durationDenominator(d)||*p++!=','||strncmp(p,"o=",2)) return false;
+  if(*p=='0'||!number(p,d,32)||!durationDenominator(d)||*p++!=','||strncmp(p,"o=",2)) return false;
   p+=2;
-  if(!number(p,o,7)||o<4||*p++!=','||strncmp(p,"b=",2)) return false;
+  // The installed driver consumes exactly one octave digit, unlike duration
+  // and BPM. Accepting c04 would send octave 0 into its pitch-table index.
+  if(*p<'4'||*p>'7')return false;
+  o=*p++-'0';
+  if(*p++!=','||strncmp(p,"b=",2)) return false;
   p+=2;
   if(!number(p,b,900)||b<25||*p++!=':'||!*p) return false;
   do {
     uint32_t nd=d,no=o;
+    if(*p=='0')return false;
     if(*p>='0'&&*p<='9' && (!number(p,nd,32)||!durationDenominator(nd))) return false;
     char note=*p++;
     if((note<'a'||note>'g')&&note!='p') return false;
     if(*p=='#') { if(note!='a'&&note!='c'&&note!='d'&&note!='f'&&note!='g') return false; ++p; }
     bool dot=*p=='.'; if(dot) ++p;
-    if(*p>='0'&&*p<='9' && (!number(p,no,7)||no<4)) return false;
+    if(*p>='0'&&*p<='9') { no=*p++-'0';if(no<4||no>7)return false; }
     if(*p=='.') { if(dot) return false; dot=true; ++p; }
     uint32_t ms=(60000/b)*4/nd; if(dot) ms+=ms/2;
     total+=ms;

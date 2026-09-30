@@ -9,7 +9,8 @@ for (const bad of ["0", "50,", "50,,20", "60001", "-5", "50 20", "1,1,1,1,1,1,1,
   assert.throws(() => builder.pulse(bad));
 assert.equal(builder.melody("vip:d=8,o=5,b=120:c,c#,16p,4g.6").length, 4);
 for (const bad of ["abc", "x:d=8,o=3,b=120:c", "x:d=8,o=5,b=0:c", "x:d=3,o=5,b=120:c",
-  "x:d=8,o=5,b=120:b#7", "x:d=8,o=5,b=120:c,", "x:d=8,o=5,b=120:c..", "x:d=8,o=5,b=120:p#"])
+  "x:d=8,o=5,b=120:b#7", "x:d=8,o=5,b=120:c,", "x:d=8,o=5,b=120:c..", "x:d=8,o=5,b=120:p#",
+  "x:d=8,o=04,b=120:c", "x:d=8,o=5,b=120:c04", "x:d=8,o=5,b=120:c007", "x:d=08,o=5,b=120:c", "x:d=8,o=5,b=120:04c"])
   assert.throws(() => builder.melody(bad));
 for (const config of Object.values(builder.EXAMPLES)) {
   const complete = {...config, id: config.kind === "contact" ? "01".repeat(32) : config.id};
