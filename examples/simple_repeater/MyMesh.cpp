@@ -7,6 +7,9 @@
 #include <new>       // std::nothrow (heap-allocated flood rule table)
 #include <stdlib.h>  // for qsort()
 #include <helpers/CLICommandUtils.h>
+#if defined(NRF52_POWER_MANAGEMENT)
+#include <helpers/NRF52VoltagePolicy.h>
+#endif
 #include <helpers/ClientACLCLI.h>
 #include <helpers/ClockSyncUtils.h>
 #include <helpers/ClientLoginPersistence.h>
@@ -455,6 +458,9 @@ static bool verifyFloodSettingsWrite(FILESYSTEM* fs, const char* filename,
 }
 
 static uint8_t batteryPercentFromMilliVolts(uint16_t batt_mv) {
+#if defined(NRF52_POWER_MANAGEMENT)
+  return mesh::power::configuredBatteryPercent(batt_mv);
+#else
   const int min_mv = BATT_MIN_MILLIVOLTS;
   const int max_mv = BATT_MAX_MILLIVOLTS;
   if (max_mv <= min_mv) return 100;
@@ -463,6 +469,7 @@ static uint8_t batteryPercentFromMilliVolts(uint16_t batt_mv) {
   if (pct < 0) return 0;
   if (pct > 100) return 100;
   return (uint8_t)pct;
+#endif
 }
 
 static bool parseBatteryAlertPercent(const char* value, uint8_t min_value, uint8_t max_value, uint8_t& result) {

@@ -140,6 +140,7 @@ does not reflect the GoogleTest count -- run the built binary directly
 | `test_packet_manager` | `src/Packet.cpp`, `src/Dispatcher.cpp`, `src/helpers/StaticPoolPacketManager.cpp` | truncated-packet rejection, unavailable-radio behavior, scoped RX-delay replacement, queue/CAD scheduling, and staged radio/TX recovery |
 | `test_persistent_store_format` | `src/helpers/PersistentStoreFormat.h` | contact-page headers and CRCs, dirty-page state, stable slot allocation, and bounded resumable legacy migration across power loss |
 | `test_power_management` | `src/helpers/PowerManagementUtils.h` | median filtering of a brownout outlier and valid-reading requirements for the boot lock |
+| `test_nrf52_voltage_rules` | `src/helpers/NRF52VoltageRules.h` | board-default threshold bounds, strict CLI values, and consecutive runtime low-voltage readings |
 | `test_rx_power_saving` | `src/helpers/radiolib/RXPowerSaving.h` | guarded timer/capture bounds across SF5-SF12, bandwidths, TCXO delays and wire preambles; experimental profiles; retuning and strict CLI parsing |
 | `test_noise_floor_estimator` | `src/helpers/radiolib/NoiseFloorEstimator.h` | spaced low percentile, captured off-SF traffic, weighting, contamination limits, persistent rises, resets and clock rollover |
 | `test_region_names` | `src/helpers/RegionNameUtils.h` | canonical public-region markers while preserving distinct private and differently named regions |

@@ -1,5 +1,8 @@
 #include "UITask.h"
 #include <helpers/TxtDataHelpers.h>
+#if defined(NRF52_POWER_MANAGEMENT)
+#include <helpers/NRF52VoltagePolicy.h>
+#endif
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
 #include <helpers/ui/CompanionHomeLayout.h>
 #include <helpers/ui/CompanionMessageHistory.h>
@@ -484,6 +487,10 @@ class HomeScreen : public UIScreen {
     int batteryPercentage = showBattery
       ? ((batteryMilliVolts - minMilliVolts) * 100) / (maxMilliVolts - minMilliVolts)
       : 0;
+#if defined(NRF52_POWER_MANAGEMENT)
+    batteryPercentage = showBattery
+      ? mesh::power::configuredBatteryPercent(batteryMilliVolts) : 0;
+#endif
     if (batteryPercentage < 0) batteryPercentage = 0; // Clamp to 0%
     if (batteryPercentage > 100) batteryPercentage = 100; // Clamp to 100%
 

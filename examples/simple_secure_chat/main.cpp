@@ -21,6 +21,9 @@
 #include <helpers/StaticPoolPacketManager.h>
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/IdentityStore.h>
+#if defined(NRF52_POWER_MANAGEMENT)
+  #include <helpers/NRF52VoltagePolicy.h>
+#endif
 #if defined(ESP32_PLATFORM)
   #include <helpers/ESP32TrueRandom.h>
 #endif
@@ -464,6 +467,14 @@ public:
   }
 
   void handleCommand(const char* command) {
+#if defined(NRF52_POWER_MANAGEMENT)
+    char voltage_reply[160];
+    if (mesh::power::handleVoltagePolicyCommand(command, voltage_reply,
+                                                 sizeof(voltage_reply))) {
+      Serial.println(voltage_reply);
+      return;
+    }
+#endif
     char profile_reply[160];
     if (_radio_profiles.handle(command, profile_reply, sizeof(profile_reply))) {
       Serial.println(profile_reply); return;
@@ -785,6 +796,7 @@ void setup() {
 void loop() {
 #if defined(NRF52_PLATFORM)
   board.feedWatchdog();
+  board.loop();
 #endif
   the_mesh.loop();
   rtc_clock.tick();

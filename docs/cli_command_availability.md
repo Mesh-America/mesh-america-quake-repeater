@@ -212,6 +212,8 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Bridge | [`get/set bridge.secret`](cli_commands.md#set-the-esp-now-secret) | ESP-NOW is ESP32 only | No | No | No |
 | Board | [`get bootloader.ver`](cli_commands.md#view-the-bootloader-version-nrf52-only) | nRF52 bootloader metadata | Yes | Yes | Yes |
 | Board | [`get pwrmgt.support`; `get pwrmgt.source`; `get pwrmgt.bootreason`; `get pwrmgt.bootmv`](nrf52_power_management.md#cli-commands) | Board power-management implementation | Feature | Feature | Feature |
+| Board | [`get/set pwrmgt.bootlock`; `get/set pwrmgt.cutoff`](cli_commands.md#configure-nrf52-battery-protection) | nRF52 power-management boards with a text CLI | Feature | Feature | Feature |
+| Board | [`get/set battery.profile`; `get/set battery.empty`; `get/set battery.full`; `get/set adc.multiplier`](cli_commands.md#configure-nrf52-battery-protection) | nRF52 power-management boards with a text CLI; relative ADC calibration | Feature | Feature | Feature |
 | Ethernet | [`eth.status`](cli_commands.md#view-ethernet-connection-status) | Ethernet target | Feature | Feature | No |
 | Browser OTA | [`start ota [ap]`; `stop ota`](cli_commands.md#start-or-stop-an-over-the-air-ota-firmware-update) | ESP32 browser uploader | No | No | No |
 | WebConfig | [`start webconfig [ap]`; `stop webconfig`; `get/set webui`](cli_commands.md#browser-configuration-portal-esp32-repeater-and-room-server) | ESP32 WebConfig | No | No | No |
