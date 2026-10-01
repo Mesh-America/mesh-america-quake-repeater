@@ -29,6 +29,89 @@ def firmware(body: bytes, version: str) -> bytes:
 
 
 class RouteSearchTests(unittest.TestCase):
+    def test_legacy_proactive_proofs_remove_one_request_per_block(self) -> None:
+        normal = search.legacy_transport_cost(61 * 1024)
+        proactive = search.legacy_transport_cost(61 * 1024, True)
+        self.assertEqual(normal['packets'] - proactive['packets'], 61)
+        self.assertEqual(normal['origin_mesh_bytes'] - proactive['origin_mesh_bytes'], 61 * 9)
+        self.assertEqual(proactive['proof_request_packets'], 0)
+        self.assertEqual(proactive['data_packets'], normal['data_packets'])
+        self.assertEqual(proactive['proof_packets'], normal['proof_packets'])
+
+    def test_proactive_proof_inventory_is_explicit_and_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = self.write_inventory(Path(directory), [b'0', b'1', b'2'])
+            original = json.loads(path.read_text())
+            for values in ((False, True, True), (False, 'true', True), (False, True, None), (True, True, True)):
+                data = json.loads(json.dumps(original))
+                for record, value in zip(data['images'], values):
+                    if value is not None:
+                        record[search.PROACTIVE_PROOF_CAPABILITY] = value
+                path.write_text(json.dumps(data))
+                if values == (False, True, True):
+                    images = search.load_inventory(path)
+                    row = dict(source=1,target=2,container=search.container_size(2048),payload=2048)
+                    self.assertEqual(search.edge_transport_cost(row,images,0)['proof_request_packets'],0)
+                    row['source'] = 0
+                    self.assertEqual(search.edge_transport_cost(row,images,0)['proof_request_packets'],2)
+                else:
+                    with self.assertRaises(search.RouteSearchError):search.load_inventory(path)
+
+    def test_endpoint_routes_keep_longer_paths_but_exclude_dead_ends(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, _ = self.write_inventory(root, [b"0", b"1", b"2", b"3", b"4", b"5"])
+            images = search.load_inventory(manifest)
+            rows = [dict(source=s, target=t, feasible=True) for s,t in
+                    [(1,5),(1,2),(2,5),(1,3),(4,5)]]
+            self.assertEqual(search.endpoint_route_pairs(rows,images), {(0,1),(1,5),(1,2),(2,5)})
+            self.assertEqual(search.minimum_hop_pairs(rows,images), {(0,1),(1,5)})
+
+    def test_traffic_first_can_choose_more_installs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = search.container_size(64)
+            manifest, _ = self.write_inventory(
+                root, [b"0", b"1", b"2", b"3"], baseline_size=baseline,
+            )
+            images = search.load_inventory(manifest)
+            def edge(source: int, target: int, payload: int) -> dict[str, object]:
+                return dict(source=source, target=target, memory=0x98000,
+                            payload=payload, container=search.container_size(payload),
+                            stage_start=0xC0000, margin=4096, feasible=True)
+            rows = [edge(1, 3, 10000), edge(1, 2, 500), edge(2, 3, 500)]
+            shortest = search.select_route(rows, images, baseline, root / "short.json",
+                                           True, objective="transport")
+            self.assertEqual(shortest["nodes"], [0, 1, 3])
+            for objective in ("bytes", "packets"):
+                result = search.select_route(rows, images, baseline, root / (objective + ".json"),
+                                             True, objective=objective)
+                self.assertEqual(result["nodes"], [0, 1, 2, 3])
+                self.assertEqual(result["shortest_package_count"], 2)
+                self.assertEqual(result["selected_package_count"], 3)
+                self.assertLess(result["selected_total_transport_bytes"], shortest["selected_total_transport_bytes"])
+                self.assertLess(result["selected_total_packets"], shortest["selected_total_packets"])
+
+    def test_packet_objective_counts_proofs_and_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = search.container_size(64)
+            manifest, _ = self.write_inventory(root, [b"0", b"1", b"2"],
+                baseline_size=baseline, transport_capabilities=[False, True, False],
+                transport_pipelines=[None, 1, None], transport_block_sizes=[1024, 2048, 1024])
+            images = search.load_inventory(manifest)
+            rows = []
+            for memory, payload, wire, packets in [(0x98000, 4096, 300, 2), (0x99000, 1800, 400, 3)]:
+                rows.append(dict(source=1, target=2, memory=memory, payload=payload,
+                    container=search.container_size(payload, 2048), block_size=2048,
+                    stage_start=0xC0000, margin=100, feasible=True,
+                    payload_sha256=f"{memory:064x}", transport_encoder_sha256="e"*64,
+                    v2_wire_bytes=wire, v2_deflate_bytes=wire, v2_deflate_blocks=(payload+2047)//2048,
+                    v2_data_packets=packets))
+            expected=min(rows,key=lambda row:(search.edge_transport_cost(row,images,0)['packets'],search.edge_transport_cost(row,images,0)['linear_path_bytes']))
+            result=search.select_route(rows,images,baseline,root/'packets.json',True,objective='packets')
+            self.assertEqual(result['steps'][1]['inplace_memory'], f"0x{expected['memory']:X}")
+
     def write_inventory(
         self, root: Path, payloads: list[bytes], *, baseline_size: int = 100,
         versions: list[str] | None = None,

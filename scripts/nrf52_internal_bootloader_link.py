@@ -28,13 +28,17 @@ requested = (
     or env["PIOENV"] in direct_targets
 )
 
+# A field node on OTAFIX2.4 cannot receive a hybrid flash/RAM handoff or
+# replace its own bootloader. Keep its ordinary application OTA path and
+# linker when explicitly building a legacy-compatible destination image.
+legacy_flash = os.environ.get("MESHCORE_NRF52_LEGACY_FLASH_OTA")
+if legacy_flash not in (None, "0", "1"):
+    raise RuntimeError("MESHCORE_NRF52_LEGACY_FLASH_OTA must be 0 or 1")
+if legacy_flash == "1":
+    if not requested:
+        raise RuntimeError("legacy flash OTA requires a qualified internal nRF52 OTA target")
+
 if requested:
-    # The macro is injected here so direct PIO and build.sh synthetic aliases
-    # cannot silently differ. Package admission is runtime-capacity based.
-    env.AppendUnique(CPPDEFINES=[
-        "OTA_INTERNAL_BOOTLOADER_UPDATE",
-        "OTA_HYBRID_RAM_STORE",
-    ])
     board = env.BoardConfig()
     # Most variants inherit the framework's top-level ``build.ldscript``.
     # A few otherwise ordinary Adafruit nRF52840 boards (notably Keepteen LT1)
@@ -60,18 +64,25 @@ if requested:
             f"S140 v6/v7 non-ExtraFS linker; found mcu={mcu or 'none'} "
             f"linker={current or 'none'}"
         )
-    mota_linker = Path(env["PROJECT_DIR"]) / "boards" / (
-        "nrf52840_s140_%s_mota64.ld" % suffix
-    )
-    if not mota_linker.is_file():
-        raise RuntimeError("missing mOTA hybrid linker: %s" % mota_linker)
+    if legacy_flash == "1":
+        print("nRF52 legacy flash OTA: ordinary linker; no hybrid RAM or bootloader self-update")
+    else:
+        mota_linker = Path(env["PROJECT_DIR"]) / "boards" / (
+            "nrf52840_s140_%s_mota64.ld" % suffix
+        )
+        if not mota_linker.is_file():
+            raise RuntimeError("missing mOTA hybrid linker: %s" % mota_linker)
 
-    # The framework builder normally resolves LDSCRIPT_PATH from BoardConfig.
-    # Set both so this remains deterministic whether PlatformIO invokes this
-    # pre-script before or after that framework step.
-    board.update("build.ldscript", str(mota_linker))
-    env.Replace(LDSCRIPT_PATH=str(mota_linker))
-    print(
-        "nRF52 shared-slot bootloader update: %s; fixed 64 KiB mOTA RAM arena; runtime EndF headroom required"
-        % mota_linker.name
-    )
+        # Direct PIO and build.sh aliases must select the same feature/map pair.
+        env.AppendUnique(CPPDEFINES=[
+            "OTA_INTERNAL_BOOTLOADER_UPDATE",
+            "OTA_HYBRID_RAM_STORE",
+        ])
+        # The framework normally resolves LDSCRIPT_PATH from BoardConfig. Set
+        # both so ordering relative to that framework step cannot change it.
+        board.update("build.ldscript", str(mota_linker))
+        env.Replace(LDSCRIPT_PATH=str(mota_linker))
+        print(
+            "nRF52 shared-slot bootloader update: %s; fixed 64 KiB mOTA RAM arena; runtime EndF headroom required"
+            % mota_linker.name
+        )

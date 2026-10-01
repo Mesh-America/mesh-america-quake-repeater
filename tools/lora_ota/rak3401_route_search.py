@@ -7,12 +7,19 @@ be migrated safely when new candidate images are inserted.
 
 The default secondary objective remains container size. ``--objective transport``
 instead measures the exact live motatool encoder and minimizes clean serialized
-MeshCore bytes. Inventory fields ``ota_transport_deflate``,
+MeshCore bytes after minimizing package count. ``--objective bytes`` and
+``--objective packets`` consider every feasible forward edge and minimize total
+traffic first, even when an additional install saves airtime. Inventory fields
+``ota_transport_deflate``,
 ``ota_fetch_pipeline``, and ``transport_max_block_bytes`` belong to the
 currently running/source image; the pinned first bootstrap is always legacy
 raw. The explicit maximum controls signed-container block geometry independently
 of whether DEFLATE is allowed; either DEFLATE or 2 KiB geometry negotiates the
 171-byte v2 wire profile.
+
+``ota_proactive_proofs`` distinguishes later legacy receivers that accept a
+modern seeder's unsolicited proof from the original receiver that explicitly
+requests each proof. If supplied for one image, it must be supplied for all.
 """
 from __future__ import annotations
 
@@ -45,6 +52,7 @@ AVAILABLE_PAGES = (STAGE_CEILING - APP_BASE) // PAGE
 EXPECTED_TARGET_ID = 0x2FA509C1
 EXPECTED_HARDWARE = "RAK_3401"
 TRANSPORT_CAPABILITY = "ota_transport_deflate"
+PROACTIVE_PROOF_CAPABILITY = "ota_proactive_proofs"
 TRANSPORT_PIPELINE_FIELD = "ota_fetch_pipeline"
 TRANSPORT_MAX_BLOCK_FIELD = "transport_max_block_bytes"
 TRANSPORT_CAPABILITY_ALIAS = "transport_inflate"
@@ -168,7 +176,7 @@ def _common_transport_cost(block_count: int) -> tuple[int, int, int]:
     )
 
 
-def legacy_transport_cost(payload_size: int) -> dict[str, int | str]:
+def legacy_transport_cost(payload_size: int, proactive_proofs: bool = False) -> dict[str, int | str]:
     """Ideal clean legacy transfer, including requests, DATA, and proofs."""
     blocks = _block_lengths(payload_size, LEGACY_BLOCK_SIZE)
     block_count = len(blocks)
@@ -178,13 +186,15 @@ def legacy_transport_cost(payload_size: int) -> dict[str, int | str]:
     )
     common_bytes, common_packets, proof_bytes = _common_transport_cost(block_count)
     # DATA is 9 OTA header + 2 Mesh bytes. Each legacy block also needs one
-    # 9-byte OTA_REQ frame and one 7-byte OTA_REQ_PROOF frame.
+    # 9-byte OTA_REQ frame. Original receivers also immediately request the
+    # proof; later legacy receivers wait for a modern seeder's proactive proof.
     data_bytes = payload_size + 11 * data_packets
     request_bytes = 11 * block_count
-    proof_request_bytes = 9 * block_count
+    proof_requests = 0 if proactive_proofs else block_count
+    proof_request_bytes = 9 * proof_requests
     manifest_bytes = common_bytes - proof_bytes
     return {
-        "profile": "legacy-160-raw",
+        "profile": "legacy-160-proactive-proof" if proactive_proofs else "legacy-160-raw",
         "block_size": LEGACY_BLOCK_SIZE,
         "payload_bytes": payload_size,
         "wire_bytes": payload_size,
@@ -194,12 +204,12 @@ def legacy_transport_cost(payload_size: int) -> dict[str, int | str]:
         "manifest_packets": common_packets - block_count,
         "request_pipeline": 1,
         "request_packets": block_count,
-        "proof_request_packets": block_count,
+        "proof_request_packets": proof_requests,
         "proof_packets": block_count,
         "origin_mesh_bytes": (
             common_bytes + data_bytes + request_bytes + proof_request_bytes
         ),
-        "packets": common_packets + data_packets + 2 * block_count,
+        "packets": common_packets + data_packets + block_count + proof_requests,
         "manifest_bytes": manifest_bytes,
         "block_request_bytes": request_bytes,
         "proof_request_bytes": proof_request_bytes,
@@ -369,6 +379,10 @@ def load_inventory(path: Path) -> list[dict[str, object]]:
         isinstance(record, dict) and TRANSPORT_MAX_BLOCK_FIELD in record
         for record in images
     )
+    strict_proof_contract = any(
+        isinstance(record, dict) and PROACTIVE_PROOF_CAPABILITY in record
+        for record in images
+    )
     edge_policy = document.get("edge_policy", {})
     strict_version_ranks = (
         isinstance(edge_policy, dict)
@@ -468,6 +482,14 @@ def load_inventory(path: Path) -> list[dict[str, object]]:
                 f"{TRANSPORT_CAPABILITY}"
             )
         record[TRANSPORT_CAPABILITY] = capability
+        if strict_proof_contract and PROACTIVE_PROOF_CAPABILITY not in record:
+            raise RouteSearchError(f"image {index} {PROACTIVE_PROOF_CAPABILITY} is required")
+        proactive_proofs = record.get(PROACTIVE_PROOF_CAPABILITY, False)
+        if type(proactive_proofs) is not bool:
+            raise RouteSearchError(f"image {index} {PROACTIVE_PROOF_CAPABILITY} must be boolean")
+        if index == 0 and proactive_proofs:
+            raise RouteSearchError("the deployed first receiver requires explicit proof requests")
+        record[PROACTIVE_PROOF_CAPABILITY] = proactive_proofs
         raw_max_block = record.get(TRANSPORT_MAX_BLOCK_FIELD)
         if raw_max_block is None:
             if strict_block_contract:
@@ -943,6 +965,26 @@ def minimum_hop_pairs(
     }
 
 
+def endpoint_route_pairs(
+    rows: list[dict[str, object]], images: list[dict[str, object]]
+) -> set[tuple[int, int]]:
+    """All start-to-endpoint edges, including routes with extra installs."""
+    pairs = feasible_forward_pairs(rows, images)
+    outgoing: dict[int, list[int]] = {}
+    for source, target in pairs:
+        outgoing.setdefault(source, []).append(target)
+    reachable = {0}
+    for source in range(len(images)):
+        if source in reachable:
+            reachable.update(outgoing.get(source, []))
+    leads_to_endpoint = {len(images) - 1}
+    for source in range(len(images) - 2, -1, -1):
+        if any(target in leads_to_endpoint for target in outgoing.get(source, [])):
+            leads_to_endpoint.add(source)
+    return {(source, target) for source, target in pairs
+            if source in reachable and target in leads_to_endpoint}
+
+
 def job_needs_transport_stats(
     job: Job,
     images: list[dict[str, object]],
@@ -950,7 +992,7 @@ def job_needs_transport_stats(
     relevant_pairs: set[tuple[int, int]] | None = None,
 ) -> bool:
     return (
-        objective == "transport"
+        objective in ("transport", "bytes", "packets")
         and source_uses_deflate(images, job[0])
         and (relevant_pairs is None or (job[0], job[1]) in relevant_pairs)
     )
@@ -1237,7 +1279,9 @@ def edge_transport_cost(
             block_size,
         )
     else:
-        cost = legacy_transport_cost(payload)
+        cost = legacy_transport_cost(
+            payload, source > 0 and images[source].get(PROACTIVE_PROOF_CAPABILITY, False)
+        )
     result = dict(cost)
     result["linear_path_bytes"] = linear_path_bytes(
         int(cost["origin_mesh_bytes"]), int(cost["packets"]), relay_hops
@@ -1248,9 +1292,10 @@ def edge_transport_cost(
 def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
                  baseline_size: int, output: Path, complete: bool,
                  objective: str = "container", relay_hops: int = 0) -> dict[str, object]:
-    if objective not in ("container", "transport"):
+    if objective not in ("container", "transport", "bytes", "packets"):
         raise RouteSearchError(f"unknown route objective: {objective}")
-    if objective == "transport" and not complete:
+    traffic = objective != "container"
+    if traffic and not complete:
         raise RouteSearchError(
             "transport objective requires complete geometry before shortest-DAG sizing"
         )
@@ -1267,13 +1312,12 @@ def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
         "container": baseline_size, "stage_start": baseline_stage,
         "margin": baseline_margin, "feasible": True,
     }
-    if objective == "transport":
+    if traffic:
         baseline_row["payload"] = payload_size_from_container(baseline_size)
     all_feasible_pairs = feasible_forward_pairs(rows, images)
-    relevant_pairs = (
-        minimum_hop_pairs(rows, images)
-        if objective == "transport" else all_feasible_pairs
-    )
+    relevant_pairs = (minimum_hop_pairs(rows, images) if objective == "transport"
+                      else endpoint_route_pairs(rows, images) if traffic
+                      else all_feasible_pairs)
     edges: dict[tuple[int, int], dict[str, object]] = {(0, 1): baseline_row}
     for row in rows:
         source = int(row["source"])
@@ -1292,12 +1336,11 @@ def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
         key = source, target
         if key not in relevant_pairs:
             continue
-        if objective == "transport":
-            transport_bytes = int(
-                edge_transport_cost(row, images, relay_hops)["linear_path_bytes"]
-            )
+        if traffic:
+            cost = edge_transport_cost(row, images, relay_hops)
             rank = (
-                transport_bytes, int(row["container"]),
+                int(cost["packets"]) if objective == "packets" else 0,
+                int(cost["linear_path_bytes"]), int(row["container"]),
                 -int(row["margin"]), int(row["memory"]),
             )
         else:
@@ -1306,9 +1349,11 @@ def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
         if old is None:
             edges[key] = row
         else:
-            if objective == "transport":
+            if traffic:
+                old_cost = edge_transport_cost(old, images, relay_hops)
                 old_rank = (
-                    int(edge_transport_cost(old, images, relay_hops)["linear_path_bytes"]),
+                    int(old_cost["packets"]) if objective == "packets" else 0,
+                    int(old_cost["linear_path_bytes"]),
                     int(old["container"]), -int(old["margin"]), int(old["memory"]),
                 )
             else:
@@ -1331,10 +1376,15 @@ def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
         for target, row in outgoing.get(source, []):
             edge_bytes = (
                 int(edge_transport_cost(row, images, relay_hops)["linear_path_bytes"])
-                if objective == "transport" else int(row["container"])
+                if traffic else int(row["container"])
             )
-            candidate = (best[source][0] + 1,
-                         best[source][1] + edge_bytes,
+            increment = (1, edge_bytes)
+            if objective == "bytes":
+                increment = (edge_bytes, 1)
+            elif objective == "packets":
+                increment = (int(edge_transport_cost(row, images, relay_hops)["packets"]), edge_bytes)
+            candidate = (best[source][0] + increment[0],
+                         best[source][1] + increment[1],
                          best[source][2] + [target])
             if target not in best or candidate < best[target]:
                 best[target] = candidate
@@ -1344,17 +1394,18 @@ def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
             elif distance == hop_distance[target]:
                 route_count[target] += route_count[source]
 
-    objective_text = (
-        "minimum packages, then minimum ideal linear-path serialized MeshCore bytes"
-        if objective == "transport"
-        else "minimum packages, then minimum total container bytes"
-    )
+    objective_text = {
+        "transport": "minimum packages, then minimum ideal linear-path serialized MeshCore bytes",
+        "container": "minimum packages, then minimum total container bytes",
+        "bytes": "minimum ideal linear-path serialized MeshCore bytes, then minimum packages",
+        "packets": "minimum ideal packets, then minimum ideal linear-path serialized MeshCore bytes",
+    }[objective]
     common = {"schema": 2, "app_base": f"0x{APP_BASE:X}",
               "stage_ceiling": f"0x{STAGE_CEILING:X}", "node_count": len(images),
               "search_complete": complete, "candidate_geometries": len(rows),
               "feasible_edges": len(all_feasible_pairs),
               "objective": objective_text}
-    if objective == "transport":
+    if traffic:
         transport_encoder = transport_encoder_for_rows(
             rows, images, relevant_pairs
         )
@@ -1364,6 +1415,7 @@ def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
             "supported_block_sizes": [LEGACY_BLOCK_SIZE, DEFLATE_BLOCK_SIZE],
             "comparison_baseline_block_size": LEGACY_BLOCK_SIZE,
             "source_capability_field": TRANSPORT_CAPABILITY,
+            "source_proactive_proof_field": PROACTIVE_PROOF_CAPABILITY,
             "source_pipeline_field": TRANSPORT_PIPELINE_FIELD,
             "source_max_block_field": TRANSPORT_MAX_BLOCK_FIELD,
             "source_profile_matrix": dict(TRANSPORT_PROFILE_MATRIX),
@@ -1373,13 +1425,18 @@ def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
                 "adaptive requests, manifest, exact per-block proofs, and MeshCore framing"
             ),
             "excluded": (
-                "discovery, retries, flood fan-out, and radio-dependent LoRa PHY coding/preamble"
+                "discovery, retries, admin/control commands, flood fan-out, "
+                "and radio-dependent LoRa PHY coding/preamble"
             ),
         }
         if transport_encoder is not None:
             common["transport_accounting"]["encoder_sha256"] = transport_encoder
     if endpoint not in best:
-        result = {**common, "status": "unreachable", "reachable_nodes": sorted(best),
+        reachable = {0}
+        for source, target in sorted(all_feasible_pairs):
+            if source in reachable:
+                reachable.add(target)
+        result = {**common, "status": "unreachable", "reachable_nodes": sorted(reachable),
                   "endpoint_node": endpoint,
                   "endpoint_incoming_feasible": sorted(
                       source for source, target in all_feasible_pairs
@@ -1398,7 +1455,7 @@ def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
                     "expected_staging_margin": int(row["margin"]),
                     "expected_target_sha256": images[target]["sha256"],
                     "expected_target_version": images[target].get("version", "unknown")}
-            if objective == "transport":
+            if traffic:
                 cost = edge_transport_cost(row, images, relay_hops)
                 step["transport"] = {
                     key: cost[key] for key in (
@@ -1424,8 +1481,11 @@ def select_route(rows: list[dict[str, object]], images: list[dict[str, object]],
                   "shortest_package_count": hop_distance[endpoint],
                   "shortest_route_count": route_count[endpoint],
                   "selected_total_bytes": selected_container_bytes, "steps": steps}
-        if objective == "transport":
-            result["selected_total_transport_bytes"] = best[endpoint][1]
+        if traffic:
+            result["selected_total_transport_bytes"] = sum(int(step["transport"]["linear_path_bytes"]) for step in steps)
+            result["selected_total_packets"] = sum(int(step["transport"]["packets"]) for step in steps)
+            result["selected_total_linear_path_packets"] = result["selected_total_packets"] * (relay_hops + 1)
+            result["selected_package_count"] = len(steps)
     write_atomic_text(
         output, json.dumps(result, indent=2, sort_keys=True) + "\n"
     )
@@ -1440,8 +1500,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1))
     parser.add_argument("--no-generate", action="store_true")
     parser.add_argument(
-        "--objective", choices=("container", "transport"), default="container",
-        help="secondary objective after minimum package count",
+        "--objective", choices=("container", "transport", "bytes", "packets"), default="container",
+        help="container/transport minimize packages first; bytes/packets minimize traffic first",
     )
     parser.add_argument(
         "--motatool", metavar="PATH",
@@ -1565,6 +1625,9 @@ def main(argv: list[str] | None = None) -> int:
                             int(row["memory"]),
                         )
                         cache[key] = row
+                        if done % 500 == 0:
+                            write_csv(args.work_dir / "geometry.csv",
+                                      project_cache(cache, images, required & cache.keys()))
                         if done % 100 == 0 or done == len(futures):
                             print(
                                 f"geometry_measured={done}/{len(geometry_remaining)}",
@@ -1584,13 +1647,14 @@ def main(argv: list[str] | None = None) -> int:
         geometry_complete = geometry_completed == required
 
         complete = geometry_complete
-        if args.objective == "transport":
+        if args.objective in ("transport", "bytes", "packets"):
             if not geometry_complete:
                 raise RouteSearchError(
                     "transport objective requires complete geometry before "
                     "shortest-DAG sizing"
                 )
-            relevant_pairs = minimum_hop_pairs(rows, images)
+            relevant_pairs = (minimum_hop_pairs(rows, images) if args.objective == "transport"
+                              else endpoint_route_pairs(rows, images))
             transport_remaining = [
                 job for job in jobs
                 if not cache_satisfies_job(
@@ -1642,6 +1706,9 @@ def main(argv: list[str] | None = None) -> int:
                                     f"transport regeneration changed geometry for {key}"
                                 )
                             cache[key] = row
+                            if done % 100 == 0:
+                                write_csv(args.work_dir / "geometry.csv",
+                                          project_cache(cache, images, geometry_completed))
                             if done % 100 == 0 or done == len(futures):
                                 print(
                                     f"transport_measured={done}/"

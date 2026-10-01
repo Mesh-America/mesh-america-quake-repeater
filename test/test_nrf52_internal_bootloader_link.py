@@ -62,13 +62,15 @@ class FakeEnvironment:
             raise AssertionError(f"unexpected fake-SCons call: {values!r}")
 
 
-def run_selector(*, pioenv, board_values, project=ROOT, requested=False):
+def run_selector(*, pioenv, board_values, project=ROOT, requested=False, legacy_flash=None):
     board = FakeBoardConfig(board_values)
     environment = FakeEnvironment(project, pioenv, board)
     process_environment = (
         {"MESHCORE_NRF52_INTERNAL_BOOTLOADER_UPDATE": "1"}
         if requested else {}
     )
+    if legacy_flash is not None:
+        process_environment["MESHCORE_NRF52_LEGACY_FLASH_OTA"] = legacy_flash
     output = io.StringIO()
     with mock.patch.dict(os.environ, process_environment, clear=True):
         with contextlib.redirect_stdout(output):
@@ -134,6 +136,38 @@ def c_integer(path, name):
 
 
 class Nrf52InternalBootloaderSelectorTest(unittest.TestCase):
+    def test_legacy_flash_preserves_linker_for_direct_and_release_builds(self):
+        for requested in (False, True):
+            with self.subTest(requested=requested):
+                environment, output = run_selector(
+                    pioenv=V6_TARGET, requested=requested, legacy_flash="1",
+                    board_values={"build.mcu": "nrf52840",
+                                  "build.ldscript": "boards/nrf52840_s140_v6.ld"},
+                )
+                self.assertEqual(environment.cppdefines, [])
+                self.assertEqual(environment.board.updates, [])
+                self.assertEqual(environment.replacements, {})
+                self.assertIn("no hybrid RAM or bootloader self-update", output)
+
+    def test_legacy_flash_rejects_unqualified_target_and_typo(self):
+        for target, value, error in (
+            ("RAK_3401_repeater", "1", "qualified internal"),
+            (V6_TARGET, "yes", "must be 0 or 1"),
+        ):
+            with self.subTest(target=target, value=value):
+                with self.assertRaisesRegex(RuntimeError, error):
+                    run_selector(pioenv=target, legacy_flash=value,
+                                 board_values={"build.mcu": "nrf52840"})
+
+    def test_legacy_flash_still_validates_mcu_and_memory_map(self):
+        for mcu, linker in (("nrf52832", "nrf52840_s140_v6.ld"),
+                            ("nrf52840", "nrf52840_s140_v6_mota64.ld"),
+                            ("nrf52840", "custom_nrf52840_s140_v6.ld")):
+            with self.subTest(mcu=mcu, linker=linker):
+                with self.assertRaisesRegex(RuntimeError, "normal S140 v6/v7"):
+                    run_selector(pioenv=V6_TARGET, legacy_flash="1",
+                                 board_values={"build.mcu": mcu, "build.ldscript": linker})
+
     def test_direct_v6_target_selects_hybrid_linker_and_both_features(self):
         environment, output = run_selector(
             pioenv=V6_TARGET,
