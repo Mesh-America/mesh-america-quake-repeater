@@ -296,7 +296,7 @@ int main() {
                                     text=True, capture_output=True, check=True)
             self.assertEqual("SHARING_ENABLED" in result.stdout, expected, flags)
 
-    def test_affected_esp32_full_overlay_keeps_queue_and_both_transports(self):
+    def test_affected_esp32_full_overlay_keeps_documented_capacity_and_transports(self):
         for target in ("Heltec_v3_companion_radio_full", "Xiao_C3_companion_radio_full",
                        "heltec_tracker_v2_companion_radio_full_femon",
                        "Heltec_Wireless_Paper_companion_radio_full"):
@@ -314,8 +314,11 @@ printf '%s\\n' "$PLATFORMIO_BUILD_FLAGS"
                 self.assertIn("-DOFFLINE_QUEUE_SIZE=256", result.stdout)
                 self.assertIn("-DOTA_SHARED_COMPANION_QUEUE=1", result.stdout)
             else:
-                self.assertIn("-DMAX_CONTACTS=150", result.stdout)
-                self.assertNotIn("-DOFFLINE_QUEUE_SIZE=", result.stdout)
+                self.assertIn("-DMAX_CONTACTS=100", result.stdout)
+                if target == "Heltec_v3_companion_radio_full":
+                    self.assertNotIn("-DOFFLINE_QUEUE_SIZE=", result.stdout)
+                else:
+                    self.assertIn("-DOFFLINE_QUEUE_SIZE=224", result.stdout)
                 self.assertNotIn("-DOTA_SHARED_COMPANION_QUEUE", result.stdout)
             self.assertIn("-DWIFI_OTA_SEEDER=1", result.stdout)
             self.assertIn("-DBLE_PIN_CODE=123456", result.stdout)
