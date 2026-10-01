@@ -31,6 +31,7 @@ static_assert(sizeof(WEBCONFIG_AP_PREFIX) <= 28,
 #endif
 
 #include "WebConfigHtml.h"
+#include <helpers/HttpContentEncoding.h>
 #include "WebTerminalStream.h"
 #include <helpers/CLICommandUtils.h>
 #include <new>
@@ -154,15 +155,11 @@ public:
     if (_in_flight != 0) return 0;
     if (_state == RESPONSE_WAIT_ACK) {
       // The full Content-Length has now been acknowledged. ESPAsyncWebServer
-      // otherwise performs a graceful active close for every response, and
-      // this IDF 4.4 stack retains malloc-backed TCP PCBs in TIME_WAIT for about
-      // two minutes. Repeated WebConfig loads consume scarce internal heap and
-      // can also prevent AsyncTCP from retiring close events, wedging both
-      // infrastructure WiFi and ESP-NOW. Abort only after the final ACK so the
-      // peer has the complete page, while freeing this PCB immediately. Keep
-      // RESPONSE_WAIT_ACK: abort synchronously dispatches disconnect and the
-      // request's scoped owner then destroys this response.
-      if (client) client->abort();
+      // otherwise performs a graceful active close for every response. Keep
+      // the graceful close here too: browsers can report a complete,
+      // Content-Length-delimited response as a failed transfer when the peer
+      // force-aborts the TCP PCB immediately after the final ACK.
+      if (client) client->close();
       return 0;
     }
     return queueNext(request);
@@ -1636,20 +1633,37 @@ bool WebConfigServer::checkAuth(AsyncWebServerRequest* req) {
 // Handlers (async_tcp task - no CLI/prefs writes, no radio access)
 // ---------------------------------------------------------------------------
 
+static bool webConfigClientAcceptsGzip(AsyncWebServerRequest* req) {
+  return req && mesh::http::acceptsGzip(req->hasHeader("Accept-Encoding")
+      ? req->getHeader("Accept-Encoding")->value().c_str() : nullptr);
+}
+
+static void webConfigRejectEncoding(AsyncWebServerRequest* req) {
+  AsyncWebServerResponse* res = req->beginResponse(
+      406, "text/plain", "WebConfig requires gzip support");
+  res->addHeader("Vary", "Accept-Encoding");
+  res->addHeader("Cache-Control", "no-store");
+  req->send(res);
+}
+
 void WebConfigServer::handleRoot(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
   _last_activity = millis();
+  if (!webConfigClientAcceptsGzip(req)) { webConfigRejectEncoding(req); return; }
   if (req->hasHeader("If-None-Match") &&
       req->getHeader("If-None-Match")->value() == WEBCONFIG_HTML_ETAG) {
     req->send(304);
     return;
   }
   AsyncWebServerResponse* res =
-      req->beginResponse(200, "text/html", WEBCONFIG_HTML_LOADER,
+      req->beginResponse(200, "text/html; charset=utf-8", WEBCONFIG_HTML_LOADER,
                          WEBCONFIG_HTML_LOADER_LEN);
   res->addHeader("ETag", WEBCONFIG_HTML_ETAG);
+  res->addHeader("Content-Encoding", "gzip");
+  res->addHeader("Vary", "Accept-Encoding");
   req->send(res);
 }
+
 
 void WebConfigServer::handleUi(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
@@ -1664,13 +1678,11 @@ void WebConfigServer::handleUi(AsyncWebServerRequest* req) {
     req->send(res);
     return;
   }
-  AsyncWebServerResponse* res =
-      new WebConfigPacedProgmemResponse("text/html; charset=utf-8",
-                                       WEBCONFIG_HTML_BR,
-                                       WEBCONFIG_HTML_BR_LEN);
-  // Keep exactly one whole-page asset in flash. Brotli is decoded by the
-  // browser; the ESP32 only streams these precompressed bytes.
-  res->addHeader("Content-Encoding", "br");
+  if (!webConfigClientAcceptsGzip(req)) { webConfigRejectEncoding(req); return; }
+  AsyncWebServerResponse* res = new WebConfigPacedProgmemResponse(
+      "text/html; charset=utf-8", WEBCONFIG_HTML_GZ, WEBCONFIG_HTML_GZ_LEN);
+  res->addHeader("Content-Encoding", "gzip");
+  res->addHeader("Vary", "Accept-Encoding");
   res->addHeader("Cache-Control", "public, max-age=31536000, immutable");
   req->send(res);
 }
@@ -2767,8 +2779,14 @@ void WebConfigServer::handleNotFound(AsyncWebServerRequest* req) {
       if (url.indexOf("generate_204") >= 0 || url.indexOf("gen_204") >= 0) {
         req->send(204);                                       // Android
       } else if (url.indexOf("hotspot-detect") >= 0 || url.indexOf("success") >= 0) {
-        req->send(200, "text/html",                            // Apple CNA
-                  "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+        if (!webConfigClientAcceptsGzip(req)) { webConfigRejectEncoding(req); return; }
+        AsyncWebServerResponse* res = req->beginResponse(
+            200, "text/html; charset=utf-8", WEBCONFIG_HTML_SUCCESS,
+            WEBCONFIG_HTML_SUCCESS_LEN);
+        res->addHeader("Content-Encoding", "gzip");
+        res->addHeader("Vary", "Accept-Encoding");
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);                                      // Apple CNA
       } else if (url.indexOf("ncsi.txt") >= 0) {
         req->send(200, "text/plain", "Microsoft NCSI");        // Windows
       } else if (url.indexOf("connecttest.txt") >= 0) {

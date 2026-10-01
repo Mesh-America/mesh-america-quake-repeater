@@ -2016,8 +2016,12 @@ function setBoardCmds(v,tries){
 // Board-specific rows in the settings form. Hidden unless the node answered for
 // the command at startup, so the form never shows a control that cannot apply.
 function applyBoardCmds(){
-  $("#sw-fem-rx").classList.toggle("hide",!boardHas("radio.fem.rxgain"));
-  $("#sw-fem-tx").classList.toggle("hide",!boardHas("radio.fem.txgain"));
+  var rx=$("[data-k=\"radio.fem.rxgain\"]");
+  var rxRow=rx&&rx.closest(".sw");
+  if(rxRow)rxRow.classList.toggle("hide",!boardHas("radio.fem.rxgain"));
+  var tx=$("[data-k=\"radio.fem.txgain\"]");
+  var txRow=tx&&tx.closest(".sw");
+  if(txRow)txRow.classList.toggle("hide",!boardHas("radio.fem.txgain"));
 }
 
 // Per-slot keys, expanded across the slots this board actually runs.

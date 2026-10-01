@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import brotli
+import gzip
 from pathlib import Path
 import re
 import unittest
@@ -226,15 +226,15 @@ class WebConfigUiTest(unittest.TestCase):
 
     def test_generated_asset_contains_show_controls(self):
         header = HEADER.read_text(encoding="utf-8")
-        self.assertIn("Compressed with Google Brotli", header)
-        length = int(re.search(r"WEBCONFIG_HTML_BR_LEN = (\d+);", header).group(1))
+        self.assertIn("Compressed with Google Zopfli", header)
+        length = int(re.search(r"WEBCONFIG_HTML_GZ_LEN = (\d+);", header).group(1))
         array = header.split(
-            "const uint8_t WEBCONFIG_HTML_BR[] PROGMEM = {", 1
+            "const uint8_t WEBCONFIG_HTML_GZ[] PROGMEM = {", 1
         )[1]
         blob = bytes(
             int(value, 16) for value in re.findall(r"0x([0-9a-f]{2})", array)
         )[:length]
-        page = brotli.decompress(blob).decode("utf-8")
+        page = gzip.decompress(blob).decode("utf-8")
         self.assertEqual(page.count('onclick="toggleWiFiPassword(this)"'), 2)
         self.assertIn("function toggleWiFiPassword(btn)", page)
         self.assertIn("function wzSkipRadio()", page)
@@ -249,13 +249,13 @@ class WebConfigUiTest(unittest.TestCase):
         self.assertIn('case"bluetooth.mac":return r.bluetooth_mac||"";', page)
         self.assertIn("random-every-boot", page)
 
-    def test_webconfig_serves_the_single_brotli_asset(self):
+    def test_webconfig_serves_the_single_gzip_asset(self):
         server = (ROOT / "src/helpers/esp32/WebConfigServer.cpp").read_text(
             encoding="utf-8"
         )
-        self.assertIn("WEBCONFIG_HTML_BR", server)
-        self.assertIn('res->addHeader("Content-Encoding", "br")', server)
-        self.assertNotIn("WEBCONFIG_HTML_GZ", server)
+        self.assertIn("WEBCONFIG_HTML_GZ", server)
+        self.assertIn('res->addHeader("Content-Encoding", "gzip")', server)
+        self.assertNotIn("WEBCONFIG_HTML_BR", server)
 
     def test_skipped_mqtt_does_not_pin_display_in_setup_mode(self):
         main = (ROOT / "examples" / "companion_radio" / "main.cpp").read_text(

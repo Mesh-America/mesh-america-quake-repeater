@@ -257,6 +257,8 @@ jobs:
           python3 -B test/test_bluetooth_mac_contract.py
           python3 -B test/test_companion_settings_persistence_contract.py
           python3 -B test/test_webconfig_ui.py
+          python3 -B test/test_webconfig_gzip.py
+          python3 -B test/test_webconfig_secret_masking.py
           python3 -B test/test_webconfig_ui_runtime.py
 
       - name: Upload Test Results

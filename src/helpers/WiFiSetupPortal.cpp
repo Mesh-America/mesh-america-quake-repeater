@@ -3,6 +3,7 @@
 #if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
 
 #include <WiFi.h>
+#include <helpers/esp32/StaticHtml.h>
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <esp_wifi.h>
@@ -23,19 +24,6 @@ static const uint32_t CONNECT_TIMEOUT_MS = 20000;
 // The rendered success page remains in the browser after the setup SSID
 // disappears; allow one second for the HTTP response to flush first.
 static const uint32_t AP_CLOSE_DELAY_MS = 1000;
-
-static const char SETUP_PAGE[] = R"HTML(<!doctype html>
-<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MeshCore WiFi setup</title><style>
-body{font-family:sans-serif;max-width:28rem;margin:2rem auto;padding:0 1rem;color:#222}
-label{display:block;margin-top:1rem}input,button{box-sizing:border-box;width:100%;font-size:1rem;padding:.7rem;margin-top:.35rem}
-button{margin-top:1.2rem}small{color:#555}</style></head><body>
-<h2>MeshCore WiFi setup</h2><p>Enter the WiFi network this node should join.</p>
-<form method="post" action="/save">
-<label>SSID<input name="ssid" maxlength="31" required autocomplete="off"></label>
-<label>Password<input name="password" type="password" maxlength="64" autocomplete="off"></label>
-<small>Leave blank for an open network. A 64-character key must be hexadecimal.</small>
-<button type="submit">Save and connect</button></form></body></html>)HTML";
 
 struct PortalImpl {
   WiFiServer server{80};
@@ -257,7 +245,11 @@ static void handleClient(PortalImpl* impl, WiFiClient& client) {
   } else if (get_request) {
     // Serve the form for every GET path. Together with wildcard DNS this makes
     // common captive-portal probes land on the setup page.
-    sendResponse(client, 200, "OK", "text/html", SETUP_PAGE);
+    client.printf("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                  "Content-Encoding: gzip\r\nContent-Length: %u\r\n"
+                  "Connection: close\r\nCache-Control: no-store\r\n\r\n",
+                  static_cast<unsigned>(MESH_HTML_WIFI_SETUP_LEN));
+    client.write(MESH_HTML_WIFI_SETUP, MESH_HTML_WIFI_SETUP_LEN);
   } else {
     sendResponse(client, 404, "Not Found", "text/plain", "Not found.");
   }

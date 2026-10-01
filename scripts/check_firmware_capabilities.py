@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import struct
 import zipfile
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "mota"))
 from motalib import parse_nrf52_layout
@@ -75,6 +76,11 @@ def parse_args() -> argparse.Namespace:
         help="Require TEXT to be present in the linked image.",
     )
     parser.add_argument(
+        "--expect-gzip", action="append", default=[],
+        metavar="CAPABILITY=TEXT",
+        help="Require TEXT inside a complete gzip asset in the linked image.",
+    )
+    parser.add_argument(
         "--expect-application", action="append", default=[],
         metavar="CAPABILITY=TEXT",
         help="Require TEXT in the packaged firmware.bin or DFU application, not ELF metadata.",
@@ -84,6 +90,24 @@ def parse_args() -> argparse.Namespace:
 
 def stable_unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
+
+
+def linked_gzip_assets(image):
+    """Inspect bounded, CRC-validated assets; ELF strings alone are not proof."""
+    assets = []
+    offset = 0
+    while True:
+        offset = image.find(b"\x1f\x8b\x08", offset)
+        if offset < 0:
+            return assets
+        decoder = zlib.decompressobj(31)
+        try:
+            decoded = decoder.decompress(image[offset:], 1024 * 1024 + 1)
+            if decoder.eof and len(decoded) <= 1024 * 1024:
+                assets.append(decoded)
+        except zlib.error:
+            pass
+        offset += 3
 
 
 def read_application(args):
@@ -169,6 +193,8 @@ def main() -> int:
             malformed = True
     expectations = [(value, image, "linked image") for value in args.expect]
     expectations += [(value, application, "packaged application") for value in args.expect_application]
+    gzip_assets = linked_gzip_assets(image) if args.expect_gzip else []
+    expectations += [(value, gzip_assets, "linked gzip asset") for value in args.expect_gzip]
     for expectation, content, source in expectations:
         if "=" not in expectation:
             print(
@@ -178,7 +204,9 @@ def main() -> int:
             malformed = True
             continue
         capability, needle = expectation.split("=", 1)
-        present = bool(needle) and needle.encode("utf-8") in content
+        encoded = needle.encode("utf-8")
+        present = bool(needle) and (any(encoded in asset for asset in content)
+                                  if source == "linked gzip asset" else encoded in content)
         checks.append(
             {
                 "capability": capability,
