@@ -21,7 +21,7 @@ from package_cascade_release import category, collect_artifacts
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_VERSION = "v1.17.1.7-halo-keymind-cascade-dev"
+DEFAULT_VERSION = "v1.17.1.8-halo-keymind-cascade-dev"
 RADIO = {"frequency_mhz": 910.525, "bandwidth_khz": 62.5,
          "spreading_factor": 7, "coding_rate": 5}
 
