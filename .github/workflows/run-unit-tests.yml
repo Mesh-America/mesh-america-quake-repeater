@@ -194,10 +194,13 @@ jobs:
       - name: Verify nRF52 SoftDevice LTO and persistent BLE subscriptions
         env:
           MESHCORE_REQUIRE_ARM_COMPILER: '1'
+          MESHCORE_REQUIRE_DFU_EMULATOR: '1'
         run: |
           pio pkg install --global --tool 'platformio/toolchain-gccarmnoneeabi@1.140201.0'
           python3 -B test/test_nrf52_svc_compat.py -v
           python3 -B test/test_nrf52_ble_cccd_fix.py -v
+          pip install unicorn==2.1.4
+          python3 -B test/test_nrf52_ble_dfu_fix.py -v
 
       - name: Verify WiFi, ESP-NOW and combined wireless controls
         run: |
