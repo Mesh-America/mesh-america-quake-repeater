@@ -3631,6 +3631,38 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 #endif
 
 #if defined(ESP32) && defined(WIFI_SSID)
+  if (strcmp(command, "get wifi.ip") == 0) {
+    char ip[16] = {};
+#ifdef WITH_WEBCONFIG
+    if (WebConfigServer::getSetupInfo(nullptr, 0, ip, sizeof(ip))) {
+      snprintf(reply, reply_size, "> %s", ip);
+      return true;
+    }
+#endif
+    snprintf(reply, reply_size, "> %s", isCompanionWiFiConnected()
+        ? WiFi.localIP().toString().c_str() : "(not connected)");
+    return true;
+  }
+  if (strcmp(command, "get wifi.enabled") == 0) {
+    snprintf(reply, reply_size, "> %u", (unsigned)_prefs.wifi_enabled);
+    return true;
+  }
+  if (strncmp(command, "set wifi.enabled ", 17) == 0) {
+    int32_t enabled;
+    if (!mesh::cli::parseIntegerStrict(command + 17, enabled)
+        || enabled < 0 || enabled > 1) {
+      snprintf(reply, reply_size, "Error: WiFi enabled must be 0 or 1");
+    } else if (!setCompanionWiFiEnabled(enabled != 0)) {
+      snprintf(reply, reply_size, "Error: WiFi setting could not be saved");
+    } else {
+#if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
+      snprintf(reply, reply_size, "OK - reboot to apply WiFi settings");
+#else
+      snprintf(reply, reply_size, "OK - WiFi setting saved");
+#endif
+    }
+    return true;
+  }
   if (strcmp(command, "get display.wifi") == 0) {
     formatCompanionWiFiDisplayStatus(reply, reply_size);
     return true;
@@ -3747,6 +3779,10 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     switch (wifi_key) {
       case mesh::cli::StandaloneWiFiKey::SSID:
         WebConfigServer::formatWiFiSSID(reply, reply_size);
+        // The official app recognizes this sentinel as an empty SSID.
+        if (strcmp(reply, "> (not configured)") == 0) {
+          snprintf(reply, reply_size, "> (not set)");
+        }
         return true;
       case mesh::cli::StandaloneWiFiKey::Status:
         formatCompanionWiFiStatus(reply, reply_size);
@@ -5048,8 +5084,9 @@ void MyMesh::handleCmdFrame(size_t len) {
   } else if (mesh::companion::isRunCliFrame(cmd_frame[0], len)) { // V14+
     int i = 1;
     char *text = (char *)&cmd_frame[i];
-    int tlen = len - i;
-    if (memchr(text, 0, tlen) != NULL) {
+    const size_t tlen = mesh::companion::cliCommandTextLength(
+        &cmd_frame[i], len - i);
+    if (tlen == 0) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     } else {
       text[tlen] = 0; // ensure null

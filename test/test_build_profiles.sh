@@ -1366,6 +1366,19 @@ expectations=" ${BUILD_EXPECTATIONS[*]} "
 [[ "$expectations" != *"Full Companion terminal listening"* ]] \
   || fail "ESP32 Full contract still depends on optional debug logging"
 
+# Every ESP32 Full Companion must ship the official app's WiFi controls.
+# These checks apply to the packaged binary, not debug strings in the ELF.
+for wifi_target in Station_G2_companion_radio_full \
+    heltec_v4_2_v4_3_companion_radio_full_femon \
+    SenseCapIndicator-LoRa_companion_radio_full; do
+  declare_build_capability_contract "$wifi_target" ESP32_PLATFORM
+  app_expectations=" ${BUILD_APPLICATION_EXPECTATIONS[*]} "
+  for operation in get_enabled set_enabled get_ssid set_ssid get_password set_password get_status get_ip; do
+    [[ "$app_expectations" == *"companion.app_wifi.${operation}="* ]] \
+      || fail "$wifi_target omitted app WiFi $operation from packaged qualification"
+  done
+done
+
 BUILD_CAPABILITIES=()
 BUILD_REDUCTIONS=()
 BUILD_EXPECTATIONS=()
@@ -1402,6 +1415,8 @@ expectations=" ${BUILD_EXPECTATIONS[*]} "
   || fail "nRF52 Full contract omitted USB folder seeding"
 [[ "$expectations" != *"companion.network_terminal="* ]] \
   || fail "nRF52 Full contract promised an ESP32-only network terminal"
+[[ " ${BUILD_APPLICATION_EXPECTATIONS[*]} " != *"companion.app_wifi."* ]] \
+  || fail "nRF52 Full contract promised ESP32 app WiFi settings"
 
 BUILD_PROFILE_FOR_TARGET=standard
 for rak_target in \

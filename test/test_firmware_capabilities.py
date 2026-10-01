@@ -110,6 +110,31 @@ class FirmwareCapabilityCheckerTest(unittest.TestCase):
         self.assertIn("logging.usb.packets", manifest["capabilities"])
         self.assertEqual(manifest["verification"][0]["source"], "packaged application")
 
+    def test_full_app_wifi_gate_rejects_missing_read_or_save_operation(self):
+        operations = {
+            "get_enabled": "get wifi.enabled",
+            "set_enabled": "set wifi.enabled ",
+            "get_ssid": "> (not set)",
+            "set_ssid": "OK - WiFi SSID saved",
+            "get_password": "get wifi.pwd",
+            "set_password": "OK - WiFi password saved",
+            "get_status": "wifi.status",
+            "get_ip": "get wifi.ip",
+        }
+        arguments = []
+        for operation, marker in operations.items():
+            arguments += ["--expect-application", f"companion.app_wifi.{operation}={marker}"]
+        # A complete ELF must not hide a missing operation in the shipped BIN.
+        linked = "\0".join(operations.values()).encode()
+        for missing in [None, *operations]:
+            application = "\0".join(marker for operation, marker in operations.items()
+                                     if operation != missing).encode()
+            with self.subTest(missing=missing):
+                result, manifest = self.run_checker(
+                    linked, *arguments, artifacts={"firmware-bin": application})
+                self.assertEqual(result.returncode, 0 if missing is None else 1, result.stderr)
+                self.assertEqual(manifest["verified"], missing is None)
+
     def test_full_logging_requires_packet_code_as_well_as_the_setting(self):
         expectations = ["--expect-application", "logging.usb.control=usb.logging",
                         "--expect-application", "logging.usb.packets=packet logger"]
