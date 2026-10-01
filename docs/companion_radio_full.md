@@ -40,6 +40,35 @@ a busy radio rollback remains pending for recovery instead of reporting success.
 | LoRa self-update | No | No |
 | Optional self-update | WiFi on existing dual-app layouts; USB on single-app layouts | Bluetooth DFU with a compatible bootloader; USB always supported |
 
+### nRF52 Bluetooth reconnect qualification
+
+Full Companions persist the paired client's notification subscriptions (CCCDs)
+alongside its bond keys. A RAM-only subscription cache is insufficient: after
+reboot, a phone can retain its bond and subscription while the node has disabled
+notifications. Bluetooth then shows Connected, but Companion replies do not
+reach the app. The RAM cache remains useful for warm reconnects; the persistent
+bond record restores subscriptions after reboot.
+
+The nRF52 build force-includes `SoftDeviceSvcCompat.h` in both application and
+framework compilation. It prevents LTO from discarding memory reads and writes
+performed by Nordic supervisor calls, including queries used to save CCCDs.
+`test/test_nrf52_svc_compat.py` compiles a real ARM regression with the build's
+LTO and pointer-analysis options and compares it with the unprotected wrapper.
+
+On an already paired test node, run the hardware regression with `bleak`:
+
+```sh
+python3 scripts/check_nrf52_ble_reconnect.py \
+  --address D1:A0:86:CD:BB:C6 --board "Seeed Tracker T1000-E" \
+  --version <expected-firmware-hash> --reboot
+```
+
+This checks app-style NUL-terminated CLI commands, reboots the selected node,
+and reads the saved subscription before the host subscribes again. It also
+checks automatic release of a secured link with no Companion traffic, followed
+by a normal reconnect and working CLI. It does not clear pairing keys or change
+preferences. Fresh pairing with the current PIN is a separate initial gate.
+
 ### SenseCAP Indicator transport and rendering exception
 
 Both SenseCAP Indicator Full layouts keep USB available and start exactly one
