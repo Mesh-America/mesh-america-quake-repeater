@@ -1,6 +1,11 @@
 # MeshCore documentation
 
-Choose firmware with the [firmware picker](firmware_picker.md), then read the [current 1.17.1.8 release notes](releases/1.17.1.8.md) before installing. For help with a device already in service, start with the [FAQ](faq.md).
+Choose firmware with the [firmware picker](firmware_picker.md). For help with a device already in service, start with the [FAQ](faq.md).
+
+## Current release
+
+- [1.17.1.8 USA Cascade release notes](releases/1.17.1.8.md)
+- [Test Results](test-results/index.md) — validation archive and 1.17.1.8 Preview 1 qualification evidence
 
 ## Documentation
 
@@ -20,7 +25,6 @@ The navigation groups the remaining guides under Documentation, including board-
 ## Engineering records
 
 - [Research](research/index.md) — design notes, diagnostics, and historical update-chain studies
-- [Test Results](test-results/index.md) — measured validation reports and Preview 1 qualification evidence
 - [Old Releases](old-releases/index.md) — historical release notes and supporting files
 
 Found a mistake or missing information? [Edit the documentation](https://github.com/mikecarper/MeshCore/tree/keymindCascade/docs).
