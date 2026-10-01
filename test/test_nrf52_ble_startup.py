@@ -30,6 +30,7 @@ HARNESS = r'''
 #include <helpers/BluetoothMac.h>
 #include <helpers/BleMotaProtocol.h>
 #include <helpers/nrf52/SecuritySessionTimer.h>
+#include <helpers/nrf52/BleDebugTrace.h>
 #ifndef COMPANION_FEATURE_BLE_MOTA_SOURCE
 #define COMPANION_FEATURE_BLE_MOTA_SOURCE 1
 #endif
