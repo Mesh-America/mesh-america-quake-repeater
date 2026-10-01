@@ -103,7 +103,7 @@ class LoggingSleepContractTest(unittest.TestCase):
         for path in (
             "docs/cli_commands.md", "docs/role_feature_switches.md",
             "docs/full_companion_features.md", "docs/companion_radio_full.md",
-            "docs/firmware_picker.md", "docs/releases/1.17.1.5.md",
+            "docs/firmware_picker.md", "docs/old-releases/1.17.1.5.md",
         ):
             with self.subTest(path=path):
                 text = (ROOT / path).read_text(encoding="utf-8")
@@ -114,7 +114,7 @@ class LoggingSleepContractTest(unittest.TestCase):
 
     def test_wifi_exception_is_documented_with_running_state_check(self):
         for path in ("docs/cli_commands.md", "docs/role_feature_switches.md",
-                     "docs/releases/1.17.1.5.md"):
+                     "docs/old-releases/1.17.1.5.md"):
             with self.subTest(path=path):
                 text = (ROOT / path).read_text(encoding="utf-8")
                 paragraphs = [

@@ -1,7 +1,7 @@
 # Releasing Firmware
 
 For the USA Cascade 1.17.1.5 matrix, use
-[the option 3 release instructions](docs/releases/1.17.1.5.md).
+[the option 3 release instructions](docs/old-releases/1.17.1.5.md).
 Package the qualified outputs with `scripts/package_cascade_release.py`.
 Local staging does not publish or push anything. Include the
 [feature switches by role](docs/role_feature_switches.md),
