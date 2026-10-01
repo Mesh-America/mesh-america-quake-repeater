@@ -28,6 +28,8 @@ def partition_migrations():
 def capacity_note(reductions, defines):
     notes = []
     for reduction in reductions:
+        if reduction == 'display.canvas limited to 320x320 internal pixels, scaled to the 480x480 panel; 350 contacts, 512 queued frames and all Full transports retained':
+            notes.append('Display renders at 320x320 and scales to the 480x480 panel to preserve internal RAM. All Full transports, 350 contacts, 512 queued messages and full-length message previews are retained.')
         contacts = re.fullmatch(r'companion.capacity limited to (\d+) contacts for runtime RAM; (\d+) queued frames and all Full transports retained', reduction)
         compact = re.fullmatch(r'companion.capacity limited to (\d+) contacts, (\d+) channels, and (\d+) queued frames by measured internal DRAM', reduction)
         queue = re.fullmatch(r'nRF52 Full: (\d+) offline frames normally; (\d+) while mOTA borrows queue storage', reduction)
