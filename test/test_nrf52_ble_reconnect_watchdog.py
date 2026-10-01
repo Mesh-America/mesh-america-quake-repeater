@@ -22,6 +22,7 @@ HARNESS = r'''
 #define BLE_COMPANION_START_TIMEOUT_MS 15000
 #define BLE_CONN_HANDLE_INVALID 0xffff
 #define BLE_DEBUG_PRINTLN(...) do {} while (0)
+#include <helpers/nrf52/BleDebugTrace.h>
 
 static uint32_t current_millis;
 uint32_t millis() { return current_millis; }

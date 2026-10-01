@@ -2,11 +2,18 @@
 #include "../BluetoothMac.h"
 #include "../CompanionFrameQueue.h"
 #include "SoftDeviceState.h"
+#include "BleDebugTrace.h"
 #include <stdio.h>
 #include <string.h>
 #include "ble_gap.h"
 #include "ble_hci.h"
 #include <utility/bonding.h>
+
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+extern "C" {
+__attribute__((used, externally_visible)) MeshBleTraceBuffer mesh_ble_trace;
+}
+#endif
 
 // Magic numbers came from actual testing
 #define BLE_HEALTH_CHECK_INTERVAL  10000  // Advertising watchdog check every 10 seconds
@@ -29,6 +36,25 @@
 #define BLE_RX_DRAIN_BUF_SIZE      32
 
 static SerialBLEInterface* instance = nullptr;
+
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+void SerialBLEInterface::formatDebugState(char* reply, size_t capacity) {
+  snprintf(reply, capacity,
+      "> enabled=%u,ready=%u,handle=%u,secured=%u,adv=%u,conn=%u,data=%u,txq=%u,rxq=%u,recovery=%u,notify=%u,mtu=%u",
+      (unsigned)_isEnabled, (unsigned)_begin_ready, (unsigned)_conn_handle,
+      (unsigned)_isDeviceConnected, (unsigned)Bluefruit.Advertising.isRunning(),
+      (unsigned)Bluefruit.connected(),
+      (unsigned)_companionDataSeen.load(std::memory_order_acquire),
+      (unsigned)send_queue_len, (unsigned)recv_queue_len,
+      (unsigned)_tx_disconnect_recovery.pending(),
+      (unsigned)(_conn_handle != BLE_CONN_HANDLE_INVALID && bleuart.notifyEnabled(_conn_handle)),
+      (unsigned)_debug_mtu.load());
+}
+void meshBleTraceState(char* reply, size_t capacity) {
+  if (instance) instance->formatDebugState(reply, capacity);
+  else snprintf(reply, capacity, "> Bluetooth not initialized");
+}
+#endif
 
 static bool formatDeviceName(char* dest, size_t capacity,
                              const char* prefix, const char* name) {
@@ -103,6 +129,7 @@ bool mesh_nrf52_restore_ram_cccd(uint16_t handle,
   const uint32_t status = sd_ble_gatts_sys_attr_set(
       handle, cccd_ram_cache.attrs, cccd_ram_cache.length,
       CCCD_SYS_ATTR_FLAGS);
+  meshBleTrace(0xf041, handle, status, cccd_ram_cache.length);
   if (status != NRF_SUCCESS) {
     BLE_DEBUG_PRINTLN("CCCD RAM initialization failed: %lu",
                       (unsigned long)status);
@@ -122,6 +149,7 @@ static void captureCccdInRam(uint16_t handle, const ble_gap_addr_t& peer) {
   // Retain a local reload barrier in addition to the global SVC ABI guard.
   // The original SDK wrapper does not declare writes through this pointer.
   __asm__ __volatile__("" ::: "memory");
+  meshBleTrace(0xf042, handle, status, length);
   if (status != NRF_SUCCESS || length == 0
       || length > CCCD_RAM_CACHE_MAX) {
     BLE_DEBUG_PRINTLN("CCCD RAM capture: status=%lu len=%u",
@@ -146,6 +174,10 @@ static bool isBondAuthenticationFailure(uint8_t reason) {
 }
 
 void SerialBLEInterface::onConnect(uint16_t connection_handle) {
+  meshBleTrace(0xf001, connection_handle);
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  mesh_ble_trace.connects.fetch_add(1);
+#endif
   BLE_DEBUG_PRINTLN("SerialBLEInterface: connected handle=0x%04X", connection_handle);
   if (instance) {
     instance->_pairingRequestPending.store(false, std::memory_order_release);
@@ -162,6 +194,12 @@ void SerialBLEInterface::onConnect(uint16_t connection_handle) {
 }
 
 void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason) {
+  meshBleTrace(0xf002, connection_handle, reason);
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  mesh_ble_trace.disconnects.fetch_add(1);
+  mesh_ble_trace.last_reason.store(reason);
+  mesh_ble_trace.last_disconnect_ms.store(millis());
+#endif
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected handle=0x%04X reason=%u", connection_handle, reason);
   if (instance) {
     if (instance->_conn_handle == connection_handle) {
@@ -215,6 +253,7 @@ size_t SerialBLEInterface::sendMotaRequest(void* context,
 #endif
 
 void SerialBLEInterface::onSecured(uint16_t connection_handle) {
+  meshBleTrace(0xf003, connection_handle);
   BLE_DEBUG_PRINTLN("SerialBLEInterface: onSecured handle=0x%04X", connection_handle);
   if (instance) {
     if (instance->isValidConnection(connection_handle, true)) {
@@ -234,6 +273,11 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
       }
 
       instance->_isDeviceConnected = true;
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+      mesh_ble_trace.secured.fetch_add(1);
+      meshBleTrace(0xf006, connection_handle, conn->bonded(),
+                   instance->bleuart.notifyEnabled(connection_handle));
+#endif
       if (conn->bonded()) {
         instance->noteSuccessfulConnection(conn->getPeerAddr());
       } else {
@@ -255,6 +299,8 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
       conn_params.conn_sup_timeout = BLE_CONN_SUP_TIMEOUT;
       
       uint32_t err_code = sd_ble_gap_conn_param_update(connection_handle, &conn_params);
+      meshBleTrace(0xf011, connection_handle, err_code,
+                   BLE_SLAVE_LATENCY | (BLE_CONN_SUP_TIMEOUT << 16));
       if (err_code == NRF_SUCCESS) {
         BLE_DEBUG_PRINTLN("Connection parameter update requested: %u-%ums interval, latency=%u, %ums timeout",
                          conn_params.min_conn_interval * 5 / 4,  // convert to ms (1.25ms units)
@@ -271,6 +317,7 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
 }
 
 bool SerialBLEInterface::onPairingPasskey(uint16_t connection_handle, uint8_t const passkey[6], bool match_request) {
+  meshBleTrace(0xf004, connection_handle, match_request);
   (void)passkey;
   BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing passkey request match=%d", match_request);
   if (instance && instance->isValidConnection(connection_handle)) {
@@ -280,6 +327,7 @@ bool SerialBLEInterface::onPairingPasskey(uint16_t connection_handle, uint8_t co
 }
 
 void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t auth_status) {
+  meshBleTrace(0xf005, connection_handle, auth_status);
   BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing complete handle=0x%04X status=%u", connection_handle, auth_status);
   if (instance) {
     if (instance->isValidConnection(connection_handle)) {
@@ -313,7 +361,72 @@ void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t a
 }
 
 void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  uint32_t detail = 0, extra = 0;
+  const ble_gap_conn_params_t* params = nullptr;
+  if (evt->header.evt_id == BLE_GAP_EVT_CONNECTED) {
+    params = &evt->evt.gap_evt.params.connected.conn_params;
+  } else if (evt->header.evt_id == BLE_GAP_EVT_CONN_PARAM_UPDATE) {
+    params = &evt->evt.gap_evt.params.conn_param_update.conn_params;
+  } else if (evt->header.evt_id == BLE_GAP_EVT_DISCONNECTED) {
+    detail = evt->evt.gap_evt.params.disconnected.reason;
+  } else if (evt->header.evt_id == BLE_GAP_EVT_ADV_SET_TERMINATED) {
+    detail = evt->evt.gap_evt.params.adv_set_terminated.reason;
+  }
+  if (evt->header.evt_id == BLE_GAP_EVT_AUTH_STATUS) {
+    const auto& auth = evt->evt.gap_evt.params.auth_status;
+    detail = auth.auth_status;
+    extra = auth.error_src | (auth.bonded << 8) | (auth.lesc << 9);
+  } else if (evt->header.evt_id == BLE_GAP_EVT_CONN_SEC_UPDATE) {
+    const auto& sec = evt->evt.gap_evt.params.conn_sec_update.conn_sec;
+    detail = sec.sec_mode.sm | (sec.sec_mode.lv << 8);
+    extra = sec.encr_key_size;
+  } else if (evt->header.evt_id == BLE_GAP_EVT_TIMEOUT) {
+    detail = evt->evt.gap_evt.params.timeout.src;
+  } else if (evt->header.evt_id == BLE_GATTS_EVT_WRITE) {
+    const auto& write = evt->evt.gatts_evt.params.write;
+    detail = write.handle | (write.len << 16);
+    extra = write.op;
+    if (write.uuid.type == BLE_UUID_TYPE_BLE
+        && write.uuid.uuid == BLE_UUID_DESCRIPTOR_CLIENT_CHAR_CONFIG) {
+      extra |= 0x100;
+      // Only a descriptor's public subscription bits; never characteristic data.
+      if (write.len == 2) extra |= (write.data[0] | (write.data[1] << 8)) << 16;
+    }
+  } else if (evt->header.evt_id == BLE_GATTS_EVT_EXCHANGE_MTU_REQUEST) {
+    detail = evt->evt.gatts_evt.params.exchange_mtu_request.client_rx_mtu;
+  } else if (evt->header.evt_id == BLE_GATTS_EVT_HVN_TX_COMPLETE) {
+    detail = evt->evt.gatts_evt.params.hvn_tx_complete.count;
+  } else if (evt->header.evt_id == BLE_GATTS_EVT_TIMEOUT) {
+    detail = evt->evt.gatts_evt.params.timeout.src;
+  } else if (evt->header.evt_id == BLE_GAP_EVT_PHY_UPDATE) {
+    const auto& phy = evt->evt.gap_evt.params.phy_update;
+    detail = phy.status;
+    extra = phy.tx_phy | (phy.rx_phy << 8);
+  } else if (evt->header.evt_id == BLE_GAP_EVT_DATA_LENGTH_UPDATE) {
+    const auto& data = evt->evt.gap_evt.params.data_length_update.effective_params;
+    detail = data.max_tx_octets | (data.max_rx_octets << 16);
+    extra = data.max_tx_time_us | (data.max_rx_time_us << 16);
+  }
+  if (params) {
+    detail = params->min_conn_interval | (params->max_conn_interval << 16);
+    extra = params->slave_latency | (params->conn_sup_timeout << 16);
+  }
+  meshBleTrace(evt->header.evt_id, evt->evt.common_evt.conn_handle, detail, extra);
+#else
+  meshBleTrace(evt->header.evt_id, evt->evt.common_evt.conn_handle);
+#endif
   if (!instance) return;
+
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  if (evt->header.evt_id == BLE_GAP_EVT_CONNECTED
+      || evt->header.evt_id == BLE_GATTS_EVT_EXCHANGE_MTU_REQUEST) {
+    BLEConnection* conn = Bluefruit.Connection(evt->evt.common_evt.conn_handle);
+    instance->_debug_mtu.store(conn ? conn->getMtu() : 0);
+  } else if (evt->header.evt_id == BLE_GAP_EVT_DISCONNECTED) {
+    instance->_debug_mtu.store(0);
+  }
+#endif
 
   if (evt->header.evt_id == BLE_GAP_EVT_CONNECTED) {
     ble_gap_evt_connected_t const* connected = &evt->evt.gap_evt.params.connected;
@@ -542,7 +655,9 @@ bool SerialBLEInterface::advertisingAllowed() const {
 
 bool SerialBLEInterface::startAdvertising(const char* failure_cause) {
   if (!advertisingAllowed()) return false;
-  if (Bluefruit.Advertising.start(0)) return true;
+  const bool started = Bluefruit.Advertising.start(0);
+  meshBleTrace(0xf012, 0xffff, started, _bonded_only);
+  if (started) return true;
   if (_bonded_only) requestBondedOnlyRecovery(failure_cause);
   return false;
 }
@@ -561,6 +676,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   _begin_attempted = true;
   _begin_failure[0] = 0;
   instance = this;
+  meshBleTrace(0xf000, 0xffff, NRF_POWER->RESETREAS, BLE_TX_POWER);
   _successfulConnectionPending.store(false, std::memory_order_release);
   _successfulConnectionStarted.store(0, std::memory_order_relaxed);
   _companionDataSeen.store(false, std::memory_order_release);
@@ -655,6 +771,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   ppcp_params.conn_sup_timeout = BLE_CONN_SUP_TIMEOUT;
   
   uint32_t err_code = sd_ble_gap_ppcp_set(&ppcp_params);
+  meshBleTrace(0xf010, 0xffff, err_code);
   if (err_code == NRF_SUCCESS) {
     BLE_DEBUG_PRINTLN("PPCP set: %u-%ums interval, latency=%u, %ums timeout",
                      ppcp_params.min_conn_interval * 5 / 4,  // convert to ms (1.25ms units)
@@ -691,6 +808,10 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
     return false;
   }
   bleuart.setRxCallback(onBleUartRX);
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  bleuart.setNotifyCallback(onBleUartNotify);
+  bleuart.setRxOverflowCallback(onBleUartOverflow);
+#endif
 
   // Register the legacy DFU service before the optional mOTA service. A
   // fielded SoftDevice has a fixed GATT table: reserve the ordinary Companion
@@ -934,6 +1055,7 @@ void SerialBLEInterface::serviceTxRecovery(uint32_t now) {
 
   const uint32_t result = sd_ble_gap_disconnect(
       _conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+  meshBleTrace(0xf013, _conn_handle, result, 1);
   if (result == NRF_SUCCESS) {
     BLE_DEBUG_PRINTLN("SerialBLEInterface: stalled TX disconnect requested");
   } else if (result == NRF_ERROR_INVALID_STATE) {
@@ -946,6 +1068,7 @@ void SerialBLEInterface::serviceTxRecovery(uint32_t now) {
 }
 
 void SerialBLEInterface::recoverStalledTx(const char* cause) {
+  meshBleTrace(0xf020, _conn_handle, send_queue_len, recv_queue_len);
   if (_tx_disconnect_recovery.pending()) return;
 
   BLE_DEBUG_PRINTLN("SerialBLEInterface: %s; forcing reconnect", cause);
@@ -1000,7 +1123,9 @@ void SerialBLEInterface::enable() {
 
 void SerialBLEInterface::disconnect() {
   if (_conn_handle != BLE_CONN_HANDLE_INVALID) {
-    sd_ble_gap_disconnect(_conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+    const uint32_t result = sd_ble_gap_disconnect(_conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+    meshBleTrace(0xf013, _conn_handle, result, 0);
+    (void)result;
   }
 }
 
@@ -1022,6 +1147,11 @@ void SerialBLEInterface::disable() {
 
 void SerialBLEInterface::loop() {
   const uint32_t now = (uint32_t)millis();
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  if (_debug_last_loop_ms) meshBleTraceMax(mesh_ble_trace.max_loop_gap_ms,
+                                          now - _debug_last_loop_ms);
+  _debug_last_loop_ms = now;
+#endif
   serviceBondedOnlyTransition();
   if (_tx_disconnect_recovery.pending()) {
     serviceTxRecovery(now);
@@ -1034,6 +1164,7 @@ void SerialBLEInterface::loop() {
       // Keep the two-minute PIN-entry window, but do not let an unfinished
       // security exchange occupy the only BLE connection indefinitely.
       BLE_DEBUG_PRINTLN("SerialBLEInterface: security setup timed out");
+      meshBleTrace(0xf021, _conn_handle);
       _security_timer.cancel();
       disconnect();
     }
@@ -1043,6 +1174,7 @@ void SerialBLEInterface::loop() {
                    now, BLE_COMPANION_START_TIMEOUT_MS)) {
       // iOS can report a secured BLE link while the app never establishes its
       // UART session. Release that occupied link so the app can reconnect.
+      meshBleTrace(0xf022, _conn_handle);
       recoverStalledTx("no Companion data after secured BLE connection");
     }
     return;
@@ -1053,6 +1185,7 @@ void SerialBLEInterface::loop() {
     _last_health_check = now;
     if (!isAdvertising()) {
       BLE_DEBUG_PRINTLN("SerialBLEInterface: advertising watchdog restarting");
+      meshBleTrace(0xf023);
       startAdvertising("advertising watchdog restart failed");
     }
   }
@@ -1068,6 +1201,7 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
   if (connected && len > 0) {
     if (!mesh::enqueueCompanionFrame(send_queue, send_queue_len, FRAME_QUEUE_SIZE,
                                      src, len)) {
+      meshBleTrace(0xf033, _conn_handle, send_queue_len, len);
       BLE_DEBUG_PRINTLN("writeFrame(), send_queue is full!");
       return 0;
     }
@@ -1100,6 +1234,10 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
             frame_to_send.buf, frame_to_send.len);
 
         size_t written = writeBleUartFrame(frame_to_send);
+        meshBleTrace(0xf031, _conn_handle, frame_to_send.len, written);
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+        if (written) mesh_ble_trace.tx.fetch_add(1);
+#endif
         if (written == frame_to_send.len) {
           BLE_DEBUG_PRINTLN("writeBytes: sz=%u, hdr=%u", (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
           _last_retry_attempt = 0;
@@ -1112,6 +1250,7 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
           // The app cannot recover framing after receiving only part of one
           // protocol frame. Reconnect instead of following it with another
           // frame on the same BLE UART stream.
+          meshBleTrace(0xf025, _conn_handle, written, frame_to_send.len);
           recoverStalledTx("partial BLE UART frame");
           return 0;
         } else {
@@ -1125,6 +1264,7 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
             _last_retry_attempt = now;
             if (delivery_required) {
               if (_tx_stall_watchdog.noteBlocked((uint32_t)now)) {
+                meshBleTrace(0xf024, _conn_handle);
                 recoverStalledTx("command reply blocked for 10 seconds");
                 return 0;
               }
@@ -1160,6 +1300,8 @@ void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
     return;
   }
   
+  meshBleTrace(0xf030, conn_handle, instance->bleuart.available(),
+               instance->isConnected());
   if (instance->_conn_handle != conn_handle || !instance->isConnected()) {
     while (instance->bleuart.available() > 0) {
       instance->bleuart.read();
@@ -1172,6 +1314,7 @@ void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
       while (instance->bleuart.available() > 0) {
         instance->bleuart.read();
       }
+      meshBleTrace(0xf034, conn_handle, instance->recv_queue_len);
       BLE_DEBUG_PRINTLN("onBleUartRX: recv queue full, dropping data");
       break;
     }
@@ -1192,10 +1335,22 @@ void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
     instance->recv_queue[instance->recv_queue_len].len = read_len;
     instance->bleuart.readBytes(instance->recv_queue[instance->recv_queue_len].buf, read_len);
     instance->recv_queue_len++;
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+    mesh_ble_trace.rx.fetch_add(1);
+#endif
     instance->_companionDataSeen.store(true, std::memory_order_release);
     instance->_companion_start_timer.cancel();
   }
 }
+
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+void SerialBLEInterface::onBleUartNotify(uint16_t handle, bool enabled) {
+  meshBleTrace(0xf040, handle, enabled);
+}
+void SerialBLEInterface::onBleUartOverflow(uint16_t handle, uint16_t leftover) {
+  meshBleTrace(0xf035, handle, leftover);
+}
+#endif
 
 bool SerialBLEInterface::isConnected() const {
   return !_tx_disconnect_recovery.pending() && _isDeviceConnected &&

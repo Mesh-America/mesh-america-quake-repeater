@@ -66,6 +66,12 @@ class SerialBLEInterface : public BaseSerialInterface {
   bool _begin_ready = false;
   char _begin_failure[96] = {};
   char _active_name[48] = {};
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  uint32_t _debug_last_loop_ms = 0;
+  std::atomic<uint32_t> _debug_mtu{0};
+  static void onBleUartNotify(uint16_t handle, bool enabled);
+  static void onBleUartOverflow(uint16_t handle, uint16_t leftover);
+#endif
   bool _isDeviceConnected;
   uint16_t _conn_handle;
   unsigned long _last_health_check;
@@ -173,6 +179,9 @@ public:
   // Kept after a failed begin so a normal Companion terminal can report the
   // cause even when early USB logging was not available.
   const char* beginFailure() const { return _begin_failure; }
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  void formatDebugState(char* reply, size_t capacity);
+#endif
 
   void disconnect();
   void loop() override;

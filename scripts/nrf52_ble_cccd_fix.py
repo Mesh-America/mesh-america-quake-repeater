@@ -85,6 +85,32 @@ def patched_bluefruit_source(source):
     return source.replace(OLD_BEGIN, FIXED_BEGIN)
 
 
+def patched_trace_source(source):
+    """Bracket real BLE dispatch in diagnostic builds, including stuck handlers."""
+    include = '#include "bluefruit.h"\n'
+    entry = 'void AdafruitBluefruit::_ble_handler(ble_evt_t* evt)\n{\n'
+    exit_marker = '  if (_event_cb) _event_cb(evt);\n'
+    marker = '// MeshCore diagnostic dispatch trace'
+    if marker in source:
+        return source
+    if any(source.count(value) != 1 for value in (include, entry, exit_marker)):
+        raise RuntimeError("nRF52 BLE trace: unrecognized event dispatcher")
+    source = source.replace(include, include + '''
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+#include <helpers/nrf52/BleDebugTrace.h>
+#endif
+''')
+    source = source.replace(entry, entry + '''  // MeshCore diagnostic dispatch trace
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  meshBleTraceDispatchEnter(evt->header.evt_id, evt->evt.common_evt.conn_handle);
+#endif
+''')
+    return source.replace(exit_marker, exit_marker + '''#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  meshBleTraceDispatchExit(evt->header.evt_id, evt->evt.common_evt.conn_handle);
+#endif
+''')
+
+
 def replace_framework_source(build_env, node):
     source = Path(node.srcnode().get_abspath())
     if source.name not in ("BLEGatt.cpp", "BLEConnection.cpp", "bluefruit.cpp") or source.parent.name != "src":
@@ -96,6 +122,9 @@ def replace_framework_source(build_env, node):
         patched = patched_connection_source(original)
     else:
         patched = patched_bluefruit_source(original)
+        if "MESH_NRF52_BLE_TRACE" in str(build_env.get("CPPDEFINES", [])):
+            patched = patched_trace_source(patched)
+            build_env.AppendUnique(CPPPATH=[build_env.subst("$PROJECT_DIR/src")])
     build_env.AppendUnique(CPPPATH=[str(source.parent)])
     destination = Path(build_env.subst("$BUILD_DIR")) / "patched-nrf52-ble" / source.name
     destination.parent.mkdir(parents=True, exist_ok=True)
