@@ -4015,17 +4015,18 @@ apply_companion_radio_full_profile() {
     sensecapindicator-espnow_companion_radio_full|\
     sensecapindicator-lora_companion_radio_full|\
     sensecapindicator-lora-n16r2_companion_radio_full)
-      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_EXCLUSIVE_WIFI_BLE=1 -DINDICATOR_TRANSPORT_RENDER_PROFILE=1 -DUI_WIFI_SETUP_HOME_PAGE=1 -DWEBCONFIG_AP_PREFIX='\"MC-Set\"'"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_EXCLUSIVE_WIFI_BLE=1 -DUI_WIFI_SETUP_HOME_PAGE=1 -DWEBCONFIG_AP_PREFIX='\"MC-Set\"'"
+      if [ "${env_name,,}" = "sensecapindicator-espnow_companion_radio_full" ]; then
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DINDICATOR_TRANSPORT_RENDER_PROFILE=1"
+      fi
       ;;
   esac
 
-  # Allocate the native canvas while internal RAM is least fragmented. After
-  # preferences load, ESP-NOW+BLE shrinks it to 320x320 before BLE starts;
-  # every other combination retains native 480x480 rendering.
+  # Allocate the ESP-NOW native canvas while internal RAM is least fragmented.
+  # Preferences may shrink it to 320x320 before BLE starts. LoRa layouts use
+  # the fixed 320px profile below to leave room for alerts and held messages.
   case "${env_name,,}" in
-    sensecapindicator-espnow_companion_radio_full|\
-    sensecapindicator-lora_companion_radio_full|\
-    sensecapindicator-lora-n16r2_companion_radio_full)
+    sensecapindicator-espnow_companion_radio_full)
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UUI_ZOOM -DUI_ZOOM=1.0f -UUI_COORD_SCALE -DUI_COORD_SCALE=3"
       ;;
   esac
@@ -4061,11 +4062,16 @@ apply_companion_radio_full_profile() {
       record_build_reduction \
         "Wireless Paper Full: 350 contacts; 256 offline frames normally, 128 while mOTA borrows queue storage"
       ;;
-    generic_espnow_companion_radio_full|\
     heltec_ct62_companion_radio_full|\
-    heltec_v3_companion_radio_full|\
     xiao_c3_companion_radio_full|\
     heltec_tracker_v2_companion_radio_full_*)
+      append_platformio_build_unflags "-DMAX_CONTACTS=350 -DOFFLINE_QUEUE_SIZE=256"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=100 -DOFFLINE_QUEUE_SIZE=224"
+      record_build_reduction \
+        "companion.capacity limited to 100 contacts for runtime RAM; 224 queued frames and all Full transports retained"
+      ;;
+    generic_espnow_companion_radio_full|\
+    heltec_v3_companion_radio_full)
       # The 1.17.1.8 matrix exceeds the runtime heap budget at 150 contacts
       # after adding alerts and held DMs. Preserve the 256-frame queue, Full
       # transports and the unchanged runtime heap safety margin.
