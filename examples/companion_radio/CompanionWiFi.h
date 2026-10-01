@@ -44,6 +44,7 @@ enum class CompanionWiFiPowerSaveResult : uint8_t {
 // The requested state is persisted immediately. Network services transition
 // from the main loop so a button callback never tears down an active server.
 bool toggleCompanionWiFi();
+bool setCompanionWiFiEnabled(bool enabled);
 bool isCompanionWiFiEnabled();
 bool hasCompanionWiFiCredentials();
 // Display-facing station state. Arduino's cached WL status can briefly lag the

@@ -287,8 +287,9 @@ refusal, manual acceptance, held-message delivery, and matching ACK.
 `--invalid-signature-first` also checks that a decryptable introduction with
 an invalid Ed25519 signature does not add a contact.
 
-`CMD_RUN_CLI_COMMAND` is followed by the local CLI text without a terminating
-NUL. The device returns `RESP_CODE_CLI_REPLY` (`0x1D`) followed by the reply
+`CMD_RUN_CLI_COMMAND` is followed by the local CLI text with an optional final
+NUL, as sent by the official app. Clients that omit it remain supported.
+The device returns `RESP_CODE_CLI_REPLY` (`0x1D`) followed by the reply
 text. This is separate from sending a remote on-air CLI command with
 `CMD_SEND_TXT_MSG` and `TXT_TYPE_CLI_COMMAND`. The body must contain at least
 one byte and must not contain an embedded NUL. An unknown command is returned
@@ -303,6 +304,12 @@ WiFi/MQTT builds accept `get wifi.pwd`, `get mqttN.password`, and
 `get mqttN.token`. `get password` reports that Companion has no admin password;
 infrastructure roles return their own admin password on a local CLI connection.
 These privileges do not apply to CLI commands relayed over LoRa.
+ESP32 WiFi Companion builds expose the official app's `get/set wifi.enabled`,
+`get/set wifi.ssid`, and `get/set wifi.pwd` controls. Credentials use the shared
+WiFi store, and enablement is saved in node preferences. WiFi/BLE builds apply
+enablement from the main loop; exclusive WiFi/BLE builds apply it after reboot.
+`get wifi.status` reports the connection state and `get wifi.ip` reports the
+station address, the setup AP address, or `(not connected)`.
 `set freq <MHz>` works through command `0x42` and authorized LoRa CLI, like
 `set radio`; it saves the frequency and requires reboot to apply. See
 [local maintenance commands](terminal_chat_cli.md#local-maintenance-commands)

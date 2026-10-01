@@ -3354,6 +3354,17 @@ declare_build_capability_contract() {
       record_build_expectation "companion.wifi_ota_seeder" \
         "OTA seeder listening on :"
       record_build_expectation "web.webconfig" "start webconfig"
+      # WiFi/WebConfig alone does not prove the official app can configure it.
+      # Require every read/save operation in the uploadable application, so a
+      # Full build fails qualification if its app command handler is omitted.
+      record_application_expectation "companion.app_wifi.get_enabled" "get wifi.enabled"
+      record_application_expectation "companion.app_wifi.set_enabled" "set wifi.enabled "
+      record_application_expectation "companion.app_wifi.get_ssid" "> (not set)"
+      record_application_expectation "companion.app_wifi.set_ssid" "OK - WiFi SSID saved"
+      record_application_expectation "companion.app_wifi.get_password" "get wifi.pwd"
+      record_application_expectation "companion.app_wifi.set_password" "OK - WiFi password saved"
+      record_application_expectation "companion.app_wifi.get_status" "wifi.status"
+      record_application_expectation "companion.app_wifi.get_ip" "get wifi.ip"
       # This branch is constant-folded away when the expanded-profile marker
       # is missing. Make artifact qualification prove that canonical Full
       # Companion images really contain the bounded first-boot WiFi policy.

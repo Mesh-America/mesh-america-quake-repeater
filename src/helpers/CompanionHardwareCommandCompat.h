@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 namespace mesh {
 namespace companion {
@@ -30,6 +31,15 @@ static constexpr uint8_t kDeprecatedSetBluetoothName = 0x7F;
 
 inline bool isRunCliFrame(uint8_t command, size_t frame_len) {
   return command == kRunCliCommand && frame_len >= 2;
+}
+
+// The official app appends a NUL; other clients send just the text. Accept
+// either representation, but never execute a truncated or empty command.
+inline size_t cliCommandTextLength(const uint8_t* body, size_t length) {
+  if (body == nullptr || length == 0) return 0;
+  if (body[length - 1] == 0) --length;
+  if (length == 0 || memchr(body, 0, length) != nullptr) return 0;
+  return length;
 }
 
 inline bool isFemRxGainGet(uint8_t command) {

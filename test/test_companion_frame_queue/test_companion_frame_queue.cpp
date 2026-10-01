@@ -171,6 +171,35 @@ TEST(CompanionHardwareCommandCompat, BothShippedAliasBlocksRemainInbound) {
   EXPECT_FALSE(mesh::companion::isWiFiPowerSaveSet(0x7F));
 }
 
+TEST(CompanionHardwareCommandCompat, OfficialAppCliTerminatorIsOptional) {
+  const uint8_t command[] = "A7|get wifi.enabled";
+  const size_t text_length = sizeof(command) - 1;
+  EXPECT_EQ(text_length, mesh::companion::cliCommandTextLength(command, sizeof(command)));
+  EXPECT_EQ(text_length, mesh::companion::cliCommandTextLength(command, text_length));
+  const uint8_t single[] = {'x', 0};
+  EXPECT_EQ(1U, mesh::companion::cliCommandTextLength(single, 1));
+  EXPECT_EQ(1U, mesh::companion::cliCommandTextLength(single, 2));
+}
+
+TEST(CompanionHardwareCommandCompat, EmptyAndEmbeddedNulCliBodiesAreRejected) {
+  const uint8_t empty[] = {0};
+  const uint8_t embedded[] = {'v', 'e', 'r', 0, 'x'};
+  const uint8_t doubled[] = {'v', 'e', 'r', 0, 0};
+  EXPECT_EQ(0U, mesh::companion::cliCommandTextLength(nullptr, 1));
+  EXPECT_EQ(0U, mesh::companion::cliCommandTextLength(empty, 0));
+  EXPECT_EQ(0U, mesh::companion::cliCommandTextLength(empty, sizeof(empty)));
+  EXPECT_EQ(0U, mesh::companion::cliCommandTextLength(embedded, sizeof(embedded)));
+  EXPECT_EQ(0U, mesh::companion::cliCommandTextLength(doubled, sizeof(doubled)));
+}
+
+TEST(CompanionHardwareCommandCompat, FullSizeCliBodyDoesNotRequireExtraByte) {
+  uint8_t body[171];
+  memset(body, 'x', sizeof(body));
+  EXPECT_EQ(sizeof(body), mesh::companion::cliCommandTextLength(body, sizeof(body)));
+  body[sizeof(body) - 1] = 0;
+  EXPECT_EQ(sizeof(body) - 1, mesh::companion::cliCommandTextLength(body, sizeof(body)));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

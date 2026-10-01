@@ -1676,34 +1676,34 @@ void halt() {
     companion_wifi_setup_stop_requested = true;
   }
 
-  bool toggleCompanionWiFi() {
-    if (mesh::wireless::control().blocked(mesh::wireless::WiFi)) return false;
+  bool setCompanionWiFiEnabled(bool enabled) {
+    if (enabled && mesh::wireless::control().blocked(mesh::wireless::WiFi)) return false;
 #if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
-    const CompanionTransportMode current = getCompanionTransportMode();
-    const CompanionTransportMode selected =
-        current == CompanionTransportMode::WiFi
-            ? CompanionTransportMode::Bluetooth
-            : CompanionTransportMode::WiFi;
-    if (!selectCompanionTransportMode(selected)) {
-      WIFI_DEBUG_PRINTLN(
-          "Companion transport selection could not be saved");
-      return current == CompanionTransportMode::WiFi;
-    }
-    WIFI_DEBUG_PRINTLN(
-        "Companion transport %s saved; reboot required",
-        selected == CompanionTransportMode::WiFi ? "WiFi" : "Bluetooth");
-    return selected == CompanionTransportMode::WiFi;
+    return selectCompanionTransportMode(enabled ? CompanionTransportMode::WiFi
+                                               : CompanionTransportMode::Bluetooth);
 #else
-    companion_wifi_requested = !companion_wifi_requested;
-    the_mesh.getNodePrefs()->wifi_enabled = companion_wifi_requested ? 1 : 0;
-    the_mesh.savePrefs();
+    CompanionNodePrefs* prefs = the_mesh.getNodePrefs();
+    const uint8_t previous = prefs->wifi_enabled;
+    prefs->wifi_enabled = enabled ? 1 : 0;
+    if (!the_mesh.savePrefs()) {
+      prefs->wifi_enabled = previous;
+      return false;
+    }
+    companion_wifi_requested = enabled;
     if (!companion_wifi_requested && companion_wifi_active) {
       companion_wifi_disable_in_progress = true;
     }
-    WIFI_DEBUG_PRINTLN("BOOT/GPIO 0 click requested WiFi %s",
-                       companion_wifi_requested ? "on" : "off");
-    return companion_wifi_requested;
+    return true;
 #endif
+  }
+
+  bool toggleCompanionWiFi() {
+#if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
+    const bool current = getCompanionTransportMode() == CompanionTransportMode::WiFi;
+#else
+    const bool current = companion_wifi_requested;
+#endif
+    return setCompanionWiFiEnabled(!current) ? !current : current;
   }
 
   #if defined(WITH_WEBCONFIG) && defined(DISPLAY_CLASS) \
