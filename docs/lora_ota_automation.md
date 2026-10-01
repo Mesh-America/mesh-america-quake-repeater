@@ -964,6 +964,25 @@ bypasses signature/install checks. It does **not** fix later block-retry
 stalls on old firmware or relays beyond the controller's direct radio reach;
 the firmware update is the permanent fix.
 
+For a short path, `--legacy-relay-reboot-recovery` offers a lower-airtime
+alternative after that same exact `0/0` timeout. It requires one managed relay
+whose saved normal-channel and active temporary-channel routes are each **zero
+or one hop**, plus `--source-shares-controller`. Before any reboot, the runner
+checks the relay and destination identities, the exact failed manifest, and
+at least eight minutes of remaining transfer and target TempRadio time. It
+asks for a separate confirmation at the failure (or requires both this flag
+and `--yes` in unattended use). The relay's `reboot` CLI intentionally sends
+no reply: the runner returns the shared source/controller to normal radio,
+authenticates the relay's exact key there, re-arms only the remaining portion
+of the target's TempRadio lease, then proves the relay, destination and same
+manifest on the temporary channel before one pull retry. If the normal path
+cannot be proved after reboot, it stops instead of assuming the reboot worked;
+the other temporary leases still expire. A reboot also clears the relay's
+temporary radio setting, so manually rebooting it during a transfer without
+this re-arming sequence will break the temporary path. When both legacy
+recovery options are enabled, the reboot choice is offered first; declining
+it leaves the direct-cache workaround available on a zero-hop route.
+
 Read-only and replay-safe transmissions retry up to three times. Three retries
 or 90 seconds, whichever comes first, opens a 10-second stop-or-continue
 prompt when stdin is an interactive terminal. Continue remains the default on
