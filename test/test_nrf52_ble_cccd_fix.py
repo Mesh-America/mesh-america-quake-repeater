@@ -13,9 +13,10 @@ spec.loader.exec_module(module)
 
 
 class Nrf52BleCccdFixTest(unittest.TestCase):
-    def test_only_full_companions_skip_persistence(self):
+    def test_full_companions_also_persist_subscriptions(self):
         patched = module.patched_source("before\n" + module.OLD_SAVE + "after\n")
-        self.assertIn("!defined(COMPANION_RADIO_FULL) || !COMPANION_RADIO_FULL", patched)
+        self.assertNotIn("#if", patched)
+        self.assertIn("SoftDeviceSvcCompat.h", patched)
         self.assertIn("conn->saveCccd();", patched)
         self.assertEqual(module.patched_source(patched), patched)
 

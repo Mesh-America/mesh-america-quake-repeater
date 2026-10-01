@@ -52,10 +52,10 @@ static bool formatDeviceName(char* dest, size_t capacity,
 }
 
 #if defined(COMPANION_RADIO_FULL) && COMPANION_RADIO_FULL
-// Bluefruit's bonded CCCD flash write resets some nRF52 Full Companions.
-// Retain the small SoftDevice system-attribute image in RAM for reconnects
-// during this boot. A reboot intentionally discards it; the client can then
-// subscribe normally without a risky flash write.
+// Cache the small SoftDevice system-attribute image for warm reconnects.
+// Bluefruit also persists it in the peer's bond record for cold boot; losing
+// that record leaves clients that retain their subscription unable to receive
+// replies after reboot. SoftDeviceSvcCompat.h protects its SDK queries under LTO.
 static constexpr uint16_t CCCD_RAM_CACHE_MAX = 128;
 static constexpr uint32_t CCCD_SYS_ATTR_FLAGS =
     BLE_GATTS_SYS_ATTR_FLAG_SYS_SRVCS | BLE_GATTS_SYS_ATTR_FLAG_USR_SRVCS;
@@ -119,8 +119,8 @@ static void captureCccdInRam(uint16_t handle, const ble_gap_addr_t& peer) {
   uint16_t length = sizeof(cccd_ram_cache.attrs);
   const uint32_t status = sd_ble_gatts_sys_attr_get(
       handle, cccd_ram_cache.attrs, &length, CCCD_SYS_ATTR_FLAGS);
-  // The SoftDevice SVC writes through this pointer, but its GCC wrapper has
-  // no memory clobber. Force LTO to reload the returned length from memory.
+  // Retain a local reload barrier in addition to the global SVC ABI guard.
+  // The original SDK wrapper does not declare writes through this pointer.
   __asm__ __volatile__("" ::: "memory");
   if (status != NRF_SUCCESS || length == 0
       || length > CCCD_RAM_CACHE_MAX) {
@@ -352,7 +352,7 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
       BLE_DEBUG_PRINTLN("CCCD RAM write: len=%u value=%u",
                         (unsigned)write.len,
                         (unsigned)(write.len ? write.data[0] : 0));
-      // Mirror Bluefruit's deferred CCCD save timing, but copy only to RAM.
+      // Mirror Bluefruit's deferred CCCD save timing for the warm RAM cache.
       // Reading during the BLE event is too early: sys_attr_get succeeds but
       // returns the pre-write CCCD even though notifyEnabled() is already on.
       cccd_ram_cache.valid.store(false, std::memory_order_release);

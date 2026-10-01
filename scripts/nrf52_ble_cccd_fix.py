@@ -1,10 +1,11 @@
 """Apply nRF52 Bluefruit fixes in private build copies of framework sources.
 
-The pinned core saves every bonded CCCD write from its callback worker into
-InternalFS. On a T1000-E Full Companion this reproducibly resets the radio as
-the client enables notifications, even after formatting InternalFS. Bond-key
-persistence still works. The Companion keeps recent CCCD state in RAM across
-BLE reconnects, without a live flash write.
+Keep bonded CCCD persistence enabled, including Full Companions. The global
+SoftDeviceSvcCompat.h guard protects the framework's system-attribute queries
+from LTO miscompilation. The previous Full-only RAM workaround lost client
+notification subscriptions after reboot while retaining the pairing keys.
+Keep the RAM cache as a warm reconnect optimization, with the framework's
+persistent bond record as the cold boot fallback.
 Patch a private build copy; never edit PlatformIO's shared framework cache.
 With the pinned GCC 14/LTO toolchain, the optimized Bluefruit.begin() fails
 on the RAK4631 repeater: S140 rejects a valid single-peripheral role request
@@ -19,9 +20,8 @@ OLD_SAVE = """      {
       }
 """
 FIXED_SAVE = """      {
-#if !defined(COMPANION_RADIO_FULL) || !COMPANION_RADIO_FULL
+        // SoftDeviceSvcCompat.h protects system-attribute query side effects.
         conn->saveCccd();
-#endif
       }
 """
 OLD_LOAD = "        if ( !loadCccd() )  sd_ble_gatts_sys_attr_set(_conn_hdl, NULL, 0, 0);\n"
