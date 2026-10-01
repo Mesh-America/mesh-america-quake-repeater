@@ -136,8 +136,9 @@ async def run(args):
         # occur on this connection; firmware must release it automatically.
         started = time.monotonic()
         await wait_disconnected(client, 22)
-        report("secured_link_without_app_recovery",
-               seconds=round(time.monotonic() - started, 2), passed=True)
+        report("secured_idle_link_disconnected",
+               seconds=round(time.monotonic() - started, 2), passed=True,
+               cause_requires_trace=True)
 
     await asyncio.sleep(2)
     async with await paired_client(args.address) as client:
