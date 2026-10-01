@@ -102,6 +102,12 @@ async def check_commands(client, args):
             raise RuntimeError("Unexpected firmware: " + reply)
         if "Unknown command" in reply or "Not Supported" in reply:
             raise RuntimeError(reply)
+        if cmd == "get radio":
+            fields = reply.removeprefix("> ").split(",")
+            if len(fields) != 4:
+                raise RuntimeError("Radio reply must have exactly four upstream fields: " + reply)
+            # Reject annotations as well as extra CSV fields.
+            float(fields[0]); float(fields[1]); int(fields[2]); int(fields[3])
         report("app_cli", command=cmd, trailing_nul=True, reply=reply)
 
 

@@ -109,7 +109,8 @@ static void _ftoa(float f, char *p, int *status)
   else if (exp2 >= 0) 
   {
     int_part = mantissa>>(23 - exp2);
-    frac_part = (mantissa<<(exp2 + 1))&0xFFFFFF;
+    // Only the low 24 bits are needed; shift unsigned to avoid signed overflow.
+    frac_part = (uint32_t(mantissa)<<(exp2 + 1))&0xFFFFFF;
   } 
   else 
   {

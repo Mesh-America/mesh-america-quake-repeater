@@ -9544,7 +9544,8 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
         }
       }
     }
-    if (!strcmp(command, "get radio")) _radio_profiles.appendSavedPreamble(reply, reply_capacity, _prefs.sf, _prefs.bw);
+    // Keep get radio as the upstream four-field tuple. Apps parse this CSV
+    // directly; preamble and timing diagnostics have separate commands.
     if (!strncmp(command, "set radio ", 10) && !strncmp(reply, "OK", 2))
       _radio_profiles.appendPrimaryChirpWarning(reply, reply_capacity, _prefs.sf, _prefs.bw,
                                                _radio_profiles.primaryPreamble());
