@@ -117,7 +117,7 @@ picocom --baud 115200 /dev/ttyACM0
 
 Current source waits for input before printing the USB banner. Press Enter or
 type a command. This preserves the clean first response needed by binary apps;
-see [USB client validation](companion_usb_client_validation.md) for release status.
+see [USB client validation](test-results/companion_usb_client_validation.md) for release status.
 
 For older firmware or a port already in Binary mode, use:
 

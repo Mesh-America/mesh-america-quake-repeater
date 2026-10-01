@@ -6,7 +6,7 @@ choices where the hardware supports them. A setting cannot add missing radio
 hardware, MQTT code, storage, or an OTA partition. Check the download's
 `.capabilities.json` and the [firmware picker](firmware_picker.md).
 For exact old device/variant names, search the
-[1.17.1.5 variant map](releases/1.17.1.5-variant-map.tsv): it maps all 1,361
+[1.17.1.5 variant map](old-releases/1.17.1.5-variant-map.tsv): it maps all 1,361
 previous release entries to 1,325 covered choices or 36 excluded entries.
 Many old choices share one current image; the command tables below explain
 how to select their former behavior. Excluded entries have no download.
@@ -204,7 +204,7 @@ ESP32 USB sleep bug, including the G3 report. Both settings are saved; turning
 logging off later does not automatically restore power saving. LoRa RXPS is
 independent. nRF52 logging does not need this ESP32 workaround.
 
-With the [G3 sleep correction](releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled),
+With the [G3 sleep correction](old-releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled),
 enabled live USB logging keeps ESP32 USB serviced and blocks light sleep,
 including when a host closes the port or disconnects. CPU idle/yield remains
 available. `set usb.logging off` removes that blocker; an attached native USB

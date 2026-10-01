@@ -534,5 +534,5 @@ release version. Its installation directions identify the nRF52 queue-sharing
 behavior, Wireless Paper Full's 350 contacts with a shared 256/128-slot queue,
 and the 150-contact limit on the other six affected ESP32 Full profiles.
 Those notices apply only to the corrected files. See the
-[memory correction details](releases/1.17.1.5.md#memory-corrections-in-aa20e927)
+[memory correction details](old-releases/1.17.1.5.md#memory-corrections-in-aa20e927)
 and each replacement's `.memory.json` report before updating.

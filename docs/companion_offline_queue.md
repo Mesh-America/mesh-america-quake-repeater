@@ -28,7 +28,7 @@ Meshadventurer SX1262 and SX1268 Full Companion use 16 frames together with 100
 contacts and 30 group channels; their ordinary transport-specific images keep
 128 frames and 40 channels.
 
-The [nRF52 Full memory correction](releases/1.17.1.5.md#t096-full-companion-bluetooth-and-menu-freeze-report)
+The [nRF52 Full memory correction](old-releases/1.17.1.5.md#t096-full-companion-bluetooth-and-menu-freeze-report)
 applies queue sharing to every nRF52 Full Companion. It keeps 256 frames
 normally, retaining each board's contacts, channels, and all
 Full transports. The upper 128 slots temporarily hold the mOTA context when

@@ -15,7 +15,7 @@ queued messages normally. During an mOTA session, 128 message slots are
 available while the other half holds its workspace. If more than 128 unread
 messages are queued, sync them with an app before starting mOTA. Disconnecting
 the source or turning it off returns all 256 slots. Idle WiFi mOTA listening
-does not borrow the queue. See the [1.17.1.5 release guide](releases/1.17.1.5.md)
+does not borrow the queue. See the [1.17.1.5 release guide](old-releases/1.17.1.5.md)
 for the corrected download; the earlier `aa20e927` Wireless Paper image has
 150 contacts.
 

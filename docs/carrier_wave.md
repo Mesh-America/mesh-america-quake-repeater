@@ -56,5 +56,5 @@ ordinary LoRa packets to verify both RX and TX recovery.
 The reproducible bench receiver that provides this live reading is
 `tools/hil/cw_observer.cpp`, built with `tools/hil/cw_observer.ini` on a
 separate RAK4631. It never transmits on its own.
-See the [hardware validation](carrier_wave_validation.md) for measured results,
+See the [hardware validation](test-results/carrier_wave_validation.md) for measured results,
 reproduction steps, and the tested preamble settings.
