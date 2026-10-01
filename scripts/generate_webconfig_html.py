@@ -135,16 +135,19 @@ def main():
     loader = ("<!doctype html><meta charset=utf-8><meta name=viewport "
               "content=\"width=device-width,initial-scale=1\"><title>MeshCore "
               "WebConfig</title><body>Loading MeshCore WebConfig&hellip;<script>"
-              "(async()=>{let p;for(let n=0;n<3&&p===undefined;n++){const C="
-              "window.AbortController,c=C&&new C(),t=c&&setTimeout(()=>c.abort()"
-              ",90000);try{const r=await fetch(\"/ui?v=%s\",c?{signal:c.signal}"
-              ":{});if(r.ok)p=await r.text();else if(r.status===409)return "
-              "location.reload()}catch(e){}finally{if(t)clearTimeout(t)}if(p==="
-              "undefined)await new Promise(r=>setTimeout(r,500*(n+1)))}if(p==="
-              "undefined)throw Error(\"transfer failed\");document.open();"
-              "document.write(p);document.close()})().catch(e=>"
+              # Android 5.1's stock Chrome 43 supports fetch and Promises, but
+              # cannot parse arrows or async functions. Match the main UI's
+              # ES5 syntax so the bootstrap cannot strand those browsers.
+              "(function(){var n=0;function load(){var C=window.AbortController,"
+              "c=C&&new C(),t=c&&setTimeout(function(){c.abort()},90000);"
+              "fetch(\"/ui?v=%s\",c?{signal:c.signal}:{}).then(function(r){"
+              "if(r.ok)return r.text();if(r.status===409){location.reload();"
+              "return null}throw Error(\"transfer failed\")}).then(function(p){"
+              "if(t)clearTimeout(t);if(p===null)return;document.open();"
+              "document.write(p);document.close()},function(e){"
+              "if(t)clearTimeout(t);if(++n<3)setTimeout(load,500*n);else "
               "document.body.textContent=\"Unable to load WebConfig: \"+e+"
-              "\". Reload to retry.\")</script>" % version)
+              "\". Reload to retry.\"})}load()})()</script>" % version)
     loader_bytes = compress_page(loader.encode("utf-8"))
     success_bytes = compress_page(b"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>")
     etag = hashlib.sha256(loader_bytes).hexdigest()[:16]

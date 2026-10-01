@@ -112,6 +112,8 @@ Browsers decompress the pages automatically over ordinary HTTP. WebConfig
 returns HTTP 406 when a client explicitly excludes gzip. Its large page closes
 the TCP connection gracefully after the final acknowledged bytes so browsers
 do not report a completed download as aborted.
+The bootstrap uses ES5 syntax and Promise-based loading, including on Android
+5.1.1 with Chrome 43; newer JavaScript syntax must not prevent the page loading.
 
 Most full-size ESP32 MQTT observer builds have the shared WebConfig portal. On a
 fresh device with no saved SSID:
