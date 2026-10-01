@@ -4,6 +4,7 @@ Welcome to the MeshCore documentation.
 
 Below are a few quick start guides.
 
+- [1.17.1.8 USA Cascade release](./releases/1.17.1.8.md)
 - [1.17.1.5 Markdown audit](./releases/1.17.1.5-doc-audit.md)
 - [1.17.1.5 USA Cascade release](./releases/1.17.1.5.md)
 - [Feature switches by role: Companion, Repeater, Room Server, Sensor](./role_feature_switches.md)
