@@ -40,6 +40,8 @@ class Nrf52SvcCompatTest(unittest.TestCase):
         cc = shutil.which("arm-none-eabi-gcc") or str(BIN / "arm-none-eabi-gcc")
         dump = shutil.which("arm-none-eabi-objdump") or str(BIN / "arm-none-eabi-objdump")
         if not Path(cc).is_file() or not Path(dump).is_file():
+            if os.environ.get("MESHCORE_REQUIRE_ARM_COMPILER") == "1":
+                self.fail("ARM compiler and objdump are required for the LTO regression")
             self.skipTest("ARM compiler required for the LTO regression")
         with tempfile.TemporaryDirectory(prefix="meshcore-svc-lto-") as temp:
             folder = Path(temp)
