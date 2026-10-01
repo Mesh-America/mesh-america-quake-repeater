@@ -109,6 +109,18 @@ class PickerControlsTests(unittest.TestCase):
         self.assertNotIn('memoryNote', control)
         self.assertNotIn('memorySource', control)
 
+    def test_indicator_canvas_tradeoff_preserves_psram_capacities(self):
+        control = self.generate([
+            'display.canvas limited to 320x320 internal pixels, scaled to the 480x480 panel; 350 contacts, 512 queued frames and all Full transports retained',
+        ])
+        self.assertIn('320x320', control['memoryNote'])
+        self.assertIn('480x480 panel', control['memoryNote'])
+        self.assertIn('350 contacts, 512 queued messages', control['memoryNote'])
+        self.assertIn('full-length message previews', control['memoryNote'])
+        self.assertEqual(control['memorySource'], 'a' * 40)
+        with self.assertRaisesRegex(ValueError, 'Unrecognized capacity reduction'):
+            self.generate(['display.canvas changed without numeric limits'])
+
     def test_unknown_capacity_formats_are_not_silently_discarded(self):
         with self.assertRaisesRegex(ValueError, 'Unrecognized capacity reduction'):
             self.generate(['companion.capacity changed without numeric limits'])
