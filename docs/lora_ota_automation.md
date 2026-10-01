@@ -9,7 +9,7 @@ describe compatibility/migration history, not the current recommended download.
 Full Companion is a MOTA source and normally updates itself over USB.
 
 
-The dedicated [RAK3401 chain report](rak3401_mota_chain.md) records the
+The dedicated [RAK3401 chain report](research/rak3401_mota_chain.md) records the
 physical failures of withdrawn migrations and the physically qualified compact
 nine-step replacement. Its runner blocks the withdrawn chains and pins every
 accepted bridge image by SHA-256.

@@ -7,7 +7,7 @@ at **350 contacts, 40 channels and 256 normal offline frames**. Their final
 capability manifests confirm compiled Bluetooth/mOTA support and valid WiFi
 OTA layouts.
 These are the optional environments in the
-[contact-cache guide](../companion_contact_cache.md). Ordinary release recipes
+[contact-cache guide](../research/companion_contact_cache.md). Ordinary release recipes
 retain their established contact limits pending qualification on those boards.
 
 ## Linked internal RAM
@@ -125,7 +125,7 @@ The native queue/store suites passed 27 cases, the radio-liveness suite passed
 eight, and the partition-selection suite passed 11.
 
 Hardware reproduction commands are in the
-[contact-cache guide](../companion_contact_cache.md#regression-checks). The tracked
+[contact-cache guide](../research/companion_contact_cache.md#regression-checks). The tracked
 harness is `tools/hil/contact_cache_serial_stress.py`. It requires exclusive
 access to the specified Companion data port.
 

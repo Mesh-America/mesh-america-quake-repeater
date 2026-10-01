@@ -12,7 +12,7 @@ exit code when the tool has a documented false-success mode.
 
 ## Bluetooth stealth qualification - 2026-09-07
 
-The [XIAO stealth report](../hardware_validation_bluetooth_stealth_2026-09-07.md)
+The [XIAO stealth report](hardware_validation_bluetooth_stealth_2026-09-07.md)
 records exact artifacts for the initial implementation and independent-flag
 follow-up. The flag run covers custom/saved-random pairing and bonded reboot
 reconnect, idempotent `on`, `off` preserving the MAC, directed advertising,
