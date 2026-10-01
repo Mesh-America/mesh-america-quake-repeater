@@ -4,7 +4,7 @@
 Uses real linker heap bounds on ARM and the linked ESP-IDF allocator tables on
 ESP32. These are capacity checks before dynamic allocation, not hardware soak
 results. PSRAM, instruction-only RAM and reserved bootloader arenas never count
-as internal heap. See docs/firmware_memory_budget.md for the budget policy.
+as internal heap. See docs/research/firmware_memory_budget.md for the budget policy.
 """
 
 from __future__ import annotations
