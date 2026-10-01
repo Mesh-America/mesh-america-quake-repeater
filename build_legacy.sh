@@ -4087,7 +4087,7 @@ apply_companion_radio_full_profile() {
       append_platformio_build_unflags "-DMAX_CONTACTS=350"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=300"
       record_build_reduction \
-        "companion.capacity limited to 300 contacts for runtime RAM; 256 queued frames and all Full transports retained"
+        "companion.capacity limited to 300 contacts for runtime RAM; 512 queued frames and all Full transports retained"
       ;;
     meshadventurer_sx1262_companion_radio_full|\
     meshadventurer_sx1268_companion_radio_full)
