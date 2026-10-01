@@ -158,6 +158,152 @@ class LegacyManifestRecoveryTests(unittest.TestCase):
                 self.assertEqual([c.args[-1] for c in recover.call_args_list], [0, 1, 2])
                 self.assertEqual({c.args[-2] for c in recover.call_args_list}, {1300})
 
+    def test_monitor_offers_reboot_only_for_exact_zero_block_timeout(self):
+        self.args.transfer_timeout_minutes = 20
+        self.args.poll_seconds = 1
+        self.args.reply_timeout = 1
+        fetching = f"download: fetching 0/40 id={self.package.manifest_id}"
+        ready = f"download: ready to install 40/40 id={self.package.manifest_id}"
+        self.controller.remote_command.side_effect = [fetching, self.status, ready]
+        reboot = mock.Mock(return_value=True)
+        with mock.patch.object(ota, "initial_status_wait_seconds", return_value=0), \
+             mock.patch.object(ota, "recover_legacy_manifest_timeout", return_value=False):
+            self.assertEqual(
+                ota.monitor_download(self.controller, self.args, self.package,
+                                     reboot_recovery=reboot), ready,
+            )
+        reboot.assert_called_once_with(self.status, 1300)
+
+
+class RelayRebootRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.package = ota.parse_mota(mota_blob(firmware(b"reboot" * 100, VERSION_NEW)))
+        self.relay = "ab" * 32
+        self.target = "cd" * 32
+        self.status = ("OTA | download: failed (manifest timeout) 0/0 "
+                       f"id={self.package.manifest_id}")
+        self.args = argparse.Namespace(
+            source_shares_controller=True, relay_values=[(self.relay, "secret")],
+            relay_reboot_normal_hops=1, target=self.target,
+            temp_values=(909.5, 125, 7, 5, 120), yes=True,
+        )
+        self.controller = mock.Mock()
+        self.controller._run.return_value = [{
+            "public_key": self.relay, "out_path_len": 1,
+        }]
+        self.controller.get_radio.return_value = ota.RadioSettings(910.525, 62.5, 7, 5, False)
+        self.controller.remote_command.side_effect = [
+            self.status, ota.TransmissionError("no reboot reply"), self.status,
+            f"OK pulling mid={self.package.manifest_id} -> flash",
+        ]
+        self.on_normal = mock.Mock()
+        self.on_temp = mock.Mock()
+        self.on_temp_active = mock.Mock()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(ota.time, "sleep").start()
+        mock.patch.object(ota.time, "monotonic", return_value=100).start()
+        self.source_cli = mock.patch.object(
+            ota, "source_cli_command",
+            return_value="TempRadio active: 909.500,125.00,7,5 7000s left,preamble=32",
+        ).start()
+        self.shorten = mock.patch.object(ota, "shorten_source_temp_window", return_value=True).start()
+        self.read_key = mock.patch.object(
+            ota, "read_remote_public_key_bounded",
+            side_effect=[self.target, self.relay, self.relay, self.relay, self.target],
+        ).start()
+        self.arm = mock.patch.object(ota, "arm_relay_temp_radio_once", return_value=True).start()
+        self.switch = mock.patch.object(ota, "switch_controller_to_temp_radio").start()
+        mock.patch.object(ota, "require_source_on_temp_after_uncertain_arm").start()
+        self.output = contextlib.redirect_stdout(io.StringIO())
+        self.output.__enter__()
+        self.addCleanup(self.output.__exit__, None, None, None)
+
+    def recover(self, status=None, armed_at=100, deadline=1300):
+        return ota.recover_manifest_by_relay_reboot(
+            self.controller, self.args, self.package, None,
+            self.status if status is None else status, deadline, armed_at,
+            {self.relay: self.relay}, self.controller.get_radio.return_value,
+            ota.RadioSettings(909.5, 125, 7, 5, False),
+            self.on_normal, self.on_temp, self.on_temp_active,
+        )
+
+    def test_one_hop_reboot_rearms_bounded_lease_and_same_mid(self):
+        self.assertTrue(self.recover())
+        commands = [c.args[1] for c in self.controller.remote_command.call_args_list]
+        self.assertEqual(commands, [
+            "ota status", "reboot", "ota status",
+            f"ota pull {self.package.manifest_id} flash",
+        ])
+        self.controller.forget_remote_auth.assert_called_once_with(self.relay)
+        self.on_normal.assert_called_once()
+        self.on_temp.assert_called_once()
+        self.on_temp_active.assert_called_once()
+        self.assertEqual(
+            self.arm.call_args.args[3], "tempradio 909.5,125,7,5,119",
+        )
+        self.assertEqual(self.read_key.call_count, 5)
+
+    def test_direct_relay_is_also_eligible(self):
+        self.args.relay_reboot_normal_hops = 0
+        self.controller._run.return_value[0]["out_path_len"] = 0
+        self.assertTrue(self.recover())
+
+    def test_recent_progress_avoids_reboot(self):
+        self.controller.remote_command.side_effect = [
+            f"download: fetching 1/40 id={self.package.manifest_id}",
+        ]
+        self.assertTrue(self.recover())
+        self.assertEqual([c.args[1] for c in self.controller.remote_command.call_args_list],
+                         ["ota status"])
+        self.on_normal.assert_not_called()
+
+    def test_wrong_status_or_route_cannot_reboot(self):
+        self.assertFalse(self.recover(status=self.status.replace("0/0", "1/40")))
+        self.controller.remote_command.assert_not_called()
+        self.controller._run.return_value[0]["out_path_len"] = 2
+        with self.assertRaisesRegex(ota.OtaError, "0- or 1-hop"):
+            self.recover()
+        self.controller.remote_command.assert_not_called()
+
+    def test_short_lease_fails_before_reboot(self):
+        with self.assertRaisesRegex(ota.OtaError, "too little"):
+            self.recover(armed_at=-7000)
+        self.controller.remote_command.assert_not_called()
+
+    def test_declined_prompt_does_not_reboot(self):
+        self.args.yes = False
+        with mock.patch.object(ota.sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", return_value="n"):
+            self.assertFalse(self.recover())
+        self.assertEqual([c.args[1] for c in self.controller.remote_command.call_args_list],
+                         ["ota status"])
+
+    def test_normal_path_failure_does_not_rearm_or_pull(self):
+        self.read_key.side_effect = [self.target, self.relay, ota.TransmissionError("offline")]
+        with self.assertRaisesRegex(ota.TransmissionError, "offline"):
+            self.recover()
+        self.on_normal.assert_called_once()
+        self.on_temp.assert_not_called()
+        self.on_temp_active.assert_not_called()
+        self.arm.assert_not_called()
+        commands = [c.args[1] for c in self.controller.remote_command.call_args_list]
+        self.assertEqual(commands, ["ota status", "reboot"])
+
+    def test_parser_requires_one_managed_shared_relay(self):
+        parser = ota.build_parser()
+        common = ["update.mota", "target", "--legacy-relay-reboot-recovery"]
+        for flags in ([], ["--relay", "relay"], ["--source-shares-controller"],
+                      ["--relay", "a", "--relay", "b", "--source-shares-controller"],
+                      ["--relay", "a", "--source-shares-controller", "--source-already-temp"]):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                ota.validate_args(parser.parse_args(common + flags), parser)
+        args = parser.parse_args(common + [
+            "--relay", "relay", "--source-shares-controller",
+            "--controller-tcp", "127.0.0.1", "--source-tcp", "127.0.0.1",
+            "--source-cli-tcp", "127.0.0.1",
+        ])
+        ota.validate_args(args, parser)
+
 
 if __name__ == "__main__":
     unittest.main()

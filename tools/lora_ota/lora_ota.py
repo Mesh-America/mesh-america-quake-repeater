@@ -151,6 +151,7 @@ OTA_MAX_HOPS = 8
 # explicit, best-effort legacy workaround, not an acknowledgement of reception.
 LEGACY_OTA_CACHE_FRAMES = 192
 LEGACY_OTA_CACHE_ROUNDS = 2
+LEGACY_RELAY_REBOOT_MIN_REMAINING_SECONDS = 8 * 60
 TARGET_RXPS_RECOVERY_FILE = "target-rxps-settings.json"
 SOURCE_RXPS_RECOVERY_FILE = "source-rxps-settings.json"
 MIN_MESHCLI_VERSION = (1, 6, 0)
@@ -4762,6 +4763,8 @@ def confirm_update(
     print(f"  TempRadio   : {args.temp_radio}")
     if getattr(args, "legacy_relay_dedup_workaround", False):
         print("  legacy retry: up to 2 x 192 short, non-forwarded TempRadio frames on manifest timeout")
+    if getattr(args, "legacy_relay_reboot_recovery", False):
+        print("  legacy reboot: offer one relay reboot on exact 0/0 manifest timeout; re-prove normal and TempRadio paths")
     saved_rxps = getattr(args, "target_rxps_saved", None)
     rxps_profile = getattr(args, "target_rxps_profile", None)
     if isinstance(saved_rxps, RxpsSettings) and saved_rxps.enabled:
@@ -5188,14 +5191,181 @@ def recover_legacy_manifest_timeout(
     return True
 
 
+def relay_route_hops(
+    controller: Controller,
+    selector: str,
+    expected_key: str,
+    label: str,
+) -> int:
+    contacts = controller._run(["contact_info", selector], label, timeout=5)
+    matching = [c for c in contacts if contact_matches_selector(c, expected_key)]
+    if len(matching) != 1 or matching[0].get("public_key", "").lower() != expected_key:
+        raise OtaError(f"cannot prove exact relay contact for {label}")
+    hops = matching[0].get("out_path_len")
+    if type(hops) is not int or hops not in (0, 1):
+        raise OtaError(f"relay reboot recovery requires a 0- or 1-hop {label}; got {hops!r}")
+    return hops
+
+
+def recover_manifest_by_relay_reboot(
+    controller: Controller,
+    args: argparse.Namespace,
+    package: MotaInfo,
+    seeder: SeederProcess | None,
+    status: str,
+    deadline: float,
+    target_armed_at: float,
+    relay_public_keys: dict[str, str],
+    original_radio: RadioSettings,
+    temp_radio: RadioSettings,
+    on_normal: Callable[[], None],
+    on_temp_owned: Callable[[], None],
+    on_temp_active: Callable[[], None],
+) -> bool:
+    """One explicitly approved reboot; never assume that a silent reboot arrived."""
+    if (download_manifest_id(status) != package.manifest_id
+            or not re.search(r"download: failed \(manifest timeout\) 0/0\b", status, re.I)):
+        return False
+    if not getattr(args, "source_shares_controller", False) or len(args.relay_values) != 1:
+        raise OtaError("relay reboot recovery requires one relay and a shared source/controller")
+    relay, password = args.relay_values[0]
+    expected_key = relay_public_keys.get(relay)
+    if expected_key is None or not re.fullmatch(r"[0-9a-f]{64}", expected_key):
+        raise OtaError("relay reboot recovery has no verified relay public key")
+    if getattr(args, "relay_reboot_normal_hops", None) not in (0, 1):
+        raise OtaError("relay reboot recovery lacks a proven normal-channel 0- or 1-hop route")
+    relay_route_hops(controller, relay, expected_key, "temporary-channel route")
+    remaining = target_armed_at + args.temp_values[-1] * 60 - time.monotonic()
+    if (remaining < LEGACY_RELAY_REBOOT_MIN_REMAINING_SECONDS
+            or deadline - time.monotonic() < LEGACY_RELAY_REBOOT_MIN_REMAINING_SECONDS):
+        raise OtaError("too little target TempRadio or transfer time remains for relay reboot recovery")
+    source_status = source_cli_command(args, "tempradio", bounded=True)
+    parsed = parse_source_temp_radio_status(source_status)
+    seconds = re.search(r"\b(\d+)s left\b", source_status)
+    expected_temp = RadioSettings(*args.temp_values[:4], False)
+    if (parsed is None or parsed[0] != "active" or parsed[1] is None
+            or not expected_temp.matches(parsed[1]) or seconds is None
+            or int(seconds[1]) < LEGACY_RELAY_REBOOT_MIN_REMAINING_SECONDS):
+        raise OtaError("cannot prove sufficient shared-source TempRadio lease for relay reboot")
+    target_key = read_remote_public_key_bounded(controller, args.target)
+    if read_remote_public_key_bounded(controller, relay, password=password) != expected_key:
+        raise OtaError("relay identity changed before reboot recovery")
+    current = remote_command_with_seeder(
+        controller, args.target, "ota status", seeder,
+        "immediately before relay reboot recovery",
+    )
+    if download_manifest_id(current) != package.manifest_id:
+        raise OtaError("destination session changed before relay reboot recovery")
+    if not re.search(r"download: failed \(manifest timeout\) 0/0\b", current, re.I):
+        require_package_session(current, package)
+        return True
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise OtaError("relay reboot recovery requires an interactive approval or --yes")
+        try:
+            answer = input(
+                f"Reboot relay {relay} ({args.relay_reboot_normal_hops} normal hops) "
+                "and re-arm the temporary radio before retrying this manifest? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("[legacy] relay reboot declined; download remains staged")
+            return False
+
+    if (target_armed_at + args.temp_values[-1] * 60 - time.monotonic()
+            < LEGACY_RELAY_REBOOT_MIN_REMAINING_SECONDS
+            or deadline - time.monotonic()
+            < LEGACY_RELAY_REBOOT_MIN_REMAINING_SECONDS):
+        raise OtaError("relay reboot approval outlasted the safe TempRadio/transfer window")
+    source_status = source_cli_command(args, "tempradio", bounded=True)
+    parsed = parse_source_temp_radio_status(source_status)
+    seconds = re.search(r"\b(\d+)s left\b", source_status)
+    if (parsed is None or parsed[0] != "active" or parsed[1] is None
+            or not expected_temp.matches(parsed[1]) or seconds is None
+            or int(seconds[1]) < LEGACY_RELAY_REBOOT_MIN_REMAINING_SECONDS):
+        raise OtaError("shared source TempRadio lease changed before relay reboot")
+
+    ensure_seeder_running(seeder, "before relay reboot recovery")
+    print(f"[legacy] sending one no-reply reboot to {relay}; a reply timeout is expected")
+    try:
+        controller.remote_command(
+            relay, "reboot", password=password, retry=False,
+            reply_timeout=5, operation_timeout=20,
+        )
+    except TransmissionError:
+        pass  # Firmware intentionally sends no reply; prove the next state.
+    controller.forget_remote_auth(relay)
+
+    if not shorten_source_temp_window(args):
+        raise OtaError("shared source did not return to normal radio after relay reboot")
+    on_normal()
+    require_radio_settings(controller.get_radio(), original_radio,
+                           "shared controller after relay reboot")
+    normal_proof_deadline = min(deadline, time.monotonic() + 90)
+    if read_remote_public_key_bounded(
+        controller, relay, password=password, deadline=normal_proof_deadline,
+    ) != expected_key:
+        raise OtaError("rebooted relay did not return with its exact key on normal radio")
+    relay_route_hops(controller, relay, expected_key, "recovered normal-channel route")
+
+    # Bound the replacement lease by the destination's original lease. A
+    # second 120-minute lease here would strand this relay after the target
+    # and original source have returned to normal.
+    remaining = target_armed_at + args.temp_values[-1] * 60 - time.monotonic()
+    recovery_minutes = int((remaining - 60) // 60)
+    if recovery_minutes < 5:
+        raise OtaError("target TempRadio lease is too short to re-arm the relay")
+    recovery_command = temp_radio_command_for_minutes(args, recovery_minutes)
+    armed = []
+    relay_ack = arm_relay_temp_radio_once(
+        controller, relay, password, recovery_command, armed, recovery_minutes,
+    )
+    on_temp_owned()  # A lost local reply can still have changed the radio.
+    switch_controller_to_temp_radio(controller, args, recovery_command, temp_radio)
+    on_temp_active()
+    time.sleep(TEMP_RADIO_SWITCH_DELAY_SECONDS)
+    require_source_on_temp_after_uncertain_arm(args, temp_radio)
+    if read_remote_public_key_bounded(controller, relay, password=password) != expected_key:
+        raise OtaError("relay identity was not recovered on the temporary radio")
+    if not relay_ack:
+        print("[legacy] lost relay TempRadio reply reconciled by exact temporary-channel identity")
+    if read_remote_public_key_bounded(controller, args.target) != target_key:
+        raise OtaError("destination identity changed during relay reboot recovery")
+    current = remote_command_with_seeder(controller, args.target, "ota status", seeder,
+                                         "after relay reboot recovery")
+    if download_manifest_id(current) != package.manifest_id:
+        raise OtaError("destination session changed during relay reboot recovery")
+    if not re.search(r"download: failed \(manifest timeout\) 0/0\b", current, re.I):
+        require_package_session(current, package)
+        return True
+    if time.monotonic() >= deadline:
+        raise OtaError("transfer deadline expired during relay reboot recovery")
+    try:
+        reply = controller.remote_command(
+            args.target, f"ota pull {package.manifest_id} flash", retry=False,
+        )
+    except TransmissionError:
+        reply = remote_command_with_seeder(controller, args.target, "ota status", seeder,
+                                           "resolving relay reboot recovery pull")
+        require_package_session(reply, package)
+    else:
+        if not re.match(rf"OK (?:pulling|resuming) mid={package.manifest_id}\b", reply, re.I):
+            raise OtaError(f"relay reboot recovery pull was not confirmed: {reply}")
+    print("[legacy] relay reboot path re-proven; retried the same manifest once")
+    return True
+
+
 def monitor_download(
     controller: Controller,
     args: argparse.Namespace,
     package: MotaInfo,
     seeder: SeederProcess | None = None,
+    reboot_recovery: Callable[[str, float], bool] | None = None,
 ) -> str:
     deadline = time.monotonic() + args.transfer_timeout_minutes * 60
     legacy_recoveries = 0
+    reboot_offered = False
     poll_seconds = float(args.poll_seconds)
     # A status command is ordinary half-duplex LoRa traffic. Asking immediately
     # after `ota pull` can occupy the link for a full reply timeout and was
@@ -5250,6 +5420,13 @@ def monitor_download(
                     controller, args.target, "ota status", seeder,
                     "during transfer",
                 )
+                if (reboot_recovery is not None and not reboot_offered
+                        and download_manifest_id(status) == package.manifest_id
+                        and re.search(r"download: failed \(manifest timeout\) 0/0\b", status, re.I)):
+                    reboot_offered = True
+                    if reboot_recovery(status, deadline):
+                        last_progress = time.monotonic()
+                        continue
                 if recover_legacy_manifest_timeout(
                     controller, args, package, seeder, status, deadline, legacy_recoveries
                 ):
@@ -5279,6 +5456,13 @@ def monitor_download(
             controller, args.target, "ota status", seeder, "during transfer"
         )
         query_seconds = time.monotonic() - query_started
+        if (reboot_recovery is not None and not reboot_offered
+                and download_manifest_id(status) == package.manifest_id
+                and re.search(r"download: failed \(manifest timeout\) 0/0\b", status, re.I)):
+            reboot_offered = True
+            if reboot_recovery(status, deadline):
+                time.sleep(min(first_wait, max(0.0, deadline - time.monotonic())))
+                continue
         if recover_legacy_manifest_timeout(
             controller, args, package, seeder, status, deadline, legacy_recoveries
         ):
@@ -7613,6 +7797,12 @@ def build_parser() -> argparse.ArgumentParser:
               "adds airtime, never reboots, does not fix legacy block retries"),
     )
     parser.add_argument(
+        "--legacy-relay-reboot-recovery", action="store_true",
+        help=("on exact 0/0 manifest timeout, offer one relay reboot and "
+              "normal/temporary path requalification before retrying the same MID; "
+              "requires one 0- or 1-hop relay and --source-shares-controller"),
+    )
+    parser.add_argument(
         "--source-contact",
         metavar="NAME_OR_KEY",
         help=(
@@ -7811,6 +8001,12 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     ):
         parser.error("--legacy-relay-dedup-workaround requires one --relay, "
                      "--source-shares-controller, and no additional OTA hops")
+    if args.legacy_relay_reboot_recovery and (
+        len(args.relay) != 1 or not args.source_shares_controller
+        or args.source_already_temp
+    ):
+        parser.error("--legacy-relay-reboot-recovery requires one --relay, "
+                     "--source-shares-controller, and a managed source TempRadio")
     clear_manifest = args.clear_completed_manifest
     clear_body_hash = args.clear_completed_on_body_hash
     if bool(clear_manifest) != bool(clear_body_hash):
@@ -8684,6 +8880,7 @@ def main(
     seeder_attempted = False
     source_temp_owned = False
     source_temp_cleanup_attempted = False
+    target_temp_armed_at: float | None = None
     source_rxps_saved: RxpsSettings | None = None
     source_rxps_changed = False
     source_rxps_recovery_path: Path | None = None
@@ -8692,6 +8889,7 @@ def main(
     target_rxps_changed = False
     armed_relay_values: list[tuple[str, str]] = []
     relay_public_keys: dict[str, str] = {}
+    relay_reboot_preflight_key: str | None = None
     relay_timing_settings: list[RelayTimingSettings] = []
     owned_ota_hop_settings: list[OtaHopSettings] = []
     password = args.password or os.environ.get("MESHCORE_ADMIN_PASSWORD", "")
@@ -8907,6 +9105,15 @@ def main(
         args.target_rxps_saved = target_rxps_saved
         args.target_rxps_profile = target_rxps_profile
         args.ota_hop_settings = prepare_ota_hop_settings(controller, args)
+        if args.legacy_relay_reboot_recovery:
+            relay_name, relay_password = args.relay_values[0]
+            relay_reboot_preflight_key = read_remote_public_key_bounded(
+                controller, relay_name, password=relay_password,
+            )
+            args.relay_reboot_normal_hops = relay_route_hops(
+                controller, relay_name, relay_reboot_preflight_key,
+                "normal-channel route before TempRadio",
+            )
         confirm_update(args, target, package)
 
         freq, bandwidth, sf, cr, _minutes = args.temp_values
@@ -9032,7 +9239,18 @@ def main(
             )
             for relay_name, relay_password in args.relay_values
         }
+        if args.legacy_relay_reboot_recovery:
+            relay_name, _relay_password = args.relay_values[0]
+            if relay_public_keys[relay_name] != relay_reboot_preflight_key:
+                raise OtaError("relay identity changed after reboot-route preflight")
+            args.relay_reboot_normal_hops = relay_route_hops(
+                controller, relay_name, relay_public_keys[relay_name],
+                "normal-channel route before TempRadio",
+            )
+            print(f"[legacy] relay reboot fallback eligible: "
+                  f"{args.relay_reboot_normal_hops} normal-channel hops")
 
+        target_temp_armed_at = time.monotonic()
         target_temp_owned = True
         if args.source_shares_controller:
             # A lost-reply probe can schedule the shared local source onto the
@@ -9114,7 +9332,35 @@ def main(
         seeder_attempted = True
         seeder.start()
         find_and_start_pull(controller, args, package, seeder)
-        monitor_download(controller, args, package, seeder)
+
+        def mark_recovery_normal() -> None:
+            nonlocal controller_changed, source_temp_owned
+            controller_changed = False
+            source_temp_owned = False
+
+        def mark_recovery_temp_owned() -> None:
+            nonlocal source_temp_owned
+            # Set before the one-shot local command: a lost acknowledgement
+            # can still mean the shared radio changed channels.
+            source_temp_owned = True
+
+        def mark_recovery_temp_active() -> None:
+            nonlocal controller_changed
+            controller_changed = True
+
+        def try_relay_reboot(status: str, deadline: float) -> bool:
+            assert target_temp_armed_at is not None
+            return recover_manifest_by_relay_reboot(
+                controller, args, package, seeder, status, deadline,
+                target_temp_armed_at, relay_public_keys, original_radio,
+                temp_radio, mark_recovery_normal, mark_recovery_temp_owned,
+                mark_recovery_temp_active,
+            )
+
+        monitor_download(
+            controller, args, package, seeder,
+            reboot_recovery=(try_relay_reboot if args.legacy_relay_reboot_recovery else None),
+        )
         # A serial source is exclusively owned by motatool. Release that
         # ownership before trying to restore its policy through the text CLI.
         seeder.stop()
@@ -9275,6 +9521,8 @@ def main(
             ):
                 if not controller_changed:
                     try:
+                        if args.source_shares_controller and args.legacy_relay_reboot_recovery:
+                            source_temp_owned = True
                         switch_controller_to_temp_radio(
                             controller, args, temp_command, temp_radio
                         )
