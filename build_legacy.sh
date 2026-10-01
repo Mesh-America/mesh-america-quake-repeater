@@ -4194,7 +4194,11 @@ write_build_capability_manifest() {
     checker_args+=(--reduction "$item")
   done
   for item in "${BUILD_EXPECTATIONS[@]}"; do
-    checker_args+=(--expect "$item")
+    if [[ "$item" == *"=MeshCore firmware update" ]]; then
+      checker_args+=(--expect-gzip "$item")
+    else
+      checker_args+=(--expect "$item")
+    fi
   done
   for item in "${BUILD_APPLICATION_EXPECTATIONS[@]}"; do
     checker_args+=(--expect-application "$item")

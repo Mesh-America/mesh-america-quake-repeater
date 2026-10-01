@@ -58,6 +58,7 @@ bool ESP32Board::isUserGpioAvailable(uint8_t pin) const {
 #if defined(LIGHTWEIGHT_WIFI_OTA) && \
     (defined(ADMIN_PASSWORD) || defined(COMPANION_RADIO_FULL))
 #include <WiFi.h>
+#include <helpers/esp32/StaticHtml.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
 #include <SPIFFS.h>
@@ -74,18 +75,6 @@ static constexpr uint16_t LIGHTWEIGHT_OTA_PORT = 8080;
 #else
 static constexpr uint16_t LIGHTWEIGHT_OTA_PORT = 80;
 #endif
-
-static const char LIGHTWEIGHT_OTA_PAGE[] = R"HTML(<!doctype html>
-<html><head><meta name="viewport" content="width=device-width"><title>MeshCore OTA</title>
-<style>body{font-family:sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem}button,input{font-size:1rem;margin:.5rem 0}pre{white-space:pre-wrap}</style></head>
-<body><h2>MeshCore firmware update</h2><input id="file" type="file" accept=".bin,application/octet-stream"><br>
-<button id="upload">Upload and reboot</button><pre id="status"></pre><script>
-const f=document.getElementById('file'),s=document.getElementById('status'),b=document.getElementById('upload');
-b.onclick=()=>{if(!f.files.length){s.textContent='Select a firmware .bin file.';return}b.disabled=true;
-const x=new XMLHttpRequest();x.open('POST','/update');x.setRequestHeader('Content-Type','application/octet-stream');
-x.upload.onprogress=e=>{if(e.lengthComputable)s.textContent='Uploading '+Math.round(e.loaded*100/e.total)+'%'};
-x.onload=()=>{s.textContent=x.responseText;b.disabled=false};x.onerror=()=>{s.textContent='Upload failed';b.disabled=false};x.send(f.files[0])};
-</script></body></html>)HTML";
 
 class LightweightOTAServer {
   WiFiServer server{LIGHTWEIGHT_OTA_PORT};
@@ -122,8 +111,11 @@ class LightweightOTAServer {
   }
 
   void sendPage(WiFiClient& client) {
-    sendResponse(client, 200, "OK", "text/html", LIGHTWEIGHT_OTA_PAGE,
-                 strlen(LIGHTWEIGHT_OTA_PAGE));
+    client.printf("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                  "Content-Encoding: gzip\r\nContent-Length: %u\r\n"
+                  "Connection: close\r\nCache-Control: no-store\r\n\r\n",
+                  static_cast<unsigned>(MESH_HTML_LIGHTWEIGHT_OTA_LEN));
+    client.write(MESH_HTML_LIGHTWEIGHT_OTA, MESH_HTML_LIGHTWEIGHT_OTA_LEN);
   }
 
   void sendLog(WiFiClient& client) {

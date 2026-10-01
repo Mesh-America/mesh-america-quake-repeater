@@ -29,8 +29,8 @@ if zopfli.__version__ != ZOPFLI_VERSION:
     )
 
 # Above zlib's maximum level 9: Zopfli refines the LZ77 model repeatedly.
-# Fifteen iterations is the upstream binding's practical default for assets
-# of this size and keeps CI/build times reasonable.
+# Fifteen iterations remains the practical default for raw OTA streams.
+# Firmware HTML gzip assets use the 1,000-iteration setting below.
 ITERATIONS = 15
 # Zopfli has no finite algorithmic iteration ceiling.  Its ``--i1000``
 # convention is the maximum-effort setting used for host-cached mOTA transfer
@@ -49,9 +49,9 @@ def _options(numiterations: int = ITERATIONS) -> dict[str, int | bool]:
     }
 
 
-def gzip_compress(data: bytes) -> bytes:
+def gzip_compress(data: bytes, *, numiterations: int = MAXIMUM_ITERATIONS) -> bytes:
     """Compress *data* as deterministic RFC 1952 gzip using Google Zopfli."""
-    encoded = bytearray(_gzip.compress(data, **_options()))
+    encoded = bytearray(_gzip.compress(data, **_options(numiterations)))
     # The gzip OS byte is informational. Normalize it to RFC 1952's unknown
     # value so a checked-in asset is identical across operating systems.
     if len(encoded) < 10 or encoded[:3] != b"\x1f\x8b\x08":

@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width"><title>MeshCore OTA</title>
+<style>body{font-family:sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem}button,input{font-size:1rem;margin:.5rem 0}pre{white-space:pre-wrap}</style></head>
+<body><h2>MeshCore firmware update</h2><input id="file" type="file" accept=".bin,application/octet-stream"><br>
+<button id="upload">Upload and reboot</button><pre id="status"></pre><script>
+const f=document.getElementById('file'),s=document.getElementById('status'),b=document.getElementById('upload');
+b.onclick=()=>{if(!f.files.length){s.textContent='Select a firmware .bin file.';return}b.disabled=true;
+const x=new XMLHttpRequest();x.open('POST','/update');x.setRequestHeader('Content-Type','application/octet-stream');
+x.upload.onprogress=e=>{if(e.lengthComputable)s.textContent='Uploading '+Math.round(e.loaded*100/e.total)+'%'};
+x.onload=()=>{s.textContent=x.responseText;b.disabled=false};x.onerror=()=>{s.textContent='Upload failed';b.disabled=false};x.send(f.files[0])};
+</script></body></html>

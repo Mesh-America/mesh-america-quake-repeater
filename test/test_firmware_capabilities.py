@@ -9,6 +9,7 @@ import unittest
 import struct
 import io
 import zipfile
+import gzip
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,21 @@ class FirmwareCapabilityCheckerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertFalse(manifest["verified"])
         self.assertIn("promised", result.stderr)
+
+    def test_gzip_asset_requires_complete_validated_stream(self):
+        page = gzip.compress(b"<title>MeshCore firmware update</title>", mtime=0)
+        for image, accepted in [(b"ELF" + page + b"symbols", True),
+                                (page[:-1], False),
+                                (page[:-8] + b"\x00" * 8, False),
+                                (b"MeshCore firmware update", False),
+                                (gzip.compress(b"different page"), False),
+                                (gzip.compress(b"MeshCore firmware update" + b"x" * 1048576), False)]:
+            with self.subTest(accepted=accepted, size=len(image)):
+                result, manifest = self.run_checker(
+                    image, "--expect-gzip", "ota.update.wifi=MeshCore firmware update")
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+                self.assertEqual(manifest["verified"], accepted)
+                self.assertEqual(manifest["verification"][0]["source"], "linked gzip asset")
 
     def test_application_gate_rejects_elf_only_logging_evidence(self):
         # Debug/symbol strings in the ELF must not qualify an image whose
