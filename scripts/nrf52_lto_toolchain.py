@@ -1,5 +1,13 @@
 Import("env")
 
+# Apply the SoftDevice ABI guard to framework code as well as the application.
+# A normal application include cannot protect Bluefruit's pairing and GATT
+# calls, which are compiled in separate framework translation units.
+env.AppendUnique(CCFLAGS=[
+    "-include",
+    env.subst("$PROJECT_DIR/src/helpers/nrf52/SoftDeviceSvcCompat.h"),
+])
+
 # This script is loaded as a ``pre:`` extra script.  The Nordic platform's
 # builder selects binutils ar/ranlib later while it creates the library build
 # actions.  Those tools do not generate the plugin index required by GNU LTO,
