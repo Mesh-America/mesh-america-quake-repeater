@@ -4082,12 +4082,12 @@ apply_companion_radio_full_profile() {
       ;;
     sensecapindicator-lora_companion_radio_full|\
     sensecapindicator-lora-n16r2_companion_radio_full)
-      # Retain the largest canvas and all transports. These two recipes need
-      # a smaller contact table to meet their measured internal RAM budget.
-      append_platformio_build_unflags "-DMAX_CONTACTS=350"
-      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=300"
+      # Contacts and the 512-frame queue already live in PSRAM here. Use the
+      # existing 320px internal canvas, scaled to the physical 480px panel,
+      # to retain those capacities, full messages and all Full transports.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UINDICATOR_TRANSPORT_RENDER_PROFILE -UUI_ZOOM -DUI_ZOOM=1.5f -UUI_COORD_SCALE -DUI_COORD_SCALE=2"
       record_build_reduction \
-        "companion.capacity limited to 300 contacts for runtime RAM; 512 queued frames and all Full transports retained"
+        "display.canvas limited to 320x320 internal pixels, scaled to the 480x480 panel; 350 contacts, 512 queued frames and all Full transports retained"
       ;;
     meshadventurer_sx1262_companion_radio_full|\
     meshadventurer_sx1268_companion_radio_full)
