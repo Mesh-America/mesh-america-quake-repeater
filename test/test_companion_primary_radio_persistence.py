@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 HARNESS = r'''
 #include <helpers/RadioProfileCLI.h>
+#include <helpers/TxtDataHelpers.h>
 #include <helpers/radiolib/RXPowerSaving.h>
 #include <limits>
 #define constrain(value,low,high) ((value)<(low)?(low):((value)>(high)?(high):(value)))
@@ -88,16 +89,32 @@ struct MyMesh {
 // CommonCLI's infrastructure roles share the same accepted duty-cycle range.
 // Extract their actual setter and boot sanitization, with only storage mocked.
 struct Infrastructure {
-  struct Prefs { float airtime_factor=1; } prefs;
+  struct Prefs { float airtime_factor=1,freq=909.5f,bw=62.5f;uint8_t sf=7,cr=5; } prefs;
   Prefs* _prefs=&prefs;
   uint8_t image[sizeof(float)]={};
   void savePrefs() { memcpy(image,&prefs.airtime_factor,sizeof(float)); }
   void command(const char* config,char* reply) { @INFRA_SETTER@ }
+  void radioCommand(char* reply) { @INFRA_RADIO@ }
   void reboot() { memcpy(&prefs.airtime_factor,image,sizeof(float));@INFRA_SANITIZE@ }
 };
 static bool error(const char* reply) { return strstr(reply,"Error") || strstr(reply,"ERROR"); }
 int main() {
   unsigned checks=0;
+  // App radio settings require exactly the upstream four-field CSV, even
+  // with an explicit preamble or an active temporary/secondary profile.
+  for(uint32_t timestamp:{0U,1700000000U})for(uint16_t preamble:{0U,48U}) {
+    MyMesh m;assert(m._radio_profiles.savePrimaryPreamble(preamble));
+    m.radio.p.primary.freq=915;m.radio.p.primary.preamble=96;
+    m.radio.p.primary_temporary=true;
+    m.radio.p.secondary.params={916,125,64,8,6};
+    m.radio.p.secondary.mode=mesh::RadioProfileMode::RxTx;
+    const char* reply=m.command("get radio",timestamp);
+    assert(!strcmp(reply,"> 909.5,62.5,7,5"));
+    assert(m._radio_profiles.primaryPreamble()==preamble);
+    Infrastructure infra;char infrastructure_reply[160]={};
+    infra.radioCommand(infrastructure_reply);
+    assert(!strcmp(infrastructure_reply,reply));++checks;
+  }
   // The outer profile validator accepts 125.005, but CommonRadioPrefs rejects
   // it. Rejection must preserve both on-disk images, even with a dirty adapter.
   for(uint32_t timestamp:{0U,1700000000U})for(bool dirty:{false,true}) {
@@ -199,6 +216,7 @@ class CompanionPrimaryRadioPersistenceTests(unittest.TestCase):
             '@COMPANION_SANITIZE@': boot_checks(companion, '_prefs.airtime_factor'),
             '@INFRA_SANITIZE@': boot_checks(infra, '_prefs->airtime_factor'),
             '@INFRA_SETTER@': extract_braced(infra, 'if (memcmp(config, "dutycycle ", 10) == 0)'),
+            '@INFRA_RADIO@': extract_braced(infra, 'if (configKeyEquals(config, "radio"))').split('{', 1)[1].rsplit('}', 1)[0],
         }
         harness = support + HARNESS
         for marker, value in replacements.items():
