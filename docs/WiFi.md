@@ -560,7 +560,7 @@ meaning can change when the service reorders or adds presets.
 Repeater profiles use up to 254 neighbors. Selected Generic E22, Heltec V2,
 Meshadventurer, T-Beam OTA/MQTT, and TLora MQTT profiles use 50 to preserve
 internal-DRAM reserves. Consult the artifact capability manifest and
-[ESP32 memory budget](esp32_memory_budget.md) for the exact target.
+[ESP32 memory budget](research/esp32_memory_budget.md) for the exact target.
 
 The interactive Option 1 **FULL everything** choice and the standalone FULL
 command select the unified USB + WiFi image when a matching MQTT target exists;

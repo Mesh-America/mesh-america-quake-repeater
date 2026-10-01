@@ -26,6 +26,75 @@ not_in_nav: |
   /releases/1.17.1.5.md
   /releases/1.17.1.6.md
   /releases/1.17.1.7.md
+  /companion_contact_cache.md
+  /esp32_memory_budget.md
+  /firmware_memory_budget.md
+  /hardware_validation_bluetooth_stealth_2026-09-07.md
+  /nrf52_bluetooth_debug.md
+  /rak3401_1.17.1.7_legacy24.md
+  /rak3401_mota_chain.md
+  /research/*.md
+  /test-results/*.md
+  /test-results/preview-1.17.1.8/*.md
+  /old-releases/*.md
+
+nav:
+  - Home: index.md
+  - Firmware and tools:
+      - firmware_picker.md
+      - notifications.md
+      - preset_test.md
+      - filter_tool.md
+      - telemetry_decoder.md
+      - management_decoder.md
+  - Documentation:
+      - Getting started and features:
+          - faq.md
+          - role_feature_switches.md
+          - full_companion_features.md
+          - companion_radio_full.md
+          - full_companion_usb_switcher.md
+          - companion_offline_queue.md
+          - halo_keymind_settings.md
+      - Firmware updates and partitions:
+          - ota_user_guide.md
+          - ota_easy.md
+          - lora_ota_automation.md
+          - ota_nrf52_bootloader_update.md
+          - ota_nrf52_qspi.md
+          - ota_meshtower_v2_sdcard.md
+          - esp32_partition_catalog.md
+          - esp32_wifi_partition_migration.md
+          - heltec_v4_wifi_partition_migration.md
+          - host_cli_service.md
+      - Radio, networking, and power:
+          - radio_profiles.md
+          - carrier_wave.md
+          - espnow_bridge_setup.md
+          - WiFi.md
+          - flood_filtering.md
+          - gps_tracking.md
+          - nrf52_power_management.md
+      - CLI and protocol reference:
+          - cli_commands.md
+          - cli_build_matrix.md
+          - cli_command_availability.md
+          - terminal_chat_cli.md
+          - companion_protocol.md
+          - kiss_modem_protocol.md
+          - packet_format.md
+          - payloads.md
+          - ota_protocol.md
+          - management_reports.md
+          - stats_binary_frames.md
+          - number_allocations.md
+          - qr_codes.md
+      - docs.md
+  - Research: research/index.md
+  - Test Results: test-results/index.md
+  - Releases:
+      - Current release: releases/1.17.1.8.md
+      - Old Releases: old-releases/index.md
 
 theme:
   name: material

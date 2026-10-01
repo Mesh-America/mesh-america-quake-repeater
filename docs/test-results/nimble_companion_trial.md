@@ -7,7 +7,7 @@ release matrix and firmware picker.
 See the [2026-09-08 hardware results](nimble_companion_trial_results.md) for
 measured RAM, MAC-policy checks, WiFi updates, and remaining qualification.
 
-The [contact-cache guide](../companion_contact_cache.md) adds six optional
+The [contact-cache guide](../research/companion_contact_cache.md) adds six optional
 350-contact trials for ESP32 boards without PSRAM, including Heltec V3.
 Their [qualification results](companion_contact_cache_results.md) include
 linked RAM margins, V4/RAK hardware tests and the mOTA queue policy.

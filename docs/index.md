@@ -1,40 +1,26 @@
-# Introduction
+# MeshCore documentation
 
-Welcome to the MeshCore documentation.
+Choose firmware with the [firmware picker](firmware_picker.md), then read the [current 1.17.1.8 release notes](releases/1.17.1.8.md) before installing. For help with a device already in service, start with the [FAQ](faq.md).
 
-Below are a few quick start guides.
+## Documentation
 
-- [1.17.1.8 USA Cascade release](./releases/1.17.1.8.md)
-- [Test Results](./test-results/index.md)
-- [Old Releases](./old-releases/index.md)
-- [Feature switches by role: Companion, Repeater, Room Server, Sensor](./role_feature_switches.md)
-- [USB web console](https://flasher.meshcore.io/console)
-- [Full Companion feature switches](./full_companion_features.md)
-- [Frequently Asked Questions](./faq.md)
-- [Firmware Picker](./firmware_picker.md)
-- [Companion Notification Builder](./notifications.md)
-- [Temporary Radio Test Command Generator](./preset_test.md)
-- [CLI Commands](./cli_commands.md)
-- [LoRa CLI Host Service](./host_cli_service.md)
-- [Filter Policy Playground](./filter_tool.md)
-- [Telemetry Decoder](./telemetry_decoder.md)
-- [Management Report Decoder](./management_decoder.md)
-- [CLI Availability by Firmware Build](./cli_build_matrix.md)
-- [Classic ESP32 image memory budget](./esp32_memory_budget.md)
-- [Full Companion contact caches and capacity trials](./companion_contact_cache.md)
-- [Easy LoRa OTA: ESP32 and nRF52 firmware updates](./ota_easy.md)
-- [Scripted LoRa OTA: Bash and PowerShell](./lora_ota_automation.md)
-- [nRF52 repeater OTA with external QSPI](./ota_nrf52_qspi.md)
-- [nRF52 bootloader updates over LoRa](./ota_nrf52_bootloader_update.md)
-- [MeshTower V2 microSD self-updates](./ota_meshtower_v2_sdcard.md)
-- [GPS Tracking](./gps_tracking.md)
-- [Companion Protocol](./companion_protocol.md)
-- [Companion Offline Message Queue](./companion_offline_queue.md)
-- [Full Companion: ESP32 and nRF52](./companion_radio_full.md)
-- [Full Companion USB CLI and binary switcher](./full_companion_usb_switcher.md)
-- [Packet Format](./packet_format.md)
-- [QR Codes](./qr_codes.md)
+- [Feature switches by role](role_feature_switches.md) and [Full Companion features](full_companion_features.md)
+- [Firmware update guide](ota_user_guide.md), [easy LoRa OTA](ota_easy.md), and [scripted LoRa OTA](lora_ota_automation.md)
+- [CLI commands](cli_commands.md), [availability by build](cli_build_matrix.md), and [radio profiles](radio_profiles.md)
+- [Companion protocol](companion_protocol.md), [packet format](packet_format.md), and [QR codes](qr_codes.md)
 
-If you find a mistake in any of our documentation, or find something is missing, please feel free to open a pull request for us to review.
+The navigation groups the remaining guides under Documentation, including board-specific updates, networking, power, and protocol references.
 
-- [Documentation Source](https://github.com/mikecarper/MeshCore/tree/keymindCascade/docs)
+## Tools
+
+- [Firmware picker](firmware_picker.md) and [USB web console](https://flasher.meshcore.io/console)
+- [Notification builder](notifications.md) and [temporary radio test builder](preset_test.md)
+- [Filter policy playground](filter_tool.md), [telemetry decoder](telemetry_decoder.md), and [management report decoder](management_decoder.md)
+
+## Engineering records
+
+- [Research](research/index.md) — design notes, diagnostics, and historical update-chain studies
+- [Test Results](test-results/index.md) — measured validation reports and Preview 1 qualification evidence
+- [Old Releases](old-releases/index.md) — historical release notes and supporting files
+
+Found a mistake or missing information? [Edit the documentation](https://github.com/mikecarper/MeshCore/tree/keymindCascade/docs).

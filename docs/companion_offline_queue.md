@@ -43,7 +43,7 @@ app first. While the loan is active, the overflow policy below applies at 128
 frames. The original `26303793` 1.17.1.5 builds reserve the queue and mOTA state
 separately. Sharing recovers about 19 KiB on nRF52 Full. The ST7735 color-display
 Full profiles require at least 72 KiB of heap space at link time; OLED and
-headless profiles use their own [memory budgets](firmware_memory_budget.md).
+headless profiles use their own [memory budgets](research/firmware_memory_budget.md).
 
 Standard, logging, MQTT, and Cascade build overlays retain the selected target
 capacity. On cache-enabled high-contact nRF52 Companions, including the RAK4631

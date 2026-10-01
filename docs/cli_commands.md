@@ -1714,7 +1714,7 @@ OTAFIX bootloader still uses its own address, which is visible only while the
 board is in BLE DFU/recovery mode. USB and LoRa updates are unaffected.
 Bluetooth update tools must follow that separate bootloader address after the
 handoff; they must not assume that a custom application address remains the
-DFU address. See the [hardware observations](hardware_validation_bluetooth_stealth_2026-09-07.md)
+DFU address. See the [hardware observations](test-results/hardware_validation_bluetooth_stealth_2026-09-07.md)
 for the tested XIAO handoff and host-cache caveats.
 
 ---

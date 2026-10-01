@@ -157,7 +157,7 @@ built with `-DTELEM_INA3221_ADDRESS=0x43` when both are installed.
 
 ESP32 siblings retain the compact browser WiFi updater and use up to
 254 neighbors. Internal-DRAM-constrained targets use 50 as recorded in the
-artifact capability manifest; see [ESP32 memory budget](esp32_memory_budget.md). RP2040 and STM32 targets are not offered because
+artifact capability manifest; see [ESP32 memory budget](research/esp32_memory_budget.md). RP2040 and STM32 targets are not offered because
 those platforms do not yet have a safe bootloader/apply path.
 
 nRF52 LoRa-OTA siblings use size optimization rather than the Adafruit platform's default `-Ofast`. This

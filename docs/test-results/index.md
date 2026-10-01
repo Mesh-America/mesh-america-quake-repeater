@@ -52,6 +52,7 @@ Completed validation reports, experiments, and test guides are collected here. O
 - [Stock nRF52 bootloader version audit](bootloader_version_stock_audit.md)
 - [CLI setting dispatch audit](cli_settings_audit.md)
 - [Hardware validation checklist](hardware_validation_checklist.md)
+- [XIAO Bluetooth stealth hardware validation — 2026-09-07](hardware_validation_bluetooth_stealth_2026-09-07.md)
 - [Shrinking the per-connection TLS footprint on non-PSRAM observers](mbedtls-tls-footprint.md)
 - [nRF52 Companion automatic ExtraFS recovery](nrf52_companion_storage_recovery.md)
 - [PR #7 review and validation](pr7_review_validation.md)
