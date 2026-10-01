@@ -65,9 +65,13 @@ python3 scripts/check_nrf52_ble_reconnect.py \
 
 This checks app-style NUL-terminated CLI commands, reboots the selected node,
 and reads the saved subscription before the host subscribes again. It also
-checks automatic release of a secured link with no Companion traffic, followed
+observes release of a secured link with no Companion traffic, followed
 by a normal reconnect and working CLI. It does not clear pairing keys or change
 preferences. Fresh pairing with the current PIN is a separate initial gate.
+A link drop alone does not prove the firmware watchdog fired: confirm the cause
+in the node debug log or Bluetooth trace. Link timeout reasons `0x08` and `0x22`
+must not be counted as a confirmed firmware-requested disconnect (`0x13` at the
+central).
 
 ### SenseCAP Indicator transport and rendering exception
 
