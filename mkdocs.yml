@@ -91,9 +91,10 @@ nav:
           - qr_codes.md
       - docs.md
   - Research: research/index.md
-  - Test Results: test-results/index.md
   - Releases:
-      - Current release: releases/1.17.1.8.md
+      - Current release:
+          - 1.17.1.8 USA Cascade: releases/1.17.1.8.md
+          - Test Results: test-results/index.md
       - Old Releases: old-releases/index.md
 
 theme:
