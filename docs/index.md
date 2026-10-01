@@ -5,8 +5,8 @@ Welcome to the MeshCore documentation.
 Below are a few quick start guides.
 
 - [1.17.1.8 USA Cascade release](./releases/1.17.1.8.md)
-- [1.17.1.5 Markdown audit](./releases/1.17.1.5-doc-audit.md)
-- [1.17.1.5 USA Cascade release](./releases/1.17.1.5.md)
+- [Test Results](./test-results/index.md)
+- [Old Releases](./old-releases/index.md)
 - [Feature switches by role: Companion, Repeater, Room Server, Sensor](./role_feature_switches.md)
 - [USB web console](https://flasher.meshcore.io/console)
 - [Full Companion feature switches](./full_companion_features.md)

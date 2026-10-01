@@ -1044,7 +1044,7 @@ set usb.logging on
 
 Verify with `get powersaving` (expect `off`) and `get usb.logging` (expect `on`).
 Both settings are saved; disabling logging later does not restore power
-saving. This works around the [released USB sleep bug](releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled).
+saving. This works around the [released USB sleep bug](old-releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled).
 nRF52 does not need this ESP32 workaround.
 
 These commands are compiled into ordinary USB-loggable artifacts and every
@@ -1443,7 +1443,7 @@ Station G2/G3 targets default to `off`.
 
 **Notes:**
 - `get rxps.wd` reports the radio watchdogs' soft and hard recovery counts.
-  See [receive calibration and recovery](radio_receive_calibration.md) for
+  See [receive calibration and recovery](test-results/radio_receive_calibration.md) for
   noise sampling, CAD handling, and the continuous-RX mode check.
 - `get radio.rxps.config` adds the persisted level and preamble assumption to
   the on/off and timing values. Deployment tools use it to restore a
@@ -2154,7 +2154,7 @@ minutes when the terminal is closed, even with a computer attached. The
 source fix blocks ESP32 light sleep while a native USB host is attached or
 live USB logging is enabled; ordinary CPU idle/yield remains available.
 The G3 button also wakes the device for at least two minutes. See the
-[G3 release note](releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled)
+[G3 release note](old-releases/1.17.1.5.md#g3-usb-disappearance-with-power-saving-enabled)
 for verification steps and the distinction between the fix and the published
 binaries.
 
@@ -2257,7 +2257,7 @@ The pin number is the Arduino pin number used by that target (the normal GPIO nu
 **1.17.1.5 infrastructure bug:** affected Repeater, Room Server, and Sensor
 images accept `get path.hash.mode` but report `unknown config` for the setter.
 The command was not renamed. The source correction restores the setter;
-installed images need an updated build. See the [setting-dispatch audit](cli_settings_audit.md).
+installed images need an updated build. See the [setting-dispatch audit](test-results/cli_settings_audit.md).
 
 **Usage:**
 - `get path.hash.mode`
@@ -4770,7 +4770,7 @@ displaying a version neither grants OTA capability nor bypasses install checks.
 The fix is in MeshCore application firmware; installing another bootloader alone
 does not update an older application's version reader.
 
-See the [stock bootloader audit](bootloader_version_stock_audit.md) for tested
+See the [stock bootloader audit](test-results/bootloader_version_stock_audit.md) for tested
 manufacturer images and the boards still requiring untouched factory dumps.
 
 ---

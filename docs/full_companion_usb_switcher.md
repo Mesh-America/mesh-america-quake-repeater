@@ -14,7 +14,7 @@ frame automatically hands the interface to the binary parser.
 Current source keeps the default terminal quiet until the host sends ASCII
 input. Press Enter or type a command to see the banner. This prevents the ASCII
 `>` prompt from being mistaken for the beginning of an app's first binary
-response. See [USB client compatibility validation](companion_usb_client_validation.md)
+response. See [USB client compatibility validation](test-results/companion_usb_client_validation.md)
 for the tested firmware and release status.
 
 These mode controls apply to Full and ordinary USB Companion builds. The

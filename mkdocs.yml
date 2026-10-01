@@ -6,6 +6,27 @@ repo_name: !ENV [MKDOCS_REPO_NAME, 'meshcore-dev/meshcore']
 repo_url: !ENV [MKDOCS_REPO_URL, 'https://github.com/meshcore-dev/meshcore/']
 edit_uri: !ENV [MKDOCS_EDIT_URI, 'edit/main/docs/']
 
+# Keep historical URLs for bookmarks while showing only the organized copies.
+not_in_nav: |
+  /*_validation.md
+  /*_results.md
+  /*_audit.md
+  /*_investigation.md
+  /*_trial.md
+  /hardware_validation_checklist.md
+  /home_text_spacing.md
+  /mbedtls-tls-footprint.md
+  /nrf52_companion_storage_recovery.md
+  /nrf52-usb-ready-fix.md
+  /radio_receive_calibration.md
+  /spiffs_regular_file_reads.md
+  /usb_serial_backpressure.md
+  /v4_pixel5_font_trial.md
+  /releases/1.17.1.5-doc-audit.md
+  /releases/1.17.1.5.md
+  /releases/1.17.1.6.md
+  /releases/1.17.1.7.md
+
 theme:
   name: material
   logo: _assets/meshcore.svg

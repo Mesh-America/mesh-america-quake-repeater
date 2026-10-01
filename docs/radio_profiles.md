@@ -320,12 +320,12 @@ channel until reception finishes.
 
 The SF8 / 500 kHz value is calculated from the same formula as every other
 profile; the older pair-specific 88-symbol floor has been removed. The explicit
-values come from [historical production validation](radio_profiles_validation.md):
+values come from [historical production validation](test-results/radio_profiles_validation.md):
 the final fast-channel attempts each received 50/50 packets at 4.8 slow symbols.
 Automatic values use the measured switch allowance below.
 Those explicit-preamble tests used the older 4.8-symbol policy; they do not
 validate the newer 4.6-symbol slow dwell. The
-[4.6/0.3 ms two-profile bench](radio_dwell_policy_validation.md#hardware-context) received 197/200
+[4.6/0.3 ms two-profile bench](test-results/radio_dwell_policy_validation.md#hardware-context) received 197/200
 at SF7/62.5 + SF8/500 with explicit 32-symbol preambles. The newer four-channel
 5.1/6.1/7.7 tests also had misses, so this is a timing policy, not a claim of zero packet loss.
 The automatic fast preamble covers the blind interval during the slow visit,
@@ -438,7 +438,7 @@ The model preserves two slow-profile return opportunities and the existing
 not a fitted success curve, and neither packet overlap nor arbitrary application
 stalls can be made safe by a finite preamble recommendation.
 
-See the [implementation and validation notes](radio_dwell_policy_validation.md).
+See the [implementation and validation notes](test-results/radio_dwell_policy_validation.md).
 
 ## Schedule the second profile
 
@@ -491,7 +491,7 @@ profile. Packets/retries bound to an expired or changed session are discarded.
 Dual mode suspends RX power saving and MCU idle sleep so receive visits can run
 promptly. The saved RX power-saving setting returns when profile 2 is off.
 The scan uses **normal receive**, following the
-[CAD/RX measurements](cad_scan_validation.md), with the updated 4.6-symbol dwell on the slower
+[CAD/RX measurements](test-results/cad_scan_validation.md), with the updated 4.6-symbol dwell on the slower
 channel, followed by the remaining fast-channel visit. It does not use CAD for scanning.
 The separate CAD check before an initial transmission still follows `cad`.
 
@@ -506,13 +506,13 @@ power during the short standby intervals.
 
 The switch-time self-test is not a forced settling delay or a proof of RF
 acquisition. The earlier standalone
-[keep-warm scan experiment](mixed_scan_validation.md) averaged about 1.19 ms
+[keep-warm scan experiment](test-results/mixed_scan_validation.md) averaged about 1.19 ms
 of overhead per hop (scan-cycle time minus both receive windows, divided by
 two). That experiment used a leaner receive path; it is not a measurement or
 guarantee of the production implementation. Measure the target board before
 shortening its timing margins or transmit preambles.
 
-The [production-path XIAO timing test](radio_profile_switch_validation.md)
+The [production-path XIAO timing test](test-results/radio_profile_switch_validation.md)
 measured **1.434 ms average / 1.467 ms maximum** with warm standby, compared
 with **3.166 ms average** using RC standby: about **1.732 ms saved per hop**.
 It covered 12,000 retunes across SF7/8/9 at 500 kHz paired with SF7/62.5 kHz.
@@ -524,7 +524,7 @@ A same-image follow-up batching SF/BW/CR into one modulation command reduced
 warm switching from **1.444 ms to 1.158 ms average** (batched maximum **1.198 ms**),
 saving another **0.286 ms / 19.8%**. RadioLib's modulation caches and LDRO
 calculation remain synchronized; frequency, preamble, packet guards, and RX
-restart are unchanged. A later [HIL-only screening](radio_profile_switch_validation.md#expanded-screening-redundant-rx-setup-and-spi-v5)
+restart are unchanged. A later [HIL-only screening](test-results/radio_profile_switch_validation.md#expanded-screening-redundant-rx-setup-and-spi-v5)
 tested redundant standby/IRQ/buffer/packet setup and SPI transfer changes.
 Its fastest candidate measured 0.535 ms mean on XIAO but 8.203 ms on the
 Indicator, whose radio GPIOs go through an I2C expander. The validated production
@@ -549,11 +549,11 @@ including when automatic LDRO policy changes. Ordinary setters and lost RX
 context invalidate that acknowledgement; initial setup, reset, sleep, failed
 commands and full RX setup conservatively reapply the tuple. Frequency,
 preamble/packet setup, IRQ clearing and BUSY checks are unchanged. This follow-up
-has [same-image hardware measurements](separated_radio_modulation_cache_validation.md):
+has [same-image hardware measurements](test-results/separated_radio_modulation_cache_validation.md):
 frequency-only hops averaged 0.452 ms on XIAO and 7.601 ms on Indicator.
 The mixed-bandwidth timing figures above predate it. Four-channel SF6 scans
 still missed packets; faster switching is not proof of loss-free acquisition.
-See [production and USB validation](radio_profile_switch_validation.md#production-integration-and-usb-recovery-v8)
+See [production and USB validation](test-results/radio_profile_switch_validation.md#production-integration-and-usb-recovery-v8)
 for current measurements, lifecycle tests and limitations.
 The Indicator result shows why each board now measures its own switch time.
 That measurement adjusts automatic preambles and dwell, but it cannot verify
