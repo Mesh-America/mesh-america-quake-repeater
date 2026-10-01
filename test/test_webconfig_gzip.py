@@ -52,6 +52,13 @@ class WebConfigGzipTest(unittest.TestCase):
         for page in (ROOT / "webui/pages").glob("*.html"):
             self.assertEqual(gzip.decompress(blobs["MESH_HTML_" + page.stem.upper()]), page.read_bytes())
 
+    def test_loader_matches_legacy_android_browser_syntax(self):
+        blobs = arrays((ROOT / "src/helpers/esp32/WebConfigHtml.h").read_text())
+        loader = gzip.decompress(blobs["WEBCONFIG_HTML_LOADER"]).decode()
+        script = loader.split("<script>", 1)[1].split("</script>", 1)[0]
+        self.assertNotIn("=>", script)
+        self.assertNotRegex(script, r"\b(?:async|await|let|const)\b")
+
     def test_gzip_binding_uses_1000_iterations_without_changing_raw_ota_default(self):
         with mock.patch.object(zopfli_compress._gzip, "compress",
                                return_value=gzip.compress(b"page", mtime=0)) as compress:
