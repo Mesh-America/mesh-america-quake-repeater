@@ -30,6 +30,7 @@ def capacity_note(reductions, defines):
     for reduction in reductions:
         if reduction == 'display.canvas limited to 320x320 internal pixels, scaled to the 480x480 panel; 350 contacts, 512 queued frames and all Full transports retained':
             notes.append('Display renders at 320x320 and scales to the 480x480 panel to preserve internal RAM. All Full transports, 350 contacts, 512 queued messages and full-length message previews are retained.')
+            continue
         contacts = re.fullmatch(r'companion.capacity limited to (\d+) contacts for runtime RAM; (\d+) queued frames and all Full transports retained', reduction)
         compact = re.fullmatch(r'companion.capacity limited to (\d+) contacts, (\d+) channels, and (\d+) queued frames by measured internal DRAM', reduction)
         queue = re.fullmatch(r'nRF52 Full: (\d+) offline frames normally; (\d+) while mOTA borrows queue storage', reduction)
@@ -61,7 +62,7 @@ def capacity_note(reductions, defines):
             notes.append(f'Neighbor table: {neighbors[1]} entries.')
         elif rules:
             notes.append(f'Flood rules: {rules[1]} entries; the complete rule engine is retained.')
-        elif reduction.startswith(('companion.capacity', 'nRF52 Full:', 'Wireless Paper Full:', 'mesh.neighbors', 'mesh.flood_rules')):
+        elif reduction.startswith(('companion.capacity', 'nRF52 Full:', 'Wireless Paper Full:', 'mesh.neighbors', 'mesh.flood_rules', 'display.canvas')):
             raise ValueError('Unrecognized capacity reduction: ' + reduction)
     return ' '.join(notes)
 
