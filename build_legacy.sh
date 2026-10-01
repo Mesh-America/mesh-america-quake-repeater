@@ -3598,6 +3598,20 @@ apply_repeater_neighbor_capacity() {
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_NEIGHBOURS=${max_neighbours}"
 }
 
+apply_stm32_companion_size_profile() {
+  local env_name=$1
+
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$env_name]:-}" = "STM32_PLATFORM" ] || return 0
+  case "$env_name" in
+    Tiny_Relay_companion_radio_usb|wio-e5-mini_companion_radio_usb|wio-e5_companion_radio_usb)
+      # GCC 14's switch tables put these 1.17.1.8 images 24-156 bytes over
+      # their existing app boundary. Branch-based switches preserve the USB
+      # protocol, CLI, crypto and 32 KiB filesystem without removing features.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -flto-partition=one -fno-jump-tables -fno-tree-switch-conversion"
+      ;;
+  esac
+}
+
 apply_nrf52_size_profile() {
   local env_name=$1
 
@@ -4048,17 +4062,32 @@ apply_companion_radio_full_profile() {
         "Wireless Paper Full: 350 contacts; 256 offline frames normally, 128 while mOTA borrows queue storage"
       ;;
     generic_espnow_companion_radio_full|\
-    heltec_wireless_tracker_companion_radio_full|\
     heltec_ct62_companion_radio_full|\
     heltec_v3_companion_radio_full|\
     xiao_c3_companion_radio_full|\
     heltec_tracker_v2_companion_radio_full_*)
-      # Published 1.17.1.5 images failed the runtime heap budget with 350
-      # contacts. Preserve the 256-frame queue and simultaneous transports.
+      # The 1.17.1.8 matrix exceeds the runtime heap budget at 150 contacts
+      # after adding alerts and held DMs. Preserve the 256-frame queue, Full
+      # transports and the unchanged runtime heap safety margin.
+      append_platformio_build_unflags "-DMAX_CONTACTS=350"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=100"
+      record_build_reduction \
+        "companion.capacity limited to 100 contacts for runtime RAM; 256 queued frames and all Full transports retained"
+      ;;
+    heltec_wireless_tracker_companion_radio_full)
       append_platformio_build_unflags "-DMAX_CONTACTS=350"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=150"
       record_build_reduction \
         "companion.capacity limited to 150 contacts for runtime RAM; 256 queued frames and all Full transports retained"
+      ;;
+    sensecapindicator-lora_companion_radio_full|\
+    sensecapindicator-lora-n16r2_companion_radio_full)
+      # Retain the largest canvas and all transports. These two recipes need
+      # a smaller contact table to meet their measured internal RAM budget.
+      append_platformio_build_unflags "-DMAX_CONTACTS=350"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=300"
+      record_build_reduction \
+        "companion.capacity limited to 300 contacts for runtime RAM; 256 queued frames and all Full transports retained"
       ;;
     meshadventurer_sx1262_companion_radio_full|\
     meshadventurer_sx1268_companion_radio_full)
@@ -4682,6 +4711,7 @@ build_firmware() {
   apply_esp32_full_shared_bridge_profile "$pio_env_name"
   apply_esp32_full_async_tcp_profile "$env_name"
   apply_repeater_neighbor_capacity "$env_name"
+  apply_stm32_companion_size_profile "$env_name"
   apply_nrf52_size_profile "$env_name"
   apply_lora_ota_no_external_sensors_profile "$env_name"
   apply_radio_overrides
