@@ -140,6 +140,29 @@ public:
 };
 '''
 
+# Only fixtures extracting the real checkDisplayOn() need its pairing API.
+# Keep PREAMBLE unchanged for inbox fixtures that supply their own BLE model.
+PAIRING_PREAMBLE = PREAMBLE.replace(
+    '#include <helpers/ui/DisplayTextLayout.h>',
+    '#include <helpers/ui/DisplayTextLayout.h>\n'
+    '#include <helpers/ui/BluetoothPairingUiPolicy.h>',
+).replace(
+    '  bool notificationButton() { return false; }',
+    '  bool notificationButton() { return false; }\n'
+    '  uint32_t getBLEPin() const { return 246810; }',
+).replace('  int getMsgCount() const { return 0; }', r'''
+  bool bluetooth_enabled=false, bluetooth_connected=false;
+  bool pairing_from_button=false;
+  int pairing_previews=0;
+  bool isBluetoothEnabled() const { return bluetooth_enabled; }
+  bool hasBluetoothConnection() const { return bluetooth_connected; }
+  void showPairingPin(bool from_button=false) {
+    ++pairing_previews;
+    pairing_from_button=from_button;
+  }
+  int getMsgCount() const { return 0; }
+''')
+
 SCENARIOS = r'''
 void gesture(UITask& task,int count) {
   for (int tap=0;tap<count;++tap) {
@@ -240,6 +263,7 @@ int main() {
   display.on=false;
   gesture(task,4); // waking consumes the entire gesture
   assert(display.on); expect("DM 1/1","direct message");
+  assert(task.pairing_previews==0); // Disabled Bluetooth must not claim the wake.
   gesture(task,4); expect("Ch 3 0/0","No buffered messages");
   gesture(task,4); expect("Ch 2 1/1","second");
 #if UI_READER_TOUCH_BAR
@@ -358,6 +382,18 @@ int main() {
   gesture(task,2); assert(home._page==HomeScreen::RADIO_STATUS);
   gesture(task,2); assert(home._page==HomeScreen::RADIO2);
   gesture(task,2); assert(home._page==HomeScreen::RADIO);
+  // Exercise the current production wake's pairing dependency rather than
+  // removing it from the extracted method to keep the navigation fixture green.
+  task.bluetooth_enabled=true;
+  display.on=false;
+  assert(task.checkDisplayOn(KEY_NEXT)==0);
+  assert(display.on && task.pairing_previews==1 && task.pairing_from_button);
+  assert(static_cast<uint8_t>(task.checkDisplayOn(KEY_NEXT))==KEY_NEXT);
+  assert(task.pairing_previews==1); // Already-awake navigation does not re-prompt.
+  task.bluetooth_connected=true;
+  display.on=false;
+  assert(task.checkDisplayOn(KEY_NEXT)==0 && display.on);
+  assert(task.pairing_previews==1); // Bonded/connected Bluetooth needs no PIN.
 }
 '''
 
@@ -409,7 +445,7 @@ class MessageNavigationTest(unittest.TestCase):
         for enabled, signedness, canvas in product(
                 (0, 1), ("-fsigned-char", "-funsigned-char"), (0, 320, 480)):
             with self.subTest(feature=enabled, signedness=signedness, canvas=canvas), tempfile.TemporaryDirectory() as temp:
-                preamble = PREAMBLE
+                preamble = PAIRING_PREAMBLE
                 flags = []
                 if canvas:
                     preamble = preamble.replace("MomentaryButton user_btn(7,1000,true,true,true);", button)
