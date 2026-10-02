@@ -73,8 +73,9 @@ Bluetooth DFU. Install an application containing this fix once through USB
 UF2, or force the board into hardware DFU and use the matching application
 package. Use the board's supported recovery entry procedure. Installing a
 new bootloader does not replace the unsafe callback in the application.
-OTAFIX recovery 2.4.12 adds a narrow fault fallback for this legacy callback:
-when the forwarded HardFault occurs with the B1 Bluetooth DFU request marker,
+The in-place correction to OTAFIX recovery 2.4.11 adds a narrow fault
+fallback for this legacy callback; the originally published 2.4.11 lacks it.
+When the forwarded HardFault occurs with the B1 Bluetooth DFU request marker,
 it sets A8 and resets directly into BLE DFU without touching the broken stack.
 Other faults keep their existing halt behavior. The unchanged 1.17.1.7 app
 was physically observed reaching DFU through this fallback. This supplies
@@ -126,11 +127,13 @@ GATT 133 reconnect errors followed, and the device later answered `ver` with
 the unchanged application. No RAK DFU advertisement was seen in a later scan.
 USB data remained connected for this baseline.
 
-### Bootloader fallback with the unchanged old application: PASS
+### Historical lab-only Nordic fallback with the unchanged old application: PASS
 
-The final recovery qualification image uses packed test version `0x02040CFF`,
+The lab-only recovery qualification image uses packed test version `0x02040CFF`,
 production-length text `R_v0.11.0-OTAFIX2.4.12`, and bootloader CRC `5B8F3E90`.
 It is a development qualification image, not the tagged production artifact.
+This correction creates no 2.4.12 release. This physical result keeps its tested version
+and does not qualify the replacement 2.4.11 release assets.
 The combined serial DFU ZIP installed it, then USB UF2 restored the unchanged
 reported 1.17.1.7 application. Both identities were checked before retrying.
 
@@ -156,9 +159,9 @@ is unchanged. The combined serial/Bluetooth DFU ZIP supplies the supported
 installation path; permissive image identity policy does not disable flash
 bounds or live-application staging safety.
 
-### Fixed application through MeshCore Open
+### Corrected 2.4.11 through MeshCore Open with the unchanged old application: PASS
 
-Pending on the second phone. The current Android legacy Open build
+The second LG phone's Android legacy Open build
 9.5.5/code 26 reached the Bluetooth updater, but `Enable radio updater`
 rejected a selected route's hash width before sending its command. Open
 commit `03b0d707` preserves each supported route's own width and rejects
@@ -170,11 +173,60 @@ the phone's pairing data retained. Its SHA-256 is
 `5a3a2f83299f1d4e27f242680335494d0ac49db5f8fa3e2ee8b71902f1924d33`.
 The second phone disappeared from the VM's USB inventory during USB
 re-enumeration before a completed Open transfer could be recorded. The
-automatic USB configuration watcher was stopped. Record transfer completion,
-installed version, USB power/data state, and restored radio state after
-reconnecting that phone before claiming an Open physical pass.
+automatic USB configuration watcher was stopped. Testing continued on the
+first LG phone, also running Android 5.1.1, using that same Open build.
 
-### Hardware restored while the phone test is pending
+The RAK4631 ran the corrected 2.4.11 qualification image with packed version
+`0x02040BFF` and bootloader manifest CRC `C2A4B64B`. The exact published old
+1.17.1.7 application was restored before this test. USB data was disabled
+at the target; USB power remained connected. Forced flood authentication
+through the companion and the temporary radio tuple `910.525,62.5,7,5`
+enabled the repeater's updater, whose reply identified the correct target
+Bluetooth address.
+
+On 2026-10-02, Open's native Nordic DFU SDK 2.11.0 initially reported GATT 133
+and disconnect status 8 while writing opcode 1. Its automatic retry reached bootloader
+revision `0800`, negotiated MTU 247, and transferred all 531,708 bytes in
+68,651 ms. Validation returned status 1 and Open sent Activate/Reset,
+logged at 03:27:16 America/Los_Angeles. Final CLI queries confirmed
+`v1.17.1.8-ble-dfu-test (Build: 01-Oct-2026)`, bootloader OTAFIX 2.4.11, the
+restored saved radio tuple `869.6179809,62.5,8,5`, and all seven unchanged
+settings digests. The raw radio reply differs only by the removal of the
+old preamble suffix. USB data was restored for verification. No erase firmware
+was used. This qualifies the tested application/bootloader/phone combination,
+not every board or a battery-only install. These measurements used a
+qualification image; the production archive inventory identifies release
+assets by their source tag, source commit, manifest CRC, and checksums.
+
+The repair uses the existing non-latest prerelease
+`R_0.11.0-OTAFIX2.4.11`, preserving that original distribution tag and its
+110 asset names. Corrected production binaries use the source-only tag
+`R_v0.11.0-OTAFIX2.4.11`. The normal latest release remains 2.4.10.
+
+### Corrected 2.4.11 through Nordic with the unchanged old application: PASS
+
+On 2026-10-02, the first LG Android 5.1.1 phone ran Nordic nRF Connect
+4.24.3/code 114 against the same corrected 2.4.11 qualification image,
+packed version `0x02040BFF` and manifest CRC `C2A4B64B`. The exact published
+old 1.17.1.7 application was restored before the test. Local CLI `start ota`
+returned the correct target Bluetooth address. USB data was disabled during
+the application transfer while USB power remained connected.
+
+Nordic displayed upload progress at 2%, 20%, 44%, 67%, and 88%, at about
+1.2 kB/s, then disconnected and the application restarted. This phone
+provided no Nordic INFO log; the recorded evidence is UI progress plus final
+CLI verification, not an exact transfer duration or a captured 100% frame.
+
+Final CLI queries confirmed `v1.17.1.8-ble-dfu-test`, bootloader OTAFIX 2.4.11,
+all seven unchanged settings digests, and the saved radio tuple
+`869.6179809,62.5,8,5`. The raw radio reply differs only by the removal of the
+old preamble suffix. No erase firmware was used. This qualifies the tested
+application/bootloader/phone combination, not every board or battery-only
+operation. The earlier lab-only 2.4.12 Nordic pass remains separate. Production
+release assets must pass the clean-tag build and package validation before
+upload; these physical tests do not bypass those gates.
+
+### Earlier restored-node handoff and exit check
 
 The RAK4631 was returned to the published normal 2.4.10 `auto` bootloader
 and the fixed `v1.17.1.8-ble-dfu-test` application. The ordinary application
