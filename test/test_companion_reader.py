@@ -10,7 +10,7 @@ import tempfile
 import unittest
 import zlib
 
-from test_message_navigation import PREAMBLE
+from test_message_navigation import PAIRING_PREAMBLE as PREAMBLE
 from test_replay_reset_integration import extract_braced
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -174,7 +174,6 @@ struct ReaderScreen : Screen { int saves = 0; void flush() { ++saves; } };
   uint32_t _pairing_screen_until = 0;
   bool hasConnection() const { return false; }
   bool isPairingScreenActive() const { return false; }
-  void showPairingPin() {}
   void finishPairingScreen(bool) {}
   void servicePairingState();
 '''
@@ -222,6 +221,17 @@ int main() {
   int before = reader.saves;
   g_mock_millis += 5000; task.servicePairingState();
   assert(!display.isOn() && reader.saves == before);
+  assert(task.pairing_previews == 0); // Bluetooth-disabled reader wakes stay ordinary.
+  task.bluetooth_enabled = true;
+  task.curr = &reader;
+  before = reader.saves;
+  assert(task.checkDisplayOn(KEY_NEXT) == 0 && display.isOn());
+  assert(task.pairing_previews == 1 && task.pairing_from_button);
+  assert(reader.saves == before); // PIN preview does not write the bookmark.
+  task.bluetooth_connected = true;
+  display.turnOff();
+  assert(task.checkDisplayOn(KEY_NEXT) == 0 && display.isOn());
+  assert(task.pairing_previews == 1); // No new PIN for a connected BLE peer.
   task._display = nullptr; task.servicePairingState();
 }
 '''
