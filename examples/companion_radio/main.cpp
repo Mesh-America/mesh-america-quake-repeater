@@ -1273,7 +1273,7 @@ void halt() {
   static char configured_wifi_ssid[32];
   static char configured_wifi_password[65];
   static bool companion_wifi_has_credentials = false;
-  static bool companion_wifi_requested = true;
+  static bool companion_wifi_requested = false;
   static bool companion_wifi_active = false;
   static bool companion_wifi_disable_in_progress = false;
   static bool companion_wifi_services_stopped = false;
@@ -1291,7 +1291,7 @@ void halt() {
 
 #if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
   static CompanionTransportMode companion_transport_boot_mode =
-      CompanionTransportMode::WiFi;
+      CompanionTransportMode::Bluetooth;
   static bool companion_transport_boot_mode_loaded = false;
 
   CompanionTransportMode getCompanionTransportMode() {
@@ -3074,7 +3074,7 @@ void setup() {
   } else {
     stopCompanionInfrastructureWiFi();
     board.setInhibitSleep(false);
-    WIFI_DEBUG_PRINTLN("WiFi remains off from the saved BOOT/GPIO 0 setting");
+    WIFI_DEBUG_PRINTLN("WiFi remains off; use set wifi.enabled 1 to enable it");
   }
 #if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
   }

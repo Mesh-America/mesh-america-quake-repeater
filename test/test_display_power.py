@@ -1,5 +1,6 @@
 """Exercise the shared display policy and real settings/CLI code on the host."""
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -109,6 +110,135 @@ void policyTests() {
   p.update(prefs, false, false, true, 1001);
   assert(!p.on()); // Off wins over a pending button wake and pairing.
 }
+void companionBootTests() {
+  // The startup exception is role-wide, independent of transport, power
+  // source, or whether an app has already connected by the first UI frame.
+  for (bool usb : {false, true}) for (bool connected : {false, true}) {
+    for (unsigned mode = 0; mode <= 5; ++mode) {
+      DisplayPowerPrefs prefs;
+      prefs.wake_on_boot = true;
+      prefs.battery.mode = prefs.usb.mode = DisplayMode::Off;
+      auto& profile = usb ? prefs.usb : prefs.battery;
+      profile.mode = DisplayMode(mode);
+      DisplayPowerPolicy p;
+      p.update(prefs, usb, connected, false, 100);
+      const bool button_mode = mode == 2 || mode == 4;
+      assert(p.on() == (mode == 1 || button_mode || (mode == 5 && !connected)));
+      p.update(prefs, usb, connected, false, 4100);
+      assert(p.on() == (mode == 1 || button_mode)); // Normal 15s, not 4s.
+      p.update(prefs, usb, connected, false, 15099);
+      assert(p.on() == (mode == 1 || button_mode));
+      p.update(prefs, usb, connected, false, 15100);
+      assert(p.on() == (mode == 1));
+      p.update(prefs, usb, connected, false, 30000);
+      assert(p.on() == (mode == 1)); // Refresh cannot retrigger startup.
+    }
+  }
+  for (DisplayMode mode : {DisplayMode::Button, DisplayMode::ButtonPairing}) {
+    DisplayPowerPrefs prefs;
+    prefs.wake_on_boot = true;
+    prefs.battery = prefs.usb = {mode, 27};
+    DisplayPowerPolicy p;
+    p.update(prefs, false, false, false, 100);
+    p.update(prefs, false, true, false, 101);
+    assert(p.on()); // Connecting does not dismiss a button-mode boot screen.
+    assert(!p.wake(DisplayWake::Message, 200));
+    p.update(prefs, false, true, false, 27099);
+    assert(p.on());
+    assert(p.wake(DisplayWake::Button, 27099));
+    p.update(prefs, false, true, false, 27100);
+    assert(p.on()); // Real input extends the boot timeout.
+    p.update(prefs, false, true, false, 54099);
+    assert(!p.on());
+    p.update(prefs, false, true, true, 54100);
+    assert(p.on() == (mode == DisplayMode::ButtonPairing));
+    p.update(prefs, false, true, true, 100000);
+    assert(p.on() == (mode == DisplayMode::ButtonPairing));
+    p.update(prefs, false, true, false, 100001);
+    assert(!p.on());
+
+    DisplayPowerPolicy switched;
+    switched.update(prefs, false, false, false, 0);
+    assert(switched.on());
+    switched.update(prefs, true, false, false, 1);
+    assert(!switched.on()); // No synthetic boot when the power source changes.
+    switched.update(prefs, false, false, false, 2);
+    assert(!switched.on());
+    prefs.battery.mode = DisplayMode::Off;
+    switched.update(prefs, false, false, false, 3);
+    prefs.battery.mode = mode;
+    switched.update(prefs, false, false, false, 4);
+    assert(!switched.on()); // No synthetic boot when the mode changes.
+
+    DisplayPowerPolicy dismissed;
+    dismissed.update(prefs, false, false, false, 0);
+    dismissed.dismiss();
+    dismissed.update(prefs, false, false, false, 1);
+    assert(!dismissed.on());
+
+    DisplayPowerPolicy rollover;
+    rollover.update(prefs, false, false, false, UINT32_MAX - 500);
+    rollover.update(prefs, false, false, false, 26498);
+    assert(rollover.on());
+    rollover.update(prefs, false, false, false, 26499);
+    assert(!rollover.on());
+  }
+}
+void companionSettingsTests() {
+  for (bool ble : {false, true}) {
+    FakeFS fs;
+    assert(!loadDisplayPowerSettings(&fs, ble, true));
+    assert(displayPowerPrefs().wake_on_boot);
+    const DisplayMode mode = ble ? DisplayMode::ButtonPairing : DisplayMode::Button;
+    assert(displayPowerPrefs().battery.mode == mode);
+    assert(displayPowerPrefs().usb.mode == mode);
+    char reply[160];
+    for (const char* command : {"set display.timeout 27", "set display.usb.timeout 123"}) {
+      assert(handleDisplayPowerCommand(command, reply, sizeof(reply)));
+      assert(std::string(reply) == "OK");
+    }
+    assert(fs.files["/display_prefs"].size() == 12); // No on-device format change.
+    assert(fs.files["/display_prefs"][10] == 0);
+    assert(loadDisplayPowerSettings(&fs, ble, true));
+    assert(displayPowerPrefs().wake_on_boot);
+    for (bool usb : {false, true}) {
+      DisplayPowerPolicy p;
+      p.update(displayPowerPrefs(), usb, false, false, 0);
+      assert(p.on()); // Previously saved button modes also show startup.
+      const uint32_t timeout = usb ? 123000 : 27000;
+      p.update(displayPowerPrefs(), usb, false, false, timeout - 1);
+      assert(p.on());
+      p.update(displayPowerPrefs(), usb, false, false, timeout);
+      assert(!p.on());
+    }
+    for (const char* command : {"set display.mode off", "set display.usb.mode off"}) {
+      assert(handleDisplayPowerCommand(command, reply, sizeof(reply)));
+      assert(std::string(reply) == "OK");
+    }
+    for (unsigned version : {1, 2}) {
+      auto& saved = fs.files["/display_prefs"];
+      saved[2] = version; saved[11] = 0;
+      for (unsigned i = 0; i < 11; ++i) saved[11] ^= saved[i];
+      assert(loadDisplayPowerSettings(&fs, ble, true));
+      assert(displayPowerPrefs().wake_on_boot);
+      for (bool usb : {false, true}) {
+        DisplayPowerPolicy p;
+        p.update(displayPowerPrefs(), usb, false, true, 0);
+        assert(!p.on()); // Saved off wins over startup and pairing.
+        assert(!p.wake(DisplayWake::Button, 1));
+      }
+    }
+    assert(loadDisplayPowerSettings(&fs, ble));
+    assert(!displayPowerPrefs().wake_on_boot); // Infrastructure does not opt in.
+    assert(!loadDisplayPowerSettings(nullptr, ble, true));
+    assert(displayPowerPrefs().wake_on_boot); // Defaults still work without flash.
+    DisplayPowerPolicy p;
+    p.update(displayPowerPrefs(), false, false, false, 0);
+    assert(p.on());
+    assert(!loadDisplayPowerSettings(nullptr, ble));
+    assert(!displayPowerPrefs().wake_on_boot);
+  }
+}
 void commandTests() {
   FakeFS fs;
   assert(!loadDisplayPowerSettings(&fs, true));
@@ -190,11 +320,30 @@ void commandTests() {
   run("get display.timeout", "> 42");
   run("get display.usb.timeout", "> 42");
 }
-int main() { policyTests(); commandTests(); }
+int main() {
+  policyTests(); companionBootTests(); companionSettingsTests(); commandTests();
+}
 '''
 
 
 class DisplayPowerTest(unittest.TestCase):
+    def test_companion_boot_wake_is_transport_and_layout_independent(self):
+        mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
+        self.assertRegex(mesh, re.compile(
+            r"loadDisplayPowerSettings\(_store->getPrimaryFS\(\),\s*"
+            r"#ifdef BLE_PIN_CODE\s*true,\s*#else\s*false,\s*#endif\s*true\b"))
+        main = (ROOT / "examples/companion_radio/main.cpp").read_text()
+        setup = main[main.index("void setup()"):main.index("\nvoid loop()")]
+        self.assertLess(setup.index("the_mesh.begin("), setup.index("ui_task.begin("))
+        for layout in ("ui-new", "ui-orig", "ui-tiny"):
+            with self.subTest(layout=layout):
+                ui = (ROOT / "examples/companion_radio" / layout / "UITask.cpp").read_text()
+                start = ui.index("void UITask::begin(")
+                end = ui.index("\n}", start)
+                self.assertIn("_display->servicePower(", ui[start:end])
+        infrastructure = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
+        self.assertIn("loadDisplayPowerSettings(fs, false);", infrastructure)
+
     def test_policy_and_persistent_commands(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
         self.assertIsNotNone(compiler, "host C++ compiler required")

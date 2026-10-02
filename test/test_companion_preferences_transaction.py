@@ -128,6 +128,7 @@ int main(int argc,char** argv){
    }
    DataStore fresh;CompanionNodePrefs defaults;double lat=0,lon=0;
    assert(fresh.loadPrefs(defaults,lat,lon));
+   assert(defaults.wifi_enabled==0); // Fresh installs never enable WiFi implicitly.
    assert(fresh.savePrefs(defaults,lat,lon));
  } else if(scenario==2){
 #if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
@@ -198,6 +199,23 @@ int main(int argc,char** argv){
    assert(legacy.loadPrefs(loaded,lat,lon));
    assert(loaded.flood_retry_advert_enabled==0);
    assert(loaded.one_key_dm_enabled==0);
+ } else if(scenario==8){
+   for(uint8_t enabled : {0,1}){
+     CompanionNodePrefs saved=original;saved.wifi_enabled=enabled;
+     assert(store.savePrefs(saved,47.1,-122.2));
+     CompanionNodePrefs loaded;double lat=0,lon=0;
+     loaded.wifi_enabled=1-enabled;
+     assert(store.loadPrefs(loaded,lat,lon));
+     assert(loaded.wifi_enabled==enabled); // Saved choices override the default.
+     assert(store.fs.files["/new_prefs"][156]==enabled); // Established byte offset.
+   }
+   for(unsigned size : {84,144,155,156}){
+     DataStore legacy;legacy.fs.files["/new_prefs"]=store.fs.files["/new_prefs"];
+     legacy.fs.files["/new_prefs"].resize(size);
+     CompanionNodePrefs loaded;double lat=0,lon=0;
+     assert(legacy.loadPrefs(loaded,lat,lon));
+     assert(loaded.wifi_enabled==0); // Old files with no WiFi field use opt-in.
+   }
  } else if(scenario==4){
    DataStore legacy;legacy.fs.files["/node_prefs"]=disk;
    legacy.fs.fail_write_after=17;
@@ -285,7 +303,7 @@ inline char* utoa(unsigned int value,char* output,int base){
                         str(ROOT / 'src/helpers/TxtDataHelpers.cpp'),
                         '-o', str(binary)], capture_output=True, text=True)
                     self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
-                    for scenario in range(8):
+                    for scenario in range(9):
                         with self.subTest(scenario=scenario):
                             run = subprocess.run([str(binary), str(scenario)], capture_output=True, text=True)
                             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

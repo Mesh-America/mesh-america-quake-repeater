@@ -7,7 +7,9 @@ namespace mesh { namespace ui {
 
 // Separate, versioned file: existing node and MQTT preference layouts stay
 // readable by older firmware. Returns true when a saved profile was loaded.
-bool loadDisplayPowerSettings(FILESYSTEM* fs, bool pairing_supported);
+// Companion startup enables a timed boot screen without changing saved modes.
+bool loadDisplayPowerSettings(FILESYSTEM* fs, bool pairing_supported,
+                              bool wake_on_boot = false);
 bool handleDisplayPowerCommand(const char* command, char* reply, size_t reply_size,
                                bool inbox_supported = false);
 bool displayPairingSupported();

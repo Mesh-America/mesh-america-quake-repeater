@@ -363,6 +363,15 @@ new address; USB password input is masked. Binary Companion clients can use
 USB, BLE, or TCP port 5000 without the terminal-start token: send command
 `0x42` (`CMD_RUN_CLI_COMMAND`) followed by the same CLI text, such as
 `get wifi.powersave`, `get wifi.pwd`, `stats-core`, or `set wifi.powersave min`.
+Full and Bluetooth/wired-capable Companions default to infrastructure WiFi off
+and Bluetooth on where supported. Legacy WiFi-only builds without another CLI
+transport retain WiFi on so they are not left unreachable.
+Use `get wifi.enabled` and `set wifi.enabled 1` to inspect or persistently enable
+WiFi; `set wifi.enabled 0` disables it. Saved enablement survives upgrades, and
+credentials alone do not turn it on. ESP32 simultaneous-transport builds apply
+the change from the main loop; exclusive-transport builds and Pico W apply it
+after reboot. This does not disable a primary ESP-NOW mesh radio or add Bluetooth
+to a WiFi-only build.
 See [local maintenance commands](terminal_chat_cli.md#local-maintenance-commands)
 for the complete access rules. WiFi-only Companions accept
 all three modes. A Full Companion that runs BLE and infrastructure WiFi
@@ -899,6 +908,13 @@ saved settings. The WebConfig **Display** card exposes the same controls:
 
 Modes are `off`, `on`, `button`, `pairing`, `button-pairing`, and `automatic`.
 Pairing modes are available only on builds supporting BLE pairing.
+
+All display-equipped Companion builds show the screen at boot in the default
+`button` or `button-pairing` mode, on battery or USB power. It stays on for the
+selected profile's timeout (15 seconds by default); button input restarts that
+timer. This also applies to previously saved button modes. Saved `off` and
+pairing-only modes still suppress the boot screen. Repeaters, room servers,
+and sensors do not gain this Companion-only boot wake.
 
 - `off`: stays dark, including boot and pairing.
 - `on`: stays on while the device is awake.
