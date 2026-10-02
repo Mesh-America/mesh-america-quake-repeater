@@ -243,3 +243,45 @@ confirmed the normal 2.4.10 bootloader, fixed application, saved radio tuple
 `869.6179809,62.5,8,5`, and all seven unchanged settings digests. USB data
 was restored. This checks the restored node's Bluetooth entry and exit;
 it is not an Open transfer.
+
+## Published recovery correction verification: PASS
+
+On 2026-10-02, [bootloader recovery workflow run 36997468388](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/actions/runs/36997468388)
+completed all 37 jobs: preparation, 35 board builds, and release
+packaging/publication. The corrected production source is tag
+`R_v0.11.0-OTAFIX2.4.11`, commit
+`de88c5fcae72bb00992ac9db7fd144fec150835e`.
+
+The [existing recovery 2.4.11 prerelease](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/R_0.11.0-OTAFIX2.4.11)
+retains all 110 filenames and its original distribution tag object
+`b3784854e72b1d3d68e6bef04c1890f251256f59`, which still points to
+`d6b3edf7d8b58c15187ccae54ea212cfa806d01c`. The release remains non-latest;
+normal latest remains OTAFIX 2.4.10. All downloaded digests, archive checksums,
+provenance, 35 profile manifest CRCs, and HEX/DFU ZIP/UF2 reconstructions passed.
+Six included profiles remain explicitly pending hardware qualification, and
+`thinknode_m8` remains excluded. The published recovery bundle SHA-256 is
+`803dffcfed20331205d1fbe581593865785a4e53988efd20d777e5fe19b05b3d`.
+
+The physical Open and Nordic tests used RAK4631 `board` qualification CRC
+`C2A4B64B`, raw SHA-256
+`239c23fabcee8478475b3bc3e1c2fc94daa79f386c5fd7ccf980c689220eda7a`.
+The published RAK4631 `board` production image has CRC `AA30573D`, raw SHA-256
+`13188cc150682a23bdee1ed7d2340a4ff0e6701b6d18dc347b75803c9ae53ae2`.
+Both have packed version `0x02040BFF`; their complete raw binaries differ.
+
+The production/qualification comparison found exactly eight differing data
+bytes out of 40,960: four in the `CURRENT.UF2` FAT create/update time fields
+and four in the resulting whole-image manifest CRC. All remaining 40,952
+bytes match, including executable instructions, vectors, CF2, version, and
+policy guards. The production timestamp matches the clean source commit,
+and the production DFU ZIP, published HEX, and workflow artifact agree.
+This verifies the published implementation against the tested one while
+keeping the physical test tied to its actual qualification artifact.
+
+### Final test-node restoration
+
+After both corrected 2.4.11 phone tests and publication verification, the
+RAK4631 was restored to the published normal 2.4.10 bootloader and the fixed
+`v1.17.1.8-ble-dfu-test` application. Final CLI verification confirmed those
+versions, the saved radio tuple `869.6179809,62.5,8,5`, and all seven unchanged
+settings digests. USB data was re-enabled. No erase firmware was used.
