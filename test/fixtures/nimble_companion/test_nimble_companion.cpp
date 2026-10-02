@@ -33,14 +33,14 @@ static void test_identity_modes() {
     auto* server = NimBLEDevice::server.get();
     assert(!server->owns_callbacks && !server->auto_advertise);
     assert(!server->advertising.active);
-    assert(pin == 246810 && bonding && mitm && sc && io_cap == BLE_HS_IO_DISPLAY_ONLY);
+    assert(pin == 123456 && bonding && mitm && sc && io_cap == BLE_HS_IO_DISPLAY_ONLY);
     interface.enable();
     assert(server->advertising.active);
     assert(std::find(calls.begin(), calls.end(), "address-type") <
            std::find(calls.begin(), calls.end(), "advertise"));
     assert(server->advertising.name == "MeshCore-trial");
     assert(server->advertising.service == "6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
-    assert(server->callbacks->onPassKeyDisplay() == 246810);
+    assert(server->displayPairingPasskey() == 246810);
     assert(interface.takePairingRequest());
     assert(!interface.takePairingRequest());
     NimBLEDevice::deinit(true);  // Must never delete the application interface.
@@ -53,6 +53,22 @@ static void test_identity_modes() {
   assert(own_type == BLE_OWN_ADDR_PUBLIC);
   assert(std::find(calls.begin(), calls.end(), "address") == calls.end());
   NimBLEDevice::deinit(true);
+}
+
+static void test_pairing_wake_for_random_and_saved_pins() {
+  for (uint32_t expected : {100000u, 246810u, 123456u, 999999u}) {
+    reset();
+    SerialBLEInterface interface;
+    assert(interface.begin("MeshCore-", "pairing", expected));
+    interface.enable();
+    assert(!interface.takePairingRequest()); // Scanning alone is not pairing.
+    auto* server = NimBLEDevice::server.get();
+    assert(server->displayPairingPasskey() == expected);
+    assert(interface.takePairingRequest());
+    assert(!interface.takePairingRequest());
+    assert(bonding && mitm && sc && io_cap == BLE_HS_IO_DISPLAY_ONLY);
+    NimBLEDevice::deinit(true);
+  }
 }
 
 static void test_startup_failures() {
@@ -185,6 +201,7 @@ static void test_real_transport_frames() {
 
 int main() {
   test_identity_modes();
+  test_pairing_wake_for_random_and_saved_pins();
   test_startup_failures();
   test_authentication_and_bond_lifecycle();
   test_real_transport_frames();

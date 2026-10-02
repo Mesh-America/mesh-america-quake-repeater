@@ -24,6 +24,10 @@ python3 test/test_color_theme.py                # shared color-display dark-pale
 python3 test/test_indicator_font_recovery.py  # Indicator TLS/SD font recovery contract
 python3 test/test_companion_terminal_profile.py  # Companion CLI capability gates
 python3 test/test_bluetooth_mac_contract.py     # MAC policies, separate stealth flag and BLE backend integration
+python3 test/test_nimble_companion.py           # real adapter, fixed/random PIN callback dispatch and bond/stealth transport
+python3 test/test_companion_pairing_display.py # real OLED pairing wake, USB coexistence and button navigation
+python3 test/test_companion_identity_startup.py # real saved/missing/unreadable identity branch and truthful startup phases
+python3 test/test_startup_screen.py            # early display ordering and cooperative entropy progress
 python3 test/test_companion_settings_persistence_contract.py  # Atomic settings and appended Bluetooth fields
 python3 test/test_webconfig_ui.py              # Web controls, reboot handling and generated-page consistency
 python3 test/test_webconfig_ui_runtime.py      # Real Chromium, including independent stealth toggle
@@ -159,6 +163,40 @@ does not reflect the GoogleTest count -- run the built binary directly
 | `test_flood_advert_limiter` | `FloodAdvertLimiter.h/.cpp`, `FloodAdvertCLI.h` | hop-based quotas, verified duplicates, prefix collisions, abuse escalation/recovery, protected capacity, rollover, exact-key clearing, read-only listing, pagination, malformed selectors, full-key details, and USB/LoRa reply bounds |
 | `test_trace_retry` | `src/Mesh.cpp`, `RTCClock`, `ClockSyncUtils.h`, retry and relay policy | app-v2 and boot-v3 traffic sharing `PAYLOAD_TYPE_OTA=0x0C` and the TempRadio suspend policy; opaque OTA relay behavior; background discovery priority; immediate primary transfer relay, receive-delay bypass, fast CAD retry, and no generic flood retry; trace and non-OTA flood retry timing; backward RTC correction; clock consensus/path policy and the 10-minute default drift threshold; advert receive/forward limits and matching read-only CLI listings |
 | `test_utils` | `src/Utils.cpp` | `Utils::toHex` (upstream) |
+
+## V4 Bluetooth/OLED hardware regression
+
+`tools/hil/v4_pairing_stealth.py` complements the host tests with real NimBLE
+pairing, protected GATT commands, USB-connected OLED frame capture, bonded
+stealth reconnection, and MAC rotation triggers. The current helper deliberately
+accepts only the MercerWoodMesh V4 USB identity; it is not a generic flasher.
+
+1. Record the original settings and make a verified **complete 16 MB flash
+   backup** before changing anything. The backup contains private keys: keep it
+   private and outside the repository.
+2. Build the diagnostic-only `heltec_v4_companion_pairing_ui_hil_preview4`
+   environment with `platformio.heltec-v4-preview4.ini`. Run only one PlatformIO
+   process at a time. Do not distribute this instrumented image as firmware.
+3. Preserve bootloader, partitions, NVS and SPIFFS when temporarily installing
+   the diagnostic application. On a compatible default-16MB layout, write the
+   matching `boot_app0.bin` at `0xe000` and application at `0x10000`.
+4. On the Linux/BlueZ host with `pyserial`, `bleak`, and `dbus-fast`, run:
+
+   ```sh
+   python3 tools/hil/v4_pairing_stealth.py \
+     --serial /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_44:1B:F6:69:CF:98-if00 \
+     --output /private/test-results --allow-settings-changes
+   ```
+
+5. Regardless of test outcome, restore the **complete original flash backup**.
+   Use `--inspect` before and after to verify firmware and settings. The helper
+   cleans up its test-created host pairing records but does **not** restore
+   target settings or firmware itself.
+
+The instrumented build records the real SSD1306 framebuffer, not a mock. This
+does not replace optical display inspection, phone-app testing, a second
+unbonded-central rejection test, or a true all-power-removed cold boot. See the
+[preview4 hardware report](../docs/test-results/preview-1.17.1.8/heltec-v4-preview4-bluetooth-oled.md).
 
 ## Conventions (and how to add a suite)
 

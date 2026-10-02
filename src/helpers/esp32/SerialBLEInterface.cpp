@@ -396,7 +396,11 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   BLEDevice::setMTU(MAX_FRAME_SIZE + 3);
 
 #if defined(MESH_USE_NIMBLE_ARDUINO)
-  BLEDevice::setSecurityPasskey(pin_code);
+  // NimBLE-Arduino 2.5.1 bypasses onPassKeyDisplay() for a non-default
+  // static passkey. Keep its callback sentinel here: our callback returns
+  // the actual random/saved _pin_code and also wakes the pairing display.
+  // This does not change the PIN used on air or weaken authentication.
+  BLEDevice::setSecurityPasskey(123456);
   BLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
   BLEDevice::setSecurityAuth(true, true, true);
 #else

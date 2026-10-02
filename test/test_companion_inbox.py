@@ -25,7 +25,10 @@ UI_MEMBERS = r'''
   const char* inboxTitle() const;
   const char* client = "USB";
   const char* connectedClientLabel() const { return connected ? client : nullptr; }
-  bool hasBluetoothConnection() const { return connected && std::string(client) == "BLUETOOTH"; }
+  bool hasBluetoothConnection() const {
+    return connected && (std::string(client) == "BLUETOOTH"
+        || std::string(client) == "BLE + USB");
+  }
   bool isBluetoothEnabled() const { return true; }
   bool isPairingPromptActive() const { return pairing; }
 '''
@@ -270,8 +273,14 @@ int main() {
       renderHome(display, &task);
       assert(display.contains("HISTORY: 12"));
       assert(display.contains("Pending: 0"));
-      assert(display.contains("CONNECTED"));
-      if (dims.second >= 135) assert(display.contains(client));
+      if (task.hasBluetoothConnection()) {
+        assert(display.contains("CONNECTED"));
+        if (dims.second >= 135) assert(display.contains(client));
+      } else {
+        // A wired/TCP connection must not conceal an unpaired BLE PIN.
+        assert(display.contains("123456"));
+        assert(!display.contains("CONNECTED"));
+      }
     }
   }
 }

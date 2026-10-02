@@ -916,6 +916,19 @@ timer. This also applies to previously saved button modes. Saved `off` and
 pairing-only modes still suppress the boot screen. Repeaters, room servers,
 and sensors do not gain this Companion-only boot wake.
 
+Startup shows `Loading identity` while reading a saved identity. `Generating key`
+and its spinner are used only when creating a replacement/new identity;
+they end before flash persistence, which shows `Saving identity`. A normal
+boot with a valid saved identity never regenerates it. An erased filesystem
+does require a new identity unless one is restored.
+
+On Full Companion screens, an unpaired Bluetooth PIN takes priority over a
+USB/TCP connected label. Button wake shows the PIN banner without requiring
+USB to be disconnected; a second navigation press can leave this preview.
+An actual phone pairing request wakes pairing-enabled display modes and keeps
+the banner visible until completion or its two-minute expiry. Bluetooth
+scanning alone is not a pairing request.
+
 - `off`: stays dark, including boot and pairing.
 - `on`: stays on while the device is awake.
 - `button`: a physical button, keyboard/navigation input, or supported touch

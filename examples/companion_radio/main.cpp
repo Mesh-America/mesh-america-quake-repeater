@@ -1,10 +1,15 @@
 #include <Arduino.h>   // needed for PlatformIO
+#include <helpers/ui/StartupScreen.h>
+#include <helpers/ui/DisplayPowerSettings.h>
 #include <Mesh.h>
 #include <helpers/BluetoothMac.h>
 #include "MyMesh.h"
 #include "CompanionBluetooth.h"
 #include "CompanionWireless.h"
 #include "CompanionWiFi.h"
+#if defined(COMPANION_PAIRING_UI_HIL)
+void companionPairingUiHilProbe();
+#endif
 #if MESH_PACKET_LOGGING
   #include <helpers/SerialPacketLog.h>
 #endif
@@ -2788,6 +2793,65 @@ void setup() {
   external_watchdog.begin();
 #endif
 
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+#if defined(NRF52_PLATFORM)
+  // InternalFileSystem::begin() auto-formats the entire primary store after a
+  // mount failure. The base mount plus a full raw scan distinguishes a virgin
+  // erased device from nonblank/corrupt identity storage. Only proven-erased
+  // media may be initialized automatically. A nonblank failure gets three
+  // additional mounts three seconds apart before the unusable store is erased
+  // so the node can still recover without physical access.
+  const mesh::storage::InternalSecondaryFsBootResult primary_fs_boot =
+      mesh::storage::beginInternalPrimaryFilesystemSafely(
+          InternalFS,
+#if defined(EXTRAFS) && !defined(QSPIFLASH)
+          ResilientInternalExtraFS::primaryConfig()
+#else
+          nullptr
+#endif
+      );
+  if (!mesh::storage::internalPrimaryFilesystemReady(primary_fs_boot)) {
+    mesh::storage::RamFallbackFileSystem* ram_primary_fs =
+        mesh::storage::createRamFallbackFileSystem();
+    if (ram_primary_fs != nullptr) {
+      MESH_DEBUG_PRINTLN(
+          "InternalFS: physical storage unusable; running from volatile RAM filesystem");
+      store.useVolatilePrimaryFS(ram_primary_fs->filesystem());
+    } else {
+      MESH_DEBUG_PRINTLN(
+          "InternalFS: physical storage and RAM fallback initialization failed");
+      store.markPrimaryFSUnavailable();
+    }
+  }
+#else
+  InternalFS.begin();
+#endif
+#elif defined(RP2040_PLATFORM)
+  LittleFS.begin();
+#elif defined(ESP32)
+  SPIFFS.begin(true);
+#else
+  #error "need to define filesystem"
+#endif
+
+#ifdef DISPLAY_CLASS
+  // Load only the display policy before radio and secondary-storage startup.
+  FILESYSTEM* display_prefs_fs = store.getPrimaryFS();
+#if defined(NRF52_PLATFORM)
+  // Never open files on a primary store whose mount and RAM fallback failed.
+  if (!mesh::storage::internalPrimaryFilesystemReady(primary_fs_boot)
+      && !store.isVolatilePrimaryFS()) display_prefs_fs = nullptr;
+#endif
+  mesh::ui::loadDisplayPowerSettings(display_prefs_fs,
+#ifdef BLE_PIN_CODE
+      true,
+#else
+      false,
+#endif
+      true);
+  mesh::ui::StartupScreen startup_screen;
+#endif
+
 #ifdef DISPLAY_CLASS
   DisplayDriver* disp = NULL;
   if (display.begin()) {
@@ -2796,7 +2860,8 @@ void setup() {
       && UI_WIFI_SETUP_HOME_PAGE != 1
     companion_setup_display = disp;
   #endif
-    disp->turnOff();  // No boot content before the saved policy is loaded.
+    startup_screen.begin(disp,
+        board.isExternalPowered() || board.isUsbHostConnected());
   }
 #if defined(ESP32) && defined(WIFI_SSID)
   companion_display_available = disp != NULL;
@@ -2846,38 +2911,6 @@ void setup() {
 #endif
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-#if defined(NRF52_PLATFORM)
-  // InternalFileSystem::begin() auto-formats the entire primary store after a
-  // mount failure. The base mount plus a full raw scan distinguishes a virgin
-  // erased device from nonblank/corrupt identity storage. Only proven-erased
-  // media may be initialized automatically. A nonblank failure gets three
-  // additional mounts three seconds apart before the unusable store is erased
-  // so the node can still recover without physical access.
-  const mesh::storage::InternalSecondaryFsBootResult primary_fs_boot =
-      mesh::storage::beginInternalPrimaryFilesystemSafely(
-          InternalFS,
-#if defined(EXTRAFS) && !defined(QSPIFLASH)
-          ResilientInternalExtraFS::primaryConfig()
-#else
-          nullptr
-#endif
-      );
-  if (!mesh::storage::internalPrimaryFilesystemReady(primary_fs_boot)) {
-    mesh::storage::RamFallbackFileSystem* ram_primary_fs =
-        mesh::storage::createRamFallbackFileSystem();
-    if (ram_primary_fs != nullptr) {
-      MESH_DEBUG_PRINTLN(
-          "InternalFS: physical storage unusable; running from volatile RAM filesystem");
-      store.useVolatilePrimaryFS(ram_primary_fs->filesystem());
-    } else {
-      MESH_DEBUG_PRINTLN(
-          "InternalFS: physical storage and RAM fallback initialization failed");
-      store.markPrimaryFSUnavailable();
-    }
-  }
-#else
-  InternalFS.begin();
-#endif
   #if defined(QSPIFLASH)
     if (!QSPIFlash.begin()) {
       // debug output might not be available at this point, might be too early. maybe should fall back to InternalFS here?
@@ -2934,6 +2967,9 @@ void setup() {
     #endif
         ,
         radio_available
+    #ifdef DISPLAY_CLASS
+        , &startup_screen
+    #endif
   );
 #if defined(NRF52_PLATFORM)
   if (store.isVolatilePrimaryFS()) {
@@ -2945,7 +2981,6 @@ void setup() {
   }
 #endif
 #elif defined(RP2040_PLATFORM)
-  LittleFS.begin();
   store.begin();
   the_mesh.begin(
     #ifdef DISPLAY_CLASS
@@ -2955,9 +2990,11 @@ void setup() {
     #endif
         ,
         radio_available
+    #ifdef DISPLAY_CLASS
+        , &startup_screen
+    #endif
   );
 #elif defined(ESP32)
-  SPIFFS.begin(true);
   store.begin();
   the_mesh.begin(
     #ifdef DISPLAY_CLASS
@@ -2967,6 +3004,9 @@ void setup() {
     #endif
         ,
         radio_available
+    #ifdef DISPLAY_CLASS
+        , &startup_screen
+    #endif
   );
 #else
   #error "need to define filesystem"
@@ -3310,6 +3350,9 @@ void loop() {
   #else
   ui_task.loop();
   #endif
+#endif
+#if defined(COMPANION_PAIRING_UI_HIL)
+  companionPairingUiHilProbe();
 #endif
   rtc_clock.tick();
   board.loop();

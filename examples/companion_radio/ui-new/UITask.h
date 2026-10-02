@@ -114,7 +114,8 @@ class UITask : public AbstractUITask {
   void setCurrScreen(UIScreen* c);
   bool isPairingScreenActive() const;
   void renderPairingBanner();
-  void showPairingPin();
+  void showPairingPin(bool from_button = false);
+  bool _pairing_from_button = false;
   void finishPairingScreen(bool timed_out);
 
 public:

@@ -840,11 +840,7 @@ public:
       const char* pairing_value = nullptr;
       int pairing_value_size = 2;
       char pairing_pin[16];
-      if (client_label != nullptr && !_task->isPairingPromptActive()) {
-        pairing_label = expanded_home && strcmp(client_label, "BLUETOOTH") == 0 ? "BLE" : client_label;
-        pairing_value = expanded_home ? "LINKED" : "CONNECTED";
-        if (expanded_home) pairing_value_size = 3;
-      } else if (mesh::ui::shouldDisplayBluetoothPairingPin(
+      if (mesh::ui::shouldDisplayBluetoothPairingPin(
                      bluetooth_enabled, bluetooth_connected, bluetooth_pin)
                  && (!_task->isPairingPromptActive()
                      || display.height() > 64)) {
@@ -853,6 +849,10 @@ public:
                  (unsigned int)bluetooth_pin);
         pairing_value = pairing_pin;
         pairing_value_size = 3;
+      } else if (client_label != nullptr && !_task->isPairingPromptActive()) {
+        pairing_label = expanded_home && strcmp(client_label, "BLUETOOTH") == 0 ? "BLE" : client_label;
+        pairing_value = expanded_home ? "LINKED" : "CONNECTED";
+        if (expanded_home) pairing_value_size = 3;
       }
 
       if (pairing_value != nullptr) {
@@ -901,7 +901,8 @@ public:
       const char* client_label = _task->connectedClientLabel();
       if (client_label != nullptr || show_bluetooth_pin) {
         char pairing_pin[16];
-        const bool show_client = client_label != nullptr && !_task->isPairingPromptActive();
+        const bool show_client = client_label != nullptr && !show_bluetooth_pin
+            && !_task->isPairingPromptActive();
         const char* pairing_label = show_client ? client_label : "BLUETOOTH PIN";
         const char* pairing_value = "CONNECTED";
         if (!show_client) {
@@ -2150,11 +2151,16 @@ void UITask::renderPairingBanner() {
   _display->drawTextCentered(_display->width() / 2, 2, prompt);
 }
 
-void UITask::showPairingPin() {
+void UITask::showPairingPin(bool from_button) {
   if (!isBluetoothEnabled()) return;
 
   const unsigned long now = millis();
-  _pairing_screen_until = now + BLE_PAIRING_DISPLAY_MILLIS;
+  _pairing_from_button = from_button;
+  const auto& prefs = mesh::ui::displayPowerPrefs();
+  const auto& profile = (_board->isExternalPowered() || _board->isUsbHostConnected())
+      ? prefs.usb : prefs.battery;
+  _pairing_screen_until = now + (from_button
+      ? uint32_t(profile.seconds) * 1000U : BLE_PAIRING_DISPLAY_MILLIS);
   if (curr == msg_preview && _msgcount > 0) {
     _deferred_msg_preview = true;
   }
@@ -2168,6 +2174,7 @@ void UITask::showPairingPin() {
 
 void UITask::finishPairingScreen(bool timed_out) {
   _pairing_screen_until = 0;
+  _pairing_from_button = false;
 
   if (_deferred_msg_preview && !hasConnection()
       && static_cast<MsgPreviewScreen*>(msg_preview)->hasMessages()) {
@@ -2424,6 +2431,12 @@ void UITask::loop() {
   }
 #endif
 
+  // A button-wake PIN is a preview, not a modal pairing request. The next
+  // navigation gesture must still work; real phone requests retain priority.
+  if (_pairing_from_button && c != 0) {
+    _pairing_screen_until = 0;
+    _pairing_from_button = false;
+  }
   if (isPairingScreenActive()) {
     // Pairing has visual priority over navigation and asynchronous screens.
     static_cast<HomeScreen*>(home)->showFirstPage();
@@ -2553,6 +2566,10 @@ char UITask::checkDisplayOn(char c) {
     const bool was_on = _display->isOn();
     _display->wake(mesh::ui::DisplayWake::Button);
     if (!was_on) {
+      if (_display->isOn() && mesh::ui::shouldDisplayBluetoothPairingPin(
+              isBluetoothEnabled(), hasBluetoothConnection(), the_mesh.getBLEPin())) {
+        showPairingPin(true);
+      }
       c = 0;
     }
     _next_refresh = 0;  // trigger refresh
