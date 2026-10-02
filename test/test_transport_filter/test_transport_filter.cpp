@@ -228,7 +228,10 @@ TEST_F(TransportFilter, ShorthandAndLongCommandsSaveIdenticalRules) {
       Pair{"set flood.rule.3 type=grp_data hops=2-5 channel=#local in=none scope=test priority=100 stop tx=slow suspend=tempradio",
            "set fr.3 6 h=2-5 c=#local i=n s=test pri=100 s f=st"},
       Pair{"set flood.rule.3 type=any channel=hash:A7 prefix=1234,5678 in=scoped rate=3/min retry stop",
-           "set fr.3 any c=hash:A7 p=1234,5678 i=s q=3 r s"}}) {
+           "set fr.3 any c=hash:A7 p=1234,5678 i=s q=3 r s"},
+      Pair{"set flood.rule.3 type=any hashbytes=1 drop", "set fr.3 any pb=1 d"},
+      Pair{"set flood.rule.3 type=any mode=bridge,cross hashbytes=3 rate=5/min",
+           "set fr.3 any m=bc pb=3 q=5"}}) {
     command(pair.full); ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
     const auto full = fs.files["/flood_filter"];
     command(pair.short_form); ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
@@ -239,6 +242,75 @@ TEST_F(TransportFilter, ShorthandAndLongCommandsSaveIdenticalRules) {
     command("del fr.3"); ASSERT_EQ(0, strncmp(reply, "OK", 2));
     command(paste.c_str()); ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
     EXPECT_EQ(full, fs.files["/flood_filter"]);
+  }
+}
+
+TEST_F(TransportFilter, HashBytesMatchesEveryPayloadAndSurvivesReboot) {
+  command("del fr all");
+  for (uint8_t wanted = 1; wanted <= 3; wanted++) {
+    const std::string cmd = "set flood.rule.3 type=any hashbytes="
+        + std::to_string(wanted) + " drop";
+    command(cmd.c_str()); ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+    rules.begin(&fs, nullptr);
+    command("get flood.rule.3");
+    EXPECT_NE(nullptr, strstr(reply, ("hashbytes=" + std::to_string(wanted)).c_str()));
+    for (uint8_t actual = 1; actual <= 3; actual++)
+      for (uint8_t hops : {0, 1, 3})
+        for (uint8_t type = 0; type < 16; type++)
+          for (uint8_t route : {ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD,
+                               ROUTE_TYPE_DIRECT, ROUTE_TYPE_TRANSPORT_DIRECT}) {
+            auto p = packet("#wardriving", type, route);
+            p.setPathHashSizeAndCount(actual, hops);
+            memset(p.path, 0x12, actual * hops);
+            // Radio filters never turn into direct-route filters.
+            const bool flood = route == ROUTE_TYPE_FLOOD || route == ROUTE_TYPE_TRANSPORT_FLOOD;
+            EXPECT_EQ(flood && actual == wanted, blocked(p, RULE_MODE_RADIO));
+          }
+  }
+}
+
+TEST_F(TransportFilter, HashBytesCombinesWithTransportChannelAndHops) {
+  command("set fr.3 any m=bc pb=2 c=#wardriving h=2+ d");
+  ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+  rules.begin(&fs, nullptr);
+  for (uint8_t width = 1; width <= 3; width++)
+    for (uint8_t hops : {0, 1, 2, 3})
+      for (const char* channel : {"#wardriving", "#other"}) {
+        auto p = packet(channel);
+        p.setPathHashSizeAndCount(width, hops);
+        for (uint8_t mode : {RULE_MODE_BRIDGE, RULE_MODE_CROSS})
+          EXPECT_EQ(width == 2 && hops >= 2 && strcmp(channel, "#wardriving") == 0,
+                    blocked(p, mode));
+      }
+}
+
+TEST_F(TransportFilter, HashBytesWildcardAndPrefixAreOrderIndependent) {
+  command("del fr all");
+  for (const char* tail : {"hashbytes=any", "pb=*", "prefix=* hashbytes=1", "pb=1 p=*",
+                          "hashbytes=1 prefix=12", "prefix=12 pb=1", "prefix=12 pb=any"}) {
+    command((std::string("set fr.3 any ") + tail + " d").c_str());
+    ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+    rules.begin(&fs, nullptr);
+    for (uint8_t width = 1; width <= 3; width++) {
+      auto p = packet();
+      p.setPathHashSizeAndCount(width, 1);
+      memset(p.path, 0x12, width);
+      const bool any_width = strcmp(tail, "hashbytes=any") == 0 || strcmp(tail, "pb=*") == 0;
+      EXPECT_EQ(any_width || width == 1, blocked(p, RULE_MODE_RADIO));
+    }
+  }
+}
+
+TEST_F(TransportFilter, InvalidHashBytesNeverReplacesSavedRules) {
+  command("set fr.3 any pb=1 d");
+  ASSERT_EQ(0, strncmp(reply, "OK", 2)) << reply;
+  const auto saved = fs.files;
+  for (const char* tail : {"hashbytes=0", "hashbytes=4", "pb=-1", "pb=01", "pb=1x", "pb=",
+                          "pb=1 hashbytes=1", "hashbytes=any pb=2",
+                          "hashbytes=1 prefix=1234", "prefix=1234 pb=1"}) {
+    command((std::string("set fr.3 any ") + tail + " d").c_str());
+    EXPECT_EQ(0, strncmp(reply, "Err", 3)) << tail << ": " << reply;
+    EXPECT_EQ(saved, fs.files);
   }
 }
 

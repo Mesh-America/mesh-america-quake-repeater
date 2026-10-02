@@ -603,13 +603,9 @@ void FloodRuleEngine::load() {
           || loaded[i].payload_type == PAYLOAD_TYPE_GRP_DATA;
     }
 
-    bool path_valid = (loaded[i].path_hash_size == 0
-            && loaded[i].path_hops == 0)
-        || (!loaded[i].match_blacklisted_path
-            && loaded[i].path_hash_size >= 1
-            && loaded[i].path_hash_size <= 3
-            && loaded[i].path_hops >= 1
-            && loaded[i].path_hops <= PATH_PREFIX_HOPS_MAX);
+    bool path_valid = FloodFilterPolicy::pathMatcherValid(
+        loaded[i].path_hash_size, loaded[i].path_hops,
+        loaded[i].match_blacklisted_path);
     bool action_valid = loaded[i].drop_on_match || direct_target
         || region_target || loaded[i].rate_limit_enabled
         || loaded[i].stop_on_match || loaded[i].retry_on_match;
@@ -1110,6 +1106,10 @@ void FloodRuleEngine::formatDetail(int index, char* reply,
   char action[72];
   char rate[24];
   char retry[10];
+  char hashbytes[16] = {};
+  if (entry.path_hops == 0 && entry.path_hash_size != 0)
+    snprintf(hashbytes, sizeof(hashbytes), " hashbytes=%u",
+             (unsigned)entry.path_hash_size);
   formatHopSpec(hops, sizeof(hops), entry.min_hops, entry.max_hops);
   if (entry.match_blacklisted_path) copyString(prefix, "blacklist", sizeof(prefix));
   else formatPathPrefix(prefix, sizeof(prefix), entry.path_hash_size,
@@ -1169,11 +1169,11 @@ void FloodRuleEngine::formatDetail(int index, char* reply,
 
   int written = snprintf(
       reply, reply_len,
-      "> %d type=%s mode=%s hops=%s channel=%s prefix=%s in=%s %s%s%s priority=%u%s%s%s",
+      "> %d type=%s mode=%s hops=%s channel=%s prefix=%s%s in=%s %s%s%s priority=%u%s%s%s",
       index + 1, payloadTypeName(entry.payload_type),
       FloodFilterPolicy::ruleModeName(entry.transport_modes), hops,
       entry.channel_key_len == 0 ? "*" : entry.channel_name,
-      prefix, incoming, action, rate, retry,
+      prefix, hashbytes, incoming, action, rate, retry,
       (unsigned int)entry.priority,
       entry.stop_on_match ? " stop" : "",
       entry.scope_uses_slow_timing ? " tx=slow" : "",
@@ -1319,6 +1319,8 @@ void FloodRuleEngine::set(const char* args, char* reply,
   bool suspend_on_temp_radio = false;
   bool path_set = false;
   uint8_t path_hash_size = 0;
+  bool hashbytes_set = false;
+  uint8_t hashbytes = 0;
   uint8_t path_hops = 0;
   uint8_t path[PATH_PREFIX_BYTES_MAX];
   memset(path, 0, sizeof(path));
@@ -1606,6 +1608,18 @@ void FloodRuleEngine::set(const char* args, char* reply,
           return;
         }
       }
+    } else if (asciiStartsWith(tokens[i], "hashbytes=")
+        || asciiStartsWith(tokens[i], "pb=")) {
+      if (hashbytes_set) {
+        copyString(reply, DUPLICATE_OPTION, 160);
+        return;
+      }
+      if (!FloodFilterPolicy::parsePathHashBytes(
+              strchr(tokens[i], '=') + 1, hashbytes)) {
+        copyString(reply, "Err - hashbytes must be any, 1, 2, or 3", 160);
+        return;
+      }
+      hashbytes_set = true;
     } else if (asciiStartsWith(tokens[i], "prefix=")
         || asciiStartsWith(tokens[i], "p=")
         || asciiStartsWith(tokens[i], "path=")) {
@@ -1639,6 +1653,13 @@ void FloodRuleEngine::set(const char* args, char* reply,
     }
   }
 
+  if (hashbytes != 0) {
+    if (path_hash_size != 0 && path_hash_size != hashbytes) {
+      copyString(reply, "Err - hashbytes conflicts with prefix width", 160);
+      return;
+    }
+    path_hash_size = hashbytes;
+  }
   if (scope_timing_set && !target_set) {
     copyString(reply, "Err - tx timing requires scope= or region=", 160);
     return;

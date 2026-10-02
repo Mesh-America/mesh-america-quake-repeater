@@ -294,6 +294,45 @@ TEST(FloodRulePrefix, RequiresTheExactPathWidthAndStartingSequence) {
       &packet, 2, 3, path));
 }
 
+TEST(FloodRuleHashBytes, StrictSelectorAndStoredMatcherValidation) {
+  using namespace FloodFilterPolicy;
+  uint8_t width = 255;
+  for (const char* text : {"any", "ANY", "*"}) {
+    ASSERT_TRUE(parsePathHashBytes(text, width));
+    EXPECT_EQ(0, width);
+  }
+  for (uint8_t expected = 1; expected <= 3; expected++) {
+    char text[] = {char('0' + expected), 0};
+    ASSERT_TRUE(parsePathHashBytes(text, width));
+    EXPECT_EQ(expected, width);
+    EXPECT_TRUE(pathMatcherValid(width, 0, false));
+    EXPECT_TRUE(pathMatcherValid(width, 0, true));
+    EXPECT_TRUE(pathMatcherValid(width, 3, false));
+    EXPECT_FALSE(pathMatcherValid(width, 1, true));
+  }
+  for (const char* text : {"", "0", "4", "-1", "1x", "01", "anymore"})
+    EXPECT_FALSE(parsePathHashBytes(text, width));
+  EXPECT_FALSE(parsePathHashBytes(nullptr, width));
+  EXPECT_TRUE(pathMatcherValid(0, 0, false));
+  EXPECT_FALSE(pathMatcherValid(0, 1, false));
+  EXPECT_FALSE(pathMatcherValid(4, 0, false));
+  EXPECT_FALSE(pathMatcherValid(1, 4, false));
+}
+
+TEST(FloodRuleHashBytes, WidthOnlyMatchesEmptyAndNonemptyPaths) {
+  const uint8_t path[9] = {};
+  for (uint8_t actual = 1; actual <= 3; actual++) {
+    for (uint8_t hops : {0, 1, 3}) {
+      auto packet = makeFloodPacket(actual, path, hops);
+      EXPECT_TRUE(FloodFilterPolicy::pathStartsWith(&packet, 0, 0, nullptr));
+      for (uint8_t wanted = 1; wanted <= 3; wanted++)
+        EXPECT_EQ(actual == wanted,
+            FloodFilterPolicy::pathStartsWith(&packet, wanted, 0, nullptr));
+    }
+  }
+  EXPECT_FALSE(FloodFilterPolicy::pathStartsWith(nullptr, 1, 0, nullptr));
+}
+
 TEST(FloodRuleIncomingScope, MatchesOriginalScopeClasses) {
   using namespace FloodFilterPolicy;
   EXPECT_TRUE(ruleIncomingScopeMatches(
