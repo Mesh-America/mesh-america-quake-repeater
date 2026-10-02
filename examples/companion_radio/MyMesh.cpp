@@ -2300,7 +2300,14 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.rx_ps_sleep_us = RX_POWERSAVING_DEFAULT_SLEEP_US;
   _prefs.powersaving_enabled = 1;
   _prefs.powersaving_policy_version = 0;
+  // Keep WiFi-only compatibility builds reachable when they have no other
+  // CLI transport. Full and Bluetooth/wired-capable Companions are opt-in.
+#if defined(WIFI_SSID) && !defined(BLE_PIN_CODE) && !defined(ENABLE_USB_INTERFACE) \
+    && !defined(SERIAL_RX) && !defined(ETHERNET_ENABLED)
   _prefs.wifi_enabled = 1;
+#else
+  _prefs.wifi_enabled = 0;
+#endif
   memset(_prefs.bluetooth_name, 0, sizeof(_prefs.bluetooth_name));
   _prefs.display_rotation_degrees = 0;
   _prefs.cad_enabled = DEFAULT_CAD_ENABLED ? 1 : 0;
@@ -2398,10 +2405,11 @@ void MyMesh::begin(bool has_display, bool radio_available) {
 
   mesh::ui::loadDisplayPowerSettings(_store->getPrimaryFS(),
 #ifdef BLE_PIN_CODE
-      true
+      true,
 #else
-      false
+      false,
 #endif
+      true  // All Companion transports show startup unless the saved mode forbids it.
   );
 
 #if COMPANION_FEATURE_NOTIFICATIONS

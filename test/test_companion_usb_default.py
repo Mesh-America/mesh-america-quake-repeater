@@ -170,6 +170,43 @@ int main() {
 
 
 class CompanionUsbDefaultTest(unittest.TestCase):
+    def test_wifi_defaults_preserve_a_reachable_cli(self):
+        mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
+        start = mesh.index("  // Keep WiFi-only compatibility builds reachable")
+        end = mesh.index("  memset(_prefs.bluetooth_name", start)
+        defaults = mesh[start:end]
+        profiles = {
+            "esp32-full": (["ESP32=1", "WIFI_SSID=1", "BLE_PIN_CODE=123456",
+                            "ENABLE_USB_INTERFACE=1", "COMPANION_RADIO_FULL=1"], 0),
+            "esp32-ble-wifi": (["ESP32=1", "WIFI_SSID=1", "BLE_PIN_CODE=123456"], 0),
+            "esp32-usb-wifi": (["ESP32=1", "WIFI_SSID=1", "ENABLE_USB_INTERFACE=1"], 0),
+            "esp32-wifi-only": (["ESP32=1", "WIFI_SSID=1"], 1),
+            "pico-usb-ble-wifi": (["RP2040_PLATFORM=1", "WIFI_SSID=1",
+                                  "ENABLE_USB_INTERFACE=1", "BLE_PIN_CODE=123456"], 0),
+            "pico-wifi-only": (["RP2040_PLATFORM=1", "WIFI_SSID=1"], 1),
+            "ethernet-wifi": (["ESP32=1", "WIFI_SSID=1", "ETHERNET_ENABLED=1"], 0),
+            "hardware-serial-wifi": (["ESP32=1", "WIFI_SSID=1", "SERIAL_RX=1"], 0),
+            "indicator-exclusive": (["ESP32=1", "WIFI_SSID=1", "BLE_PIN_CODE=123456",
+                                    "ENABLE_USB_INTERFACE=1", "COMPANION_EXCLUSIVE_WIFI_BLE=1"], 0),
+            "nrf52-ble": (["NRF52_PLATFORM=1", "BLE_PIN_CODE=123456"], 0),
+            "usb-only": (["ENABLE_USB_INTERFACE=1"], 0),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "wireless-defaults"
+            for name, (flags, expected) in profiles.items():
+                with self.subTest(profile=name):
+                    source = ("#include <cassert>\nstruct Prefs { unsigned wifi_enabled = 99; } _prefs;\n"
+                              "int main() {\n" + defaults
+                              + f"assert(_prefs.wifi_enabled == {expected});\n}}\n")
+                    build = subprocess.run(["g++", "-std=c++17", "-x", "c++",
+                                            *["-D" + flag for flag in flags],
+                                            "-", "-o", str(binary)], input=source,
+                                           text=True, capture_output=True)
+                    self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+                    subprocess.run([str(binary)], check=True)
+        self.assertIn("static bool companion_wifi_requested = false;", MAIN)
+        self.assertIn("companion_transport_boot_mode =\n      CompanionTransportMode::Bluetooth;", MAIN)
+
     def test_startup_and_reconnection_for_each_usb_transport(self):
         functions = "\n".join(function("static void " + name + "(") for name in (
             "resetUsbTerminalHostSession", "serviceUsbTerminalHostSessionReset",

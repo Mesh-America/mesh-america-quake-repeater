@@ -25,6 +25,8 @@ struct DisplayPowerPrefs {
   DisplayPowerProfile battery;
   DisplayPowerProfile usb;
   DisplayInboxMode inbox = DisplayInboxMode::History;
+  // Runtime role policy, not serialized with the user's display settings.
+  bool wake_on_boot = false;
 };
 
 inline DisplayPowerPrefs& displayPowerPrefs() {
@@ -70,7 +72,8 @@ public:
   void update(const DisplayPowerPrefs& prefs, bool usb, bool connected,
               bool pairing, uint32_t now) {
     const auto& selected = usb ? prefs.usb : prefs.battery;
-    const bool reset = !_initialized || _usb != usb || _profile.mode != selected.mode;
+    const bool startup = !_initialized;
+    const bool reset = startup || _usb != usb || _profile.mode != selected.mode;
     const bool timeout_changed = _profile.seconds != selected.seconds;
     const bool just_connected = connected && !_connected;
     _profile = selected;
@@ -80,7 +83,14 @@ public:
     if (reset) {
       _timed = false;
       _initialized = true;
-      wake(DisplayWake::Boot, now);
+      // Companions show startup for the normal button timeout. Only the first
+      // initialization counts; changing profiles must not synthesize input.
+      if (startup && prefs.wake_on_boot && (_profile.mode == DisplayMode::Button
+          || _profile.mode == DisplayMode::ButtonPairing)) {
+        wake(DisplayWake::Button, now);
+      } else {
+        wake(DisplayWake::Boot, now);
+      }
     } else if (timeout_changed && _timed) {
       _deadline = now + uint32_t(_profile.seconds) * 1000;
     }

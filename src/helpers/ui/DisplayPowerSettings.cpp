@@ -80,10 +80,11 @@ bool savePrefs(const DisplayPowerPrefs& prefs) {
 }
 }
 
-bool loadDisplayPowerSettings(FILESYSTEM* fs, bool pairing_supported) {
+bool loadDisplayPowerSettings(FILESYSTEM* fs, bool pairing_supported, bool wake_on_boot) {
   settings_fs = fs;
   pairing_available = pairing_supported;
   DisplayPowerPrefs prefs;
+  prefs.wake_on_boot = wake_on_boot;
   if (pairing_supported) prefs.battery.mode = prefs.usb.mode = DisplayMode::ButtonPairing;
   displayPowerPrefs() = prefs;
   if (!fs) return false;

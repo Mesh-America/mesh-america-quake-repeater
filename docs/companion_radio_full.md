@@ -18,6 +18,13 @@ updating other nodes. Most targets can run those transports simultaneously;
 the SenseCAP Indicator exception selects one secondary wireless transport per
 boot as described below.
 
+Fresh Full Companion installs default to Bluetooth on and infrastructure WiFi off.
+WiFi remains compiled in: use `set wifi.enabled 1` through the USB or Bluetooth
+CLI to enable it, or `set wifi.enabled 0` to disable it persistently. Existing
+saved WiFi enablement is honored after an upgrade. The SenseCAP Indicator
+requires a reboot to apply its exclusive transport selection; primary ESP-NOW
+mesh operation is unaffected by the infrastructure-WiFi default.
+
 The full Companion is deliberately not a LoRa OTA destination: it has no
 firmware staging store, refuses `ota install`, and never advertises its own
 firmware as an mOTA image.
