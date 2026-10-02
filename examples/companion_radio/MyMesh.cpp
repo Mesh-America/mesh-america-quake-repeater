@@ -1,4 +1,5 @@
 #include <helpers/ui/DisplayPowerSettings.h>
+#include <helpers/ui/StartupScreen.h>
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
 #include <helpers/CompanionTxRoutingCLI.h>
@@ -2339,7 +2340,8 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   if (_ui != nullptr) _ui->setShutdownGuard(this);
 }
 
-void MyMesh::begin(bool has_display, bool radio_available) {
+void MyMesh::begin(bool has_display, bool radio_available,
+                   mesh::ui::StartupScreen* startup_screen) {
   _radio_available = radio_available;
   setRadioAvailable(radio_available);
   initializeContactStorage();
@@ -2354,6 +2356,9 @@ void MyMesh::begin(bool has_display, bool radio_available) {
   mesh::ota::ota_set_context_config_loader(mesh::ota::loadCompanionOtaConfig);
 #endif
 
+#ifdef DISPLAY_CLASS
+  if (startup_screen != nullptr) startup_screen->loadingIdentity();
+#endif
   const bool identity_loaded = _store->loadMainIdentity(self_id);
   const bool is_new_install = !identity_loaded
       || mesh::hasReservedIdentityPrefix(self_id);
@@ -2366,9 +2371,27 @@ void MyMesh::begin(bool has_display, bool radio_available) {
 
   bool identity_ready = true;
   if (is_new_install) {
-    identity_ready = mesh::generateUsableLocalIdentity(self_id, radio_new_identity);
+    {
+#ifdef DISPLAY_CLASS
+      if (startup_screen != nullptr) startup_screen->generatingKey();
+      mesh::ScopedIdentityGenerationProgress progress(
+          mesh::ui::StartupScreen::progress, startup_screen);
+#endif
+      identity_ready = mesh::generateUsableLocalIdentity(self_id, radio_new_identity);
+    }
+#ifdef DISPLAY_CLASS
+    // Generation has finished. Flash persistence must never retain its label
+    // or cooperative animation callback.
+    if (startup_screen != nullptr) {
+      if (identity_ready) startup_screen->savingIdentity();
+      else startup_screen->starting();
+    }
+#endif
     if (identity_ready) identity_ready = _store->saveMainIdentity(self_id);
   }
+#ifdef DISPLAY_CLASS
+  if (startup_screen != nullptr) startup_screen->starting();
+#endif
 
 #if defined(ESP32_PLATFORM)
   mesh::discardESP32TrueRandom();

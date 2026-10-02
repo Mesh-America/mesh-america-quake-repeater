@@ -41,6 +41,10 @@ public:
   bool begin();
 
   bool isOn() override { return _isOn; }
+#if defined(COMPANION_PAIRING_UI_HIL)
+  // Test-only access to the same pixels sent by endFrame(), never a mock UI.
+  const uint8_t* hilFramebuffer() { return display.getBuffer(); }
+#endif
   bool supportsRotation() const override { return true; }
   bool setRotationDegrees(uint16_t degrees) override;
   void setFlipped(bool flipped) override;

@@ -4,6 +4,10 @@ This preview contains USA Cascade builds for RAK3401 Repeater and Heltec V4 OLED
 
 The [RAK3401 source test run](https://github.com/mikecarper/MeshCore/actions/runs/36810565194) and [Heltec V4 source test run](https://github.com/mikecarper/MeshCore/actions/runs/36826971285) passed. The RAK3401 UF2 and DFU application payloads match, with verified DFU CRCs. Both RAK3401 packages passed capability and memory checks. The four Heltec V4 OLED variants passed capability and memory qualification. These are build/package checks, not physical on-device tests of every variant.
 
+## Preview4 local regression validation
+
+- [Heltec V4 Bluetooth pairing, USB OLED, stealth and MAC rotation hardware results](heltec-v4-preview4-bluetooth-oled.md) — 2026-10-02, unreleased local preview4 build; the original Pi V4 firmware and settings were restored afterward.
+
 ## RAK3401 package results
 
 - [Build information](BUILD-INFO.json)

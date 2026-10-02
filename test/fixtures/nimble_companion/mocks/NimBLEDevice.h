@@ -114,6 +114,12 @@ struct NimBLEServer {
     callbacks = cb; owns_callbacks = take_ownership;
   }
   void advertiseOnDisconnect(bool value) { auto_advertise = value; }
+  uint32_t displayPairingPasskey() {
+    // NimBLE-Arduino 2.5.1 only invokes the display callback when the
+    // configured static passkey is its 123456 sentinel.
+    return fake_nimble::pin == 123456
+        ? callbacks->onPassKeyDisplay() : fake_nimble::pin;
+  }
   bool start() { return true; }
   uint8_t getConnectedCount() const { return connected; }
   uint16_t getPeerMTU(uint16_t) const { return fake_nimble::mtu; }
