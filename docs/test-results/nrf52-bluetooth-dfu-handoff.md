@@ -285,3 +285,35 @@ RAK4631 was restored to the published normal 2.4.10 bootloader and the fixed
 `v1.17.1.8-ble-dfu-test` application. Final CLI verification confirmed those
 versions, the saved radio tuple `869.6179809,62.5,8,5`, and all seven unchanged
 settings digests. USB data was re-enabled. No erase firmware was used.
+
+## Published production bootloader and following application BLE test: PASS
+
+On 2026-10-02 an attached LG LGL51AL/Android 5.1.1 phone running nRF Connect
+4.24.3 installed the published repaired RAK4631 `board` recovery 2.4.11 ZIP
+over Bluetooth. This uses the production package rather than the earlier
+qualification image. The package SHA-256 is
+`3ec67bba63dff7ed44dc1680d0f65b0b371ffd9505f5ed6540ec7de8e4999771`.
+
+The phone recorded validation success and Activate and Reset. Read-only
+UF2 information confirmed recovery 2.4.11. With host USB configuration
+blocked before the replacement bootloader appeared and VBUS retained,
+recovery subsequently advertised `4631_DFU` at `C3:C6:A8:FC:AD:A7`.
+The phone found it in a fresh scan and read firmware revision `R_0x02040BFF`.
+The previous application connection used A6; the cached tab's reconnect
+to A6 logged GATT 133 after successful activation, while connecting to the
+new A7 DFU advertisement worked.
+
+The same phone then installed the 531,708-byte fixed MeshCore application
+over Bluetooth. Validation succeeded and Activate and Reset was logged at
+13:51:27 America/Los_Angeles. CLI verification confirmed
+`v1.17.1.8-ble-dfu-test`, bootloader OTAFIX 2.4.11, the saved radio tuple
+`869.6179809,62.5,8,5`, and all seven unchanged settings digests.
+No erase firmware was used. The normal 2.4.10 bootloader and the original
+fixed application were restored afterward; final identities and settings
+matched the initial baseline.
+
+The [full hardware report](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/blob/feature/ota-delta-apply/docs/hardware-qualification-2.4.11-ble-bootloader.md)
+records the host USB configuration guard, its failed trailing audit after a
+separate hub reset, restored hub access and policies, package identities,
+and evidence. This is one RAK4631/profile/phone test, not an all-board,
+physical charge-only-cable, battery-only, or LoRa transfer qualification.
