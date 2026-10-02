@@ -1,5 +1,8 @@
 #include "ST7735Display.h"
 #include "../UsbLogging.h"
+#if defined(NRF52_PLATFORM) && defined(MESH_NRF52_FLASH_TRIM) && MESH_NRF52_FLASH_TRIM
+  #include "Nrf52TftFontTrim.h"
+#endif
 #include <TFT_eSPI.h>
 
 #if defined(NRF52_PLATFORM)

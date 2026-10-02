@@ -242,7 +242,12 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
                  state_word(fs), have, tot, pct, midhx, age);
     }
     const char* hw = (c.hw_id[0]) ? c.hw_id : "?";
+#if OTA_TARGET_NAME_TABLE && OTA_TARGET_NAME_FRONT_CODED
+    char target_name[OTA_TARGET_ENV_NAME_CAPACITY];
+    const char* tenv = ota_target_env_name(c.manager.target(), target_name, sizeof target_name);
+#else
     const char* tenv = ota_target_env_name(c.manager.target());   // env name, or "?" if not in the table
+#endif
 #if defined(NRF52_PLATFORM)
     // nRF52 applies via the bootloader - show (cached) whether it can, so `ota get`/`install` won't surprise.
     // blrc = the bootloader's last apply code (diagnostic; 0xB8=success, see ota_delta.c).
@@ -390,7 +395,12 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       // and flag the explicit legacy rescue path when an app-only internal-flash nRF52 has no valid EndF.
       char hwbuf[16];
       const char* fit;
+#if OTA_TARGET_NAME_TABLE && OTA_TARGET_NAME_FRONT_CODED
+      char target_name[OTA_TARGET_ENV_NAME_CAPACITY];
+      const char* env = ota_target_env_name(h->target_id, target_name, sizeof target_name);
+#else
       const char* env = ota_target_env_name(h->target_id);
+#endif
       const bool boot_package = (h->flags & MFLAG_BOOTLOADER) != 0;
       if (boot_package) {
         bool installable = false;

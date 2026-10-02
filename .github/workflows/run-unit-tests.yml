@@ -260,6 +260,20 @@ jobs:
           python3 -B test/test_nrf52_usb_power.py
           python3 -B test/test_shared_mota_queue.py
 
+      - name: Verify nRF52 infrastructure trims and unchanged Companion scope
+        run: |
+          python3 -B test/test_nrf52_flash_trim.py -v
+          python3 -B test/test_nrf52_tft_font_trim.py -v
+          python3 -B test/test_ota_target_names.py -v
+
+      - name: Verify compact same-size fonts and lossless rendering
+        run: |
+          python3 -B test/test_compact_arial.py -v
+          python3 -B test/test_compact_noto.py -v
+          python3 -B test/test_nrf52_font_license.py -v
+          python3 -B test/test_oled_font_experiments.py -v
+          python3 -B test/test_font_family_trials.py -v
+
       - name: Verify Companion Bluetooth settings and WebConfig
         run: |
           python3 -B test/test_nimble_companion.py

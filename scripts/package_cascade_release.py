@@ -16,6 +16,7 @@ from urllib.parse import quote, urljoin
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from firmware_memory_manifest import validate_package
 from check_nrf52_uf2 import check_uf2
+from package_nrf52_font_license import validate_artifact_notice
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +70,9 @@ def collect_artifacts(directory, version):
         if any(item.stat().st_size == 0 for item in files):
             raise ValueError(f"{stem}: empty firmware artifact")
         memory = validate_package(directory / stem)
+        font_notice = validate_artifact_notice(directory / stem)
+        if font_notice is not None:
+            files.append(font_notice)
         manifest["runtime_ram"] = {key: memory[key] for key in (
             "passed", "available_internal_bytes", "required_heap_bytes", "elf_sha256")}
         accounted.update(files)
