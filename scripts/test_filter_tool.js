@@ -432,4 +432,33 @@ test("wildcard width preserves existing behavior and explicit conflicting widths
     hashBytes: decoded.pathHashBytes })).hashBytes, 3);
 });
 
+test("2+ matches both supported larger widths, including zero hops, and round trips", () => {
+  const rule = tool.EXAMPLES.hash_width_two_plus[0];
+  const definition = tool.buildDefinition(rule);
+  assert.ok(definition.includes("hashbytes=2+"));
+  assert.strictEqual(tool.parseDefinition(definition).hashBytes, "2+");
+  assert.strictEqual(tool.decodeBundle(tool.encodeBundle([rule]))[0].hashBytes, "2+");
+  assert.match(tool.explainRule(rule), /2- or 3-byte/);
+  for (const actual of [1, 2, 3]) {
+    for (const path of ["", "12".repeat(actual)]) {
+      const facts = packet({ path, hops: path ? 1 : 0, hashBytes: actual });
+      assert.strictEqual(tool.matchRule(rule, facts).matched, actual >= 2);
+    }
+  }
+});
+
+test("2+ works with 2- and 3-byte prefixes but rejects incompatible or invalid ranges", () => {
+  const base = tool.EXAMPLES.hash_width_two_plus[0];
+  for (const prefix of ["1234", "123456"]) {
+    const rule = tool.normalizeRule({ ...base, pathKind: "prefix", pathPrefix: prefix });
+    assert.strictEqual(tool.parseDefinition(tool.buildDefinition(rule)).hashBytes, "2+");
+    assert.strictEqual(tool.matchRule(rule, packet({ path: prefix })).matched, true);
+    assert.strictEqual(tool.matchRule(rule, packet({ path: "", hops: 0, hashBytes: 2 })).matched, false);
+  }
+  assertToolError(() => tool.normalizeRule({ ...base, pathKind: "prefix", pathPrefix: "12" }), /conflicts with prefix width/);
+  for (const hashBytes of ["1+", "3+", "4+", "02+", "2++"])
+    assertToolError(() => tool.normalizeRule({ ...base, hashBytes }), /Path hash bytes/);
+  assertToolError(() => tool.normalizePacket(packet({ path: "", hashBytes: "2+" })), /Packet path hash bytes/);
+});
+
 process.stdout.write(`# ${passed} filter-policy playground tests passed\n`);

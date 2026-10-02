@@ -445,7 +445,7 @@ The extended form is:
 
 ```text
 set flood.rule[.<slot>] type=<type> [mode=radio|bridge|cross|bridge,cross]
-    [hops=<range>] [channel=<channel>] [hashbytes=any|1|2|3]
+    [hops=<range>] [channel=<channel>] [hashbytes=any|1|2|2+|3]
     [prefix=<ID[,ID...]>] [in=<input-scope>] <action> [rate=<N>/min]
     [priority=<0-255>] [stop] [tx=fast|slow] [suspend=tempradio]
 get flood.rule
@@ -495,12 +495,14 @@ Match fields:
   collision, while `public` verifies and decrypts with the Public key. This is
   channel authentication, not sender authentication: the group MAC is two
   bytes and the Public key is shared.
-- `hashbytes=any|1|2|3` matches the encoded width of each path hash, independent
+- `hashbytes=any|1|2|2+|3` matches the encoded width of each path hash, independent
   of its value or the hop count. Omitted or `any` means any width; `*` is an
   alias for `any`. It includes zero-hop packets carrying the selected width.
-  Four-byte path hashes are reserved and unsupported. Combine this with other
-  match fields as needed; a `prefix=` must have the same width when both are
-  specified. The compact alias is `pb=`.
+  `2+` matches the supported 2- and 3-byte widths in one rule; a rate limit is
+  shared across both widths. Four-byte path hashes are reserved and unsupported.
+  Combine this with other match fields as needed; a `prefix=` must satisfy the
+  width selector. With `2+`, a 2- or 3-byte prefix narrows the rule to that exact
+  width, and saved output shows the prefix. The compact alias is `pb=`.
 - `prefix=` is a source-path prefix containing one to three comma-separated
   pbyte IDs. Every ID must use the packet's pbyte width: 2, 4, or 6 hex
   characters for 1-, 2-, or 3-byte paths. Order matters and matching begins at
@@ -690,7 +692,7 @@ set fr.3 any c=#wardriving m=bc d
 | `mode=radio`, `bridge`, `cross`, `bridge,cross` | `m=r`, `m=b`, `m=c`, `m=bc` | Select the admission path. Omitted means radio; `cb`, `b,c`, and `c,b` also mean both transport paths. |
 | `channel=...` | `c=...` | Same authenticated name/key or explicit `hash:XX` matcher. |
 | `prefix=...` | `p=...` | Ordered path prefix. |
-| `hashbytes=any`, `1`, `2`, or `3` | `pb=*`, `1`, `2`, or `3` | Encoded path-hash width, even with zero hops. |
+| `hashbytes=any`, `1`, `2`, `2+`, or `3` | `pb=*`, `1`, `2`, `2+`, or `3` | Encoded path-hash width, even with zero hops; `2+` matches 2 and 3. |
 | `path=blacklist` | `p=bl` | Shared unordered blacklist; repeater only. |
 | `in=any`, `none`, `scoped`, `allowed`, `unknown` | `i=*`, `i=n`, `i=s`, `i=a`, `i=u` | Incoming scope condition. |
 | `in=scope:name`, `in=region:name` | `i=s:name`, `i=r:name` | Match a specific incoming scope or region. |
@@ -716,7 +718,8 @@ slot without replacing the default rules. It stops this node forwarding all
 1-byte flood packets, including advertisements and relayed login/admin traffic;
 direct routes and local delivery are unchanged. Use a narrower `type=` or
 `channel=` if those floods must remain reachable. Use `hashbytes=2` or `3` for
-the other supported widths, and `get fr.<slot>` to copy the saved command.
+an exact width, or `set fr any pb=2+ d` to drop both larger supported widths with
+one rule. Use `get fr.<slot>` to copy the saved command.
 
 Width-only rules require updated firmware. Existing rules remain unchanged and
 the table uses no additional RAM or storage. Before downgrading to firmware
