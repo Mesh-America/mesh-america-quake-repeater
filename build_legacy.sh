@@ -4304,6 +4304,8 @@ collect_nrf52_artifacts() {
   if [ -f "${build_output_dir}/firmware.zip" ]; then
     copy_build_output "${build_output_dir}/firmware.zip" "${OUTPUT_DIR}/${firmware_filename}.zip" || return $?
   fi
+  python3 scripts/package_nrf52_font_license.py collect "$build_output_dir" \
+    --stem "${OUTPUT_DIR}/${firmware_filename}" || return $?
 }
 
 collect_stm32_artifacts() {

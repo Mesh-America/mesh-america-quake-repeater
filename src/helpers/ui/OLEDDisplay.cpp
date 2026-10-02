@@ -45,7 +45,11 @@ OLEDDisplay::OLEDDisplay() {
 	color = WHITE;
 	geometry = GEOMETRY_128_64;
 	textAlignment = TEXT_ALIGN_LEFT;
+#if MESHCORE_ARIAL_FONT_MODE >= 1
+	fontData = ArialMT_Plain_16;
+#else
 	fontData = ArialMT_Plain_10;
+#endif
 	fontTableLookupFunction = DefaultFontTableLookup;
 	buffer = NULL;
 #ifdef OLEDDISPLAY_DOUBLE_BUFFER
@@ -557,6 +561,10 @@ uint16_t OLEDDisplay::drawStringInternal(int16_t xMove, int16_t yMove, const cha
   uint8_t textHeight       = pgm_read_byte(fontData + HEIGHT_POS);
   uint8_t firstChar        = pgm_read_byte(fontData + FIRST_CHAR_POS);
   uint16_t sizeOfJumpTable = pgm_read_byte(fontData + CHAR_NUM_POS)  * JUMPTABLE_BYTES;
+#if MESHCORE_FONT_COMPRESSED
+  const bool compactFont = mesh::ui::active_compact_font::identify(fontData) >= 0;
+  uint8_t glyphScratch[mesh::ui::active_compact_font::kScratchSize];
+#endif
 
   uint16_t cursorX         = 0;
   uint16_t cursorY         = 0;
@@ -594,7 +602,11 @@ uint16_t OLEDDisplay::drawStringInternal(int16_t xMove, int16_t yMove, const cha
         continue;
     } else
       code = text[j];
+#if MESHCORE_ARIAL_FONT_MODE >= 1
+    if (code >= firstChar && code - firstChar < pgm_read_byte(fontData + CHAR_NUM_POS)) {
+#else
     if (code >= firstChar) {
+#endif
       uint8_t charCode = code - firstChar;
 
       // 4 Bytes per char code
@@ -605,9 +617,23 @@ uint16_t OLEDDisplay::drawStringInternal(int16_t xMove, int16_t yMove, const cha
 
       // Test if the char is drawable
       if (!(msbJumpToChar == 255 && lsbJumpToChar == 255)) {
+#if MESHCORE_FONT_COMPRESSED
+        if (compactFont) {
+          const mesh::ui::active_compact_font::Glyph glyph = mesh::ui::active_compact_font::glyph(
+              fontData, code, glyphScratch, sizeof(glyphScratch));
+          // A zero byte count has a different meaning to drawInternal().
+          // Failed/blank glyphs must not enter the generic bitmap renderer.
+          if (glyph.valid && glyph.drawable && glyph.data && glyph.length)
+            drawInternal(xPos, yPos, currentCharWidth, textHeight,
+                         glyph.data, 0, glyph.length);
+        } else {
+#endif
         // Get the position of the char data
         uint16_t charDataPosition = JUMPTABLE_START + sizeOfJumpTable + ((msbJumpToChar << 8) + lsbJumpToChar);
         drawInternal(xPos, yPos, currentCharWidth, textHeight, fontData, charDataPosition, charByteSize);
+#if MESHCORE_FONT_COMPRESSED
+        }
+#endif
       }
 
       cursorX += currentCharWidth;
@@ -678,10 +704,17 @@ uint16_t OLEDDisplay::drawStringMaxWidth(int16_t xMove, int16_t yMove, uint16_t 
   uint16_t drawStringResult = 1; // later tested for 0 == error, so initialize to 1
 
   for (uint16_t i = 0; i < length; i++) {
+#if MESHCORE_ARIAL_FONT_MODE >= 1
+    const uint8_t c = (this->fontTableLookupFunction)(text[i]);
+#else
     char c = (this->fontTableLookupFunction)(text[i]);
+#endif
     if (c == 0)
       continue;
-    strWidth += pgm_read_byte(fontData + JUMPTABLE_START + (c - firstChar) * JUMPTABLE_BYTES + JUMPTABLE_WIDTH);
+#if MESHCORE_ARIAL_FONT_MODE >= 1
+    if (c >= firstChar && c - firstChar < pgm_read_byte(fontData + CHAR_NUM_POS))
+#endif
+      strWidth += pgm_read_byte(fontData + JUMPTABLE_START + (c - firstChar) * JUMPTABLE_BYTES + JUMPTABLE_WIDTH);
 
     // Always break on newline
     if (text[i] == '\n') {
@@ -737,13 +770,20 @@ uint16_t OLEDDisplay::getStringWidth(const char* text, uint16_t length, bool utf
   uint16_t maxWidth = 0;
 
   for (uint16_t i = 0; i < length; i++) {
+#if MESHCORE_ARIAL_FONT_MODE >= 1
+    uint8_t c = text[i];
+#else
     char c = text[i];
+#endif
     if (utf8) {
       c = (this->fontTableLookupFunction)(c);
       if (c == 0)
         continue;
     }
-    stringWidth += pgm_read_byte(fontData + JUMPTABLE_START + (c - firstChar) * JUMPTABLE_BYTES + JUMPTABLE_WIDTH);
+#if MESHCORE_ARIAL_FONT_MODE >= 1
+    if (c >= firstChar && c - firstChar < pgm_read_byte(fontData + CHAR_NUM_POS))
+#endif
+      stringWidth += pgm_read_byte(fontData + JUMPTABLE_START + (c - firstChar) * JUMPTABLE_BYTES + JUMPTABLE_WIDTH);
     if (c == 10) {
       maxWidth = max(maxWidth, stringWidth);
       stringWidth = 0;
