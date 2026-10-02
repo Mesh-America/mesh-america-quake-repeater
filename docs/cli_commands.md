@@ -2910,9 +2910,9 @@ worked moderation examples, see [Flood Filtering and Moderation](flood_filtering
 - `get flood.rule`
 - `get flood.rule.<n>`
 - `get fr[.<n>]` (numbered form returns a complete short setter for copying)
-- `set fr[.<n>] <type> [h=<range>] [m=r|b|c|bc] [c=<channel>] [pb=any|1|2|3] <d|s=<scope>|r=<region>|q=<N>|r|s> [...]`
+- `set fr[.<n>] <type> [h=<range>] [m=r|b|c|bc] [c=<channel>] [pb=any|1|2|2+|3] <d|s=<scope>|r=<region>|q=<N>|r|s> [...]`
 - `del fr.<n>` or `del fr all`
-- `set flood.rule[.<n>] type=<type> [mode=radio|bridge|cross|bridge,cross] [hops=<range>] [channel=<channel>] [hashbytes=any|1|2|3] [prefix=<path-prefix>] [in=<input-scope>] <drop|scope=<name>|region=<name>|rate=<N>/min|retry|stop> [priority=<0-255>] [tx=slow] [suspend=tempradio]`
+- `set flood.rule[.<n>] type=<type> [mode=radio|bridge|cross|bridge,cross] [hops=<range>] [channel=<channel>] [hashbytes=any|1|2|2+|3] [prefix=<path-prefix>] [in=<input-scope>] <drop|scope=<name>|region=<name>|rate=<N>/min|retry|stop> [priority=<0-255>] [tx=slow] [suspend=tempradio]`
 - `del flood.rule.<n>`
 - `del flood.rule all`
 - `get flood.filter`
@@ -2968,10 +2968,12 @@ compile this table.
   MAC/decrypt check with the Public channel key. That distinguishes an ordinary
   `0x11` collision, but it is channel authentication rather than sender
   authentication: the group MAC is two bytes and the Public key is shared.
-- `hashbytes=any|1|2|3`: Optional encoded path-hash width, independent of hop
+- `hashbytes=any|1|2|2+|3`: Optional encoded path-hash width, independent of hop
   count and hash value. Omitted, `any`, or `*` matches every supported width.
   Width-specific rules also match zero-hop packets. Four-byte hashes are
-  reserved and unsupported. A simultaneous `prefix=` must use the same width.
+  reserved and unsupported. `2+` selects both 2- and 3-byte paths in one row,
+  sharing any rate limit across both. A simultaneous `prefix=` must satisfy the
+  selector; a 2- or 3-byte prefix narrows `2+` to its own exact width.
   Example: `set fr any pb=1 d` drops all 1-byte floods from forwarding, including
   relayed login/admin traffic, but not direct packets or local delivery.
 - `prefix=<ID[,ID...]>`: Optional ordered source-path prefix of one to three
@@ -3223,7 +3225,7 @@ have the same behavior as their long forms.
 | `hops=...` | Positional range or `h=...`; `*` means `all` |
 | `mode=radio/bridge/cross/bridge,cross` | `m=r/b/c/bc` (choose one value) |
 | `channel=...`, `prefix=...` | `c=...`, `p=...` |
-| `hashbytes=any/1/2/3` | `pb=*/1/2/3` (choose one value) |
+| `hashbytes=any/1/2/2+/3` | `pb=*/1/2/2+/3` (choose one value) |
 | `path=blacklist` | `p=bl` (repeater only) |
 | `in=any/none/scoped/allowed/unknown` | `i=*/n/s/a/u` (choose one value) |
 | `in=scope:name`, `in=region:name` | `i=s:name`, `i=r:name` |

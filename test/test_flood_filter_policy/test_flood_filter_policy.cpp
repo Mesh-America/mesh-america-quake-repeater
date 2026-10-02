@@ -310,7 +310,16 @@ TEST(FloodRuleHashBytes, StrictSelectorAndStoredMatcherValidation) {
     EXPECT_TRUE(pathMatcherValid(width, 3, false));
     EXPECT_FALSE(pathMatcherValid(width, 1, true));
   }
-  for (const char* text : {"", "0", "4", "-1", "1x", "01", "anymore"})
+  ASSERT_TRUE(parsePathHashBytes("2+", width));
+  EXPECT_EQ(RULE_HASH_BYTES_TWO_PLUS, width);
+  EXPECT_STREQ("2+", pathHashBytesName(width));
+  EXPECT_TRUE(pathMatcherValid(width, 0, false));
+  EXPECT_TRUE(pathMatcherValid(width, 0, true));
+  EXPECT_FALSE(pathMatcherValid(width, 1, false));
+  for (uint8_t actual = 0; actual <= 4; actual++)
+    EXPECT_EQ(actual == 2 || actual == 3, pathHashBytesMatch(width, actual));
+  for (const char* text : {"", "0", "4", "-1", "1x", "01", "anymore",
+                          "1+", "3+", "4+", "02+", "2++", "130"})
     EXPECT_FALSE(parsePathHashBytes(text, width));
   EXPECT_FALSE(parsePathHashBytes(nullptr, width));
   EXPECT_TRUE(pathMatcherValid(0, 0, false));
@@ -325,8 +334,10 @@ TEST(FloodRuleHashBytes, WidthOnlyMatchesEmptyAndNonemptyPaths) {
     for (uint8_t hops : {0, 1, 3}) {
       auto packet = makeFloodPacket(actual, path, hops);
       EXPECT_TRUE(FloodFilterPolicy::pathStartsWith(&packet, 0, 0, nullptr));
-      for (uint8_t wanted = 1; wanted <= 3; wanted++)
-        EXPECT_EQ(actual == wanted,
+      for (uint8_t wanted : {uint8_t(1), uint8_t(2), uint8_t(3),
+                            FloodFilterPolicy::RULE_HASH_BYTES_TWO_PLUS})
+        EXPECT_EQ(actual == wanted
+                || (wanted == FloodFilterPolicy::RULE_HASH_BYTES_TWO_PLUS && actual >= 2),
             FloodFilterPolicy::pathStartsWith(&packet, wanted, 0, nullptr));
     }
   }

@@ -407,11 +407,34 @@ inline bool pathMatchesConfiguredIds(const mesh::Packet* packet,
 
 // A nonzero width with no prefix hops is a width-only matcher. Reuse the
 // existing FPF7 fields so runtime RAM and serialized row sizes stay fixed.
+// The high-bit selector is a rule-storage value, never a packet hash width.
+static constexpr uint8_t RULE_HASH_BYTES_TWO_PLUS = 0x82;
+
+inline const char* pathHashBytesName(uint8_t width) {
+  switch (width) {
+    case 1: return "1";
+    case 2: return "2";
+    case 3: return "3";
+    case RULE_HASH_BYTES_TWO_PLUS: return "2+";
+    default: return "any";
+  }
+}
+
+inline bool pathHashBytesMatch(uint8_t selector, uint8_t actual_width) {
+  return actual_width >= 1 && actual_width <= 3
+      && (selector == 0 || selector == actual_width
+          || (selector == RULE_HASH_BYTES_TWO_PLUS && actual_width >= 2));
+}
+
 inline bool parsePathHashBytes(const char* text, uint8_t& width) {
   if (text == NULL) return false;
   if (strcmp(text, "*") == 0
       || (strlen(text) == 3 && channelHashPrefixEqual(text, "any"))) {
     width = 0;
+    return true;
+  }
+  if (strcmp(text, "2+") == 0) {
+    width = RULE_HASH_BYTES_TWO_PLUS;
     return true;
   }
   if (text[0] >= '1' && text[0] <= '3' && text[1] == 0) {
@@ -424,6 +447,7 @@ inline bool parsePathHashBytes(const char* text, uint8_t& width) {
 inline bool pathMatcherValid(uint8_t width, uint8_t prefix_hops,
                              bool blacklist) {
   return (width == 0 && prefix_hops == 0)
+      || (width == RULE_HASH_BYTES_TWO_PLUS && prefix_hops == 0)
       || (width >= 1 && width <= 3 && prefix_hops <= 3
           && (prefix_hops == 0 || !blacklist));
 }
@@ -433,8 +457,9 @@ inline bool pathStartsWith(const mesh::Packet* packet,
                            uint8_t prefix_hops,
                            const uint8_t* prefix) {
   if (hash_size == 0 && prefix_hops == 0) return true;
-  if (packet == NULL || hash_size < 1 || hash_size > 3
-      || packet->getPathHashSize() != hash_size
+  if (packet == NULL
+      || (prefix_hops != 0 && (hash_size < 1 || hash_size > 3))
+      || !pathHashBytesMatch(hash_size, packet->getPathHashSize())
       || packet->getPathHashCount() < prefix_hops) {
     return false;
   }

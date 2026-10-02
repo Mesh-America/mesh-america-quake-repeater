@@ -82,7 +82,7 @@ bool formatCompact(char* out, size_t capacity, unsigned slot, const Entry& entry
   }
   if (entry.channel_key_len != 0) text.append(" c=%s", entry.channel_name);
   if (entry.path_hops == 0 && entry.path_hash_size != 0)
-    text.append(" pb=%u", (unsigned)entry.path_hash_size);
+    text.append(" pb=%s", pathHashBytesName(entry.path_hash_size));
   if (entry.match_blacklisted_path) text.append(" p=bl");
   else if (entry.path_hops) {
     text.append(" p=");

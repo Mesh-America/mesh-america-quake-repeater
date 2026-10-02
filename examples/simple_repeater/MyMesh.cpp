@@ -7426,8 +7426,8 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
   char retry[10];
   char hashbytes[16] = {};
   if (entry.path_hops == 0 && entry.path_hash_size != 0)
-    snprintf(hashbytes, sizeof(hashbytes), " hashbytes=%u",
-             (unsigned)entry.path_hash_size);
+    snprintf(hashbytes, sizeof(hashbytes), " hashbytes=%s",
+             FloodFilterPolicy::pathHashBytesName(entry.path_hash_size));
   formatFloodFilterHopSpec(hops, sizeof(hops), entry.min_hops, entry.max_hops);
   if (entry.match_blacklisted_path) {
     strcpy(prefix, "blacklist");
@@ -7945,7 +7945,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
       }
       if (!FloodFilterPolicy::parsePathHashBytes(
               strchr(tokens[i], '=') + 1, hashbytes)) {
-        strcpy(reply, "Err - hashbytes must be any, 1, 2, or 3");
+        strcpy(reply, "Err - hashbytes must be any, 1, 2, 2+, or 3");
         return;
       }
       hashbytes_set = true;
@@ -7984,11 +7984,13 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
     }
   }
   if (hashbytes != 0) {
-    if (path_hash_size != 0 && path_hash_size != hashbytes) {
+    if (path_hash_size != 0
+        && !FloodFilterPolicy::pathHashBytesMatch(hashbytes, path_hash_size)) {
       strcpy(reply, "Err - hashbytes conflicts with prefix width");
       return;
     }
-    path_hash_size = hashbytes;
+    // An explicit prefix already narrows 2+ to its exact 2- or 3-byte width.
+    if (path_hash_size == 0) path_hash_size = hashbytes;
   }
   if (scope_timing_set && !target_set) {
     strcpy(reply, "Err - tx timing requires scope= or region=");
