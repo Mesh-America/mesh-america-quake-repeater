@@ -6135,14 +6135,9 @@ bool MyMesh::loadFloodPacketFilters() {
           || loaded[i].payload_type == PAYLOAD_TYPE_GRP_DATA;
     }
 
-    bool path_valid = (loaded[i].path_hash_size == 0
-            && loaded[i].path_hops == 0)
-        || (!loaded[i].match_blacklisted_path
-            && loaded[i].path_hash_size >= 1
-            && loaded[i].path_hash_size <= 3
-            && loaded[i].path_hops >= 1
-            && loaded[i].path_hops
-                <= FLOOD_PACKET_FILTER_PATH_PREFIX_HOPS_MAX);
+    bool path_valid = FloodFilterPolicy::pathMatcherValid(
+        loaded[i].path_hash_size, loaded[i].path_hops,
+        loaded[i].match_blacklisted_path);
     bool action_valid = loaded[i].drop_on_match || direct_target
         || region_target || loaded[i].rate_limit_enabled
         || loaded[i].stop_on_match || loaded[i].retry_on_match;
@@ -7429,6 +7424,10 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
   char action[64];
   char rate[24];
   char retry[10];
+  char hashbytes[16] = {};
+  if (entry.path_hops == 0 && entry.path_hash_size != 0)
+    snprintf(hashbytes, sizeof(hashbytes), " hashbytes=%u",
+             (unsigned)entry.path_hash_size);
   formatFloodFilterHopSpec(hops, sizeof(hops), entry.min_hops, entry.max_hops);
   if (entry.match_blacklisted_path) {
     strcpy(prefix, "blacklist");
@@ -7490,11 +7489,11 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
   }
   int written = snprintf(
       reply, reply_len,
-      "> %d type=%s mode=%s hops=%s channel=%s prefix=%s in=%s %s%s%s priority=%u%s%s%s",
+      "> %d type=%s mode=%s hops=%s channel=%s prefix=%s%s in=%s %s%s%s priority=%u%s%s%s",
       index + 1, floodFilterPayloadTypeName(entry.payload_type),
       FloodFilterPolicy::ruleModeName(entry.transport_modes), hops,
       entry.channel_key_len == 0 ? "*" : entry.channel_name,
-      prefix, incoming, action, rate, retry,
+      prefix, hashbytes, incoming, action, rate, retry,
       (unsigned int)entry.priority,
       entry.stop_on_match ? " stop" : "",
       entry.scope_uses_slow_timing ? " tx=slow" : "",
@@ -7641,6 +7640,8 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   bool match_blacklisted_path = false;
   bool path_set = false;
   uint8_t path_hash_size = 0;
+  bool hashbytes_set = false;
+  uint8_t hashbytes = 0;
   uint8_t path_hops = 0;
   uint8_t path[FLOOD_PACKET_FILTER_PATH_PREFIX_BYTES_MAX];
   memset(path, 0, sizeof(path));
@@ -7936,6 +7937,18 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
         }
         channel_hash = hash_prefix[0];
       }
+    } else if (floodFilterAsciiStartsWith(tokens[i], "hashbytes=")
+        || floodFilterAsciiStartsWith(tokens[i], "pb=")) {
+      if (hashbytes_set) {
+        strcpy(reply, FLOOD_PACKET_FILTER_DUPLICATE);
+        return;
+      }
+      if (!FloodFilterPolicy::parsePathHashBytes(
+              strchr(tokens[i], '=') + 1, hashbytes)) {
+        strcpy(reply, "Err - hashbytes must be any, 1, 2, or 3");
+        return;
+      }
+      hashbytes_set = true;
     } else if (floodFilterAsciiStartsWith(tokens[i], "prefix=")
         || floodFilterAsciiStartsWith(tokens[i], "p=")
         || (floodFilterAsciiStartsWith(tokens[i], "path=")
@@ -7969,6 +7982,13 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
       strcpy(reply, FLOOD_PACKET_FILTER_USAGE);
       return;
     }
+  }
+  if (hashbytes != 0) {
+    if (path_hash_size != 0 && path_hash_size != hashbytes) {
+      strcpy(reply, "Err - hashbytes conflicts with prefix width");
+      return;
+    }
+    path_hash_size = hashbytes;
   }
   if (scope_timing_set && !target_set) {
     strcpy(reply, "Err - tx timing requires scope= or region=");

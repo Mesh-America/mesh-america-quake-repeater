@@ -24,6 +24,15 @@ Start with an example or build a rule, then test the draft against packet facts
 in the simulator below. The examples draw from
 [Flood Filtering and Moderation](flood_filtering.md).
 
+To match every 1-byte path, select **Path hash width → 1 byte**, **type → ANY**,
+all hops, no channel/input-scope restriction, and no prefix condition (or use
+the 1-byte example below). This also matches zero-hop packets. The firmware command is
+`set fr any pb=1 d` (or `set flood.rule type=any hashbytes=1 drop`); it adds a
+forwarding-drop rule, including for relayed login/admin floods. Direct routes
+and local delivery remain unaffected. Width-only rules require updated
+firmware. The simulator's policy definitions remain design-preview text, not
+installable commands.
+
 <div class="filter-tool" data-filter-tool>
   <div class="filter-management-safety" role="note">
     <strong>Remote login and direct routes</strong>
@@ -68,6 +77,7 @@ in the simulator below. The examples draw from
             <tr><td><code>channel=</code></td><td><code>*</code> means no channel condition; a name or key authenticates one group channel; <code>hash:XX</code> is an unauthenticated one-byte fallback</td></tr>
             <tr><td><code>rx.scope=</code></td><td>Original incoming transport scope</td></tr>
             <tr><td><code>path=</code></td><td>Path prefix, blacklist, bucket, or loop match</td></tr>
+            <tr><td><code>hashbytes=</code></td><td>Encoded path-hash width: 1, 2, or 3 bytes, including zero-hop packets</td></tr>
             <tr><td><code>tempradio=</code></td><td>Temporary-radio state</td></tr>
             <tr><td><code>do drop</code></td><td>Do not retransmit</td></tr>
             <tr><td><code>do scope=</code></td><td>Set the outgoing transport scope</td></tr>
@@ -82,6 +92,10 @@ in the simulator below. The examples draw from
       </p>
     </div>
     <div class="filter-example-grid">
+      <button type="button" data-example="hash_width">
+        <span>Drop all floods with 1-byte path hashes (including zero hops)</span>
+        <code>when type=any hops=all hashbytes=1 do drop</code>
+      </button>
       <button type="button" data-example="channel_scope">
         <span>Set #BlackHole86 scope on all #rgdata group traffic</span>
         <code>when type=class:group hops=all channel=#rgdata do scope=#BlackHole86 timing=fast</code>
@@ -184,6 +198,15 @@ in the simulator below. The examples draw from
             <option value="scope:usa"></option>
             <option value="region:west"></option>
           </datalist>
+        </label>
+        <label>
+          Path hash width
+          <select data-field="hash-bytes">
+            <option value="0">Any width</option>
+            <option value="1">1 byte</option>
+            <option value="2">2 bytes</option>
+            <option value="3">3 bytes</option>
+          </select>
         </label>
         <label>
           Path matcher
@@ -496,6 +519,15 @@ in the simulator below. The examples draw from
       <label>
         Channel
         <input data-packet="channel" value="#rgdata" placeholder="#name, public, hash:A7, key, or blank">
+      </label>
+      <label>
+        Encoded path hash width
+        <select data-packet="hash-bytes">
+          <option value="auto">Infer from path (empty defaults to 1 byte)</option>
+          <option value="1">1 byte</option>
+          <option value="2">2 bytes</option>
+          <option value="3">3 bytes</option>
+        </select>
       </label>
       <label>
         Received pbyte path

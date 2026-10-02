@@ -405,17 +405,42 @@ inline bool pathMatchesConfiguredIds(const mesh::Packet* packet,
       packet, ids, configuredIdCount(ids, maximum_count));
 }
 
+// A nonzero width with no prefix hops is a width-only matcher. Reuse the
+// existing FPF7 fields so runtime RAM and serialized row sizes stay fixed.
+inline bool parsePathHashBytes(const char* text, uint8_t& width) {
+  if (text == NULL) return false;
+  if (strcmp(text, "*") == 0
+      || (strlen(text) == 3 && channelHashPrefixEqual(text, "any"))) {
+    width = 0;
+    return true;
+  }
+  if (text[0] >= '1' && text[0] <= '3' && text[1] == 0) {
+    width = (uint8_t)(text[0] - '0');
+    return true;
+  }
+  return false;
+}
+
+inline bool pathMatcherValid(uint8_t width, uint8_t prefix_hops,
+                             bool blacklist) {
+  return (width == 0 && prefix_hops == 0)
+      || (width >= 1 && width <= 3 && prefix_hops <= 3
+          && (prefix_hops == 0 || !blacklist));
+}
+
 inline bool pathStartsWith(const mesh::Packet* packet,
                            uint8_t hash_size,
                            uint8_t prefix_hops,
                            const uint8_t* prefix) {
-  if (prefix_hops == 0) return true;
-  if (packet == NULL || prefix == NULL || hash_size < 1 || hash_size > 3
+  if (hash_size == 0 && prefix_hops == 0) return true;
+  if (packet == NULL || hash_size < 1 || hash_size > 3
       || packet->getPathHashSize() != hash_size
       || packet->getPathHashCount() < prefix_hops) {
     return false;
   }
-  return memcmp(packet->path, prefix, hash_size * prefix_hops) == 0;
+  return prefix_hops == 0
+      || (prefix != NULL
+          && memcmp(packet->path, prefix, hash_size * prefix_hops) == 0);
 }
 
 inline bool ruleIncomingScopeMatches(uint8_t kind,

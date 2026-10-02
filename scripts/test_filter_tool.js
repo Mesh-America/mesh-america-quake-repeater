@@ -390,4 +390,46 @@ test("combined transport selector survives readable and bundle round trips", () 
   assert.strictEqual(tool.normalizeRule({ ...rule, via: "cross,bridge" }).via, "bridge,cross");
 });
 
+test("path hash width survives definitions and bundle round trips", () => {
+  assert.strictEqual(tool.buildDefinition(tool.EXAMPLES.hash_width[0]),
+    "policy set drop-one-byte-paths phase=forward owner=filter priority=100 when route=flood type=any hops=all hashbytes=1 do drop");
+  for (const hashBytes of [1, 2, 3]) {
+    const rule = tool.normalizeRule({ ...tool.EXAMPLES.factory[2], hashBytes });
+    const definition = tool.buildDefinition(rule);
+    assert.ok(definition.includes(`hashbytes=${hashBytes}`));
+    assert.strictEqual(tool.parseDefinition(definition).hashBytes, hashBytes);
+    assert.strictEqual(tool.decodeBundle(tool.encodeBundle([rule]))[0].hashBytes, hashBytes);
+    assert.match(tool.explainRule(rule), new RegExp(`${hashBytes}-byte encoded path hashes`));
+  }
+});
+
+test("width-only rules match all IDs and zero hops without widening other conditions", () => {
+  for (const wanted of [1, 2, 3]) {
+    const rule = { ...tool.EXAMPLES.factory[2], hashBytes: wanted };
+    for (const actual of [1, 2, 3]) {
+      for (const path of ["", "12".repeat(actual), "AB".repeat(actual)]) {
+        const facts = packet({ via: "bridge", channel: "#wardriving", path,
+          hops: path ? 1 : 0, hashBytes: actual });
+        assert.strictEqual(tool.matchRule(rule, facts).matched, wanted === actual);
+        assert.strictEqual(tool.matchRule(rule, { ...facts, channel: "#other" }).matched, false);
+      }
+    }
+  }
+});
+
+test("wildcard width preserves existing behavior and explicit conflicting widths fail", () => {
+  const base = tool.EXAMPLES.factory[2];
+  for (const hashBytes of [undefined, 0, "any", "*"])
+    assert.strictEqual(tool.normalizeRule({ ...base, hashBytes }).hashBytes, 0);
+  for (const hashBytes of [4, -1, "1x"])
+    assertToolError(() => tool.normalizeRule({ ...base, hashBytes }), /Path hash bytes/);
+  assertToolError(() => tool.normalizeRule({ ...base, hashBytes: 1,
+    pathKind: "prefix", pathPrefix: "1234" }), /conflicts with prefix width/);
+  assertToolError(() => tool.normalizePacket(packet({ hashBytes: 1 })), /conflicts with received path width/);
+  const decoded = tool.decodeRawPacketHex("15 80 A7 00 00");
+  assert.strictEqual(decoded.hops, 0);
+  assert.strictEqual(tool.normalizePacket(packet({ path: "", hops: 0,
+    hashBytes: decoded.pathHashBytes })).hashBytes, 3);
+});
+
 process.stdout.write(`# ${passed} filter-policy playground tests passed\n`);

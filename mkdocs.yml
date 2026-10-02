@@ -122,5 +122,5 @@ extra_javascript:
   - _javascript/firmware_picker.js?v=20260929-4
   - _javascript/telemetry_decoder.js
   - _javascript/management_decoder.js
-  - _javascript/filter_tool.js
+  - _javascript/filter_tool.js?v=20261002-hashbytes
   - _javascript/preset_test.js?v=20260923-2
