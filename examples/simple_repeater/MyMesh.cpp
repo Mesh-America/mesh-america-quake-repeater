@@ -8,6 +8,7 @@
 #if defined(ESP_PLATFORM)
 #include <WiFi.h>
 #endif
+#include <helpers/OtaChannel.h>
 #if defined(WITH_MQTT_NEIGHBORS)
 #include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
 #endif
@@ -1820,7 +1821,7 @@ void MyMesh::loop() {
       setBridgeState(true);
       otaAlert(bridge->isRunning() ? "OTA aborted: MQTT stop unclean, bridge resumed"
                                    : "OTA aborted: MQTT stop unproven, bridge resumes when it completes");
-    } else if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+    } else if (!_cli.getBoard()->otaFromManifest(ota_resolve_base(_prefs.ota_channel), getFirmwareVer(), false, ota_reply)) {
       Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
       char ota_alert_msg[160];
       snprintf(ota_alert_msg, sizeof(ota_alert_msg), "OTA aborted: %s", ota_reply);
