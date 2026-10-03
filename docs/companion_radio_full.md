@@ -47,6 +47,68 @@ a busy radio rollback remains pending for recovery instead of reporting success.
 | LoRa self-update | No | No |
 | Optional self-update | WiFi on existing dual-app layouts; USB on single-app layouts | Bluetooth DFU with a compatible bootloader; USB always supported |
 
+### Screenless nRF52 spoken button confirmations
+
+Full Companion builds for T1000-E, RAK WisMesh Tag, MeshTracker X1,
+Muziworks R1 Neo and ThinkNode M3 use prerecorded spoken confirmations for
+their shared single-button controls. Other roles, legacy USB/BLE-only builds,
+screened boards and all Wio profiles retain their existing audio behavior.
+Set `MESH_GPS_VOICE=0` at build time to retain tones on an eligible Full build.
+
+| User-button gesture | Action / spoken confirmation |
+| --- | --- |
+| One press | Acknowledge an active notification: "Notification cleared"; otherwise "Ready" |
+| Two presses | "Advert queued" or "Advert failed" |
+| Three presses | "Sound on" or "Sound off" after the preference is saved |
+| Four presses | "GPS on" or "GPS off" when the GPS setting is available |
+| Hold more than three seconds | "Shutting down"; shutdown remains nonblocking while audio drains |
+| Hold during the first eight seconds of UI startup | "USB setup" for terminal/rescue mode |
+
+MeshTracker X1's three-press gesture instead cycles "Sound and vibration",
+"Sound only", "Vibration only", and "Silent". The new setting must save before
+either live alert output changes. A failed save restores both preferences and
+announces "Action failed". An explicit mute or alert-mode change permits one
+courtesy confirmation without unmuting ordinary notifications. The four
+additional mode clips are compiled only for `HAS_DRV2605` builds.
+Notification timers cannot cancel control speech, and the committed alert
+mode remains authoritative for vibration even if a notification-mask save fails.
+
+Power-on and wake wiring remain board-specific. Speech is nonblocking and uses
+the existing nRF52 PWM player; each buzzer still needs a physical listening
+test for intelligibility. All spoken button, alert-mode and GPS recordings use
+Microsoft Zira Desktop with the selected compressed Companion voice profile.
+R1 Neo's buzzer pin aliases its optional QSPI clock, so voice is
+not default-enabled when `QSPIFLASH` is selected. ThinkNode M4 is deliberately
+excluded: its former
+buzzer definitions incorrectly claimed I2C SDA and a battery-status LED, not
+verified audio hardware. Its Companion recipes no longer drive those pins as
+a buzzer.
+
+The optional ESP32 RC32-without-display recipe is not part of this nRF52
+extension: its fitted audio hardware needs verification and its `ui-new`
+controls require an ESP32 playback backend, not the nRF52 PWM player.
+
+#### Experimental G.726 speech
+
+Ordinary builds still use the approved Zira IMA recordings. G.726 is a hardware
+test option only: set both `MESH_BUTTON_AUDIO_HIL=1` and
+`MESH_GPS_VOICE_G726_BITRATE=16` or `24`. Invalid bitrates or a missing test gate
+are rejected. The generated catalog selects exactly one bitrate, retains the
+original sample counts, and omits the X1-only mode prompts on other boards.
+
+The decoder needs 52 bytes of state, no heap or full-clip buffer, and about
+1.2 KiB of Cortex-M4 code/tables. Its packing, resets and PWM lifecycle are
+checked against independently pinned FFmpeg output. At 24 kbps the audio
+payload is 25% smaller; at 16 kbps it is 50% smaller with more waveform error.
+Neither software comparisons nor successful builds qualify physical buzzer
+intelligibility or the refill deadline under Bluetooth/radio load.
+
+`scripts/generate_g726_voice.py` regenerates both experimental catalogs from
+the approved mono 8 kHz Zira WAVs using FFmpeg's MSB-first `g726` encoder.
+Production IMA headers cannot be selected as its output. The decoder's Sun
+provenance, attributed FFmpeg MIX interpolation and LGPL license are retained
+in `src/helpers/ui/g726`; no claim of independent ITU conformance is made.
+
 ### nRF52 Bluetooth reconnect qualification
 
 Full Companions persist the paired client's notification subscriptions (CCCDs)

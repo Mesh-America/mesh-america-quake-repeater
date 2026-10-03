@@ -40,8 +40,17 @@ public:
     // State getters
     bool isPressed() const { return _currentState; }
     EventType getLastEvent() const { return _lastEvent; }
+#ifdef MESH_BUTTON_AUDIO_HIL
+    bool injectPresses(uint8_t clicks, uint32_t hold_ms = 120);
+    bool injecting() const { return _hil_active; }
+#endif
 
 private:
+#ifdef MESH_BUTTON_AUDIO_HIL
+    bool _hil_active = false, _hil_down = false;
+    uint8_t _hil_remaining = 0;
+    uint32_t _hil_at = 0, _hil_hold_ms = 120;
+#endif
     enum State {
         IDLE,
         PRESSED,

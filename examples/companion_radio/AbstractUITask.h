@@ -117,6 +117,9 @@ public:
   // override these hooks. The default keeps setup-screen routing compatible
   // with older UIs that handle pairing only from their regular loop.
   virtual void servicePairingState() {}
+#ifdef MESH_BUTTON_AUDIO_HIL
+  virtual bool handleButtonAudioTest(const char*, char*, size_t) { return false; }
+#endif
   virtual bool isPairingPromptActive() const { return false; }
   virtual void loop() = 0;
 };

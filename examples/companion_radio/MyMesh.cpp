@@ -3194,13 +3194,12 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
       return true;
     }
     const bool enabled = strcmp(gps_value, "on") == 0;
-    if (!sensors.setSettingValue("gps", enabled ? "1" : "0")) {
+    if (sensors.getSettingByKey("gps") == nullptr) {
       snprintf(reply, reply_size, "Error: GPS unavailable");
     } else {
-      if (savePreference(_prefs.gps_enabled, static_cast<uint8_t>(enabled))) {
+      if (setGpsEnabled(enabled)) {
         snprintf(reply, reply_size, "OK - GPS %s (saved)", enabled ? "on" : "off");
       } else {
-        applyGpsPrefs();
         snprintf(reply, reply_size, "Error: GPS could not be saved");
       }
     }
@@ -7242,6 +7241,15 @@ bool MyMesh::saveAdvertName(const char* name) {
   return false;
 }
 
+#if ENV_INCLUDE_GPS == 1
+bool MyMesh::setGpsEnabled(bool enabled) {
+  if (!sensors.setSettingValue("gps", enabled ? "1" : "0")) return false;
+  if (savePreference(_prefs.gps_enabled, static_cast<uint8_t>(enabled))) return true;
+  applyGpsPrefs();
+  return false;
+}
+#endif
+
 bool MyMesh::saveAdvertLocation(double latitude, double longitude) {
   const double previous_lat = sensors.node_lat, previous_lon = sensors.node_lon;
   sensors.node_lat = latitude;
@@ -9291,6 +9299,10 @@ static bool isCompanionRadioPrefsCommand(const char* command) {
 // Called only for directly attached USB/BLE/TCP/browser clients. Commands
 // received over LoRa use handleCommand() with a nonzero sender timestamp.
 bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_size) {
+#ifdef MESH_BUTTON_AUDIO_HIL
+  // Present only in an explicitly instrumented physical-test build.
+  if (_ui && _ui->handleButtonAudioTest(command, reply, reply_size)) return true;
+#endif
 #if defined(MESH_SOAK_DIAGNOSTICS)
   if (mesh::hil::handleSoakCommand(command, reply, reply_size)) return true;
 #endif
