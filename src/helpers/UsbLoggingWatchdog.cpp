@@ -573,15 +573,19 @@ bool isUsbLoggingWatchdogUpdateActive() { return false; }
 bool handleUsbLoggingWatchdogCommand(const char* command, char* reply,
                                     size_t capacity) {
   if (!command || !reply || !capacity) return false;
-  static const char* const keys[] = {"get usb.watchdog.last", "get usb.watchdog", "set usb.watchdog"};
-  for (const char* key : keys) {
-    const size_t length = strlen(key);
-    if (strncmp(command, key, length)
-        || (command[length] && command[length] != ' ' && command[length] != '\t')) continue;
-    snprintf(reply, capacity, "Error: unsupported");
-    return true;
+  const char* suffix;
+  constexpr size_t prefix_size = sizeof("get usb.watchdog") - 1;
+  if (strncmp(command, "get usb.watchdog", prefix_size) == 0) {
+    suffix = command + prefix_size;
+    if (strncmp(suffix, ".last", 5) == 0) suffix += 5;
+  } else if (strncmp(command, "set usb.watchdog", prefix_size) == 0) {
+    suffix = command + prefix_size;
+  } else {
+    return false;
   }
-  return false;
+  if (*suffix && *suffix != ' ' && *suffix != '\t') return false;
+  snprintf(reply, capacity, "Error: unsupported");
+  return true;
 }
 }  // namespace mesh
 #endif  // MESH_USB_CONSOLE_COOPERATIVE

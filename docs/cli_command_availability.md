@@ -165,6 +165,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | System | [`get/set reboot.interval`](#reboot-interval) | Full parser | Yes | Yes | Yes |
 | Clock sync | [`get/set clock.sync.*`; `clock.sync.mesh now`](cli_commands.md#estimate-and-correct-infrastructure-node-time-after-startup) | Repeater, sensor, and room server; `clock.sync.internet` needs MQTT repeater | Yes | Yes | Yes |
 | Routing | [`get/set repeat`](cli_commands.md#view-or-change-this-nodes-repeat-flag) | Forwarding-capable role | Yes | Yes | Yes |
+| Routing | [`get/set repeat.trace`](cli_commands.md#allow-routed-traces-while-repeating-is-disabled-repeater-only) | Repeater only; saved repeat-off trace exception, default off | Yes | Yes | Yes |
 | Routing | [`get/set path.hash.mode`](cli_commands.md#view-or-change-this-nodes-advert-path-hash-size) | Role that supports path-hash selection | Yes | Yes | Yes |
 | Routing | [`get/set loop.detect`](cli_commands.md#view-or-change-this-nodes-loop-detection) | Repeater | Yes | Yes | Yes |
 | Routing | [`get/set txdelay`](cli_commands.md#view-or-change-the-retransmit-delay-factor-for-flood-traffic) | All text CLI roles, including bridges | Yes | Yes | Yes |
@@ -338,6 +339,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | System | [`get/set reboot.interval`](#reboot-interval) | Full parser | Yes | Yes | Yes | Yes | Yes |
 | Clock sync | [`get/set clock.sync.*`; `clock.sync.mesh now`](cli_commands.md#estimate-and-correct-infrastructure-node-time-after-startup) | Repeater, sensor, and room server; `clock.sync.internet` needs MQTT repeater | Yes | Yes | Yes | Yes | Yes |
 | Routing | [`get/set repeat`](cli_commands.md#view-or-change-this-nodes-repeat-flag) | Forwarding-capable role | Yes | Yes | Yes | Yes | Yes |
+| Routing | [`get/set repeat.trace`](cli_commands.md#allow-routed-traces-while-repeating-is-disabled-repeater-only) | Repeater only; saved repeat-off trace exception, default off | Yes | Yes | Yes | Yes | Yes |
 | Routing | [`get/set path.hash.mode`](cli_commands.md#view-or-change-this-nodes-advert-path-hash-size) | Full parser | Yes | Yes | Yes | Yes | Yes |
 | Routing | [`get/set loop.detect`](cli_commands.md#view-or-change-this-nodes-loop-detection) | Repeater, full common parser | Yes | Yes | Yes | Yes | Yes |
 | Routing | [`get/set txdelay`](cli_commands.md#view-or-change-the-retransmit-delay-factor-for-flood-traffic) | All text CLI roles, including bridges | Yes | Yes | Yes | Yes | Yes |

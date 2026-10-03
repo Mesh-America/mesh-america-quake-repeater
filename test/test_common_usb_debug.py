@@ -157,11 +157,11 @@ int main() {
   cli.savePrefs(&cli.fs, PrefsSaveRouting::Scope::Common);
   assert(cli._common_save_succeeded);
   const auto baseline = cli.fs.files["/com_prefs"];
-  assert(baseline.size() == 870);
-  const size_t debug_offset = baseline.size() - 1;
-  const size_t logging_offset = baseline.size() - 7;
-  const size_t preamble_offset = baseline.size() - 4;
-  const size_t espnow_offset = baseline.size() - 2;
+  assert(baseline.size() == 871);
+  const size_t debug_offset = baseline.size() - 2;
+  const size_t logging_offset = baseline.size() - 8;
+  const size_t preamble_offset = baseline.size() - 5;
+  const size_t espnow_offset = baseline.size() - 3;
   assert(baseline[debug_offset] == 0 && baseline[logging_offset] == 1);
   assert(baseline[preamble_offset] == 48 && baseline[espnow_offset] == 1);
   Capture capture;
@@ -249,10 +249,11 @@ int main() {
     assert(cli.prefs.usb_debug_enabled == 0 && cli.fs.files["/com_prefs"][debug_offset] == 0);
   }
 
-  // Every older/torn length inherits debug OFF, even after loading debug ON.
+  // Every image without the complete debug byte inherits debug OFF, even
+  // after loading debug ON; a missing later trace byte cannot erase debug.
   auto image = baseline;
   image[logging_offset] = 0; image[debug_offset] = 1;
-  for (size_t size = 0; size < image.size(); ++size) {
+  for (size_t size = 0; size <= debug_offset; ++size) {
     CommonCLI reader;
     reader.prefs.usb_debug_enabled = 1;
     reader.fs.files["/com_prefs"] = {image.begin(), image.begin() + size};

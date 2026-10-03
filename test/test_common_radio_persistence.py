@@ -82,8 +82,9 @@ int main() {
   CommonCLI cli;
   assert(cli.saveCommonPrefs());
   auto original=cli.fs.files["/com_prefs"];
-  const size_t preamble_offset=original.size()-4;
-  assert(preamble_offset>=864);
+  // Appending preferences must not move the established preamble bytes.
+  const size_t preamble_offset=866;
+  assert(original.size() >= preamble_offset+2);
   assert(original[preamble_offset]==48 && original[preamble_offset+1]==0);
   assert(original[preamble_offset+2]==1);
   Capture capture; assert(writeCommonPrefsImage(capture,&cli.prefs));

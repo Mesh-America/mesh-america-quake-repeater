@@ -2382,7 +2382,47 @@ The pin number is the Arduino pin number used by that target (the normal GPIO nu
 **Parameters:**
   - `state`: `on`|`off`
 
-**Default:** `flood.channel.data on`; `flood.channel.data.hops h=all`
+**Default:** `repeat on`.
+
+`repeat off` disables relay forwarding, not locally generated traffic or
+configuration replies. Repeaters can separately opt in to the routed-trace
+exception below.
+
+#### Allow routed traces while repeating is disabled (repeater only)
+
+```text
+get repeat.trace
+set repeat.trace on
+set repeat.trace off
+```
+
+Default: `off`, including upgrades from older preference files. The setting is
+saved and takes effect without reboot. Failed saves leave the active choice
+unchanged. Room Server, Sensor, and Companion do not gain this exception.
+
+To keep ordinary forwarding disabled while allowing routed trace diagnostics:
+
+```text
+set repeat off
+set repeat.trace on
+```
+
+Only direct TRACE packets with a matching next hop may be relayed. Ordinary
+messages, adverts, group data, ACKs, and control packets remain subject to
+`repeat off`; flood traces remain invalid. Existing trace length, path-capacity,
+duplicate, radio-profile, and channel/duty-cycle checks still apply. This is
+a diagnostics opt-in, not authenticated-admin-only forwarding: trace packets
+retain the protocol's existing authentication behavior.
+
+`get repeat` and the disabled status bit continue to report repeating off.
+With `repeat on`, traces use the ordinary forwarding policy regardless of
+`repeat.trace`. Changing the exception to off while repeating is off blocks
+subsequent relayed trace transmissions, including queued copies and retries;
+a trace already on air is allowed to finish. Locally initiated traffic and
+management replies are not cancelled.
+
+The dynamic configuration field is `repeat.trace_off` (`0` or `1`). It is
+appended to `/com_prefs`; all previously saved field offsets stay unchanged.
 
 ---
 
