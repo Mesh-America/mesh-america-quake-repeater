@@ -2310,6 +2310,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.wifi_enabled = 0;
 #endif
   memset(_prefs.bluetooth_name, 0, sizeof(_prefs.bluetooth_name));
+  _prefs.bluetooth_enabled = 1;
   _prefs.display_rotation_degrees = 0;
   _prefs.cad_enabled = DEFAULT_CAD_ENABLED ? 1 : 0;
   _prefs.cad_scan_timeout_ms = 0;
@@ -4135,6 +4136,14 @@ CompanionNodePrefs *MyMesh::getNodePrefs() {
 }
 uint32_t MyMesh::getBLEPin() {
   return _active_ble_pin;
+}
+
+bool MyMesh::setBluetoothEnabledPreference(bool enabled) {
+  return savePreference(_prefs.bluetooth_enabled, static_cast<uint8_t>(enabled));
+}
+
+bool MyMesh::isBluetoothEnabledPreference() const {
+  return _prefs.bluetooth_enabled != 0;
 }
 
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
@@ -9161,7 +9170,7 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().print("  set bluetooth.name <name|default>\r\n");
 #if defined(BLE_PIN_CODE)
     terminalOutput().print("  get bluetooth (alias: get ble)\r\n");
-    terminalOutput().print("  set bluetooth <on|off> [force] (this boot; force only with off)\r\n");
+    terminalOutput().print("  set bluetooth <on|off> [force] (saved; force only with off)\r\n");
     terminalOutput().print("  get bluetooth.mac\r\n");
     terminalOutput().print(
         "  set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>\r\n");

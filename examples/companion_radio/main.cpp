@@ -2340,7 +2340,9 @@ void halt() {
 #endif
     companion_bluetooth_initialized = true;
     companion_bluetooth_start_failure[0] = 0;
-    if (interface_manager.isEnabled()) bluetooth_interface.enable();
+    if (interface_manager.isEnabled() && the_mesh.isBluetoothEnabledPreference()) {
+      bluetooth_interface.enable();
+    }
   }
 
   static void serviceDeferredCompanionBluetooth() {
@@ -2539,6 +2541,13 @@ static void serviceCompanionBluetoothControl() {
   // Give the requesting BLE client its reply, with a bounded wait even when
   // its notification queue is stuck. The command itself reports a request.
   if (bluetooth_interface.hasPendingIO() && elapsed < 1750) return;
+  if (!the_mesh.setBluetoothEnabledPreference(false)) {
+    companion_bluetooth_off_at = 0;
+    mesh::usbLoggingPort().println(
+        "Bluetooth off cancelled: preference save failed");
+    return;
+  }
+  interface_manager.setBluetoothAutoEnable(false);
   disableCompanionBluetoothForCli();
 }
 #endif
@@ -2554,12 +2563,6 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
     return true;
   }
 #if defined(BLE_PIN_CODE)
-  if (!companion_bluetooth_initialized) {
-    snprintf(reply, reply_size,
-             "Error: Bluetooth unavailable in this boot: %s",
-             companion_bluetooth_start_failure);
-    return true;
-  }
   if (action == CompanionBluetoothCommand::Get) {
     snprintf(reply, reply_size, "bluetooth %s%s",
              interface_manager.isBluetoothEnabled() ? "on" : "off",
@@ -2567,19 +2570,43 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
     return true;
   }
   if (action == CompanionBluetoothCommand::On) {
+    if (!companion_bluetooth_initialized) {
+      snprintf(reply, reply_size,
+               "Error: Bluetooth unavailable in this boot: %s",
+               companion_bluetooth_start_failure);
+      return true;
+    }
     if (!mesh::wireless::control().allowService(mesh::wireless::Bluetooth)) {
       snprintf(reply, reply_size, "Error: 2.4ghz is off or changing; use set 2.4ghz on first");
       return true;
     }
-    companion_bluetooth_off_at = 0;
+    const bool previous_preference = the_mesh.isBluetoothEnabledPreference();
+    if (!the_mesh.setBluetoothEnabledPreference(true)) {
+      snprintf(reply, reply_size, "Error: Bluetooth preference save failed; unchanged");
+      return true;
+    }
+    interface_manager.setBluetoothAutoEnable(true);
     interface_manager.enableBluetooth();
-    snprintf(reply, reply_size, "%s", interface_manager.isBluetoothEnabled()
-        ? "OK - Bluetooth on (this boot)" : "Error: Bluetooth enable failed");
+    if (interface_manager.isBluetoothEnabled()) {
+      companion_bluetooth_off_at = 0;
+      snprintf(reply, reply_size, "OK - Bluetooth on (saved)");
+    } else if (the_mesh.setBluetoothEnabledPreference(previous_preference)) {
+      interface_manager.setBluetoothAutoEnable(previous_preference);
+      snprintf(reply, reply_size, "Error: Bluetooth enable failed; preference restored");
+    } else {
+      snprintf(reply, reply_size,
+               "Error: Bluetooth enable failed; rollback save failed (saved on)");
+    }
     return true;
   }
   if (!interface_manager.isBluetoothEnabled()) {
+    if (!the_mesh.setBluetoothEnabledPreference(false)) {
+      snprintf(reply, reply_size, "Error: Bluetooth preference save failed; unchanged");
+      return true;
+    }
     companion_bluetooth_off_at = 0;
-    snprintf(reply, reply_size, "OK - Bluetooth already off (this boot)");
+    interface_manager.setBluetoothAutoEnable(false);
+    snprintf(reply, reply_size, "OK - Bluetooth already off (saved)");
     return true;
   }
   const bool force = action == CompanionBluetoothCommand::ForceOff;
@@ -2598,13 +2625,18 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
     return true;
   }
   if (non_bluetooth_requester) {
+    if (!the_mesh.setBluetoothEnabledPreference(false)) {
+      snprintf(reply, reply_size, "Error: Bluetooth preference save failed; unchanged");
+      return true;
+    }
+    interface_manager.setBluetoothAutoEnable(false);
     disableCompanionBluetoothForCli();
-    snprintf(reply, reply_size, "OK - Bluetooth off (this boot)");
+    snprintf(reply, reply_size, "OK - Bluetooth off (saved)");
   } else {
     companion_bluetooth_force_off = force;
     companion_bluetooth_off_at = millis() + 250;
     if (companion_bluetooth_off_at == 0) companion_bluetooth_off_at = 1;
-    snprintf(reply, reply_size, "OK - Bluetooth off requested (this boot)");
+    snprintf(reply, reply_size, "OK - Bluetooth off requested (save pending)");
   }
 #else
   (void)source;
@@ -3020,6 +3052,12 @@ void setup() {
   // until the saved Companion preferences above are available. Single-TTY
   // platforms have no separate port, so this is a harmless no-op there.
   mesh::beginUsbLoggingPort();
+
+#if defined(BLE_PIN_CODE)
+  // Keep stack registration available for a later USB `set bluetooth on`,
+  // without advertising even briefly when startup enables all interfaces.
+  interface_manager.setBluetoothAutoEnable(the_mesh.isBluetoothEnabledPreference());
+#endif
 
 // Lock the saved transport selection before bringing up either wireless stack.
 #if defined(COMPANION_EXCLUSIVE_WIFI_BLE)

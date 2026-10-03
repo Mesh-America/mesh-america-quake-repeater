@@ -1619,7 +1619,17 @@ set bluetooth on
 
 `get ble` and `set ble ...` are aliases. This controls the running Bluetooth
 service on ESP32 and nRF52 Companions: `off` stops advertising and disconnects
-Bluetooth clients; `on` enables it again. The change lasts until reboot.
+Bluetooth clients; `on` enables it again. Both choices are saved and survive
+reboots. USB remains available when Bluetooth is off. Older saved preferences
+without this setting retain the previous default of Bluetooth on.
+
+Successful local commands report `(saved)`. If saving fails, the command reports
+an error and leaves Bluetooth unchanged. When requested over Bluetooth, `off`
+first reports `(save pending)` so its reply can drain; the firmware rechecks the
+alternate connection and saves the preference before disconnecting. If that
+connection disappears or the save fails, shutdown is cancelled. `get bluetooth`
+reports the current runtime state. Broad `2.4ghz` controls still apply to the
+current boot only and do not change this saved Bluetooth preference.
 
 Plain `off` requires another active management connection. A connected USB
 terminal or binary client, TCP client, or browser terminal can provide that
@@ -1629,7 +1639,8 @@ bridge), issue the command through that USB client so the request itself proves
 it is active.
 
 Append `force` to `off` to permit disconnecting the only active connection.
-Use USB, another management transport, or reboot to regain access afterward.
+Use USB or another management transport and `set bluetooth on` to regain
+access afterward. Reboot alone will not re-enable saved-off Bluetooth.
 `force` is accepted only as the final argument to `off`.
 
 Commands sent through Bluetooth allow its reply to drain before shutdown

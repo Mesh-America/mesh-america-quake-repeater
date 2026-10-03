@@ -194,6 +194,8 @@ public:
   const char *getNodeName();
   CompanionNodePrefs *getNodePrefs();
   uint32_t getBLEPin();
+  bool setBluetoothEnabledPreference(bool enabled);
+  bool isBluetoothEnabledPreference() const;
 #if defined(BLE_PIN_CODE)
   bool prepareBluetoothMacForBoot(bool& address_rotated);
   bool armBluetoothMacRotationAfterConnection();
