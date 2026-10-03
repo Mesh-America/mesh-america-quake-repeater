@@ -54,7 +54,7 @@ Settings are stored in `/quake_prefs`, separate from the shared preferences file
 
 ## The clock
 
-Alerts do not need the clock. A repeater with no battery-backed clock module or GPS starts at 1970 after every power loss and then sends alerts stamped with that date; clients may show them as very old or ignore them. Set the time with `time <epoch seconds>` (or `gps sync` with a GPS fitted) if you want proper timestamps.
+Alerts do not need the clock. A repeater with no battery-backed clock module or GPS starts at 1970 after every power loss and then sends alerts stamped with that date. Clients still show them (tested), just with the wrong time. Set the time with `time <epoch seconds>` (or `gps sync` with a GPS fitted) if you want proper timestamps.
 
 ## Not in this version
 
