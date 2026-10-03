@@ -46,7 +46,7 @@ namespace mesh {
 // overlapping debug formatter calls. The historical helper name
 // is retained for callers; ESP32 TinyUSB uses the same bounded formatter.
 inline size_t nrf52DebugPrintf(const char* format, ...) {
-  if (format == nullptr || !isUsbLoggingEnabled()) return 0;
+  if (format == nullptr || !isUsbDebugLoggingEnabled()) return 0;
 
   static std::atomic_flag writer_busy = ATOMIC_FLAG_INIT;
   if (writer_busy.test_and_set(std::memory_order_acquire)) return 0;
@@ -90,8 +90,8 @@ inline size_t nrf52DebugPrintf(const char* format, ...) {
     #define MESH_DEBUG_PRINT(F, ...) do { mesh::nrf52DebugPrintf("DEBUG: " F, ##__VA_ARGS__); } while(0)
     #define MESH_DEBUG_PRINTLN(F, ...) do { mesh::nrf52DebugPrintf("DEBUG: " F "\n", ##__VA_ARGS__); } while(0)
   #else
-    #define MESH_DEBUG_PRINT(F, ...) do { if (mesh::isUsbLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("DEBUG: " F, ##__VA_ARGS__); } } while(0)
-    #define MESH_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("DEBUG: " F "\n", ##__VA_ARGS__); } } while(0)
+    #define MESH_DEBUG_PRINT(F, ...) do { if (mesh::isUsbDebugLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("DEBUG: " F, ##__VA_ARGS__); } } while(0)
+    #define MESH_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbDebugLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("DEBUG: " F "\n", ##__VA_ARGS__); } } while(0)
   #endif
 #else
   #define MESH_DEBUG_PRINT(...) {}
@@ -102,7 +102,7 @@ inline size_t nrf52DebugPrintf(const char* format, ...) {
   #if defined(NRF52_PLATFORM) || MESH_ESP32_USB_CONSOLE_COOPERATIVE
     #define BRIDGE_DEBUG_PRINTLN(F, ...) do { mesh::nrf52DebugPrintf("%s BRIDGE: " F, getLogDateTime(), ##__VA_ARGS__); } while(0)
   #else
-    #define BRIDGE_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("%s BRIDGE: " F, getLogDateTime(), ##__VA_ARGS__); } } while(0)
+    #define BRIDGE_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbDebugLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("%s BRIDGE: " F, getLogDateTime(), ##__VA_ARGS__); } } while(0)
   #endif
 #else
   #define BRIDGE_DEBUG_PRINTLN(...) {}
@@ -114,8 +114,8 @@ inline size_t nrf52DebugPrintf(const char* format, ...) {
     #define POWERSAVING_DEBUG_PRINT(F, ...) do { mesh::nrf52DebugPrintf("POWERSAVING: " F, ##__VA_ARGS__); } while(0)
     #define POWERSAVING_DEBUG_PRINTLN(F, ...) do { mesh::nrf52DebugPrintf("POWERSAVING: " F "\n", ##__VA_ARGS__); } while(0)
   #else
-    #define POWERSAVING_DEBUG_PRINT(F, ...) do { if (mesh::isUsbLoggingEnabled()) { mesh::usbLoggingPort().printf("POWERSAVING: " F, ##__VA_ARGS__); } } while(0)
-    #define POWERSAVING_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbLoggingEnabled()) { mesh::usbLoggingPort().printf("POWERSAVING: " F "\n", ##__VA_ARGS__); } } while(0)
+    #define POWERSAVING_DEBUG_PRINT(F, ...) do { if (mesh::isUsbDebugLoggingEnabled()) { mesh::usbLoggingPort().printf("POWERSAVING: " F, ##__VA_ARGS__); } } while(0)
+    #define POWERSAVING_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbDebugLoggingEnabled()) { mesh::usbLoggingPort().printf("POWERSAVING: " F "\n", ##__VA_ARGS__); } } while(0)
   #endif
 #else
   #define POWERSAVING_DEBUG_PRINT(...) {}

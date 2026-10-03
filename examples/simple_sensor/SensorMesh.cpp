@@ -963,7 +963,7 @@ void SensorMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_i
 bool SensorMesh::handleIncomingMsg(ClientInfo& from, uint32_t timestamp, uint8_t* data, uint8_t flags, size_t len) {
   MESH_DEBUG_PRINT("handleIncomingMsg: unhandled msg from ");
   #ifdef MESH_DEBUG
-  if (mesh::isUsbLoggingEnabled()) {
+  if (mesh::isUsbDebugLoggingEnabled()) {
     Stream& logging_port = mesh::usbLoggingPort();
     mesh::Utils::printHex(logging_port, from.id.pub_key, PUB_KEY_SIZE);
     logging_port.printf(": %s\n", data);

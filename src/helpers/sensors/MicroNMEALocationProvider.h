@@ -213,7 +213,7 @@ public :
             if (_gps_serial->available()) {
                 char c = _gps_serial->read();
                 #ifdef GPS_NMEA_DEBUG
-                if (mesh::isUsbLoggingEnabled()) mesh::usbLoggingPort().print(c);
+                if (mesh::isUsbDebugLoggingEnabled()) mesh::usbLoggingPort().print(c);
                 #endif
                 // MicroNMEA also returns true for a complete sentence with a
                 // bad checksum. A damaged ACK must not confirm GPS sleep.
@@ -235,7 +235,7 @@ public :
             _last_uart_ms = millis();
             _uart_seen = true;
             #ifdef GPS_NMEA_DEBUG
-            if (mesh::isUsbLoggingEnabled()) mesh::usbLoggingPort().print(c);
+            if (mesh::isUsbDebugLoggingEnabled()) mesh::usbLoggingPort().print(c);
             #endif
             bool parsed = nmea.process(c);
             processed++;

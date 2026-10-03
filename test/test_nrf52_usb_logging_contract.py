@@ -294,7 +294,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
 
         session_end = source[source.index(
             "static void endPrimaryUsbHostSession("
-        ):source.index("#endif", source.index(
+        ):source.index("\n}\n#endif", source.index(
             "static void endPrimaryUsbHostSession("
         ))]
         self.assertIn("primary_usb_line_state_dtr.exchange(", session_end)

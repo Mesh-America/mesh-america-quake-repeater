@@ -48,7 +48,7 @@ static void s2v(const uint8_t key[32], const uint8_t* aad, size_t aad_len,
     for (unsigned i = 0; i < 16; ++i) buf[len - 16 + i] ^= d[i];
     cmac(aes, buf, len, tag);
   } else {
-    dbl(d); memcpy(buf, data, len); buf[len] = 0x80;
+    dbl(d); if (len) memcpy(buf, data, len); buf[len] = 0x80;
     for (unsigned i = 0; i < 16; ++i) buf[i] ^= d[i];
     cmac(aes, buf, 16, tag);
   }

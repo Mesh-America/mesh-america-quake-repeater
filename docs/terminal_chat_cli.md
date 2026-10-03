@@ -55,6 +55,7 @@ the corresponding feature:
 | Command | Result |
 |---|---|
 | `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets` | Runtime diagnostics |
+| `get public.key` | Read-only node identity public key; Companion returns `> ` followed by 64 uppercase hex characters |
 | `get prv.key` | Node identity private key; Companion requires private key export enabled in the build |
 | `get password` | Infrastructure admin password; Companion reports that it has no admin password |
 | `erase` | Erase stored identity and settings; reboot for a fresh node |
@@ -264,10 +265,28 @@ GPS idle behavior; it does not change LoRa RXPS or WiFi modem sleep.
 ```
 get usb.logging
 set usb.logging {on|off} [reboot]
+get usb.debug
+set usb.debug {on|off}
 ```
-Shows or changes persistent live USB debug and packet output in an ordinary
-USB-loggable Companion or Full Companion. USB Companion and Full start off on
-a fresh install with logging disabled to protect framed traffic.
+Shows or changes persistent USB packet output and a separate verbose-debug
+preference in an ordinary USB-loggable Companion or Full Companion.
+`usb.logging` is the master; debug output requires the master and `usb.debug`
+to be on. RAW and RX/TX packet records need only the master. Use
+`set usb.debug off` with packet logging for USB-to-MQTT capture.
+`get usb.debug` reports saved intent, even while the master is off. Disabling
+the master does not clear it. Debug defaults off for fresh installs and older
+preferences without the new field; it still needs compiled debug support.
+Changing debug verbosity takes effect without a reboot.
+
+Current source also accepts `get usb.watchdog` and saved
+`set usb.watchdog off|on|auto`. Auto is the default and requires 14 continuous
+healthy logging-client days before saving On. Exact USB stats polls, not merely
+USB attachment, renew the client lease. See
+[USB logging watchdog](usb_logging_watchdog.md) for USB-only repair, increasing
+physical-fault reboot intervals, status fields, and ownership/storage safeguards.
+
+USB Companion and Full start off on a fresh install with the logging master
+disabled to protect framed traffic.
 nRF52 Full changes its interface count after a reboot and keeps Companion on
 interface `00`. Every ESP32 Full Companion has one TTY and needs no reboot:
 logging uses the active text terminal, disables framed Binary Companion on
@@ -275,6 +294,12 @@ USB, and continues accepting `set usb.logging off`. Turning logging off leaves
 the port in the normal ASCII terminal, matching fresh firmware. Send
 `+++MESHCORE-TERM-STOP`, or let a Companion app send a valid framed probe, to
 switch it to Binary Companion afterward.
+Full Companion emits complete received frames as uppercase ASCII `RAW:` hex
+followed by decoded RX summaries where possible; TX summaries are separate.
+These are best-effort records, not atomic pairs or a durable capture.
+nRF52 interface `02` is logging-only: send CLI/control commands on interface
+`00`. A single-port bridge that queries identity on its logging port needs
+separate control-port support before it can use that dedicated log endpoint.
 
 ```
 reboot

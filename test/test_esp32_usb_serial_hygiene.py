@@ -30,7 +30,7 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
                 r"\bSerial\.(?:print|println|printf|write)\s*\(",
                 relative,
             )
-            self.assertIn("mesh::usbLoggingPort()", text, relative)
+            self.assertRegex(text, r"mesh::usb(?:Logging|Debug)Port\(\)", relative)
 
     def test_v4_companion_uses_usb_serial_jtag_mode(self):
         platformio = source("variants/heltec_v4/platformio.ini")
@@ -134,7 +134,7 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         self.assertNotIn("Serial.setTxBufferSize(", helper)
         self.assertIn("while (Serial.read() >= 0)", helper)
         self.assertIn(
-            "setPlatformDebugOutputEnabled(isUsbLoggingEnabled());", purge
+            "setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());", purge
         )
         self.assertIn(
             "esp32_hwcdc_self_reset_guard.expectSelfResetBurst()", purge
@@ -325,7 +325,7 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         )
         self.assertIn("Stream& output = mesh::usbLoggingPort();", text)
 
-    def test_framework_diagnostics_follow_same_runtime_gate(self):
+    def test_framework_diagnostics_require_master_and_debug_gates(self):
         text = source("src/helpers/UsbLogging.cpp")
         self.assertIn("Serial.setDebugOutput(enabled);", text)
 
@@ -333,14 +333,14 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
             text.index("void setUsbLoggingEnabled(") :
             text.index("bool saveUsbLoggingBootPreference(")
         ]
-        self.assertIn("setPlatformDebugOutputEnabled(enabled);", setter)
+        self.assertIn("setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());", setter)
 
         begin = text[
             text.index("void beginUsbLoggingPort(") :
             text.index("void serviceUsbLoggingPort(")
         ]
         self.assertIn(
-            "setPlatformDebugOutputEnabled(isUsbLoggingEnabled());", begin
+            "setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());", begin
         )
 
     def test_expected_fresh_nvs_state_is_silent(self):

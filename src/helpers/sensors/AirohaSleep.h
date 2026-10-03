@@ -12,7 +12,7 @@ static inline bool airohaEnterSleep(LocationProvider* nmea) {
     nmea->sendSentence("$PAIR650,0");
     if (nmea->waitFor("$PAIR001,650,0", 50)) {  // wait for the command received signal
       #ifdef GPS_NMEA_DEBUG
-      if (mesh::isUsbLoggingEnabled()) {
+      if (mesh::isUsbDebugLoggingEnabled()) {
         mesh::usbLoggingPort().printf("Airoha RTC Backup sleep command accepted by GPS after %u attempts\r\n", attempt + 1);
       }
       #endif

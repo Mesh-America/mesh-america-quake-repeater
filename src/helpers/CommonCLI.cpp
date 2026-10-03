@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "CommonCLI.h"
 #include "PrefsSaveReplyGuard.h"
+#include "UsbLoggingWatchdog.h"
 #include <helpers/ui/DisplayPowerSettings.h>
 #include "CLICommandUtils.h"
 #include "FloodAdvertCLI.h"
@@ -762,6 +763,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   _prefs->system_watchdog_enabled = 1;
   memset(_prefs->extra_sf, 0, sizeof(_prefs->extra_sf));
   _prefs->usb_logging_enabled = 1;
+  _prefs->usb_debug_enabled = 0;
 #ifdef WITH_RS232_BRIDGE
   _prefs->bridge_uart = WITH_RS232_BRIDGE_UART;
 #else
@@ -903,6 +905,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   if (loaded) syncOtaConfigFromPrefs();   // persisted OTA policy/keys -> OtaContext (else keep safe defaults)
 #endif
 #if MESH_USB_LOGGING_AVAILABLE
+  mesh::setUsbDebugEnabled(_prefs->usb_debug_enabled != 0);
   mesh::setUsbLoggingEnabled(_prefs->usb_logging_enabled != 0);
 #endif
   _radio_profiles.adoptPrimaryPreamble(_prefs->primary_radio_preamble);
@@ -932,6 +935,9 @@ void CommonCLI::syncOtaConfigFromPrefs() {
 #endif
 
 void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
+  // Older or truncated preference images must never inherit debug opt-in
+  // from a previous load of a newer image.
+  _prefs->usb_debug_enabled = 0;
 #if defined(RP2040_PLATFORM)
   File file = fs->open(filename, "r");
 #else
@@ -1321,6 +1327,10 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
                 if (file.available() >= (int)sizeof(_prefs->espnow_bridge_enabled)) {
                   file.read((uint8_t *)&_prefs->espnow_bridge_enabled,
                             sizeof(_prefs->espnow_bridge_enabled));
+                  if (file.available() >= (int)sizeof(_prefs->usb_debug_enabled)) {
+                    file.read((uint8_t *)&_prefs->usb_debug_enabled,
+                              sizeof(_prefs->usb_debug_enabled));
+                  }
                 }
               }
             }
@@ -1433,6 +1443,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->radio_fem_rxgain = constrain(_prefs->radio_fem_rxgain, 0, 1); // boolean
     _prefs->radio_fem_txgain = constrain(_prefs->radio_fem_txgain, 0, 1); // boolean
     _prefs->usb_logging_enabled = constrain(_prefs->usb_logging_enabled, 0, 1); // boolean
+    // Only a deliberately saved 1 enables diagnostics; corrupted bytes are OFF.
+    _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
     _prefs->cad_enabled = constrain(_prefs->cad_enabled, 0, 1); // boolean
     if (!directRetryPrefsValid(_prefs)) {
       setDefaultDirectRetryPrefs(_prefs);
@@ -1645,6 +1657,7 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   WRITE_COMMON_PREFS(&prefs->bridge_format);                   // 863
   WRITE_COMMON_PREFS(&prefs->primary_radio_preamble);          // appended primary tuple field
   WRITE_COMMON_PREFS(&prefs->espnow_bridge_enabled);           // appended Full ESP-NOW intent
+  WRITE_COMMON_PREFS(&prefs->usb_debug_enabled);               // appended USB debug intent
 
 #undef WRITE_COMMON_PREFS_BYTES
 #undef WRITE_COMMON_PREFS
@@ -1657,6 +1670,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
   if (plan.common) {
     _common_save_result_known = true;
     _common_save_succeeded = false;
+    _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
   }
 #ifdef WITH_MQTT_BRIDGE
   // Observer builds use a verified temp/backup transaction for common prefs.
@@ -1666,7 +1680,6 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     _observer_save_result_known = true;
     _observer_save_succeeded = saveMQTTPrefs(fs);
   }
-  return;
 #else
   // Observer-only saves are a no-op on roles with no observer preference image.
   if (!plan.common) return;
@@ -1803,11 +1816,20 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->bridge_format, sizeof(_prefs->bridge_format));                   // 863
     file.write((uint8_t *)&_prefs->primary_radio_preamble, sizeof(_prefs->primary_radio_preamble)); // appended
     file.write((uint8_t *)&_prefs->espnow_bridge_enabled, sizeof(_prefs->espnow_bridge_enabled));   // appended
+    file.write((uint8_t *)&_prefs->usb_debug_enabled, sizeof(_prefs->usb_debug_enabled));           // appended
 
     _common_save_succeeded = file.commit();
     if (!_common_save_succeeded) {
       MESH_DEBUG_PRINTLN("ERROR: savePrefs atomic commit failed");
     }
+  }
+#endif
+#if MESH_USB_LOGGING_AVAILABLE
+  if (plan.common && _common_save_succeeded) {
+    // Dynamic config imports use this path too. Do not enable diagnostics
+    // until the corresponding common preference image is committed.
+    mesh::setUsbDebugEnabled(_prefs->usb_debug_enabled != 0);
+    mesh::setUsbLoggingEnabled(_prefs->usb_logging_enabled != 0);
   }
 #endif
 }
@@ -2599,6 +2621,7 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     PrefsSaveReplyGuard save_reply(_prefs_save_failures, reply);
     mesh::cli::normalizeCommandVerb(command);
+    if (mesh::handleUsbLoggingWatchdogCommand(command, reply, 160)) return;
     if (handleManagementCommand(command, reply)) return;
     if (mesh::wireless::control().handle(command, reply, 160, millis(),
                                        _callbacks->wirelessCommandSource(sender_timestamp))) return;
@@ -3395,6 +3418,27 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       snprintf(reply, 160, "OK - USB logging %s (saved)", enabled ? "on" : "off");
     } else {
       strcpy(reply, "Error: usage set usb.logging on|off");
+    }
+    return;
+  }
+  if (strncmp(config, "usb.debug", 9) == 0
+      && (config[9] == 0 || config[9] == ' ' || config[9] == '\t')) {
+    const char* value = &config[9];
+    while (*value == ' ' || *value == '\t') value++;
+    bool enabled = false, reboot_if_needed = false;
+    if (mesh::cli::parseLoggingToggle(value, enabled, reboot_if_needed)
+        && !reboot_if_needed) {
+      const uint8_t previous = _prefs->usb_debug_enabled;
+      _prefs->usb_debug_enabled = enabled ? 1 : 0;
+      if (!trySavePrefs()) {
+        _prefs->usb_debug_enabled = previous;
+        strcpy(reply, "Error: USB debug not saved; unchanged");
+        return;
+      }
+      mesh::setUsbDebugEnabled(enabled);
+      snprintf(reply, 160, "OK - USB debug %s (saved)", enabled ? "on" : "off");
+    } else {
+      strcpy(reply, "Error: usage set usb.debug on|off");
     }
     return;
   }
@@ -4684,6 +4728,11 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strcmp(config, "usb.logging") == 0) {
     snprintf(reply, 160, "> %s",
              mesh::isUsbLoggingEnabled() ? "on" : "off");
+    return;
+  }
+  if (strcmp(config, "usb.debug") == 0) {
+    snprintf(reply, 160, "> %s",
+             mesh::isUsbDebugEnabled() ? "on" : "off");
     return;
   }
 #endif

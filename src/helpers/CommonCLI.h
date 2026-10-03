@@ -182,6 +182,9 @@ public:
   // older images remain readable and merged standard builds keep the former
   // logging artifact's enabled-at-first-boot behavior.
   uint8_t usb_logging_enabled = 1;
+  // USB diagnostics are opt-in independently of the packet output gate.
+  // Persisted at the very end of /com_prefs, not beside usb_log.
+  uint8_t usb_debug_enabled = 0;
   // Runtime UART choice for merged RS-232 repeater artifacts. Appended at
   // /com_prefs offset 862; single-UART builds keep their compiled port here.
   uint8_t bridge_uart = 0;
@@ -331,6 +334,7 @@ private:
       def("secret", _parent->bridge_secret, sizeof(_parent->bridge_secret));
       def("format", _parent->bridge_format);
       def("usb_log", _parent->usb_logging_enabled);
+      def("usb_dbg", _parent->usb_debug_enabled);
     }
 
   public:

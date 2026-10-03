@@ -110,6 +110,9 @@ public:
   uint8_t one_key_dm_enabled = 0;
   // Appended after all existing fields so older images keep Bluetooth enabled.
   uint8_t bluetooth_enabled = 1;
+  // Debug verbosity is independent of the packet/output master switch. Keep
+  // this after every prior persisted field so legacy images default to quiet.
+  uint8_t usb_debug_enabled = 0;
 
 private:
   class RadioPrefs : public CommonRadioPrefs {
@@ -134,6 +137,7 @@ private:
       def("agc_int", _parent->agc_reset_interval);
       def("hash_mode", _parent->path_hash_mode);
       def("multi_ack", _parent->multi_acks);
+      def("usb_debug", _parent->usb_debug_enabled);
 #ifdef TBEAM_1W
       def("fan", _parent->fan_mode, sizeof(_parent->fan_mode));
       def("fan_lo", _parent->fan_lo);
@@ -143,6 +147,32 @@ private:
 
   public:
     explicit RadioPrefs(CompanionNodePrefs* parent) : _parent(parent) { }
+
+    bool getByKey(const char* key, char* value, size_t max_len) override {
+      if (key != nullptr && strcmp(key, "usb_debug") == 0) {
+        if (value == nullptr || max_len == 0) return false;
+        if (max_len < 2) {
+          value[0] = 0;
+          return false;
+        }
+        value[0] = _parent->usb_debug_enabled == 1 ? '1' : '0';
+        value[1] = 0;
+        return true;
+      }
+      return CommonRadioPrefs::getByKey(key, value, max_len);
+    }
+    bool setByKey(const char* key, const char* value) override {
+      if (key != nullptr && strcmp(key, "usb_debug") == 0) {
+        if (value == nullptr
+            || (strcmp(value, "0") != 0 && strcmp(value, "1") != 0)) {
+          return false;
+        }
+        _parent->usb_debug_enabled = value[0] == '1' ? 1 : 0;
+        markDirty();
+        return true;
+      }
+      return CommonRadioPrefs::setByKey(key, value);
+    }
 
     float getFreq() const override { return _parent->freq; }
     void setFreq(float value) override {

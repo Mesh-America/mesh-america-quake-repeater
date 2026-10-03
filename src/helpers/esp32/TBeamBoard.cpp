@@ -55,7 +55,7 @@ void TBeamBoard::scanDevices(TwoWire *w)
     uint8_t err, addr;
     int nDevices = 0;
     uint32_t start = 0;
-    const bool usb_logging = mesh::isUsbLoggingEnabled();
+    const bool usb_logging = mesh::isUsbDebugLoggingEnabled();
 
     if (usb_logging) Serial.println("Scanning I2C for Devices");
     for (addr = 1; addr < 127; addr++) {
@@ -120,7 +120,7 @@ void TBeamBoard::scanDevices(TwoWire *w)
 }
 void TBeamBoard::printPMU()
 {
-    if (!mesh::isUsbLoggingEnabled()) return;
+    if (!mesh::isUsbDebugLoggingEnabled()) return;
     Serial.print("isCharging:"); Serial.println(PMU->isCharging() ? "YES" : "NO");
     Serial.print("isDischarge:"); Serial.println(PMU->isDischarge() ? "YES" : "NO");
     Serial.print("isVbusIn:"); Serial.println(PMU->isVbusIn() ? "YES" : "NO");

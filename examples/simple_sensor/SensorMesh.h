@@ -58,6 +58,11 @@ public:
   SensorMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
   void begin(FILESYSTEM* fs);
   void loop();
+  bool canRecoverUsbLogging() const {
+    return dirty_contacts_expiry == 0 && !hasOutbound() && !isAnyTempRadioActive()
+        && !hasPendingOtaApply() && !saved_radio_apply_pending
+        && set_radio_at == 0;
+  }
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply,
                      int gpio_client_index = -1,
                      uint8_t gpio_path_hash_size = 1);

@@ -25,6 +25,10 @@
 #include <helpers/StatsFormatHelper.h>
 #include <helpers/UsbAsciiBinarySwitch.h>
 #include <helpers/UsbLogging.h>
+#include <helpers/UsbLoggingWatchdog.h>
+#if MESH_PACKET_LOGGING
+#include <helpers/SerialPacketLog.h>
+#endif
 #if defined(NRF52_POWER_MANAGEMENT)
 #include <helpers/NRF52VoltagePolicy.h>
 #endif
@@ -678,7 +682,34 @@ void MyMesh::updateGpsTelemetryPolicy() {
   sensors.setTelemetryLocationAccessAvailable(hasLocationTelemetryRecipient());
 }
 
+#if MESH_PACKET_LOGGING && !MESH_PACKET_LOGGING_COMPACT
+const char* MyMesh::getLogDateTime() {
+  // The shared RX/TX summaries use this same virtual formatter. Keep the
+  // repeater's UTC record grammar so USB packet bridges can pair RAW and RX.
+  static char timestamp[32];
+  const DateTime now(getRTCClock()->getCurrentTime());
+  snprintf(timestamp, sizeof(timestamp), "%02u:%02u:%02u - %u/%u/%u U",
+           (unsigned)now.hour(), (unsigned)now.minute(), (unsigned)now.second(),
+           (unsigned)now.day(), (unsigned)now.month(), (unsigned)now.year());
+  return timestamp;
+}
+#endif
+
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#if MESH_PACKET_LOGGING
+  if (mesh::isUsbLoggingEnabled()) {
+    mesh::SerialLogLine<> line;
+#if MESH_PACKET_LOGGING_COMPACT
+    line.printf("R");
+    line.hex(raw, len);
+    line.flush(mesh::usbLoggingPort(), false);
+#else
+    line.printf("%s RAW: ", getLogDateTime());
+    line.hex(raw, len);
+    line.flush(mesh::usbLoggingPort());
+#endif
+  }
+#endif
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
   if (_mqtt_bridge && _mqtt_bridge->isRunning()) {
     _mqtt_bridge->storeRawRadioData(raw, len, snr, rssi);
@@ -2311,6 +2342,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 #endif
   memset(_prefs.bluetooth_name, 0, sizeof(_prefs.bluetooth_name));
   _prefs.bluetooth_enabled = 1;
+  _prefs.usb_debug_enabled = 0;
   _prefs.display_rotation_degrees = 0;
   _prefs.cad_enabled = DEFAULT_CAD_ENABLED ? 1 : 0;
   _prefs.cad_scan_timeout_ms = 0;
@@ -2586,6 +2618,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
   _prefs.powersaving_enabled = constrain(_prefs.powersaving_enabled, 0, 1);
   _prefs.wifi_enabled = constrain(_prefs.wifi_enabled, 0, 1);
   _prefs.usb_logging_enabled = constrain(_prefs.usb_logging_enabled, 0, 1);
+  _prefs.usb_debug_enabled = _prefs.usb_debug_enabled == 1 ? 1 : 0;
   _prefs.cad_enabled = constrain(_prefs.cad_enabled, 0, 1);
   if (_prefs.cad_scan_timeout_ms != 0
       && (_prefs.cad_scan_timeout_ms < mesh::CAD_SCAN_MIN_TIMEOUT_MS
@@ -2607,6 +2640,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
   }
 #if MESH_USB_LOGGING_AVAILABLE
   const bool usb_logging_enabled = _prefs.usb_logging_enabled != 0;
+  mesh::setUsbDebugEnabled(_prefs.usb_debug_enabled != 0);
   mesh::setUsbLoggingEnabled(usb_logging_enabled);
   if (!mesh::saveUsbLoggingBootPreference(usb_logging_enabled)) {
     MESH_DEBUG_PRINTLN("Unable to save next-boot USB logging interface state");
@@ -3156,7 +3190,15 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (!command || !reply || reply_size == 0) return false;
   while (*command == ' ') command++;
 
+  if (strcmp(command, "get public.key") == 0) {
+    char public_key_hex[PUB_KEY_SIZE * 2 + 1];
+    mesh::Utils::toHex(public_key_hex, self_id.pub_key, PUB_KEY_SIZE);
+    snprintf(reply, reply_size, "> %s", public_key_hex);
+    return true;
+  }
+
   if (handleTxRoutingCommand(command, reply, reply_size)) return true;
+  if (mesh::handleUsbLoggingWatchdogCommand(command, reply, reply_size)) return true;
 #if COMPANION_FEATURE_OTA_CLI
   const auto* ota_context = mesh::ota::ota_context_if_active();
   const float adaptive_ota_pace = ota_context
@@ -3241,6 +3283,40 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 #endif
 
 #if MESH_USB_LOGGING_AVAILABLE
+  if (strcmp(command, "get usb.debug") == 0) {
+    snprintf(reply, reply_size, "usb.debug %s%s",
+             mesh::isUsbDebugEnabled() ? "on" : "off",
+#if MESH_DEBUG
+             mesh::isUsbLoggingEnabled() ? "" : " (USB logging off)"
+#else
+             " (core debug not compiled)"
+#endif
+             );
+    return true;
+  }
+  if (strncmp(command, "set usb.debug", 13) == 0
+      && (command[13] == 0 || command[13] == ' ' || command[13] == '\t')) {
+    const char* value = command + 13;
+    while (*value == ' ' || *value == '\t') value++;
+    if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+      snprintf(reply, reply_size, "Error: use set usb.debug <on|off>");
+    } else {
+      const uint8_t enabled = strcmp(value, "on") == 0 ? 1 : 0;
+      if (!savePreference(_prefs.usb_debug_enabled, enabled)) {
+        snprintf(reply, reply_size, "Error: USB debug setting could not be saved");
+      } else {
+        snprintf(reply, reply_size, "OK - USB debug %s (saved)%s",
+                 enabled ? "on" : "off",
+#if MESH_DEBUG
+                 ""
+#else
+                 " (core debug not compiled)"
+#endif
+                 );
+      }
+    }
+    return true;
+  }
   if (strcmp(command, "get usb.logging") == 0) {
     snprintf(reply, reply_size, "usb.logging %s; port: %s%s",
              mesh::isUsbLoggingEnabled() ? "on" : "off",
@@ -9131,11 +9207,12 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().printf("Companion %s (protocol %u, build %s)\r\n",
                   FIRMWARE_VERSION, (unsigned)FIRMWARE_VER_CODE, FIRMWARE_BUILD_DATE);
   } else if (strcmp(command, "help") == 0) {
-    terminalOutput().print("Commands:\r\n");
-    terminalOutput().print("  stats-core / stats-radio / stats-radio-diag / stats-packets\r\n");
-    terminalOutput().print("  get prv.key (when private key export is enabled)\r\n");
-    terminalOutput().print("  get password (this role has no admin password)\r\n");
-    terminalOutput().print("  erase (erase stored settings and identity)\r\n");
+    terminalOutput().print(
+        "Commands:\r\n"
+        "  stats-core / stats-radio / stats-radio-diag / stats-packets\r\n"
+        "  get prv.key (when private key export is enabled)\r\n"
+        "  get password (this role has no admin password)\r\n"
+        "  erase (erase stored settings and identity)\r\n");
     terminalOutput().print("  board\r\n");
     terminalOutput().print("  version\r\n");
     terminalOutput().print("  get storage.layout\r\n");
@@ -9157,17 +9234,20 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().print("  set notify.remote <contact:key|room:key> on|off (!notify, max 15s, no GPIO)\r\n");
     terminalOutput().print("  notify.test <target> / notify.stop / notify.delete <target>\r\n");
   #endif
-    terminalOutput().print("  get display.inbox\r\n");
-    terminalOutput().print("  set display.inbox <history|pending|unread>\r\n");
-    terminalOutput().print("  set display.rotation <0|90|180|270>\r\n");
-    terminalOutput().print("  get display.touch\r\n");
-    terminalOutput().print("  set display.touch <on|off> (this boot only)\r\n");
-    terminalOutput().print("  set {name|lat|lon|freq|tx|af} {value}\r\n");
-    terminalOutput().print("  get wifi|espnow|2.4ghz\r\n");
-    terminalOutput().print("  set wifi|espnow on|off [force] (force only with off)\r\n");
-    terminalOutput().print("  set 2.4ghz on [all|force]|off [force] (this boot)\r\n");
-    terminalOutput().print("  get bluetooth.name\r\n");
-    terminalOutput().print("  set bluetooth.name <name|default>\r\n");
+    terminalOutput().print(
+        "  get display.inbox\r\n"
+        "  set display.inbox <history|pending|unread>\r\n"
+        "  set display.rotation <0|90|180|270>\r\n"
+        "  get display.touch\r\n"
+        "  set display.touch <on|off> (this boot only)\r\n");
+    terminalOutput().print("  get public.key\r\n");
+    terminalOutput().print(
+        "  set {name|lat|lon|freq|tx|af} {value}\r\n"
+        "  get wifi|espnow|2.4ghz\r\n"
+        "  set wifi|espnow on|off [force] (force only with off)\r\n"
+        "  set 2.4ghz on [all|force]|off [force] (this boot)\r\n"
+        "  get bluetooth.name\r\n"
+        "  set bluetooth.name <name|default>\r\n");
 #if defined(BLE_PIN_CODE)
     terminalOutput().print("  get bluetooth (alias: get ble)\r\n");
     terminalOutput().print("  set bluetooth <on|off> [force] (saved; force only with off)\r\n");
@@ -9180,8 +9260,17 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().print("  set pin <0-999999>\r\n");
     terminalOutput().print("  powersaving [on|off]\r\n");
 #if MESH_USB_LOGGING_AVAILABLE
-    terminalOutput().print("  get usb.logging\r\n");
-    terminalOutput().print("  set usb.logging <on|off> [reboot]\r\n");
+    terminalOutput().print(
+        "  get usb.logging\r\n"
+        "  set usb.logging <on|off> [reboot]\r\n"
+        "  get usb.debug\r\n"
+        "  set usb.debug <on|off>\r\n"
+#if MESH_USB_CONSOLE_COOPERATIVE
+        "  get usb.watchdog\r\n"
+        "  get usb.watchdog.last\r\n"
+        "  set usb.watchdog <off|on|auto> (saved; default auto)\r\n"
+#endif
+        );
 #endif
 #if defined(ESP32) && defined(WIFI_SSID)
 #if defined(COMPANION_RADIO_FULL)
@@ -9208,40 +9297,47 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().print("  get espnow.channel\r\n");
     terminalOutput().print("  set espnow.channel <1-13>\r\n");
 #endif
-    terminalOutput().print("  get radio.rxps\r\n");
-    terminalOutput().print("  get radio.rxps.config\r\n");
-    terminalOutput().print("  set radio.rxps <off|on|level 1-10 [preamble 16|32]|rx_us sleep_us>\r\n");
-    terminalOutput().print("  get radio.cad\r\n");
-    terminalOutput().print("  set radio.cad <on|off>\r\n");
-    terminalOutput().print("  set radio.cad timings <scan_ms|auto> <retry_ms|auto> <max_ms|auto>\r\n");
-    terminalOutput().print("  get radio.rxgain\r\n");
-    terminalOutput().print("  set radio.rxgain <on|off>\r\n");
-    terminalOutput().print("  get radio.fem.rxgain\r\n");
-    terminalOutput().print("  set radio.fem.rxgain <on|off>\r\n");
-    terminalOutput().print("  get radio.fem.txgain\r\n");
-    terminalOutput().print("  set radio.fem.txgain <on|off>\r\n");
-    terminalOutput().print("  get/set flood.retry.count <0-15>\r\n");
-    terminalOutput().print("  get/set flood.retry.path <0-63|off>\r\n");
-    terminalOutput().print("  get/set flood.retry.group.path <0-63|off>\r\n");
-    terminalOutput().print("  get/set flood.retry.advert <on|off>\r\n");
-    terminalOutput().print("  card\r\n");
-    terminalOutput().print("  import <meshcore://card>\r\n");
-    terminalOutput().print("  clock\r\n");
-    terminalOutput().print("  time <epoch-seconds>\r\n");
-    terminalOutput().print("  list [n]\r\n");
-    terminalOutput().print("  show [adverts|channels|emergency] [on|off]\r\n");
-    terminalOutput().print("  to [recipient name or prefix]\r\n");
-    terminalOutput().print("  path [direct|clear|hops separated by spaces or commas]\r\n");
-    terminalOutput().print("  send <text>\r\n");
-    terminalOutput().print("  login <admin-password>\r\n");
-    terminalOutput().print("  cmd <remote-command>\r\n");
-    terminalOutput().print("  trace [recipient name or prefix]\r\n");
-    terminalOutput().print("  trace path <1|2|4> <prefixes...>\r\n");
-    terminalOutput().print("  advert\r\n");
-    terminalOutput().print("  reset path\r\n");
-    terminalOutput().print("  public <text>\r\n");
-    terminalOutput().print("  channels\r\n");
-    terminalOutput().print("  channel <name-or-slot> <text>\r\n");
+    // Keep identical help text in bounded chunks. Fewer virtual Print calls
+    // leave room for USB controls on small-flash boards without cutting CLI.
+    terminalOutput().print(
+        "  get radio.rxps\r\n"
+        "  get radio.rxps.config\r\n"
+        "  set radio.rxps <off|on|level 1-10 [preamble 16|32]|rx_us sleep_us>\r\n"
+        "  get radio.cad\r\n"
+        "  set radio.cad <on|off>\r\n"
+        "  set radio.cad timings <scan_ms|auto> <retry_ms|auto> <max_ms|auto>\r\n");
+    terminalOutput().print(
+        "  get radio.rxgain\r\n"
+        "  set radio.rxgain <on|off>\r\n"
+        "  get radio.fem.rxgain\r\n"
+        "  set radio.fem.rxgain <on|off>\r\n"
+        "  get radio.fem.txgain\r\n"
+        "  set radio.fem.txgain <on|off>\r\n");
+    terminalOutput().print(
+        "  get/set flood.retry.count <0-15>\r\n"
+        "  get/set flood.retry.path <0-63|off>\r\n"
+        "  get/set flood.retry.group.path <0-63|off>\r\n"
+        "  get/set flood.retry.advert <on|off>\r\n"
+        "  card\r\n"
+        "  import <meshcore://card>\r\n"
+        "  clock\r\n"
+        "  time <epoch-seconds>\r\n");
+    terminalOutput().print(
+        "  list [n]\r\n"
+        "  show [adverts|channels|emergency] [on|off]\r\n"
+        "  to [recipient name or prefix]\r\n"
+        "  path [direct|clear|hops separated by spaces or commas]\r\n"
+        "  send <text>\r\n"
+        "  login <admin-password>\r\n"
+        "  cmd <remote-command>\r\n");
+    terminalOutput().print(
+        "  trace [recipient name or prefix]\r\n"
+        "  trace path <1|2|4> <prefixes...>\r\n"
+        "  advert\r\n"
+        "  reset path\r\n"
+        "  public <text>\r\n"
+        "  channels\r\n"
+        "  channel <name-or-slot> <text>\r\n");
 #if defined(NRF52_PLATFORM) && defined(EXTRAFS) && !defined(QSPIFLASH)
     terminalOutput().print("  repair extrafs (erases/rebuilds internal ExtraFS)\r\n");
     terminalOutput().print("  scan extrafs erase (USB only; reboot for destructive page test)\r\n");
@@ -9255,8 +9351,7 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().print("  ota {status|ls|announce|folder|config|...}\r\n");
 #endif
 #endif
-    terminalOutput().print("  reboot\r\n");
-    terminalOutput().print("  ver\r\n");
+    terminalOutput().print("  reboot\r\n" "  ver\r\n");
 #if defined(NRF52_PLATFORM)
     terminalOutput().println("  uf2reset");
 #endif
@@ -10153,6 +10248,18 @@ bool MyMesh::advert() {
 }
 
 // To check if there is pending work
+bool MyMesh::canRecoverUsbLogging() const {
+  // Do not discard dirty pages or interrupt a protocol/flash/radio operation.
+  // Normal lazy writes resolve this veto without adding writes to each poll.
+  return dirty_contacts_expiry == 0 && !_store->hasPendingContactWrites()
+      && !hasOutbound() && !isAnyTempRadioActive() && !hasPendingOtaApply()
+      && !command_radio_apply_pending && !saved_radio_apply_pending
+      && _scheduled_reboot_at == 0 && pending_serial_reply_route == NULL
+      && !binary_trace_pending && sign_data == NULL
+      && !(_serial && _serial->hasPendingIO())
+      && !(_iter_started && _serial && _serial->isConnected());
+}
+
 bool MyMesh::hasPendingWork() const {
 #if COMPANION_FEATURE_NOTIFICATIONS
   if (_notifications.active()) return true;

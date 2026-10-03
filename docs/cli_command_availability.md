@@ -38,6 +38,14 @@ Build columns mean:
   where there is no MQTT sibling. It has the complete parser and a saved
   USB-logging on/off gate. ESP-NOW bridges use this profile.
 
+USB packet output and verbose diagnostics are separate saved controls in
+current source. Where `usb.logging` is available, `get/set usb.debug on|off`
+selects debug intent without changing packet capture or adding a build variant.
+Debug defaults off for fresh and older preference images; effective output
+requires `usb.logging` and `usb.debug` on plus compiled diagnostic support.
+See [live USB logging](cli_commands.md#control-live-usb-logging) for transport
+restrictions and Full Companion RAW output.
+
 The firmware-configured INA3221 and RAK12500 addresses are both `0x42`; they
 cannot coexist on one bus at those addresses. Leave RAK12500 at `0x42`, strap
 INA3221 A0 to SCL for `0x43`, and use a build with
@@ -71,6 +79,7 @@ over the normal binary USB, BLE, or TCP connection:
 | `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets` | Local terminal and binary command `0x42` |
 | `erase` | Local terminal and binary command `0x42`; reboot after erasing stored settings |
 | `set freq <MHz>` | Local terminal, binary command `0x42`, and authorized LoRa CLI; reboot to apply |
+| [`get public.key`](cli_commands.md#view-this-nodes-public-key) | Companion text terminal and binary command `0x42`; read-only, no private-key export feature required |
 | `get prv.key` | Local terminal and binary command `0x42`; requires private key export enabled |
 | `get password` | Reports that Companion has no admin password; infrastructure returns its password locally |
 | `get wifi.pwd`, `get mqttN.password`, `get mqttN.token` | Local terminal and binary command `0x42`; corresponding WiFi/MQTT feature required |
@@ -124,6 +133,9 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Logging | [`log start`; `log stop`; `log erase`](cli_commands.md#logging) | Storage-backed roles retain data; other roles can return empty data | Yes | Yes | Yes |
 | Logging | [`log`](cli_commands.md#print-the-captured-log-to-the-serial-terminal) | Local connection | Local | Local | Local |
 | Logging | [`get/set usb.logging`; unified FULL `get/set logging.output`](cli_commands.md#control-live-usb-logging) | Ordinary safe-USB artifacts; CommonCLI USB gate is persistent; unified ESP32 FULL selects off/USB/WiFi/both; nRF52 Full Companion can add a reboot-controlled second CDC | Yes | Yes | No |
+| Logging | [`get/set usb.debug`](cli_commands.md#control-live-usb-logging) | Same USB-control availability; saved intent defaults off; actual diagnostics need compiled support and USB master on | Yes | Yes | No |
+| Logging | [`get/set usb.watchdog off\|on\|auto`](usb_logging_watchdog.md) | Current source; recovery requires native USB, live logging, and durable storage; Auto qualifies from USB stats polling | Yes | Yes | Feature |
+| Logging | [`get usb.watchdog.last`](usb_logging_watchdog.md#last-event-review) | Current source; latest USB watchdog event with advisory timestamp, uptime, action, reasons, and durability; native USB required | Yes | Yes | Feature |
 | Radio | [`get radio`; `set radio ...`](cli_commands.md#view-or-change-this-nodes-radio-parameters) | All text CLI roles | Yes | Yes | Yes |
 | Radio | [`get tx`; `set tx <dbm>`](cli_commands.md#view-or-change-this-nodes-transmit-power) | Board TX-power limits apply | Yes | Yes | Yes |
 | Radio | [`tempradio ...`; `normalradio`](cli_commands.md#change-the-radio-parameters-for-a-set-duration) | Full parser | Yes | Yes | Yes |
@@ -293,6 +305,9 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Logging | [`log start`; `log stop`; `log erase`](cli_commands.md#logging) | Storage-backed roles retain data | Yes | Yes | Yes | Yes | Yes |
 | Logging | [`log`](cli_commands.md#print-the-captured-log-to-the-serial-terminal) | Local connection | Local | Local | Local | Local | Local |
 | Logging | [`get/set usb.logging`; unified FULL `get/set logging.output`](cli_commands.md#control-live-usb-logging) | Ordinary safe-USB artifacts; CommonCLI USB gate is persistent; unified ESP32 FULL selects off/USB/WiFi/both; every ESP32 Full Companion uses an input-capable single-TTY logging terminal with framed USB Companion disabled while logging | Yes | Yes | No | No | Yes |
+| Logging | [`get/set usb.debug`](cli_commands.md#control-live-usb-logging) | Same USB-control availability; saved intent defaults off; actual diagnostics need compiled support and USB master on | Yes | Yes | No | No | Yes |
+| Logging | [`get/set usb.watchdog off\|on\|auto`](usb_logging_watchdog.md) | Current source; recovery requires native USB, live logging, and durable storage; Auto qualifies from USB stats polling | Yes | Yes | Feature | Yes | Yes |
+| Logging | [`get usb.watchdog.last`](usb_logging_watchdog.md#last-event-review) | Current source; latest USB watchdog event with advisory timestamp, uptime, action, reasons, and durability; native USB required | Yes | Yes | Feature | Yes | Yes |
 | Radio | [`get radio`; `set radio ...`](cli_commands.md#view-or-change-this-nodes-radio-parameters) | All text CLI roles | Yes | Yes | Yes | Yes | Yes |
 | Radio | [`get tx`; `set tx <dbm>`](cli_commands.md#view-or-change-this-nodes-transmit-power) | Board TX-power limits apply | Yes | Yes | Yes | Yes | Yes |
 | Radio | [`tempradio ...`; `normalradio`](cli_commands.md#change-the-radio-parameters-for-a-set-duration) | Full parser | Yes | Yes | Yes | Yes | Yes |
