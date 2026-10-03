@@ -1,0 +1,136 @@
+name: Quake Repeater Build and Release
+
+# Builds the Mesh America Quake Repeater image (the only firmware this repository ships), checks it,
+# and on a tag publishes a GitHub release for the web flasher to pick up.
+#
+#   pull request / push to main  ->  build and verify only (replaces the disabled PR Build Check)
+#   tag quake-vX.Y.Z.W           ->  build, verify, then create a pre-release with the package
+#   manual run                   ->  build and verify, upload the result as a workflow artifact
+#
+# The tag must name the version inside the image (quake-v1.17.1.0 for firmware 1.17.1.0). A
+# mismatch fails the run before anything is published.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'lib/**'
+      - 'examples/**'
+      - 'variants/**'
+      - 'boards/**'
+      - 'arch/**'
+      - 'scripts/**'
+      - 'test/test_quake_release_manifest.py'
+      - 'platformio.ini'
+      - 'requirements-build.txt'
+      - '.github/workflows/quake-repeater-release.yml'
+  # No path filter on push: GitHub does not reliably apply one to tag pushes, and a release that
+  # silently fails to start is worse than one extra build of main.
+  push:
+    branches: [main]
+    tags: ['quake-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quake-repeater-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PIO_ENV: MeshAmerica_Quake_Repeater_RAK3401
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Init Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-quake
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      # intelhex is imported by the nRF52 packaging step that turns the build into the DFU zip. It is
+      # not in requirements-build.txt, and without it that step fails with "No module named 'intelhex'".
+      - name: Install PlatformIO and build dependencies
+        run: |
+          pip install --upgrade platformio -r requirements-build.txt intelhex==2.3.0
+          python -c "import intelhex; print('intelhex', intelhex.__version__)"
+
+      - name: Test the release manifest script
+        run: python3 -B test/test_quake_release_manifest.py -v
+
+      - name: Build firmware
+        run: pio run -e "$PIO_ENV"
+
+      - name: Verify the package and write the manifest
+        run: |
+          TAG_ARGS=()
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_ARGS=(--tag "${GITHUB_REF_NAME}")
+          fi
+          python3 scripts/quake_release_manifest.py \
+            --zip ".pio/build/${PIO_ENV}/firmware.zip" \
+            --env "$PIO_ENV" \
+            --commit "$GITHUB_SHA" \
+            "${TAG_ARGS[@]}" \
+            --out dist
+
+      - name: Upload build result
+        uses: actions/upload-artifact@v7
+        with:
+          name: quake-repeater-release
+          path: dist
+          if-no-files-found: error
+
+  release:
+    # Only for a tag. Everything above has already passed, including the check that the tag names
+    # the version inside the image.
+    if: startsWith(github.ref, 'refs/tags/quake-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build result
+        uses: actions/download-artifact@v8
+        with:
+          name: quake-repeater-release
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY' > notes.md
+          import json
+          m = json.load(open("dist/manifest.json"))
+          print(f"Mesh America Quake Repeater firmware {m['version']} for the RAK3401 (RAK12027 earthquake sensor in sensor slot A).")
+          print()
+          print("**Pre-release.** This firmware has not been fully tested. Install it with the web flasher at https://apps.meshamerica.com/quake-repeater/ and read its warnings first.")
+          print()
+          print(f"- Package: `{m['package']['file']}` ({m['package']['size']} bytes)")
+          print(f"- SHA-256: `{m['package']['sha256']}`")
+          print(f"- OTA target id: `{m['targetId']}`, hardware tag `{m['hardwareId']}`")
+          print(f"- Built from commit `{m['commit']}`")
+          PY
+          gh release create "$TAG" dist/*.zip dist/manifest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --prerelease \
+            --title "Quake Repeater ${TAG#quake-v}" \
+            --notes-file notes.md
