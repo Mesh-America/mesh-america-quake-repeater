@@ -12,6 +12,7 @@
 #include "OtaFormat.h"
 #include "OtaByteIO.h"
 #include "OtaSelf.h"          // ota_self_firmware() - prefer self-describing EndF identity at begin()
+#include "OtaSelfServePolicy.h"
 #include "OtaBlInfo.h"        // bootloader OTA-apply capability marker (nRF52); cached after first read
 
 // Storage policy for the mOTA context. A "dynamic" context is created on demand
@@ -144,6 +145,10 @@ struct OtaContext {
 #endif
   uint32_t serve_expected = 0;   // size declared by `ota stage`
   bool     serving = false;      // manager.serve() succeeded
+  // Capture application-storage eligibility once. An adaptive nRF52 may later
+  // switch to internal flash to stage a bootloader without changing its normal
+  // ability to offer its running application.
+  bool     self_serve_supported = false;
   // flash-backed self-serve: cached merkle leaves (heap, freed on re-serve) + assembled manifest of our
   // own running firmware. The payload is read from flash per block; only the metadata is held in RAM.
   // serve_self_proof is the proof-gen working buffer (>= block_count*4) - sized to OUR image's block
@@ -713,6 +718,17 @@ struct OtaContext {
     manager.set_accept_bootloader(false);
 #endif
     manager.set_fetch_store(&fetch_store);
+#if defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE) && !defined(OTA_SEEDER_ONLY)
+    self_serve_supported = ota_self_serve_supported(fetch_store.usesExternal());
+#else
+    self_serve_supported = ota_self_serve_supported();
+#endif
+#if MESHCORE_OTA_DEVICE_DEFLATE
+    // Register only on qualified full-image nodes (adaptive RAK eligibility
+    // is the application backend latched above). Host precompressed blocks
+    // still take precedence in OtaManager; receiver checks are unchanged.
+    manager.set_transport_deflate_encoder(self_serve_supported ? ota_transport_deflate : nullptr);
+#endif
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
     sd_cache.attach(fetch_store);
     manager.set_archive_interest(true);        // default on; the SD marker can turn it off at first mount

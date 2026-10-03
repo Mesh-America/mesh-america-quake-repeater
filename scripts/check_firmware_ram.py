@@ -106,6 +106,28 @@ def requirements(platform, defines, target):
         parts["room_flood_rule_table"] = 31 * 200 + 16
     if "ENABLE_OTA" in defines and "OTA_HEAP_CONTEXT" in defines:
         parts["ota_context"] = 16384 + 16
+    # Match OtaDeflateConfig.h's compile eligibility and build-role override.
+    # Adaptive RAK may qualify only at runtime; reserve its worst eligible case.
+    # The shared role hook qualifies sources, not environment names. An
+    # infrastructure recipe can inherit a Companion-named custom environment.
+    device_deflate = ("ENABLE_OTA" in defines and "OTA_SEEDER_ONLY" not in defines
+                      and integer(defines, "MESHCORE_OTA_DEVICE_DEFLATE", 0) != 0
+                      and (platform == "ESP32_PLATFORM" or
+                           (platform == "NRF52_PLATFORM" and any(name in defines for name in
+                            ("OTA_QSPI_STORE", "OTA_SD_STORE", "OTA_RAK_AUTO_STORE")))))
+    if device_deflate:
+        hash_bits = integer(defines, "MESHCORE_OTA_DEFLATE_HASH_BITS", 9)
+        if not 7 <= hash_bits <= 10:
+            raise ValueError("device DEFLATE hash must have 128..1024 entries")
+        # The encoder uses input offsets, not pointers: sizeof(uint16_t) per
+        # bucket on every platform. This allocation is freed before radio TX.
+        parts["ota_encoder_workspace"] = (1 << hash_bits) * 2 + 16
+        if platform == "NRF52_PLATFORM":
+            # The running nRF52840 app is <1 MiB: <=512 2-KiB leaves. Self-serve
+            # holds its leaf cache plus max(leaves,2048) proof/output scratch.
+            # Unlike ESP32's existing source scratch reserve these allocations
+            # were formerly covered only by the general transient margin.
+            parts["ota_self_source_scratch"] = 2 * 2048 + 2 * 16
     if display and display != "NullDisplayDriver":
         parts["display_pixels_and_driver"] = display_heap
         screen_budget = integer(defines, "MESH_COMPANION_SCREEN_STARTUP_BYTES", 0)
@@ -137,7 +159,7 @@ def requirements(platform, defines, target):
     if "expanded_message_previews" in parts:
         largest = max(largest, 8192 + parts["expanded_message_previews"])
     for name in ("client_table", "flood_filter_table", "room_flood_rule_table",
-                 "ota_context", "screen_objects_and_history"):
+                 "ota_context", "screen_objects_and_history", "ota_encoder_workspace"):
         largest = max(largest, parts.get(name, 0))
     return {"required_heap_bytes": required, "required_contiguous_bytes": largest,
             "components": parts, "display": display, "full_companion": full}

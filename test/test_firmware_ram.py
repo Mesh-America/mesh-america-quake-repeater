@@ -66,6 +66,52 @@ def esp_fixture(path, modern=False, fragmented=False):
 
 
 class FirmwareRamTest(unittest.TestCase):
+    def test_device_encoder_budget_matches_storage_and_role_gates(self):
+        matrix = [
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "v4_repeater", True),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "v4_room_server", True),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "v4_sensor", True),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "v4_companion_alias", True),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1}, "v4_repeater", False),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1}, "v4_companion_radio_usb", False),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "OTA_SEEDER_ONLY": 1}, "v4_repeater", False),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 0}, "v4_repeater", False),
+            ("ESP32_PLATFORM", {}, "v4_repeater", False),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_FLASH_STORE": 1}, "rak3401_repeater", False),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_QSPI_STORE": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "xiao_repeater", True),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_SD_STORE": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "tower_room_server", True),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_RAK_AUTO_STORE": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "rak4631_sensor", True),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_QSPI_STORE": 1}, "xiao_companion_radio_full", False),
+            ("STM32_PLATFORM", {"ENABLE_OTA": 1, "OTA_SD_STORE": 1}, "wio_repeater", False),
+        ]
+        for platform, defines, target, enabled in matrix:
+            with self.subTest(platform=platform, defines=defines, target=target):
+                components = ram.requirements(platform, defines, target)["components"]
+                self.assertEqual("ota_encoder_workspace" in components, enabled)
+                if enabled:
+                    self.assertEqual(components["ota_encoder_workspace"], 1024 + 16)
+                self.assertEqual("ota_self_source_scratch" in components,
+                                 enabled and platform == "NRF52_PLATFORM")
+                if enabled and platform == "NRF52_PLATFORM":
+                    self.assertEqual(components["ota_self_source_scratch"], 4096 + 32)
+
+    def test_device_encoder_hash_override_is_budgeted_and_bounded(self):
+        for bits in (7, 8, 9, 10):
+            with self.subTest(bits=bits):
+                policy = ram.requirements("NRF52_PLATFORM", {
+                    "ENABLE_OTA": 1, "OTA_QSPI_STORE": 1,
+                    "MESHCORE_OTA_DEVICE_DEFLATE": 1,
+                    "MESHCORE_OTA_DEFLATE_HASH_BITS": bits,
+                }, "xiao_repeater")
+                self.assertEqual(policy["components"]["ota_encoder_workspace"],
+                                 (1 << bits) * 2 + 16)
+        for bits in (6, 11):
+            with self.subTest(bits=bits), self.assertRaisesRegex(ValueError, "DEFLATE hash"):
+                ram.requirements("ESP32_PLATFORM", {
+                    "ENABLE_OTA": 1, "MESHCORE_OTA_DEFLATE_HASH_BITS": bits,
+                    "MESHCORE_OTA_DEVICE_DEFLATE": 1,
+                }, "v4_repeater")
+
     def test_sh1107_framebuffer_is_budgeted(self):
         policy = ram.requirements("NRF52_PLATFORM", {
             "DISPLAY_CLASS": "SH1107Display",
