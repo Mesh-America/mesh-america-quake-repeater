@@ -139,6 +139,58 @@ bool EnvironmentSensorManager::i2c_probe(TwoWire& wire, uint8_t addr) {
 // Sensor library includes and static driver instances
 // ============================================================
 
+#if ENV_INCLUDE_D7S
+#include "D7S.h"
+#include "D7SBoard.h"
+#include "D7SWireTransport.h"
+// Omron D7S seismic sensor, found by the I2C scan like the other sensors. Channels are allocated
+// only when something answers at its address, so builds without one are unchanged.
+static const uint8_t  D7S_CHANNELS   = 6;     // health/state, live SI, live PGA, events, stored SI, stored PGA
+static const uint32_t D7S_STARTUP_MS = 4000;  // RAK's library waits about 4 s after power-up before reading.
+static const uint32_t D7S_FRESH_MS   = 2000;  // Readings older than this are reported as unavailable.
+static d7s::WireTransport d7s_bus;
+static d7s::Sensor d7s_sensor(d7s_bus);
+static bool d7s_active = false;     // Something answered at the D7S address during the scan.
+static bool d7s_confirmed = false;  // It has returned a valid D7S state register.
+static uint32_t d7s_started_at = 0;
+
+static uint8_t init_d7s(TwoWire* wire, uint8_t address) {
+  // No register is read here: the device may still be calibrating and the EVENT register clears
+  // on read. The first valid poll in loop() confirms it is a D7S.
+  d7s_bus.begin(wire, address);
+  d7s_started_at = millis();
+  d7s_active = true;
+  return D7S_CHANNELS;
+}
+
+static void query_d7s(uint8_t channel, uint8_t sub, CayenneLPP& telemetry) {
+  const auto& s = d7s_sensor.snapshot();
+  const bool fresh = s.valid && uint32_t(millis() - s.updatedAt) < D7S_FRESH_MS;
+  switch (sub) {
+    case 0:  // Health (digital input) and sensor state.
+      telemetry.addDigitalInput(channel, fresh);
+      if (fresh) telemetry.addGenericSensor(channel, unsigned(s.state));
+      break;
+    case 1:  // Live SI, only while the sensor is processing. Raw / 10 = cm/s.
+      if (fresh && s.liveValid) telemetry.addGenericSensor(channel, s.live.siRaw);
+      break;
+    case 2:  // Live PGA, raw counts (scale unresolved).
+      if (fresh && s.liveValid) telemetry.addGenericSensor(channel, s.live.pgaRaw);
+      break;
+    case 3:  // Retained event flags, once the sensor has answered or a read may have lost flags.
+             // Bit 0x80 marks a failed EVENT read that may have discarded flags.
+      if (s.everValid || s.eventReadUncertain) telemetry.addGenericSensor(channel, s.eventReport());
+      break;
+    case 4:  // Stored SI. Raw / 10 = cm/s. May predate boot.
+      if (fresh && s.storedValid) telemetry.addGenericSensor(channel, s.stored.siRaw);
+      break;
+    case 5:  // Stored PGA. Raw / 10 = gal. May predate boot.
+      if (fresh && s.storedValid) telemetry.addGenericSensor(channel, s.stored.pgaRaw);
+      break;
+  }
+}
+#endif
+
 #if ENV_INCLUDE_BME680_BSEC
 #ifndef TELEM_BME680_ADDRESS
 #define TELEM_BME680_ADDRESS 0x76
@@ -914,6 +966,9 @@ static const SensorDef SENSOR_TABLE[] = {
 #if ENV_INCLUDE_RAK12035
   { TELEM_RAK12035_ADDRESS,"RAK12035",     init_rak12035, query_rak12035, NULL },
 #endif
+#if ENV_INCLUDE_D7S
+  { d7s::Sensor::Address,  "D7S",          init_d7s,      query_d7s,      NULL },
+#endif
   { 0, nullptr, nullptr, nullptr, nullptr }  // sentinel keeps array non-empty
 };
 
@@ -1547,8 +1602,18 @@ bool EnvironmentSensorManager::setGpsSerialTransportBlocked(uint8_t uart,
 #endif
 }
 
-#if ENV_INCLUDE_GPS || defined(ENV_INCLUDE_BME680_BSEC)
+#if ENV_INCLUDE_GPS || defined(ENV_INCLUDE_BME680_BSEC) || ENV_INCLUDE_D7S
 void EnvironmentSensorManager::loop() {
+
+  #if ENV_INCLUDE_D7S
+  if (d7s_active && uint32_t(millis() - d7s_started_at) >= D7S_STARTUP_MS) {
+    d7s_sensor.service(millis());
+    if (!d7s_confirmed && d7s_sensor.snapshot().everValid) {
+      d7s_confirmed = true;
+      d7sBoardOnConfirmed();  // Only once the device has behaved like a D7S.
+    }
+  }
+  #endif
 
   #if ENV_INCLUDE_GPS
   static unsigned long next_gps_update = 0;
@@ -1627,4 +1692,4 @@ void EnvironmentSensorManager::loop() {
   }
   #endif  // ENV_INCLUDE_BME680_BSEC
 }
-#endif // ENV_INCLUDE_GPS || ENV_INCLUDE_BME680_BSEC
+#endif // ENV_INCLUDE_GPS || ENV_INCLUDE_BME680_BSEC || ENV_INCLUDE_D7S

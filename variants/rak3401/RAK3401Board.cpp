@@ -17,6 +17,7 @@ void RAK3401Board::initiateShutdown(uint8_t reason) {
   digitalWrite(SX126X_POWER_EN, LOW);
 
   // Disable 3V3 switched peripherals and 5V boost
+  pinMode(PIN_3V3_EN, OUTPUT);  // May have been released to an input once a D7S was confirmed.
   digitalWrite(PIN_3V3_EN, LOW);
 
   if (reason == SHUTDOWN_REASON_LOW_VOLTAGE ||

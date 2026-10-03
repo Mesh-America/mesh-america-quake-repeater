@@ -6,7 +6,11 @@
 
 class EnvironmentSensorManager : public SensorManager {
 protected:
+#if ENV_INCLUDE_D7S
+  static const int MAX_ACTIVE_SENSORS = 16 + 6;  // The D7S needs six sub-channels.
+#else
   static const int MAX_ACTIVE_SENSORS = 16;
+#endif
 
   // Query function pointer + sub-channel index (for multi-channel sensors like INA3221).
   // Sub-channel is 0 for all single-output sensors.
@@ -58,7 +62,7 @@ public:
                                    uint8_t capacity) const override;
   uint8_t queryVoltageSensors(VoltageSensorReading readings[],
                               uint8_t capacity) override;
-  #if ENV_INCLUDE_GPS || defined(ENV_INCLUDE_BME680_BSEC)
+  #if ENV_INCLUDE_GPS || defined(ENV_INCLUDE_BME680_BSEC) || ENV_INCLUDE_D7S
   void loop() override;
   #endif
   int getNumSettings() const override;
