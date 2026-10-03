@@ -1132,7 +1132,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
     strcpy(reply, "ERR: online OTA not supported on this build");
 #endif
     return true;
-  } else if (memcmp(command, "ota branch", 10) == 0) {
+  } else if (memcmp(command, "ota branch", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
     // Switch (or report) the OTA release channel this device pulls from. The
     // selection is persisted (NodePrefs::ota_channel) and resolved to a baked-in
     // base URL by ota_resolve_base(); it changes only WHERE updates are fetched,
@@ -1142,18 +1142,17 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
     const char* arg = command + 10;
     while (*arg == ' ') arg++;
     if (*arg == 0) {
-      snprintf(reply, 160, "channel: %s (%s), base %s",
-               ota_channel_name(_prefs->ota_channel),
-               _prefs->ota_channel == OTA_CH_NATIVE ? "native" : "override",
+      snprintf(reply, 160, "channel: %s (build: %s), base %s",
+               ota_channel_name(_prefs->ota_channel), ota_native_channel_name(),
                ota_resolve_base(_prefs->ota_channel));
     } else {
       uint8_t ch;
       if (!ota_parse_channel(arg, &ch)) {
-        strcpy(reply, "ERR: usage ota branch [stable|dev|default]");
+        strcpy(reply, "ERR: usage ota branch [prod|beta|default] (aliases: stable, dev)");
       } else {
         _prefs->ota_channel = ch;
         savePrefs();
-        snprintf(reply, 160, "channel set to %s, base %s",
+        snprintf(reply, 160, "channel set to %s, base %s; run ota update to switch",
                  ota_channel_name(ch), ota_resolve_base(ch));
       }
     }
