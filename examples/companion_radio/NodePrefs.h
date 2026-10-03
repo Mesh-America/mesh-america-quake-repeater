@@ -110,6 +110,8 @@ public:
   uint8_t one_key_dm_enabled = 0;
   // Appended after all existing fields so older images keep Bluetooth enabled.
   uint8_t bluetooth_enabled = 1;
+  // Appended after all existing fields; zero retains the board's legacy cadence.
+  uint16_t gps_sync_interval_hours = 0;
 
 private:
   class RadioPrefs : public CommonRadioPrefs {

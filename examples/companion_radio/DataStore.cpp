@@ -1002,6 +1002,7 @@ bool DataStore::loadPrefsInt(const char *filename,
     // Files written before this tail existed always started Bluetooth at boot.
     // Do not inherit a runtime off value when loading one of those images.
     loaded_prefs.bluetooth_enabled = 1;
+    loaded_prefs.gps_sync_interval_hours = 0;
     double loaded_lat = node_lat;
     double loaded_lon = node_lon;
     // The original image ended after ble_pin at byte 84. Later releases only
@@ -1056,6 +1057,13 @@ bool DataStore::loadPrefsInt(const char *filename,
         329,
 #else
         232,
+#endif
+#ifdef TBEAM_1W
+        241,  // GPS time-sync cadence in hours, appended after Bluetooth enable
+#elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        331,
+#else
+        234,
 #endif
     };
     const uint32_t prefs_size = file.size();
@@ -1200,6 +1208,8 @@ bool DataStore::loadPrefsInt(const char *filename,
                       sizeof(loaded_prefs.one_key_dm_enabled));
     readOptionalField(&loaded_prefs.bluetooth_enabled,
                       sizeof(loaded_prefs.bluetooth_enabled));
+    readOptionalField(&loaded_prefs.gps_sync_interval_hours,
+                      sizeof(loaded_prefs.gps_sync_interval_hours));
 
     // Any bytes left over form only part of a historically appended field.
     // Preserve the file and defaults rather than treating that tail as EOF.
@@ -1363,6 +1373,8 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
         sizeof(_prefs.one_key_dm_enabled)) == sizeof(_prefs.one_key_dm_enabled);
     success = success && file.write((uint8_t *)&_prefs.bluetooth_enabled,
         sizeof(_prefs.bluetooth_enabled)) == sizeof(_prefs.bluetooth_enabled);
+    success = success && file.write((uint8_t *)&_prefs.gps_sync_interval_hours,
+        sizeof(_prefs.gps_sync_interval_hours)) == sizeof(_prefs.gps_sync_interval_hours);
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
     success = file.commit(success);

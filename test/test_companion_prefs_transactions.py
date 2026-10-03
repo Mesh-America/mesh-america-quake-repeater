@@ -107,6 +107,7 @@ struct MyMesh {
   bool applyAndSaveRxPowerSaving(const char*,char*);
   bool applyAndSavePowerSaving(const char*,char*);
   bool applyAndSaveRxBoostedGain(bool);
+  bool setGpsEnabled(bool);
   bool savePrefs() {
     ++saves;if(!storage_accepts)return false;
     memcpy(&durable,&_prefs,sizeof(Prefs));durable_lat=sensors.node_lat;durable_lon=sensors.node_lon;return true;
@@ -357,6 +358,7 @@ class CompanionPrefsTransactionTests(unittest.TestCase):
                 'bool MyMesh::applyAndSaveRxPowerSaving(',
                 'bool MyMesh::applyAndSaveRxBoostedGain(',
                 'bool MyMesh::applyAndSavePowerSaving(',
+                'bool MyMesh::setGpsEnabled(',
             )),
             '@FRAMES@': ' else '.join(extract_braced(text, f'if (cmd_frame[0] == {cmd})') for cmd in frames),
             '@WEB@': ' else '.join(extract_braced(text,f'if ({expr})') for expr in web),

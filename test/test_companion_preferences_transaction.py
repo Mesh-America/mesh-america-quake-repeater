@@ -1,5 +1,6 @@
 """Exercise real Companion preferences saves and startup recovery with I/O faults."""
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
@@ -54,6 +55,7 @@ int main(int argc,char** argv){
  original.flood_retry_attempts=4;original.flood_retry_max_path=3;
  original.flood_retry_group_max_path=2;original.flood_retry_advert_enabled=0;
  original.one_key_dm_enabled=1;
+ original.gps_sync_interval_hours=336;
 #ifdef TBEAM_1W
  strcpy(original.fan_mode,"on");original.fan_lo=33;original.fan_hi=42;
 #endif
@@ -90,6 +92,7 @@ int main(int argc,char** argv){
    assert(loaded.flood_retry_attempts==4&&loaded.flood_retry_max_path==3);
    assert(loaded.flood_retry_group_max_path==2&&loaded.flood_retry_advert_enabled==0);
    assert(loaded.one_key_dm_enabled==1);
+   assert(loaded.gps_sync_interval_hours==336);
 #ifdef TBEAM_1W
    assert(!strcmp(loaded.fan_mode,"on")&&loaded.fan_lo==33&&loaded.fan_hi==42);
 #endif
@@ -194,11 +197,24 @@ int main(int argc,char** argv){
  } else if(scenario==7){
    // Pre-consent image: all earlier settings survive with default-off consent.
    DataStore legacy;legacy.fs.files["/new_prefs"]=disk;
-   legacy.fs.files["/new_prefs"].resize(disk.size()-2);
+   legacy.fs.files["/new_prefs"].resize(disk.size()-4);
    CompanionNodePrefs loaded;double lat=0,lon=0;
    assert(legacy.loadPrefs(loaded,lat,lon));
    assert(loaded.flood_retry_advert_enabled==0);
    assert(loaded.one_key_dm_enabled==0);
+ } else if(scenario==9){
+   // The previous complete image loads with the board policy even when the
+   // receiving prefs object previously held an explicit configured interval.
+   DataStore legacy;legacy.fs.files["/new_prefs"]=disk;
+   legacy.fs.files["/new_prefs"].resize(disk.size()-2);
+   CompanionNodePrefs loaded;loaded.gps_sync_interval_hours=24;
+   double lat=0,lon=0;
+   assert(legacy.loadPrefs(loaded,lat,lon));
+   assert(loaded.gps_sync_interval_hours==0 && loaded.one_key_dm_enabled==1);
+   // Half of the two-byte append is never accepted as a complete image.
+   DataStore torn;torn.fs.files["/new_prefs"]=disk;
+   torn.fs.files["/new_prefs"].resize(disk.size()-1);
+   assert(!torn.loadPrefsInt("/new_prefs",loaded,lat,lon));
  } else if(scenario==8){
    for(uint8_t enabled : {0,1}){
      CompanionNodePrefs saved=original;saved.wifi_enabled=enabled;
@@ -288,10 +304,12 @@ inline char* utoa(unsigned int value,char* output,int base){
                              'ESP32_PLATFORM,TBEAM_1W', 'RP2040_PLATFORM,ENABLE_WIFI_INTERFACE'):
                 with self.subTest(platform=platform):
                     binary = work / 'test'
+                    sanitizer_flags = [] if os.name == 'nt' else [
+                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                        '-fno-pie', '-no-pie']
                     build = subprocess.run(['g++', '-std=c++17',
                         *['-D'+flag+'=1' for flag in platform.split(',')],
-                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
-                        '-fno-pie', '-no-pie', '-include', str(work / 'platform_shim.h'),
+                        *sanitizer_flags, '-include', str(work / 'platform_shim.h'),
                         '-I', str(work),
                         '-I', str(ROOT / 'test/fixtures/radio_profiles/mocks'),
                         '-I', str(ROOT / 'test/mocks'), '-I', str(ROOT / 'src'),
@@ -303,7 +321,7 @@ inline char* utoa(unsigned int value,char* output,int base){
                         str(ROOT / 'src/helpers/TxtDataHelpers.cpp'),
                         '-o', str(binary)], capture_output=True, text=True)
                     self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
-                    for scenario in range(9):
+                    for scenario in range(10):
                         with self.subTest(scenario=scenario):
                             run = subprocess.run([str(binary), str(scenario)], capture_output=True, text=True)
                             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

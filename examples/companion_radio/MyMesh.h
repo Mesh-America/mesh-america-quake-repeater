@@ -302,6 +302,10 @@ public:
   bool handleLocalControlCommand(const char* command, char* reply,
                                  size_t reply_size);
   void applyUsbLoggingState(bool enabled);
+  // A framed USB logging change cannot abandon its requester before the
+  // acknowledgement has entered the transport. Other transports stay live.
+  void beginUsbLoggingReplyBarrier(BaseSerialInterface* route);
+  void endUsbLoggingReplyBarrier(bool reply_queued);
   bool handleTxRoutingCommand(const char* command, char* reply, size_t reply_size);
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
@@ -436,6 +440,7 @@ public:
     char interval_str[12];  // Max: 24 hours = 86400 seconds (5 digits + null)
     sprintf(interval_str, "%u", _prefs.gps_interval);
     sensors.setSettingValue("gps_interval", interval_str);
+    sensors.applyGpsTimeSyncInterval(_prefs.gps_sync_interval_hours);
   }
 #endif
 

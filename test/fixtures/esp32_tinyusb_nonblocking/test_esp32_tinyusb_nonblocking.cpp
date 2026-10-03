@@ -2,11 +2,16 @@
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <atomic>
+#include <thread>
 #include "helpers/UsbLogging.h"
 #include "MeshCore.h"
 
 MockSerial Serial;
 static bool connected = true;
+static bool mounted = true, attached = true, arm_packets = false;
+static std::string endpoint;
+static unsigned detach_calls = 0, attach_calls = 0;
 static bool auto_drain = false;
 static std::string fifo;
 static std::string host;
@@ -14,6 +19,25 @@ static unsigned write_calls = 0;
 static unsigned flush_calls = 0;
 static unsigned clear_calls = 0;
 static void (*during_write)() = nullptr;
+static void (*during_disconnect)() = nullptr;
+
+extern "C" void meshEsp32TinyUsbCdcLineState(bool dtr);
+extern "C" bool meshEsp32TinyUsbAcceptRx();
+extern "C" void meshEsp32TinyUsbDeviceSessionBoundary(bool mounted);
+extern "C" bool meshEsp32TinyUsbTxPending() { return !endpoint.empty(); }
+bool tud_mounted() { return mounted; }
+bool tud_disconnect() {
+  ++detach_calls;
+  if (during_disconnect) during_disconnect();
+  attached = false;
+  connected = false;
+  return true;
+}
+bool tud_connect() { ++attach_calls; attached = true; return true; }
+void tud_cdc_n_read_flush(uint8_t instance) {
+  assert(instance == 0);
+  assert(mounted && "RX flush must not rearm a reset/unopened OUT endpoint");
+}
 
 bool tud_cdc_n_connected(uint8_t instance) {
   assert(!mock_isr);
@@ -38,6 +62,12 @@ uint32_t tud_cdc_n_write_flush(uint8_t instance) {
   assert(!mock_isr);
   assert(instance == 0);
   ++flush_calls;
+  if (arm_packets) {
+    if (!endpoint.empty()) return 0;
+    const auto size = fifo.size();
+    endpoint.swap(fifo);
+    return size;
+  }
   if (!auto_drain) return 0;
   const auto size = fifo.size();
   host += fifo;
@@ -69,10 +99,10 @@ static void drain_all() {
 
 static void fresh_session() {
   connected = false;
-  arduino_usb_cdc_event_data_t event;
-  event.line_state.dtr = false;
-  Serial.callback(nullptr, nullptr, ARDUINO_USB_CDC_LINE_STATE_EVENT, &event);
+  meshEsp32TinyUsbCdcLineState(false); // synchronous TinyUSB owner hook
+  assert(!meshEsp32TinyUsbAcceptRx()); // late old RX cannot refill Arduino queue
   connected = true;  // fast close/reopen, without an intervening service poll
+  meshEsp32TinyUsbCdcLineState(true);
   mesh::serviceUsbLoggingPort();
   assert(mesh::takeUsbTerminalSessionReset());
   assert(!mesh::takeUsbTerminalSessionReset());
@@ -136,8 +166,17 @@ static void check_stalled_host_and_visible_overflow() {
 static void check_disconnect_cleanup_keeps_new_host_input() {
   assert(put(mesh::usbConsolePort(), std::string(1000, 'O')) == 1000);
   const auto before = clear_calls;
-  Serial.rx_count = 4;
-  fresh_session();
+  Serial.rx_count = 12; // old owner queued commands while output was paused
+  connected = false;
+  meshEsp32TinyUsbCdcLineState(false);
+  assert(Serial.rx_count == 0);
+  connected = true;
+  meshEsp32TinyUsbCdcLineState(true);
+  Serial.rx_count = 4; // new host sends its first query BEFORE main-loop cleanup
+  mesh::serviceUsbLoggingPort();
+  assert(mesh::takeUsbTerminalSessionReset());
+  assert(mesh::tryCompleteUsbTerminalSessionReset());
+  host.clear();
   assert(clear_calls > before);
   assert(!mesh::hasPendingUsbTerminalOutput());
   assert(mesh::usbConsolePort().available() == 4);
@@ -146,6 +185,118 @@ static void check_disconnect_cleanup_keeps_new_host_input() {
   assert(put(mesh::usbConsolePort(), "new\r\n") == 5);
   drain_all();
   assert(host == "new\r\n");
+  fresh_session();
+}
+
+static void check_armed_endpoint_reenumerates_without_leaking() {
+  fresh_session();
+  arm_packets = true;
+  const unsigned disconnected_before = detach_calls, connected_before = attach_calls;
+  assert(put(mesh::usbConsolePort(), "old packet") == 10);
+  assert(endpoint == "old packet" && fifo.empty());
+  Serial.rx_count = 12;
+  connected = false;
+  meshEsp32TinyUsbCdcLineState(false);
+  assert(detach_calls == disconnected_before + 1 && !attached);
+  assert(Serial.rx_count == 0 && !meshEsp32TinyUsbAcceptRx());
+  assert(put(mesh::usbCompanionPort(), "racing old writer") == 0);
+  mesh::serviceUsbLoggingPort();
+  assert(attach_calls == connected_before); // real detach interval, no wait loop
+  delay(21);
+  mesh::serviceUsbLoggingPort();
+  assert(attach_calls == connected_before + 1 && attached);
+  assert(!meshEsp32TinyUsbAcceptRx()); // retain quarantine until reset/mount
+  endpoint.clear(); // actual bus reset cancels controller packet, not write_clear
+  fifo.clear();
+  meshEsp32TinyUsbDeviceSessionBoundary(true);
+  connected = true;
+  meshEsp32TinyUsbCdcLineState(true);
+  Serial.rx_count = 4;
+  assert(meshEsp32TinyUsbAcceptRx());
+  mesh::serviceUsbLoggingPort();
+  assert(mesh::takeUsbTerminalSessionReset());
+  assert(mesh::tryCompleteUsbTerminalSessionReset());
+  assert(mesh::usbConsolePort().available() == 4);
+  arm_packets = false;
+  drain_all();
+  assert(host.find("old packet") == std::string::npos);
+  fresh_session();
+}
+
+static void check_unmount_purges_rx_without_rearming_endpoint() {
+  fresh_session();
+  Serial.rx_count = 12;
+  mounted = false;
+  connected = false;
+  meshEsp32TinyUsbDeviceSessionBoundary(false);
+  assert(Serial.rx_count == 0);
+  assert(!meshEsp32TinyUsbAcceptRx());
+  mesh::serviceUsbLoggingPort();
+  mounted = true;
+  meshEsp32TinyUsbDeviceSessionBoundary(true);
+  connected = true;
+  meshEsp32TinyUsbCdcLineState(true);
+  Serial.rx_count = 4;
+  mesh::serviceUsbLoggingPort();
+  assert(mesh::takeUsbTerminalSessionReset());
+  assert(mesh::tryCompleteUsbTerminalSessionReset());
+  assert(mesh::usbConsolePort().available() == 4);
+  fresh_session();
+}
+
+static void check_logging_disable_retains_functional_reply() {
+  fresh_session();
+  const std::string reply(500, 'R');
+  assert(put(mesh::usbConsolePort(), reply) == reply.size());
+  mesh::setUsbLoggingEnabled(false);
+  assert(mesh::hasPendingUsbTerminalOutput());
+  assert(put(mesh::usbConsolePort(), "next reply") == 10);
+  drain_all();
+  assert(host == reply + "next reply");
+  mesh::setUsbLoggingEnabled(true);
+  fresh_session();
+}
+
+static std::atomic<bool> writer_started{false}, writer_release{false};
+static std::thread* racing_writer = nullptr;
+static unsigned race_attach_baseline = 0;
+static void check_detach_publication_waits_for_physical_disconnect() {
+  fresh_session();
+  writer_started = false;
+  writer_release = false;
+  during_write = [] {
+    writer_started.store(true, std::memory_order_release);
+    while (!writer_release.load(std::memory_order_acquire)) std::this_thread::yield();
+  };
+  std::thread writer([] { assert(put(mesh::usbCompanionPort(), "racing old") == 10); });
+  racing_writer = &writer;
+  while (!writer_started.load(std::memory_order_acquire)) std::this_thread::yield();
+  race_attach_baseline = attach_calls;
+  during_disconnect = [] {
+    // The writer finishes just after the owner's failed exclusive attempt.
+    writer_release.store(true, std::memory_order_release);
+    racing_writer->join();
+    delay(25); // stale deadline would now allow the other core to reconnect
+    mesh::serviceUsbLoggingPort();
+    assert(attach_calls == race_attach_baseline);
+  };
+  connected = false;
+  meshEsp32TinyUsbCdcLineState(false);
+  during_disconnect = nullptr;
+  during_write = nullptr;
+  assert(!attached && !meshEsp32TinyUsbAcceptRx());
+  mesh::serviceUsbLoggingPort();
+  assert(attach_calls == race_attach_baseline);
+  delay(21);
+  mesh::serviceUsbLoggingPort();
+  assert(attach_calls == race_attach_baseline + 1 && fifo.empty());
+  meshEsp32TinyUsbDeviceSessionBoundary(true);
+  connected = true;
+  meshEsp32TinyUsbCdcLineState(true);
+  mesh::serviceUsbLoggingPort();
+  assert(mesh::takeUsbTerminalSessionReset());
+  assert(mesh::tryCompleteUsbTerminalSessionReset());
+  assert(host.find("racing old") == std::string::npos);
   fresh_session();
 }
 
@@ -186,10 +337,11 @@ static void check_protocol_switch_cancels_text_and_overflow_marker() {
   assert(put(mesh::usbConsolePort(), std::string(5000, 'X')) == 0);
   assert(put(mesh::usbLoggingPort(), std::string(550, 'L')) == 550);
   mesh::setUsbLoggingEnabled(false);
-  assert(!mesh::hasPendingUsbTerminalOutput());
+  assert(mesh::hasPendingUsbTerminalOutput()); // no protocol switch yet
   // A protocol owner may discard application text without resetting USB. The
   // already accepted FIFO prefix stays ordered before the new binary frame.
   mesh::discardUsbTerminalOutput();
+  assert(!mesh::hasPendingUsbTerminalOutput());
   host += fifo;
   fifo.clear();
   assert(put(mesh::usbCompanionPort(), "binary") == 6);
@@ -210,8 +362,10 @@ int main() {
 #if MESH_ESP32_TINYUSB_NONBLOCKING
   mesh::beginUsbLoggingPort();
   mesh::beginUsbLoggingPort();
+  meshEsp32TinyUsbDeviceSessionBoundary(true);
+  meshEsp32TinyUsbCdcLineState(true);
   mesh::setUsbLoggingEnabled(true);
-  assert(Serial.registrations == 1);
+  assert(Serial.registrations == 0); // delayed Arduino events cannot purge new RX
   assert(!Serial.debug_enabled);
   mesh::serviceUsbLoggingPort();
   assert(&mesh::usbConsolePort() == &mesh::usbTerminalPort());
@@ -219,6 +373,10 @@ int main() {
   check_ordered_text_and_functional_reserve();
   check_stalled_host_and_visible_overflow();
   check_disconnect_cleanup_keeps_new_host_input();
+  check_armed_endpoint_reenumerates_without_leaking();
+  check_unmount_purges_rx_without_rearming_endpoint();
+  check_logging_disable_retains_functional_reply();
+  check_detach_publication_waits_for_physical_disconnect();
   check_debug_formatter_and_reentrancy();
   check_cached_logging_gate_and_isr();
   check_protocol_switch_cancels_text_and_overflow_marker();

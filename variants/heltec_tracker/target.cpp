@@ -44,7 +44,7 @@ mesh::LocalIdentity radio_new_identity() {
 
 void HWTSensorManager::armGpsPowerSavingCycle() {
   if (!powersaving_enabled || !_location->getGPSPowerSaving()) return;
-  _location->syncTime();
+  _location->syncTimeForPowerSavingCycle();
   _location->setNextGPSOn(0);
   _location->setNextSleep();
 }

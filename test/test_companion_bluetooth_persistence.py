@@ -32,13 +32,14 @@ int main(){
  assert(mesh.savePrefs());
  const auto on_disk=mesh.store.fs.files["/new_prefs"];
 #if defined(TBEAM_1W)
- assert(on_disk.size()==239);
+ assert(on_disk.size()==241);
 #elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
- assert(on_disk.size()==329);
+ assert(on_disk.size()==331);
 #else
- assert(on_disk.size()==232);
+ assert(on_disk.size()==234);
 #endif
- assert(on_disk.back()==1);
+ const size_t bluetooth_offset=on_disk.size()-3;
+ assert(on_disk[bluetooth_offset]==1);
  // Both choices survive a fresh instance reading the actual on-device image.
  for(bool enabled : {false,true,false}){
    assert(mesh.setBluetoothEnabledPreference(enabled));
@@ -49,7 +50,7 @@ int main(){
    assert(prefs.ble_pin==876543&&prefs.freq==910.525f);
    assert(prefs.bluetooth_stealth_mode==2&&prefs.one_key_dm_enabled==1);
    assert(prefs.wifi_enabled==0&&prefs.usb_logging_enabled==1);
-   assert(reboot.fs.files["/new_prefs"].back()==enabled);
+   assert(reboot.fs.files["/new_prefs"][bluetooth_offset]==enabled);
  }
  const auto off_disk=mesh.store.fs.files["/new_prefs"];
  // The public setter must roll live state back when the atomic save fails.
@@ -69,7 +70,7 @@ int main(){
  assert(mesh.isBluetoothEnabledPreference());
  mesh.store.fs.fail_write=false;
  // Legacy images cannot accidentally inherit an off value from the caller.
- for(unsigned size : {84u,156u,215u,226u,unsigned(on_disk.size()-1)}){
+ for(unsigned size : {84u,156u,215u,226u,unsigned(bluetooth_offset)}){
    DataStore legacy;legacy.fs.files["/new_prefs"]=on_disk;
    legacy.fs.files["/new_prefs"].resize(size);
    CompanionNodePrefs prefs;prefs.bluetooth_enabled=0;
@@ -80,7 +81,7 @@ int main(){
  // Invalid new encoding rejects the transaction rather than partially loading.
  for(uint8_t corrupt : {2,255}){
    DataStore damaged;damaged.fs.files["/new_prefs"]=off_disk;
-   damaged.fs.files["/new_prefs"].back()=corrupt;
+   damaged.fs.files["/new_prefs"][bluetooth_offset]=corrupt;
    CompanionNodePrefs prefs;prefs.bluetooth_enabled=1;
    strcpy(prefs.node_name,"unchanged");double lat=1,lon=2;
    assert(!damaged.loadPrefsInt("/new_prefs",prefs,lat,lon));
