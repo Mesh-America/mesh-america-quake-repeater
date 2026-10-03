@@ -255,7 +255,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         ):]
         self.assertIn("if (instance == 1)", bridge)
         self.assertIn("handleDedicatedUsbLoggingLineState(dtr);", bridge)
-        self.assertIn("tud_cdc_n_write_clear(1);", source)
+        self.assertIn("clearNrf52UsbTxForSession(1);", source)
         self.assertIn("endPrimaryUsbHostSession(true);", bridge)
         self.assertIn("if (instance == 0 && !dtr)", bridge)
         self.assertIn("tud_cdc_get_line_coding(&coding);", bridge)
@@ -306,7 +306,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         )
         self.assertLess(
             session_end.index("tud_cdc_n_read_flush(0)"),
-            session_end.index("tud_cdc_n_write_clear(0)"),
+            session_end.index("clearNrf52UsbTxForSession(0)"),
         )
         self.assertIn(
             "dedicated_usb_logging_line_state_dtr.exchange(", source
@@ -332,7 +332,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         restart_gate = restart.index(
             "dedicated_usb_logging_port_connected.store(false"
         )
-        restart_fifo = restart.index("tud_cdc_n_write_clear(1)")
+        restart_fifo = restart.index("clearNrf52UsbTxForSession(1)")
         restart_state = restart.index("resetDedicatedUsbLoggingUsbTaskState()")
         restart_quiet = restart.index("dedicated_usb_logging_quiet_sofs =")
         restart_generation = restart.index(
@@ -368,7 +368,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         self.assertLess(marker_write, queued_drain)
 
         quiet_block = owner_service[quiet_start:positive_gate]
-        quiet_fifo = quiet_block.index("tud_cdc_n_write_clear(1)")
+        quiet_fifo = quiet_block.index("clearNrf52UsbTxForSession(1)")
         quiet_state = quiet_block.index(
             "resetDedicatedUsbLoggingUsbTaskState()"
         )
@@ -595,7 +595,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         # A second purge after the settle gate would erase a new host's
         # immediately sent APP_START (meshcli does not delay after open).
         self.assertNotIn("tud_cdc_n_read_flush(0);", completion)
-        self.assertIn("tud_cdc_n_write_clear(0);", completion)
+        self.assertIn("clearNrf52UsbTxForSession(0);", completion)
         self.assertIn("primary_usb_allowed_generation.store(", completion)
         self.assertIn(".tryRunExclusive(", source)
         self.assertIn("primary_usb_reset_settle_until.store(", source)

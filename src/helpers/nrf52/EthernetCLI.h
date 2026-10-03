@@ -6,6 +6,16 @@
 #include <SPI.h>
 #include <RAK13800_W5100S.h>
 #include <helpers/nrf52/EthernetMac.h>
+#include <helpers/UsbLogging.h>
+
+// Ethernet startup runs on a FreeRTOS task, and client acceptance runs in the
+// mesh loop. Never let either path wait on a CDC host which stopped reading.
+// Keep diagnostics separate from functional replies on the Ethernet client.
+#define ETHERNET_CLI_LOG(F, ...) do { \
+  if (mesh::isUsbDebugLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { \
+    mesh::usbLoggingPort().printf("ETH: " F "\n", ##__VA_ARGS__); \
+  } \
+} while (0)
 
 #define PIN_SPI1_MISO (29)
 #define PIN_SPI1_MOSI (30)
@@ -41,7 +51,7 @@ static bool ethernet_take_session_reset() {
 static void ethernet_task(void* param) {
   (void)param;
 
-  Serial.println("ETH: Initializing hardware");
+  ETHERNET_CLI_LOG("Initializing hardware");
   // WB_IO2 (power enable) is already driven HIGH by early constructor
   // in RAK4631Board.cpp to support POE boot.
   // Skip hardware reset - the W5100S comes out of power-on reset cleanly,
@@ -54,30 +64,30 @@ static void ethernet_task(void* param) {
 
   uint8_t mac[6];
   generateEthernetMac(mac);
-  Serial.printf("ETH: MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+  ETHERNET_CLI_LOG("MAC: %02X:%02X:%02X:%02X:%02X:%02X",
       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
   // Retry loop: keep trying until we get an IP
   while (!ethernet_running) {
-    Serial.println("ETH: Attempting DHCP...");
+    ETHERNET_CLI_LOG("Attempting DHCP...");
     if (Ethernet.begin(mac, 10000, 2000) == 0) {
       if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-        Serial.println("ETH: Hardware not found, giving up");
+        ETHERNET_CLI_LOG("Hardware not found, giving up");
         vTaskDelete(NULL);
         return;
       }
       if (Ethernet.linkStatus() == LinkOFF) {
-        Serial.println("ETH: Cable not connected, will retry");
+        ETHERNET_CLI_LOG("Cable not connected, will retry");
       } else {
-        Serial.println("ETH: DHCP failed, will retry");
+        ETHERNET_CLI_LOG("DHCP failed, will retry");
       }
       vTaskDelay(pdMS_TO_TICKS(ETHERNET_RETRY_INTERVAL_MS));
       continue;
     }
 
     IPAddress ip = Ethernet.localIP();
-    Serial.printf("ETH: IP: %u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
-    Serial.printf("ETH: Listening on TCP port %d\n", ETHERNET_TCP_PORT);
+    ETHERNET_CLI_LOG("IP: %u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    ETHERNET_CLI_LOG("Listening on TCP port %d", ETHERNET_TCP_PORT);
     ethernet_server.begin();
     ethernet_running = true;
   }
@@ -115,7 +125,7 @@ static void ethernet_check_client() {
     ethernet_client = newClient;
     ethernet_session_reset = true;
     IPAddress ip = ethernet_client.remoteIP();
-    Serial.printf("ETH: Client connected from %u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
+    ETHERNET_CLI_LOG("Client connected from %u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
     ethernet_client.println(ETHERNET_CLI_BANNER);
   }
 }
@@ -160,5 +170,7 @@ static void ethernet_send_reply(const char* reply) {
     ethernet_client.print("  -> "); ethernet_client.println(reply);
   }
 }
+
+#undef ETHERNET_CLI_LOG
 
 #endif // ETHERNET_ENABLED

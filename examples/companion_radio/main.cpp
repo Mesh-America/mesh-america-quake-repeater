@@ -626,6 +626,8 @@ static size_t usb_terminal_line_len = 0;
 static bool usb_terminal_discard_line = false;
 static bool usb_host_session_connected = false;
 static bool usb_logging_terminal_mode = false;
+static bool usb_logging_network_parked = false;
+static bool usb_protocol_initialized = false;
 static mesh::UsbBinaryStartupProbe usb_binary_startup_probe;
 static mesh::UsbAsciiSessionDefault usb_ascii_session_default;
 #if COMPANION_FEATURE_USB_MOTA_SOURCE
@@ -774,7 +776,10 @@ static void leaveUsbTerminalMode(bool acknowledge) {
     mesh::discardUsbTerminalOutput();
   }
   the_mesh.exitTerminalMode();
-  usb_serial_interface.setPassthroughMode(false);
+  // A network handoff can leave the USB CLI while diagnostics remain enabled.
+  // Do not briefly reopen the framed transport on that same logging stream.
+  usb_serial_interface.setPassthroughMode(
+      !mesh::hasDedicatedUsbLoggingPort() && mesh::isUsbLoggingEnabled());
   clearUsbTerminalLine();
   usb_terminal_discard_line = false;
   usb_logging_terminal_mode = false;
@@ -1013,68 +1018,15 @@ static void beginUsbDefaultSession() {
   serviceUsbAsciiSessionDefault();
 }
 
+static void serviceUsbLoggingOwnership(bool logging_enabled);
+
 static void serviceUsbTerminal() {
+  serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());
+  if (usb_logging_network_parked) return;
 #if COMPANION_FEATURE_USB_MOTA_SOURCE
   if (usb_mota_mode) {
-#if MESH_USB_LOGGING_AVAILABLE
-    // A single-TTY logger and framed USB mOTA cannot share the primary USB
-    // stream. A remote logging change can arrive while mOTA owns USB, so stop
-    // the transfer before its next binary exchange and return to ASCII.
-    if (!mesh::hasDedicatedUsbLoggingPort()
-        && mesh::isUsbLoggingEnabled()) {
-      leaveUsbMotaMode(false);
-      enterUsbLoggingTerminalMode();
-      usbTerminalOutput().print(
-          "\r\nUSB mOTA stopped: USB logging owns this port\r\n> ");
-      return;
-    }
-#endif
     serviceUsbMota();
     return;
-  }
-#endif
-  // A saved logging-on preference makes the one available TTY behave like a
-  // logging repeater: plaintext diagnostics plus an input-capable CLI. Put the
-  // Companion interface into passthrough before it can mix framed traffic with
-  // logs. An active TCP terminal owns the role CLI, so logging must not reclaim
-  // it. Turning logging off retains the ordinary ASCII terminal.
-#if MESH_USB_LOGGING_AVAILABLE
-  const mesh::UsbLoggingTerminalAction logging_action =
-      mesh::selectUsbLoggingTerminalAction(
-          mesh::hasDedicatedUsbLoggingPort(), mesh::isUsbLoggingEnabled(),
-          the_mesh.isTerminalMode(), usb_logging_terminal_mode,
-          true,
-#if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
-          isNetworkTerminalActive()
-#else
-          false
-#endif
-      );
-  switch (logging_action) {
-    case mesh::UsbLoggingTerminalAction::CLAIM_USB:
-      if (!the_mesh.isTerminalMode()) {
-        enterUsbLoggingTerminalMode();
-        return;
-      }
-      usb_logging_terminal_mode = true;
-      break;
-    case mesh::UsbLoggingTerminalAction::RETURN_TO_BINARY:
-      leaveUsbTerminalMode(true);
-      return;
-    case mesh::UsbLoggingTerminalAction::KEEP_ASCII:
-      // Logging may also be disabled over BLE/WiFi. Stop treating this session
-      // as the logging terminal, but keep the ordinary ASCII terminal active;
-      // do not silently change the USB protocol underneath an idle host. A
-      // remote mode change also cancels any partially typed USB command before
-      // drawing a fresh prompt.
-      usb_logging_terminal_mode = false;
-      clearUsbTerminalLine();
-      usb_terminal_discard_line = false;
-      usbTerminalOutput().print(
-          "\r\nUSB logging off; ASCII terminal active\r\n> ");
-      break;
-    case mesh::UsbLoggingTerminalAction::NO_ACTION:
-      break;
   }
 #endif
   if (!the_mesh.isTerminalMode()) {
@@ -1206,6 +1158,91 @@ static void serviceUsbTerminal() {
   }
 }
 
+static void serviceUsbLoggingOwnership(bool logging_enabled) {
+  // A saved logging-on preference makes the one available TTY behave like a
+  // logging repeater: plaintext diagnostics plus an input-capable CLI. Put the
+  // Companion interface into passthrough before it can mix framed traffic with
+  // logs. An active TCP terminal owns the role CLI, so logging must not reclaim
+  // it. Turning logging off retains the ordinary ASCII terminal.
+#if MESH_USB_LOGGING_AVAILABLE
+#if COMPANION_FEATURE_USB_MOTA_SOURCE
+  if (usb_mota_mode) {
+    if (mesh::hasDedicatedUsbLoggingPort() || !logging_enabled) return;
+    // Run before framed dispatch, not just the later terminal-input service.
+    leaveUsbMotaMode(false);
+  }
+#endif
+  const mesh::UsbLoggingTerminalAction logging_action =
+      mesh::selectUsbLoggingTerminalAction(
+          mesh::hasDedicatedUsbLoggingPort(), logging_enabled,
+          the_mesh.isTerminalMode(), usb_logging_terminal_mode,
+          true,
+#if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
+          isNetworkTerminalActive()
+#else
+          false
+#endif
+      );
+  if (usb_logging_network_parked
+      && logging_action != mesh::UsbLoggingTerminalAction::PARK_USB_FOR_NETWORK) {
+    // Bytes typed while USB was log-only belong to neither the new ASCII CLI
+    // nor a new Binary client. Bound the discard to the existing RX snapshot.
+    Stream& input = mesh::usbCompanionPort();
+    int pending = input.available();
+    while (pending-- > 0) input.read();
+    usb_logging_network_parked = false;
+    usb_serial_interface.setPassthroughMode(the_mesh.isTerminalMode());
+  }
+  switch (logging_action) {
+    case mesh::UsbLoggingTerminalAction::PARK_USB_FOR_NETWORK:
+      if (!usb_logging_network_parked
+          || !usb_serial_interface.isPassthroughMode()) {
+        usb_binary_startup_probe.cancel();
+        cancelUsbSerialOperations();
+        mesh::discardUsbTerminalOutput();
+        usb_serial_interface.setPassthroughMode(true);
+        clearUsbTerminalLine();
+        usb_terminal_discard_line = false;
+      }
+      usb_logging_network_parked = true;
+      return; // Do not move the role CLI away from TCP/browser.
+    case mesh::UsbLoggingTerminalAction::CLAIM_USB:
+      usb_logging_network_parked = false;
+      if (!the_mesh.isTerminalMode()) {
+        enterUsbLoggingTerminalMode();
+        return;
+      }
+      usb_logging_terminal_mode = true;
+      break;
+    case mesh::UsbLoggingTerminalAction::RETURN_TO_BINARY:
+      leaveUsbTerminalMode(true);
+      return;
+    case mesh::UsbLoggingTerminalAction::KEEP_ASCII:
+      // Logging may also be disabled over BLE/WiFi. Stop treating this session
+      // as the logging terminal, but keep the ordinary ASCII terminal active;
+      // do not silently change the USB protocol underneath an idle host. A
+      // remote mode change also cancels any partially typed USB command before
+      // drawing a fresh prompt.
+      usb_logging_terminal_mode = false;
+      clearUsbTerminalLine();
+      usb_terminal_discard_line = false;
+      usbTerminalOutput().print(
+          "\r\nUSB logging off; ASCII terminal active\r\n> ");
+      break;
+    case mesh::UsbLoggingTerminalAction::NO_ACTION:
+      break;
+  }
+#endif
+}
+
+void MyMesh::applyUsbLoggingState(bool enabled) {
+  // Park the framed transport before opening the diagnostic gate, including
+  // TCP/browser commands which execute outside the mesh dispatcher.
+  if (enabled && usb_protocol_initialized) serviceUsbLoggingOwnership(true);
+  mesh::setUsbLoggingEnabled(enabled);
+  if (usb_protocol_initialized) serviceUsbLoggingOwnership(enabled);
+}
+
 static void expireUsbBinaryStartupProbeBeforeDispatch() {
   const uint32_t now = millis();
   if (!usb_binary_startup_probe.hasTimedOut(now)) return;
@@ -1219,6 +1256,12 @@ static void expireUsbBinaryStartupProbeBeforeDispatch() {
   int pending = usb_input.available();
   while (pending-- > 0) usb_input.read();
   enterUsbTerminalMode();
+}
+#endif
+
+#if !defined(ENABLE_USB_INTERFACE)
+void MyMesh::applyUsbLoggingState(bool enabled) {
+  mesh::setUsbLoggingEnabled(enabled);
 }
 #endif
 
@@ -1243,7 +1286,10 @@ bool MyMesh::beginStreamTerminal(Stream& output) {
           hasObservableActiveUsbTerminalClient(), input_idle,
           usb_serial_interface.getCompletedFrameCount())) return false;
   if (ascii_selected) leaveUsbTerminalMode(false);
-  if (enterNetworkTerminalMode(output)) return true;
+  if (enterNetworkTerminalMode(output)) {
+    serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());
+    return true;
+  }
   if (browser_usb_handoff.shouldRestoreAscii(
           usb_serial_interface.getCompletedFrameCount())) enterUsbTerminalMode();
   return false;
@@ -1943,6 +1989,9 @@ void halt() {
               "ERROR: another client currently owns the Full Companion terminal\r\n");
           ota_console_client.stop();
         }
+#if defined(ENABLE_USB_INTERFACE)
+        serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());
+#endif
 #else
         ota_console_client.print("Local CLI and OTA console - type `version` or `ota status`\r\n> ");
 #endif
@@ -3263,6 +3312,7 @@ void setup() {
   usb_serial_interface.setConnectedCheck([]() { return (bool)Serial; });
 #endif
   interface_manager.addInterface(InterfaceType::USB, &usb_serial_interface);
+  usb_protocol_initialized = true;
   // Select ASCII before any framed dispatch, including non-Full USB builds.
   // BLE/WiFi/Ethernet keep their existing Binary Companion transports.
   beginUsbDefaultSession();
@@ -3325,7 +3375,9 @@ static bool usbLoggingRecoverySafe(void*) {
 #endif
   // The logging CDC may be separate, but USB re-enumeration/reboot affects the
   // primary Companion connection too. Never reset a live Binary client.
-  if (!the_mesh.isTerminalMode()
+  // A network CLI can own the role while USB is parked in log-only
+  // passthrough, so the USB transport, not the role CLI, identifies Binary.
+  if (!usb_serial_interface.isPassthroughMode()
       && (isUsbTerminalDataConnected() || usb_serial_interface.hasPendingIO())) return false;
   const auto usb = mesh::usbLoggingStatus();
   if (usb.reader_connected && !usb.stalled
@@ -3351,6 +3403,7 @@ void loop() {
 #if defined(ENABLE_USB_INTERFACE)
   serviceUsbTerminalHostSessionReset();
   serviceUsbAsciiSessionDefault();
+  serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled()); // Before framed dispatch.
 #endif
   // Identify nRF52 CDC 1 when a terminal opens it. Doing this on the connection
   // edge avoids losing the marker before the host has opened the port.

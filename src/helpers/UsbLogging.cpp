@@ -29,6 +29,9 @@
     (defined(USE_TINYUSB) || defined(ENABLE_USB_INTERFACE) || defined(OTA_FOLDER_SERIAL))
   #define MESH_NRF52_PRIMARY_USB_NONBLOCKING 1
   #include <Adafruit_TinyUSB.h>
+  // Build-local CDC query installed by scripts/nrf52_usb_power_fix.py. It does
+  // not clear/cancel an endpoint or change its USB bulk data-toggle state.
+  extern "C" bool mesh_tud_cdc_n_tx_pending(uint8_t instance);
   #if !defined(CFG_TUD_CDC) || CFG_TUD_CDC < 1
     #error "nRF52 USB Companion/mOTA requires CFG_TUD_CDC >= 1"
   #endif
@@ -472,6 +475,52 @@ static std::atomic<bool> primary_usb_line_state_dtr{false};
 static std::atomic<uint32_t> primary_usb_rx_generation{UINT32_MAX};
 static constexpr uint32_t primary_usb_session_settle_millis = 8;
 static std::atomic<uint32_t> primary_usb_reset_settle_until{0};
+static std::atomic<bool> nrf52_usb_reenumeration_pending{false};
+static std::atomic<uint32_t> nrf52_usb_reattach_after{0};
+static constexpr uint32_t nrf52_usb_detach_millis = 20;
+
+static void requestNrf52UsbSessionReenumeration() {
+  // Only an armed old-session packet needs this recovery. TinyUSB has no safe
+  // nRF52 per-endpoint abort API; FIFO clears cannot retract endpoint RAM. A
+  // physical detach guarantees that packet cannot enter a reopened handle,
+  // and the host's fresh enumeration resets endpoint/data-toggle state. Both
+  // CDC ports briefly re-enumerate whenever a close finds a pending transfer,
+  // including an unread packet or the stack's trailing zero-length packet.
+  if (nrf52_usb_reenumeration_pending.exchange(true,
+                                               std::memory_order_acq_rel)) return;
+  primary_usb_line_state_dtr.store(false, std::memory_order_release);
+  primary_usb_reset_generation.fetch_add(1, std::memory_order_acq_rel);
+  nrf52_usb_reattach_after.store(millis() + nrf52_usb_detach_millis,
+                                std::memory_order_release);
+  TinyUSBDevice.detach();
+}
+
+static void clearNrf52UsbTxForSession(uint8_t instance) {
+  (void)tud_cdc_n_write_clear(instance);
+  if (mesh_tud_cdc_n_tx_pending(instance)) {
+    requestNrf52UsbSessionReenumeration();
+  }
+}
+
+static void serviceNrf52UsbSessionReenumeration() {
+  if (!nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)
+      || (int32_t)(millis() - nrf52_usb_reattach_after.load(
+                       std::memory_order_acquire)) < 0
+      || tud_mounted()) return;
+#if defined(USE_TINYUSB)
+  // A watchdog recovery can overlap an old-session endpoint quarantine. Both
+  // detach deadlines must expire before either service reattaches the device.
+  if (usb_logging_watchdog_detached
+      && (int32_t)(millis() - usb_logging_watchdog_attach_at) < 0) return;
+#endif
+  // Waiting for unmount as well as the quiet interval ensures TinyUSB's owner
+  // has consumed the unplug event. Never reattach with its old class state.
+  TinyUSBDevice.attach();
+#if defined(USE_TINYUSB)
+  usb_logging_watchdog_detached = false;
+#endif
+  nrf52_usb_reenumeration_pending.store(false, std::memory_order_release);
+}
 
 static uint32_t primaryUsbSessionGeneration() {
   return primary_usb_reset_generation.load(std::memory_order_acquire);
@@ -480,7 +529,8 @@ static uint32_t primaryUsbSessionGeneration() {
 static bool canAccessPrimaryUsbSession(void*) {
   if (primary_usb_terminal_discard_pending.load(std::memory_order_acquire)) return false;
   const uint32_t generation = primaryUsbSessionGeneration();
-  if (!tud_mounted()
+  if (nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)
+      || !tud_mounted()
       || primary_usb_allowed_generation.load(std::memory_order_acquire)
           != generation) return false;
 
@@ -505,9 +555,9 @@ static void endPrimaryUsbHostSession(bool clear_cdc_fifos) {
       && !(clear_cdc_fifos && tud_cdc_n_available(0) != 0)) return;
 
   // Publish a short quiescence deadline before closing the generation gate.
-  // TinyUSB's TX clear does not cancel an endpoint transfer already in its
-  // class buffer, so the later final TX purge catches a racing old-session
-  // write. RX is purged synchronously below; bytes sent by a reopened host
+  // FIFO-only cleanup suffices when no old IN packet is armed; otherwise
+  // quarantine and physically re-enumerate rather than leaking that packet.
+  // RX is purged synchronously below; bytes sent by a reopened host
   // during the settle interval remain queued until the gate reopens.
   primary_usb_reset_settle_until.store(
       millis() + primary_usb_session_settle_millis,
@@ -520,7 +570,7 @@ static void endPrimaryUsbHostSession(bool clear_cdc_fifos) {
     // The line-state callback runs before TinyUSB resets the device. A device
     // unmount/remount boundary has already reset these class FIFOs.
     tud_cdc_n_read_flush(0);
-    (void)tud_cdc_n_write_clear(0);
+    clearNrf52UsbTxForSession(0);
   }
 }
 #endif
@@ -537,6 +587,7 @@ static size_t writeTinyUsbCdcOnce(void* context, const uint8_t* data,
     return 0;
   }
 #if defined(ENABLE_USB_INTERFACE) || defined(USE_TINYUSB)
+  if (nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)) return 0;
   if (instance == 0) {
     if (!canAccessPrimaryUsbSession(nullptr)) return 0;
   } else
@@ -714,7 +765,7 @@ static void restartDedicatedUsbLoggingHostSession() {
   // identity marker after a rapid reopen.
   dedicated_usb_logging_port_connected.store(false,
                                                std::memory_order_release);
-  (void)tud_cdc_n_write_clear(1);
+  clearNrf52UsbTxForSession(1);
   resetDedicatedUsbLoggingUsbTaskState();
   dedicated_usb_logging_quiet_sofs =
       dedicated_usb_logging_host_settle_sofs;
@@ -755,9 +806,18 @@ static void handleDedicatedUsbLoggingLineCoding() {
 // 1 kHz also catches a close/reopen that occurs entirely between main-loop
 // service calls.
 void serviceDedicatedUsbLoggingFromUsbTask() {
+  if (nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)) {
+    dedicated_usb_logging_port_connected.store(false,
+                                               std::memory_order_release);
+    resetDedicatedUsbLoggingUsbTaskState();
+    return;
+  }
   if (dedicated_usb_logging_watchdog_reset_requested.exchange(false,
                                                               std::memory_order_acq_rel)) {
     restartDedicatedUsbLoggingHostSession();
+    // Clearing an armed old packet can itself request a detach. Do not touch
+    // any endpoint again in this owner tick while that recovery is pending.
+    if (nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)) return;
   }
   const uint32_t reset_generation =
       dedicated_usb_logging_reset_generation.load(std::memory_order_acquire);
@@ -788,9 +848,9 @@ void serviceDedicatedUsbLoggingFromUsbTask() {
   if (dedicated_usb_logging_quiet_sofs > 0) {
     dedicated_usb_logging_port_connected.store(
         false, std::memory_order_release);
-    // Drop anything already in flight from the prior session and anything a
-    // producer raced into the owner queue before the callback gated it.
-    (void)tud_cdc_n_write_clear(1);
+    // Drop racing producer bytes. An armed old IN packet requires a physical
+    // detach, not another FIFO clear or an arbitrary number of quiet SOFs.
+    clearNrf52UsbTxForSession(1);
     resetDedicatedUsbLoggingUsbTaskState();
     --dedicated_usb_logging_quiet_sofs;
     return;
@@ -958,19 +1018,17 @@ void beginUsbLoggingPort() {
     return;
   }
 
+  // The core already started USB before setup. A host can have fetched the
+  // old descriptor even while mounted() is false. Detach BEFORE mutating the
+  // live configuration buffer, allow the owner to consume the unplug event,
+  // then always enumerate the complete descriptor (not just mounted hosts).
+  TinyUSBDevice.detach();
+  delay(10);
   dedicated_usb_logging_port.begin(115200);
   dedicated_usb_logging_port_configured = true;
   dedicated_usb_logging_port_started = true;
 
-  // The nRF52 core starts TinyUSB before setup(). If the host completed
-  // enumeration in that small window, reconnect once so it reads the expanded
-  // two-CDC descriptor. Usually enumeration has not completed and no reconnect
-  // is needed.
-  if (TinyUSBDevice.mounted()) {
-    TinyUSBDevice.detach();
-    delay(10);
-    TinyUSBDevice.attach();
-  }
+  TinyUSBDevice.attach();
 #endif
 }
 
@@ -980,10 +1038,18 @@ void serviceUsbLoggingPort() {
   // A timed reconnect retains all descriptors and never blocks the radio loop
   // in delay(), Serial.end(), or a host-progress wait.
   if (usb_logging_watchdog_detached
-      && int32_t(millis() - usb_logging_watchdog_attach_at) >= 0) {
+      && int32_t(millis() - usb_logging_watchdog_attach_at) >= 0
+#if defined(NRF52_PLATFORM)
+      && !nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)
+      && !tud_mounted()
+#endif
+      ) {
     (void)tud_connect();
     usb_logging_watchdog_detached = false;
   }
+#endif
+#if defined(NRF52_PLATFORM) && (defined(ENABLE_USB_INTERFACE) || defined(USE_TINYUSB))
+  serviceNrf52UsbSessionReenumeration();
 #endif
 #if MESH_ESP32_TINYUSB_NONBLOCKING
   serviceEsp32TinyUsbPorts();
@@ -1352,7 +1418,7 @@ static void completePrimaryUsbSessionReset(void*) {
   // the close/line-coding boundary was captured. Do not purge it again here:
   // hosts such as meshcli send APP_START immediately after opening the port,
   // while this generation gate is deliberately settling.
-  (void)tud_cdc_n_write_clear(0);
+  clearNrf52UsbTxForSession(0);
   const uint32_t cleaned_generation =
       primary_usb_terminal_taken_reset_generation;
   primary_usb_allowed_generation.store(cleaned_generation,
@@ -1366,6 +1432,8 @@ bool tryCompleteUsbTerminalSessionReset() {
   return esp32_tinyusb_clean_generation.load(std::memory_order_acquire)
       == esp32_tinyusb_reset_generation.load(std::memory_order_acquire);
 #elif defined(NRF52_PLATFORM) && (defined(ENABLE_USB_INTERFACE) || defined(USE_TINYUSB))
+  serviceNrf52UsbSessionReenumeration();
+  if (nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)) return false;
   serviceUsbTerminalPort();
   const uint32_t generation = primaryUsbSessionGeneration();
   if (primary_usb_terminal_discard_pending.load(std::memory_order_acquire)
@@ -1380,7 +1448,8 @@ bool tryCompleteUsbTerminalSessionReset() {
   if (!nonblocking_primary_usb_companion_port.tryRunExclusive(
       completePrimaryUsbSessionReset)) return false;
   return primary_usb_allowed_generation.load(std::memory_order_acquire)
-      == primaryUsbSessionGeneration();
+      == primaryUsbSessionGeneration()
+      && !nrf52_usb_reenumeration_pending.load(std::memory_order_acquire);
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
   if (!esp32_hwcdc_cleanup_pending
       && esp32_hwcdc_allowed_generation.load(std::memory_order_acquire)
@@ -1519,7 +1588,7 @@ UsbLoggingRecoveryResult recoverUsbLoggingTransport(uint8_t stage) {
     if (tud_cdc_n_connected(1)) tud_sof_cb_enable(true);
 #else
     endPrimaryUsbHostSession(false);
-    (void)tud_cdc_n_write_clear(0);
+    clearNrf52UsbTxForSession(0);
     probeUsbLoggingTransport();
 #endif
   } else if (!usb_logging_watchdog_detached) {
@@ -1534,8 +1603,12 @@ UsbLoggingRecoveryResult recoverUsbLoggingTransport(uint8_t stage) {
 }
 
 bool isUsbLoggingTransportRecoveryPending() {
-#if MESH_ESP32_TINYUSB_NONBLOCKING \
-    || (defined(NRF52_PLATFORM) && defined(USE_TINYUSB))
+#if defined(NRF52_PLATFORM) && defined(USE_TINYUSB)
+  return usb_logging_watchdog_detached
+      || nrf52_usb_reenumeration_pending.load(std::memory_order_acquire);
+#elif defined(NRF52_PLATFORM) && defined(ENABLE_USB_INTERFACE)
+  return nrf52_usb_reenumeration_pending.load(std::memory_order_acquire);
+#elif MESH_ESP32_TINYUSB_NONBLOCKING
   return usb_logging_watchdog_detached;
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
   return esp32_hwcdc_cleanup_pending;
