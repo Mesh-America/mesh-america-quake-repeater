@@ -334,13 +334,14 @@ bool ESP32Board::otaFromManifestImpl(const char* manifest_base, const char* curr
   bool same_base = (own_base[0] && avail_base[0] && strcmp(own_base, avail_base) == 0);
   bool have_builds = (own_build >= 0 && avail_build >= 0);
   bool diff_base = (own_base[0] && avail_base[0] && !same_base);
-  // Build counters are per channel, so build numbers only compare within the native channel.
+  // Another channel's image always differs (its native base does), even from the same
+  // commit; build counters are per channel, so build numbers only compare natively.
   bool cross_channel = (strcmp(manifest_base, OTA_MANIFEST_BASE) != 0);
 
   int behind = 0;
   bool up_to_date;
   if (cross_channel) {
-    up_to_date = hash_equal;
+    up_to_date = false;
   } else if (same_base && have_builds) {
     behind = avail_build - own_build;
     up_to_date = (behind <= 0);
