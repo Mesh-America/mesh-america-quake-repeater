@@ -27,6 +27,7 @@ private:
   };
 
   bool _enabled = false;
+  bool _bluetooth_auto_enable = true;
   RegisteredInterface _interfaces[MAX_INTERFACES] = {};
   BaseSerialInterface* _lastRxInterface = nullptr;
   BaseSerialInterface* _lockedReplyInterface = nullptr;
@@ -55,6 +56,10 @@ private:
   }
 
 public:
+  // The Companion's saved preference controls blanket startup/wake enables.
+  // Explicit Bluetooth/wireless controls remain able to enable it temporarily.
+  void setBluetoothAutoEnable(bool enabled) { _bluetooth_auto_enable = enabled; }
+
   bool addInterface(InterfaceType type, BaseSerialInterface* iface) {
     // make sure an interface was provided
     if(iface == nullptr){
@@ -143,6 +148,7 @@ public:
     _lockedReplyInterface = nullptr;
     for(auto iface : _interfaces){
       if(iface.instance){
+        if (iface.type == InterfaceType::Bluetooth && !_bluetooth_auto_enable) continue;
         iface.instance->enable();
       }
     }

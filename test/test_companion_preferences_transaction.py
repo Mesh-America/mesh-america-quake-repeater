@@ -194,7 +194,7 @@ int main(int argc,char** argv){
  } else if(scenario==7){
    // Pre-consent image: all earlier settings survive with default-off consent.
    DataStore legacy;legacy.fs.files["/new_prefs"]=disk;
-   legacy.fs.files["/new_prefs"].resize(disk.size()-1);
+   legacy.fs.files["/new_prefs"].resize(disk.size()-2);
    CompanionNodePrefs loaded;double lat=0,lon=0;
    assert(legacy.loadPrefs(loaded,lat,lon));
    assert(loaded.flood_retry_advert_enabled==0);

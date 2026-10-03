@@ -108,6 +108,8 @@ public:
   uint8_t flood_retry_advert_enabled = 1;
   // Appended persisted field: old preferences images default to consent required.
   uint8_t one_key_dm_enabled = 0;
+  // Appended after all existing fields so older images keep Bluetooth enabled.
+  uint8_t bluetooth_enabled = 1;
 
 private:
   class RadioPrefs : public CommonRadioPrefs {
