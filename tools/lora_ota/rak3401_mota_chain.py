@@ -2388,6 +2388,9 @@ def run_step(
         "--discovery-interval", str(args.discovery_interval),
         "--poll-seconds", str(args.poll_seconds),
         "--transfer-timeout-minutes", str(args.transfer_timeout_minutes),
+        "--seeder-prepare-wait", str(getattr(
+            args, "seeder_prepare_wait", ota.DEFAULT_SEEDER_PREPARE_WAIT_SECONDS
+        )),
         "--seeder-start-wait", str(args.seeder_start_wait),
         "--reboot-wait", str(args.reboot_wait),
         "--source-rxps-recovery-file",
@@ -2521,7 +2524,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds between transfer status checks; sparse checks leave airtime for OTA",
     )
     parser.add_argument("--transfer-timeout-minutes", type=int, default=90)
-    parser.add_argument("--seeder-start-wait", type=int, default=5)
+    parser.add_argument(
+        "--seeder-prepare-wait", type=int, default=ota.DEFAULT_SEEDER_PREPARE_WAIT_SECONDS,
+        help="maximum seconds for motatool host compression before opening the device link",
+    )
+    parser.add_argument(
+        "--seeder-start-wait", type=int, default=5,
+        help="seconds to wait for the device COUNT acknowledgement after host compression",
+    )
     parser.add_argument(
         "--reboot-wait",
         type=int,
@@ -2589,7 +2599,7 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     for name in (
         "controller_baud", "source_baud", "reply_timeout", "discovery_timeout",
         "discovery_interval", "poll_seconds", "transfer_timeout_minutes",
-        "seeder_start_wait", "reboot_wait",
+        "seeder_prepare_wait", "seeder_start_wait", "reboot_wait",
     ):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")

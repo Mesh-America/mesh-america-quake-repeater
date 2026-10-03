@@ -774,6 +774,20 @@ verbose device log contains its `COUNT` acknowledgement; an immediate device
 `ERR` or a missing acknowledgement fails during startup instead of surfacing
 later as a catalog timeout.
 
+Newer `motatool` builds prepare raw-DEFLATE blocks with Zopfli before opening
+the source link. This host-only work has a separate 30-minute preparation
+limit (`--seeder-prepare-wait SECONDS`) and reports progress while waiting.
+The five-second device acknowledgement timer (`--seeder-start-wait SECONDS`)
+starts after the final `compressed N/N blocks` message, not when compression
+starts. Neither compression progress nor a host "serving" message proves
+device readiness: the runner still requires the device's `COUNT` reply.
+Older motatool builds without a preparation phase keep the original device
+startup timeout. Process exits and device errors still fail immediately.
+Preparation happens after TempRadio is armed, so leave enough lease time for
+both compression and transfer, especially on a slow host. The suggested
+TempRadio budget includes the preparation limit; it remains a warning, not a
+hard requirement to select that entire worst-case budget.
+
 ```bash
 ./tools/lora_ota/lora_ota.sh ./release.mota "Remote Target" \
   --controller-serial /dev/ttyACM0 \
@@ -905,7 +919,8 @@ the destination.
    target, far-to-near relays, and source. A separate controller is moved and
    read back through Binary; a shared Full Companion instead schedules its
    bounded local override while Binary remains the transport. The runner
-   rejects a TempRadio window that cannot cover setup, seeder startup,
+   rejects TempRadio windows under 20 minutes and warns when the selected
+   window does not cover worst-case setup, seeder preparation and startup,
    discovery, the transfer timeout, final polling, and install checks.
 7. Start `motatool serve`, discover the exact eight-hex manifest ID, request
    `ota pull <id> flash`, and poll until that same ID reports ready. A seeder
