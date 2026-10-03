@@ -89,7 +89,7 @@ for target in "${!PIO_ENV_PLATFORM_BY_NAME[@]}"; do
     full_only_count=$((full_only_count + 1))
   fi
 done
-[ "$full_only_count" -eq 129 ] || fail "expected 129 same-partition FULL-only targets, found $full_only_count"
+[ "$full_only_count" -eq 147 ] || fail "expected 147 same-partition FULL-only targets, found $full_only_count"
 
 for target in heltec_rc32_repeater Station_G2_repeater_observer_mqtt \
     Heltec_v3_repeater heltec_v4_r8_repeater \
@@ -228,7 +228,7 @@ done
   }
   build_firmware heltec_rc32_repeater >/dev/null
   [ "$observed_full" = 1 ] || fail "audited bulk target did not promote to FULL"
-  [[ "$observed_filename" == heltec_rc32_repeater-full-logging-ota-vtest-* ]] \
+  [[ "$observed_filename" == heltec_rc32_repeater-full-usb-wifi-ota-vtest-* ]] \
     || fail "FULL-only bulk target lost its exact identity"
 )
 (

@@ -99,6 +99,93 @@ TEST(MQTTPayloadBuilder, StatusOmissionSentinelsRemainOmitted) {
   EXPECT_FALSE(parsed["repeat"].is<JsonVariant>());
 }
 
+TEST(MQTTPayloadBuilder, StatusIncludesAllConnectionHealthFields) {
+  JsonDocument scratch;
+  char buffer[1024];
+  MQTTConnHealth health;
+  health.slots_up = 2;
+  health.slots_total = 3;
+  health.worst_outage_secs = 18432;
+  health.heap_largest = 16116;
+  health.connect_failures = 57;
+  health.slots_breaker = 1;
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health), 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  EXPECT_EQ(2, stats["mqtt_slots_up"].as<int>());
+  EXPECT_EQ(3, stats["mqtt_slots_total"].as<int>());
+  EXPECT_EQ(18432, stats["mqtt_outage_secs"].as<int>());
+  EXPECT_EQ(16116, stats["heap_largest"].as<int>());
+  EXPECT_EQ(57, stats["mqtt_connect_failures"].as<int>());
+  EXPECT_EQ(1, stats["mqtt_slots_breaker"].as<int>());
+}
+
+TEST(MQTTPayloadBuilder, HealthyStatusOmitsOutageAndZeroFailureKeys) {
+  JsonDocument scratch;
+  char buffer[1024];
+  MQTTConnHealth health;
+  health.slots_up = 3;
+  health.slots_total = 3;
+  health.heap_largest = 54260;
+  health.connect_failures = 0;
+  health.slots_breaker = 0;
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health), 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonObject stats = parsed["stats"].as<JsonObject>();
+  EXPECT_EQ(3, stats["mqtt_slots_up"].as<int>());
+  EXPECT_FALSE(stats["mqtt_outage_secs"].is<JsonVariant>());
+  EXPECT_FALSE(stats["mqtt_connect_failures"].is<JsonVariant>());
+  EXPECT_FALSE(stats["mqtt_slots_breaker"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, FailedStartsAloneCreateHealthStats) {
+  JsonDocument scratch;
+  char buffer[1024];
+  MQTTConnHealth health;
+  health.connect_failures = 1;
+  ASSERT_GT(MQTTPayloadBuilder::buildStatusMessage(
+      scratch, "node", "id", "model", "firmware", "radio", "client", "online",
+      kTimestamp, buffer, sizeof(buffer), -1, -1, -1, -1, -999,
+      -1, -1, -1, -1, -1, -1, nullptr, health), 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_EQ(1, parsed["stats"]["mqtt_connect_failures"].as<int>());
+  EXPECT_FALSE(parsed["stats"]["mqtt_slots_up"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, WorstCaseStatusWithHealthFitsProductionCeiling) {
+  // Actual bridge field maxima, including legal quote characters doubled by JSON.
+  const std::string origin(31, '"'), origin_id(64, 'A'), model(63, 'M');
+  const std::string firmware(63, 'F'), client(63, 'C');
+  JsonDocument scratch;
+  char buffer[1024];
+  MQTTConnHealth health;
+  health.slots_up = 0;
+  health.slots_total = 5;
+  health.worst_outage_secs = 4294967;
+  health.heap_largest = 8388608;
+  health.connect_failures = INT32_MAX;
+  health.slots_breaker = 5;
+  const int len = MQTTPayloadBuilder::buildStatusMessage(
+      scratch, origin.c_str(), origin_id.c_str(), model.c_str(), firmware.c_str(),
+      "9999.999999,1000.0,12,8", client.c_str(), "online", kTimestamp,
+      buffer, sizeof(buffer), 4200, 2147483, INT32_MAX, 6, -128,
+      2147483, 2147483, INT32_MAX, 8388608, INT32_MAX, INT32_MAX, "off", health);
+  ASSERT_GT(len, 0);
+  EXPECT_LT(len, 1024 - 32);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_EQ(INT32_MAX, parsed["stats"]["mqtt_connect_failures"].as<int>());
+}
+
 TEST(MQTTPayloadBuilder, StringsAreEscapedAndRoundTrip) {
   const char* origin = "node \"north\"\\rack\nline";
   const char* model = "Heltec\tV3";
@@ -197,6 +284,27 @@ TEST(MQTTPayloadBuilder, RxPacketOmitsUnknownRadioMetrics) {
   EXPECT_FALSE(parsed["SNR"].is<JsonVariant>());
   EXPECT_FALSE(parsed["RSSI"].is<JsonVariant>());
   EXPECT_FALSE(parsed["score"].is<JsonVariant>());
+}
+
+TEST(MQTTPayloadBuilder, RxPacketOmitsOnlyTheUnknownRadioMetric) {
+  JsonDocument scratch;
+  char buffer[2048];
+  ASSERT_GT(MQTTPayloadBuilder::buildPacketMessage(
+      scratch, "node", "id", kTimestamp, "rx", "12:34:56", "18/07/2026",
+      42, 4, "D", 20, "A0B1", std::nanf(""), -93, std::nanf(""), "hash",
+      nullptr, 0, 0, 64, buffer, sizeof(buffer)), 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_FALSE(parsed["SNR"].is<JsonVariant>());
+  EXPECT_STREQ("-93", parsed["RSSI"].as<const char*>());
+  ASSERT_GT(MQTTPayloadBuilder::buildPacketMessage(
+      scratch, "node", "id", kTimestamp, "rx", "12:34:56", "18/07/2026",
+      42, 4, "D", 20, "A0B1", 7.2f, -999, std::nanf(""), "hash",
+      nullptr, 0, 0, 64, buffer, sizeof(buffer)), 0);
+  parsed.clear();
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("7.2", parsed["SNR"].as<const char*>());
+  EXPECT_FALSE(parsed["RSSI"].is<JsonVariant>());
 }
 
 TEST(MQTTPayloadBuilder, RawMessageHasExactContractAndEscapesData) {

@@ -4,6 +4,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// A healthy slot reports sibling outages because a disconnected slot cannot
+// report itself. Defaults omit the fields for existing callers.
+struct MQTTConnHealth {
+  int slots_up = -1;
+  int slots_total = -1;       // enabled and fully configured, connected or not
+  int worst_outage_secs = -1; // no timed outage until the first DISCONNECTED
+  int heap_largest = -1;      // trend sampled at publish time, not per attempt
+  int connect_failures = -1; // failed attempts/starts across all slots since boot
+  int slots_breaker = -1;
+};
+
 // Mesh-independent JSON serialization core for MQTT publication payloads.
 // MQTTMessageBuilder keeps the firmware-facing API and delegates these three
 // deterministic contracts here so they can be exercised by native tests.
@@ -32,7 +43,8 @@ public:
     int internal_heap = -1,
     int packets_sent = -1,
     int packets_received = -1,
-    const char* repeat = nullptr
+    const char* repeat = nullptr,
+    const MQTTConnHealth& conn_health = MQTTConnHealth()
   );
 
   static int buildPacketMessage(

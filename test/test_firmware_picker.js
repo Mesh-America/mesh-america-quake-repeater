@@ -5,7 +5,7 @@ const picker = require("../docs/_javascript/firmware_picker.js");
 
 const bootloaderManifest = require("../docs/_data/bootloader_manifest.json");
 const bootloaderCatalog = picker.buildBootloaderCatalog(bootloaderManifest);
-assert.strictEqual(bootloaderCatalog.profiles.length, 24);
+assert.strictEqual(bootloaderCatalog.profiles.length, 23);
 for (const profile of bootloaderCatalog.profiles) {
   for (const hardware of profile.meshcoreHardware) {
     assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, hardware, "nrf52").id, profile.id);
@@ -16,7 +16,8 @@ for (const profile of bootloaderCatalog.profiles) {
 assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "Heltec_t096", "nrf52").id, "heltec_t096");
 assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "Heltec_t114", "nrf52").id, "heltec_t114");
 assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "Heltec_tower_v2_sdcard", "nrf52").storage, "sd");
-assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "Heltec_tower_v2", "nrf52").storage, "internal");
+assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "Heltec_tower_v2", "nrf52"), null);
+assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "Heltec_tower_v2", "nrf52").reason.includes("one-time local installation"));
 assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "RAK_3401", "nrf52").storage, "adaptive");
 assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "RAK_4631", "nrf52").id, "wiscore_rak4631_auto");
 assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, "ThinkNode_M8", "nrf52"), null);
@@ -34,7 +35,7 @@ for (const hardware of nrf52Hardware) {
   }
   assert.strictEqual(picker.unavailableBootloaderForHardware(bootloaderCatalog, hardware, "esp32"), null);
 }
-assert.strictEqual(mappedNrf52, 39);
+assert.strictEqual(mappedNrf52, 38);
 for (const hardware of nrf52Hardware.filter(h => /^(ikoka_|solarxiao_)/.test(h))) {
   assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, hardware, "nrf52").id, "xiao_nrf52840_ble");
 }
@@ -42,8 +43,8 @@ for (const hardware of ["WioTrackerL1-1W", "WioTrackerL1Eink"]) {
   assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, hardware, "nrf52").id, "wio_tracker_l1");
 }
 assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "GAT562_Mesh_Watch13", "nrf52").reason.includes("vibration motor"));
-assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "wio_wm1110", "nrf52").reason.includes("does not make it XIAO"));
-const nextBootloaderTag = "v0.11.0-OTAFIX2.4.11";
+assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "wio_wm1110", "nrf52").reason.includes("identity and installation route still need qualification"));
+const nextBootloaderTag = "v0.11.0-OTAFIX2.4.12";
 const nextBootloaderRelease = {
   tag_name: nextBootloaderTag, draft: false, prerelease: false,
   html_url: "https://github.com/" + bootloaderManifest.repository + "/releases/tag/" + nextBootloaderTag,
@@ -56,7 +57,7 @@ const nextBootloaderRelease = {
   }),
 };
 const nextBootloaderCatalog = picker.buildBootloaderCatalog(bootloaderManifest, nextBootloaderRelease);
-assert.strictEqual(nextBootloaderCatalog.version, "2.4.11");
+assert.strictEqual(nextBootloaderCatalog.version, "2.4.12");
 assert(picker.bootloaderForHardware(nextBootloaderCatalog, "t1000e", "nrf52").files.uf2.url.includes(nextBootloaderTag));
 const ambiguousBootloader = structuredClone(nextBootloaderRelease);
 ambiguousBootloader.assets.push(ambiguousBootloader.assets.find(a => a.name.startsWith("update-heltec_t096_")));
@@ -1407,6 +1408,83 @@ assert.strictEqual(picker.firmwareProfileLabel({ota: 'lora-receiver', feature: '
   'Full - Receives LoRa OTA');
 assert(picker.firmwareProfileLabel({ota: 'lora-receiver', feature: 'standard', variant: 'w25q16'})
   .includes('External storage board (W25Q16)'));
+
+// New nRF52 releases keep both sensor policies, using verified release-bound
+// controls rather than a publication suffix as evidence of compiled drivers.
+const sensorSource = 'deadbeef' + '0'.repeat(32);
+const sensorFamily = 'v1.17.1.7-halo-keymind-cascade-dev-deadbeef';
+const sensorAssets = [];
+const sensorControls = {familyTag: sensorFamily, profiles: {}};
+for (const role of ['repeater', 'room_server', 'sensor']) {
+  for (const storage of ['', '_w25q16']) {
+    const logical = 'RAK_3401_' + role + '_lora_ota_no_external_sensors' + storage;
+    for (const policy of ['full', 'reduced']) {
+      const publication = logical + '-' + policy;
+      for (const extension of ['zip', 'uf2']) {
+        sensorAssets.push(asset(publication + '-ota-' + sensorFamily + '.' + extension));
+      }
+      sensorControls.profiles[publication] = {
+        platform: 'NRF52_PLATFORM', otaRole: 'lora-receiver', updateMethods: ['lora'],
+        sensorProfile: policy, sensorProfileSource: sensorSource,
+      };
+    }
+  }
+}
+const sensorReleases = [release(sensorFamily, '2026-10-02T00:00:00Z', sensorAssets)];
+const sensorCatalog = picker.buildCatalog(sensorReleases, sensorControls);
+assert.strictEqual(sensorCatalog.profiles.length, 12);
+for (const item of sensorCatalog.profiles) {
+  const policy = item.target.endsWith('-full') ? 'full' : 'reduced';
+  assert.strictEqual(item.sensorProfile, policy);
+  assert.strictEqual(item.chipFamily, 'nrf52');
+  assert.strictEqual(item.ota, 'lora-receiver');
+  assert.strictEqual(item.feature, policy === 'full' ? 'full' : 'standard');
+  assert(!item.variant.includes('-reduced'));
+  if (policy === 'full') assert(!item.variant.includes('no-external-sensors'));
+  const label = picker.firmwareProfileLabel(item);
+  assert(label.startsWith(policy === 'full' ? 'Full supported sensors + LoRa OTA' : 'Reduced sensors + LoRa OTA'));
+  if (item.target.includes('w25q16')) assert(label.includes('W25Q16'));
+  const choices = picker.firmwareProfileChoices(sensorCatalog.profiles, {
+    hardware: item.hardware, role: item.role, mode: item.mode, install: 'zip',
+  });
+  const choice = choices.find(entry => entry.value === picker.firmwareProfileValue(item));
+  assert(choice, item.target);
+  const selected = sensorCatalog.profiles.filter(profile => picker.profileMatchesFacets(profile,
+    {...choice.filters, hardware: item.hardware, role: item.role, mode: item.mode}));
+  assert.deepStrictEqual(selected.map(profile => profile.target), [item.target]);
+  assert.deepStrictEqual(item.installKinds, ['zip', 'uf2']);
+  const steps = picker.installSteps(item, 'zip');
+  assert(steps.some(step => step.includes(policy === 'full' ? 'complete sensor drivers' : 'Omits selected optional')));
+  if (policy === 'full') assert(!steps.some(step => step.includes('compact profile omits')));
+}
+for (const change of [{sensorProfileSource: 'bad'}, {sensorProfileSource: 'f'.repeat(40)},
+                      {platform: 'ESP32_PLATFORM'}, {updateMethods: []}, {otaRole: 'none'}]) {
+  const changedControls = structuredClone(sensorControls);
+  Object.values(changedControls.profiles).forEach(info => Object.assign(info, change));
+  assert(picker.buildCatalog(sensorReleases, changedControls).profiles.every(item => !item.sensorProfile));
+}
+assert(picker.buildCatalog(sensorReleases).profiles.every(item => !item.sensorProfile));
+assert(picker.buildCatalog(sensorReleases, {...sensorControls, familyTag: 'v0.0.0'}).profiles
+  .every(item => !item.sensorProfile));
+for (const length of [7, 9, 40]) {
+  const hash = sensorSource.slice(0, length);
+  const tag = sensorFamily.replace(/-deadbeef$/, '-' + hash);
+  const files = sensorAssets.map(file => asset(file.name.replace(/-deadbeef\.(zip|uf2)$/, '-' + hash + '.$1')));
+  const metadata = {...sensorControls, familyTag: tag};
+  const profiles = picker.buildCatalog([release(tag, '2026-10-02T00:00:00Z', files)], metadata).profiles;
+  assert.strictEqual(profiles.length, 12, 'Git abbreviation length ' + length);
+  assert(profiles.every(item => item.sensorProfile), 'Git abbreviation length ' + length);
+  const wrong = hash.slice(0, -1) + (hash.endsWith('f') ? '1' : 'f');
+  const badFiles = files.map(file => asset(file.name.replace('-' + hash + '.', '-' + wrong + '.')));
+  const badProfiles = picker.buildCatalog([release(tag, '2026-10-02T00:00:00Z', badFiles)], metadata).profiles;
+  assert.strictEqual(badProfiles.length, 12);
+  assert(badProfiles.every(item => !item.sensorProfile), 'Mismatched source of length ' + length);
+}
+const mixedSourceFiles = sensorAssets.map(file => asset(file.name.endsWith('.uf2')
+  ? file.name.replace('-deadbeef.uf2', '-deadbeef1.uf2') : file.name));
+assert(picker.buildCatalog([release(sensorFamily, '2026-10-02T00:00:00Z', mixedSourceFiles)], sensorControls)
+  .profiles.every(item => !item.sensorProfile), 'Every file must bind to the exact source');
+console.log('nRF52 full and reduced sensor OTA profile pairs and qualification gating passed');
 
 // A combined profile can be replaced in one click even when its former
 // OTA/feature/variant facets have narrowed the catalog to a different image.

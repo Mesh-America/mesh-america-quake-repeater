@@ -15,6 +15,8 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "mota"))
 from motalib import parse_nrf52_layout
 
+OTAFIX_RELEASE = "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/v0.11.0-OTAFIX2.4.11"
+
 
 def nrf52_lora_details(application):
     """Inspect application bytes, not just an ELF symbol or an OTA CLI stub."""
@@ -31,13 +33,14 @@ def nrf52_lora_details(application):
     notes = ["Use a destination-specific .mota package matching the board, target, and storage layout.",
              "An in-place delta requires the exact firmware currently running as its base.",
              "The package must fit the receiver's staging and apply workspace.",
+             "Check the release's exact-board bootloader manifest; hardware-pending boards are not covered by the normal release.",
              "Artifact inspection verifies compiled support; it does not verify the bootloader installed on a physical device."]
     if layout.auto_store:
         notes.append("One application detects RAK external NOR and chooses QSPI only with the exact matching OTAFIX bootloader; otherwise it uses internal flash where safe.")
         notes.append("External QSPI accepts full images and in-place deltas; internal flash accepts in-place deltas only and needs the retained-RAM OTAFIX profile.")
-        notes.append("The merged RAK OTAFIX bootloader is a local 2.4.8 build; install the exact RAK core package by serial/BLE DFU or SWD. Bootloader self-update is unavailable in this merged profile.")
+        notes.append("OTAFIX 2.4.11 provides normal RAK3401/RAK4631 *_auto bootloaders with standard board identities and internal signed bootloader-update staging. Historical *_AUTO_DFU or dedicated external identities need the documented local identity-matching migration, not a cross-profile LoRa update.")
     elif layout.hybrid_ram:
-        notes.append("Requires OTAFIX 2.4.6 retained-RAM handoff support; a transfer cannot resume after the receiver restarts.")
+        notes.append("Requires the exact-board retained-RAM handoff bootloader profile; a transfer cannot resume after the receiver restarts.")
     elif layout.external_backed:
         notes.append("Requires the matching external-storage hardware, wiring, and storage-aware OTAFIX bootloader.")
     else:
@@ -45,10 +48,9 @@ def nrf52_lora_details(application):
     return {
         "storage": storage,
         "package_types": ["full", "in_place_delta"] if layout.auto_store or layout.external_backed else ["in_place_delta"],
-        "bootloader": ("Merged RAK3401 or RAK4631 OTAFIX bootloader, or the exact legacy storage profile"
+        "bootloader": ("Matching normal RAK3401 or RAK4631 adaptive OTAFIX bootloader, or the exact legacy storage profile"
                        if layout.auto_store else "Matching board/storage OTAFIX bootloader"),
-        "bootloader_release": (None if layout.auto_store else
-                               "https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6"),
+        "bootloader_release": OTAFIX_RELEASE,
         "notes": notes,
     }
 

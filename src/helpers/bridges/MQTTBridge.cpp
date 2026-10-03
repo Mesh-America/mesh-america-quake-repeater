@@ -423,12 +423,21 @@ void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
   if (b->_filtered_packets > 0) {
     replyAppendf(buf, bufsize, &pos, " filt=%lu", b->_filtered_packets);
   }
+  int down = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (MQTTConnectionHealth::isOutageSlot(
+            b->_slots[i].enabled, b->isSlotReady(i), b->_slots[i].connected)) down++;
+  }
+  if (down > 0) replyAppendf(buf, bufsize, &pos, " down=%d", down);
   replyAppendf(buf, bufsize, &pos, " |");
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (!b->_slots[i].enabled || !b->_slots[i].client) continue;
-    replyAppendf(buf, bufsize, &pos, " s%d=%lu/%lu", i + 1,
+    // Preserve existing sN=ok/err parsers; the suffix marks a down slot.
+    replyAppendf(buf, bufsize, &pos, " s%d=%lu/%lu%s", i + 1,
                  b->_slots[i].client->getPublishOk(),
-                 b->_slots[i].client->getPublishErr());
+                 b->_slots[i].client->getPublishErr(),
+                 MQTTConnectionHealth::isOutageSlot(
+                     b->_slots[i].enabled, b->isSlotReady(i), b->_slots[i].connected) ? "!" : "");
   }
 }
 
@@ -632,6 +641,13 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
     replyAppendf(buf, bufsize, &pos, ", no error info");
   }
 
+  // Error detail has priority when a remote reply is clamped.
+  const uint64_t cf = static_cast<uint64_t>(slot.connect_failures) + slot.start_failures;
+  if (cf > 0) {
+    replyAppendf(buf, bufsize, &pos, ", cf:%lu",
+                 static_cast<unsigned long>(MQTTConnectionHealth::clampFailureTotal(cf)));
+  }
+
   // Appended last so it never displaces connection diagnostics. replyAppendf
   // clamps rather than overflows, but a clipped type list is worse than no
   // list: "...,13,14," parses as a real, different allowlist, and this is the
@@ -774,6 +790,7 @@ MQTTBridge::MQTTBridge(const MQTTNodeInfo& node_info, MQTTPrefs *obs,
     _slots[i].port = 1883;
     _slot_reconfigure_pending[i] = false;
     _slot_force_jwt_mint[i] = false;
+    _slot_attempt_pending[i] = false;
     _status_publish_pending[i] = false;
   }
 
@@ -1764,6 +1781,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
 
   slot.client->onConnect([this, index](bool sessionPresent) {
     MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
+    _slot_attempt_pending[index] = false;
     _slots[index].connected = true;
     _slot_force_jwt_mint[index] = false;
     // NOTE: reconnect_backoff / max_backoff_failures are NOT reset here.
@@ -1795,6 +1813,14 @@ bool MQTTBridge::ensureSlotClient(int index) {
   });
   slot.client->onDisconnect([this, index](bool sessionPresent) {
     MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
+    // A deliberate stop clears the flag first. A late disconnect from a
+    // bounced live session must not be mistaken for a failed new attempt.
+    if (MQTTConnectionHealth::disconnectFailedAttempt(
+            _slot_attempt_pending[index], _slots[index].connected)) {
+      _slot_attempt_pending[index] = false;
+      _slots[index].connect_failures =
+          MQTTConnectionHealth::incrementFailures(_slots[index].connect_failures);
+    }
     _slots[index].disconnect_count++;
     if (_slots[index].first_disconnect_time == 0) {
       _slots[index].first_disconnect_time = millis();
@@ -1872,6 +1898,7 @@ void MQTTBridge::releaseSlotAuthToken(int index) {
 void MQTTBridge::destroySlotClients(bool force) {
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     MQTTSlot& slot = _slots[i];
+    _slot_attempt_pending[i] = false;
     if (slot.client != nullptr) {
       if (force) {
         slot.client->forceStop();
@@ -1941,6 +1968,7 @@ bool MQTTBridge::setupSlot(int index) {
   // fields in place before connect() restarts the ESP-IDF client.
   if (slot.initial_connect_done) {
     if (slot.client->connected()) {
+      _slot_attempt_pending[index] = false;
       slot.client->disconnect();
     }
     // Clear TLS verification fields so a stale CA-bundle attach or cert
@@ -2127,7 +2155,15 @@ bool MQTTBridge::setupSlot(int index) {
     }
   }
 
-  slot.client->connect();
+  // A reconfigure can retain a started client. Use reconnect in that case,
+  // and do not claim activation after a rejected start/config transaction.
+  const esp_err_t result = reconnectSlotClient(index);
+  if (result != ESP_OK) {
+    MQTT_DEBUG_PRINTLN("MQTT%d start failed (%s) - will retry", index + 1,
+                      esp_err_to_name(result));
+    slot.last_reconnect_attempt = millis();
+    return false;
+  }
   slot.initial_connect_done = true;
   return true;
 }
@@ -2140,6 +2176,7 @@ void MQTTBridge::teardownSlot(int index, bool force) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[index];
 
+  _slot_attempt_pending[index] = false;
   if (slot.client && (force || slot.client->connected())) {
     if (force) {
       slot.client->forceStop();
@@ -2170,17 +2207,30 @@ void MQTTBridge::teardownSlot(int index, bool force) {
   _slot_force_jwt_mint[index] = false;
 }
 
-void MQTTBridge::reconnectSlotClient(int index) {
-  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return;
+esp_err_t MQTTBridge::reconnectSlotClient(int index) {
+  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return ESP_ERR_INVALID_ARG;
   MQTTSlot& slot = _slots[index];
-  if (slot.client == nullptr) return;
+  if (slot.client == nullptr) return ESP_ERR_INVALID_STATE;
 
-  if (!slot.client->isStarted()) {
+  const bool was_pending = _slot_attempt_pending[index];
+  const bool starting = !slot.client->isStarted();
+  _slot_attempt_pending[index] = true;  // callbacks may run before the call returns
+  esp_err_t result;
+  if (starting) {
     MQTT_DEBUG_PRINTLN("MQTT%d start (client was stopped)", index + 1);
-    slot.client->connect();
-    return;
+    result = slot.client->connect();
+  } else {
+    result = slot.client->reconnect();
   }
-  slot.client->reconnect();
+  if (result != ESP_OK) {
+    if (MQTTConnectionHealth::clearPendingAfterRejectedRequest(starting, was_pending)) {
+      _slot_attempt_pending[index] = false;
+    }
+    if (starting) {
+      slot.start_failures = MQTTConnectionHealth::incrementFailures(slot.start_failures);
+    }
+  }
+  return result;
 }
 
 void MQTTBridge::maintainSlotConnections() {
@@ -2336,13 +2386,11 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
           MQTT_DEBUG_PRINTLN("MQTT%d token renewal: reconnecting with fresh credentials", index + 1);
           if (slot.client->isStarted()) {
             // Retain the esp-mqtt task and its stack across the TLS handshake.
+            _slot_attempt_pending[index] = false;
             slot.client->softDisconnect();
-            slot.client->setCredentials(_jwt_username, slot.auth_token);
-            slot.client->reconnect();
-          } else {
-            slot.client->setCredentials(_jwt_username, slot.auth_token);
-            slot.client->connect();
           }
+          slot.client->setCredentials(_jwt_username, slot.auth_token);
+          reconnectSlotClient(index);
           reconnect_attempted = true;
           _last_slot_reconnect_ms = now_millis;
           MQTT_DEBUG_PRINTLN("MQTT%d int_heap=%d at token renewal reconnect", index + 1,
@@ -2748,7 +2796,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
-    repeatStatus()
+    repeatStatus(), collectConnHealth()
   );
 
   if (len > 0) {
@@ -2762,6 +2810,27 @@ void MQTTBridge::publishStatusToSlot(int index) {
       MQTT_DEBUG_PRINTLN("MQTT%d status publish failed", index + 1);
     }
   }
+}
+
+MQTTConnHealth MQTTBridge::collectConnHealth() const {
+  MQTTConnHealth health;
+  MQTTConnectionHealth::Totals totals;
+  const uint32_t now = static_cast<uint32_t>(millis());
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    const MQTTSlot& slot = _slots[i];
+    // Counters survive disabling/reconfiguring a slot and bridge restarts.
+    // Use a wide sum so the exposed counter saturates instead of wrapping.
+    MQTTConnectionHealth::addSlot(totals, slot.enabled, isSlotReady(i), slot.connected,
+        slot.circuit_breaker_tripped, static_cast<uint32_t>(slot.current_outage_started_ms),
+        now, slot.connect_failures, slot.start_failures);
+  }
+  health.slots_up = totals.up;
+  health.slots_total = totals.total;
+  health.slots_breaker = totals.breakers;
+  if (totals.outage_timed) health.worst_outage_secs = static_cast<int>(totals.worst_outage_ms / 1000UL);
+  health.connect_failures = MQTTConnectionHealth::clampFailureTotal(totals.failures);
+  health.heap_largest = static_cast<int>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  return health;
 }
 
 void MQTTBridge::updateCachedConnectionStatus() {
@@ -2986,6 +3055,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
       // Disconnect all slot clients when WiFi drops
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
         if (_slots[i].client && _slots[i].connected) {
+          _slot_attempt_pending[i] = false;
           _slots[i].client->disconnect();
         }
       }
@@ -3684,7 +3754,7 @@ bool MQTTBridge::publishStatus() {
     battery_mv, uptime_secs, errors, _queue_count, noise_floor,
     tx_air_secs, rx_air_secs, recv_errors, internal_heap_free,
     packets_sent, packets_received,
-    repeatStatus()
+    repeatStatus(), collectConnHealth()
   );
 
   if (len > 0) {
@@ -4442,8 +4512,9 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
             } else if (action == MQTTConnectionPolicy::StaleTokenAction::Bounce) {
               MQTT_DEBUG_PRINTLN(
                   "MQTT%d bouncing for the corrected-clock token", i + 1);
+              _slot_attempt_pending[i] = false;
               _slots[i].client->softDisconnect();
-              _slots[i].client->reconnect();
+              reconnectSlotClient(i);
             } else {
               MQTT_DEBUG_PRINTLN(
                   "MQTT%d token re-created without a live-session bounce", i + 1);

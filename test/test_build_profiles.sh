@@ -517,6 +517,44 @@ for t1000_env in \
   )
 done
 
+# Every added observer recipe must become the feature base for its exact
+# normal-role Full image, without changing that normal target's mOTA identity.
+# Only same-partition hardware may advertise an automatic observer successor;
+# the four legacy-slot targets must retain their partition-expansion handoff.
+for observer_hardware in \
+    Ebyte_EoRa-S3 Heltec_E213 Heltec_E290 heltec_rc32 \
+    heltec_rc32_without_display Heltec_Wireless_Tracker Heltec_Wireless_Paper \
+    LilyGo_T3S3_sx1276 LilyGo_TETH_Elite_sx1262 meshnology_w12 Xiao_S3; do
+  for observer_role in repeater room_server; do
+    normal_target="${observer_hardware}_${observer_role}"
+    observer_target="${normal_target}_observer_mqtt"
+    if [ "$normal_target" = Ebyte_EoRa-S3_repeater ]; then
+      normal_target=Ebyte_EoRa-S3_Repeater
+    fi
+    is_mqtt_bridge_target "$observer_target" \
+      || fail "$observer_target missing its MQTT feature base"
+    [ "${PIO_ENV_OTA_BY_NAME[$observer_target]:-0}" = 1 ] \
+      || fail "$observer_target lost LoRa OTA"
+    [ "$(get_exact_identity_full_pio_env "$normal_target")" = "$observer_target" ] \
+      || fail "$normal_target Full did not use its exact observer recipe"
+    case "$observer_hardware" in
+      Ebyte_EoRa-S3|LilyGo_T3S3_sx1276)
+        is_esp32_partition_migration_full_target "$normal_target" \
+          || fail "$normal_target lost its partition-migration boundary"
+        if get_exact_identity_full_migration_target "$observer_target" >/dev/null; then
+          fail "$observer_target bypassed partition expansion with an OTA alias"
+        fi
+        ;;
+      *)
+        is_esp32_full_only_bulk_target "$observer_target" \
+          || fail "$observer_target lost same-partition Full policy"
+        [ "$(get_exact_identity_full_migration_target "$observer_target")" = "$normal_target" ] \
+          || fail "$observer_target lost its exact same-partition successor"
+        ;;
+    esac
+  done
+done
+
 # Arduino-ESP32 3.x OTA-only targets that have always declared larger A/B
 # slots must be checked against their real partition table, not the legacy
 # 1.25 MiB portable ceiling. Keep that exception OTA-only so ordinary RC32
@@ -928,42 +966,40 @@ BUILD_PROFILE_EXPLICIT=0
 RESOLVED_BUILD_TARGETS=(nrf_repeater)
 configure_effective_build_profile build-firmware >/dev/null
 [ "${RESOLVED_BUILD_TARGETS[0]}" = \
-  nrf_repeater_lora_ota_no_external_sensors ] \
-  || fail "nRF52 complete OTA pass did not select the OTA identity"
-[ "$AUTO_COMPLETE_FIRST_PASS" = 1 ] \
-  || fail "nRF52 complete first pass was not scheduled"
-[ "$AUTO_PUBLISH_REDUCED_SECOND_PASS" = 1 ] \
-  || fail "internal-flash nRF52 reduced second artifact was not scheduled"
+  nrf_repeater ] || fail "nRF52 profile configuration changed the selected target"
+is_nrf52_sensor_ota_pair_target nrf_repeater \
+  || fail "nRF52 repeater did not enter the required two-profile policy"
+[ "$AUTO_COMPLETE_FIRST_PASS" = 0 ] \
+  || fail "nRF52 retained the permissive size-fallback policy"
 
 BUILD_PROFILE_OVERRIDE=auto
 BUILD_PROFILE_EXPLICIT=0
 RESOLVED_BUILD_TARGETS=(nrf_room_server)
 configure_effective_build_profile build-firmware >/dev/null
 [ "${RESOLVED_BUILD_TARGETS[0]}" = \
-  nrf_room_server_lora_ota_no_external_sensors ] \
-  || fail "nRF52 room-server complete OTA pass did not select the OTA identity"
-[ "$AUTO_COMPLETE_FIRST_PASS" = 1 ] \
-  || fail "nRF52 room-server complete first pass was not scheduled"
-[ "$AUTO_PUBLISH_REDUCED_SECOND_PASS" = 1 ] \
-  || fail "internal-flash nRF52 room-server reduced second artifact was not scheduled"
+  nrf_room_server ] || fail "nRF52 room profile configuration changed the selected target"
+is_nrf52_sensor_ota_pair_target nrf_room_server \
+  || fail "nRF52 room server did not enter the required two-profile policy"
+[ "$AUTO_COMPLETE_FIRST_PASS" = 0 ] \
+  || fail "nRF52 room server retained the permissive size-fallback policy"
 
 BUILD_PROFILE_OVERRIDE=auto
 BUILD_PROFILE_EXPLICIT=0
 RESOLVED_BUILD_TARGETS=(nrf_qspi_repeater)
 configure_effective_build_profile build-firmware >/dev/null
-[ "$AUTO_COMPLETE_FIRST_PASS" = 1 ] \
-  || fail "external-storage nRF52 complete first pass was not scheduled"
-[ "$AUTO_PUBLISH_REDUCED_SECOND_PASS" = 0 ] \
-  || fail "external-storage nRF52 incorrectly scheduled a redundant artifact"
+is_nrf52_sensor_ota_pair_target nrf_qspi_repeater \
+  || fail "external-storage nRF52 repeater did not enter the pair policy"
+[ "$AUTO_COMPLETE_FIRST_PASS" = 0 ] \
+  || fail "external-storage nRF52 retained the old fallback policy"
 
 BUILD_PROFILE_OVERRIDE=auto
 BUILD_PROFILE_EXPLICIT=0
 RESOLVED_BUILD_TARGETS=(nrf_qspi_room_server)
 configure_effective_build_profile build-firmware >/dev/null
-[ "$AUTO_COMPLETE_FIRST_PASS" = 1 ] \
-  || fail "external-storage nRF52 room-server complete first pass was not scheduled"
-[ "$AUTO_PUBLISH_REDUCED_SECOND_PASS" = 0 ] \
-  || fail "external-storage nRF52 room-server incorrectly scheduled a redundant artifact"
+is_nrf52_sensor_ota_pair_target nrf_qspi_room_server \
+  || fail "external-storage nRF52 room server did not enter the pair policy"
+[ "$AUTO_COMPLETE_FIRST_PASS" = 0 ] \
+  || fail "external-storage nRF52 room server retained the old fallback policy"
 
 BUILD_PROFILE_OVERRIDE=auto
 BUILD_PROFILE_EXPLICIT=0
@@ -972,9 +1008,9 @@ configure_effective_build_profile build-firmware >/dev/null
 [ "$BUILD_PROFILE_EFFECTIVE" = auto ] \
   || fail "nRF52 sensor did not retain its ordinary auto profile"
 [ "$AUTO_COMPLETE_FIRST_PASS" = 0 ] \
-  || fail "nRF52 sensor incorrectly scheduled OTA profile passes"
-[ "$AUTO_PUBLISH_REDUCED_SECOND_PASS" = 0 ] \
-  || fail "nRF52 sensor incorrectly scheduled two artifacts"
+  || fail "nRF52 sensor retained the permissive size-fallback policy"
+is_nrf52_sensor_ota_pair_target nrf_sensor \
+  || fail "nRF52 sensor was excluded from the required pair policy"
 
 # Ordinary USB-loggable roles compile their historical logging profile into
 # the canonical artifact. LoRa OTA repeaters, KISS, and BLE keep their distinct
@@ -1105,6 +1141,7 @@ fi
 # Option 3 must not publish an oversized standard ESP32 image, but its expected
 # portable-slot status is satisfied by the mandatory expanded FULL pass.
 saved_has_esp32_full_profile=$(declare -f has_esp32_full_profile)
+saved_build_firmware=$(declare -f build_firmware)
 has_esp32_full_profile() { [ "$1" = esp32_portable_overflow ]; }
 build_firmware() { return 42; }
 saved_output_dir=$OUTPUT_DIR
@@ -1124,6 +1161,7 @@ fi
 OUTPUT_DIR=$saved_output_dir
 unset DEFER_ESP32_PORTABLE_OVERFLOW_TO_FULL
 eval "$saved_has_esp32_full_profile"
+eval "$saved_build_firmware"
 
 reduced_full_alias=Tbeam_SX1262_repeater_lora_ota_no_external_sensors
 [ "$(get_esp32_full_profile_target "$reduced_full_alias")" = Tbeam_SX1262_repeater ] \
@@ -1132,8 +1170,9 @@ has_esp32_full_profile "$reduced_full_alias" \
   || fail "reduced ESP32 LoRa OTA alias lost its expanded FULL replacement"
 
 calls=()
-build_firmware() {
-  calls+=("$1:$BUILD_PROFILE_EFFECTIVE:$SKIP_DECLARED_REDUCTIONS:$FIRMWARE_OUTPUT_ENV_NAME")
+saved_build_firmware_one_profile=$(declare -f build_firmware_one_profile)
+build_firmware_one_profile() {
+  calls+=("$1:$BUILD_PROFILE_EFFECTIVE:$SKIP_DECLARED_REDUCTIONS:$NRF52_OTA_SENSOR_PROFILE")
   if [ "${#calls[@]}" -eq 1 ]; then
     return 42
   fi
@@ -1146,15 +1185,17 @@ AUTO_REDUCED_FALLBACK_TARGET=nrf_repeater_lora_ota_no_external_sensors
 BUILD_PROFILE_EFFECTIVE=auto
 FIRMWARE_FILENAME_INFIX=""
 SKIP_DECLARED_REDUCTIONS=0
-run_auto_two_pass_build nrf_repeater_lora_ota_no_external_sensors >/dev/null
+if run_auto_two_pass_build nrf_repeater_lora_ota_no_external_sensors >/dev/null 2>&1; then
+  fail "failed full nRF52 option was hidden by a successful reduced fallback"
+fi
 
 [ "${#calls[@]}" -eq 2 ] || fail "size overflow did not run exactly two passes"
 [[ "${calls[0]}" == *:auto:1:* ]] || fail "pass 1 unexpectedly applied reductions"
-[[ "${calls[1]}" == *:standard:0:* ]] || fail "pass 2 did not apply standard reductions"
+[[ "${calls[1]}" == *:auto:0:reduced ]] || fail "pass 2 did not apply reduced sensor policy"
 
 calls=()
-build_firmware() {
-  calls+=("$1:$BUILD_PROFILE_EFFECTIVE:$SKIP_DECLARED_REDUCTIONS:$FIRMWARE_OUTPUT_ENV_NAME")
+build_firmware_one_profile() {
+  calls+=("$1:$BUILD_PROFILE_EFFECTIVE:$SKIP_DECLARED_REDUCTIONS:$NRF52_OTA_SENSOR_PROFILE")
   return 0
 }
 
@@ -1167,10 +1208,11 @@ run_auto_two_pass_build nrf_repeater_lora_ota_no_external_sensors >/dev/null
 
 [ "${#calls[@]}" -eq 2 ] \
   || fail "successful internal-flash nRF52 build did not publish both artifacts"
-[[ "${calls[0]}" == *:auto:1:nrf_repeater ]] \
-  || fail "complete nRF52 artifact did not use the feature-rich output name"
-[[ "${calls[1]}" == *:standard:0: ]] \
-  || fail "reduced nRF52 artifact did not use the reduced target name"
+[[ "${calls[0]}" == *:auto:1:full ]] \
+  || fail "complete nRF52 artifact did not declare the full sensor policy"
+[[ "${calls[1]}" == *:auto:0:reduced ]] \
+  || fail "reduced nRF52 artifact did not declare the reduced sensor policy"
+eval "$saved_build_firmware_one_profile"
 
 is_rak_i2c_voltage_monitor_ota_target \
   RAK_3401_repeater_lora_ota_no_external_sensors \

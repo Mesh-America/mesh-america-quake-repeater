@@ -451,6 +451,7 @@ public:
     _time_sync_needed = true;
     _time_sync_applied = false;
     _last_valid_time_sync = 0;
+    resetTimeSyncRequestState();
   }
   void begin() override { }
   void stop() override { }
@@ -1200,14 +1201,17 @@ void EnvironmentSensorManager::initBasicGPS() {
     MESH_DEBUG_PRINTLN("No GPS wake/reset pin found for this board. Continuing on...");
   #endif
 
-  // Give GPS a moment to power up and send data
-  delay(1000);
-
-  // We'll consider GPS detected if we see any data on Serial1
+  // Cold-start receivers can take several seconds to emit their first NMEA
+  // data. Check immediately, then wait at most five seconds; an already awake
+  // receiver and the explicit bypass need no extra startup delay.
 #ifdef ENV_SKIP_GPS_DETECT
   gps_detected = true;
 #else
   gps_detected = (Serial1.available() > 0);
+  for (uint8_t attempt = 0; attempt < 20 && !gps_detected; attempt++) {
+    delay(250);
+    gps_detected = (Serial1.available() > 0);
+  }
 #endif
 
   if (gps_detected) {

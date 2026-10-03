@@ -11,6 +11,8 @@
 #include <Timezone.h>
 #include "helpers/JWTHelper.h"
 #include "helpers/MQTTConnectionPolicy.h"
+#include "helpers/MQTTConnectionHealth.h"
+#include "helpers/MQTTPayloadBuilder.h"
 #include "helpers/MQTTPacketFilter.h"
 #include "helpers/MQTTPresets.h"
 #include "helpers/MQTTLifecycle.h"
@@ -144,11 +146,13 @@ private:
     int last_sock_errno;            // socket errno
     unsigned long last_error_time;  // millis() of last error
     uint32_t disconnect_count;      // Number of disconnect callbacks since boot
+    uint32_t connect_failures;      // attempts ending before onConnect
+    uint32_t start_failures;        // rejected starts (not rejected reconnects)
     unsigned long first_disconnect_time; // millis() of first disconnect after boot
 
     // Current-outage timer (used by AlertReporter to fire faults after a sustained
     // outage). Reset to 0 on each successful connect, set to millis() on first
-    // disconnect-after-connect. first_disconnect_time is intentionally separate
+    // DISCONNECTED (including a failed initial attempt). first_disconnect_time is intentionally separate
     // so the existing 'mqttN.diag' "first_disc" semantics don't change.
     unsigned long current_outage_started_ms;
   };
@@ -250,6 +254,10 @@ private:
   // callback sets this byte and the bridge task consumes it.
   volatile bool _slot_force_jwt_mint[RUNTIME_MQTT_SLOTS];
 
+  // Set before starting/reconnecting, cleared by connect/failed-attempt/stop.
+  // Must be set before the SDK call because its event task can callback at once.
+  volatile bool _slot_attempt_pending[RUNTIME_MQTT_SLOTS];
+
   // Pending on-connect status publish: set from the onConnect callback (which
   // runs on the esp-mqtt event task, NOT this bridge task), consumed by the MQTT
   // task (Core 0). publishStatusToSlot() touches the shared status doc/buffer/
@@ -337,9 +345,10 @@ private:
   // internal heap. On non-PSRAM: inline in the class object so the allocation doesn't
   // interleave with large TLS buffers at startup.
   static const size_t PUBLISH_JSON_BUFFER_SIZE = 2048;
-  // Status keeps its own smaller ceiling: raising it would change which oversized
-  // status documents get published instead of dropped.
-  static const size_t STATUS_JSON_BUFFER_SIZE = 768;
+  // Actual field maxima (including JSON-escaped node names) plus slot health
+  // exceed 768. Reuse the existing 2048-byte scratch; only the PSRAM-failure
+  // stack fallback grows by 256 bytes.
+  static const size_t STATUS_JSON_BUFFER_SIZE = 1024;
   static_assert(STATUS_JSON_BUFFER_SIZE <= PUBLISH_JSON_BUFFER_SIZE,
                 "status payloads serialize into the shared publish buffer");
   #if defined(BOARD_HAS_PSRAM)
@@ -484,7 +493,7 @@ private:
   int activatedSlotCount() const;
   bool canActivateSlot(int index) const;
   void teardownSlot(int index, bool force = false);
-  void reconnectSlotClient(int index);
+  esp_err_t reconnectSlotClient(int index);
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot
@@ -495,6 +504,7 @@ private:
   bool publishToSlot(int index, const char* topic, const char* payload, size_t payload_len, bool retained = false, uint8_t qos = 0);
   bool publishToAllSlots(const char* topic, const char* payload, size_t payload_len, bool retained = false, uint8_t qos = 0);
   void publishStatusToSlot(int index);
+  MQTTConnHealth collectConnHealth() const;
   void updateCachedConnectionStatus();
 
   void processPacketQueue();

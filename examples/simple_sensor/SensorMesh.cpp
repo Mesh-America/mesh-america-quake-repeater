@@ -63,6 +63,12 @@ static uint32_t nextRadioApplyRetryDelay(uint8_t& failure_count) {
   #define SENSOR_READ_INTERVAL_SECS  60
 #endif
 
+// Minimum interval between telemetry-triggered time acquisitions, not the
+// persisted gps_interval which controls position update cadence.
+#ifndef GPS_READ_INTERVAL_SECS
+  #define GPS_READ_INTERVAL_SECS 60
+#endif
+
 /* ------------------------------ Code -------------------------------- */
 
 #define FIRMWARE_VER_LEVEL       1
@@ -212,10 +218,8 @@ uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp,
       }
     }
     // query other sensors -- target specific
-    if ((telemetry_permissions & TELEM_PERM_LOCATION)
-        && sensors.getLocationProvider() != nullptr
-        && sensors.getLocationProvider()->getGPSPowerSaving()) {
-      sensors.getLocationProvider()->syncTime();
+    if (telemetry_permissions & TELEM_PERM_LOCATION) {
+      sensors.requestGpsTelemetryTimeSync(GPS_READ_INTERVAL_SECS);
     }
     sensors.querySensors(telemetry_permissions, telemetry);
     // TODO: let requester know permissions they have:  telemetry.addPresence(TELEM_CHANNEL_SELF, perms);

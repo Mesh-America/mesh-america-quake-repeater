@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ./build-iotthinks.sh
-export FIRMWARE_VERSION="PowerSaving17.1.2"
+export FIRMWARE_VERSION="PowerSaving17.1.5"
 
 ############# Repeaters #############
 # Commonly-used boards
-## ESP32 - 21 boards
+## ESP32 - 22 boards
 ./build.sh build-firmware \
 Heltec_ct62_repeater \
 Heltec_E290_repeater \
@@ -22,6 +22,7 @@ LilyGo_TDeck_repeater \
 Station_G2_repeater \
 T_Beam_S3_Supreme_SX1262_repeater \
 Tbeam_SX1262_repeater \
+ThinkNode_M2_Repeater \
 ThinkNode_M5_Repeater \
 Xiao_C3_repeater \
 Xiao_C6_repeater_ \
@@ -91,6 +92,7 @@ Heltec_t096_companion_radio_ble_femoff \
 Heltec_t1_companion_radio_ble \
 Heltec_t114_companion_radio_ble \
 MKE_s3_companion_radio_ble \
+Mesh_pocket_companion_radio_ble \
 LilyGo_T-Echo_Card_companion_radio_ble \
 LilyGo_T-Echo_companion_radio_ble \
 LilyGo_T-Echo-Lite_companion_radio_ble \
@@ -146,6 +148,9 @@ heltec_v4_companion_radio_usb_ps_femoff \
 heltec_v4_companion_radio_usb_ps_femon \
 heltec_tracker_v2_companion_radio_usb_femoff \
 heltec_tracker_v2_companion_radio_usb_femon \
+Heltec_v3_companion_radio_usb \
+Mesh_pocket_companion_radio_usb \
+ThinkNode_M2_companion_radio_usb \
 MKE_s3_companion_radio_usb \
 LilyGo_TBeam_1W_companion_radio_usb \
 LilyGo_TDeck_companion_radio_usb \
@@ -156,11 +161,16 @@ Xiao_S3_WIO_companion_radio_usb
 
 ############# Sensors #############
 ./build.sh build-firmware \
+Heltec_t096_sensor \
 Heltec_t114_sensor \
 t1000e_sensor
 
+############# Bridge #############
+./build.sh build-firmware \
+Xiao_nrf52_repeater_bridge_rs232
+
 ############# Sample builds #############
-# 27 boards
+# 28 boards
 ./build.sh build-firmware \
 Heltec_t096_companion_radio_ble_femon \
 Heltec_t096_companion_radio_ble_femoff \
@@ -175,6 +185,7 @@ heltec_v4_3_companion_radio_ble_ps_femoff \
 heltec_v4_companion_radio_ble_ps_femon \
 heltec_v4_repeater \
 heltec_v4_r8_companion_radio_ble_ps \
+ProMicro_repeater \
 RAK_3401_companion_radio_ble \
 RAK_3401_repeater \
 RAK_4631_companion_radio_ble \
@@ -189,6 +200,17 @@ Xiao_C6_companion_radio_ble_ \
 Xiao_C6_repeater_ \
 Xiao_nrf52_companion_radio_ble \
 Xiao_nrf52_repeater
+
+# Upstream application targets pending feedback. These are not evidence of
+# factory bootloader compatibility; OTAFIX qualification remains independent.
+./build.sh build-firmware \
+wio_wm1110_repeater \
+wio_wm1110_room_server \
+wio_wm1110_companion_radio_ble
+
+./build.sh build-firmware \
+meshnology_w12_repeater \
+meshnology_w12_companion_radio_ble
 
 # Heltec v4 USB power-saving variants
 ./build.sh build-firmware \

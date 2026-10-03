@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from package_esp32_partition_migration import BOARDS
+from package_cascade_release import nrf52_sensor_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,6 +82,12 @@ def runtime_metadata(manifest, mqtt, release_source=None):
     else:
         ota_role = 'none'
     result = {'otaRole': ota_role}
+    sensor_profile = nrf52_sensor_profile(manifest)
+    if sensor_profile:
+        source = manifest.get('source_commit', release_source)
+        if not isinstance(source, str) or not re.fullmatch(r'[0-9a-f]{40}', source):
+            raise ValueError('Sensor profiles require an exact source commit: ' + manifest['target'])
+        result.update(sensorProfile=sensor_profile, sensorProfileSource=source)
     if {'logging.usb.packets', 'logging.usb.control'} <= packaged:
         result['loggingModes'] = ['none', 'usb', 'wifi', 'both'] if mqtt else ['none', 'usb']
         result['loggingControl'] = 'logging.output' if mqtt else 'usb.logging'

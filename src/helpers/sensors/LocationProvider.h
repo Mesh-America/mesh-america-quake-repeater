@@ -3,6 +3,7 @@
 #include "Mesh.h"
 #include <stddef.h>
 #include <stdio.h>
+#include <stdint.h>
 
 #ifndef GPS_POWERSAVING_ON_DURATION_SECS
 #define GPS_POWERSAVING_ON_DURATION_SECS (10UL * 60UL)
@@ -22,12 +23,49 @@ protected:
     unsigned long _gps_on_duration_secs = GPS_POWERSAVING_ON_DURATION_SECS;
     unsigned long _gps_off_duration_secs = GPS_POWERSAVING_OFF_DURATION_SECS;
     unsigned long _last_valid_time_sync = 0;
+    uint32_t _last_time_sync_request_ms = 0;
+    uint32_t _last_time_sync_applied_ms = 0;
+    bool _time_sync_request_seen = false;
+    bool _time_sync_applied_seen = false;
 
-    void markTimeSyncApplied() { _time_sync_applied = true; }
+    void markTimeSyncApplied() {
+        _time_sync_applied = true;
+        _last_time_sync_applied_ms = static_cast<uint32_t>(millis());
+        _time_sync_applied_seen = true;
+    }
+    void resetTimeSyncRequestState() {
+        _last_time_sync_request_ms = 0;
+        _last_time_sync_applied_ms = 0;
+        _time_sync_request_seen = false;
+        _time_sync_applied_seen = false;
+    }
 
 public:
     virtual void syncTime() { _time_sync_needed = true; }
     virtual bool waitingTimeSync() { return _time_sync_needed; }
+    // Telemetry requests share an in-progress acquisition and rate-limit new
+    // ones using monotonic time, not an RTC which GPS/manual sync may correct.
+    // Direct syncTime() callers (startup, CLI, power-cycle policy) remain force
+    // requests. The argument is seconds, separately from position gps_interval.
+    bool requestTimeSync(uint64_t min_interval_secs) {
+        if (waitingTimeSync()) return false;
+        // Keep the interval below half the 32-bit millis range. Clamp before
+        // multiplying so even unusually large build overrides cannot overflow.
+        const uint32_t max_interval_ms = 0x7FFFFFFFUL;
+        const uint32_t interval_ms = min_interval_secs > max_interval_ms / 1000UL
+            ? max_interval_ms : static_cast<uint32_t>(min_interval_secs) * 1000UL;
+        const uint32_t now = static_cast<uint32_t>(millis());
+        if ((_time_sync_applied_seen
+             && static_cast<uint32_t>(now - _last_time_sync_applied_ms) < interval_ms)
+            || (_time_sync_request_seen
+                && static_cast<uint32_t>(now - _last_time_sync_request_ms) < interval_ms)) {
+            return false;
+        }
+        _last_time_sync_request_ms = now;
+        _time_sync_request_seen = true;
+        syncTime();
+        return true;
+    }
     // Edge-triggered notification for consumers that need to know a GPS time
     // was actually written, rather than merely seeing a valid location fix.
     bool consumeTimeSyncApplied() {

@@ -1,5 +1,7 @@
 """All OTA names survive front coding; original Companion API stays unchanged."""
 import re
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,7 +37,8 @@ class OtaTargetNameTest(unittest.TestCase):
                     (ROOT / "src/helpers/ota/tinf/tinf.h").read_text(), encoding="utf-8")
             decoder = Path(temp_dir) / "tinf.o"
             subprocess.run([
-                "cc", "-Os", "-DMESHCORE_TINF_IMPLEMENTATION=1", "-c",
+                os.environ.get("CC") or shutil.which("cc") or "gcc",
+                "-Os", "-DMESHCORE_TINF_IMPLEMENTATION=1", "-c",
                 str(ROOT / "src/helpers/ota/tinf/tinflate.c"), "-o", str(decoder),
             ], check=True)
             subprocess.run([

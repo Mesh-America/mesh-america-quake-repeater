@@ -47,6 +47,58 @@ class PickerControlsTests(unittest.TestCase):
         manifest['ota_update_methods'] = ['lora']
         self.assertEqual(GENERATOR.runtime_metadata(manifest, False)['otaRole'], 'lora-receiver')
 
+    def test_sensor_profile_is_qualified_nrf52_receiver_metadata_not_a_filename(self):
+        source = 'a' * 40
+        manifest = dict(target='RAK_3401_repeater_lora_ota_no_external_sensors',
+                        platform='NRF52_PLATFORM', verified=True, ota_update_verified=True,
+                        capabilities=['ota.update.lora', 'sensor.profile.full'],
+                        ota_update_methods=['lora'], verification=[
+                            dict(capability='ota.update.lora', present=True, source='linked image')])
+        result = GENERATOR.runtime_metadata(manifest, False, source)
+        self.assertEqual(result['sensorProfile'], 'full')
+        self.assertEqual(result['sensorProfileSource'], source)
+        manifest['capabilities'][-1] = 'sensor.profile.reduced'
+        self.assertEqual(GENERATOR.runtime_metadata(manifest, False, source)['sensorProfile'], 'reduced')
+        for changes in (dict(platform='ESP32_PLATFORM'), dict(target='RAK_3401_companion_radio_full'),
+                        dict(ota_update_verified=False), dict(verification=[]),
+                        dict(verification=[dict(capability='ota.update.lora', present=True, source='filename')])):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'qualified nRF52'):
+                GENERATOR.runtime_metadata({**manifest, **changes}, False, source)
+        with self.assertRaisesRegex(ValueError, 'exact source commit'):
+            GENERATOR.runtime_metadata(manifest, False, 'aaaaaaaa')
+        manifest['capabilities'].append('sensor.profile.full')
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            GENERATOR.runtime_metadata(manifest, False, source)
+
+    def test_generates_independent_controls_for_same_identity_sensor_pair(self):
+        source = 'a' * 40
+        family = 'v1.17.1.7-dev-aaaaaaaa'
+        logical = 'RAK_3401_repeater_lora_ota_no_external_sensors'
+        manifests = []
+        for policy in ('full', 'reduced'):
+            manifests.append(dict(target=logical, artifact_target=logical + '-' + policy + '-ota',
+                platformio_env='sample', platform='NRF52_PLATFORM', verified=True,
+                ota_update_verified=True, capabilities=['sensor.profile.' + policy, 'ota.update.lora'],
+                ota_update_methods=['lora'], verification=[dict(capability='ota.update.lora',
+                    present=True, source='linked image')], files=[logical + '-' + policy + '-ota-' + family + ext
+                    for ext in ('.zip', '.uf2')]))
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            for group in ('companion', 'lora-ota'):
+                (stage / group).mkdir()
+            (stage / 'release-plan.json').write_text(json.dumps(dict(source=source, groups=[
+                dict(key='companion', tag=family), dict(key='lora-ota', tag='lora-ota-' + family)])))
+            (stage / 'companion/TARGET-MANIFEST.json').write_text('[]')
+            (stage / 'lora-ota/TARGET-MANIFEST.json').write_text(json.dumps(manifests))
+            controls = GENERATOR.generate(stage, [('env:sample', [('build_flags', [])])])
+        self.assertEqual(set(controls['profiles']), {logical + '-full', logical + '-reduced'})
+        for policy in ('full', 'reduced'):
+            profile = controls['profiles'][logical + '-' + policy]
+            self.assertEqual(profile['sensorProfile'], policy)
+            self.assertEqual(profile['sensorProfileSource'], source)
+            self.assertEqual(profile['otaRole'], 'lora-receiver')
+            self.assertEqual(profile['updateMethods'], ['lora'])
+
     def generate(self, reductions, *, source=None, flags=(), verified=True):
         initial = 'a' * 40
         manifest = dict(target='sample_companion_radio_full', platformio_env='sample',

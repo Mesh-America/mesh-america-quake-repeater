@@ -8,7 +8,7 @@ fail() { echo "test_xiao_qspi_combined: $*" >&2; exit 1; }
 
 # Use the resolved PlatformIO recipes, not a board-name allowlist: each
 # canonical XIAO repeater must retain the internal bootloader scratch bank,
-# raw external-QSPI OTA staging, and packet logging in one application.
+# raw external-QSPI OTA staging, and packet logging in both sensor profiles.
 init_project_context
 BUILD_PROFILE_FOR_TARGET=standard
 BUILD_PROFILE_EFFECTIVE=standard
@@ -33,11 +33,14 @@ for target in \
   is_xiao_qspi_canonical_repeater_build "$target" \
     || fail "$target lost its combined-image classification"
   if is_supported_build_env "${target}_lora_ota_no_external_sensors"; then
-    fail "$target still publishes a redundant lean OTA sibling"
+    fail "$target invented a separate lean OTA identity instead of pairing its deployed ID"
   fi
   if get_reduced_lora_ota_target "$target" >/dev/null; then
-    fail "$target still falls back to a reduced OTA sibling"
+    fail "$target still changes its deployed OTA identity for the reduced option"
   fi
+  is_nrf52_sensor_ota_pair_target "$target" || fail "$target lacks the required sensor pair policy"
+  [ "$(get_nrf52_sensor_ota_pair_target "$target")" = "$target" ] \
+    || fail "$target pair changed its deployed QSPI identity"
   pio_env_option_contains "$target" board_build.ldscript \
     nrf52840_s140_v7_xiao_bootloader_ota.ld \
     || fail "$target lost its 40 KiB internal bootloader scratch reservation"
@@ -68,7 +71,8 @@ for target in \
     || fail "$target no longer verifies the packaged USB logging control"
 done
 
-# This consolidation is specific to the external-QSPI XIAO repeater layout.
+# The deployed QSPI layout/identity classification stays specific to XIAO
+# repeaters, while the new sensor pairing policy also covers other roles.
 is_xiao_qspi_combined_repeater_target Xiao_nrf52_room_server \
   && fail "non-QSPI room server was incorrectly consolidated"
 is_xiao_qspi_combined_repeater_target RAK_4631_repeater \
