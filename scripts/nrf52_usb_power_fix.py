@@ -76,9 +76,43 @@ PORT_INIT = """  if (usb_reg & POWER_USBREGSTATUS_VBUSDETECT_Msk) {
 }
 """
 
+# A FIFO clear does not cancel the packet already submitted to the controller.
+# Expose only a read-only owner-state query; firmware uses the supported USB
+# detach/re-enumeration path when a session boundary finds an armed IN packet.
+# Do not invent an endpoint abort that would desynchronize bulk data toggles.
+CDC_WRITE_CLEAR = """bool tud_cdc_n_write_clear(uint8_t itf) {
+  return tu_fifo_clear(&_cdcd_itf[itf].tx_ff);
+}
+"""
+CDC_SESSION_QUERY = """
+bool mesh_tud_cdc_n_tx_pending(uint8_t itf) {
+  if (itf >= CFG_TUD_CDC) return false;
+  uint8_t const ep_in = _cdcd_itf[itf].ep_in;
+  return ep_in != 0 && usbd_edpt_busy(0, ep_in);
+}
+"""
+CDC_LOCAL_INCLUDE = '#include "cdc_device.h"'
+CDC_ROOT_INCLUDE = '#include "class/cdc/cdc_device.h"'
+NRF_DISCONNECT = """void dcd_disconnect(uint8_t rhport) {
+  (void) rhport;
+  NRF_USBD->USBPULLUP = 0;
+
+  // Disable Pull-up does not trigger Power USB Removed, in fact it have no
+  // impact on the USB Power status at all -> need to submit unplugged event to the stack.
+  dcd_event_bus_signal(0, DCD_EVENT_UNPLUGGED, false);
+}
+"""
+
 
 def patched_source(source):
     source = source.replace("\r\n", "\n")
+    # Session recovery waits for TinyUSB's owner to consume this explicit
+    # local unplug event. A physical VBUS edge is neither required nor assumed.
+    if source.count(NRF_DISCONNECT) != 1:
+        raise RuntimeError(
+            "nRF52 USB session fix: changed disconnect/unmount behavior; "
+            "review the framework update before building"
+        )
     if READY in source and ATTACH in source and OLD_READY not in source and OLD_ATTACH not in source:
         return source
     if source.count(OLD_READY) != 1 or source.count(OLD_ATTACH) != 1:
@@ -101,17 +135,36 @@ def patched_port_source(source):
     return source.replace(OLD_PORT_INIT, PORT_INIT)
 
 
+def patched_cdc_source(source):
+    source = source.replace("\r\n", "\n")
+    if (source.count(CDC_SESSION_QUERY) == 1
+            and source.count(CDC_ROOT_INCLUDE) == 1
+            and CDC_LOCAL_INCLUDE not in source):
+        return source
+    if (source.count(CDC_WRITE_CLEAR) != 1 or source.count(CDC_LOCAL_INCLUDE) != 1
+            or CDC_SESSION_QUERY in source or CDC_ROOT_INCLUDE in source):
+        raise RuntimeError(
+            "nRF52 USB session fix: unrecognized TinyUSB CDC driver; review "
+            "the framework update before building (shared SDK was not modified)"
+        )
+    # Middleware relocates this source into BUILD_DIR. Its original sibling
+    # include no longer resolves there; the TinyUSB root already on CPPPATH
+    # provides a portable, SDK-local path (including cdc_device.h's siblings).
+    return source.replace(CDC_LOCAL_INCLUDE, CDC_ROOT_INCLUDE).replace(
+        CDC_WRITE_CLEAR, CDC_WRITE_CLEAR + CDC_SESSION_QUERY)
+
+
 def replace_driver(build_env, node):
     # SCons passes a not-yet-created VariantDir node, not the SDK source path.
     source = Path(node.srcnode().get_abspath())
-    patcher = (patched_port_source if source.name == "Adafruit_TinyUSB_nrf.cpp"
-               else patched_source)
+    patcher = {"Adafruit_TinyUSB_nrf.cpp": patched_port_source,
+               "cdc_device.c": patched_cdc_source}.get(source.name, patched_source)
     patched = patcher(source.read_text(encoding="utf-8"))
     destination = Path(build_env.subst("$BUILD_DIR")) / "patched-nrf52-usb" / source.name
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists() or destination.read_text(encoding="utf-8") != patched:
         destination.write_text(patched, encoding="utf-8")
-    print("nRF52 USB: build-local bounded READY/HFCLK fix enabled")
+    print("nRF52 USB: build-local bounded startup/session fix enabled")
     return build_env.File(str(destination))
 
 
@@ -123,6 +176,10 @@ def install(build_env):
     build_env.AddBuildMiddleware(
         replace_driver,
         "*Adafruit_TinyUSB_Arduino*src*arduino*ports*nrf*Adafruit_TinyUSB_nrf.cpp",
+    )
+    build_env.AddBuildMiddleware(
+        replace_driver,
+        "*Adafruit_TinyUSB_Arduino*src*class*cdc*cdc_device.c",
     )
 
 

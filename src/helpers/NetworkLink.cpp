@@ -3,6 +3,7 @@
 #if defined(ESP_PLATFORM)
 
 #include "MQTTConnectionPolicy.h"
+#include "UsbLogging.h"
 #include "WifiPowerSavePolicy.h"
 
 #include <atomic>
@@ -25,8 +26,8 @@ extern void tcpipInit();
 #endif
 
 // Same "MQTT: " prefix as MQTT_DEBUG_PRINTLN so existing log greps keep matching.
-#if defined(MQTT_DEBUG)
-  #define NETWORK_DEBUG_PRINTLN(F, ...) do { if (Serial.availableForWrite() > 0) { Serial.printf("MQTT: " F "\n", ##__VA_ARGS__); } } while (0)
+#if defined(MQTT_DEBUG) && MQTT_DEBUG
+  #define NETWORK_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("MQTT: " F "\n", ##__VA_ARGS__); } } while (0)
 #else
   #define NETWORK_DEBUG_PRINTLN(...) do {} while (0)
 #endif

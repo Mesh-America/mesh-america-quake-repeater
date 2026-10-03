@@ -46,6 +46,116 @@ int main() {
 
 
 class UsbPowerTests(unittest.TestCase):
+    def test_cdc_query_tracks_armed_endpoint_not_fifo_bytes(self):
+        original = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include "cdc_device.h"
+#define CFG_TUD_CDC 2
+struct { uint8_t ep_in; unsigned tx_ff; } _cdcd_itf[2];
+static bool armed[256];
+static bool usbd_edpt_busy(uint8_t port, uint8_t endpoint) {
+  assert(port == 0); return armed[endpoint];
+}
+static bool tu_fifo_clear(unsigned* fifo) { *fifo = 0; return true; }
+'''+ FIX.CDC_WRITE_CLEAR + r'''
+int main(void) {
+  _cdcd_itf[0].ep_in = 0x81;
+  _cdcd_itf[1].ep_in = 0x83;
+  _cdcd_itf[0].tx_ff = 16;
+  armed[0x81] = true;
+  assert(mesh_tud_cdc_n_tx_pending(0));
+  tud_cdc_n_write_clear(0);
+  assert(_cdcd_itf[0].tx_ff == 0 && mesh_tud_cdc_n_tx_pending(0));
+  assert(!mesh_tud_cdc_n_tx_pending(1));
+  assert(!mesh_tud_cdc_n_tx_pending(2));
+  armed[0x81] = false;
+  assert(!mesh_tud_cdc_n_tx_pending(0));
+  _cdcd_itf[1].ep_in = 0;
+  armed[0] = true; // unopened CDC must not query control endpoint
+  assert(!mesh_tud_cdc_n_tx_pending(1));
+}
+'''
+        patched = FIX.patched_cdc_source(original)
+        self.assertEqual(patched, FIX.patched_cdc_source(patched))
+        self.assertEqual(patched, FIX.patched_cdc_source(original.replace("\n", "\r\n")))
+        compiler = shutil.which("gcc")
+        if compiler is None:
+            self.skipTest("C compiler unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "cdc.c"
+            binary = Path(directory) / "cdc"
+            header = Path(directory) / "class/cdc/cdc_device.h"
+            header.parent.mkdir(parents=True)
+            header.write_text("// Only the isolated session-query API is tested here.\n")
+            source.write_text(patched)
+            subprocess.run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-I", directory, str(source), "-o", str(binary)],
+                           check=True, capture_output=True)
+            subprocess.run([str(binary)], check=True, capture_output=True)
+
+    def test_relocated_cdc_driver_compiles_against_real_tinyusb_headers(self):
+        # Exercise the middleware's actual relocated file, not just an API
+        # extraction: cdc_device.h is originally a sibling of cdc_device.c.
+        # CI without this hardware framework can still run the isolated API
+        # and relocation guards; a local hardware build runs this full check.
+        sdk = (Path.home() / ".platformio/packages/framework-arduinoadafruitnrf52/"
+               "libraries/Adafruit_TinyUSB_Arduino/src")
+        original = sdk / "class/cdc/cdc_device.c"
+        compiler = shutil.which("gcc")
+        if compiler is None or not original.is_file():
+            self.skipTest("native compiler/nRF52 TinyUSB framework unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "tusb_config.h"
+            config.write_text("""
+#define CFG_TUSB_MCU OPT_MCU_NONE
+#define CFG_TUSB_OS OPT_OS_NONE
+#define CFG_TUSB_RHPORT0_MODE OPT_MODE_DEVICE
+#define CFG_TUD_ENABLED 1
+#define CFG_TUD_CDC 2
+#define CFG_TUD_CDC_RX_BUFSIZE 256
+#define CFG_TUD_CDC_TX_BUFSIZE 256
+#define CFG_TUSB_DEBUG 0
+""")
+            class Node:
+                def srcnode(self): return self
+                def get_abspath(self): return str(original)
+            class Env:
+                def subst(self, value):
+                    assert value == "$BUILD_DIR"
+                    return str(root / "build")
+                def File(self, value): return Path(value)
+            patched = FIX.replace_driver(Env(), Node())
+            self.assertNotEqual(patched.parent, original.parent)
+            self.assertIn(FIX.CDC_ROOT_INCLUDE, patched.read_text())
+            result = subprocess.run(
+                [compiler, "-std=c11", '-DCFG_TUSB_CONFIG_FILE="' + config.as_posix() + '"',
+                 "-I", str(root), "-I", str(sdk),
+                 "-c", str(patched), "-o", str(root / "cdc.o")],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_changed_cdc_driver_fails_closed(self):
+        prefix = FIX.CDC_LOCAL_INCLUDE + "\n"
+        for source in ("", prefix + FIX.CDC_WRITE_CLEAR.replace("tx_ff", "tx_fifo"),
+                       prefix + FIX.CDC_WRITE_CLEAR * 2,
+                       prefix + FIX.CDC_WRITE_CLEAR + FIX.CDC_SESSION_QUERY,
+                       FIX.CDC_ROOT_INCLUDE + "\n" + FIX.CDC_WRITE_CLEAR):
+            with self.subTest(source=source), self.assertRaises(RuntimeError):
+                FIX.patched_cdc_source(source)
+
+    def test_cdc_query_is_built_from_local_copy(self):
+        hooks = []
+        class Env:
+            def AddBuildMiddleware(self, handler, pattern):
+                hooks.append((handler, pattern))
+        FIX.install(Env())
+        self.assertEqual(len(hooks), 3)
+        self.assertTrue(any("class*cdc*cdc_device.c" in pattern
+                            for _, pattern in hooks))
+
     def test_actual_handler_and_inherited_hang(self):
         exercise(FIX.patched_source(ORIGINAL))
 
@@ -76,7 +186,9 @@ class UsbPowerTests(unittest.TestCase):
 
     def test_unrecognized_or_partly_fixed_driver_fails_closed(self):
         for source in ("", ORIGINAL.replace("hfclk_running()", "clock_running()"),
-                       ORIGINAL + ORIGINAL, ORIGINAL.replace(FIX.OLD_READY, FIX.READY)):
+                       ORIGINAL + ORIGINAL, ORIGINAL.replace(FIX.OLD_READY, FIX.READY),
+                       ORIGINAL.replace("dcd_event_bus_signal(0, DCD_EVENT_UNPLUGGED, false);",
+                                        "// removed local disconnect event")):
             with self.subTest(source=source[:40]), self.assertRaises(RuntimeError):
                 FIX.patched_source(source)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute the real native-TinyUSB role output pumps with small host stubs."""
+"""Execute the real native-USB role output pumps with small host stubs."""
 
 from pathlib import Path
 import os
@@ -23,8 +23,9 @@ HARNESS = r'''
 #include <vector>
 #include <cstdint>
 #include <helpers/FileRead.h>
-#define MESH_ESP32_TINYUSB_NONBLOCKING 1
+@USB_CONFIG@
 #define MESH_ESP32_USB_CONSOLE_COOPERATIVE 1
+#define PUB_KEY_SIZE 32
 #define MAX_ROUTE_HASH_BYTES 3
 #define PACKET_LOG_FILE "/packet_log"
 static void require(bool ok, const char* what) {
@@ -104,6 +105,15 @@ struct SimpleMeshTables {
     return result < static_cast<int>(rows.size()) ? &rows[result] : nullptr;
   }
 };
+struct FakeAcl {
+  struct Client {
+    struct { uint8_t pub_key[PUB_KEY_SIZE]; } id{};
+    uint8_t permissions = 3;
+  };
+  std::vector<Client> clients;
+  int getNumClients() const { return static_cast<int>(clients.size()); }
+  Client* getClientByIdx(int index) { return &clients.at(index); }
+};
 class MyMesh {
  public:
   FakeFS* _fs = &fs;
@@ -114,6 +124,9 @@ class MyMesh {
   bool serial_log_active = false;
   bool serial_log_eof_pending = false;
   bool serial_log_skip_line = false;
+  int serial_acl_next = -1;
+  int serial_acl_count = 0;
+  bool serial_acl_header = false;
   int serial_recent_next = -1;
   int serial_recent_count = 0;
   bool serial_recent_header = false;
@@ -121,8 +134,10 @@ class MyMesh {
   SimpleMeshTables::RecentRepeaterInfo serial_recent_cursor{};
   int serial_recent_cursor_index = -1;
   SimpleMeshTables tables;
+  FakeAcl acl;
   const SimpleMeshTables* getTables() const { return &tables; }
   void dumpLogFile();
+  void printAclSerial();
   bool hasPendingSerialOutput() const;
   void servicePendingSerialOutput();
   void cancelPendingSerialOutput();
@@ -207,6 +222,78 @@ int main() {
       drain(radio);
       require(console.output.empty(), "canceled old-session output leaked");
     }
+    setupFile("");
+    {
+      MyMesh radio;
+      std::string expected = "ACL:\r\n";
+      for (int i = 0; i < 32; ++i) {
+        FakeAcl::Client client;
+        std::fill(std::begin(client.id.pub_key), std::end(client.id.pub_key), i);
+        radio.acl.clients.push_back(client);
+        char key[PUB_KEY_SIZE * 2 + 1], line[80];
+        mesh::Utils::toHex(key, client.id.pub_key, PUB_KEY_SIZE);
+        snprintf(line, sizeof(line), "%02X %s\n", client.permissions, key);
+        expected += line;
+      }
+      require(expected.size() > 2048, "ACL test does not exceed admission reserve");
+      console.capacity = 256;  // Accepted with a nearly-full HWCDC/logging FIFO.
+      radio.printAclSerial();
+      require(console.output.empty(), "ACL is still emitted synchronously");
+      radio.acl.clients.emplace_back();  // New arrivals must not extend the snapshot.
+      console.capacity = 0;
+      for (int i = 0; i < 1000; ++i) radio.servicePendingSerialOutput();
+      require(console.output.empty(), "ACL wrote into a stalled host");
+      require(radio.serial_acl_next == 0, "stalled header skipped an ACL row");
+      console.fail_once = true;
+      console.short_limit = 17;
+      drain(radio, 73);
+      require(console.output == expected, "full ACL lost or duplicated short-write bytes");
+      require(!radio.hasPendingSerialOutput(), "ACL blocks the next command after completion");
+    }
+    setupFile("");
+    {
+      MyMesh radio;
+      radio.acl.clients.resize(32);
+      for (auto& client : radio.acl.clients) client.permissions = 0;
+      radio.printAclSerial();
+      drain(radio, 73);
+      require(console.output == "ACL:\r\n", "deleted ACL clients were printed");
+    }
+    setupFile("");
+    {
+      MyMesh radio;
+      radio.acl.clients.resize(1);
+      std::fill(std::begin(radio.acl.clients[0].id.pub_key),
+                std::end(radio.acl.clients[0].id.pub_key), 0xAA);
+      radio.printAclSerial();
+      radio.servicePendingSerialOutput();
+      console.short_limit = 7;
+      radio.servicePendingSerialOutput();
+      require(radio.serial_log_pending_size > 0, "ACL short-write suffix was not retained");
+      radio.cancelPendingSerialOutput();
+      require(!radio.hasPendingSerialOutput(), "ACL cancellation leaves a pending job");
+      console.output.clear();
+      console.records.clear();
+      console.short_limit = 0;
+      radio.acl.clients.clear();
+      radio.printAclSerial();
+      drain(radio, 73);
+      require(console.output == "ACL:\r\n", "old ACL row leaked after reconnect cancellation");
+    }
+    setupFile("existing file dump\n");
+    {
+      MyMesh radio;
+      radio.dumpLogFile();
+      console.capacity = 0;
+      radio.servicePendingSerialOutput();
+      const size_t pending = radio.serial_log_pending_size;
+      radio.printAclSerial();
+      require(radio.serial_log_pending_size == pending && radio.serial_acl_next == -1,
+          "overlapping ACL command overwrote a pending file record");
+      drain(radio);
+      require(console.output == "existing file dump\n" + eof,
+          "overlapping ACL command corrupted an existing output job");
+    }
     @RECENT_TEST@
     std::cout << "cooperative output checks passed\n";
     return 0;
@@ -241,12 +328,23 @@ RECENT_TEST = r'''
 
 
 class CooperativeOutputTest(unittest.TestCase):
+    def test_usb_acl_commands_route_to_the_cooperative_pump(self):
+        for role in ("simple_repeater", "simple_room_server"):
+            with self.subTest(role=role):
+                text = (ROOT / f"examples/{role}/MyMesh.cpp").read_text()
+                start = text.index('strcmp(command, "get acl") == 0) {')
+                end = text.index("reply[0] = 0;", text.index("#endif", start))
+                self.assertIn("printAclSerial();", text[start:end])
+                self.assertNotIn("mesh::usbConsolePort().printf", text[start:end])
+
     def test_real_role_pumps(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
         if not compiler:
             self.skipTest("A host C++ compiler is required for pump execution")
-        for role in ("simple_repeater", "simple_room_server"):
-            with self.subTest(role=role), tempfile.TemporaryDirectory() as temporary:
+        for role, config in ((role, config)
+                for role in ("simple_repeater", "simple_room_server")
+                for config in ("MESH_ESP32_TINYUSB_NONBLOCKING", "MESH_ESP32_HWCDC_SESSION_GUARD")):
+            with self.subTest(role=role, transport=config), tempfile.TemporaryDirectory() as temporary:
                 text = (ROOT / f"examples/{role}/MyMesh.cpp").read_text()
                 dump_start = text.index("void MyMesh::dumpLogFile()")
                 dump_end = text.index("\n#if MESH_ESP32_USB_CONSOLE_COOPERATIVE\nbool MyMesh::hasPendingSerialOutput", dump_start)
@@ -261,7 +359,7 @@ class CooperativeOutputTest(unittest.TestCase):
                     methods = text[format_start:format_end] + "\n" + text[recent_start:recent_end] + "\n" + methods
                 program = HARNESS.replace("@METHODS@", methods).replace(
                     "@RECENT_TEST@", RECENT_TEST if role == "simple_repeater" else ""
-                )
+                ).replace("@USB_CONFIG@", f"#define {config} 1")
                 executable = Path(temporary) / ("pump.exe" if os.name == "nt" else "pump")
                 build = subprocess.run(
                     [compiler, "-std=c++17", "-O0", "-I", str(ROOT / "src"),
