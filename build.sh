@@ -206,10 +206,10 @@ build_firmware() {
   # Both named channel bases are baked into EVERY observer build so `ota branch`
   # can re-point a device at either channel at runtime. OTA_MANIFEST_BASE above stays
   # the build's NATIVE channel (= stable base for stable builds, dev base for dev
-  # builds), so `ota branch default` resolves correctly. These two must match the
-  # paths DutchMeshCore-OTA serves (feat/dev-stable-ota-channels): /mqtt/v + /mqtt/dev/v.
-  OTA_MANIFEST_BASE_STABLE_URL="${OTA_MANIFEST_BASE_STABLE_URL:-https://ota.dutchmeshcore.nl/mqtt/v}"
-  OTA_MANIFEST_BASE_DEV_URL="${OTA_MANIFEST_BASE_DEV_URL:-https://ota.dutchmeshcore.nl/mqtt/dev/v}"
+  # builds), so `ota branch default` resolves correctly. These must match the
+  # production (/v) and beta (/beta/v) manifest paths.
+  OTA_MANIFEST_BASE_STABLE_URL="${OTA_MANIFEST_BASE_STABLE_URL:-https://observer.gessaman.com/v}"
+  OTA_MANIFEST_BASE_DEV_URL="${OTA_MANIFEST_BASE_DEV_URL:-https://observer.gessaman.com/beta/v}"
 
   # add firmware version info to end of existing platformio build flags in environment vars.
   # OTA_VARIANT is the env name ($1) — it selects this build's slim per-variant manifest
