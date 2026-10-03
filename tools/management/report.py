@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decode and authenticate complete MGR1/MGR2/MGR3 management reports.
+"""Decode and authenticate complete MGR1/MGR2 management reports.
 
 Input is a JSON list of raw payload hex strings, one entry for each page (not
 MeshCore packet headers/paths). A relay/collector can obtain these from RX logs
@@ -14,13 +14,11 @@ import struct
 from pathlib import Path
 
 HEADER, ENTRY, PER_PAGE, TAG, MAX_KEYS = 83, 13, 6, 16, 36
-MGR2_HEADER, MGR2_PER_PAGE = 98, 5
 CURRENT_HEADER, CURRENT_PER_PAGE = 111, 4
 
 
 def _layout(payload):
-    formats = {b"MGR1": (HEADER, PER_PAGE), b"MGR2": (MGR2_HEADER, MGR2_PER_PAGE),
-               b"MGR3": (CURRENT_HEADER, CURRENT_PER_PAGE)}
+    formats = {b"MGR1": (HEADER, PER_PAGE), b"MGR2": (CURRENT_HEADER, CURRENT_PER_PAGE)}
     result = formats.get(payload[:4])
     if result is None or len(payload) < result[0] + TAG:
         raise ValueError("invalid management payload")
@@ -29,7 +27,7 @@ def _layout(payload):
 
 def _page_bounds(payload):
     header, per_page = _layout(payload)
-    if header >= MGR2_HEADER and (int.from_bytes(payload[83:85], "little") & 0xf800 or payload[85] & 0xc0):
+    if header == CURRENT_HEADER and (int.from_bytes(payload[83:85], "little") & 0xf800 or payload[85] & 0xc0):
         raise ValueError("reserved USB status bits must be zero")
     if header == CURRENT_HEADER:
         _watchdog_event(payload)
@@ -43,7 +41,7 @@ def _page_bounds(payload):
 
 
 def _usb_status(payload):
-    if payload[:4] not in (b"MGR2", b"MGR3"):
+    if payload[:4] != b"MGR2":
         return None
     flags = int.from_bytes(payload[83:85], "little")
     names = ("supported", "logging_enabled", "watchdog_enabled", "host_connected",
@@ -58,7 +56,7 @@ def _usb_status(payload):
 
 
 def _watchdog_event(payload):
-    if payload[:4] != b"MGR3":
+    if payload[:4] != b"MGR2":
         return None
     code = payload[98]
     epoch, uptime, sequence = struct.unpack_from("<III", payload, 99)
@@ -133,7 +131,7 @@ def decode_page(payload, password):
 
 
 def mqtt_payload(message):
-    """Extract an MGR1/MGR2/MGR3 payload from the observer's MQTT PACKET/raw JSON.
+    """Extract an MGR1/MGR2 payload from the observer's MQTT PACKET/raw JSON.
 
     Path length is encoded, not simply a byte count. Region transport codes
     precede it. Never trust the redundant MQTT payload_len/type fields.
@@ -158,16 +156,18 @@ def mqtt_payload(message):
         return None
     start = position + 1 + width * count
     payload = packet[start:]
+    try:
+        _, canonical = _page_bounds(payload)
+    except ValueError:
+        return None
     if (packet[0] >> 2) & 15 == 6:
-        try:
-            _, canonical = _page_bounds(payload)
-        except ValueError:
-            return None
         padded = 3 + ((canonical - 3 + 15) // 16) * 16
-        if len(payload) != padded or any(payload[canonical:]):
+        if padded > 179 or len(payload) != padded or any(payload[canonical:]):
             return None
         payload = payload[:canonical]
-    return payload if payload[:4] in (b"MGR1", b"MGR2", b"MGR3") else None
+    elif len(payload) != canonical or len(payload) > 179:
+        return None
+    return payload
 
 
 def mqtt_reports(messages, password):

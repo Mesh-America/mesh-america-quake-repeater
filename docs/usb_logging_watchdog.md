@@ -155,10 +155,10 @@ an exact trigger time; this record covers the staged USB logging watchdog.
 | `defer`, `fs` | Ownership/backend deferral and verified durable persistence readiness. |
 | `rec`, `boot` | Attempted USB recoveries and durable reset authorizations. Attempts save the event and recovery count together; a failed save can leave the live recovery count unsaved. The reset count can include a later safety/health veto; it is not a count of completed physical reboots. |
 
-The [MGR3 management report](management_reports.md) exports the USB status and
+The [MGR2 management report](management_reports.md) exports the USB status and
 the same latest-event record as a frozen, authenticated public snapshot. Updated
-Python and browser decoders retain MGR1/MGR2 support; older decoder copies must
-be updated to read MGR3. Events appear on the normal management schedule, not
+Python and browser decoders retain released MGR1 support; older decoder copies
+must be updated to read MGR2. Events appear on the normal management schedule, not
 as immediate alerts. Reading status does not renew the logging-client lease.
 
 ## Verification
@@ -182,12 +182,16 @@ and ordinary RAK 3x72 STM32 USB Companion. The STM32 image retains all CLI
 features and its 32 KiB filesystem, but has only 368 bytes of app flash margin;
 its unsupported USB watchdog machinery is compiled out.
 
-Latest-event/MGR3 verification on the same date passed 116 USB regression tests,
+Latest-event verification on the same date passed 116 USB regression tests,
 15 management tests with fatal AddressSanitizer/UndefinedBehaviorSanitizer
 checks, and the browser decoder tests. Coverage includes timestamp callbacks,
 clock corrections and rollover, legacy-state migration, commit failures,
 reboot-intent cancellation, deferred cancellation saves, and authenticated
-cross-language MGR1/MGR2/MGR3 decoding. The full native suite passed 1,713 cases
+cross-language decoding of the development report formats. The extension was
+called MGR3 during those pre-release checks, then assigned to MGR2 because the
+earlier USB-only MGR2 layout had never been released. Current decoders support
+released MGR1 and the finalized MGR2 layout; this reassignment was not a migration
+of deployed MGR2 reports. The full native suite passed 1,713 cases
 during implementation; the final packet validator also passed a fresh 116-case
 routing suite and 5,855,168 previous/current validator comparisons under fatal
 sanitizers.
@@ -217,3 +221,9 @@ latter uses 229,020 of 229,376 app flash bytes (356 bytes of margin), retaining
 all features and the 32 KiB filesystem. The bare recipe is tighter still.
 These checks do not qualify every board or physical USB recovery. No device
 was flashed and existing `out` artifacts were not changed.
+
+Finalizing the event-capable layout as MGR2 passed 1,719 native cases, 16
+management tests with real C++/Python/browser cryptography, the standalone
+browser decoder checks, and the bare STM32 Companion compile. Coverage retains
+MGR1, rejects retired formats and old prototype ciphertext, and verifies that
+invalid management sends release their packet without queueing it.

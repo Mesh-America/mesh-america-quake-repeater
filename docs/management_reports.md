@@ -1,4 +1,4 @@
-# Management reports (MGR1/MGR2/MGR3)
+# Management reports (MGR1/MGR2)
 
 Available on repeater (including observer), room-server and sensor firmware.
 Companions/terminal-chat nodes and KISS modems do not originate these reports.
@@ -6,10 +6,11 @@ Off by default. A management password and explicit enable are both required.
 No radio settings, existing preferences layout, or OTA authorization policy is
 changed by enabling reporting. This protocol does **not** authorize updates.
 
-Current firmware emits `MGR3`, including a public USB logging/recovery snapshot
-and its latest watchdog event. Updated decoders still accept legacy `MGR1` and
-`MGR2`; older decoder copies need an update to read MGR3. Reporting USB status
-does not enable logging or change retry policy.
+Current firmware emits `MGR2`, including a public USB logging/recovery snapshot
+and its latest watchdog event. Updated decoders still accept released `MGR1`;
+older decoder copies need an update to read MGR2. The earlier USB-only MGR2
+development layout was never released and was replaced before release.
+Reporting USB status does not enable logging or change retry policy.
 
 ## CLI
 
@@ -97,7 +98,7 @@ is bounded to 1.5 KiB, plus a small configuration object and temporary stack use
 ## Routing and MQTT
 
 Both direct/path and flood reports use **`PAYLOAD_TYPE_GRP_DATA` (`0x06`)**.
-The route bits independently select direct or flood. `MGR1`/`MGR2`/`MGR3` are application
+The route bits independently select direct or flood. `MGR1`/`MGR2` are application
 extensions with **literally plaintext public fields**, not a call to the ordinary
 encrypted `createGroupDatagram()` builder. A fixed public marker is not an owner
 or password-derived channel ID. There is no outer channel encryption.
@@ -133,11 +134,11 @@ For a browser-local decoder that also decrypts and authenticates ACL entries,
 use the [Management report decoder](management_decoder.md). It does not upload
 the captured packet or password.
 
-## Canonical MGR3 payload (little endian)
+## Canonical MGR2 payload (little endian)
 
 | Offset | Bytes | Field |
 |---:|---:|---|
-| 0 | 4 | `MGR3` |
+| 0 | 4 | `MGR2` |
 | 4 | 16 | First 16 bytes of reporter public key |
 | 20 | 4 | Persisted report sequence (never wraps; exhaustion stops TX) |
 | 24 | 4 | RTC Unix timestamp; advisory, may be wrong |
@@ -176,7 +177,7 @@ the captured packet or password.
 | after ACL | 16 | Full AES-SIV authentication tag |
 | after tag | 0-15 | Zero padding to group-compatible length; not part of canonical payload |
 
-MGR3 retains all 36 ACL entries, using four per page and up to nine pages. The
+MGR2 retains all 36 ACL entries, using four per page and up to nine pages. The
 largest canonical page is 179 bytes and already group-compatible;
 the radio payload budget is unchanged. The USB snapshot is frozen with the
 other public fields at report start and repeated on each page. It is not a
@@ -230,11 +231,6 @@ normal reboot and mode changes, but is not a log of hardware hangs or sudden
 power failures. See [USB logging watchdog](usb_logging_watchdog.md) for storage
 failure, cancellation, and review limitations.
 
-Legacy MGR2 retains the same offsets through byte 97, followed by encrypted ACL
-entries at byte 98 and the authentication tag. It carries five entries per page
-and up to eight pages. Its USB status is available, but watchdog event history
-is unavailable rather than an empty modern record.
-
 Legacy MGR1 retains the same offsets through byte 82, followed immediately
 by encrypted ACL entries at byte 83 and the authentication tag. It carries
 six entries per page and up to six pages, with no USB block. Its absent USB
@@ -273,8 +269,8 @@ needs a candidate administrator's full key to identify a fingerprint.
 
 Encryption is [RFC 5297 AES-SIV-CMAC-256](https://www.rfc-editor.org/rfc/rfc5297),
 using the existing rweather AES primitive. The single associated-data string is
-the complete clear header: 111 bytes for MGR3, including USB status and its event,
-98 bytes for MGR2, or 83 bytes for MGR1. All retain the existing derivation domains; the authenticated
+the complete clear header: 111 bytes for MGR2, including USB status and its event,
+or 83 bytes for MGR1. Both retain the existing derivation domains; the authenticated
 magic and layout distinguish their wire versions. Ciphertext is exactly the ACL byte length.
 Full 16-byte tag, no truncation. This deterministic misuse-resistant mode avoids
 reliance on the firmware's noncryptographic general-purpose RNG or RTC nonces.
