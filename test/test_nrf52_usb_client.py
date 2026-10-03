@@ -55,6 +55,10 @@ static uint32_t baud = 115200;
 static void tud_cdc_get_line_coding(cdc_line_coding_t* coding) { coding->bit_rate = baud; }
 static void TinyUSB_Port_EnterDFU() { dfu = true; }
 namespace mesh {
+static std::atomic<bool> usb_logging_tx_waiting{false};
+static bool isUsbLoggingEnabled() { return true; }
+static void clearUsbLoggingClientActivity() {}
+@ATTEMPT@
 @GATES@
 static uint32_t primary_usb_terminal_taken_reset_generation = 0;
 @WRITE@
@@ -152,6 +156,7 @@ int main() {
 
 
 class Nrf52UsbClientTest(unittest.TestCase):
+
     def test_stop_token_reports_shared_logging_conflict(self):
         main = (ROOT / 'examples/companion_radio/main.cpp').read_text()
         stop = function(main, 'if (strcmp(usb_terminal_line, USB_TERMINAL_STOP_TOKEN) == 0)')
@@ -294,8 +299,10 @@ int main() {
 
     def test_real_usb_callbacks_and_transport_with_both_client_styles(self):
         start = USB.index('static std::atomic<uint32_t> primary_usb_reset_generation')
-        gates = USB[start:USB.index('\n#endif', start)]
+        end_start = USB.index('static void endPrimaryUsbHostSession(', start)
+        gates = USB[start:end_start] + function(USB, 'static void endPrimaryUsbHostSession(')
         source = HARNESS.replace('@GATES@', gates)
+        source = source.replace('@ATTEMPT@', function(USB, 'static void noteUsbLoggingTxAttempt('))
         for marker, signature in (
             ('@WRITE@', 'static size_t writeTinyUsbCdcOnce('),
             ('@COMPLETE@', 'static void completePrimaryUsbSessionReset('),
@@ -308,10 +315,15 @@ int main() {
         with tempfile.TemporaryDirectory() as directory:
             cpp = Path(directory) / 'usb-client.cpp'
             cpp.write_text(source)
-            for dual in (False, True):
-                with self.subTest(dedicated_logging=dual):
+            for dual, ordinary in ((False, False), (True, False), (False, True)):
+                with self.subTest(dedicated_logging=dual, ordinary_role=ordinary):
                     binary = Path(directory) / ('usb-client-' + str(dual))
                     flags = ['-DMESH_DUAL_CDC_LOGGING=1'] if dual else []
+                    tested_source = source
+                    if ordinary:
+                        flags += ['-DUSE_TINYUSB=1']
+                        tested_source = source.replace('#define ENABLE_USB_INTERFACE 1\n', '')
+                    cpp.write_text(tested_source)
                     subprocess.run(['g++', '-std=c++17', *flags, str(cpp), '-o', str(binary)], check=True)
                     subprocess.run([str(binary)], check=True)
 

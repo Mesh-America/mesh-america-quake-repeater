@@ -462,7 +462,7 @@ command `0x42` where the role supports the command; unavailable over LoRa.
 ### Remove a neighbor
 **Usage:** 
 - `neighbor.remove <pubkey_prefix>`
-- `neighbor.remove` — remove all neighbors
+- `neighbor.remove` - remove all neighbors
 
 **Parameters:** 
 - `pubkey_prefix`: An even-length hexadecimal prefix (up to the full 64-character
@@ -1040,17 +1040,27 @@ flip state on display-enabled observer builds.
 
 ## Logging
 
-Builds compiled with `MESH_PACKET_LOGGING` emit one `RAW:` line for every
-received radio frame. Serial output uses backpressure: if a connected host
-temporarily stops reading, packet processing waits for USB transmit space
-instead of silently omitting the record. A disconnected host cannot retain an
-unbounded capture, so logging deployments should keep the reader attached and
-draining the serial port.
+Non-compact builds compiled with `MESH_PACKET_LOGGING` emit a `RAW:` line
+for received radio frames that reach the raw capture hook while `usb.logging`
+is on, including Full Companion. Frames rejected by the early route policy
+are not exposed to raw capture.
+`RAW:` contains the complete received frame as uppercase hexadecimal, not only
+its decoded payload. Packet records do not require verbose USB debug output.
+Keep the host reader attached and draining the serial port: capture is best
+effort, not durable storage. Native-USB transports use bounded queues and drop
+records rather than block radio processing when the host stops reading;
+`DROP:<count>` markers report capture loss when output capacity returns.
 
-Every valid received frame also emits the decoded RX summary, including signal,
+Successfully parsed received frames also emit the decoded RX summary, including signal,
 timing, hash, type, route, and payload information. Frames that cannot be
-decoded still emit their `RAW:` line. Transmitted packets emit the decoded TX
-summary.
+decoded, or cannot obtain a packet-pool slot, can still emit their `RAW:` line.
+Transmitted packets emit the decoded TX
+summary. RAW and RX summary are separate records, not an atomic pair; a queue
+drop or disconnect can leave a summary without its RAW bytes. USB log consumers
+must not associate a stale RAW record with the next unrelated summary.
+Size-constrained `MESH_PACKET_LOGGING_COMPACT` images instead use `R<hex>` and
+`T<hex>` records; that compact stream is not the full ASCII RAW/summary format
+expected by ordinary USB-to-MQTT parsers.
 
 Ordinary non-OTA artifacts compile packet logging into the canonical image and
 control its live USB output at runtime; no separate `-logging-` artifact is
@@ -1072,7 +1082,26 @@ set usb.logging on
 set usb.logging off
 set usb.logging on reboot
 set usb.logging off reboot
+get usb.debug
+set usb.debug on
+set usb.debug off
 ```
+
+Current source also provides `get usb.watchdog` and saved
+`set usb.watchdog off|on|auto`. Missing watchdog state defaults to Auto, which
+requires 14 continuous healthy logging-client days before saving On. Existing
+five-minute USB stats polls confirm recent logging-client activity; a plugged
+cable/open TTY alone does not. See the [USB logging watchdog](usb_logging_watchdog.md) for staged
+five-minute USB recovery, physical-fault-only MCU resets, persisted backoff,
+status fields, and safe shutdown deferrals. Older release binaries need an
+upgrade before these commands exist.
+
+`get usb.watchdog.last` shows the latest USB watchdog event: recovery action,
+fault-reason bitmask, advisory node-clock epoch, uptime at the event, sequence,
+and whether the record passed durable readback. It survives reboot on durable
+storage. `reboot-requested` records intent, not proof that a physical reset
+occurred; a later safety veto records `reboot-cancelled`. See the watchdog
+documentation for storage and timestamp limitations.
 
 **ESP32 1.17.1.5 USB logging procedure:** disable device sleep before enabling
 the log stream, using separate text commands:
@@ -1088,16 +1117,44 @@ saving. This works around the [released USB sleep bug](old-releases/1.17.1.5.md#
 nRF52 does not need this ESP32 workaround.
 
 These commands are compiled into ordinary USB-loggable artifacts and every
-Full Companion. They control live USB debug and packet output. CommonCLI roles
-save the setting in `/com_prefs`, so it survives reboot; their first boot
-defaults to on. Full Companion and ordinary USB Companion start off on a fresh
-installation so diagnostics cannot corrupt framed traffic.
+Full Companion. `usb.logging` is the saved USB output master and packet-log
+gate. `usb.debug` is a separate saved preference for verbose diagnostics;
+effective USB debug output requires both switches to be on. Packet RAW and
+RX/TX summaries require only the master switch. `get usb.debug` reports saved
+intent even when the master is off. Turning `usb.logging` off does not erase
+that intent; turning it back on restores debug output if `usb.debug` is on.
+
+CommonCLI roles save these settings in `/com_prefs`; their fresh USB logging
+default is on. Full Companion and ordinary USB Companion start with the
+master off on a fresh installation so diagnostics cannot corrupt framed
+traffic. Verbose USB debug defaults to off for every role, including when
+loading older preferences without a debug field. Updates retain an existing
+saved `usb.logging` choice. Older binaries without the new `usb.debug`
+command retain their previous behavior until upgraded.
+
+For packet-only capture, use these separate text commands:
+
+```text
+set usb.debug off
+set usb.logging on
+```
+
+Use `set usb.debug on` temporarily when troubleshooting, then turn it off
+again to reduce USB traffic. This setting applies immediately and needs no
+USB-interface reboot. It does not select a firmware variant or enable code
+omitted from the image: verbose output still requires compiled `MESH_DEBUG`
+or other relevant diagnostic support. A packet-only build can retain the
+preference without gaining missing debug messages.
+
+Debug off suppresses verbose diagnostic chatter, not functional CLI replies,
+USB port identity/drop markers, or retained operational warnings. Readers
+must still filter non-packet lines instead of treating every line as a packet.
 
 On Full Companion these lines belong to its text terminal, not `meshcli`'s
 Binary `get/set` parameter namespace. Open interface `00`, send
 `+++MESHCORE-TERM-START`, and then issue the command. Running
-`meshcli ... get usb.logging` directly can instead return
-`Unknown var usb.logging` because that is a different protocol operation.
+`meshcli ... get usb.logging` or `get usb.debug` directly can instead return
+`Unknown var ...` because that is a different protocol operation.
 
 nRF52 Full Companion defaults logging to off and enumerates only USB interface
 `00`, which carries Companion, terminal, and serial mOTA traffic. Enabling
@@ -1107,6 +1164,8 @@ the optional `reboot` argument saves the choice and reports that a reboot is
 required when the USB interface count must change. The exact
 `set usb.logging on reboot` and `set usb.logging off reboot` forms save the
 choice, send their reply, and reboot one second later only when needed.
+Interface `02` is logging-only, not an input-capable CLI. Send logging/debug
+commands to interface `00`; USB debug uses the same log endpoint as packets.
 
 On every ESP32 Full Companion, enter the USB text terminal and use
 `set usb.logging on` (preceded by `set powersaving off` on 1.17.1.5) to turn that TTY into a logging-repeater-style plaintext
@@ -1122,6 +1181,20 @@ Turning USB logging off does not disable CLI replies. nRF52 keeps Companion
 frames active on interface `00`; ESP32 resumes the ordinary ASCII/Binary
 switcher after the logging terminal turns logging off. This setting does not
 change the node-storage capture controlled by `log start` and `log stop`.
+
+For a USB-to-MQTT bridge, enable packet logging but leave `usb.debug` off.
+Full Companion now supplies the ASCII RAW/RX/TX packet stream needed by such
+consumers; it does not provide durable or lossless capture. A compatible host
+must also support the role's identity/control commands and replies: packet
+records alone do not make an existing bridge compatible. Companion now answers
+`get public.key` with its node public key. ESP32 Full's logging TTY remains
+input-capable and accepts that query. nRF52 Full's dedicated logging CDC is
+not a command/reply console (its bounded stats-poll input only renews the
+watchdog client lease):
+a host integration must use interface `00` for commands and identity and
+interface `02` for logs.
+Existing single-port bridges that require CLI replies cannot simply point at
+the dedicated log endpoint. This change does not add a two-port bridge driver.
 
 Companion, Repeater, Room Server, and Sensor builds with both MQTT and USB
 logging provide the same saved selector for both output paths:
@@ -1143,6 +1216,8 @@ in `both` mode; Full Companion starts with USB logging off. To change only
 MQTT, use `set mqtt.enabled on|off`; `get mqtt.enabled` checks the saved
 switch and `get mqtt.running` checks whether the MQTT service is running.
 Turning MQTT off preserves all broker slots and credentials.
+The output selector changes the USB master, not saved `usb.debug` intent;
+WiFi MQTT logging is independent of the USB debug preference.
 
 On **1.17.1.5 ESP32**, run `set powersaving off` before selecting
 `set logging.output usb` or `set logging.output both`, since those modes
@@ -1895,7 +1970,7 @@ through binary command `0x42`; this command does not report the Bluetooth PIN.
 **Note:** On nRF52 boards with power management and a boot-voltage setting,
 this is a saved *relative* calibration: `1.000` keeps the board conversion,
 `1.050` raises all reported battery millivolts by 5%, and `0` resets to
-`1.000`. The allowed range is `0.500`–`1.500`. This affects boot protection,
+`1.000`. The allowed range is `0.500`-`1.500`. This affects boot protection,
 running cutoff, telemetry, battery alerts, and percentage. Calibrate against a
 voltmeter before enabling a low cutoff. Other boards retain their existing
 board-specific multiplier behavior, or return unsupported.
@@ -2166,6 +2241,13 @@ get clock.sync.status
 
 #### View this node's public key
 **Usage:** `get public.key`
+
+Returns this node's identity public key without changing it or exposing its
+private key. Companion supports the query through its text terminal and
+framed CLI command `0x42` (`CMD_RUN_CLI_COMMAND`); its reply is `> ` followed
+by exactly 64 uppercase hexadecimal characters. Private-key export support
+is not required. On nRF52 Full Companion, send the query to control interface
+`00`, not the output-only logging interface `02`.
 
 ---
 
@@ -4909,12 +4991,12 @@ get adc.multiplier
 set adc.multiplier 1.050
 ```
 
-The custom empty/full endpoints may be 2000–4200 mV and must be at least 100 mV
+The custom empty/full endpoints may be 2000-4200 mV and must be at least 100 mV
 apart. Setting either endpoint automatically selects `custom`; boot lock and
 cutoff remain separately adjustable. `get pwrmgt.bootlock` and
 `get pwrmgt.cutoff` show the values in force after selecting a profile.
 
-For a RAK3401/RAK13302 LiFePO₄ cell:
+For a RAK3401/RAK13302 LiFePO4 cell:
 
 ```text
 set battery.profile lifepo4

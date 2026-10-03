@@ -171,41 +171,49 @@ TEST(ManagementRouting, GroupDataForBothRoutesKeepsPublicHeaderAndLegacyLength) 
   TraceTestRadio radio; TraceTestClock clock; TraceTestRNG rng; TraceTestRTC rtc;
   TraceTestTables tables; StaticPoolPacketManager pool(8);
   TraceTestMesh mesh(radio, clock, rng, rtc, pool, tables);
-  uint8_t raw[mesh::management::HEADER + mesh::management::TAG] = {};
-  memcpy(raw, "MGR1", 4); raw[79] = 1;
+  uint8_t raw[mesh::management::CURRENT_HEADER + mesh::management::TAG] = {};
   const uint8_t path[] = {0x12, 0xab};
   uint8_t scope_key[16]; memset(scope_key, 0x42, sizeof(scope_key));
-  for (bool flood : {false, true}) {
-    auto* p = mesh.createRawData(raw, sizeof(raw)); ASSERT_NE(nullptr, p);
-    ASSERT_TRUE(mesh.sendManagementData(p, flood, path, 2, 2,
-                                        flood ? scope_key : nullptr));
-    EXPECT_EQ(PAYLOAD_TYPE_GRP_DATA, p->getPayloadType());
-    EXPECT_EQ(flood, p->isRouteFlood());
-    EXPECT_EQ(0, memcmp(p->payload, raw, sizeof(raw)));
-    EXPECT_EQ(0u, (p->payload_len - 3u) % 16u);
-    EXPECT_TRUE(mesh::management::validPage(p->payload, p->payload_len, true));
-    EXPECT_EQ(flood ? 0 : 2, p->getPathHashCount());
-    if (!flood) EXPECT_EQ(0, memcmp(p->path, path, 2));
+  for (const char* magic : {"MGR1", "MGR2", "MGR3"}) {
+    memset(raw, 0, sizeof(raw));
+    memcpy(raw, magic, 4); raw[79] = 1;
+    const size_t size = mesh::management::headerSize(raw) + mesh::management::TAG;
+    for (bool flood : {false, true}) {
+      auto* p = mesh.createRawData(raw, size); ASSERT_NE(nullptr, p);
+      ASSERT_TRUE(mesh.sendManagementData(p, flood, path, 2, 2,
+                                          flood ? scope_key : nullptr));
+      EXPECT_EQ(PAYLOAD_TYPE_GRP_DATA, p->getPayloadType());
+      EXPECT_EQ(flood, p->isRouteFlood());
+      EXPECT_EQ(0, memcmp(p->payload, raw, size));
+      EXPECT_EQ(0u, (p->payload_len - 3u) % 16u);
+      EXPECT_TRUE(mesh::management::validPage(p->payload, p->payload_len, true));
+      EXPECT_EQ(flood ? 0 : 2, p->getPathHashCount());
+      if (!flood) EXPECT_EQ(0, memcmp(p->path, path, 2));
+    }
   }
 }
 
 TEST(ManagementRouting, FloodForwardingDoesNotNeedAKeyAndStillHonorsFilters) {
-  TraceTestRadio radio; TraceTestClock clock; TraceTestRNG rng; TraceTestRTC rtc;
-  TraceTestTables tables; StaticPoolPacketManager pool(8);
-  TraceTestMesh mesh(radio, clock, rng, rtc, pool, tables);
-  mesh.forwardFloods = true;
-  mesh::Packet p;
-  p.header = (PAYLOAD_TYPE_GRP_DATA << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
-  p.setPathHashSizeAndCount(1, 0);
-  p.payload_len = mesh::management::floodSize(mesh::management::HEADER + mesh::management::TAG);
-  memset(p.payload, 0, p.payload_len);
-  memcpy(p.payload, "MGR1", 4);
-  p.payload[79] = 1; // one page containing zero ACL entries
-  ASSERT_TRUE(mesh::management::validPage(p.payload, p.payload_len, true));
-  EXPECT_NE(ACTION_RELEASE, mesh.receivePacket(&p));
-  EXPECT_FALSE(mesh.groupPacketObserved); // never delivered as decrypted channel data
-  mesh.rejectFloods = true;
-  EXPECT_EQ(ACTION_RELEASE, mesh.receivePacket(&p));
+  for (const char* magic : {"MGR1", "MGR2", "MGR3"}) {
+    TraceTestRadio radio; TraceTestClock clock; TraceTestRNG rng; TraceTestRTC rtc;
+    TraceTestTables tables; StaticPoolPacketManager pool(8);
+    TraceTestMesh mesh(radio, clock, rng, rtc, pool, tables);
+    mesh.forwardFloods = true;
+    mesh::Packet p;
+    p.header = (PAYLOAD_TYPE_GRP_DATA << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
+    p.setPathHashSizeAndCount(1, 0);
+    memset(p.payload, 0, sizeof(p.payload));
+    memcpy(p.payload, magic, 4);
+    p.payload_len = mesh::management::floodSize(
+        mesh::management::headerSize(p.payload) + mesh::management::TAG);
+    memset(p.payload + 4, 0, p.payload_len - 4);
+    p.payload[79] = 1; // one page containing zero ACL entries
+    ASSERT_TRUE(mesh::management::validPage(p.payload, p.payload_len, true));
+    EXPECT_NE(ACTION_RELEASE, mesh.receivePacket(&p));
+    EXPECT_FALSE(mesh.groupPacketObserved); // never delivered as decrypted channel data
+    mesh.rejectFloods = true;
+    EXPECT_EQ(ACTION_RELEASE, mesh.receivePacket(&p));
+  }
 }
 
 class RetryCodingRateRadio : public TraceTestRadio {

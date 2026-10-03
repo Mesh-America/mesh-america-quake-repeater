@@ -3,6 +3,8 @@
 #include <helpers/IdentityGeneration.h>
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#include <helpers/UsbLoggingWatchdog.h>
+#include <helpers/UsbLoggingClientActivity.h>
 #if MESH_PACKET_LOGGING
   #include <helpers/SerialPacketLog.h>
 #endif
@@ -97,7 +99,7 @@ void setup() {
   mesh::wireless::control().begin(infrastructure_wireless);
   mesh::prepareUsbLoggingPort();
   Serial.begin(115200);
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::beginUsbLoggingPort();
 #endif
 #if MESH_PACKET_LOGGING
@@ -177,7 +179,7 @@ void setup() {
       radioinit_attempts = 0;
       const uint32_t retry_started = millis();
       while (millis() - retry_started < 60000UL) {
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
         mesh::serviceUsbLoggingPort();
         mesh::serviceUsbTerminalPort();
 #endif
@@ -279,6 +281,14 @@ void setup() {
   the_mesh.begin(fs);
 
 #if defined(NRF52_PLATFORM)
+  mesh::loadUsbLoggingWatchdog(fs, !volatile_primary_fs,
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#else
+  mesh::loadUsbLoggingWatchdog(fs, true,
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#endif
+
+#if defined(NRF52_PLATFORM)
   if (volatile_primary_fs) {
     strncpy(the_mesh.getNodePrefs()->node_name,
             mesh::storage::BAD_FILESYSTEM_NODE_NAME,
@@ -314,7 +324,7 @@ void setup() {
 
 static void __attribute__((noinline)) serviceCommandInterfaces() {
   bool usb_ready = true;
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::serviceUsbLoggingPort();
   mesh::serviceUsbTerminalPort();
   if (mesh::takeUsbTerminalSessionReset()) {
@@ -374,6 +384,8 @@ static void __attribute__((noinline)) serviceCommandInterfaces() {
     console.print('\n');
     char reply[160];
     reply[0] = 0;
+    if (strlen(command) == static_cast<size_t>(len))
+      mesh::noteUsbLoggingStatsCommand(command);
 #if defined(MESH_SOAK_DIAGNOSTICS)
     if (mesh::hil::handleSoakCommand(command, reply, sizeof(reply))) {
       console.print("  -> ");
@@ -428,7 +440,23 @@ static void __attribute__((noinline)) serviceCommandInterfaces() {
 #endif
 }
 
+static bool usbLoggingRecoverySafe(void*) {
+  if (board.isOTAUpdateRunning() || board.isRadioTestActive()
+      || radio_driver.isWatchdogObserving() || radio_driver.isCalibratingNoiseFloor()
+      || !the_mesh.canRecoverUsbLogging()) return false;
+  const auto usb = mesh::usbLoggingStatus();
+  // A stale line/listing from a disconnected or stalled host cannot lock out
+  // recovery forever. Protect a functional live command pump, not diagnostics.
+  return !usb.reader_connected || usb.stalled
+      || (!command[0] && !command_overflow
+#if MESH_USB_CONSOLE_COOPERATIVE
+          && !the_mesh.hasPendingSerialOutput()
+#endif
+      );
+}
+
 void loop() {
+  mesh::serviceUsbLoggingPort();
   mesh::wireless::control().service(millis());
 #if defined(NRF52_PLATFORM)
   board.feedWatchdog(the_mesh.getNodePrefs()->system_watchdog_enabled != 0);
@@ -456,7 +484,8 @@ void loop() {
   if (display_ready) ui_task.loop();
 #endif
   rtc_clock.tick();
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+  if (mesh::serviceUsbLoggingWatchdog(usbLoggingRecoverySafe)) board.reboot();
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::serviceUsbTerminalPort();
 #endif
 
@@ -469,6 +498,7 @@ void loop() {
 #endif
   bool can_power_save = the_mesh.getNodePrefs()->powersaving_enabled
       && !board.isUsbDataConnected()
+      && !mesh::isUsbLoggingWatchdogArmed()
       && !mesh::wireless::control().pending();
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP \

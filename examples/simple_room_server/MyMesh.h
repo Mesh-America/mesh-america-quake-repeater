@@ -177,8 +177,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
   Stream* _web_terminal = nullptr;
 #endif
 
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
+#if defined(NRF52_PLATFORM)
+  File serial_log_dump{InternalFS};
+#else
   File serial_log_dump;
+#endif
   size_t serial_log_remaining = 0;
   size_t serial_log_pending_size = 0;
   char serial_log_pending[640];
@@ -488,7 +492,7 @@ public:
   }
 
   void dumpLogFile() override;
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   // Large local-only replies advance between radio service passes.
   bool hasPendingSerialOutput() const;
   void servicePendingSerialOutput();
@@ -550,6 +554,11 @@ public:
     return mesh::wireless::WiFi;
   }
   void loop();
+  bool canRecoverUsbLogging() const {
+    return dirty_contacts_expiry == 0 && !hasOutbound() && !isAnyTempRadioActive()
+        && !hasPendingOtaApply() && !saved_radio_apply_pending
+        && set_radio_at == 0 && _ota_update_at == 0;
+  }
 #if MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE
   bool allowTransportPacket(const mesh::Packet* packet, uint8_t context);
   bool allowRadioProfileCross(const mesh::Packet* packet) override {

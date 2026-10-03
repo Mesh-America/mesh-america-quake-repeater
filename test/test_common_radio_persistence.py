@@ -26,7 +26,11 @@ HARNESS = r'''
 struct NodePrefs { @FIELDS@ };
 void markDirectRetryPrefsValid(NodePrefs*) {}
 bool isValidLoRaBandwidth(float bw) { return bw==62.5f || bw==125; }
-namespace mesh { struct RadioProfiles { static constexpr unsigned MaxPreamble=65535; }; }
+namespace mesh {
+struct RadioProfiles { static constexpr unsigned MaxPreamble=65535; };
+void setUsbLoggingEnabled(bool) {}
+void setUsbDebugEnabled(bool) {}
+}
 struct Profiles {
   bool accepted=true;
   uint16_t saved=48;
@@ -78,7 +82,7 @@ int main() {
   CommonCLI cli;
   assert(cli.saveCommonPrefs());
   auto original=cli.fs.files["/com_prefs"];
-  const size_t preamble_offset=original.size()-3;
+  const size_t preamble_offset=original.size()-4;
   assert(preamble_offset>=864);
   assert(original[preamble_offset]==48 && original[preamble_offset+1]==0);
   assert(original[preamble_offset+2]==1);

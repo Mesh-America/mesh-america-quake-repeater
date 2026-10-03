@@ -1232,7 +1232,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
         break;
       }
 
-      // MGR1 is a plaintext management extension, not an encrypted channel
+      // MGR1/MGR2/MGR3 are plaintext management extensions, not encrypted channel
       // datagram. Keep the legacy group payload length shape for opaque relay
       // compatibility. Recognize it before any channel decryption/delivery.
       if (pkt->getPayloadType() == PAYLOAD_TYPE_GRP_DATA &&

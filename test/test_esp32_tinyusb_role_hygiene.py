@@ -24,6 +24,8 @@ class Esp32TinyUsbRoleHygieneTest(unittest.TestCase):
             r"return buffered_esp32_tinyusb_terminal_port;\s+"
             r"#elif MESH_ESP32_HWCDC_SESSION_GUARD\s+"
             r"return guarded_esp32_hwcdc_port;\s+"
+            r"#elif MESH_NRF52_USB_CONSOLE_COOPERATIVE\s+"
+            r"return buffered_primary_usb_terminal_port;\s+"
             r"#else\s+return Serial;\s+#endif",
         )
 
@@ -140,15 +142,18 @@ class Esp32TinyUsbRoleHygieneTest(unittest.TestCase):
 
     def test_sleep_keeps_raw_flush_only_for_other_esp32_transports(self):
         text = source("src/helpers/ESP32Board.cpp")
+        shutdown = text[text.index("void ESP32Board::shutdownPeripherals(") :
+                        text.index("void ESP32Board::powerOff(")]
         sleep = text[text.index("void ESP32Board::enterDeepSleep(") :]
+        self.assertIn("shutdownPeripherals();", sleep)
         guard = re.search(
             r"#if MESH_ESP32_USB_CONSOLE_COOPERATIVE\s+"
             r"mesh::serviceUsbTerminalPort\(\);\s+"
             r"#else\s+Serial\.flush\(\);\s+#endif",
-            sleep,
+            shutdown,
         )
         self.assertIsNotNone(guard)
-        self.assertEqual(sleep.count("Serial.flush();"), 1)
+        self.assertEqual(shutdown.count("Serial.flush();"), 1)
 
     def test_large_file_dumps_are_bounded_and_cancelable(self):
         for role in ROLES:

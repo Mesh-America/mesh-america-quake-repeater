@@ -1,4 +1,4 @@
-# Feature switches by role — 1.17.1.5 USA Cascade
+# Feature switches by role - 1.17.1.5 USA Cascade
 
 Use these settings with the exact board's canonical release image. Former
 logging, power-saving, FEM-gain, and rotated-display variants are now runtime
@@ -71,6 +71,16 @@ change them. A command requires its feature to be compiled into the build.
 `set usb.logging on|off` changes only USB logging. On MQTT-capable builds,
 `set mqtt.enabled on|off` changes only MQTT and keeps broker settings;
 `set logging.output off|usb|wifi|both` selects both outputs together.
+`set usb.debug on|off` separately saves verbose USB diagnostics. Debug output
+requires both USB switches on; RAW/RX/TX packet records need only
+`usb.logging`. Leave `usb.debug off` for USB-to-MQTT packet capture.
+
+Current source also includes a saved [USB logging watchdog](usb_logging_watchdog.md):
+`get usb.watchdog` and `set usb.watchdog off|on|auto`. Missing state defaults to
+Auto, qualifying from 14 continuous healthy USB stats-polling days, not a cable
+or open TTY alone. Confirmed client loss can trigger USB-only repair; MCU resets
+require On and an entire physical-fault tier, growing from one hour to one week.
+This repairs the node's USB connection, not the host Pi or MQTT service.
 
 ## Full Companion commands
 
@@ -83,6 +93,8 @@ change them. A command requires its feature to be compiled into the build.
 | External FEM TX gain | `set radio.fem.txgain on` | `set radio.fem.txgain off` | `get radio.fem.txgain` |
 | ESP32 USB logging | `set powersaving off`, then `set usb.logging on` | `set usb.logging off` | `get powersaving`, `get usb.logging` |
 | nRF52 second USB logging port | `set usb.logging on reboot` | `set usb.logging off reboot` | `get usb.logging` |
+| Verbose USB diagnostics | `set usb.debug on` while USB logging is on | `set usb.debug off` | `get usb.debug` reports saved intent |
+| USB logging watchdog (current source) | `set usb.watchdog auto` or `on` | `set usb.watchdog off` | `get usb.watchdog`; native USB and durable storage required |
 | MQTT master | `set mqtt.enabled on` | `set mqtt.enabled off` | `get mqtt.enabled`, `get mqtt.running`, `get mqtt.status` |
 | ESP32 persistent WebConfig | `set webui on` | `set webui off` | `get webui` |
 | ESP32 WebConfig browser console | `set wifi.cli on` | `set wifi.cli off` | `get wifi.cli` |
@@ -94,11 +106,19 @@ Saved settings apply immediately unless noted. Rotation and gain controls
 report unsupported hardware instead of creating that feature. Fresh Full
 Companion preferences enable device power saving and leave USB logging off;
 existing saved preferences win after an update.
+USB debug defaults off, including on upgrade from preferences without that
+field. Its saved intent survives switching the USB master off. Verbose messages
+still require compiled debug support; changing this preference adds no missing
+code and does not require a reboot.
 
 **ESP32:** logging and binary Companion traffic share one USB port. Turn logging
 off before handing USB to an app/MOTA host. **nRF52:** the optional second CDC
 port is for logs; use the primary port for Companion/MOTA. Adding/removing the
 second port requires a reboot; the optional suffix shown above requests it.
+Full Companion includes complete ASCII RAW packet records and decoded RX/TX
+summaries, independent of verbose debug. The nRF52 log port is output-only;
+CLI/identity queries belong to interface `00`. A USB-to-MQTT program that expects
+both logs and CLI replies on one port cannot use interface `02` alone.
 
 ### MQTT controls shared by Companion and infrastructure
 
@@ -167,6 +187,7 @@ from some portable builds. The USB browser console still works without it.
 | Setting | Enable | Disable | Read back |
 | --- | --- | --- | --- |
 | Live USB logging | ESP32 1.17.1.5: `set powersaving off`, then `set usb.logging on`; other platforms: `set usb.logging on` | `set usb.logging off` | `get powersaving`, `get usb.logging` |
+| Verbose USB diagnostics | `set usb.debug on` while USB logging is on | `set usb.debug off` | `get usb.debug` reports saved intent |
 | Capture RX log to node storage | `log start` | `log stop` | `log` prints the capture locally |
 | RS232 / ESP-NOW bridge master | `set bridge.enabled on` | `set bridge.enabled off` | `get bridge.enabled`, `get bridge.running`, `get bridge.type` |
 | MQTT periodic status publication | `set mqtt.status on` | `set mqtt.status off` | `get mqtt.status` shows connection status |
@@ -188,6 +209,13 @@ requests a reboot only when changing the USB interfaces requires it, as on
 nRF52 Full Companion. `log start/stop` records to storage independently of live
 USB logging. Use
 `log erase` to delete that capture.
+
+For quiet packet capture in current firmware, use `set usb.debug off` and
+`set usb.logging on`. Verbose diagnostics default off for fresh and upgraded
+preferences without the new field. The debug choice is saved separately;
+turning logging off, or selecting `logging.output wifi`, does not erase it.
+Debug output is effective only when USB logging is on and the image includes
+the relevant debug code. RAW/RX/TX records remain enabled without debug.
 
 For **ESP32 1.17.1.5 USB logging**, run these as separate commands in the
 role's text terminal (or remote admin CLI on infrastructure):
@@ -232,6 +260,8 @@ settings override these defaults. To toggle only MQTT while keeping
 USB logging unchanged, use `set mqtt.enabled off` / `on`. Neither setting
 turns LoRa repeating off. Repeater forwarding uses `set repeat off` / `on`
 and `get repeat` separately.
+The selector changes USB master output, not saved `usb.debug` intent. Direct
+WiFi MQTT is independent of that USB verbosity preference.
 
 The `set powersaving off` step above is the **1.17.1.5 ESP32 USB workaround**.
 **WiFi/MQTT-only logging does not need it while the Repeater/Room Server MQTT

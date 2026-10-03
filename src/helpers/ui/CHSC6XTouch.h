@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <helpers/UsbLogging.h>
 
 #include "TouchTapDetector.h"
 
@@ -36,17 +37,18 @@ public:
   #endif
 
     if (_present) {
-      Serial.printf("Touch: CHSC6X found at 0x%02X\n", CHSC6X_I2C_ADDR);
-    } else {
+      if (mesh::isUsbDebugLoggingEnabled())
+        mesh::usbDebugPort().printf("Touch: CHSC6X found at 0x%02X\n", CHSC6X_I2C_ADDR);
+    } else if (mesh::isUsbDebugLoggingEnabled()) {
       // Report what is actually on the bus, so an unexpected controller or
       // address can be identified from a normal boot log.
-      Serial.printf("Touch: idle or absent at 0x%02X; I2C bus currently answers:",
+      mesh::usbDebugPort().printf("Touch: idle or absent at 0x%02X; I2C bus currently answers:",
                     CHSC6X_I2C_ADDR);
       for (uint8_t addr = 8; addr < 0x78; addr++) {
         _wire->beginTransmission(addr);
-        if (_wire->endTransmission() == 0) Serial.printf(" 0x%02X", addr);
+        if (_wire->endTransmission() == 0) mesh::usbDebugPort().printf(" 0x%02X", addr);
       }
-      Serial.println();
+      mesh::usbDebugPort().println();
     }
     return _present;
   }
@@ -58,7 +60,7 @@ public:
     bool pressed = readPressed();
     if (pressed && !_present) {
       _present = true;   // answered late; the boot probe caught it mid-idle
-      Serial.println("Touch: CHSC6X responding");
+      mesh::usbDebugPort().println("Touch: CHSC6X responding");
     }
     return _detector.update(now_ms, pressed);
   }
@@ -104,21 +106,22 @@ private:
   // frames are unconditional so an idle read that never changes is still
   // visible in the log.
   void logRaw(uint8_t got, const uint8_t* buf) {
+    if (!mesh::isUsbDebugLoggingEnabled()) return;
     int16_t key = buf ? (int16_t)buf[0] : (int16_t)(-2 - (int16_t)got);
     if (key == _logged && _log_budget == 0) return;
     if (_log_budget > 0) _log_budget--;
     _logged = key;
 
     if (!buf) {
-      Serial.printf("Touch: short read (%u of %u bytes)\n", got, CHSC6X_READ_LEN);
+      mesh::usbDebugPort().printf("Touch: short read (%u of %u bytes)\n", got, CHSC6X_READ_LEN);
       return;
     }
-    Serial.printf("Touch: raw %02X %02X %02X %02X %02X", buf[0], buf[1], buf[2], buf[3], buf[4]);
+    mesh::usbDebugPort().printf("Touch: raw %02X %02X %02X %02X %02X", buf[0], buf[1], buf[2], buf[3], buf[4]);
   #ifdef PIN_TOUCH_INT
     // Pulled up, so an unfitted R13 sits steady HIGH and a wired INT pulses LOW.
-    Serial.printf("  INT=%d", digitalRead(PIN_TOUCH_INT));
+    mesh::usbDebugPort().printf("  INT=%d", digitalRead(PIN_TOUCH_INT));
   #endif
-    Serial.println();
+    mesh::usbDebugPort().println();
   }
 #else
   void logRaw(uint8_t, const uint8_t*) {}

@@ -8,6 +8,7 @@ using esp_event_handler_t = void (*)(void*, esp_event_base_t, int32_t, void*);
 constexpr int ARDUINO_USB_CDC_ANY_EVENT = -1;
 constexpr int ARDUINO_USB_CDC_DISCONNECTED_EVENT = 1;
 constexpr int ARDUINO_USB_CDC_LINE_STATE_EVENT = 2;
+constexpr int ARDUINO_USB_CDC_TX_EVENT = 3;
 struct arduino_usb_cdc_event_data_t {
   struct { bool dtr; bool rts; } line_state{};
 };
@@ -35,6 +36,7 @@ class MockSerial : public Stream {
     assert(false && "mode0 must never call USBCDC::flush");
   }
   void setDebugOutput(bool enabled) { debug_enabled = enabled; }
+  void setTxTimeoutMs(unsigned timeout) { tx_timeout_ms = timeout; }
   void onEvent(int event, esp_event_handler_t handler) {
     assert(event == ARDUINO_USB_CDC_ANY_EVENT);
     callback = handler;
@@ -44,6 +46,7 @@ class MockSerial : public Stream {
   int rx_count = 0;
   int registrations = 0;
   bool debug_enabled = true;
+  unsigned tx_timeout_ms = 99;
   esp_event_handler_t callback = nullptr;
 };
 

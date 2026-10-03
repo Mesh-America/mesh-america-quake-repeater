@@ -1,6 +1,8 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#include <helpers/UsbLoggingWatchdog.h>
+#include <helpers/UsbLoggingClientActivity.h>
 #include <Mesh.h>
 #include <helpers/BluetoothMac.h>
 #include "MyMesh.h"
@@ -1158,6 +1160,10 @@ static void serviceUsbTerminal() {
         return;
       }
 #endif
+      // On dual CDC hardware only CDC1 is the logging-reader endpoint.
+      if (!mesh::hasDedicatedUsbLoggingPort()
+          && strlen(usb_terminal_line) == usb_terminal_line_len)
+        mesh::noteUsbLoggingStatsCommand(usb_terminal_line);
       the_mesh.handleTerminalCommand(usb_terminal_line);
       clearUsbTerminalLine();
 #if MESH_USB_LOGGING_AVAILABLE
@@ -2866,6 +2872,7 @@ void setup() {
   #error "need to define filesystem"
 #endif
 
+
 #ifdef DISPLAY_CLASS
   // Load only the display policy before radio and secondary-storage startup.
   FILESYSTEM* display_prefs_fs = store.getPrimaryFS();
@@ -3052,6 +3059,14 @@ void setup() {
   // until the saved Companion preferences above are available. Single-TTY
   // platforms have no separate port, so this is a harmless no-op there.
   mesh::beginUsbLoggingPort();
+
+#if defined(NRF52_PLATFORM)
+  mesh::loadUsbLoggingWatchdog(store.getPrimaryFS(), !store.isVolatilePrimaryFS(),
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#else
+  mesh::loadUsbLoggingWatchdog(store.getPrimaryFS(), true,
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#endif
 
 #if defined(BLE_PIN_CODE)
   // Keep stack registration available for a later USB `set bluetooth on`,
@@ -3300,6 +3315,25 @@ void setup() {
 #endif
 }
 
+static bool usbLoggingRecoverySafe(void*) {
+  if (board.isOTAUpdateRunning() || board.isRadioTestActive()
+      || radio_driver.isWatchdogObserving() || radio_driver.isCalibratingNoiseFloor()
+      || !the_mesh.canRecoverUsbLogging()) return false;
+#if defined(ENABLE_USB_INTERFACE)
+#if COMPANION_FEATURE_USB_MOTA_SOURCE
+  if (usb_mota_mode) return false;
+#endif
+  // The logging CDC may be separate, but USB re-enumeration/reboot affects the
+  // primary Companion connection too. Never reset a live Binary client.
+  if (!the_mesh.isTerminalMode()
+      && (isUsbTerminalDataConnected() || usb_serial_interface.hasPendingIO())) return false;
+  const auto usb = mesh::usbLoggingStatus();
+  if (usb.reader_connected && !usb.stalled
+      && (usb_terminal_line_len || usb_terminal_discard_line)) return false;
+#endif
+  return true;
+}
+
 void loop() {
 #if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
   if (pico_wifi_active && WiFi.status() != WL_CONNECTED
@@ -3394,6 +3428,7 @@ void loop() {
 #endif
   rtc_clock.tick();
   board.loop();
+  if (mesh::serviceUsbLoggingWatchdog(usbLoggingRecoverySafe)) board.reboot();
 #ifdef TBEAM_1W
   board.updateFanControl();
 #endif
@@ -3409,6 +3444,7 @@ void loop() {
   // Host sessions, live logging, and button activity still need service.
   bool can_sleep = the_mesh.getNodePrefs()->powersaving_enabled
       && !the_mesh.hasPendingWork()
+      && !mesh::isUsbLoggingWatchdogArmed()
       && !mesh::wireless::control().pending();
 #if defined(ESP32_PLATFORM) && MESH_USB_LOGGING_AVAILABLE
   // The native-USB-only light-sleep path below bypasses ESP32Board::sleep.

@@ -1645,7 +1645,7 @@ void MyMesh::dumpLogFile() {
     return;
   }
 #endif
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   if (hasPendingSerialOutput()) {
     mesh::usbConsolePort().printf("Err - USB output busy\r\n");
     return;
@@ -1669,7 +1669,7 @@ void MyMesh::dumpLogFile() {
 #endif
 }
 
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
 bool MyMesh::hasPendingSerialOutput() const {
   return serial_log_active || serial_log_eof_pending;
 }
@@ -2513,7 +2513,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
     if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
 #endif
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
     if (sender_timestamp == 0 && serial_log_eof_pending
         && strcmp(reply, "   EOF") == 0) reply[0] = 0;
 #endif
@@ -2534,7 +2534,7 @@ void MyMesh::loop() {
   // Check radio FIRST to ensure we don't miss incoming packets
   // MQTT processing can take time, so we prioritize radio reception
   mesh::Mesh::loop();
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   servicePendingSerialOutput();
 #endif
   _cli.loop();

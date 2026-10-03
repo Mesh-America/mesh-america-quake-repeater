@@ -25,6 +25,80 @@ function hex(text) {
   assert.strictEqual(publicOnly.public.radioId, "000102030405060708090A0B0C0D0E0F");
   assert.strictEqual(publicOnly.public.firmware, "1.17.1.5");
   assert.strictEqual(publicOnly.acl.length, 0);
+  assert.strictEqual(publicOnly.public.protocol, "MGR1");
+  assert.strictEqual(publicOnly.public.usbLogging, null);
+  assert.strictEqual(publicOnly.public.usbWatchdogLast, null);
+
+  // Public MGR2 parsing is additive; actual MGR2 SIV ciphertext is checked
+  // cross-language by test_management_report.py using the production encoder.
+  const legacy = Buffer.from(decoder.EXAMPLE_PAGE, "hex");
+  const currentHeader = Buffer.from(legacy.subarray(0, 83)); currentHeader[3] = 0x32;
+  const usb = Buffer.alloc(15);
+  usb.writeUInt16LE(0x07ff, 0); usb[2] = 2 | (8 << 2);
+  usb.writeUInt32LE(604800, 3); usb.writeUInt32LE(0xffffffff, 7);
+  usb.writeUInt32LE(1209600, 11);
+  const current = Buffer.concat([currentHeader, usb, legacy.subarray(83)]);
+  const currentPublic = await decoder.decodeManagement(current.toString("hex"), "");
+  assert.strictEqual(currentPublic.public.protocol, "MGR2");
+  assert.strictEqual(currentPublic.public.usbWatchdogLast, null);
+  assert.strictEqual(currentPublic.public.usbLogging.supported, true);
+  assert.strictEqual(currentPublic.public.usbLogging.persistenceReady, true);
+  assert.strictEqual(currentPublic.public.usbLogging.loggerActive, true);
+  assert.strictEqual(currentPublic.public.usbLogging.stage, 2);
+  assert.strictEqual(currentPublic.public.usbLogging.backoffStep, 8);
+  assert.strictEqual(currentPublic.public.usbLogging.retrySeconds, 604800);
+  assert.strictEqual(currentPublic.public.usbLogging.inactiveSeconds, 0xffffffff);
+  assert.strictEqual(currentPublic.public.usbLogging.watchdogAuto, true);
+  assert.strictEqual(currentPublic.public.usbLogging.autoConnectedSeconds, 1209600);
+  const unsupported = Buffer.from(current); unsupported.writeUInt16LE(0, 83);
+  assert.strictEqual((await decoder.decodeManagement(unsupported.toString("hex"), "")).public.usbLogging.supported, false);
+  const openReaderOnly = Buffer.from(current); openReaderOnly[84] &= ~4;
+  const readerWithoutLogger = (await decoder.decodeManagement(openReaderOnly.toString("hex"), "")).public.usbLogging;
+  assert.strictEqual(readerWithoutLogger.hostConnected, true);
+  assert.strictEqual(readerWithoutLogger.readerConnected, true);
+  assert.strictEqual(readerWithoutLogger.loggerActive, false);
+  const badCount = Buffer.from(current); badCount[82] = 6;
+  await assert.rejects(decoder.decodeManagement(badCount.toString("hex"), ""), /bounds/);
+  await assert.rejects(decoder.decodeManagement(current.subarray(0, 99).toString("hex"), ""), /complete/);
+  for (const [offset, value] of [[84, 8], [85, 0xc0]]) {
+    const reserved = Buffer.from(current); reserved[offset] = value;
+    await assert.rejects(decoder.decodeManagement(reserved.toString("hex"), ""), /Reserved/);
+  }
+
+  // Public MGR3 fields use their own layout; production ciphertext for all
+  // three versions is authenticated cross-language by the Python host test.
+  const mgr3Header = Buffer.from(current.subarray(0, 98)); mgr3Header[3] = 0x33;
+  const event = Buffer.alloc(13); event[0] = 0xbf;
+  event.writeUInt32LE(1700000001, 1); event.writeUInt32LE(777, 5); event.writeUInt32LE(42, 9);
+  const mgr3 = Buffer.concat([mgr3Header, event, current.subarray(98)]);
+  const mgr3Public = await decoder.decodeManagement(mgr3.toString("hex"), "");
+  assert.strictEqual(mgr3Public.public.protocol, "MGR3");
+  assert.strictEqual(mgr3Public.public.usbLogging.loggerActive, true);
+  assert.deepStrictEqual(mgr3Public.public.usbWatchdogLast, {
+    reasons: 15, reasonNames: ["host-absent", "reader-absent", "tx-stalled", "client-inactive"],
+    actionCode: 3, action: "reboot-requested", persisted: true,
+    epoch: 1700000001, uptimeSeconds: 777, sequence: 42,
+  });
+  const none = Buffer.from(mgr3); none.fill(0, 98, 111);
+  assert.strictEqual((await decoder.decodeManagement(none.toString("hex"), "")).public.usbWatchdogLast, null);
+  for (let action = 1; action <= 4; ++action) {
+    const ramOnly = Buffer.from(mgr3); ramOnly[98] = 15 | (action << 4); ramOnly.writeUInt32LE(0, 99);
+    const decodedEvent = (await decoder.decodeManagement(ramOnly.toString("hex"), "")).public.usbWatchdogLast;
+    assert.strictEqual(decodedEvent.actionCode, action);
+    assert.strictEqual(decodedEvent.persisted, false);
+    assert.strictEqual(decodedEvent.epoch, 0);
+  }
+  for (const code of [0x80, 0x8f, 0xdf, 0xef, 0xff]) {
+    const invalid = Buffer.from(mgr3); invalid[98] = code;
+    await assert.rejects(decoder.decodeManagement(invalid.toString("hex"), ""), /Invalid/);
+  }
+  const invalidSequence = Buffer.from(mgr3); invalidSequence.writeUInt32LE(0, 107);
+  await assert.rejects(decoder.decodeManagement(invalidSequence.toString("hex"), ""), /Invalid/);
+  const fiveEntries = Buffer.from(mgr3); fiveEntries[82] = 5;
+  await assert.rejects(decoder.decodeManagement(fiveEntries.toString("hex"), ""), /bounds/);
+  for (const size of [99, 110, 126]) {
+    await assert.rejects(decoder.decodeManagement(mgr3.subarray(0, size).toString("hex"), ""), /complete/);
+  }
 
   const decoded = await decoder.decodeManagement(
     decoder.EXAMPLE_PAGE,
@@ -37,6 +111,10 @@ function hex(text) {
   assert.strictEqual(decoded.acl[0].fingerprint, "AABBCCDDEEFF001122334455");
   assert.strictEqual(decoded.acl[0].administrator, true);
   assert.strictEqual(decoded.acl[0].otaSigner, true);
+  const wrapped = decoder.EXAMPLE_PAGE.match(/.{1,64}/g).join("\n");
+  assert.strictEqual((await decoder.decodeManagement(wrapped, decoder.EXAMPLE_PASSWORD)).authenticated, true);
+  const duplicateLines = decoder.EXAMPLE_PAGE + "\n" + decoder.EXAMPLE_PAGE;
+  assert.strictEqual((await decoder.decodeManagement(duplicateLines, decoder.EXAMPLE_PASSWORD)).acl.length, 1);
 
   const groupData = "1A00" + decoder.EXAMPLE_PAGE;
   const packet = await decoder.decodeManagement(groupData, decoder.EXAMPLE_PASSWORD);

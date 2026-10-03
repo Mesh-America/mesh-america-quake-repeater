@@ -26,7 +26,7 @@ struct ManagementReporter::Working {
   History history;
   Extrema during_report;
   AclList acl;
-  uint8_t header[HEADER] = {};
+  uint8_t header[CURRENT_HEADER] = {};
   TransportKey scope;
   uint8_t route_path[MAX_PATH_SIZE] = {};
   uint8_t route_path_len = OUT_PATH_UNKNOWN;
@@ -103,7 +103,10 @@ uint32_t ManagementReporter::jitter() const {
 }
 void ManagementReporter::snapshot() {
   auto& w = *work; memset(w.header, 0, sizeof(w.header)); w.acl = AclList();
-  auto* p = w.header; memcpy(p, "MGR1", 4); memcpy(p + 4, mesh.self_id.pub_key, 16);
+  auto* p = w.header; memcpy(p, "MGR3", 4); memcpy(p + 4, mesh.self_id.pub_key, 16);
+  const UsbLoggingStatus usb = usbLoggingStatus();
+  encodeUsbStatus(p + HEADER, usb);
+  encodeUsbWatchdogEvent(p + WATCHDOG_EVENT_OFFSET, usb.last_event);
   write32(p + 20, sequence); write32(p + 24, mesh.getRTCClock()->getCurrentTime());
   const uint64_t hours = uptime / 3600; write16(p + 60, hours > 65535 ? 65535 : hours);
   w.history.week().encode(p + 62); w.history.period.encode(p + 66);
@@ -229,15 +232,16 @@ void ManagementReporter::start(bool flood) {
 }
 void ManagementReporter::sendPage() {
   auto& w = *work;
-  uint8_t packet[MAX_PAYLOAD], enc[32]; memcpy(packet, w.header, HEADER);
-  const uint8_t first = w.page * PER_PAGE;
-  const uint8_t count = w.acl.count - first < PER_PAGE ? w.acl.count - first : PER_PAGE;
+  uint8_t packet[MAX_PAYLOAD], enc[32]; memcpy(packet, w.header, CURRENT_HEADER);
+  const uint8_t first = w.page * CURRENT_PER_PAGE;
+  const uint8_t count = w.acl.count - first < CURRENT_PER_PAGE ? w.acl.count - first : CURRENT_PER_PAGE;
   packet[78] = w.page; packet[79] = w.acl.pages(); packet[80] = w.acl.count;
   packet[81] = first; packet[82] = count;
-  const size_t private_len = count * ENTRY, size = HEADER + private_len + TAG;
-  memcpy(packet + HEADER, w.acl.entries + first, private_len);
+  const size_t private_len = count * ENTRY, size = CURRENT_HEADER + private_len + TAG;
+  memcpy(packet + CURRENT_HEADER, w.acl.entries + first, private_len);
   deriveKey(key, "MeshCore-MGR1-SIV", packet + 4, enc);
-  seal(enc, packet, HEADER, packet + HEADER, private_len, packet + HEADER + private_len);
+  seal(enc, packet, CURRENT_HEADER, packet + CURRENT_HEADER, private_len,
+       packet + CURRENT_HEADER + private_len);
   erase(enc, sizeof(enc));
   Packet* pkt = mesh.createRawData(packet, size);
   if (!pkt) { w.page_in = 60; return; }

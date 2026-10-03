@@ -49,6 +49,7 @@
 #include <helpers/StaticPoolPacketManager.h>
 #include <helpers/TerminalCommandTracker.h>
 #include <helpers/TerminalDisplayFilter.h>
+#include <helpers/UsbLogging.h>
 #include <target.h>
 #if defined(OTA_SHARED_COMPANION_QUEUE)
 #include <helpers/BorrowableFrameBuffer.h>
@@ -350,6 +351,9 @@ protected:
   bool sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
 
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
+#if MESH_PACKET_LOGGING && !MESH_PACKET_LOGGING_COMPACT
+  const char* getLogDateTime() override;
+#endif
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
   void logRx(mesh::Packet* packet, int len, float score) override;
   void logTx(mesh::Packet* packet, int len) override;
@@ -418,9 +422,18 @@ protected:
 
 public:
   bool savePrefs() {
+    const uint8_t previous_usb_debug = _prefs.usb_debug_enabled;
+    _prefs.usb_debug_enabled = _prefs.usb_debug_enabled == 1 ? 1 : 0;
     const bool saved =
         _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
-    if (saved) _prefs.clearDirty();
+    if (saved) {
+      _prefs.clearDirty();
+#if MESH_USB_LOGGING_AVAILABLE
+      mesh::setUsbDebugEnabled(_prefs.usb_debug_enabled != 0);
+#endif
+    } else {
+      _prefs.usb_debug_enabled = previous_usb_debug;
+    }
     return saved;
   }
 #if COMPANION_FEATURE_READER
@@ -440,6 +453,7 @@ public:
 
   // To check if there is pending work
   bool hasPendingWork() const;
+  bool canRecoverUsbLogging() const;
 
 private:
   // Only snapshot the changed value: CompanionNodePrefs owns self-referencing
