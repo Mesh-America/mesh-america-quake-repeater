@@ -89,6 +89,12 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 - `start ota ap` — always raises the `MeshCore-OTA` Wi-Fi hotspot, even when joined to a network. Use this when the network applies client isolation and the station IP isn't reachable.
 - `stop ota` — stops an idle manual-OTA web server, releases port 80, and re-enables automatic network switching. It refuses while a firmware upload is in progress.
 
+### Switch the OTA release channel (observer builds)
+
+- `ota branch` — shows the selected channel, the channel this build was made for, and the manifest base `ota check`/`ota update` will use.
+- `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`) — pull future `ota update`s from that channel. The selection is saved; run `ota update` to switch.
+- `ota branch default` — follow the channel this build was made for.
+
 ---
 
 ### Erase/Factory Reset
