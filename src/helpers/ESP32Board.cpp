@@ -334,10 +334,14 @@ bool ESP32Board::otaFromManifestImpl(const char* manifest_base, const char* curr
   bool same_base = (own_base[0] && avail_base[0] && strcmp(own_base, avail_base) == 0);
   bool have_builds = (own_build >= 0 && avail_build >= 0);
   bool diff_base = (own_base[0] && avail_base[0] && !same_base);
+  // Build counters are per channel, so build numbers only compare within the native channel.
+  bool cross_channel = (strcmp(manifest_base, OTA_MANIFEST_BASE) != 0);
 
   int behind = 0;
   bool up_to_date;
-  if (same_base && have_builds) {
+  if (cross_channel) {
+    up_to_date = hash_equal;
+  } else if (same_base && have_builds) {
     behind = avail_build - own_build;
     up_to_date = (behind <= 0);
   } else if (diff_base) {
@@ -362,6 +366,8 @@ bool ESP32Board::otaFromManifestImpl(const char* manifest_base, const char* curr
   if (dry_run) {
     if (up_to_date) {
       snprintf(reply, 160, "up to date: %s", avail_disp);
+    } else if (cross_channel) {
+      snprintf(reply, 160, "update available: %s -> %s (channel switch)%s", own_disp, avail_disp, pc_note);
     } else if (same_base && have_builds) {
       snprintf(reply, 160, "update available: %s -> %s (%d behind)%s", own_disp, avail_disp, behind, pc_note);
     } else if (diff_base) {
