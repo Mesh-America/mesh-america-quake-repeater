@@ -1513,3 +1513,74 @@ assert(!picker.firmwareProfileChoices(catalog.profiles, {
   hardware: 'Station_G2', role: 'repeater', variant: 'missing',
 }).some(item => item.filters.variant === 'missing'));
 console.log('combined firmware profile choices and legacy links passed');
+
+// Mobile progress counts builds, not the installation files for each build.
+const feedbackFilters = {hardware: 'Heltec_v3', role: 'companion'};
+const v3Feedback = controlled.profiles.find(p => p.target === 'Heltec_v3_companion_radio_full');
+const feedbackCatalog = [Object.assign({}, v3Feedback, {
+  installKinds: ['merged-bin', 'bin'],
+})];
+const feedbackSnapshot = JSON.stringify(feedbackCatalog);
+assert.deepStrictEqual(picker.selectionProgress(feedbackCatalog, feedbackFilters), {
+  count: 1, state: 'single', title: '1 firmware build left',
+  note: 'Choose an install operation.',
+});
+for (const install of ['merged-bin', 'bin']) {
+  const progress = picker.selectionProgress(feedbackCatalog, {...feedbackFilters, install});
+  assert.strictEqual(progress.count, 1);
+  assert(progress.note.includes('Confirm your board and install choice'));
+}
+assert.strictEqual(picker.selectionProgress(controlled.profiles, {}).state, 'multiple');
+assert.strictEqual(picker.selectionProgress(controlled.profiles, {}).count, controlled.profiles.length);
+assert.strictEqual(picker.selectionProgress(feedbackCatalog, {hardware: 'Missing'}).state, 'empty');
+assert.strictEqual(picker.selectionProgress([], {}).count, 0);
+assert.strictEqual(picker.selectionProgress([], {}).title, 'No matching firmware builds');
+assert.strictEqual(picker.selectionProgress(feedbackCatalog).count, 1);
+
+function feedbackOptions(values) {
+  return [{value: ''}].concat(values.map(value => ({value})));
+}
+assert(picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'logging',
+  feedbackOptions(v3Feedback.loggingModes)));
+assert(picker.choicesUseSameFirmware(feedbackCatalog, {...feedbackFilters, logging: 'usb'}, 'logging',
+  feedbackOptions(v3Feedback.loggingModes)));
+assert(picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'mode',
+  feedbackOptions(picker.profileFieldValues(v3Feedback, 'mode'))));
+assert(picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'firmwareProfile',
+  picker.firmwareProfileChoices(feedbackCatalog, feedbackFilters)));
+// A sole available option can be marked without disabling it or selecting it.
+assert(picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'role',
+  feedbackOptions(['companion'])));
+assert(!picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'install',
+  feedbackOptions(['merged-bin', 'bin'])));
+
+// One currently selected build is not enough: alternatives may change builds.
+const feedbackAlternatives = [
+  {...feedbackCatalog[0], loggingModes: ['none', 'usb'], mode: 'usb', connectionModes: ['usb']},
+  {...feedbackCatalog[0], target: 'second-build', loggingModes: ['wifi'],
+    mode: 'wifi', connectionModes: ['wifi'], feature: 'standard', ota: 'none'},
+];
+const selectedFeedback = {...feedbackFilters, logging: 'usb'};
+assert.strictEqual(picker.selectionProgress(feedbackAlternatives, selectedFeedback).count, 1);
+assert(!picker.choicesUseSameFirmware(feedbackAlternatives, selectedFeedback, 'logging',
+  feedbackOptions(['none', 'usb', 'wifi'])));
+assert(!picker.choicesUseSameFirmware(feedbackAlternatives, {...feedbackFilters, mode: 'usb'}, 'mode',
+  feedbackOptions(['usb', 'wifi'])));
+const selectedProfileFeedback = {...feedbackFilters, feature: 'full', ota: 'lora-source', variant: 'default'};
+assert(!picker.choicesUseSameFirmware(feedbackAlternatives, selectedProfileFeedback, 'firmwareProfile',
+  picker.firmwareProfileChoices(feedbackAlternatives, selectedProfileFeedback)));
+// Multiple builds can all share a runtime choice; report that accurately too.
+assert(picker.choicesUseSameFirmware(feedbackAlternatives.map(p => ({...p, loggingModes: ['none', 'usb']})),
+  feedbackFilters, 'logging', feedbackOptions(['none', 'usb'])));
+for (const partial of [{feature: 'full'}, {ota: 'lora-source'}]) {
+  const selection = {...feedbackFilters, ...partial};
+  assert(picker.choicesUseSameFirmware(feedbackCatalog, selection, 'firmwareProfile',
+    picker.firmwareProfileChoices(feedbackCatalog, selection)));
+}
+assert(!picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'firmwareProfile',
+  [{value: 'invalid'}]));
+assert(!picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'role', [{value: ''}]));
+assert(!picker.choicesUseSameFirmware([], {}, 'role', feedbackOptions(['companion'])));
+assert.strictEqual(JSON.stringify(feedbackCatalog), feedbackSnapshot);
+assert.deepStrictEqual(feedbackFilters, {hardware: 'Heltec_v3', role: 'companion'});
+console.log('build counts, non-refining choices, install safety and partial-link feedback passed');

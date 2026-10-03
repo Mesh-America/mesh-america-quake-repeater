@@ -5,6 +5,46 @@ The canonical LUT is `firmware/esp32_partition_catalog.json` in this fork.
 assets. MeshCore Open bundles an identical copy for offline phone updates.
 There is no need to run a command on the phone or download old firmware there.
 
+## Smallest partition by board
+
+The table shows each board's **smallest known application partition** across
+all cataloged releases, roles, and profiles. It does not count smaller NVS or
+filesystem partitions. Sizes use MiB (1,048,576 bytes), with exact bytes below.
+Mixed layouts means some releases have dual-slot OTA and others do not.
+These are historical factory-image minimums, not measurements of your device;
+use `get storage.layout` to check its actual installed layout.
+
+<div class="partition-catalog" id="partition-catalog">
+  <div class="partition-catalog-controls">
+    <label for="partition-catalog-search">Board</label>
+    <input id="partition-catalog-search" type="search" placeholder="Search board name" autocomplete="off" disabled>
+    <a id="partition-catalog-open" href="../_data/esp32_partition_catalog.json">Open JSON</a>
+    <a href="../_data/esp32_partition_catalog.json" download="esp32_partition_catalog.json">Download JSON</a>
+  </div>
+  <p id="partition-catalog-status" role="status" aria-live="polite">Loading catalog JSON...</p>
+  <p id="partition-catalog-count" role="status" aria-live="polite"></p>
+  <div class="partition-catalog-table" id="partition-catalog-table" tabindex="0" aria-label="Smallest application partition by board" hidden>
+    <table>
+      <thead><tr><th scope="col">Board</th><th scope="col">Smallest app partition</th><th scope="col">OTA layouts</th></tr></thead>
+      <tbody id="partition-catalog-boards"></tbody>
+    </table>
+  </div>
+  <details class="partition-catalog-raw" id="partition-catalog-raw">
+    <summary>Show JSON details</summary>
+    <div class="partition-catalog-controls">
+      <label for="partition-catalog-view">JSON view</label>
+      <select id="partition-catalog-view" disabled>
+        <option value="layouts">Snapshot and partition layouts</option>
+        <option value="releases">Release inventory</option>
+        <option value="all">Complete catalog (large)</option>
+      </select>
+    </div>
+    <pre class="partition-catalog-json" tabindex="0" aria-label="Partition catalog JSON"><code id="partition-catalog-json">Expand this section to view the JSON.</code></pre>
+  </details>
+</div>
+
+With JavaScript disabled, use [the complete JSON file](_data/esp32_partition_catalog.json).
+
 ## Coverage
 
 The initial snapshot enumerates every published release (including prereleases,

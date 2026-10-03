@@ -6,6 +6,9 @@ repo_name: !ENV [MKDOCS_REPO_NAME, 'meshcore-dev/meshcore']
 repo_url: !ENV [MKDOCS_REPO_URL, 'https://github.com/meshcore-dev/meshcore/']
 edit_uri: !ENV [MKDOCS_EDIT_URI, 'edit/main/docs/']
 
+hooks:
+  - scripts/docs_partition_catalog.py
+
 # Keep historical URLs for bookmarks while showing only the organized copies.
 not_in_nav: |
   /*_validation.md
@@ -110,17 +113,19 @@ extra_css:
   - _stylesheets/notification_builder.css
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.css
   - _stylesheets/extra.css
-  - _stylesheets/firmware_picker.css?v=20260929-1
+  - _stylesheets/firmware_picker.css?v=20261001-feedback-1
   - _stylesheets/telemetry_decoder.css
   - _stylesheets/management_decoder.css
   - _stylesheets/filter_tool.css
   - _stylesheets/preset_test.css?v=20260923-2
+  - _stylesheets/esp32_partition_catalog.css?v=20261001-1
 
 extra_javascript:
   - _javascript/notification_builder.js?v=20260930-audio-start
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.js
-  - _javascript/firmware_picker.js?v=20260929-4
+  - _javascript/firmware_picker.js?v=20261001-feedback-1
   - _javascript/telemetry_decoder.js
   - _javascript/management_decoder.js
   - _javascript/filter_tool.js?v=20261002-hashbytes-2plus
   - _javascript/preset_test.js?v=20260923-2
+  - _javascript/esp32_partition_catalog.js?v=20261001-1

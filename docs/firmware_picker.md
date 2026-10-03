@@ -8,8 +8,11 @@ MQTT and GPS show their app/WebConfig steps instead. See
 The [USB web console](https://flasher.meshcore.io/console) works with the
 default ASCII terminal on USB Companion and infrastructure roles.
 
-Pick the choices in any order. Every selection narrows all the other controls
-to firmware combinations that were actually built in the current release set.
+Pick the choices in any order. The controls stay limited to compatible
+firmware combinations that were actually built in the current release set.
+The result count stays visible while you scroll through the filters on a phone.
+**Same firmware** marks choices that do not narrow the builds any further;
+they remain usable because they can change the setup instructions.
 The optional chip-family filter (ESP32, nRF52, RP2040, or STM32) can narrow the
 hardware list first. You can skip it: picking hardware fills it in automatically.
 Chip family and hardware are the only dropdowns. All remaining choices use
@@ -51,6 +54,14 @@ from the published firmware assets.
   </p>
 
   <form class="firmware-picker-form" data-role="form">
+    <div class="firmware-picker-feedback firmware-picker-wide" data-role="filter-feedback" hidden>
+      <div aria-live="polite" aria-atomic="true">
+        <strong data-role="filter-count"></strong>
+        <p data-role="filter-note"></p>
+      </div>
+      <a data-role="view-results" hidden>View files</a>
+    </div>
+
     <details class="firmware-picker-chip-family firmware-picker-wide">
       <summary data-role="chip-family-summary">Optional: chip family</summary>
       <p id="firmware-picker-chip-help">Skip this if you know your board. Picking hardware selects its chip family automatically. Choose Any to clear this filter.</p>
