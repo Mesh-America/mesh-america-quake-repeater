@@ -1,0 +1,1246 @@
+(function (global) {
+  "use strict";
+
+  const DEFAULTS = Object.freeze({
+    tz: "",
+    freq: "910.1",
+    bw: "500",
+    sf: "8",
+    cr: "7",
+    tx: "22",
+  });
+  const VALID_BANDWIDTHS = Object.freeze([
+    7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125, 250, 500,
+  ]);
+  const SCHEDULE_HORIZON_MS = 0x7fffffff;
+  const SCHEDULER_EPOCH_MAX = 0xffffffff;
+  const EARLY_JOIN_MS = 60 * 60 * 1000;
+  const DEFAULT_START_HOUR = 17;
+  const DEFAULT_WINDOW_DAYS = 2;
+  const SCHEDULE_MODE_RELATIVE = "relative";
+  const SCHEDULE_MODE_ABSOLUTE = "absolute";
+  const CLOCK_RESET_COMMAND = "clkreboot";
+  const TIMEZONE_BOUNDARY_PATH = "../_data/timezones-2025b-simplified.json";
+  const TIMEZONE_MAP_STYLE = Object.freeze({
+    default: Object.freeze({
+      color: "#ffffff",
+      weight: 1,
+      opacity: 0.7,
+      dashArray: "3",
+      fillColor: "#087f8c",
+      fillOpacity: 0.14,
+    }),
+    hover: Object.freeze({
+      color: "#67204f",
+      weight: 2,
+      opacity: 1,
+      dashArray: "",
+      fillColor: "#b83280",
+      fillOpacity: 0.35,
+    }),
+    selected: Object.freeze({
+      color: "#67204f",
+      weight: 3,
+      opacity: 1,
+      dashArray: "",
+      fillColor: "#b83280",
+      fillOpacity: 0.5,
+    }),
+  });
+
+  class PresetTestError extends Error {}
+
+  function strictNumber(value, name) {
+    const text = String(value).trim();
+    if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
+      throw new PresetTestError(name + " must be a decimal number");
+    }
+    const parsed = Number(text);
+    if (!Number.isFinite(parsed)) {
+      throw new PresetTestError(name + " is outside the supported range");
+    }
+    return parsed;
+  }
+
+  function strictSignedNumber(value, name) {
+    const text = String(value).trim();
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
+      throw new PresetTestError(name + " must be a decimal number");
+    }
+    const parsed = Number(text);
+    if (!Number.isFinite(parsed)) {
+      throw new PresetTestError(name + " is outside the supported range");
+    }
+    return parsed;
+  }
+
+  function strictInteger(value, name) {
+    const text = String(value).trim();
+    if (!/^\d+$/.test(text)) {
+      throw new PresetTestError(name + " must be an integer");
+    }
+    return Number(text);
+  }
+
+  function parseTimestamp(value, name) {
+    const text = String(value).trim();
+    let milliseconds;
+    if (/^\d{10}$/.test(text)) {
+      milliseconds = Number(text) * 1000;
+    } else if (/^\d{13}$/.test(text)) {
+      milliseconds = Number(text);
+    } else {
+      if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(text)) {
+        throw new PresetTestError(
+          name + " must include an explicit UTC offset such as Z or -07:00"
+        );
+      }
+      milliseconds = Date.parse(text);
+    }
+    if (!Number.isFinite(milliseconds)) {
+      throw new PresetTestError(
+        name + " must be ISO-8601 with an explicit offset, or a Unix timestamp"
+      );
+    }
+    return milliseconds;
+  }
+
+  function parseNodeClock(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+    const match = /^(\d{1,2}):(\d{2})\s*(?:-\s*)?(\d{1,2})\/(\d{1,2})\/(\d{4})\s+UTC$/i.exec(text);
+    if (!match) {
+      throw new PresetTestError(
+        "node clock must be HH:mm DD/M/YYYY UTC"
+      );
+    }
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    const day = Number(match[3]);
+    const month = Number(match[4]);
+    const year = Number(match[5]);
+    if (hour > 23 || minute > 59 || day < 1 || month < 1 || month > 12) {
+      throw new PresetTestError("node clock must be a real UTC date and time");
+    }
+    const milliseconds = Date.UTC(year, month - 1, day, hour, minute, 0);
+    const parsed = new Date(milliseconds);
+    if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 ||
+        parsed.getUTCDate() !== day || parsed.getUTCHours() !== hour ||
+        parsed.getUTCMinutes() !== minute) {
+      throw new PresetTestError("node clock must be a real UTC date and time");
+    }
+    const epoch = Math.floor(milliseconds / 1000);
+    if (epoch < 0 || epoch > SCHEDULER_EPOCH_MAX) {
+      throw new PresetTestError("node clock must be within the firmware epoch range");
+    }
+    return epoch;
+  }
+
+  function nodeClockOffsetSeconds(nodeClockEpoch, browserNowMs) {
+    if (nodeClockEpoch === null) return 0;
+    if (!Number.isSafeInteger(nodeClockEpoch) ||
+        nodeClockEpoch < 0 || nodeClockEpoch > SCHEDULER_EPOCH_MAX) {
+      throw new PresetTestError("node clock must be a Unix epoch within the firmware range");
+    }
+    if (!Number.isFinite(browserNowMs)) {
+      throw new PresetTestError("browser clock is unavailable");
+    }
+    const browserEpoch = Math.floor(browserNowMs / 60000) * 60;
+    return nodeClockEpoch - browserEpoch;
+  }
+
+  function schedulerEpochs(config, clockOffsetSeconds) {
+    const offset = clockOffsetSeconds == null ? 0 : clockOffsetSeconds;
+    if (!Number.isSafeInteger(offset)) {
+      throw new PresetTestError("node clock offset must be whole seconds");
+    }
+    const startEpoch = config.startEpoch + offset;
+    const endEpoch = config.endEpoch + offset;
+    if (startEpoch < 1 || endEpoch < 1 ||
+        startEpoch > SCHEDULER_EPOCH_MAX || endEpoch > SCHEDULER_EPOCH_MAX) {
+      throw new PresetTestError("adjusted scheduler epochs are outside the firmware range");
+    }
+    return Object.freeze({ startEpoch: startEpoch, endEpoch: endEpoch });
+  }
+
+  function formatClockOffset(seconds) {
+    const absolute = Math.abs(seconds);
+    const hours = Math.floor(absolute / 3600);
+    const minutes = Math.floor((absolute % 3600) / 60);
+    const parts = [];
+    if (hours) parts.push(hours + "h");
+    if (minutes || !parts.length) parts.push(minutes + "m");
+    return parts.join(" ");
+  }
+
+  function numberText(value) {
+    return String(Number(value));
+  }
+
+  function validateTimeZone(value) {
+    const text = String(value || "").trim();
+    if (!text) {
+      throw new PresetTestError("tz must be an IANA time zone such as America/Los_Angeles");
+    }
+    try {
+      return new Intl.DateTimeFormat("en-US", { timeZone: text })
+        .resolvedOptions().timeZone;
+    } catch (error) {
+      throw new PresetTestError(
+        "tz must be a valid IANA time zone such as America/Los_Angeles or UTC"
+      );
+    }
+  }
+
+  function browserTimeZone() {
+    try {
+      return validateTimeZone(
+        new Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+      );
+    } catch (error) {
+      return "UTC";
+    }
+  }
+
+  function hasPresetParameters(search) {
+    const params = new URLSearchParams(search || "");
+    return ["start", "end"].concat(Object.keys(DEFAULTS)).some(function (key) {
+      return params.has(key);
+    });
+  }
+
+  function supportedTimeZones(selectedTimeZone) {
+    const zones = new Set(["UTC"]);
+    if (typeof Intl.supportedValuesOf === "function") {
+      Intl.supportedValuesOf("timeZone").forEach(function (zone) {
+        zones.add(zone);
+      });
+    } else {
+      [
+        "Africa/Johannesburg", "America/Chicago", "America/Denver",
+        "America/Los_Angeles", "America/New_York", "America/Phoenix",
+        "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney", "Europe/Berlin",
+        "Europe/London", "Pacific/Auckland", "Pacific/Honolulu",
+      ].forEach(function (zone) { zones.add(zone); });
+    }
+    if (selectedTimeZone) zones.add(validateTimeZone(selectedTimeZone));
+    return Array.from(zones).sort(function (left, right) {
+      if (left === "UTC") return -1;
+      if (right === "UTC") return 1;
+      return left.localeCompare(right);
+    });
+  }
+
+  function calendarDayValue(parts, daysLater) {
+    const value = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + daysLater));
+    return String(value.getUTCFullYear()).padStart(4, "0") + "-" +
+      twoDigits(value.getUTCMonth() + 1) + "-" + twoDigits(value.getUTCDate());
+  }
+
+  function defaultWindow(timeZone, nowMs) {
+    const zone = validateTimeZone(timeZone);
+    const now = nowMs == null ? Date.now() : Number(nowMs);
+    if (!Number.isFinite(now)) throw new PresetTestError("browser clock is unavailable");
+    const today = zonedParts(now, zone);
+    const startText = calendarDayValue(today, 1) + "T" +
+      twoDigits(DEFAULT_START_HOUR) + ":00";
+    const endText = calendarDayValue(today, 1 + DEFAULT_WINDOW_DAYS) + "T" +
+      twoDigits(DEFAULT_START_HOUR) + ":00";
+    return Object.freeze({
+      startMs: localDateTimeToMs(startText, zone, "default start"),
+      endMs: localDateTimeToMs(endText, zone, "default end"),
+    });
+  }
+
+  function configFromSearch(search, fallbackTimeZone, nowMs) {
+    const params = new URLSearchParams(search || "");
+    const raw = {};
+    Object.keys(DEFAULTS).forEach(function (key) {
+      raw[key] = params.has(key) ? params.get(key) : DEFAULTS[key];
+    });
+    if (!params.has("tz")) {
+      raw.tz = fallbackTimeZone || browserTimeZone();
+    }
+
+    const tz = validateTimeZone(raw.tz);
+    const generatedWindow = defaultWindow(tz, nowMs);
+    let startMs = params.has("start")
+      ? parseTimestamp(params.get("start"), "start") : generatedWindow.startMs;
+    let endMs = params.has("end")
+      ? parseTimestamp(params.get("end"), "end") : generatedWindow.endMs;
+    if (params.has("start") && !params.has("end")) endMs = startMs + 86400000;
+    if (!params.has("start") && params.has("end")) startMs = endMs - 86400000;
+    const freq = strictNumber(raw.freq, "freq");
+    const bw = strictNumber(raw.bw, "bw");
+    const sf = strictInteger(raw.sf, "sf");
+    const cr = strictInteger(raw.cr, "cr");
+    const tx = strictSignedNumber(raw.tx, "tx");
+
+    if (endMs <= startMs) {
+      throw new PresetTestError("end must be later than start");
+    }
+    if (freq < 150 || freq > 2500) {
+      throw new PresetTestError("freq must be between 150 and 2500 MHz");
+    }
+    if (!VALID_BANDWIDTHS.some(function (allowed) {
+      return Math.abs(allowed - bw) < 0.01;
+    })) {
+      throw new PresetTestError(
+        "bw must be one of " + VALID_BANDWIDTHS.join(", ") + " kHz"
+      );
+    }
+    if (sf < 5 || sf > 12) {
+      throw new PresetTestError("sf must be between 5 and 12");
+    }
+    if (cr < 5 || cr > 8) {
+      throw new PresetTestError("cr must be between 5 and 8");
+    }
+    if (tx < -30 || tx > 60) {
+      throw new PresetTestError("tx must be between -30 and 60 dBm");
+    }
+
+    return Object.freeze({
+      startMs: startMs,
+      endMs: endMs,
+      startEpoch: Math.floor(startMs / 1000),
+      endEpoch: Math.floor(endMs / 1000),
+      tz: tz,
+      freq: freq,
+      bw: bw,
+      sf: sf,
+      cr: cr,
+      tx: tx,
+      freqText: numberText(freq),
+      bwText: numberText(bw),
+      txText: numberText(tx),
+    });
+  }
+
+  function isDefaultPreset(config) {
+    const startLocal = zonedInputValue(config.startMs, config.tz);
+    const endLocal = zonedInputValue(config.endMs, config.tz);
+    const startParts = zonedParts(config.startMs, config.tz);
+    return (
+      config.freq === Number(DEFAULTS.freq) &&
+      config.bw === Number(DEFAULTS.bw) &&
+      config.sf === Number(DEFAULTS.sf) &&
+      config.cr === Number(DEFAULTS.cr) &&
+      config.tx === Number(DEFAULTS.tx) &&
+      startLocal.endsWith("T17:00") &&
+      endLocal === calendarDayValue(startParts, DEFAULT_WINDOW_DAYS) + "T17:00"
+    );
+  }
+
+  function presetDurationText(config) {
+    const hours = (config.endMs - config.startMs) / (60 * 60 * 1000);
+    if (Number.isInteger(hours)) return hours + (hours === 1 ? " hour" : " hours");
+    return formatCountdown(config.endMs - config.startMs);
+  }
+
+  function presetDurationLabel(config) {
+    const hours = (config.endMs - config.startMs) / (60 * 60 * 1000);
+    if (Number.isInteger(hours)) return hours + "-hour";
+    return presetDurationText(config);
+  }
+
+  function presetPageTitle(config) {
+    return (isDefaultPreset(config) ? "Default temporary" : "Temporary") +
+      " radio test · " + config.freqText + " MHz";
+  }
+
+  function presetPageSummary(config) {
+    return "The " + (isDefaultPreset(config) ? "default" : "configured") +
+      " window is " + formatZoned(config.startMs, config.tz) + " through " +
+      formatZoned(config.endMs, config.tz) + " (" + presetDurationText(config) +
+      "), using " + config.freqText + " MHz, " + config.bwText + " kHz, SF" +
+      config.sf + ", CR" + config.cr + ", " + config.txText + " dBm.";
+  }
+
+  function presetEyebrow(config) {
+    return "MeshCore · " + (isDefaultPreset(config) ? "default " : "") +
+      presetDurationLabel(config) + " temporary preset test";
+  }
+
+  function phaseAt(config, nowMs) {
+    if (nowMs < config.startMs) return "before";
+    if (nowMs < config.endMs) return "active";
+    return "ended";
+  }
+
+  function remainingMinutes(config, nowMs) {
+    return Math.max(0, Math.ceil((config.endMs - nowMs) / 60000));
+  }
+
+  function immediateAvailable(config, nowMs) {
+    return nowMs >= config.startMs - EARLY_JOIN_MS && nowMs < config.endMs;
+  }
+
+  function scheduleAvailability(config, nowMs) {
+    if (nowMs >= config.startMs) {
+      return { available: false, reason: "The start time has passed; use the immediate option." };
+    }
+    if (config.endMs - nowMs > SCHEDULE_HORIZON_MS) {
+      return {
+        available: false,
+        reason: "The end is outside the firmware's roughly 24-day horizon; return closer to the test.",
+      };
+    }
+    return { available: true, reason: "Ready to queue." };
+  }
+
+  function primaryScheduleAvailability(config, nowMs) {
+    if (nowMs >= config.startMs) {
+      return { available: false, reason: "The start time has passed; use the immediate option." };
+    }
+    return { available: true, reason: "Ready to queue." };
+  }
+
+  function relativeMinutes(targetMs, nowMs) {
+    return Math.max(1, Math.ceil((targetMs - nowMs) / 60000));
+  }
+
+  function commandsFor(config, nowMs, clockOffsetSeconds, scheduleMode) {
+    const tuple = [config.freqText, config.bwText, config.sf, config.cr].join(",");
+    const minutes = remainingMinutes(config, nowMs);
+    const mode = scheduleMode || SCHEDULE_MODE_RELATIVE;
+    if (mode !== SCHEDULE_MODE_RELATIVE && mode !== SCHEDULE_MODE_ABSOLUTE) {
+      throw new PresetTestError("schedule mode must be relative or absolute");
+    }
+    let startArgument;
+    let endArgument;
+    if (mode === SCHEDULE_MODE_RELATIVE) {
+      startArgument = "+" + relativeMinutes(config.startMs, nowMs);
+      endArgument = "+" + relativeMinutes(config.endMs, nowMs);
+    } else {
+      const scheduled = schedulerEpochs(config, clockOffsetSeconds);
+      startArgument = String(scheduled.startEpoch);
+      endArgument = String(scheduled.endEpoch);
+    }
+    return Object.freeze({
+      stockNow: "tempradio " + tuple + "," + minutes,
+      companionNow:
+        "set radio2.cross on\nset tempradio2 " + tuple + ",rxtx," + minutes,
+      primaryScheduled:
+        "set tempradioat " + tuple + "," + startArgument + "," +
+        endArgument + "\nget tempradioat",
+      companionScheduled:
+        "set radio2.cross on\nset tempradioat2 " + tuple + ",rxtx," +
+        startArgument + "," + endArgument + "\nget tempradioat2",
+      stockCancelDuring: "tempradio " + tuple + ",1",
+      stockLeaveIn30: "tempradio " + tuple + ",30",
+      primaryCancel:
+        "get tempradioat\ndel tempradioat all",
+      companionCancelBefore:
+        "get tempradioat2\ndel tempradioat2 all\nset radio2.cross auto",
+      companionCancelDuring: "set tempradio2 off\nset radio2.cross auto",
+      companionLeaveIn30:
+        "set radio2.cross on\ndel tempradioat2 all\nset tempradio2 " +
+        tuple + ",rxtx,30",
+    });
+  }
+
+  function radioEstimates(config) {
+    const requiredSnr = {
+      5: -2.5,
+      6: -5,
+      7: -7.5,
+      8: -10,
+      9: -12.5,
+      10: -15,
+      11: -17.5,
+      12: -20,
+    }[config.sf];
+    const bandwidthHz = config.bw * 1000;
+    const bitrateKbps = (
+      config.sf * (4 / config.cr) * bandwidthHz / Math.pow(2, config.sf)
+    ) / 1000;
+    const sensitivityDbm = -174 + 10 * Math.log10(bandwidthHz) + 6 + requiredSnr;
+    return Object.freeze({
+      bitrateKbps: bitrateKbps,
+      sensitivityDbm: sensitivityDbm,
+      linkBudgetDb: config.tx - sensitivityDbm,
+    });
+  }
+
+  function formatCountdown(milliseconds) {
+    let seconds = Math.max(0, Math.ceil(milliseconds / 1000));
+    const days = Math.floor(seconds / 86400);
+    seconds %= 86400;
+    const hours = Math.floor(seconds / 3600);
+    seconds %= 3600;
+    const minutes = Math.floor(seconds / 60);
+    seconds %= 60;
+    const parts = [];
+    if (days) parts.push(days + "d");
+    if (days || hours) parts.push(hours + "h");
+    if (days || hours || minutes) parts.push(minutes + "m");
+    parts.push(seconds + "s");
+    return parts.join(" ");
+  }
+
+  function formatZoned(milliseconds, timeZone) {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: timeZone,
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    }).format(new Date(milliseconds));
+  }
+
+  function zonedParts(milliseconds, timeZone) {
+    const result = {};
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(milliseconds)).forEach(function (part) {
+      if (part.type !== "literal") result[part.type] = Number(part.value);
+    });
+    return result;
+  }
+
+  function twoDigits(value) {
+    return String(value).padStart(2, "0");
+  }
+
+  function zonedInputValue(milliseconds, timeZone) {
+    const parts = zonedParts(milliseconds, timeZone);
+    return String(parts.year).padStart(4, "0") + "-" +
+      twoDigits(parts.month) + "-" + twoDigits(parts.day) + "T" +
+      twoDigits(parts.hour) + ":" + twoDigits(parts.minute);
+  }
+
+  function parseLocalDateTime(value, name) {
+    const text = String(value || "").trim();
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(text);
+    if (!match) {
+      throw new PresetTestError(name + " must include a date and time");
+    }
+    const parts = {
+      year: Number(match[1]),
+      month: Number(match[2]),
+      day: Number(match[3]),
+      hour: Number(match[4]),
+      minute: Number(match[5]),
+      second: Number(match[6] || 0),
+    };
+    const checked = new Date(Date.UTC(
+      parts.year, parts.month - 1, parts.day,
+      parts.hour, parts.minute, parts.second
+    ));
+    if (checked.getUTCFullYear() !== parts.year ||
+        checked.getUTCMonth() + 1 !== parts.month ||
+        checked.getUTCDate() !== parts.day ||
+        checked.getUTCHours() !== parts.hour ||
+        checked.getUTCMinutes() !== parts.minute ||
+        checked.getUTCSeconds() !== parts.second) {
+      throw new PresetTestError(name + " is not a valid calendar date and time");
+    }
+    return parts;
+  }
+
+  function sameDateTime(left, right) {
+    return left.year === right.year && left.month === right.month &&
+      left.day === right.day && left.hour === right.hour &&
+      left.minute === right.minute && left.second === right.second;
+  }
+
+  function offsetAt(milliseconds, timeZone) {
+    const parts = zonedParts(milliseconds, timeZone);
+    const rounded = Math.floor(milliseconds / 1000) * 1000;
+    return Date.UTC(
+      parts.year, parts.month - 1, parts.day,
+      parts.hour, parts.minute, parts.second
+    ) - rounded;
+  }
+
+  function localDateTimeToMs(value, timeZone, name) {
+    const label = name || "date and time";
+    const zone = validateTimeZone(timeZone);
+    const desired = parseLocalDateTime(value, label);
+    const wallMilliseconds = Date.UTC(
+      desired.year, desired.month - 1, desired.day,
+      desired.hour, desired.minute, desired.second
+    );
+    const offsets = new Set();
+    for (let hours = -48; hours <= 48; hours += 6) {
+      offsets.add(offsetAt(wallMilliseconds + hours * 60 * 60 * 1000, zone));
+    }
+    const matches = Array.from(offsets).map(function (offset) {
+      return wallMilliseconds - offset;
+    }).filter(function (candidate) {
+      return sameDateTime(zonedParts(candidate, zone), desired);
+    }).sort(function (left, right) { return left - right; });
+
+    if (matches.length === 0) {
+      throw new PresetTestError(
+        label + " does not exist in " + zone + " because of a clock change"
+      );
+    }
+    if (matches.length > 1) {
+      throw new PresetTestError(
+        label + " is ambiguous in " + zone + " because of a clock change"
+      );
+    }
+    return matches[0];
+  }
+
+  function configFromGenerator(values) {
+    const tz = validateTimeZone(values.tz);
+    const startMs = localDateTimeToMs(values.start, tz, "start");
+    const endMs = localDateTimeToMs(values.end, tz, "end");
+    const params = new URLSearchParams();
+    params.set("start", new Date(startMs).toISOString());
+    params.set("end", new Date(endMs).toISOString());
+    params.set("tz", tz);
+    params.set("freq", values.freq);
+    params.set("bw", values.bw);
+    params.set("sf", values.sf);
+    params.set("cr", values.cr);
+    params.set("tx", values.tx);
+    return configFromSearch("?" + params.toString());
+  }
+
+  function formatUtc(milliseconds) {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZoneName: "short",
+    }).format(new Date(milliseconds));
+  }
+
+  function readableQueryValue(value) {
+    return encodeURIComponent(String(value))
+      .replace(/%3A/gi, ":")
+      .replace(/%2F/gi, "/");
+  }
+
+  function configuredUrl(config, baseUrl) {
+    const url = new URL(baseUrl);
+    const values = [
+      ["start", new Date(config.startMs).toISOString()],
+      ["end", new Date(config.endMs).toISOString()],
+      ["tz", config.tz],
+      ["freq", config.freqText],
+      ["bw", config.bwText],
+      ["sf", String(config.sf)],
+      ["cr", String(config.cr)],
+      ["tx", config.txText],
+    ];
+    url.search = "?" + values.map(function (entry) {
+      return entry[0] + "=" + readableQueryValue(entry[1]);
+    }).join("&");
+    return url.toString();
+  }
+
+  function setText(root, selector, value) {
+    root.querySelectorAll(selector).forEach(function (element) {
+      element.textContent = value;
+    });
+  }
+
+  function setPageText(selector, value) {
+    if (!global.document) return;
+    global.document.querySelectorAll(selector).forEach(function (element) {
+      element.textContent = value;
+    });
+  }
+
+  function setCommand(root, name, value) {
+    setText(root, '[data-command="' + name + '"]', value);
+    root.querySelectorAll('[data-copy-command="' + name + '"]').forEach(function (button) {
+      button.dataset.copyValue = value;
+    });
+  }
+
+  function setCommandEnabled(root, name, enabled) {
+    root.querySelectorAll('[data-copy-command="' + name + '"]').forEach(function (button) {
+      button.disabled = !enabled;
+    });
+  }
+
+  function setMaterialCommandCopyEnabled(root, name, enabled) {
+    root.querySelectorAll('[data-command="' + name + '"]').forEach(function (code) {
+      const container = code.closest(".highlight") || code.closest("pre") || code.parentElement;
+      if (!container) return;
+      container.querySelectorAll(
+        'button.md-code__button[data-md-type="copy"], button.md-clipboard'
+      ).forEach(function (button) {
+        button.disabled = !enabled;
+        if (enabled) button.removeAttribute("aria-disabled");
+        else button.setAttribute("aria-disabled", "true");
+      });
+    });
+  }
+
+  function fallbackCopy(text) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(function () {
+        fallbackCopy(text);
+      });
+    }
+    fallbackCopy(text);
+    return Promise.resolve();
+  }
+
+  function timeZoneBoundaryUrl() {
+    let baseUrl = global.location
+      ? global.location.href
+      : "https://example.invalid/preset_test/";
+    if (typeof document !== "undefined") {
+      const script = document.querySelector('script[src*="_javascript/preset_test.js"]');
+      if (script && script.src) baseUrl = script.src;
+    }
+    return new URL(TIMEZONE_BOUNDARY_PATH, baseUrl).toString();
+  }
+
+  function initTimeZoneMap(root, initialTimeZone, onChange) {
+    const container = root.querySelector('[data-role="timezone-map"]');
+    const status = root.querySelector('[data-role="timezone-map-status"]');
+    const selectedLabel = root.querySelector('[data-role="selected-time-zone"]');
+    const browserButton = root.querySelector('[data-action="use-browser-time-zone"]');
+    const disclosure = container && container.closest("details");
+    const generator = root.querySelector('[data-role="url-generator"]');
+    const zoneInput = generator && generator.elements.tz;
+    let selectedZone = validateTimeZone(initialTimeZone);
+    let selectedLayer = null;
+    const layerByZone = new Map();
+    let map = null;
+
+    function showStatus(message, state) {
+      if (!status) return;
+      status.textContent = message;
+      status.dataset.state = state || "ready";
+    }
+
+    function setSelection(zone, options) {
+      const settings = options || {};
+      selectedZone = validateTimeZone(zone);
+      if (zoneInput) zoneInput.value = selectedZone;
+      if (selectedLabel) selectedLabel.textContent = selectedZone;
+
+      if (selectedLayer) {
+        selectedLayer.setStyle(TIMEZONE_MAP_STYLE.default);
+        selectedLayer.bringToBack();
+        selectedLayer = null;
+      }
+
+      const nextLayer = layerByZone.get(selectedZone);
+      if (nextLayer) {
+        selectedLayer = nextLayer;
+        selectedLayer.setStyle(TIMEZONE_MAP_STYLE.selected);
+        selectedLayer.bringToFront();
+        if (map && settings.focus) {
+          map.fitBounds(selectedLayer.getBounds(), { padding: [18, 18], maxZoom: 5 });
+        }
+        showStatus("Selected " + selectedZone + ".", "ready");
+      } else if (layerByZone.size) {
+        showStatus(
+          selectedZone + " is selected, but this zone has no visible land boundary on the map.",
+          "ready"
+        );
+      }
+
+      if (settings.notify && typeof onChange === "function") onChange(selectedZone);
+    }
+
+    if (zoneInput) zoneInput.value = selectedZone;
+    if (selectedLabel) selectedLabel.textContent = selectedZone;
+
+    if (browserButton) {
+      browserButton.addEventListener("click", function () {
+        setSelection(browserTimeZone(), { focus: true, notify: true });
+      });
+    }
+
+    if (!container) return;
+    if (!global.L || typeof global.L.map !== "function") {
+      showStatus(
+        "The map library did not load. The browser time zone is still selected.",
+        "error"
+      );
+      return;
+    }
+
+    const L = global.L;
+    map = L.map(container, {
+      minZoom: 1,
+      maxZoom: 8,
+      worldCopyJump: true,
+    }).setView([25, 10], 2);
+
+    if (disclosure) {
+      disclosure.addEventListener("toggle", function () {
+        if (!disclosure.open || !map) return;
+        global.setTimeout(function () {
+          map.invalidateSize();
+          if (selectedLayer) {
+            map.fitBounds(selectedLayer.getBounds(), { padding: [18, 18], maxZoom: 5 });
+          }
+        }, 0);
+      });
+    }
+
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      minZoom: 1,
+      maxZoom: 8,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }).addTo(map);
+
+    global.fetch(timeZoneBoundaryUrl()).then(function (response) {
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      return response.json();
+    }).then(function (geoJson) {
+      L.geoJSON(geoJson, {
+        style: TIMEZONE_MAP_STYLE.default,
+        onEachFeature: function (feature, layer) {
+          const zone = feature && feature.properties && feature.properties.tzid;
+          if (!zone) return;
+          layerByZone.set(zone, layer);
+          layer.bindTooltip(zone, { sticky: true });
+          layer.on("mouseover", function () {
+            if (layer !== selectedLayer) layer.setStyle(TIMEZONE_MAP_STYLE.hover);
+          });
+          layer.on("mouseout", function () {
+            if (layer !== selectedLayer) layer.setStyle(TIMEZONE_MAP_STYLE.default);
+          });
+          layer.on("click", function () {
+            setSelection(zone, { focus: true, notify: true });
+          });
+        },
+      }).addTo(map);
+      setSelection(selectedZone, { focus: true, notify: false });
+      global.setTimeout(function () { map.invalidateSize(); }, 0);
+    }).catch(function () {
+      showStatus(
+        "The time zone boundaries could not be loaded. The current selection is still usable.",
+        "error"
+      );
+    });
+  }
+
+  function init(root) {
+    const search = global.location ? global.location.search : "";
+    let showTest = hasPresetParameters(search);
+    let config;
+    try {
+      config = configFromSearch(
+        search,
+        browserTimeZone()
+      );
+    } catch (error) {
+      const box = root.querySelector('[data-role="config-error"]');
+      box.hidden = false;
+      box.textContent = "Invalid test URL: " + error.message;
+      config = configFromSearch("", browserTimeZone());
+      showTest = false;
+    }
+
+    const testContent = root.querySelector('[data-role="test-content"]');
+    if (testContent) testContent.hidden = !showTest;
+    const testFooter = root.querySelector('[data-role="test-content-footer"]');
+    if (testFooter) testFooter.hidden = !showTest;
+    const builderDisclosure = root.querySelector('[data-role="url-builder-disclosure"]');
+    if (builderDisclosure) builderDisclosure.open = !showTest;
+
+    let activeClockOffsetSeconds = 0;
+    let scheduleMode = SCHEDULE_MODE_RELATIVE;
+
+    function setScheduledCommands(nowMs) {
+      const staticCommands = commandsFor(
+        config,
+        nowMs == null ? Date.now() : nowMs,
+        activeClockOffsetSeconds,
+        scheduleMode
+      );
+      setCommand(root, "primary-scheduled", staticCommands.primaryScheduled);
+      setCommand(root, "companion-scheduled", staticCommands.companionScheduled);
+      return staticCommands;
+    }
+
+    function setScheduleMode(nextMode) {
+      scheduleMode = nextMode === SCHEDULE_MODE_ABSOLUTE
+        ? SCHEDULE_MODE_ABSOLUTE : SCHEDULE_MODE_RELATIVE;
+      const absoluteControls = root.querySelector('[data-role="absolute-clock-controls"]');
+      if (absoluteControls) absoluteControls.hidden = scheduleMode !== SCHEDULE_MODE_ABSOLUTE;
+      const relativeNote = root.querySelector('[data-role="relative-schedule-note"]');
+      if (relativeNote) relativeNote.hidden = scheduleMode !== SCHEDULE_MODE_RELATIVE;
+      const absoluteNote = root.querySelector('[data-role="absolute-schedule-note"]');
+      if (absoluteNote) absoluteNote.hidden = scheduleMode !== SCHEDULE_MODE_ABSOLUTE;
+      setScheduledCommands(Date.now());
+    }
+
+    function setNodeClockStatus(message, state) {
+      const status = root.querySelector('[data-role="node-clock-status"]');
+      if (!status) return;
+      status.textContent = message;
+      status.dataset.state = state || "normal";
+    }
+
+    function applyNodeClock() {
+      const input = root.querySelector('[data-role="node-clock-input"]');
+      const text = input ? input.value : "";
+      if (!String(text).trim()) {
+        activeClockOffsetSeconds = 0;
+        setScheduledCommands(Date.now());
+        setNodeClockStatus(
+          "No node-clock correction is applied. Scheduled commands use the normal UTC epochs.",
+          "normal"
+        );
+        return;
+      }
+      try {
+        const nodeClockEpoch = parseNodeClock(text);
+        const offset = nodeClockOffsetSeconds(nodeClockEpoch, Date.now());
+        schedulerEpochs(config, offset);
+        activeClockOffsetSeconds = offset;
+        setScheduledCommands(Date.now());
+        const direction = offset === 0
+          ? "matches browser UTC to the minute"
+          : "is " + formatClockOffset(offset) + (offset > 0 ? " ahead of" : " behind") +
+            " browser UTC";
+        setNodeClockStatus(
+          "Node clock " + direction + ". Absolute schedule commands now use this fixed correction. " +
+          "If the node clock later syncs or jumps, delete and requeue the schedule.",
+          "adjusted"
+        );
+      } catch (error) {
+        setNodeClockStatus(
+          error.message + ". The previous schedule correction remains unchanged.",
+          "error"
+        );
+      }
+    }
+
+    if (showTest) {
+      setPageText('[data-role="preset-test-page-title"]', presetPageTitle(config));
+      setPageText('[data-role="preset-test-page-summary"]', presetPageSummary(config));
+      setText(root, '[data-role="preset-test-eyebrow"]', presetEyebrow(config));
+      setText(root, '[data-field="freq-display"]', config.freq.toFixed(3));
+      setText(root, '[data-field="bw-display"]', config.bwText);
+      setText(root, '[data-field="sf"]', String(config.sf));
+      setText(root, '[data-field="cr"]', String(config.cr));
+      setText(root, '[data-role="start-zoned"]', formatZoned(config.startMs, config.tz));
+      setText(root, '[data-role="end-zoned"]', formatZoned(config.endMs, config.tz));
+      setText(root, '[data-role="display-zone"]', config.tz);
+      setText(
+        root,
+        '[data-role="epoch-range"]',
+        config.startEpoch + " → " + config.endEpoch
+      );
+      setText(
+        root,
+        '[data-role="window-summary"]',
+        "A " + formatCountdown(config.endMs - config.startMs) +
+          " window. Saved primary settings return automatically at the end."
+      );
+
+      const staticCommands = setScheduledCommands(Date.now());
+      setCommand(root, "stock-leave-30", staticCommands.stockLeaveIn30);
+      setCommand(root, "primary-cancel", staticCommands.primaryCancel);
+      setCommand(root, "companion-cancel-before", staticCommands.companionCancelBefore);
+      setCommand(root, "companion-cancel-during", staticCommands.companionCancelDuring);
+      setCommand(root, "companion-leave-30", staticCommands.companionLeaveIn30);
+      setCommand(root, "reset-clock", CLOCK_RESET_COMMAND);
+    }
+
+    if (showTest) {
+      root.querySelectorAll('input[name="schedule-command-mode"]').forEach(function (input) {
+        input.addEventListener("change", function () {
+          if (input.checked) setScheduleMode(input.value);
+        });
+      });
+      setScheduleMode(SCHEDULE_MODE_RELATIVE);
+
+      const nodeClockInput = root.querySelector('[data-role="node-clock-input"]');
+      const applyNodeClockButton = root.querySelector('[data-action="apply-node-clock"]');
+      if (nodeClockInput) {
+        nodeClockInput.addEventListener("change", applyNodeClock);
+        nodeClockInput.addEventListener("keydown", function (event) {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          applyNodeClock();
+        });
+      }
+      if (applyNodeClockButton) {
+        applyNodeClockButton.addEventListener("click", applyNodeClock);
+      }
+    }
+
+    const generator = root.querySelector('[data-role="url-generator"]');
+    if (generator) {
+      const sourceParams = new URLSearchParams(search || "");
+      const followsDefaultWindow = !sourceParams.has("start") && !sourceParams.has("end");
+      let timeFieldsEdited = false;
+      generator.elements.start.value = zonedInputValue(config.startMs, config.tz);
+      generator.elements.end.value = zonedInputValue(config.endMs, config.tz);
+      generator.elements.tz.value = config.tz;
+      setText(root, '[data-role="selected-time-zone"]', config.tz);
+      generator.elements.freq.value = config.freqText;
+      generator.elements.bw.value = config.bwText;
+      generator.elements.sf.value = String(config.sf);
+      generator.elements.cr.value = String(config.cr);
+      generator.elements.tx.value = config.txText;
+
+      function generateUrl() {
+        const errorBox = root.querySelector('[data-role="generator-error"]');
+        try {
+          const generated = configFromGenerator({
+            start: generator.elements.start.value,
+            end: generator.elements.end.value,
+            tz: generator.elements.tz.value,
+            freq: generator.elements.freq.value,
+            bw: generator.elements.bw.value,
+            sf: generator.elements.sf.value,
+            cr: generator.elements.cr.value,
+            tx: generator.elements.tx.value,
+          });
+          const url = configuredUrl(
+            generated,
+            global.location ? global.location.href : "https://example.invalid/"
+          );
+          setCommand(root, "generated-url", url);
+          setCommandEnabled(root, "generated-url", true);
+          const estimates = radioEstimates(generated);
+          setText(root, '[data-role="estimate-rate"]', estimates.bitrateKbps.toFixed(2) + " kbps");
+          setText(root, '[data-role="estimate-sensitivity"]', estimates.sensitivityDbm.toFixed(1) + " dBm");
+          setText(root, '[data-role="estimate-budget"]', estimates.linkBudgetDb.toFixed(1) + " dB");
+          setText(root, '[data-role="estimate-tx"]', generated.txText + " dBm");
+          const openLink = root.querySelector('[data-role="open-generated-url"]');
+          if (openLink) {
+            openLink.href = url;
+            openLink.hidden = false;
+          }
+          if (errorBox) {
+            errorBox.textContent = "";
+            errorBox.hidden = true;
+          }
+        } catch (error) {
+          setCommand(root, "generated-url", "Fix the highlighted configuration error first.");
+          setCommandEnabled(root, "generated-url", false);
+          const openLink = root.querySelector('[data-role="open-generated-url"]');
+          if (openLink) openLink.hidden = true;
+          if (errorBox) {
+            errorBox.textContent = error.message;
+            errorBox.hidden = false;
+          }
+        }
+      }
+
+      generator.addEventListener("submit", function (event) {
+        event.preventDefault();
+        generateUrl();
+      });
+      [generator.elements.start, generator.elements.end].forEach(function (input) {
+        input.addEventListener("input", function () { timeFieldsEdited = true; });
+      });
+      generator.addEventListener("change", generateUrl);
+      generateUrl();
+      initTimeZoneMap(root, config.tz, function (zone) {
+        if (followsDefaultWindow && !timeFieldsEdited) {
+          const nextWindow = defaultWindow(zone, Date.now());
+          generator.elements.start.value = zonedInputValue(nextWindow.startMs, zone);
+          generator.elements.end.value = zonedInputValue(nextWindow.endMs, zone);
+        }
+        generateUrl();
+      });
+    }
+
+    root.querySelectorAll("[data-copy-command]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const original = button.textContent;
+        copyText(button.dataset.copyValue || "").then(function () {
+          button.textContent = "Copied";
+          global.setTimeout(function () { button.textContent = original; }, 1600);
+        });
+      });
+    });
+
+    if (!showTest) return;
+
+    function render() {
+      const nowMs = Date.now();
+      const phase = phaseAt(config, nowMs);
+      const immediateOpen = immediateAvailable(config, nowMs);
+      const status = root.querySelector('[data-role="status"]');
+      const primarySchedule = primaryScheduleAvailability(config, nowMs);
+      const schedule = scheduleAvailability(config, nowMs);
+      const commands = commandsFor(
+        config, nowMs, activeClockOffsetSeconds, scheduleMode
+      );
+      setCommand(root, "primary-scheduled", commands.primaryScheduled);
+      setCommand(root, "companion-scheduled", commands.companionScheduled);
+
+      status.dataset.state = phase;
+      if (phase === "before") {
+        if (immediateOpen) {
+          status.textContent = "Setup window open";
+          setText(root, '[data-role="countdown-label"]', "Test starts in");
+          setText(root, '[data-role="countdown"]', formatCountdown(config.startMs - nowMs));
+          setText(root, '[data-role="countdown-detail"]', "Immediate TempRadio commands are enabled.");
+        } else {
+          status.textContent = "Scheduled";
+          setText(root, '[data-role="countdown-label"]', "Commands open in");
+          setText(
+            root,
+            '[data-role="countdown"]',
+            formatCountdown(config.startMs - EARLY_JOIN_MS - nowMs)
+          );
+          setText(root, '[data-role="countdown-detail"]', "The setup window opens one hour before the test.");
+        }
+      } else if (phase === "active") {
+        status.textContent = "Test live";
+        setText(root, '[data-role="countdown-label"]', "Ends in");
+        setText(root, '[data-role="countdown"]', formatCountdown(config.endMs - nowMs));
+        setText(root, '[data-role="countdown-detail"]', "Temporary radios revert at zero.");
+      } else {
+        status.textContent = "Test finished";
+        setText(root, '[data-role="countdown-label"]', "Window closed");
+        setText(root, '[data-role="countdown"]', "0s");
+        setText(root, '[data-role="countdown-detail"]', "Temporary radios should be back on saved settings.");
+      }
+
+      if (immediateOpen) {
+        setCommand(root, "stock-now", commands.stockNow);
+        setCommand(root, "companion-now", commands.companionNow);
+      } else {
+        const endedMessage = "Test window ended — do not start TempRadio.";
+        setCommand(
+          root,
+          "stock-now",
+          phase === "before" ? "Available one hour before the test." : endedMessage
+        );
+        setCommand(
+          root,
+          "companion-now",
+          phase === "before"
+            ? "Available one hour before the test — schedule in advance below if supported."
+            : endedMessage
+        );
+      }
+      setCommand(
+        root,
+        "stock-cancel-during",
+        immediateOpen ? commands.stockCancelDuring
+          : phase === "before" ? "Available after you join the test." : "Test ended — no need to leave."
+      );
+      setCommandEnabled(root, "stock-now", immediateOpen);
+      setCommandEnabled(root, "stock-cancel-during", immediateOpen);
+      setCommandEnabled(root, "companion-now", immediateOpen);
+      setMaterialCommandCopyEnabled(root, "stock-now", immediateOpen);
+      setMaterialCommandCopyEnabled(root, "stock-cancel-during", immediateOpen);
+      setMaterialCommandCopyEnabled(root, "companion-now", immediateOpen);
+      setText(
+        root,
+        '[data-role="stock-now-note"]',
+        phase === "before" && !immediateOpen
+          ? "The join command unlocks one hour before the test."
+          : phase === "before"
+            ? "The setup window is open; the timeout includes the hour before the official start."
+          : phase === "active"
+            ? "The final argument is the live minutes remaining until the common end."
+            : "The test window has ended."
+      );
+
+      setCommandEnabled(root, "primary-scheduled", primarySchedule.available);
+      setCommandEnabled(root, "companion-scheduled", schedule.available);
+
+      const nowEpoch = Math.floor(nowMs / 1000);
+      setText(root, '[data-role="browser-utc"]', formatUtc(nowMs));
+      setText(root, '[data-role="browser-epoch"]', String(nowEpoch));
+      setCommand(root, "set-clock", "time " + nowEpoch + "\nclock");
+    }
+
+    render();
+    if (typeof global.MutationObserver === "function") {
+      const materialCopyObserver = new global.MutationObserver(function () {
+        const enabled = immediateAvailable(config, Date.now());
+        setMaterialCommandCopyEnabled(root, "stock-now", enabled);
+        setMaterialCommandCopyEnabled(root, "companion-now", enabled);
+      });
+      materialCopyObserver.observe(root, { childList: true, subtree: true });
+    }
+    global.setInterval(render, 1000);
+  }
+
+  const api = Object.freeze({
+    DEFAULTS: DEFAULTS,
+    VALID_BANDWIDTHS: VALID_BANDWIDTHS,
+    SCHEDULE_HORIZON_MS: SCHEDULE_HORIZON_MS,
+    SCHEDULER_EPOCH_MAX: SCHEDULER_EPOCH_MAX,
+    EARLY_JOIN_MS: EARLY_JOIN_MS,
+    DEFAULT_START_HOUR: DEFAULT_START_HOUR,
+    DEFAULT_WINDOW_DAYS: DEFAULT_WINDOW_DAYS,
+    SCHEDULE_MODE_RELATIVE: SCHEDULE_MODE_RELATIVE,
+    SCHEDULE_MODE_ABSOLUTE: SCHEDULE_MODE_ABSOLUTE,
+    CLOCK_RESET_COMMAND: CLOCK_RESET_COMMAND,
+    PresetTestError: PresetTestError,
+    parseNodeClock: parseNodeClock,
+    nodeClockOffsetSeconds: nodeClockOffsetSeconds,
+    schedulerEpochs: schedulerEpochs,
+    formatClockOffset: formatClockOffset,
+    configFromSearch: configFromSearch,
+    configFromGenerator: configFromGenerator,
+    isDefaultPreset: isDefaultPreset,
+    presetDurationText: presetDurationText,
+    presetDurationLabel: presetDurationLabel,
+    presetPageTitle: presetPageTitle,
+    presetPageSummary: presetPageSummary,
+    presetEyebrow: presetEyebrow,
+    validateTimeZone: validateTimeZone,
+    browserTimeZone: browserTimeZone,
+    defaultWindow: defaultWindow,
+    hasPresetParameters: hasPresetParameters,
+    supportedTimeZones: supportedTimeZones,
+    phaseAt: phaseAt,
+    remainingMinutes: remainingMinutes,
+    immediateAvailable: immediateAvailable,
+    scheduleAvailability: scheduleAvailability,
+    primaryScheduleAvailability: primaryScheduleAvailability,
+    commandsFor: commandsFor,
+    radioEstimates: radioEstimates,
+    formatCountdown: formatCountdown,
+    formatZoned: formatZoned,
+    zonedInputValue: zonedInputValue,
+    localDateTimeToMs: localDateTimeToMs,
+    configuredUrl: configuredUrl,
+    init: init,
+  });
+
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  global.MeshCorePresetTest = api;
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", function () {
+      document.querySelectorAll("[data-preset-test]").forEach(init);
+    });
+  }
+})(typeof globalThis !== "undefined" ? globalThis : this);

@@ -1,0 +1,3578 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for the open source MeshCore firmware">
+      
+      
+      
+        <link rel="canonical" href="https://Mesh-America.github.io/mesh-america-quake-repeater/lora_ota_automation/">
+      
+      
+        <link rel="prev" href="../ota_easy/">
+      
+      
+        <link rel="next" href="../ota_nrf52_bootloader_update/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Scripted LoRa OTA from start to finish - MeshCore Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../_stylesheets/notification_builder.css">
+    
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/extra.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/firmware_picker.css?v=20260929-1">
+    
+      <link rel="stylesheet" href="../_stylesheets/telemetry_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/management_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/filter_tool.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/preset_test.css?v=20260923-2">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#scripted-lora-ota-from-start-to-finish" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MeshCore Docs" class="md-header__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MeshCore Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Scripted LoRa OTA from start to finish
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MeshCore Docs" class="md-nav__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    MeshCore Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware and tools
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware and tools
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firmware_picker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware picker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notifications/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion notification builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../preset_test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Temporary radio test builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../filter_tool/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Filter policy playground
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management report decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Documentation
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Documentation
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_1" id="__nav_3_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started and features
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started and features
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frequently Asked Questions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../role_feature_switches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature switches by role — 1.17.1.5 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../full_companion_features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion: turn features on and off
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_radio_full/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../full_companion_usb_switcher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion USB CLI and binary switcher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_offline_queue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Offline Message Queue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../halo_keymind_settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Halo and Keymind Branch Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware updates and partitions
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware updates and partitions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_user_guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Updating your node over the air (OTA) - user guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_easy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Easy firmware updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scripted LoRa OTA from start to finish
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scripted LoRa OTA from start to finish
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#required-topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Required topology
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bootloader-packages-and-station-identifiers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bootloader packages and station identifiers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#destination-requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Destination requirements
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-install-the-host-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Install the host tools
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-identify-and-test-both-local-links" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Identify and test both local links
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-check-the-destination-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Check the destination once
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3. Check the destination once">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rxps-handling-during-tempradio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RXPS handling during TempRadio
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-run-an-esp32-update" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Run an ESP32 update
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-run-an-nrf52-update" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Run an nRF52 update
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-add-intermediate-relays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Add intermediate relays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#other-connection-choices" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Other connection choices
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#package-selection-and-safety-gates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Package selection and safety gates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-happens-during-a-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What happens during a run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transmission-loss-and-retries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transmission loss and retries
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Transmission loss and retries">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#legacy-relay-manifest-workaround" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Legacy relay manifest workaround
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interruption-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interruption and recovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_nrf52_bootloader_update/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 bootloader updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_nrf52_qspi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 repeater LoRa OTA with external QSPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_meshtower_v2_sdcard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshTower V2 microSD LoRa OTA
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_partition_catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 release partition lookup table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 legacy-partition migration over Wi-Fi or LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../heltec_v4_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Heltec V4 legacy-partition migration over Wi-Fi
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../host_cli_service/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LoRa CLI Host Service
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Radio, networking, and power
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Radio, networking, and power
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../radio_profiles/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Two LoRa profiles on one radio
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../carrier_wave/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Carrier-wave RF checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../espnow_bridge_setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP-NOW bridge: simple setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../WiFi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WiFi and MQTT by Firmware Type
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../flood_filtering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flood Filtering and Moderation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gps_tracking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GPS Tracking
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nrf52_power_management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 Power Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI and protocol reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    CLI and protocol reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_build_matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Availability by Firmware Build
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_command_availability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Command Availability Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../terminal_chat_cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terminal Chat CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kiss_modem_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore KISS Modem Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packet_format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packet Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../payloads/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Payload Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore OTA - .mota container &amp; LoRa protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_reports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management reports (MGR1)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stats_binary_frames/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stats Binary Frame Structures
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../number_allocations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Number Allocations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../qr_codes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QR Codes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local Documentation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../research/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Releases
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Current release
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Current release
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releases/1.17.1.8/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    1.17.1.8 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../test-results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Test Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../old-releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Old Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#required-topology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Required topology
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bootloader-packages-and-station-identifiers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bootloader packages and station identifiers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#destination-requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Destination requirements
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-install-the-host-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Install the host tools
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-identify-and-test-both-local-links" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Identify and test both local links
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-check-the-destination-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Check the destination once
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3. Check the destination once">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rxps-handling-during-tempradio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RXPS handling during TempRadio
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-run-an-esp32-update" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Run an ESP32 update
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-run-an-nrf52-update" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Run an nRF52 update
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-add-intermediate-relays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Add intermediate relays
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#other-connection-choices" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Other connection choices
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#package-selection-and-safety-gates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Package selection and safety gates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-happens-during-a-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What happens during a run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transmission-loss-and-retries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transmission loss and retries
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Transmission loss and retries">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#legacy-relay-manifest-workaround" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Legacy relay manifest workaround
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interruption-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interruption and recovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/edit/main/docs/lora_ota_automation.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="scripted-lora-ota-from-start-to-finish">Scripted LoRa OTA from start to finish</h1>
+<p>For <strong>1.17.1.5</strong>, use the exact board/storage profile from
+<a href="https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6">OTAFIX 2.4.6</a>
+for nRF52 OTAFIX installations. New internal-flash hybrid receivers require
+its 64 KiB retained-RAM handoff; QSPI and microSD targets require their own
+matching bootloader profiles. Earlier preview versions mentioned below
+describe compatibility/migration history, not the current recommended download.
+Full Companion is a MOTA source and normally updates itself over USB.</p>
+<p>The dedicated <a href="../research/rak3401_mota_chain/">RAK3401 chain report</a> records the
+physical failures of withdrawn migrations and the physically qualified compact
+nine-step replacement. Its runner blocks the withdrawn chains and pins every
+accepted bridge image by SHA-256.</p>
+<p><a href="https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/lora_ota/lora_ota.sh"><code>tools/lora_ota/lora_ota.sh</code></a> and
+<a href="https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/lora_ota/lora_ota.ps1"><code>tools/lora_ota/lora_ota.ps1</code></a> automate a
+MeshCore LoRa firmware update from a release <code>.zip</code> or ready <code>.mota</code>. They
+identify the destination, validate the hardware and running firmware, prepare
+the right container, move the participating nodes to a temporary radio
+channel, serve and monitor the download, request installation, restore the
+controller, and check the rebooted node.</p>
+<p>The script cannot install the destination's first OTA-capable firmware. It can
+stage signed v3 bootloader containers with <code>--no-install</code>, but never sends the
+privileged bootloader install command. Invalid v2 containers carrying the
+bootloader flag remain rejected. Do the first nRF52 bootloader installation over USB.
+An already-capable, explicitly supported internal-flash, XIAO QSPI, or exact
+MeshTower V2 microSD repeater may later use the separate manual
+<a href="../ota_nrf52_bootloader_update/"><code>ota bootloader install</code></a> workflow.</p>
+<h2 id="required-topology">Required topology</h2>
+<p>The reliable serial topology uses two local radios:</p>
+<pre><code class="language-text">                                      authenticated admin commands
+computer -- MeshCore binary API --&gt; controller Companion -------------------+
+   |                                                                         |
+   +-- raw text CLI + mOTA seeder --&gt; OTA source ---- LoRa OTA blocks ----&gt; target
+                                                        |                    ^
+                                                        +-- relay(s) --------+
+</code></pre>
+<ul>
+<li><strong>Controller:</strong> a Companion connected through serial, TCP, or BLE. The
+  script uses <code>meshcli</code> to send remote admin commands to the target and changes
+  the controller's live radio parameters during the transfer. A serial
+  Companion stays in its normal <strong>Binary</strong> USB mode at 115200 baud.</li>
+<li><strong>OTA source:</strong> an OTA-enabled repeater/FULL node whose USB port is a raw
+  text CLI, an ESP32 <code>companion_radio_full</code> using WiFi ports 5001 and 5002, or
+  an nRF52 <code>companion_radio_full</code> whose USB port switches between Binary,
+  terminal control, and exclusive mOTA seeding.</li>
+<li><strong>Target:</strong> an OTA-enabled ESP32 or nRF52 node present in the controller's
+  contact list. Its admin password is required.</li>
+<li><strong>Relays:</strong> optional. They do not need to install OTA themselves, but every
+  relay on the path must be running current firmware and have an overlapping
+  TempRadio window.</li>
+</ul>
+<p>One serial port cannot serve both controller roles: <code>meshcli</code> must keep
+reopening the controller while <code>motatool</code> owns the source port. The script
+rejects an attempt to use the same port for both.</p>
+<p>The USB ASCII switch (<code>+++MESHCORE-TERM-START</code>) is the local control path, not
+the mOTA data framing. On an nRF52 dual-CDC Full Companion, the script uses
+that mode briefly for <code>ota status</code> and TempRadio commands. It then closes the
+CLI and starts <code>motatool</code>; the exact <code>ota folder on</code> preamble switches the same
+USB interface <code>00</code> into exclusive mOTA mode from either startup ASCII or
+Binary Companion mode. If USB logging was enabled and the Full Companion
+rebooted, its separate interface <code>02</code> continues to provide plaintext logging
+and is not a controller or source port. With default logging off, interface
+<code>02</code> is not enumerated. BLE remains available.</p>
+<p>ESP32 Full Companion normally uses its dedicated TCP seeder on port 5001.
+ESP32 builds that also retain serial folder support use the same exclusive USB
+mOTA ownership state as nRF52. The exact <code>ota folder on</code> line transfers the USB
+port from startup ASCII or idle Binary Companion mode before binary mOTA frames
+begin; neither console mode shares that port until the folder detaches.</p>
+<h2 id="bootloader-packages-and-station-identifiers">Bootloader packages and station identifiers</h2>
+<p>Both wrappers use the same package-aware runner. It identifies application
+versus bootloader updates from container metadata, not filenames. A ZIP mixing
+application inputs and bootloader mOTAs requires <code>--zip-member</code>; their versions
+and target IDs are independent and must not be ranked together.</p>
+<p>Signed format-3 nRF52 bootloader packages can be <strong>staged with <code>--no-install</code></strong>.
+Use the same controller/source/TempRadio arguments as an application transfer,
+but provide the bootloader <code>.mota</code> (or its ZIP member) and <code>--no-install</code>.
+Without that flag, even <code>--yes</code> stops before opening a radio. Bootloader staging
+requires Python <code>cryptography</code> in the interpreter running the wrapper and a
+current <code>motatool</code> supporting format 3. The runner reuses <code>tools/mota/motalib.py</code>
+for strict geometry, embedded identity/CRC, capability, hash and signature
+validation, and still runs <code>motatool verify</code> including any <code>--public-key</code> pin.</p>
+<p>If Python cannot load <code>cryptography</code>, an interactive run offers:</p>
+<pre><code class="language-text">Install cryptography privately and retry signature verification? [y/N]
+</code></pre>
+<p>After approval, it uses the <strong>exact running Python interpreter</strong> to install
+<code>cryptography==50.0.1</code> and its dependencies from PyPI into a separate per-user,
+per-interpreter cache. Binary wheels only are accepted; the repair does not
+compile native code, overwrite system/virtual-environment packages, change PATH,
+use <code>sudo</code>, or bypass externally-managed Python protections. It checks Ed25519
+against a known valid signature and a tampered message, then retries the original
+full package verification. A later run can reuse a working cache without another
+download. This works for direct <code>.mota</code> files and bootloader members inside ZIPs;
+ordinary application updates and raw <code>--tcp-cli</code> commands do not need this library.</p>
+<p>The interpreter must have working pip. If pip is missing, the script gives an
+exact-interpreter <code>ensurepip</code> command and operating-system pip/venv guidance;
+it does not silently install system tools. No compatible binary wheel, an old
+pip, network/download failures, an unwritable cache, or a failed signature check
+stop the run before radio access. Pip output is shown and installation is bounded
+at ten minutes. The radio admin-password environment variable is not passed to
+pip. Partial installation files may remain in the displayed private directory.
+The cache is under <code>meshcore-lora-ota/python/&lt;interpreter-id&gt;/cryptography==50.0.1</code>
+in the same per-user cache base described below for <code>motatool</code>.</p>
+<p>Only <code>y</code> or <code>yes</code> approves this repair; <code>--yes</code> is <strong>not</strong> installation consent.
+Noninteractive runs print a copyable private-install command and stop. After
+running that command manually, rerun the original OTA command; no Python path
+changes are needed. Declining never skips signature verification.</p>
+<p>It probes actual <code>motatool inspect</code> support before radio access: older and newer
+builds may advertise the same version. If the tool is missing or incompatible,
+an interactive run offers an automatic repair:</p>
+<pre><code class="language-text">Install this bootloader-capable motatool and continue after verification? [y/N]
+</code></pre>
+<p>Only <code>y</code> or <code>yes</code> approves installation. <strong><code>--yes</code> does not approve host software
+installation.</strong> Noninteractive runs stop and print a copyable manual installation
+command plus the <code>--motatool</code> argument to use afterward.</p>
+<p>The motatool repair builds the <a href="https://github.com/mikecarper/motatool">mikecarper/motatool</a>
+fork at pinned revision <code>8c38369e7d35ad50cf74261869676d52dd24adf7</code>, with Cargo's
+<code>--locked</code> dependencies, in a separate per-user cache directory. It needs
+matching stable Cargo and rustc <strong>1.86.0 or newer</strong> and a native linker already
+installed; otherwise it points to
+<a href="https://rustup.rs/">Rust installation</a> and stops without installing anything.
+The pinned dependency set needs more than the older <code>rust-version</code> in motatool's
+own manifest: <code>zeroize 1.9.0</code> needs edition 2024, and ICU/idna dependencies need
+Rust 1.86. Cargo 1.75 is a version problem, not a root-permission problem; no
+nightly toolchain is necessary.</p>
+<p>Before asking to build or downloading crates, the runner checks both executable
+versions. It keeps a compatible default pair; otherwise it looks for versioned
+executables on PATH (such as Ubuntu's <code>cargo-1.91</code> and <code>rustc-1.91</code>) and already
+installed stable rustup toolchains. It displays the selected paths and pins both
+for the build process, so a newer Cargo cannot silently invoke an old rustc.
+Rustup proxies are resolved to their actual toolchain binaries before changing
+to the build directory. No default toolchain, symlink, system PATH, or package
+installation is changed, and probes disable rustup's automatic toolchain install.
+Tool version probes have ten-second timeouts. A working cached motatool does not
+need Cargo or Rust checks at all.</p>
+<p>To choose a pair explicitly, append:</p>
+<pre><code class="language-text">--cargo cargo-1.91 --rustc rustc-1.91
+</code></pre>
+<p>These options also accept executable paths, not shell aliases or a command with
+embedded arguments. Explicit selections and <code>RUSTC</code>/<code>CARGO_BUILD_RUSTC</code> compiler
+overrides are honored; if incompatible, they fail instead of silently selecting
+another compiler. <code>--rustc</code> takes precedence over those environment variables.
+The manual build command includes the chosen compiler as well as Cargo. Native
+linker, SDK, and system-library availability are still checked by the real build;
+a passed version check is not a guarantee that every host prerequisite is present.
+Source/dependency downloads, build time and disk use are disclosed before
+confirmation. Cargo progress is displayed, with a one-hour build timeout.
+The radio admin-password environment variable is not passed to the build.</p>
+<p>The installer does not overwrite the selected/system <code>motatool</code> or alter PATH.
+It may replace only a previous copy in its displayed private install directory.
+After installation it repeats the bootloader-package capability check and uses
+the new binary for this run only if that check passes. A later run using the
+default <code>motatool</code> selection can reuse the checked cache without downloading
+again; switching from an explicit <code>--motatool</code> path still asks permission.
+Refusal, a failed build, or a failed recheck stops before opening any radio.
+Failed build files may remain in the displayed cache directory for diagnostics.</p>
+<p>The install root is <code>meshcore-lora-ota/motatool/&lt;revision&gt;</code> under <code>%LOCALAPPDATA%</code>
+on Windows, <code>~/Library/Caches</code> on macOS, or <code>$XDG_CACHE_HOME</code> (default
+<code>~/.cache</code>) on Linux. Cargo uses an explicit
+<a href="https://doc.rust-lang.org/cargo/commands/cargo-install.html"><code>--root</code>, <code>--rev</code>, and <code>--locked</code></a>
+instead of replacing a global installation or following a moving branch.</p>
+<p>Before transfer it queries the destination's <code>ota bootloader status</code>, checks its
+bootloader-specific target/hardware identity, installed ABI/codecs and matching
+internal/QSPI/SD storage profile. It does not compare an application version or
+application target ID to a bootloader package. After transfer it checks the
+destination's exact staged MID and image-hash confirmation, then prints the
+manual command; it <strong>never sends a bootloader install command</strong>:</p>
+<pre><code class="language-text">ota bootloader status
+ota bootloader install &lt;MID8&gt; &lt;HASH16&gt;
+</code></pre>
+<p>Review and send those commands on the <strong>destination</strong>, not the source. The
+device independently enforces signer authorization, safe live storage,
+continuity and upgrade-only policy at installation. <code>--base</code>,
+<code>--allow-non-upgrade</code>, and <code>--prepare-only</code> remain application-only. See the
+<a href="../ota_nrf52_bootloader_update/">bootloader prerequisites and recovery limits</a>.</p>
+<p><code>TARGET_NODE</code>, <code>--relay</code>, and <code>--source-contact</code> accept a contact name, full
+public key, or unique hexadecimal key prefix. The runner reads the controller's
+existing contact table and binds each selection to a full key before remote
+commands, so emoji names need not be typed and later name changes cannot
+redirect the run. Duplicate names, ambiguous prefixes, or the same radio under
+different participant aliases stop with an actionable error. Missing destination
+and relay contacts must first be imported or discovered. A missing connected
+source can be imported with the confirmation prompt below; a key alone does not
+create a contact.</p>
+<p>For a separate source with a managed USB/TCP console, automatic source selection
+reads the physical source's full public key and matches it in the controller's
+contacts. Repeaters use <code>get public.key</code>. Full Companion does not implement
+that repeater command: on both USB and TCP, its key is read from a <strong>fresh
+terminal welcome banner</strong>, with a supported <code>ver</code> reply on the same connection
+proving the terminal is live. USB briefly uses the existing STOP/START/STOP
+terminal wrapper to obtain that banner, even for an ASCII-first Full Companion;
+TCP reads the greeting from a new connection. Identity rechecks repeat this
+exchange rather than trusting a key cached from an earlier connection.</p>
+<p><code>ota status</code> identifies the Full Companion seeder role before this probe. For
+unrecognized firmware, only an explicit unsupported <code>get public.key</code> response
+can trigger the Companion fallback. Timeouts, permission errors, malformed keys,
+missing/ambiguous banners, and failed <code>ver</code> replies still stop the run. Firmware
+that exposes neither identity mechanism needs a supported terminal firmware;
+the runner does not guess a key from the node name or skip the identity check.</p>
+<p>Source selection does not require the source's current name to match an
+old saved advert, and duplicate/emoji names cannot redirect this lookup. An
+explicit <code>--source-contact</code> must identify that same physical source. If its key
+is missing, an interactive run offers:</p>
+<pre><code class="language-text">Add the connected OTA source to this controller's contacts? [y/N]
+</code></pre>
+<p>This works through both the shell and PowerShell launchers. The runner reads the
+source's existing <code>card</code> command over USB/TCP, checks the full key in its contact
+card against the connected source, and shows its name/key before asking. On
+approval it rechecks the source/controller identities and live contact table,
+then uses MeshCore's existing <code>import_contact</code> API. Signature validation remains
+with the controller's normal advert importer. For manual-add controllers it can
+approve only that exact source through <code>add_pending</code>; it does not enable general
+auto-add. A fresh <code>reload_contacts</code> must confirm the full source key before OTA
+continues. No LoRa advertisement or firmware update is required for this import.</p>
+<p>The default answer is <strong>No</strong>; <code>--yes</code> does not approve adding a contact. A
+noninteractive run stops with instructions to rerun in a terminal. Unsupported
+<code>card</code> firmware, malformed/mismatched cards, and unverified imports stop with
+manual-import/discovery guidance. To protect existing contacts, the controller's
+overwrite-oldest policy must be verifiably disabled; otherwise the runner stops
+and shows how to disable that bit without changing other auto-add flags. It does
+not change this policy itself. A full table or rejected import cannot be worked
+around by deleting another contact; an uncertain import is not automatically
+retried. An approved contact remains on the controller for subsequent runs.</p>
+<p>The normal/TempRadio on-air ACK checks still run; adding a contact does not prove
+radio reachability or skip those checks.
+When the controller and source are the same TCP Full Companion, use the verified
+<code>--source-shares-controller</code> topology; it does not need a contact for itself.</p>
+<h2 id="destination-requirements">Destination requirements</h2>
+<table>
+<thead>
+<tr>
+<th>Destination</th>
+<th>Package installed</th>
+<th>One-time prerequisite</th>
+<th>Raw ZIP handling</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ESP32</td>
+<td>Full application image</td>
+<td>OTA-enabled image with an A/B partition table</td>
+<td>Builds a full mOTA from the matching non-merged application <code>.bin</code></td>
+</tr>
+<tr>
+<td>nRF52, internal flash</td>
+<td>In-place delta</td>
+<td>Exact-board OTAFIX bootloader with mOTA apply support</td>
+<td>Requires <code>--base</code> with the exact image currently running</td>
+</tr>
+<tr>
+<td>nRF52 repeater, external QSPI</td>
+<td>Full image or in-place delta</td>
+<td>QSPI-aware exact-board OTAFIX bootloader and matched repeater build</td>
+<td>Builds a full mOTA; adding <code>--base</code> requests a delta</td>
+</tr>
+<tr>
+<td>MeshTower V2 nRF52, microSD</td>
+<td>Full image or in-place delta</td>
+<td>SD-aware exact-board OTAFIX bootloader and compatible card</td>
+<td>Builds a full mOTA; adding <code>--base</code> requests a delta</td>
+</tr>
+</tbody>
+</table>
+<p>MeshTower V2 microSD application and bootloader containers require an Ed25519 signature from a key in the
+device allowlist. Supply <code>--sign-key</code> when the runner must build a container, and install the BLM2-capable
+SD-aware bootloader locally before attempting application or bootloader OTA. Preview.12 requires USB/BLE
+DFU or SWD; see <a href="../ota_meshtower_v2_sdcard/">MeshTower V2 microSD LoRa OTA</a>.</p>
+<p>The firmware inside a raw ZIP must have a valid MeshCore <code>EndF</code> trailer. An
+ESP32 merged/factory image is not an application image and is rejected. A
+generic vendor DFU ZIP may also be unusable if it does not contain the raw
+EndF-bearing <code>.hex</code> or <code>.bin</code>.</p>
+<p>For an internal-staging nRF52, the exact base image is irreducible information.
+The node reports its eight-byte body hash, but that hash cannot reconstruct the
+firmware bytes needed to create a delta. Keep the <code>.pio/build/ENV/firmware.hex</code>
+that was actually flashed. A matching filename or version alone is not enough.</p>
+<h2 id="1-install-the-host-tools">1. Install the host tools</h2>
+<p>Install Python 3.10 or newer, <a href="https://rustup.rs/">Rust</a>, Git, the official
+<a href="https://github.com/meshcore-dev/meshcore-cli"><code>meshcore-cli</code></a> <strong>1.6.0 or newer</strong>, and the official
+<a href="https://github.com/vk496/motatool"><code>motatool</code></a>.</p>
+<p>For signed bootloader staging, see the automatic <code>cryptography</code> and
+bootloader-capable <code>motatool</code> repairs above. Pip is needed only when installing
+the missing Python dependency; Rust/Cargo and a native linker are needed only
+when building motatool, not when using an already compatible binary. The
+runner checks the selected meshcli version before opening radios. Keep its
+serial/BLE dependencies in meshcli's own environment (pipx handles these);
+installing cryptography in meshcli's pipx environment does not make it available
+to the separate Python interpreter running this wrapper. A ready bootloader
+<code>.mota</code> does not need the Python <code>detools</code> or <code>intelhex</code> build dependencies.</p>
+<p>On Bash:</p>
+<pre><code class="language-bash">python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+pipx install meshcore-cli
+
+git clone https://github.com/vk496/motatool.git
+cargo install --path ./motatool
+
+meshcli -v
+motatool --version
+</code></pre>
+<p>On PowerShell:</p>
+<pre><code class="language-powershell">py -m pip install --user pipx
+py -m pipx ensurepath
+pipx install meshcore-cli
+
+git clone https://github.com/vk496/motatool.git
+cargo install --path .\motatool
+
+meshcli -v
+motatool --version
+</code></pre>
+<p>Restart the shell if <code>pipx</code> or Cargo reports that it changed <code>PATH</code>.</p>
+<h2 id="2-identify-and-test-both-local-links">2. Identify and test both local links</h2>
+<p>List serial devices:</p>
+<pre><code class="language-bash">meshcli -l
+</code></pre>
+<p>The examples below assume <code>/dev/ttyACM0</code> is the controller and
+<code>/dev/ttyACM1</code> is the OTA source. On Windows they might be <code>COM7</code> and <code>COM8</code>.
+Close picocom, a serial monitor, the phone app, and any other program holding
+either link.</p>
+<p>Test the controller's binary API:</p>
+<pre><code class="language-bash">meshcli -s /dev/ttyACM0 -b 115200 ver
+</code></pre>
+<p>For an ordinary raw-text source, test its OTA support:</p>
+<pre><code class="language-bash">meshcli -r -s /dev/ttyACM1 -b 115200 &quot;ota status&quot;
+</code></pre>
+<p>The command must print an <code>OTA | ... target:XXXXXXXX</code> status.</p>
+<p>For an nRF52 full Companion, open the source port with terminal mode selected
+automatically:</p>
+<pre><code class="language-bash">picocom -b 115200 \
+  --imap spchex \
+  --initstring $'+++MESHCORE-TERM-START\r' \
+  /dev/ttyACM1
+</code></pre>
+<p>Run <code>ota status</code>. It must report <code>OTA seeder</code>, <code>install:disabled</code>, and target
+<code>00000000</code>; send <code>+++MESHCORE-TERM-STOP</code> before closing the terminal. The
+automation detects and performs this token-wrapped preflight itself, so no
+extra command-line option is needed.</p>
+<p>For an ESP32 full Companion, test its separate WiFi control console instead:</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh --tcp-cli 192.168.1.50 &quot;ota status&quot;
+</code></pre>
+<p>It must report <code>OTA seeder</code>, <code>install:disabled</code>, and target <code>00000000</code>.</p>
+<p>This standalone fallback uses Python's raw TCP socket directly. It works with
+<code>meshcli</code> versions whose <code>-r</code> mode rejects <code>-t</code>; it does not need <code>meshcli</code>,
+<code>motatool</code>, <code>nc</code>, or a firmware package. It defaults to text port 5002; port
+5000 speaks the binary Companion protocol and port 5001 serves mOTA data.
+The firmware must expose the text console; this option does not enable one.</p>
+<p>Specify a port or adjust the total connection/command timeout (10 seconds by
+default):</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh --tcp-cli 192.168.1.50:5002 --timeout 15 &quot;ver&quot;
+</code></pre>
+<p>PowerShell uses the same option:</p>
+<pre><code class="language-powershell">.\tools\lora_ota\lora_ota.ps1 --tcp-cli 192.168.1.50 &quot;ota status&quot;
+</code></pre>
+<p>Place <code>--tcp-cli</code> first. Each invocation sends one command and waits for the
+complete reply and terminal prompt. Connection failures, timeouts, missing
+replies, and rejected commands exit nonzero. If USB owns the terminal, close
+the active USB terminal and try again. Commands are never automatically resent
+in this standalone mode: a timeout after sending may mean the command executed
+but its reply was lost. Inspect the device state before repeating a change.</p>
+<p>For an actual OTA run, continue using <code>--source-tcp HOST:5001</code> with
+<code>--source-cli-tcp HOST:5002</code>; that existing control path also bypasses <code>meshcli</code>
+raw mode. The standalone fallback does not transfer a firmware image itself.</p>
+<p>Changing a terminal to 57600 baud does not select ASCII mode. USB Companion
+builds and the normal raw management CLI use 115200 unless a particular build
+was explicitly configured otherwise.</p>
+<h2 id="3-check-the-destination-once">3. Check the destination once</h2>
+<p>The destination must be in the controller's contacts and remotely reachable
+on the normal channel. The script runs these authenticated checks itself:</p>
+<pre><code class="language-text">ota status
+get bootloader.ver
+ota self
+ota stats
+</code></pre>
+<p>The script uses <code>get bootloader.ver</code> as an optional platform/version hint, not
+as an install gate. It makes one attempt without an interactive retry loop.
+<code>unknown</code>, an unsupported/missing command, an unrecognized reply, or a lost reply
+produces a warning and does not by itself block the run. In particular, older
+MeshCore firmware can report <code>unknown</code> for the installed signed OTAFIX 2.4.6
+MeshTower V2 SD image because it omits the legacy UF2 version string. Both the
+shell and PowerShell launchers use this same behavior; no application or
+Companion firmware update is required for this host-side workaround. The runner
+also accepts the new <code>OTAFIX2.4.6</code> and explicitly labelled <code>0.11.0 (base)</code> formats.</p>
+<p>The runner still requires <code>ota self</code> to
+report <code>bootloader: apply OK</code>, <code>bootloader: QSPI apply OK</code>, or
+<code>bootloader: SD apply OK</code> and checks the
+reported bootloader ABI and codec mask against the selected package. If the
+version command is unavailable on older firmware, the script warns and falls
+back to the legacy <code>ota self</code> platform marker. If an nRF52 bootloader lacks
+the required capabilities, install the exact-board OTAFIX bootloader first.
+Positive nRF52 capability markers take precedence over a generic unsupported
+getter response, so it cannot silently skip nRF52 safety checks. Bootloader
+packages still require the independently checked <code>ota bootloader status</code> board,
+target, ABI, codec and storage identity; missing version text never bypasses
+package signature checks or the explicit bootloader-install workflow. The
+separate hardware-qualified <code>rak3401_mota_chain.py</code> retains its exact deployed
+version restriction; it is not a general OTAFIX 2.4.6 update runner.
+Current firmware also reports <code>maxblk:2048</code> near the front of both OTA replies.
+The runner treats a missing marker as the deployed 1 KiB receive limit, rejects
+a ready 2 KiB package for such a target before transfer, and passes the live
+limit to <code>motatool --block-size</code> when it builds from raw firmware. Thus updating
+an older target from a release ZIP produces a compatible 1 KiB package while a
+current target retains the 2 KiB application default.
+<code>ota stats</code> is only an optional EndF version probe. It uses one bounded retry
+cycle; unsupported firmware or a lost reply falls back directly to the
+required <code>ver</code> command instead of entering an operator continuation loop.</p>
+<p>The default TempRadio tuple is:</p>
+<pre><code class="language-text">909.5,500,5,5,120
+</code></pre>
+<p>The lab test default is 909.5 MHz, 500 kHz bandwidth, SF5, and CR5. The frequency is only a
+North American example: choose a legal frequency supported by every
+participating radio and appropriate to your location. Older radios that do not
+support SF5 require a complete replacement tuple passed with <code>--temp-radio</code>.
+The fifth value is the TempRadio window in minutes. To change only that value,
+pass <code>--temp-radio-minutes 90</code>; this works with <code>--relay</code> and keeps the chosen
+frequency, bandwidth, SF, and CR. The hard minimum is 20 minutes. The 120-minute
+default and the runner's worst-case timeout estimate are guidance. A window
+below the estimate prints a warning and continues; the radio lease can expire
+before a slow OTA finishes.
+For an interactive run configured at 250 kHz, the runner offers a 125-kHz path
+rehearsal at SF5 before the final update confirmation. If a 250-kHz rehearsal
+cannot prove the temporary path but every short lease expires and the exact
+normal path returns without active recovery, it offers the same 125-kHz SF5
+start. If the 125-kHz SF5 path fails in that same cleanly returned way, the
+operator can approve a fresh SF6 rehearsal, then SF7 if SF6 fails. Each change
+prints the revised plan and requires confirmation before its rehearsal; the
+long transfer uses only the setting that passes. The selected long-window
+duration is unchanged, and each attempt repeats the full short rehearsal.
+<code>--yes</code> and non-interactive runs never change bandwidth or spreading factor
+automatically. To start directly at 125 kHz SF5 without a prompt, pass
+<code>--temp-radio 909.5,125,5,5,150</code> (choose a legal frequency and an appropriate
+window for the actual route).
+The separate three-minute path rehearsal and its identity checks still run.</p>
+<p>Before that long window is allowed, the live runner performs a mandatory
+independent three-minute rehearsal. Its exact normal-channel <code>ota status</code> and
+<code>ota self</code> identity proof gets one shared four-minute, read-only budget before
+any schedule, radio override, seeder, or transfer is armed; this tolerates a
+marginal link without consuming or extending a live lease. It advances a stale
+managed controller with exact readback and treats a source terminal's
+whole-minute display as an uncertainty window, never as an exact epoch. A
+source minute overlapping the host is preserved; a completely stale minute is
+pinned to a guarded future value and read back once. Neither clock is moved
+backward, and the runner stops if a managed clock cannot be proven within the
+ten-minute limit. Each remote participant must expose an empty <code>tempradioat</code>
+schedule. The runner projects one fixed start/end interval into each
+participant's independently sampled RTC, sends each mutation once, proves
+every exact identity on the temporary tuple, waits for natural expiry, and
+proves the complete normal path again. A lost schedule reply is resolved by
+those on-air proofs; it is never blindly replayed with a fresh duration.</p>
+<p>The published RAK3401 <code>v1.16.7-c1caa5ad</code> LoRa-OTA image includes
+<code>get/set/del tempradioat</code> and can take this safe first step. A truly older or
+reduced build without fixed TempRadio scheduling is rejected before mutation;
+bootstrap it locally or with another explicitly controlled maintenance path.
+The automation does not substitute an immediate <code>tempradio</code> command whose
+first delivery could remain queued after cleanup.</p>
+<h3 id="rxps-handling-during-tempradio">RXPS handling during TempRadio</h3>
+<p>RXPS improves receive performance per unit of radio-on time, so the runner
+keeps the destination's saved RXPS preference enabled whenever the selected
+fast tuple has a qualified timing window. Before changing any radio, it reads
+<code>ver</code> from the destination, controller, source, and every named relay. It treats
+v1.17.1.5 as the first forward contract in which every SF5-SF8 transmission,
+including a retry, uses the same tuple-selected physical preamble: normally 32
+symbols, 64 only when 32 cannot enable RXPS, and 128 only when neither 32 nor
+64 can. A saved RXPS level is also safely retuned after a radio change. An
+older or unparseable destination version fails closed: the runner temporarily
+sends <code>set radio.rxps off</code> instead of assuming an ad-hoc build contains the
+timing fixes. Automation deliberately treats the version as a wire-format
+contract.</p>
+<p>For the default SF5/BW250 tuple, the runner keeps destination RXPS on only when
+the destination and every possible sender are v1.17.1.5 or newer. It does not
+overwrite an existing level-based preference. Current firmware retunes that
+preference against the tuple-selected 64-symbol wire preamble; the qualified boundary is
+effective level 8, preamble 64 (<code>1252 / 6424 us</code>). A manually configured node
+may save <code>set radio.rxps level 8 preamble 32</code> before entering TempRadio: when
+32 symbols cannot cover the TCXO transition, firmware safely selects the real
+64-symbol preamble. If the saved setting uses fixed manual timings, or even one
+participant is older or unknown, RXPS is temporarily off. This avoids the
+receive gap that a 32-symbol sender or an unretuned manual window would create.</p>
+<p>The complete qualified SX1262+TCXO policy is:</p>
+<table>
+<thead>
+<tr>
+<th>TempRadio SF/BW</th>
+<th>Saved reference setting</th>
+<th>Qualified boundary</th>
+<th>Automation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SF7/BW500</td>
+<td><code>level 7 preamble 32</code></td>
+<td>7 / 32</td>
+<td>RXPS on for a current destination</td>
+</tr>
+<tr>
+<td>SF6/BW250</td>
+<td><code>level 7 preamble 32</code></td>
+<td>7 / 32</td>
+<td>RXPS on for a current destination</td>
+</tr>
+<tr>
+<td>SF5/BW125</td>
+<td><code>level 7 preamble 32</code></td>
+<td>7 / 32</td>
+<td>RXPS on for a current destination</td>
+</tr>
+<tr>
+<td>SF5/BW250</td>
+<td><code>level 8 preamble 32</code></td>
+<td>8 / 64</td>
+<td>RXPS on only when every participant follows the 64-symbol contract</td>
+</tr>
+<tr>
+<td>SF6/BW500</td>
+<td><code>level 8 preamble 32</code></td>
+<td>8 / 64</td>
+<td>RXPS on only when every participant follows the adaptive-preamble contract</td>
+</tr>
+<tr>
+<td>SF5/BW500</td>
+<td><code>level 8 preamble 32</code></td>
+<td>8 / 128</td>
+<td>RXPS on only when every participant follows the adaptive-preamble contract</td>
+</tr>
+<tr>
+<td>SF5/BW62.5</td>
+<td><code>level 10 preamble 16</code></td>
+<td>10 / 16</td>
+<td>RXPS on for a current destination</td>
+</tr>
+<tr>
+<td>Unqualified tuple</td>
+<td>none</td>
+<td>continuous RX</td>
+<td>RXPS temporarily off</td>
+</tr>
+</tbody>
+</table>
+<p>If RXPS was already off, the runner leaves it off. Otherwise it writes the
+original level, preamble assumption, receive/sleep periods, and temporary
+decision to protected
+<code>target-rxps-settings.json</code> in the run's working directory, verifies the
+temporary state, and restores the exact original setting after the target is
+back on its normal radio. Current firmware exposes this complete state through
+<code>get radio.rxps.config</code>; a legacy reply has only on/off and periods, so the
+runner can restore those periods but cannot reconstruct an unreported saved
+level. A radio change later recalculates from a preserved saved minimum, so
+moving back to a slower tuple returns to the operator's saved level.</p>
+<p>The OTA source has a stricter policy than the destination. For every source
+with a managed serial or TCP CLI, the runner reads and retains its exact RXPS
+preference, using the legacy fixed-period query only when the detailed query is
+unavailable. It builds and verifies the package, completes the read-only target
+checks, and obtains confirmation while that preference remains unchanged.
+Immediately before the first radio mutation, it reads the source RXPS state
+again, disables RXPS, and verifies the readback. Source RXPS stays off through
+catalog serving,
+download, installation, and post-install identity verification. Cleanup first
+proves that the source has returned to its normal radio, then restores and
+verifies the exact saved level/preamble or fixed-period state once. A source
+whose RXPS state cannot be read, disabled, or restored safely fails closed.
+If current firmware explicitly rejects an RXPS disable or restore with <code>radio
+busy; retry</code>, the runner retries that idempotent mutation at staggered
+210–378 ms intervals. All 32 delays are distinct and contribute about 9.4
+seconds of waits; source-CLI command round-trip time is additional. This avoids
+repeatedly sampling one radio phase while retaining a strict attempt cap. Other
+rejections are not replayed.</p>
+<h2 id="4-run-an-esp32-update">4. Run an ESP32 update</h2>
+<p>The ZIP can contain a compatible ready <code>.mota</code> or the exact board-and-role
+non-merged application <code>.bin</code>:</p>
+<pre><code class="language-bash">export MESHCORE_ADMIN_PASSWORD='target-admin-password'
+
+./tools/lora_ota/lora_ota.sh ./release.zip &quot;Roof ESP32&quot; \
+  --controller-serial /dev/ttyACM0 \
+  --source-serial /dev/ttyACM1
+</code></pre>
+<p>The script shows the detected target, hardware, running hash, chosen package,
+version, manifest ID, and action before asking for confirmation. For an
+unattended job, add <code>--yes</code>:</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh ./release.mota &quot;Roof ESP32&quot; \
+  --controller-serial /dev/ttyACM0 \
+  --source-serial /dev/ttyACM1 \
+  --yes
+</code></pre>
+<p>PowerShell equivalents:</p>
+<pre><code class="language-powershell">$env:MESHCORE_ADMIN_PASSWORD = 'target-admin-password'
+
+&amp; .\tools\lora_ota\lora_ota.ps1 '.\release.zip' 'Roof ESP32' `
+  --controller-serial COM7 `
+  --source-serial COM8
+
+&amp; .\tools\lora_ota\lora_ota.ps1 '.\release.mota' 'Roof ESP32' `
+  --controller-serial COM7 `
+  --source-serial COM8 `
+  --yes
+</code></pre>
+<p>Prefer the environment variable or the interactive password prompt. Passing
+<code>--password</code> works, but the wrapper's own command line may be visible to other
+local processes. The runner keeps the password out of child <code>meshcli</code> command
+lines and removes its protected temporary command file after each call.</p>
+<h2 id="5-run-an-nrf52-update">5. Run an nRF52 update</h2>
+<p>If the input ZIP already contains a compatible in-place delta <code>.mota</code>, no
+base argument is needed: its embedded base hash is compared with the live
+node. If the ZIP contains raw new firmware, supply the exact running image:</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh ./nrf52-new-release.zip &quot;Hill nRF52&quot; \
+  --base ./firmware-that-is-running.hex \
+  --controller-serial /dev/ttyACM0 \
+  --source-serial /dev/ttyACM1
+</code></pre>
+<pre><code class="language-powershell">&amp; .\tools\lora_ota\lora_ota.ps1 '.\nrf52-new-release.zip' 'Hill nRF52' `
+  --base '.\firmware-that-is-running.hex' `
+  --controller-serial COM7 `
+  --source-serial COM8
+</code></pre>
+<p>Before building a delta, the runner proves that the base's target ID,
+hardware identity, firmware version when available, and <code>EndF</code> body hash match
+the live destination. It then asks <code>motatool</code> for codec 2, the nRF52 in-place
+format. The normal workspace is <code>0x98000</code>.</p>
+<p>For a QSPI-backed repeater or the SD-backed MeshTower V2 target, a raw ZIP
+becomes a full image without <code>--base</code>. Supplying an exact base requests a
+smaller in-place delta and automatically selects the conservative external
+workspace <code>0xC6000</code>, which is safe for S140 v6 and v7 application layouts. An explicit
+<code>--inplace-memory</code> overrides the automatic value.</p>
+<p>The live runner detects QSPI from <code>ota self</code> (<code>QSPI apply OK</code>) or <code>ota status</code>
+(<code>bl:QSPI</code>) and refuses an explicit <code>QSPI store:ERR 0K</code> report even when the
+bootloader itself advertises QSPI apply support. Offline <code>--prepare-only</code> runs
+must supply <code>--nrf-qspi</code>; do not use that switch for a board that only exposes
+QSPI pins or uses the chip as a
+Companion filesystem. The application and bootloader must both be from the
+matched repeater list in <a href="../ota_nrf52_qspi/">the nRF52 QSPI guide</a>.</p>
+<h2 id="6-add-intermediate-relays">6. Add intermediate relays</h2>
+<p>The runner automatically checks <code>ota config</code> on the destination, managed source,
+and each OTA-enabled relay before confirmation. The declared <code>--relay</code> count is
+the minimum required OTA reach: one relay requires at least one hop, not the
+direct-only <code>hops=0</code>. After the radio rehearsal passes, it rechecks the original
+policies and temporarily raises only limits below that minimum. Higher existing
+limits remain unchanged. Every change needs exact readback; a lost setter reply
+is reconciled by reading the policy, not blindly repeating the write.</p>
+<p>The original limits are restored after the download, before installation can
+reboot the destination, and cleanup also attempts restoration after an error or
+Ctrl-C. A serial seeder is stopped before the source text CLI is used. The
+private, password-free <code>ota-hop-settings.json</code> recovery file is flushed before
+any hop write. Hop limits are persisted by firmware: if the host loses power or
+a radio becomes unreachable, use that file's original values once the correct
+radio channel is reachable. Unexpected external policy changes are not overwritten.</p>
+<p>For a route containing additional, undeclared repeaters, add <code>--ota-hops N</code>
+(0..8, at least the declared relay count). This is a minimum, not a command to
+reduce larger limits. It does not discover or switch undeclared repeaters;
+all participating radios still need overlapping TempRadio windows. Direct runs
+without relays or a positive explicit minimum leave hop policies untouched.
+Explicitly non-OTA relays remain opaque forwarders; unsupported/ambiguous policy
+replies, authentication failures and timeouts on OTA participants stop the run.
+No signer, install-security or forwarding-filter checks are bypassed.</p>
+<p>List relays from farthest to nearest so each command is sent before its route
+moves to TempRadio. A bare relay name uses the destination password; use
+<code>NAME=PASSWORD</code> when it differs:</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh ./release.mota &quot;Remote Target&quot; \
+  --controller-serial /dev/ttyACM0 \
+  --source-serial /dev/ttyACM1 \
+  --relay &quot;Far Relay=far-password&quot; \
+  --relay &quot;Near Relay=near-password&quot;
+</code></pre>
+<p>PowerShell uses the same arguments:</p>
+<pre><code class="language-powershell">&amp; .\tools\lora_ota\lora_ota.ps1 '.\release.mota' 'Remote Target' `
+  --controller-serial COM7 `
+  --source-serial COM8 `
+  --relay 'Far Relay=far-password' `
+  --relay 'Near Relay=near-password'
+</code></pre>
+<h2 id="other-connection-choices">Other connection choices</h2>
+<p>The controller can use any one of:</p>
+<pre><code class="language-text">--controller-serial PORT
+--controller-tcp HOST[:PORT]       # default port 5000
+--controller-ble ADDRESS_OR_NAME
+</code></pre>
+<p>An ESP32 FULL/repeater source can serve over its dedicated WiFi seeder port
+while its raw USB CLI is used to start TempRadio:</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh ./release.mota &quot;Remote Target&quot; \
+  --controller-serial /dev/ttyACM0 \
+  --source-tcp 192.168.1.50:5001 \
+  --source-cli-serial /dev/ttyACM1
+</code></pre>
+<p>An ESP32 <code>companion_radio_full</code> uses WiFi for both dedicated source links:</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh ./release.mota &quot;Remote Target&quot; \
+  --controller-serial /dev/ttyACM0 \
+  --source-tcp 192.168.1.50:5001 \
+  --source-cli-tcp 192.168.1.50:5002
+</code></pre>
+<p>Port 5002 defaults automatically when it is omitted from
+<code>--source-cli-tcp</code>. Current Full Companion firmware exposes its complete
+role-specific text terminal there; the runner uses only <code>ota</code>, <code>tempradio</code>,
+and <code>normalradio</code>, and remains compatible with older bounded port-5002
+consoles. The source-only Companion never stages or installs the image itself;
+it streams the host folder to other nodes over LoRa. See the
+<a href="../companion_radio_full/">full Companion guide</a> for manual operation and
+interface details.</p>
+<p>An nRF52 <code>companion_radio_full</code> uses one USB source port sequentially. The
+runner automatically wraps local control commands in the terminal tokens, and
+unmodified <code>motatool</code> switches that port into mOTA mode when seeding starts:</p>
+<p>The wrapper sends STOP, then START, before each command. This makes fallback
+independent of whether a prior raw probe left an unobservable USB-UART
+connection in ASCII or Binary mode. Seeder startup is reported only after the
+verbose device log contains its <code>COUNT</code> acknowledgement; an immediate device
+<code>ERR</code> or a missing acknowledgement fails during startup instead of surfacing
+later as a catalog timeout.</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh ./release.mota &quot;Remote Target&quot; \
+  --controller-serial /dev/ttyACM0 \
+  --source-serial /dev/ttyACM1
+</code></pre>
+<p>If the source is already on the exact TempRadio tuple through a scheduled or
+manual operation, <code>--source-already-temp</code> lets a TCP source run without a raw
+CLI link. The script cannot verify, extend, or shorten that source window, so
+leave a comfortable time margin. It also cannot inspect or change that
+unmanaged source's RXPS state; disable source RXPS yourself before starting
+the run and restore it only after returning the source to its normal radio.</p>
+<p>Use <code>--controller-baud</code> or <code>--source-baud</code> only for a build whose corresponding
+interface is genuinely configured to another speed.</p>
+<h2 id="package-selection-and-safety-gates">Package selection and safety gates</h2>
+<p>For a ZIP, the runner first examines every <code>.mota</code> without extracting paths.
+It keeps only packages matching the live target, hardware, base, platform,
+codec, and bootloader capabilities. It chooses the newest compatible version
+and prefers a delta over a full image at the same version. If equally suitable
+files differ, select one explicitly:</p>
+<pre><code class="language-text">--zip-member path/inside/archive/update.mota
+</code></pre>
+<p>If no ready mOTA is usable, it searches <code>.bin</code> and <code>.hex</code> members for a valid,
+matching <code>EndF</code>, then builds the platform-appropriate container. Every result
+is structurally checked by the runner and independently passed through
+<code>motatool verify</code> before any radio changes. Direct firmware and mOTA inputs, as
+well as individual ZIP members, are rejected above 64 MiB before being loaded.</p>
+<p>Useful controls:</p>
+<ul>
+<li><code>--public-key signer.key.pub</code> requires a particular Ed25519 signer during
+  verification.</li>
+<li><code>--sign-key signer.key</code> signs a newly built container.</li>
+<li><code>--no-install</code> downloads and verifies the image but leaves it staged. By
+  default the runner then schedules the target, relays, and a script-configured
+  source back to their normal radios. Combining it with
+  <code>--leave-controller-radio</code> deliberately preserves the destination, relays,
+  and separate controller on the TempRadio topology; a managed source is still
+  returned to normal so its exact RXPS setting can be restored.
+  If the version gate required RXPS off, it stays off while that topology is
+  preserved; use <code>target-rxps-settings.json</code> to restore it only after sending
+  <code>normalradio</code>.</li>
+<li><code>--allow-non-upgrade</code> deliberately permits the same or an older application version.</li>
+<li><code>--replace-active-download</code> deliberately discards a different update already
+  downloading or staged on the target. Without it, that update is preserved.</li>
+<li><code>--source-shares-controller</code> is for a Full Companion whose USB Binary API is
+  the controller while its TCP port <code>5001</code> is the source. It verifies that the
+  source's port-<code>5000</code> public key equals the controller key, then binds the
+  fresh port-<code>5002</code> Full Terminal banner's complete public key to that Binary
+  identity and challenges it with the supported <code>ver</code> command. It does not
+  assume the Full Terminal implements repeater-only <code>get public.key</code>. Port
+  <code>5002</code> uses a bounded local <code>tempradio</code> override to move the shared physical
+  radio without overwriting its saved normal tuple; the Binary API remains the
+  authenticated transport. Cleanup sends local <code>normalradio</code>, proves that
+  override inactive, and then reasserts the saved Binary tuple. It cannot be
+  combined with
+  <code>--leave-controller-radio</code>,
+  because exact source RXPS restoration requires that shared physical radio to
+  be back on its verified normal tuple.</li>
+<li><code>--require-system-watchdog-off</code> checks <code>get system.watchdog</code> immediately
+  before every <code>ota install</code> transmission and refuses installation unless the
+  destination reports <code>&gt; off</code>. Use it for nRF52 chains whose bootloader cannot
+  service an application watchdog inherited across reset.</li>
+<li>Managed <code>--relay</code> nodes have their original <code>rxdelay</code> and <code>txdelay</code> captured
+  in the work directory. During transfer the runner verifies <code>rxdelay 0</code> and
+  an airtime-scaled <code>txdelay 0.3</code> (override with <code>--relay-txdelay</code>), then
+  restores both values before the relay leaves TempRadio.</li>
+<li><code>--work-dir PATH</code> chooses a new, non-existent work directory.</li>
+<li><code>--meshcli PATH</code> and <code>--motatool PATH</code> select binaries not on <code>PATH</code>.</li>
+<li><code>--package-build-timeout SECONDS</code> bounds local mOTA generation. It defaults
+  to 3600 seconds. Run detools, delta/compression, and raw-firmware package
+  generation on a workstation or build VM, then transfer the completed,
+  hash-verified <code>.mota</code> to a Pi-class radio host. The Pi should perform only
+  lightweight identity-gated hardware I/O and serve that finished artifact;
+  preparation still occurs before any radio state changes.</li>
+<li><code>--debug</code> prints redacted child commands, timeouts, process status, stdout,
+  and stderr. Admin passwords are never printed, but node names, addresses,
+  paths, and command replies can still be sensitive; share the log carefully.</li>
+</ul>
+<p>For offline package preparation only:</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh ./release.zip offline \
+  --prepare-only \
+  --platform nrf52 \
+  --target-id 1234ABCD \
+  --target-base-hash 0011223344556677 \
+  --target-hw Heltec_T114 \
+  --base ./firmware-that-is-running.hex
+</code></pre>
+<p>Live operation is safer because the script obtains these values directly from
+the destination.</p>
+<h2 id="what-happens-during-a-run">What happens during a run</h2>
+<ol>
+<li>Validate the input paths and host tools, then prove the source is either an
+   OTA-enabled raw CLI or a source-only full Companion control interface. Read
+   and durably save a managed source's exact RXPS preference without changing
+   it.</li>
+<li>Before sending any remote packet, prove the managed source has no active,
+   pending, or fixed TempRadio work, then gate the source and controller
+   clocks. Advance a stale exact clock to host time; for a minute-resolution
+   source, preserve an overlapping minute or use one guarded forward value
+   with readback. Preserve a small future lead and fail closed above the
+   ten-minute drift limit. Then
+   authenticate to the target, query its target ID, hardware, running body
+   hash, firmware version, bootloader version, and nRF52 bootloader
+   capabilities, and save the controller's normal radio tuple.</li>
+<li>Select or build one compatible <strong>v2 application</strong> mOTA and verify all block
+   hashes, Merkle root, full-image hash where applicable, identity fields,
+   signature, codec, base, and the live firmware's reported maximum block size
+   (1 KiB for legacy replies without <code>maxblk</code>, currently 2 KiB otherwise).
+   Version-3 bootloader packages are refused before any target state changes.</li>
+<li>Read every participant's version, save the destination's RXPS state,
+   select the qualified destination policy, and show the confirmation prompt.</li>
+<li>Run the fixed-window three-minute rehearsal described above. This phase
+   does not disable RXPS, start a seeder, request a pull, or install anything;
+   the long transfer remains completely unarmed until temporary and normal
+   reachability both pass.</li>
+<li>Fresh-read, disable, and verify source RXPS; apply and verify the
+   destination RXPS policy; then start TempRadio on the
+   target, far-to-near relays, and source. A separate controller is moved and
+   read back through Binary; a shared Full Companion instead schedules its
+   bounded local override while Binary remains the transport. The runner
+   rejects a TempRadio window that cannot cover setup, seeder startup,
+   discovery, the transfer timeout, final polling, and install checks.</li>
+<li>Start <code>motatool serve</code>, discover the exact eight-hex manifest ID, request
+   <code>ota pull &lt;id&gt; flash</code>, and poll until that same ID reports ready. A seeder
+   process exit stops the run immediately. For <code>--no-install</code>, schedule all
+   script-controlled nodes back to their normal radios before restoring the
+   controller, unless <code>--leave-controller-radio</code> was requested.</li>
+<li>Recheck that exact ID, give the target a short final TempRadio safety window,
+   and request <code>ota install</code>. Then shorten each relay's TempRadio window so the
+   normal multi-hop route returns, stop the seeder, shorten the source window,
+   restore the controller, and probe <code>ota self</code> every 10 seconds through the
+   configured readiness window (five minutes by default). The exact new body
+   hash is the readiness signal;
+   only then does the runner require the exact package version. A relayed run
+   continues the 10-second probes through the mandatory relay-return window. A
+   source supplied with <code>--source-already-temp</code> is never modified.
+   <code>--leave-controller-radio</code> moves the controller back to TempRadio only after
+   this normal-channel verification. Restore the destination's exact original
+   RXPS setting after normal-channel identity is proven. A managed source stays
+   RXPS-off through that verification and its exact setting is restored only
+   after its own TempRadio state is proven inactive.</li>
+</ol>
+<p>Remote replies are matched only after queued messages have been drained and
+only when they come from the intended contact and fit the command. A ready
+status for another manifest ID is an error, never permission to install it.</p>
+<h2 id="transmission-loss-and-retries">Transmission loss and retries</h2>
+<h3 id="legacy-relay-manifest-workaround">Legacy relay manifest workaround</h3>
+<p>The deployed <code>2d03e098</code> firmware uses the ordinary 160-entry, non-expiring packet
+hash FIFO for OTA forwarding. Identical manifest requests <strong>and replies</strong> can
+therefore be suppressed after packet loss, even while CLI commands work.
+The firmware fix replaces that forwarding decision with a small timed OTA
+cache, suppresses downstream echoes and already-queued copies, and keeps
+TempRadio, hop limits and forwarding filters authoritative. It applies to
+discovery, manifest and block traffic, including opaque OTA relays.</p>
+<p>Until the relay is updated, add <code>--legacy-relay-dedup-workaround</code> to the same
+runner command. This is opt-in because it adds airtime. It requires
+<code>--source-shares-controller</code>, exactly one <code>--relay</code>, a saved <strong>direct (zero-hop)</strong>
+route to that relay, and no extra <code>--ota-hops</code> beyond one. After an exact
+<code>download: failed (manifest timeout) 0/0</code> for the requested MID, it sends up to
+192 unique 13-byte <strong>direct, non-forwarded</strong> OTA no-operation/unknown-opcode
+frames on the verified TempRadio channel. These replace legacy FIFO entries;
+192 gives some loss headroom over 160 entries, not proof of reception. Then
+it rechecks the destination and requests the same signed package once. A lost
+pull reply is reconciled using status, not blindly replayed.</p>
+<p>There are at most two recovery rounds within the original transfer deadline.
+Each round adds 2,496 origin Mesh bytes plus LoRa overhead, normally roughly
+a minute at 125 kHz/SF7 before command/status latency. The companion's local
+queue acceptance is not an RF acknowledgement. Recovery stops on insufficient
+verified lease time, wrong radio settings, command errors, or changed session.
+It never reboots a relay, cancels a partial image, changes package bytes, or
+bypasses signature/install checks. It does <strong>not</strong> fix later block-retry
+stalls on old firmware or relays beyond the controller's direct radio reach;
+the firmware update is the permanent fix.</p>
+<p>For a short path, <code>--legacy-relay-reboot-recovery</code> offers a lower-airtime
+alternative after that same exact <code>0/0</code> timeout. It requires one managed relay
+whose saved normal-channel and active temporary-channel routes are each <strong>zero
+or one hop</strong>, plus <code>--source-shares-controller</code>. Before any reboot, the runner
+checks the relay and destination identities, the exact failed manifest, and
+at least eight minutes of remaining transfer and target TempRadio time. It
+asks for a separate confirmation at the failure (or requires both this flag
+and <code>--yes</code> in unattended use). The relay's <code>reboot</code> CLI intentionally sends
+no reply: the runner returns the shared source/controller to normal radio,
+authenticates the relay's exact key there, re-arms only the remaining portion
+of the target's TempRadio lease, then proves the relay, destination and same
+manifest on the temporary channel before one pull retry. If the normal path
+cannot be proved after reboot, it stops instead of assuming the reboot worked;
+the other temporary leases still expire. A reboot also clears the relay's
+temporary radio setting, so manually rebooting it during a transfer without
+this re-arming sequence will break the temporary path. When both legacy
+recovery options are enabled, the reboot choice is offered first; declining
+it leaves the direct-cache workaround available on a zero-hop route.</p>
+<p>Read-only and replay-safe transmissions retry up to three times. Three retries
+or 90 seconds, whichever comes first, opens a 10-second stop-or-continue
+prompt when stdin is an interactive terminal. Continue remains the default on
+timeout or Enter, so an operator can persist through a temporary outage; enter
+<code>s</code> or <code>stop</code> to end the run, and Ctrl-C remains immediate. With non-interactive
+stdin, the runner stops after that finite automatic retry cycle instead of
+silently starting another cycle forever. Optional participant-version probes
+always use a bounded cycle and degrade to <code>unknown</code>; optional destination
+<code>ota stats</code> falls back directly to <code>ver</code>. The mandatory normal-channel
+destination baseline is the narrow exception: it may make nine total read-only
+attempts but is stopped by one hard four-minute deadline before any TempRadio
+lease or OTA mutation exists. Proofs inside the live rehearsal retain the
+smaller four-attempt limit.</p>
+<p>Commands that change OTA state are reconciled before replay:</p>
+<ul>
+<li>After a lost <code>ota pull</code> reply, <code>ota status</code> must show the requested manifest
+  ID before the runner treats the pull as started. Otherwise the safe retry
+  policy applies.</li>
+<li>A lost <code>ota install</code> reply is not blindly resent. After a short wait, it is
+  sent again only if the target replies that the same manifest is still ready.
+  If the target has stopped replying because it may be rebooting, the runner
+  restores the normal path and lets post-reboot identity resolve the outcome.
+  The target's final three-minute safety window also returns a non-rebooting
+  target to the normal channel promptly.</li>
+</ul>
+<p>Retries and operator-selected continuation can outlast the original TempRadio
+budget. If a bounded window expires, rerun the same package after the nodes
+return to their normal channel; the manifest-ID check resumes its partial
+download without replacing it.</p>
+<p>The working directory is created before a managed source can be changed, then
+retained and printed at exit. It contains the exact
+served mOTA, <code>motatool-serve.log</code>, extracted build inputs when needed, and
+<code>controller-radio.txt</code>, plus <code>ota-hop-settings.json</code> when OTA reach needed a
+temporary increase. A managed source also gets a protected
+<code>source-rxps-settings.json</code> containing its exact original preference and
+idempotent restore command. Its contents and directory entry are flushed before
+RXPS is disabled. When the destination
+started with RXPS enabled, protected <code>target-rxps-settings.json</code> records its
+manual recovery state. The RAK3401 chain points every nested step at one
+chain-root source record, so a rerun after host power loss does not adopt the
+temporary RXPS-off state as the original. A retained record is accepted only
+for the same managed CLI endpoint. These files contain no saved admin password.
+After exact source restoration, a standalone run atomically retires its record;
+the chain retains its shared record between steps and retires it only after the
+verified endpoint restoration completes.</p>
+<h2 id="interruption-and-recovery">Interruption and recovery</h2>
+<p>Ctrl-C stops the seeder, detaches its serial folder, makes a bounded attempt to
+shorten a source TempRadio window started by the script, and attempts to
+restore the controller. For a managed source it leaves RXPS off until the
+source is proven back on its normal radio, then restores and verifies the
+saved source preference. A transient success-path restore failure remains
+armed for one more idempotent cleanup attempt. The target and relays remain on
+TempRadio only until their bounded windows end; rebooting also restores their
+saved radio settings. A normal cleanup restores the destination's exact RXPS
+periods. If that remote restore cannot be confirmed, use
+<code>target-rxps-settings.json</code> after the target returns to its normal channel.
+A partial download remains safe. Once the target is reachable again (after its
+TempRadio window ends, or after putting the controller back on that tuple),
+rerunning the same package recognizes its manifest ID and resumes the existing
+session instead of clearing it.</p>
+<p>When a chained run has already proved the newly running body hash, its retained
+previous package can briefly report <code>verifying staged blocks</code> after TempRadio
+reactivates the OTA manager. The runner waits only through the configured
+discovery timeout, keeps checking source liveness, and accepts only the same
+manifest becoming <code>ready to install</code> or the manager becoming idle. A changed
+ID, failed or incomplete state, or timeout stops the chain. It then proves the
+exact installed body again. If that same session is still attached and ready,
+the runner detaches it with <code>ota cancel</code>; if the manager has become idle, it
+sends no cancel. An ordinary-channel <code>no download</code> status proves only that the
+manager is idle, not that persistent staging was erased. The runner therefore
+does not issue or describe an IDLE cancel as durable cleanup. The next chain
+transition explicitly re-adopts and proves the expected previous MID before detaching it;
+after the final install OTAFIX has consumed the approval word, so any retained
+container is inert and is replaced by the next valid pull.</p>
+<p>A hard process kill or host power loss cannot run cleanup. Recover a serial
+controller using the tuple saved in the printed work directory:</p>
+<pre><code class="language-bash">radio=$(tr -d '\r\n' &lt; ./meshcore-lora-ota-20260807-123456-1234/controller-radio.txt)
+meshcli -s /dev/ttyACM0 set radio &quot;$radio&quot;
+</code></pre>
+<pre><code class="language-powershell">$radio = (Get-Content '.\meshcore-lora-ota-...\controller-radio.txt' -Raw).Trim()
+meshcli -s COM7 set radio $radio
+</code></pre>
+<p>For a managed source, first return it to its ordinary radio, then inspect
+<code>source-rxps-settings.json</code> and issue its exact <code>restore_command</code> through the
+same serial or TCP-console endpoint recorded in that file. The command is
+idempotent; confirm the full setting with <code>get radio.rxps.config</code> before
+resuming an update.</p>
+<p>If you stop during final confirmation, reconnect on the node's normal channel
+and run <code>ota self</code> and <code>ver</code>. A completed run returns success only when
+<code>ota self</code> reports a valid new body hash and <code>ver</code> exactly matches the package;
+an unverified install returns status 2. Do not immediately replace a staged
+image: the default active-download guard preserves it until you explicitly use
+<code>--replace-active-download</code> or run <code>ota cancel</code>.</p>
+<p>Exit status is <code>0</code> for success, <code>2</code> for a validation or operational error, and
+<code>130</code> for Ctrl-C.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.action.edit", "content.code.copy", "search.highlight", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../_javascript/notification_builder.js?v=20260930-audio-start"></script>
+      
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      
+        <script src="../_javascript/firmware_picker.js?v=20260929-4"></script>
+      
+        <script src="../_javascript/telemetry_decoder.js"></script>
+      
+        <script src="../_javascript/management_decoder.js"></script>
+      
+        <script src="../_javascript/filter_tool.js?v=20261002-hashbytes-2plus"></script>
+      
+        <script src="../_javascript/preset_test.js?v=20260923-2"></script>
+      
+    
+  </body>
+</html>

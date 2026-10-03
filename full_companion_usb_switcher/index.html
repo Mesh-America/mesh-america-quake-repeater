@@ -1,0 +1,2770 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for the open source MeshCore firmware">
+      
+      
+      
+        <link rel="canonical" href="https://Mesh-America.github.io/mesh-america-quake-repeater/full_companion_usb_switcher/">
+      
+      
+        <link rel="prev" href="../companion_radio_full/">
+      
+      
+        <link rel="next" href="../companion_offline_queue/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Companion USB CLI and binary switcher - MeshCore Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../_stylesheets/notification_builder.css">
+    
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/extra.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/firmware_picker.css?v=20260929-1">
+    
+      <link rel="stylesheet" href="../_stylesheets/telemetry_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/management_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/filter_tool.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/preset_test.css?v=20260923-2">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#companion-usb-cli-and-binary-switcher" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MeshCore Docs" class="md-header__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MeshCore Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Companion USB CLI and binary switcher
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MeshCore Docs" class="md-nav__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    MeshCore Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware and tools
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware and tools
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firmware_picker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware picker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notifications/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion notification builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../preset_test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Temporary radio test builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../filter_tool/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Filter policy playground
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management report decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Documentation
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Documentation
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_1" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3_1" id="__nav_3_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started and features
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_1_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started and features
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frequently Asked Questions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../role_feature_switches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature switches by role — 1.17.1.5 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../full_companion_features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion: turn features on and off
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_radio_full/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion USB CLI and binary switcher
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion USB CLI and binary switcher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#wire-formats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wire formats
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#state-transitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State transitions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-automatic-detection-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How automatic detection works
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#manual-controls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manual controls
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#logging-and-mota-ownership" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Logging and mOTA ownership
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shortcomings-and-edge-cases" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shortcomings and edge cases
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Shortcomings and edge cases">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#session-detection-depends-on-the-usb-hardware" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Session detection depends on the USB hardware
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#detection-works-only-at-an-empty-prompt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Detection works only at an empty prompt
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-first-frame-has-a-one-second-deadline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The first frame has a one-second deadline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#framing-confirmation-is-not-authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Framing confirmation is not authentication
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-default-terminal-waits-for-input" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The default terminal waits for input
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#text-and-binary-output-cannot-be-interleaved" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Text and binary output cannot be interleaved
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-literal-leading-briefly-hides-the-prompt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A literal leading &lt; briefly hides the prompt
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_offline_queue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Offline Message Queue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../halo_keymind_settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Halo and Keymind Branch Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware updates and partitions
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware updates and partitions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_user_guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Updating your node over the air (OTA) - user guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_easy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Easy firmware updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lora_ota_automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scripted LoRa OTA from start to finish
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_nrf52_bootloader_update/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 bootloader updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_nrf52_qspi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 repeater LoRa OTA with external QSPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_meshtower_v2_sdcard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshTower V2 microSD LoRa OTA
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_partition_catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 release partition lookup table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 legacy-partition migration over Wi-Fi or LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../heltec_v4_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Heltec V4 legacy-partition migration over Wi-Fi
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../host_cli_service/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LoRa CLI Host Service
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Radio, networking, and power
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Radio, networking, and power
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../radio_profiles/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Two LoRa profiles on one radio
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../carrier_wave/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Carrier-wave RF checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../espnow_bridge_setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP-NOW bridge: simple setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../WiFi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WiFi and MQTT by Firmware Type
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../flood_filtering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flood Filtering and Moderation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gps_tracking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GPS Tracking
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nrf52_power_management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 Power Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI and protocol reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    CLI and protocol reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_build_matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Availability by Firmware Build
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_command_availability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Command Availability Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../terminal_chat_cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terminal Chat CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kiss_modem_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore KISS Modem Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packet_format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packet Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../payloads/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Payload Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore OTA - .mota container &amp; LoRa protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_reports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management reports (MGR1)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stats_binary_frames/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stats Binary Frame Structures
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../number_allocations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Number Allocations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../qr_codes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QR Codes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local Documentation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../research/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Releases
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Current release
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Current release
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releases/1.17.1.8/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    1.17.1.8 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../test-results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Test Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../old-releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Old Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#wire-formats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wire formats
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#state-transitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State transitions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-automatic-detection-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How automatic detection works
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#manual-controls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manual controls
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#logging-and-mota-ownership" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Logging and mOTA ownership
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shortcomings-and-edge-cases" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shortcomings and edge cases
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Shortcomings and edge cases">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#session-detection-depends-on-the-usb-hardware" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Session detection depends on the USB hardware
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#detection-works-only-at-an-empty-prompt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Detection works only at an empty prompt
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-first-frame-has-a-one-second-deadline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The first frame has a one-second deadline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#framing-confirmation-is-not-authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Framing confirmation is not authentication
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-default-terminal-waits-for-input" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The default terminal waits for input
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#text-and-binary-output-cannot-be-interleaved" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Text and binary output cannot be interleaved
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-literal-leading-briefly-hides-the-prompt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A literal leading &lt; briefly hides the prompt
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/edit/main/docs/full_companion_usb_switcher.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="companion-usb-cli-and-binary-switcher">Companion USB CLI and binary switcher</h1>
+<p>USB Companion uses one primary USB serial interface for two incompatible wire
+formats:</p>
+<ul>
+<li>a human-readable ASCII command line;</li>
+<li>the framed Binary Companion protocol used by MeshCore apps and <code>meshcli</code>.</li>
+</ul>
+<p>The primary interface starts in the ASCII terminal after each boot and returns
+to ASCII after a USB session reset that the hardware can observe. A Binary
+Companion client does not need to send a special mode command: its first valid
+frame automatically hands the interface to the binary parser.</p>
+<p>Current source keeps the default terminal quiet until the host sends ASCII
+input. Press Enter or type a command to see the banner. This prevents the ASCII
+<code>&gt;</code> prompt from being mistaken for the beginning of an app's first binary
+response. See <a href="../test-results/companion_usb_client_validation/">USB client compatibility validation</a>
+for the tested firmware and release status.</p>
+<p>These mode controls apply to Full and ordinary USB Companion builds. The
+explicit <code>+++MESHCORE-TERM-START</code> and
+<code>+++MESHCORE-TERM-STOP</code> controls remain available, including for older firmware.
+See the <a href="../terminal_chat_cli/">Terminal Chat CLI guide</a>.</p>
+<h2 id="wire-formats">Wire formats</h2>
+<p>Host-to-device Binary Companion frames use this layout:</p>
+<pre><code class="language-text">'&lt;'  length-low  length-high  payload[length]
+</code></pre>
+<p>Device-to-host frames use the same little-endian length with a different
+marker:</p>
+<pre><code class="language-text">'&gt;'  length-low  length-high  payload[length]
+</code></pre>
+<p>For example, a representative two-byte device query is:</p>
+<pre><code class="language-text">3C 02 00 16 03
+</code></pre>
+<p>The ASCII terminal is line-oriented and accepts commands such as:</p>
+<pre><code class="language-text">get radio.cad
+set display.rotation 90
+reboot
+</code></pre>
+<p>Changing the configured baud rate does not select a mode. Use 115200 for
+compatibility even though native USB CDC hardware does not use UART timing.</p>
+<h2 id="state-transitions">State transitions</h2>
+<pre><code class="language-text">                         complete '&lt;' frame
+                 +--------------------------------+
+                 |                                v
+boot ------&gt; ASCII terminal                  Binary Companion
+                 ^                                |
+                 |                                | +++MESHCORE-TERM-START
+                 | incomplete '&lt;' probe           |
+                 | (one-second timeout)            |
+                 +--------------------------------+
+
+ASCII terminal -- +++MESHCORE-TERM-STOP ------&gt; Binary Companion
+any mode ------- observable USB session reset ---&gt; ASCII terminal
+ESP32 logging terminal -- usb.logging off -----&gt; ASCII terminal
+any mode ------- reboot ------------------------&gt; ASCII terminal
+</code></pre>
+<p>Serial mOTA and single-TTY logging add exclusive ownership states described
+below. BLE, WiFi, Ethernet, and hardware-serial Companion transports are not
+switched; they remain binary.</p>
+<h2 id="how-automatic-detection-works">How automatic detection works</h2>
+<ol>
+<li>Companion initializes the normal USB Binary Companion interface, then
+   gives its primary stream to the ASCII terminal before normal loop service
+   begins.</li>
+<li>While the prompt has no buffered input, the terminal peeks at the next byte.
+   It does not remove that byte.</li>
+<li>If the byte is <code>&lt;</code>, the terminal temporarily releases the stream and enables
+   the existing <code>ArduinoSerialInterface</code> frame parser.</li>
+<li>The parser consumes the original <code>&lt;</code>, the two-byte length, and the payload.
+   There is no second parser and no copied or synthetic frame.</li>
+<li>A monotonically increasing completed-frame counter confirms that the parser
+   received a complete frame. The interface then remains in Binary Companion
+   mode.</li>
+<li>If no complete frame arrives within one second, the parser state is reset
+   and the ASCII terminal prints a new banner and prompt.</li>
+</ol>
+<p>The switcher checks framing, not client identity. Any syntactically complete
+Binary Companion frame confirms binary mode; it does not require the first
+command to be <code>CMD_APP_START</code> or <code>CMD_DEVICE_QUERY</code>. Normal command validation
+still occurs after the frame parser returns the payload.</p>
+<p>The empty-prompt requirement prevents a literal <code>&lt;</code> in the middle of a command
+from silently changing modes. A literal <code>&lt;</code> typed as the first character does
+start a probe, but the terminal returns after the one-second timeout if no
+binary header and payload follow.</p>
+<h2 id="manual-controls">Manual controls</h2>
+<p>The original controls remain available.</p>
+<p>From Binary Companion, send this exact unframed line while the parser is idle:</p>
+<pre><code class="language-text">+++MESHCORE-TERM-START
+</code></pre>
+<p>Terminate it with CR or LF. The binary parser accepts control tokens only as
+complete delimiter-bounded lines; prefixes, suffixes, and partial tokens are
+ignored.</p>
+<p>From the ASCII terminal, send this exact sequence to return to binary mode:</p>
+<pre><code class="language-text">+++MESHCORE-TERM-STOP
+</code></pre>
+<p>The stop sequence takes effect as soon as its last byte arrives in ASCII mode.
+The start sequence is recognized only as a completed line while the binary
+parser is idle and is not examined inside a length-prefixed frame.</p>
+<p><code>meshcli</code> can normally connect directly after boot:</p>
+<pre><code class="language-bash">meshcli -s /dev/ttyACM0 -b 115200 ver
+</code></pre>
+<p>An explicit terminal start token is still useful when the device is already in
+binary mode:</p>
+<pre><code class="language-bash">picocom -b 115200 \
+  --imap spchex \
+  --initstring $'+++MESHCORE-TERM-START\r' \
+  /dev/ttyACM0
+</code></pre>
+<h2 id="logging-and-mota-ownership">Logging and mOTA ownership</h2>
+<p>The switcher never attempts to mix ASCII, framed Companion traffic, or binary
+mOTA traffic on the same stream.</p>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th>Primary USB behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>USB Companion after boot or observable session reset</td>
+<td>ASCII; a complete <code>&lt;</code> frame switches to Binary Companion</td>
+</tr>
+<tr>
+<td>nRF52 logging enabled</td>
+<td>Primary interface still follows the switcher; logs use the optional second interface</td>
+</tr>
+<tr>
+<td>ESP32 logging enabled at boot</td>
+<td>Logging terminal owns the only USB TTY; automatic <code>&lt;</code> detection is disabled</td>
+</tr>
+<tr>
+<td>nRF52 USB serial mOTA active</td>
+<td>mOTA owns primary USB; ASCII and Binary Companion are unavailable there</td>
+</tr>
+<tr>
+<td>BLE/WiFi/Ethernet/hardware serial</td>
+<td>Always Binary Companion and unaffected by the USB mode</td>
+</tr>
+</tbody>
+</table>
+<p>On RAK4631 and other nRF52 Full Companions, ASCII and Binary Companion both use
+the primary interface (<code>*-if00</code> on Linux). The optional <code>*-if02</code> interface is
+for logging. <code>OK - Binary mode</code> acknowledges a mode change on the same primary
+port; it does not move the connection to the logging port.</p>
+<p>On every ESP32 Full Companion, use <code>set usb.logging off</code> in its logging terminal
+before trying to use USB with an app. That command stops logging and returns to
+the ordinary ASCII terminal; it does not select Binary Companion. The app's
+first valid framed probe can perform the normal automatic switch, or a human
+can send <code>+++MESHCORE-TERM-STOP</code> first. The framed/binary Companion parser is
+disabled while logging owns that TTY. BLE and WiFi Companion transports remain
+available while USB is logging. ESP32 Full builds use the Arduino-ESP32 2.x
+base where supported; RC32 and ESP32-C6 keep their board-required Arduino 3.x
+platform but follow the same one-TTY policy. No ESP32 Full build enumerates a
+second CDC interface.</p>
+<p>With logging enabled on a shared port, the stop token is rejected with
+<code>ERROR: set usb.logging off before Binary mode</code>. Turn logging off first; a
+successful binary-mode acknowledgement must not immediately revert to logging.</p>
+<p>On nRF52, serial <code>motatool</code> is also text-first. Its exact initial
+<code>ota folder on</code> line is recognized in either startup ASCII or Binary Companion
+mode. From ASCII, the firmware leaves terminal mode and directly enters
+exclusive mOTA ownership; from binary, the idle frame parser recognizes the
+same control sequence. The following mOTA request/reply frames therefore cannot
+be consumed by the ASCII line editor. <code>motatool serve --serial</code> can be the
+first client after boot and does not require a terminal token or disconnect
+workaround.</p>
+<p>Only the exact completed line selects mOTA from ASCII. Extra arguments,
+leading/trailing whitespace, or a partial line remain ordinary terminal input.</p>
+<h2 id="shortcomings-and-edge-cases">Shortcomings and edge cases</h2>
+<p>This mechanism is deliberately small and deterministic, but it is not a full
+protocol negotiation layer.</p>
+<h3 id="session-detection-depends-on-the-usb-hardware">Session detection depends on the USB hardware</h3>
+<p>After the first complete binary frame, the device stays in Binary Companion
+mode for that session. Native USB with DTR/session events restores ASCII when
+the host closes or resets the connection. Old input, queued output and mOTA
+ownership are cleared before selecting the default for the next session.</p>
+<p>Some clients, including <code>meshcore</code> 2.3.10 used by stock MeshCLI, deliberately
+deassert DTR. The nRF52 primary interface also accepts actual incoming USB data
+as evidence of a client in the current session. Closing, changing line coding,
+or resetting USB invalidates that evidence. The dedicated logging interface
+continues to require its own connected reader.</p>
+<p>ESP32 hardware USB Serial/JTAG reports bus reset and physical host loss, but
+cannot reliably report a terminal program closing its handle. A USB-to-UART
+bridge also usually cannot report that close. On those ports, use the terminal
+start token to return from Binary mode without rebooting. Idle time alone never
+changes the selected protocol.</p>
+<p>An active network terminal temporarily delays restoring the USB ASCII prompt.
+If a fresh USB app sends a complete binary frame during that delay, its Binary
+mode remains selected when the network terminal closes.</p>
+<h3 id="detection-works-only-at-an-empty-prompt">Detection works only at an empty prompt</h3>
+<p>If part of an ASCII command is already buffered, an incoming <code>&lt;</code> is treated as
+ordinary terminal input. Clear or submit the line before starting a Binary
+Companion client. Only one process should have the serial port open.</p>
+<h3 id="the-first-frame-has-a-one-second-deadline">The first frame has a one-second deadline</h3>
+<p>The complete marker, length, and payload must arrive within the probe window.
+This is generous for local USB but may reject a heavily buffered serial proxy,
+a debugger that pauses the MCU, or a tool that writes the header and body with
+a long delay. A timed-out client can retry after the ASCII banner appears.</p>
+<h3 id="framing-confirmation-is-not-authentication">Framing confirmation is not authentication</h3>
+<p>Any complete length-prefixed frame selects binary mode, even if its command is
+unknown or malformed at the application layer. This is safe for stream
+separation but means a random complete frame can leave the device in binary
+mode until an observable USB session reset or a manual switch back.</p>
+<h3 id="the-default-terminal-waits-for-input">The default terminal waits for input</h3>
+<p>The firmware enters ASCII mode during boot but suppresses the banner and
+unsolicited terminal events until ASCII input identifies a terminal client.
+Send Enter or a harmless <code>get</code> command to display the banner. A binary client
+instead gets a clean first response. Older builds that immediately printed
+<code>&gt;</code> could consume the first binary response's marker as part of a bogus frame
+length; scanning past leading text alone did not reliably recover that reply.</p>
+<h3 id="text-and-binary-output-cannot-be-interleaved">Text and binary output cannot be interleaved</h3>
+<p>Primary USB suppresses Binary Companion output while the terminal owns the
+stream. Packet/debug logging must use its dedicated CDC interface or the
+exclusive single-TTY logging mode. Writing diagnostic text directly to the
+primary binary stream will corrupt clients regardless of the switcher.</p>
+<h3 id="a-literal-leading-briefly-hides-the-prompt">A literal leading <code>&lt;</code> briefly hides the prompt</h3>
+<p>Typing <code>&lt;</code> as the first terminal character begins a binary probe. With no
+complete frame, the prompt returns after one second and the banner is printed
+again. There is currently no escape syntax for entering a literal leading <code>&lt;</code>;
+prefix it with another character if it is needed as command text.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p>If <code>meshcli</code> cannot connect:</p>
+<ol>
+<li>close every terminal or logging reader using the primary interface;</li>
+<li>on ESP32, confirm that saved USB logging is off;</li>
+<li>reboot and let <code>meshcli</code> be the first process to open the data interface;</li>
+<li>use the stable <code>/dev/serial/by-id/*-if00</code> path on Linux when available;</li>
+<li>if a prompt appears after one second, the client's first frame was not
+   completed inside the probe window.</li>
+</ol>
+<p>If an ASCII terminal shows no banner, press Enter and issue a harmless query
+such as <code>get radio.cad</code>. If binary bytes appear, send the exact terminal start
+token or reboot.</p>
+<p>The switch policy is implemented in
+<a href="https://github.com/mikecarper/MeshCore/blob/keymindCascade/src/helpers/UsbAsciiBinarySwitch.h"><code>UsbAsciiBinarySwitch.h</code></a>, with stream
+ownership in <a href="https://github.com/mikecarper/MeshCore/blob/keymindCascade/examples/companion_radio/main.cpp"><code>main.cpp</code></a> and framing in
+<a href="https://github.com/mikecarper/MeshCore/blob/keymindCascade/src/helpers/ArduinoSerialInterface.cpp"><code>ArduinoSerialInterface.cpp</code></a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.action.edit", "content.code.copy", "search.highlight", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../_javascript/notification_builder.js?v=20260930-audio-start"></script>
+      
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      
+        <script src="../_javascript/firmware_picker.js?v=20260929-4"></script>
+      
+        <script src="../_javascript/telemetry_decoder.js"></script>
+      
+        <script src="../_javascript/management_decoder.js"></script>
+      
+        <script src="../_javascript/filter_tool.js?v=20261002-hashbytes-2plus"></script>
+      
+        <script src="../_javascript/preset_test.js?v=20260923-2"></script>
+      
+    
+  </body>
+</html>

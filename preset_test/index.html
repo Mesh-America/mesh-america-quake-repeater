@@ -1,0 +1,2667 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for the open source MeshCore firmware">
+      
+      
+      
+        <link rel="canonical" href="https://Mesh-America.github.io/mesh-america-quake-repeater/preset_test/">
+      
+      
+        <link rel="prev" href="../notifications/">
+      
+      
+        <link rel="next" href="../filter_tool/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Temporary radio test builder - MeshCore Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../_stylesheets/notification_builder.css">
+    
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/extra.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/firmware_picker.css?v=20260929-1">
+    
+      <link rel="stylesheet" href="../_stylesheets/telemetry_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/management_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/filter_tool.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/preset_test.css?v=20260923-2">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#temporary-radio-test-builder" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MeshCore Docs" class="md-header__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MeshCore Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Temporary radio test builder
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MeshCore Docs" class="md-nav__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    MeshCore Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware and tools
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware and tools
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firmware_picker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware picker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notifications/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion notification builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Temporary radio test builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../filter_tool/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Filter policy playground
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management report decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Documentation
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Documentation
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_1" id="__nav_3_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started and features
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started and features
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frequently Asked Questions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../role_feature_switches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature switches by role — 1.17.1.5 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../full_companion_features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion: turn features on and off
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_radio_full/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../full_companion_usb_switcher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion USB CLI and binary switcher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_offline_queue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Offline Message Queue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../halo_keymind_settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Halo and Keymind Branch Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware updates and partitions
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware updates and partitions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_user_guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Updating your node over the air (OTA) - user guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_easy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Easy firmware updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lora_ota_automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scripted LoRa OTA from start to finish
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_nrf52_bootloader_update/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 bootloader updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_nrf52_qspi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 repeater LoRa OTA with external QSPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_meshtower_v2_sdcard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshTower V2 microSD LoRa OTA
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_partition_catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 release partition lookup table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 legacy-partition migration over Wi-Fi or LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../heltec_v4_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Heltec V4 legacy-partition migration over Wi-Fi
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../host_cli_service/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LoRa CLI Host Service
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Radio, networking, and power
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Radio, networking, and power
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../radio_profiles/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Two LoRa profiles on one radio
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../carrier_wave/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Carrier-wave RF checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../espnow_bridge_setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP-NOW bridge: simple setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../WiFi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WiFi and MQTT by Firmware Type
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../flood_filtering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flood Filtering and Moderation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gps_tracking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GPS Tracking
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nrf52_power_management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 Power Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI and protocol reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    CLI and protocol reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_build_matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Availability by Firmware Build
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_command_availability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Command Availability Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../terminal_chat_cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terminal Chat CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kiss_modem_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore KISS Modem Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packet_format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packet Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../payloads/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Payload Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore OTA - .mota container &amp; LoRa protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_reports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management reports (MGR1)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stats_binary_frames/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stats Binary Frame Structures
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../number_allocations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Number Allocations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../qr_codes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QR Codes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local Documentation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../research/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Releases
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Current release
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Current release
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releases/1.17.1.8/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    1.17.1.8 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../test-results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Test Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../old-releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Old Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/edit/main/docs/preset_test.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="temporary-radio-test-builder"><span data-role="preset-test-page-title">Temporary radio test builder</span></h1>
+<p><span data-role="preset-test-page-summary">Choose a window and radio tuple to
+create a shareable temporary-radio test URL.</span></p>
+<div class="preset-test" data-preset-test>
+  <div class="preset-test-error" data-role="config-error" role="alert" hidden></div>
+
+  <div data-role="content">
+    <div data-role="test-content" hidden>
+    <section class="preset-test-hero" aria-labelledby="preset-test-title">
+      <p class="preset-test-eyebrow" data-role="preset-test-eyebrow">MeshCore · default 48-hour temporary preset test</p>
+      <div class="preset-test-hero-row">
+        <div>
+          <h2 id="preset-test-title">
+            <span data-field="freq-display">910.100</span> MHz /
+            <span data-field="bw-display">500</span> kHz /
+            SF<span data-field="sf">8</span> /
+            CR<span data-field="cr">7</span>
+          </h2>
+          <p data-role="window-summary"></p>
+        </div>
+        <span class="preset-test-status" data-role="status" data-state="before">Scheduled</span>
+      </div>
+
+      <div class="preset-test-quick-command" aria-labelledby="stock-test-title">
+        <h3 id="stock-test-title">Stock firmware: copy this <code>tempradio</code> command</h3>
+        <pre><code data-command="stock-now"></code></pre>
+        <button type="button" data-copy-command="stock-now">Copy tempradio command</button>
+        <p class="preset-test-note" data-role="stock-now-note"></p>
+        <p class="preset-test-note">
+          Before sending it, run <code>get radio</code> and save the result.
+          No clock setup is needed. Your saved settings return automatically.
+        </p>
+      </div>
+
+      <div class="preset-test-clock" aria-live="polite">
+        <span class="preset-test-clock-label" data-role="countdown-label">Starts in</span>
+        <strong data-role="countdown">—</strong>
+        <span data-role="countdown-detail">—</span>
+      </div>
+
+      <dl class="preset-test-window">
+        <div><dt>Start</dt><dd data-role="start-zoned"></dd></div>
+        <div><dt>End</dt><dd data-role="end-zoned"></dd></div>
+        <div><dt>Display time zone</dt><dd data-role="display-zone"></dd></div>
+      </dl>
+    </section>
+
+    <details class="preset-test-generator-disclosure preset-test-stock-leave">
+      <summary><h2>Need to leave the test early?</h2></summary>
+      <div class="preset-test-generator-disclosure-body">
+        <p>Send this command to return to your saved radio settings in one minute:</p>
+        <pre><code data-command="stock-cancel-during"></code></pre>
+        <button type="button" data-copy-command="stock-cancel-during">Copy leave command</button>
+      </div>
+    </details>
+
+    </div>
+
+    <div data-role="test-content-footer" hidden>
+    <details class="preset-test-generator-disclosure preset-test-keymind-disclosure"
+             data-role="keymind-disclosure">
+      <summary><h2>KeyMind Cascade firmware and advanced commands</h2></summary>
+      <div class="preset-test-generator-disclosure-body">
+      <p>
+        Use these only if your firmware supports the listed commands or you need
+        dual-radio operation, scheduling, or clock correction.
+      </p>
+
+      <section class="preset-test-schedule-mode" aria-labelledby="schedule-mode-title">
+        <h2 id="schedule-mode-title">Scheduled command timing</h2>
+        <fieldset>
+          <legend>Choose the syntax supported by the node</legend>
+          <label>
+            <input type="radio" name="schedule-command-mode" value="relative" checked>
+            <span><strong>KeyMind Cascade · <code>+minutes</code></strong> (default)</span>
+          </label>
+          <label>
+            <input type="radio" name="schedule-command-mode" value="absolute">
+            <span><strong>Absolute Unix time</strong></span>
+          </label>
+        </fieldset>
+        <p data-role="relative-schedule-note">
+          Relative commands calculate whole minutes from now to the shared start
+          and end. Both offsets use the node's same command-time snapshot, so no
+          clock correction is needed. Copy the command shortly after it is shown.
+        </p>
+        <p data-role="absolute-schedule-note" hidden>
+          Absolute commands use fixed UTC epochs. Verify or compensate for the
+          node clock with the controls below before queuing them.
+        </p>
+      </section>
+
+    <section class="preset-test-warning" aria-labelledby="continuity-plan-title">
+      <h2 id="continuity-plan-title">Bridges and early-revert plan</h2>
+      <p>
+        The test will include bridges. If the Puget Sound area experiences a
+        widespread power outage or loss of cellular service, we will end the
+        test early. A stock node's one-minute temporary test profile then ends
+        on that node's own saved radio settings.
+      </p>
+    </section>
+
+    <section class="preset-test-warning" aria-labelledby="save-settings-title">
+      <h2 id="save-settings-title">Before changing a radio</h2>
+      <p>
+        Run <code>get radio</code> and record the saved primary tuple. Both
+        primary TempRadio methods return to that saved tuple; they do not store
+        a return tuple inside the temporary command. On a Companion, also run
+        <code>get radio2</code> and <code>get radio2.cross</code> so you can restore
+        any non-default secondary-profile setup.
+      </p>
+    </section>
+
+    <div data-role="absolute-clock-controls" hidden>
+      <p>Firmware schedule epochs: <code data-role="epoch-range"></code></p>
+    <section aria-labelledby="clock-check-title">
+      <h2 id="clock-check-title">Check the node clock before scheduling</h2>
+      <p>
+        The primary <code>tempradioat</code> and Companion
+        <code>tempradioat2</code> schedulers use UTC Unix time. Run
+        <code>clock</code> on every node that will be scheduled and compare it
+        with the browser UTC time below. It should agree to within about a minute.
+        A wrong clock can start late, start immediately, or cause the schedule to
+        be rejected.
+      </p>
+
+      <div class="preset-test-clock-check">
+        <div>
+          <span>Browser UTC now</span>
+          <strong data-role="browser-utc">—</strong>
+        </div>
+        <div>
+          <span>Browser Unix time</span>
+          <strong data-role="browser-epoch">—</strong>
+        </div>
+      </div>
+
+      <div class="preset-test-clock-override">
+        <label>
+          <span>Node clock reported by <code>clock</code> (UTC, optional)</span>
+          <input
+            type="text"
+            inputmode="text"
+            autocomplete="off"
+            spellcheck="false"
+            data-role="node-clock-input"
+            placeholder="02:42 22/9/2026 UTC"
+          >
+          <small>
+            Paste the node's <code>clock</code> reply immediately after it arrives.
+            The firmware form <code>02:42 - 22/9/2026 UTC</code> is also accepted.
+            Leave this blank to keep the normal UTC schedule epochs unchanged.
+          </small>
+        </label>
+        <button type="button" data-action="apply-node-clock">Apply clock conversion</button>
+      </div>
+      <p class="preset-test-clock-status" data-role="node-clock-status" aria-live="polite">
+        No node-clock correction is applied. Scheduled commands use the normal UTC epochs.
+      </p>
+
+      <p class="preset-test-note">
+        This changes only the absolute <code>tempradioat</code> and
+        <code>tempradioat2</code> epochs shown on this page; it does not issue a
+        clock-setting command. The correction is for this node and this open page
+        only: it is never added to generated URLs, and is cleared on reload. If
+        the node clock later syncs or jumps, delete and queue the schedule again.
+      </p>
+
+      <div class="preset-test-grid preset-test-grid--clock">
+        <article class="preset-test-card">
+          <h3>Remote admin session</h3>
+          <p>
+            In a MeshCore client that supplies the sender timestamp, sync and
+            then verify:
+          </p>
+          <pre><code>clock sync
+clock</code></pre>
+        </article>
+
+        <article class="preset-test-card">
+          <h3>Local USB or browser console</h3>
+          <p>Copy this fresh, run it immediately, and then verify with <code>clock</code>:</p>
+          <pre><code data-command="set-clock">time 0
+clock</code></pre>
+          <button type="button" data-copy-command="set-clock">Copy current clock command</button>
+        </article>
+
+        <article class="preset-test-card preset-test-card--wide">
+          <h3>If the clock is ahead and cannot move backward</h3>
+          <p>
+            If setting the correct time returns <code>ERR: clock cannot go backwards</code>,
+            run the command below. It resets the clock to an older fallback date and
+            reboots the node immediately, so it sends no reply. After the node reconnects,
+            copy and run the fresh local clock command above, verify with <code>clock</code>,
+            and then add the Companion <code>tempradioat2</code> schedule again. The
+            reboot clears any pending scheduled entries.
+          </p>
+          <p>
+            If resetting or correcting this remote node's clock is not safe, leave
+            it unchanged and use the optional node-clock conversion above instead.
+          </p>
+          <pre><code data-command="reset-clock">clkreboot</code></pre>
+          <button type="button" data-copy-command="reset-clock">Copy clock reset command</button>
+        </article>
+      </div>
+
+      <p class="preset-test-note">
+        The Companion schedule must be queued while both its start and end are
+        in the future and within the firmware's roughly 24-day scheduling
+        horizon. Scheduled entries are held in RAM and disappear if the node
+        reboots.
+      </p>
+    </section>
+    </div>
+
+    <section aria-labelledby="join-now-title">
+      <h2 id="join-now-title">Companion: use both frequencies</h2>
+      <p>
+        These commands become available one hour before the official start.
+        Their timeout shrinks so the Companion returns at the same end time.
+      </p>
+
+      <div class="preset-test-grid">
+        <article class="preset-test-card">
+          <div class="preset-test-card-heading">
+            <h3>Companion using both frequencies</h3>
+            <span>Dual profile</span>
+          </div>
+          <pre><code data-command="companion-now"></code></pre>
+          <button type="button" data-copy-command="companion-now">Copy commands</button>
+          <p class="preset-test-note">
+            <code>rxtx</code> permits transmission on the second profile;
+            <code>radio2.cross on</code> copies ordinary Companion traffic across
+            the primary and temporary profiles.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="schedule-title">
+      <h2 id="schedule-title">Schedule a supported node in advance</h2>
+      <p>
+        A Simple Repeater build can schedule its primary radio with
+        <code>tempradioat</code>. A Companion can instead schedule its second
+        profile with <code>tempradioat2</code>. The default KeyMind Cascade form
+        uses <code>+minutes</code> for both endpoints. Switch to Absolute Unix time
+        above for fixed UTC epochs and the node-clock correction tools. Both forms
+        switch at the common start and restore saved settings at the common end.
+        Room-server and sensor roles use the stock join command above instead.
+      </p>
+
+      <div class="preset-test-grid">
+        <article class="preset-test-card">
+          <div class="preset-test-card-heading">
+            <h3>Room server or sensor</h3>
+            <span>No advance schedule</span>
+          </div>
+          <p class="preset-test-note">
+            Use the stock <code>tempradio</code> command above after
+            its setup window opens.
+          </p>
+        </article>
+
+        <article class="preset-test-card">
+          <div class="preset-test-card-heading">
+            <h3>Simple Repeater primary radio</h3>
+            <span>Primary schedule</span>
+          </div>
+          <pre><code data-command="primary-scheduled"></code></pre>
+          <button type="button" data-copy-command="primary-scheduled">Copy schedule commands</button>
+          <p class="preset-test-note">
+            This is available only on a Simple Repeater build with primary
+            scheduled-radio support. It changes the primary tuple at the start
+            and restores the saved tuple at the end. If <code>get tempradioat</code>
+            returns <code>Error: unsupported</code>, use the stock join command
+            above instead.
+          </p>
+        </article>
+
+        <article class="preset-test-card">
+          <div class="preset-test-card-heading">
+            <h3>Companion using both frequencies</h3>
+            <span>Dual-profile schedule</span>
+          </div>
+          <pre><code data-command="companion-scheduled"></code></pre>
+          <button type="button" data-copy-command="companion-scheduled">Copy schedule commands</button>
+          <p class="preset-test-note">
+            Crossing is saved independently and remains <code>on</code> after the
+            temporary second profile ends. Restore its previous value after the
+            test; <code>auto</code> is the normal default.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="cancel-title">
+      <h2 id="cancel-title">Cancel a schedule or adjust the timeout</h2>
+      <p>
+        For a primary or Companion schedule, the <code>all</code> form removes every temporary
+        schedule in that family. To preserve another schedule, first run the
+        corresponding <code>get</code> command and replace <code>all</code> with
+        its displayed entry number.
+      </p>
+
+      <div class="preset-test-cancel-grid">
+        <article class="preset-test-card">
+          <h3>Stock: leave in 30 minutes</h3>
+          <pre><code data-command="stock-leave-30"></code></pre>
+          <button type="button" data-copy-command="stock-leave-30">Copy 30-minute command</button>
+          <p class="preset-test-note">
+            This replaces the current temporary timeout with 30 minutes, then
+            restores the saved primary tuple automatically.
+          </p>
+        </article>
+
+        <article class="preset-test-card">
+          <h3>Simple Repeater · scheduled primary radio</h3>
+          <pre><code data-command="primary-cancel"></code></pre>
+          <button type="button" data-copy-command="primary-cancel">Copy cancel commands</button>
+          <p class="preset-test-note">
+            Before the start, this removes the queued temporary schedule. While
+            it is running, it also restores the saved primary tuple after the
+            command reply drains.
+          </p>
+        </article>
+
+        <article class="preset-test-card">
+          <h3>Companion · before it starts</h3>
+          <pre><code data-command="companion-cancel-before"></code></pre>
+          <button type="button" data-copy-command="companion-cancel-before">Copy cancel commands</button>
+        </article>
+
+        <article class="preset-test-card">
+          <h3>Companion · while it is running</h3>
+          <h4>Leave now</h4>
+          <pre><code data-command="companion-cancel-during"></code></pre>
+          <button type="button" data-copy-command="companion-cancel-during">Copy restore commands</button>
+          <p class="preset-test-note">
+            If <code>get radio2.cross</code> was not <code>auto</code> before the
+            test, restore that recorded value instead.
+          </p>
+          <h4>Leave in 30 minutes</h4>
+          <pre><code data-command="companion-leave-30"></code></pre>
+          <button type="button" data-copy-command="companion-leave-30">Copy 30-minute commands</button>
+          <p class="preset-test-note">
+            These commands clear any absolute second-profile schedule and give
+            the test profile a fresh 30-minute lease. The saved second profile
+            returns at expiry, but crossing remains <code>on</code>; afterward,
+            restore the value you recorded before the test (<code>auto</code> is
+            the normal default).
+          </p>
+        </article>
+      </div>
+    </section>
+
+      <p class="preset-test-note">
+        Primary scheduling requires a Simple Repeater build. Companion
+        <code>tempradio2</code> and <code>tempradioat2</code> require dual-profile
+        firmware. If a command is unknown, use only the method your installed
+        firmware supports.
+      </p>
+      </div>
+    </details>
+    </div>
+    <section aria-labelledby="share-title">
+      <details class="preset-test-generator-disclosure" data-role="url-builder-disclosure" open>
+        <summary>
+          <h2 id="share-title">Build a temporary radio test URL</h2>
+        </summary>
+        <div class="preset-test-generator-disclosure-body">
+          <p>
+        Enter the test times in the selected time zone and choose the radio
+        tuple. The generated URL converts the times to exact UTC instants, keeps
+        the date punctuation readable, and keeps <code>tz</code> so the page
+        displays them in the organizer's local time zone. With no URL settings,
+        the builder starts at 5:00 PM tomorrow and ends at 5:00 PM two days
+        later in the selected time zone, creating a 48-hour window.
+          </p>
+
+      <div class="preset-test-generator-layout">
+        <form class="preset-test-generator" data-role="url-generator">
+          <div class="preset-test-time-fields">
+            <label>
+              <span>Start date and time</span>
+              <input type="datetime-local" name="start" step="60" required>
+            </label>
+            <label>
+              <span>End date and time</span>
+              <input type="datetime-local" name="end" step="60" required>
+            </label>
+          </div>
+
+          <div class="preset-test-timezone-picker">
+            <div class="preset-test-timezone-toolbar">
+              <div>
+                <span>Selected time zone</span>
+                <strong data-role="selected-time-zone">Detecting browser time zone…</strong>
+              </div>
+              <button type="button" data-action="use-browser-time-zone">
+                Use browser time zone
+              </button>
+            </div>
+            <input type="hidden" name="tz" required>
+            <div
+              class="preset-test-timezone-map"
+              data-role="timezone-map"
+              aria-label="Interactive world map for selecting a time zone"
+            ></div>
+            <p class="preset-test-timezone-status" data-role="timezone-map-status" aria-live="polite">
+              Loading time zone map…
+            </p>
+            <small>
+              Click a region to select its IANA time zone. The initial selection
+              comes from <code>tz=</code> when present; otherwise it uses your
+              browser's time zone. Map design inspired by
+              <a href="https://zones.arilyn.cc/" target="_blank" rel="noopener">zones.arilyn.cc</a>;
+              boundaries from
+              <a href="https://github.com/evansiroky/timezone-boundary-builder" target="_blank" rel="noopener">Timezone Boundary Builder</a>
+              and © OpenStreetMap contributors.
+            </small>
+          </div>
+
+          <div class="preset-test-radio-layout">
+            <div class="preset-test-radio-fields">
+            <div class="preset-test-generator-subheading">Test radio profile</div>
+            <label>
+              <span>Frequency (MHz)</span>
+              <input type="number" name="freq" min="150" max="2500" step="0.001" required>
+            </label>
+            <label>
+              <span>Bandwidth (kHz)</span>
+              <select name="bw" required>
+                <option>7.8</option><option>10.4</option><option>15.6</option>
+                <option>20.8</option><option>31.25</option><option>41.7</option>
+                <option>62.5</option><option>125</option><option>250</option><option>500</option>
+              </select>
+            </label>
+            <label>
+              <span>Spreading factor</span>
+              <select name="sf" required>
+                <option>5</option><option>6</option><option>7</option><option>8</option>
+                <option>9</option><option>10</option><option>11</option><option>12</option>
+              </select>
+            </label>
+            <label>
+              <span>Coding-rate denominator</span>
+              <select name="cr" required>
+                <option>5</option><option>6</option><option>7</option><option>8</option>
+              </select>
+            </label>
+            <label>
+              <span>TX output for estimate (dBm)</span>
+              <input type="number" name="tx" min="-30" max="60" step="0.1" required>
+              <small>This estimate-only value does not change the TempRadio commands.</small>
+            </label>
+            </div>
+
+            <aside class="preset-test-estimates" aria-labelledby="radio-estimates-title">
+              <h3 id="radio-estimates-title">Radio estimates</h3>
+              <dl>
+                <div><dt>Nominal LoRa bitrate</dt><dd data-role="estimate-rate">—</dd></div>
+                <div><dt>Estimated sensitivity</dt><dd data-role="estimate-sensitivity">—</dd></div>
+                <div><dt>TX output used</dt><dd data-role="estimate-tx">—</dd></div>
+                <div><dt>Estimated link budget</dt><dd data-role="estimate-budget">—</dd></div>
+              </dl>
+              <p class="preset-test-note">
+                The bitrate is the nominal LoRa physical-layer rate; usable payload
+                throughput is lower. Sensitivity assumes a 6 dB receiver noise figure
+                and the standard LoRa SNR threshold for the selected spreading factor.
+                Link budget is TX output minus that sensitivity, before antenna gain,
+                cable loss, path loss, interference, and implementation differences.
+              </p>
+            </aside>
+          </div>
+
+          <button type="submit">Generate test URL</button>
+        </form>
+      </div>
+
+      <p class="preset-test-error preset-test-generator-error"
+         data-role="generator-error" role="alert" hidden></p>
+      <pre class="preset-test-generated-url"><code data-command="generated-url"></code></pre>
+      <div class="preset-test-generator-actions">
+        <button type="button" data-copy-command="generated-url">Copy generated URL</button>
+        <a data-role="open-generated-url" target="_blank" rel="noopener">Open generated page</a>
+      </div>
+
+          <p class="preset-test-note">
+        Advanced use: <code>start</code> and <code>end</code> also accept ISO-8601
+        timestamps with explicit UTC offsets or Unix epoch seconds. If
+        <code>tz</code> is omitted, the page uses the browser's time zone. The
+        other URL parameters are <code>freq</code>, <code>bw</code>,
+        <code>sf</code>, <code>cr</code>, and estimate-only <code>tx</code>.
+          </p>
+        </div>
+      </details>
+    </section>
+  </div>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.action.edit", "content.code.copy", "search.highlight", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../_javascript/notification_builder.js?v=20260930-audio-start"></script>
+      
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      
+        <script src="../_javascript/firmware_picker.js?v=20260929-4"></script>
+      
+        <script src="../_javascript/telemetry_decoder.js"></script>
+      
+        <script src="../_javascript/management_decoder.js"></script>
+      
+        <script src="../_javascript/filter_tool.js?v=20261002-hashbytes-2plus"></script>
+      
+        <script src="../_javascript/preset_test.js?v=20260923-2"></script>
+      
+    
+  </body>
+</html>

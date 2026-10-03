@@ -1,0 +1,355 @@
+.firmware-picker {
+  --picker-accent: #0f766e;
+  --picker-accent-dark: #115e59;
+  --picker-border: color-mix(in srgb, currentColor 18%, transparent);
+  margin: 1.25rem 0 2rem;
+}
+
+.firmware-picker-intro,
+.firmware-picker-result,
+.firmware-picker-missing,
+.firmware-asset-browser {
+  border: 1px solid var(--picker-border);
+  border-radius: 0.7rem;
+  padding: 1rem 1.15rem;
+}
+
+.firmware-picker-intro {
+  border-left: 0.35rem solid var(--picker-accent);
+  background: color-mix(in srgb, var(--picker-accent) 8%, transparent);
+}
+
+.firmware-picker-intro p,
+.firmware-picker-result p,
+.firmware-picker-missing p {
+  margin-bottom: 0;
+}
+
+.firmware-picker-intro [data-role="release-set"] {
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+}
+
+.firmware-picker-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  align-items: start;
+  gap: 1rem;
+  margin: 1.2rem 0;
+}
+
+.firmware-picker-order-note {
+  margin: 1rem 0 0;
+  color: var(--md-default-fg-color--light);
+}
+
+.firmware-picker-chip-family {
+  border-bottom: 1px solid var(--picker-border);
+  padding-bottom: 0.75rem;
+}
+
+.firmware-picker-chip-family summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.firmware-picker-chip-family p {
+  color: var(--md-default-fg-color--light);
+}
+
+.firmware-picker-control {
+  min-width: 0;
+  margin: 0;
+}
+
+.firmware-picker-select-control > label,
+.firmware-picker-radio-control > legend,
+.firmware-asset-browser label {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 650;
+}
+
+.firmware-picker-radio-control {
+  padding: 0;
+  border: 0;
+}
+
+.firmware-picker-radio-control > legend {
+  margin-bottom: 0.35rem;
+  padding: 0;
+}
+
+.firmware-picker-select-control select,
+.firmware-asset-browser input {
+  width: 100%;
+  min-height: 2.7rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--picker-border);
+  border-radius: 0.35rem;
+  color: inherit;
+  background: var(--md-default-bg-color);
+  font: inherit;
+}
+
+.firmware-picker-radio-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.firmware-picker-control-help {
+  margin: 0 0 0.65rem;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.85rem;
+}
+
+.firmware-picker-radio-option {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  cursor: pointer;
+}
+
+.firmware-picker-radio-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.firmware-picker-radio-option span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.45rem;
+  padding: 0.45rem 0.72rem;
+  border: 1px solid var(--picker-border);
+  border-radius: 999px;
+  background: var(--md-default-bg-color);
+  font-weight: 600;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.firmware-picker-radio-option input:checked + span {
+  border-color: var(--picker-accent);
+  color: white;
+  background: var(--picker-accent);
+}
+
+.firmware-picker-radio-option input:focus-visible + span {
+  outline: 0.16rem solid var(--picker-accent);
+  outline-offset: 0.12rem;
+}
+
+.firmware-picker-radio-control:disabled {
+  opacity: 0.62;
+}
+
+.firmware-picker-wide {
+  grid-column: 1 / -1;
+}
+
+.firmware-picker-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.firmware-picker-form-actions [data-role="link-status"] {
+  flex-basis: 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.firmware-picker-form-actions button {
+  min-height: 2.35rem;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--picker-border);
+  border-radius: 0.35rem;
+  color: inherit;
+  background: var(--md-default-bg-color);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.firmware-picker-form-actions button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.firmware-picker-status {
+  min-height: 1.5rem;
+  margin: 0.75rem 0;
+  color: var(--md-default-fg-color--light);
+}
+
+.firmware-picker-result {
+  border-top: 0.3rem solid var(--picker-accent);
+}
+
+.firmware-picker-eyebrow {
+  margin: 0 0 0.15rem !important;
+  color: var(--picker-accent);
+  font-size: 0.75rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.firmware-picker-result h2,
+.firmware-picker-missing h2 {
+  margin-top: 0.2rem;
+}
+
+.firmware-picker-card {
+  padding: 0.75rem 0 0.25rem;
+}
+
+.firmware-picker-card + .firmware-picker-card {
+  border-top: 1px solid var(--picker-border);
+  margin-top: 1rem;
+  padding-top: 1.25rem;
+}
+
+.firmware-picker-card h3 {
+  margin: 0 0 0.7rem;
+  overflow-wrap: anywhere;
+}
+
+.firmware-picker-facts {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) 1fr;
+  gap: 0.35rem 0.9rem;
+  margin: 1rem 0;
+}
+
+.firmware-picker-facts dt {
+  font-weight: 700;
+}
+
+.firmware-picker-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.firmware-picker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin: 1rem 0;
+}
+
+.firmware-picker-actions a {
+  display: inline-block;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid var(--picker-accent);
+  border-radius: 0.4rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.firmware-picker-actions .firmware-picker-primary {
+  color: white;
+  background: var(--picker-accent);
+}
+
+.firmware-picker-actions .firmware-picker-primary:hover {
+  background: var(--picker-accent-dark);
+}
+
+.firmware-picker-steps {
+  border-top: 1px solid var(--picker-border);
+  margin-top: 1rem;
+  padding-top: 0.8rem;
+}
+
+.firmware-picker-steps ol {
+  margin-bottom: 0;
+}
+
+.firmware-picker-missing {
+  border-left: 0.35rem solid #b45309;
+}
+
+.firmware-asset-browser {
+  margin-top: 1.2rem;
+}
+
+.firmware-asset-browser summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.firmware-asset-list {
+  max-height: 24rem;
+  margin-top: 0.8rem;
+  padding-left: 1.2rem;
+  overflow: auto;
+}
+
+.firmware-asset-list li {
+  margin: 0.35rem 0;
+  overflow-wrap: anywhere;
+}
+
+.firmware-asset-meta {
+  display: block;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.78rem;
+}
+
+@media (max-width: 44rem) {
+  .firmware-picker-form {
+    grid-template-columns: 1fr;
+  }
+
+  .firmware-picker-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .firmware-picker-facts dd + dt {
+    margin-top: 0.35rem;
+  }
+}
+
+.firmware-picker-runtime {
+  border-top: 1px solid var(--picker-border);
+  margin-top: 1rem;
+  padding-top: 0.5rem;
+}
+
+.firmware-picker-runtime details {
+  border: 1px solid var(--picker-border);
+  border-radius: 0.4rem;
+  margin: 0.65rem 0;
+  padding: 0.7rem;
+}
+
+.firmware-picker-runtime summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.firmware-picker-runtime button {
+  padding: 0.5rem;
+  margin: 0.4rem 0;
+  font: inherit;
+  color: inherit;
+  background: var(--md-default-bg-color, white);
+  border: 1px solid var(--picker-border);
+  border-radius: 0.3rem;
+  max-width: 100%;
+}
+
+.firmware-picker-runtime pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 0.8rem;
+  background: var(--md-code-bg-color, #f3f5f7);
+}

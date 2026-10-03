@@ -1,0 +1,711 @@
+.preset-test {
+  --preset-accent: #b83280;
+  --preset-accent-dark: #8f245f;
+  --preset-cyan: #087f8c;
+  --preset-border: color-mix(in srgb, currentColor 18%, transparent);
+  margin: 1.25rem 0 2rem;
+}
+
+.preset-test section {
+  margin: 1.4rem 0;
+}
+
+.preset-test-hero {
+  border: 1px solid var(--preset-border);
+  border-top: 0.35rem solid var(--preset-accent);
+  border-radius: 0.75rem;
+  padding: 1.1rem 1.2rem 1.2rem;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--preset-accent) 9%, transparent), transparent 55%),
+    var(--md-default-bg-color);
+}
+
+.preset-test-eyebrow {
+  margin: 0 0 0.45rem;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.preset-test-hero-row,
+.preset-test-card-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.preset-test-hero h2 {
+  margin: 0;
+  font-size: clamp(1.35rem, 4vw, 2.15rem);
+  letter-spacing: -0.025em;
+}
+
+.preset-test-hero-row p {
+  margin-bottom: 0;
+}
+
+.preset-test-status,
+.preset-test-card-heading > span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 0.22rem 0.55rem;
+  background: color-mix(in srgb, var(--preset-cyan) 12%, transparent);
+  color: var(--preset-cyan);
+  font-size: 0.7rem;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.preset-test-status[data-state="active"] {
+  background: color-mix(in srgb, #1b8f4b 14%, transparent);
+  color: #168143;
+}
+
+.preset-test-status[data-state="ended"] {
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  color: var(--md-default-fg-color--light);
+}
+
+.preset-test-clock {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.1rem 0.8rem;
+  align-items: baseline;
+  margin: 1.2rem 0;
+  padding: 0.8rem 0;
+  border-block: 1px solid var(--preset-border);
+}
+
+.preset-test-clock-label {
+  color: var(--md-default-fg-color--light);
+  font-weight: 650;
+}
+
+.preset-test-clock strong {
+  color: var(--preset-accent);
+  font-family: var(--md-code-font-family);
+  font-size: clamp(1.35rem, 4vw, 2rem);
+}
+
+.preset-test-clock > span:last-child {
+  grid-column: 2;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.82rem;
+}
+
+.preset-test-window {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.8rem;
+  margin: 0;
+}
+
+.preset-test-window div,
+.preset-test-clock-check > div {
+  min-width: 0;
+}
+
+.preset-test-window dt,
+.preset-test-clock-check span {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.preset-test-window dd {
+  margin: 0.18rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.preset-test-warning,
+.preset-test-error {
+  border-left: 0.32rem solid #d97706;
+  border-radius: 0.35rem;
+  padding: 0.85rem 1rem;
+  background: color-mix(in srgb, #d97706 9%, transparent);
+}
+
+.preset-test-warning h2 {
+  margin-top: 0;
+}
+
+.preset-test-warning p {
+  margin-bottom: 0;
+}
+
+.preset-test-quick-command {
+  border: 1px solid var(--preset-border);
+  border-radius: 0.6rem;
+  margin-top: 1rem;
+  padding: 0.85rem 1rem 1rem;
+  background: color-mix(in srgb, var(--preset-cyan) 5%, var(--md-default-bg-color));
+}
+
+.preset-test-quick-command h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.preset-test-quick-command .preset-test-note + .preset-test-note {
+  margin-top: 0.4rem;
+}
+
+.preset-test-stock-leave {
+  margin: 1rem 0;
+}
+
+.preset-test-error {
+  color: var(--md-code-hl-number-color);
+  font-weight: 650;
+}
+
+.preset-test-grid,
+.preset-test-cancel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.preset-test-cancel-grid {
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+}
+
+.preset-test-card {
+  min-width: 0;
+  border: 1px solid var(--preset-border);
+  border-radius: 0.65rem;
+  padding: 0.9rem 1rem 1rem;
+  background: var(--md-default-bg-color);
+}
+
+.preset-test-card--wide {
+  grid-column: 1 / -1;
+}
+
+.preset-test-card h3 {
+  margin-top: 0;
+}
+
+.preset-test-card-heading h3 {
+  padding-right: 0.5rem;
+}
+
+.preset-test-quick-command pre,
+.preset-test-stock-leave pre,
+.preset-test-card pre,
+.preset-test > [data-role="content"] > section > pre {
+  margin: 0.8rem 0;
+  border: 1px solid var(--preset-border);
+  border-radius: 0.35rem;
+}
+
+.preset-test-quick-command pre code,
+.preset-test-stock-leave pre code,
+.preset-test-card pre code,
+.preset-test > [data-role="content"] > section > pre code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Material adds its own copier to every code block. This page supplies
+   state-aware copy buttons, so the generic buttons would bypass disabled
+   pre-start commands and duplicate every enabled action. */
+.preset-test .md-clipboard,
+.preset-test .md-code__button[data-md-type="copy"] {
+  display: none !important;
+}
+
+.preset-test button {
+  border: 0;
+  border-radius: 0.25rem;
+  padding: 0.55rem 0.8rem;
+  background: var(--preset-accent);
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.preset-test button:hover:not(:disabled),
+.preset-test button:focus-visible:not(:disabled) {
+  background: var(--preset-accent-dark);
+}
+
+.preset-test button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.preset-test-note {
+  margin-bottom: 0;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.82rem;
+}
+
+.preset-test-clock-check {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 1rem 0;
+}
+
+.preset-test-clock-check > div {
+  display: grid;
+  gap: 0.2rem;
+  border: 1px solid var(--preset-border);
+  border-radius: 0.5rem;
+  padding: 0.75rem 0.9rem;
+}
+
+.preset-test-clock-check strong {
+  overflow-wrap: anywhere;
+  font-family: var(--md-code-font-family);
+}
+
+.preset-test-clock-override {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.8rem;
+  align-items: end;
+  margin: 1rem 0 0;
+}
+
+.preset-test-clock-override label {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.preset-test-clock-override label > span {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.preset-test-clock-override input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--preset-border);
+  border-radius: 0.3rem;
+  padding: 0.52rem 0.58rem;
+  background: var(--md-code-bg-color);
+  color: var(--md-default-fg-color);
+  font: inherit;
+}
+
+.preset-test-clock-override input:focus {
+  border-color: var(--preset-cyan);
+  outline: 2px solid color-mix(in srgb, var(--preset-cyan) 24%, transparent);
+  outline-offset: 1px;
+}
+
+.preset-test-clock-override small,
+.preset-test-clock-status {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.preset-test-clock-status {
+  margin: 0.5rem 0 0;
+}
+
+.preset-test-clock-status[data-state="adjusted"] {
+  color: var(--preset-accent);
+  font-weight: 650;
+}
+
+.preset-test-clock-status[data-state="error"] {
+  color: var(--md-code-hl-number-color);
+  font-weight: 650;
+}
+
+.preset-test-generator-disclosure {
+  border: 1px solid var(--preset-border);
+  border-radius: 0.65rem;
+  background: var(--md-default-bg-color);
+}
+
+.preset-test-generator-disclosure > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.9rem 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.preset-test-generator-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.preset-test-generator-disclosure > summary h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.preset-test-generator-disclosure > summary::after {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 0.24rem 0.58rem;
+  background: color-mix(in srgb, var(--preset-cyan) 12%, transparent);
+  color: var(--preset-cyan);
+  content: "Open generator";
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.preset-test-generator-disclosure[open] > summary {
+  border-bottom: 1px solid var(--preset-border);
+}
+
+.preset-test-generator-disclosure[open] > summary::after {
+  content: "Close generator";
+}
+
+.preset-test-stock-leave > summary::after {
+  content: "Show leave command";
+}
+
+.preset-test-stock-leave[open] > summary::after {
+  content: "Hide leave command";
+}
+
+.preset-test-keymind-disclosure > summary::after {
+  content: "Show advanced";
+}
+
+.preset-test-keymind-disclosure {
+  margin-top: 1.4rem;
+}
+
+.preset-test-keymind-disclosure[open] > summary::after {
+  content: "Hide advanced";
+}
+
+.preset-test-schedule-mode fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.preset-test-schedule-mode legend {
+  grid-column: 1 / -1;
+  margin-bottom: 0.35rem;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.preset-test-schedule-mode label {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  border: 1px solid var(--preset-border);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  cursor: pointer;
+}
+
+.preset-test-schedule-mode input {
+  flex: 0 0 auto;
+  margin-top: 0.2rem;
+  accent-color: var(--preset-accent);
+}
+
+.preset-test-schedule-mode label:has(input:checked) {
+  border-color: var(--preset-accent);
+  background: color-mix(in srgb, var(--preset-accent) 8%, transparent);
+}
+
+.preset-test-generator-disclosure-body {
+  padding: 0 1rem 1rem;
+}
+
+.preset-test-generator-layout {
+  min-width: 0;
+}
+
+.preset-test-generator {
+  min-width: 0;
+  border: 1px solid var(--preset-border);
+  border-radius: 0.65rem;
+  padding: 0.8rem;
+  background: var(--md-default-bg-color);
+}
+
+.preset-test-time-fields,
+.preset-test-radio-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.preset-test-time-fields {
+  width: 100%;
+  margin-bottom: 1rem;
+}
+
+.preset-test-radio-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(15rem, 2fr);
+  gap: 0.65rem;
+  align-items: start;
+  margin-top: 0.75rem;
+}
+
+.preset-test-estimates {
+  min-width: 0;
+  border: 1px solid var(--preset-border);
+  border-radius: 0.65rem;
+  padding: 0.75rem;
+  background: var(--md-default-bg-color);
+}
+
+.preset-test-generator label {
+  display: grid;
+  align-content: start;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.preset-test-generator label > span {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.preset-test-generator-subheading {
+  grid-column: 1 / -1;
+  border-bottom: 1px solid var(--preset-border);
+  padding: 0.3rem 0 0.35rem;
+  color: var(--preset-cyan);
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.preset-test-timezone-picker {
+  min-width: 0;
+}
+
+.preset-test-timezone-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  align-items: center;
+  margin-bottom: 0.55rem;
+}
+
+.preset-test-timezone-toolbar > div {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.preset-test-timezone-toolbar span {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.preset-test-timezone-toolbar strong {
+  overflow-wrap: anywhere;
+  color: var(--preset-cyan);
+  font-family: var(--md-code-font-family);
+  font-size: 0.9rem;
+}
+
+.preset-test-timezone-toolbar button {
+  flex: 0 0 auto;
+  background: var(--preset-cyan);
+}
+
+.preset-test-timezone-map {
+  z-index: 1;
+  width: 100%;
+  height: clamp(18rem, 52vw, 31rem);
+  border: 1px solid var(--preset-border);
+  border-radius: 0.45rem;
+  background: color-mix(in srgb, var(--preset-cyan) 5%, var(--md-default-bg-color));
+}
+
+.preset-test-timezone-map:focus-visible {
+  outline: 2px solid var(--preset-cyan);
+  outline-offset: 2px;
+}
+
+.preset-test-timezone-map .leaflet-control-attribution {
+  font-size: 0.62rem;
+}
+
+.preset-test-timezone-map .leaflet-tooltip {
+  color: #202020;
+  font-family: var(--md-text-font-family);
+}
+
+.preset-test-timezone-status {
+  min-height: 1.2em;
+  margin: 0.45rem 0 0;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.72rem;
+}
+
+.preset-test-timezone-status[data-state="error"] {
+  color: var(--md-code-hl-number-color);
+  font-weight: 700;
+}
+
+.preset-test-generator input,
+.preset-test-generator select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--preset-border);
+  border-radius: 0.3rem;
+  padding: 0.52rem 0.58rem;
+  background: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+  font: inherit;
+}
+
+.preset-test-generator input:focus,
+.preset-test-generator select:focus {
+  border-color: var(--preset-cyan);
+  outline: 2px solid color-mix(in srgb, var(--preset-cyan) 24%, transparent);
+  outline-offset: 1px;
+}
+
+.preset-test-generator small {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
+.preset-test-generator > button {
+  margin-top: 0.9rem;
+}
+
+.preset-test-estimates h3 {
+  margin: 0 0 0.65rem;
+}
+
+.preset-test-estimates dl {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0 0 0.7rem;
+}
+
+.preset-test-estimates dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.65rem;
+  border-bottom: 1px solid var(--preset-border);
+  padding-bottom: 0.4rem;
+}
+
+.preset-test-estimates dt {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.preset-test-estimates dd {
+  margin: 0;
+  color: var(--preset-accent);
+  font-family: var(--md-code-font-family);
+  font-weight: 750;
+  text-align: right;
+}
+
+.preset-test-estimates .preset-test-note {
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.preset-test-generator-error {
+  margin-top: 1rem;
+}
+
+.preset-test-generated-url code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preset-test-generator-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.preset-test-generator-actions a {
+  border: 1px solid var(--preset-accent);
+  border-radius: 0.25rem;
+  padding: 0.48rem 0.8rem;
+  color: var(--preset-accent);
+  font-size: 0.78rem;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.preset-test-generator-actions a:hover,
+.preset-test-generator-actions a:focus-visible {
+  background: color-mix(in srgb, var(--preset-accent) 10%, transparent);
+}
+
+@media (max-width: 44rem) {
+  .preset-test-grid,
+  .preset-test-grid--clock,
+  .preset-test-clock-check,
+  .preset-test-clock-override,
+  .preset-test-time-fields,
+  .preset-test-radio-layout,
+  .preset-test-radio-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .preset-test-schedule-mode fieldset {
+    grid-template-columns: 1fr;
+  }
+
+  .preset-test-hero-row {
+    display: grid;
+  }
+
+  .preset-test-status {
+    justify-self: start;
+  }
+
+  .preset-test-clock {
+    grid-template-columns: 1fr;
+  }
+
+  .preset-test-clock > span:last-child {
+    grid-column: 1;
+  }
+
+  .preset-test-timezone-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .preset-test-timezone-toolbar button {
+    align-self: start;
+  }
+}

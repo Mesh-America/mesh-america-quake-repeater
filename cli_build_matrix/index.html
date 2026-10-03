@@ -1,0 +1,2685 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for the open source MeshCore firmware">
+      
+      
+      
+        <link rel="canonical" href="https://Mesh-America.github.io/mesh-america-quake-repeater/cli_build_matrix/">
+      
+      
+        <link rel="prev" href="../cli_commands/">
+      
+      
+        <link rel="next" href="../cli_command_availability/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>CLI Availability by Firmware Build - MeshCore Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../_stylesheets/notification_builder.css">
+    
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/extra.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/firmware_picker.css?v=20260929-1">
+    
+      <link rel="stylesheet" href="../_stylesheets/telemetry_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/management_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/filter_tool.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/preset_test.css?v=20260923-2">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#cli-availability-by-firmware-build" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MeshCore Docs" class="md-header__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MeshCore Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              CLI Availability by Firmware Build
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MeshCore Docs" class="md-nav__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    MeshCore Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware and tools
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware and tools
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firmware_picker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware picker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notifications/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion notification builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../preset_test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Temporary radio test builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../filter_tool/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Filter policy playground
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management report decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Documentation
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Documentation
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_1" id="__nav_3_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started and features
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started and features
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frequently Asked Questions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../role_feature_switches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature switches by role — 1.17.1.5 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../full_companion_features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion: turn features on and off
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_radio_full/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../full_companion_usb_switcher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion USB CLI and binary switcher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_offline_queue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Offline Message Queue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../halo_keymind_settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Halo and Keymind Branch Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware updates and partitions
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware updates and partitions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_user_guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Updating your node over the air (OTA) - user guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_easy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Easy firmware updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lora_ota_automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scripted LoRa OTA from start to finish
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_nrf52_bootloader_update/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 bootloader updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_nrf52_qspi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 repeater LoRa OTA with external QSPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_meshtower_v2_sdcard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshTower V2 microSD LoRa OTA
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_partition_catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 release partition lookup table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 legacy-partition migration over Wi-Fi or LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../heltec_v4_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Heltec V4 legacy-partition migration over Wi-Fi
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../host_cli_service/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LoRa CLI Host Service
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Radio, networking, and power
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Radio, networking, and power
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../radio_profiles/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Two LoRa profiles on one radio
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../carrier_wave/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Carrier-wave RF checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../espnow_bridge_setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP-NOW bridge: simple setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../WiFi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WiFi and MQTT by Firmware Type
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../flood_filtering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flood Filtering and Moderation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gps_tracking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GPS Tracking
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nrf52_power_management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 Power Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI and protocol reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    CLI and protocol reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Availability by Firmware Build
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Availability by Firmware Build
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#selecting-a-build-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Selecting a build profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role-comes-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Role comes first
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#profile-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profile matrix
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#canonical-bulk-build-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Canonical bulk-build policy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#complete-cli-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Complete CLI policy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#discovery-invariant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discovery invariant
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#feature-dependent-commands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feature-dependent commands
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_command_availability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Command Availability Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../terminal_chat_cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terminal Chat CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kiss_modem_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore KISS Modem Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packet_format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packet Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../payloads/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Payload Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore OTA - .mota container &amp; LoRa protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_reports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management reports (MGR1)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stats_binary_frames/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stats Binary Frame Structures
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../number_allocations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Number Allocations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../qr_codes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QR Codes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local Documentation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../research/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Releases
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Current release
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Current release
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releases/1.17.1.8/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    1.17.1.8 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../test-results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Test Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../old-releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Old Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#selecting-a-build-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Selecting a build profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#role-comes-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Role comes first
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#profile-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profile matrix
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#canonical-bulk-build-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Canonical bulk-build policy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#complete-cli-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Complete CLI policy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#discovery-invariant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discovery invariant
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#feature-dependent-commands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feature-dependent commands
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/edit/main/docs/cli_build_matrix.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="cli-availability-by-firmware-build">CLI Availability by Firmware Build</h1>
+<p>MeshCore command availability is determined in three layers:</p>
+<ol>
+<li><strong>Role</strong> - repeater, room server, sensor, companion, bridge, or KISS modem.</li>
+<li><strong>Build profile</strong> - standard, logging, OTA, or FULL.</li>
+<li><strong>Compiled hardware features</strong> - WiFi, MQTT, GPS, external sensors, PSRAM,
+   Ethernet, and similar optional support.</li>
+</ol>
+<p>The complete command descriptions are in <a href="../cli_commands/">CLI Commands</a>. This
+page describes the commands intentionally omitted or limited by build profile.
+The <a href="../cli_command_availability/">CLI Command Availability Matrix</a> expands this
+summary into separate nRF52 and ESP32 command tables.</p>
+<h2 id="selecting-a-build-profile">Selecting a build profile</h2>
+<p>The runtime settings profile and the feature profile are separate switches:</p>
+<pre><code class="language-bash">bash build.sh build-firmware RAK_3401_repeater \
+  --profile cascade \
+  --build-profile auto
+</code></pre>
+<p><code>--profile default|cascade</code> selects saved-setting defaults. It does not select
+which code is linked. <code>--build-profile auto|standard|full</code> controls features
+and partition policy:</p>
+<table>
+<thead>
+<tr>
+<th>Selection</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auto</code></td>
+<td>nRF52 repeater, room-server, and sensor builds publish the required pair: Full supported sensors + LoRa OTA and Reduced sensors + LoRa OTA. Both must pass flash, RAM, packaged-application OTA, and layout checks; a reduced image cannot substitute for a failing full image. The same policy applies to canonical bulk/release builds and external-QSPI/SD recipes. ESP32 boards with a qualified expanded profile use it; other standalone ESP32 repeaters and room servers attempt the complete recipe in their current application region, with a measured flash/partition-overflow fallback to their reduced LoRa OTA recipe. Other roles keep every capability declared by their resolved PlatformIO recipe and fail instead of silently removing one that does not fit. Compiler errors and missing-capability checks never trigger or conceal a reduced build.</td>
+</tr>
+<tr>
+<td><code>standard</code></td>
+<td>Preserves the deployed/portable partition contract and documented reductions. nRF52 infrastructure still publishes both OTA sensor profiles in that same exact layout; this is not an override to remove OTA or skip the full profile.</td>
+</tr>
+<tr>
+<td><code>full</code></td>
+<td>Requires a qualified ESP32 expanded-partition target (or an explicitly named Full Companion). Install a matching merged image when this changes the partition table.</td>
+</tr>
+</tbody>
+</table>
+<p>Successful builds also emit
+<code>&lt;firmware&gt;.capabilities.json</code>. The sidecar records the effective profile,
+logical OTA target, actual PlatformIO base, artifact name target, promised
+capabilities, and every reduction selected by the script. The build
+fails if a promised linked marker is absent. Current invariants include
+<code>retry.preset</code> for repeater/room-server roles, WebConfig for the Indicator and
+ESP32 Full Companion, TempRadio/OTA controls for install-capable Companions,
+host-mOTA controls for Full Companion, and the
+advanced flood-rule engine for Full room servers. Resume mode will not accept
+an old or failed artifact without a verified sidecar.</p>
+<p>For a single ESP32 repeater or room-server target, <code>auto</code> selects its matching
+combined Full MQTT/USB/WiFi image when that image covers the plain Full recipe.
+The direct observer and Full-matrix paths use the same <code>full-usb-wifi-ota</code>
+artifact and runtime output controls. The ordinary bulk release publishes one
+Full OTA identity per exact ESP32 board and role. Audited plain targets keep
+their identity while compiling the combined observer/ESP-NOW sources; G2 keeps
+its deployed observer identity. T-Beam SX1262/SX1276 and TLora V2 choose the
+observer in the ordinary release. Their plain Full recipes remain available
+as explicit alternatives with different routing capacities. Build one with
+<code>bash build.sh build-firmware &lt;target&gt; --full-exact</code>, then deliberately install
+it over LoRa with <code>ota pull &lt;MID8&gt; flash</code> and <code>ota install</code> on compatible
+hardware and partition layouts.</p>
+<p>Standard and reduced OTA images, including images that fit the 1.25 MiB
+portable application slot, remain available and remain in the standard matrix
+pass. Select <code>--build-profile standard</code> to retain the original target and
+partition contract. Moving from a plain target to its MQTT sibling changes the
+LoRa OTA target identity; a partition layout change needs its matching
+migration step.
+For the normal-role partition migrations, the matrix also publishes a
+canonical Full image under the normal target identity. Install its matching
+merged image over USB once; mOTA rejects the incompatible partition signature
+until that migration is complete, then later Full updates use the normal
+target ID. The portable image remains available while deployed nodes move.</p>
+<p>Legacy supported ESP32 Wi-Fi repeaters can use the
+<a href="../esp32_wifi_partition_migration/">Wi-Fi partition migration</a> bridge to
+preserve their identity and install an expanded Full image without a USB flash.
+The default <code>cascade</code> settings profile enables device and LoRa RX power saving;
+saved preferences take precedence, and active USB/network services can prevent
+device sleep. <code>--profile default</code> instead uses the upstream power-saving defaults.</p>
+<h2 id="role-comes-first">Role comes first</h2>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Text administration CLI</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Repeater</td>
+<td>Full repeater administration surface, subject to the profile differences below</td>
+</tr>
+<tr>
+<td>Room server</td>
+<td>Room-server administration surface, subject to the profile differences below</td>
+</tr>
+<tr>
+<td>Sensor</td>
+<td>Sensor command surface; it does not acquire the repeater administration tree</td>
+</tr>
+<tr>
+<td>Full, serial, Ethernet, USB, BLE, or WiFi companion</td>
+<td>Uses the companion protocol; Full combines every qualified transport for that exact board</td>
+</tr>
+<tr>
+<td>KISS modem</td>
+<td>Uses the KISS/TNC frame interface, not the repeater text CLI</td>
+</tr>
+<tr>
+<td>Bridge</td>
+<td>Uses its base role plus commands for the bridge transport compiled into that target</td>
+</tr>
+</tbody>
+</table>
+<p>A command belonging to a different role is not considered a profile cut. For
+example, adding FULL features to a sensor does not turn it into a repeater
+administrator.</p>
+<p>Repeater profiles use up to 254 neighbor entries. Measured internal-DRAM
+limits reduce selected Generic E22, Heltec V2, Meshadventurer, T-Beam OTA/MQTT,
+and TLora MQTT profiles to 50. Check the artifact capability manifest and
+<a href="../research/esp32_memory_budget/">ESP32 memory budget</a> for the exact target.</p>
+<p>See <a href="../terminal_chat_cli/#local-maintenance-commands">local maintenance commands</a>
+for USB, BLE/binary Companion, TCP/Ethernet, and browser CLI privileges.
+A direct connection can access local diagnostics and explicit credential
+getters; relaying a command over LoRa keeps its remote restrictions.</p>
+<h2 id="profile-matrix">Profile matrix</h2>
+<table>
+<thead>
+<tr>
+<th>Build/profile</th>
+<th>Command availability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard non-MQTT repeater or room server</td>
+<td>Keeps the normal role CLI and, where USB is a safe plaintext console, embeds debug/packet logging behind persistent <code>get/set usb.logging</code>. The explicitly selected portable policy can omit WebConfig and browser WiFi OTA, so those commands are unavailable and the omission is recorded in the capability manifest.</td>
+</tr>
+<tr>
+<td>Legacy standard logging</td>
+<td>No longer emitted separately. Its behavior is compiled into the ordinary artifact. Size-constrained STM32 targets embed packet logging without verbose <code>MESH_DEBUG</code>.</td>
+</tr>
+<tr>
+<td>LoRa-OTA (<code>-ota-</code>)</td>
+<td>LoRa OTA adds the <code>ota ...</code> commands; it does not otherwise reduce the role CLI. ESP32 <code>no_external_sensors</code> artifacts retain the compact browser WiFi uploader, the complete CLI, and up to 254 neighbors, subject to recorded internal-DRAM reductions.</td>
+</tr>
+<tr>
+<td>nRF52 repeater/room-server/sensor release pair</td>
+<td><code>full-ota</code> retains the complete supported sensor recipe; <code>reduced-ota</code> omits declared optional sensor drivers. Both include verified LoRa OTA, use the same logical target identity and exact storage/layout contract within the pair, and retain the role's normal commands. Repeaters/room servers also verify <code>retry.preset</code>. RAK3401 and RAK4631 reduced builds retain GPS where compatible and INA219/INA226/INA260/INA3221 I2C voltage/current monitors. External QSPI/SD targets also publish both choices. Companion/Terminal Chat and KISS roles do not enter this policy.</td>
+</tr>
+<tr>
+<td>ESP32 MQTT observer or ESP-NOW bridge</td>
+<td>Always uses the expanded FULL partition profile. The build never substitutes a reduced CLI to fit the legacy application slot.</td>
+</tr>
+<tr>
+<td>FULL ESP32 USB + WiFi</td>
+<td>Uses the matching MQTT target with packet logging on, verbose debug off, and the complete command surface supported by that role and hardware. <code>get/set logging.output off\|usb\|wifi\|both</code> selects and persists the active output paths.</td>
+</tr>
+<tr>
+<td>FULL ESP32 logging fallback</td>
+<td>Uses the matching non-MQTT target only when no WiFi MQTT sibling exists, with debug and packet logging enabled and the complete command surface supported by that role and hardware. Its persistent USB gate also covers output-off operation, avoiding a second FULL ESP-NOW image.</td>
+</tr>
+<tr>
+<td>nRF52 dual-CDC Full Companion</td>
+<td>Fresh installs expose only interface <code>00</code>; it starts as an ASCII terminal and automatically hands a complete <code>&lt;</code> frame to framed Companion. The same interface also carries exclusive serial mOTA traffic. Enabling logging and rebooting adds interface <code>02</code> for plaintext logs. BLE and source-only LoRa OTA remain available. <code>get/set usb.logging</code> persistently controls whether the logging interface is present.</td>
+</tr>
+<tr>
+<td>ESP32 single-TTY Full Companion</td>
+<td>Every ESP32 Full image starts with the ASCII terminal on its one USB TTY and automatically hands a complete <code>&lt;</code> frame to framed Companion. On 1.17.1.5, run <code>set powersaving off</code> first. <code>set usb.logging on</code> switches that TTY to an input-capable plaintext logging terminal and makes framed Companion unavailable on USB; <code>set usb.logging off</code> stops logging but leaves the TTY in normal ASCII mode. The terminal stop token or a valid incoming framed probe then performs the ordinary switch to Binary Companion. A saved logging-on setting starts directly in that logging terminal and disables automatic frame detection. BLE, WiFi, and source-only LoRa OTA remain available. ESP32 Full uses Arduino-ESP32 2.x where supported; RC32 and ESP32-C6 keep their board-required Arduino 3.x platform but still expose only one TTY.</td>
+</tr>
+<tr>
+<td><code>no_external_sensors</code></td>
+<td>Trims selected optional environmental/ranging drivers and their settings; it does not remove generic I2C, core repeater discovery, routing, or runtime RS-232 commands. RAK3401 and RAK4631 profiles retain the four common INA I2C voltage/current monitors. GPS-preserving RAK nRF52 OTA profiles retain their GPS commands and provider; RAK4631 defaults the bridge to UART 2 because RAK12501/L76K GPS uses UART 1. Legacy target suffixes remain stable for OTA identity compatibility.</td>
+</tr>
+</tbody>
+</table>
+<p>The four retained INA drivers are entries in the optional environmental-sensor
+table, not the complete set of RAK I2C consumers. Compatible reduced profiles
+also retain the SSD1306 OLED, supported autodiscovered RTCs, and RAK12500 I2C
+GPS as separate board peripherals. RAK12501/L76K GPS uses UART Serial1. The
+explicit RAK4631 Serial1 bridge omits the combined GPS provider, including the
+otherwise non-UART RAK12500 path.</p>
+<p>The firmware-configured INA3221 and RAK12500 addresses are both <code>0x42</code>. To use
+both devices on one bus, leave RAK12500 at <code>0x42</code>, strap INA3221 A0 to SCL for
+<code>0x43</code>, and build with <code>-DTELEM_INA3221_ADDRESS=0x43</code>.</p>
+<p><code>logging</code>, <code>OTA</code>, and <code>FULL</code> describe independent build features in historical
+filenames. Current standard artifacts use no <code>-logging-</code> infix because their
+USB logging is runtime controlled.</p>
+<h2 id="canonical-bulk-build-policy">Canonical bulk-build policy</h2>
+<p>Bulk and release-matrix commands omit legacy names whose behavior is already
+available from a canonical image:</p>
+<ul>
+<li>
+<p>Every canonical nRF52 repeater, room-server, and sensor recipe emits two
+  separately named, qualified OTA artifacts: <code>full-ota</code> and <code>reduced-ota</code>.
+  The capability sidecar records <code>sensor.profile.full</code> or
+  <code>sensor.profile.reduced</code> so the picker can identify the actual profile.
+  Boards without optional sensor drivers still receive the two named choices;
+  the size saving may be small or zero. A missing or unqualified member blocks
+  publication of an incomplete pair. This does not make an unsupported
+  bootloader or a different physical storage layout compatible.</p>
+</li>
+<li>
+<p>Companion <code>_ps</code> names are replaced by the ordinary Companion image plus the
+  persisted <code>set powersaving on|off</code> setting.</p>
+</li>
+<li>Companion <code>_femoff</code> names are replaced by the matching controllable-FEM
+  image plus <code>radio.fem.rxgain on|off</code>. The old names remain explicit build
+  targets for compatibility.</li>
+<li><code>Station_G2_logging_*</code> and <code>Station_G3_ESP32_logging_*</code> hardware names are
+  replaced by their ordinary Station target. G2 boosted receive gain is the
+  persisted <code>radio.rxgain on|off</code> setting; the G3 alias changed only the
+  advertised default name.</li>
+<li>
+<p>When a board has a Full Companion, that one artifact replaces its
+  separate USB, BLE, ordinary WiFi, hardware-serial, Ethernet Companion, and
+  USB packet-logging Companion artifacts.
+  It provides BLE and source-only LoRa OTA; ESP32 also provides ordinary WiFi.
+  nRF52 keeps framed traffic on interface <code>00</code> and can add logging on interface
+  <code>02</code> after a reboot. Every ESP32 Full build instead switches its one USB TTY
+  into an input-capable logging terminal. Turning logging off restores the
+  normal ASCII terminal; the usual stop token or a valid framed probe then
+  switches it to Binary Companion.
+  Its LoRa OTA support is source-only: it can serve a host file to another node
+  but has no staging store and cannot update itself over LoRa.
+  Installing an ESP32 Full Companion may require one merged-image erase/flash
+  to adopt its expanded partition table. Once migrated, later Full Companion
+  releases use normal app updates. The transport-specific non-Full images stay
+  available as explicit build targets, but are not canonical release artifacts
+  when the qualified Full image fits.</p>
+</li>
+<li>
+<p>Standalone Terminal Chat is omitted when the same exact hardware has either
+  Full Companion or a USB Companion, because their local text terminal supplies
+  the same role. Heltec E290 and T190 similarly publish one combined USB + BLE
+  Companion. RAK4631 repeater and room-server Ethernet builds stay separate;
+  only the RAK4631 Ethernet Companion is folded into Full Companion.</p>
+</li>
+<li>Matching RS-232 bridge roles are compiled into the normal repeater and
+  selected at runtime with <code>bridge.enabled</code>, <code>bridge.baud</code>, and <code>bridge.uart</code>.
+  Historical bridge names remain directly buildable but are omitted from bulk
+  releases. Wio-E5 remains separate because its normal image has only 916
+  bytes free, while the combined image exceeds the fixed 240 KiB application
+  partition by 2,192 bytes.</li>
+</ul>
+<p>The old aliases still work with <code>build-firmware</code> and
+<code>build-matching-firmwares</code>. Dedicated LoRa OTA repeater images are not
+collapsed; they retain their exact storage, bootloader, role, and target
+identity contracts. Companion boards keep transport-specific canonical images
+only when no exact Full recipe has passed the combined flash/RAM qualification.
+ESP32 deliberately uses one TTY: Binary Companion and plaintext USB logging
+are mutually exclusive there. nRF52 retains its optional second CDC port.</p>
+<p>The <a href="https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/v0.11.0-OTAFIX2.4.11">OTAFIX 2.4.11 release</a>
+is the current bootloader reference, not an all-board qualification claim.
+Consult its exact-board manifest and unavailable-profile reasons. Internal
+application storage accepts exact-base in-place deltas that fit the workspace;
+full application packages need the matching external NOR or microSD profile.
+The retired internal-only MeshTower V2 bootloader requires one local
+installation of the combined SD/internal profile. Its changed identity/layout
+must not be crossed by an ordinary LoRa application or bootloader update.</p>
+<h2 id="complete-cli-policy">Complete CLI policy</h2>
+<p>The compact ESP32 CLI has been removed. <code>retry.preset</code> is a checked invariant
+for every repeater and room-server artifact, not a FULL-only command. MQTT
+observers and ESP-NOW bridges are
+automatically promoted to FULL builds with expanded partitions rather than
+dropping administration commands. This keeps <code>tempradio</code>, LoRa OTA, power
+saving, RXPS, logging, statistics, sensor, ACL, routing, and advanced radio
+commands whenever the role and compiled hardware support them.</p>
+<p>Some commands still have hardware or feature limits. MQTT neighbor-table
+publishing and <code>discover.scopes</code> require the compiled <code>WITH_MQTT_NEIGHBORS</code>
+feature. PSRAM boards enable it automatically, and selected non-PSRAM variants
+opt in with <code>MQTT_NEIGHBORS_WITHOUT_PSRAM</code>. <code>discover.neighbors</code> does not
+require MQTT or PSRAM.</p>
+<h2 id="discovery-invariant">Discovery invariant</h2>
+<p><code>discover.neighbors</code> sends the zero-hop node-discovery request used to refresh
+the repeater neighbor table. It is available in every repeater build profile,
+including standard, logging, OTA, unified FULL, and FULL logging-fallback builds.</p>
+<p>The exact command is:</p>
+<pre><code class="language-text">discover.neighbors
+</code></pre>
+<p>It accepts no options and returns:</p>
+<pre><code class="language-text">OK - Discover sent
+</code></pre>
+<p>Some MQTT room-server targets also expose the command as part of their compiled
+neighbor-table feature. It is not a cross-role guarantee: companion, KISS,
+sensor, and ordinary room-server firmware use different interfaces or do not
+maintain the repeater administrator neighbor table.</p>
+<h2 id="feature-dependent-commands">Feature-dependent commands</h2>
+<p>Even in a FULL build, a command can be unavailable when its underlying feature
+does not exist on that target:</p>
+<ul>
+<li>WebConfig and the <code>wifi.ssid</code>, <code>wifi.status</code>, and <code>wifi.powersave</code> command
+  family require an ESP32 WebConfig build. FULL standalone repeater and
+  room-server builds support the corresponding WiFi setters and status
+  commands. ESP32 WiFi Companions with WebConfig expose WiFi credentials,
+  connection status, WebConfig, and power-save controls from their USB
+  text terminal as well as power saving through WebConfig and the binary
+  protocol. All ESP32 WiFi Companions with WebConfig also expose the browser
+  CLI tab and <code>wifi.cli</code> switch, enabled by default in station/LAN mode. Older
+  Companion firmware needs an update to support it. Full Companion additionally
+  exposes its complete chat and streaming text terminal on TCP port 5002.</li>
+<li>MQTT commands require an MQTT observer target.</li>
+<li><code>discover.scopes</code> requires an MQTT observer with compiled neighbor support;
+  it does not independently require PSRAM or the FULL parser.</li>
+<li>GPS and external-sensor commands require their drivers and pins.</li>
+<li>Ethernet and bridge commands require the corresponding transport.</li>
+<li>LoRa OTA commands require an artifact with OTA enabled.</li>
+<li><code>uf2reset</code> applies only to nRF52.</li>
+</ul>
+<p>When diagnosing an unavailable command, check the role first, then the filename
+profile, then the target's compiled hardware features and its adjacent
+<code>.capabilities.json</code> file. A current artifact that promises the command but
+does not contain its linked marker is rejected during the build.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.action.edit", "content.code.copy", "search.highlight", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../_javascript/notification_builder.js?v=20260930-audio-start"></script>
+      
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      
+        <script src="../_javascript/firmware_picker.js?v=20260929-4"></script>
+      
+        <script src="../_javascript/telemetry_decoder.js"></script>
+      
+        <script src="../_javascript/management_decoder.js"></script>
+      
+        <script src="../_javascript/filter_tool.js?v=20261002-hashbytes-2plus"></script>
+      
+        <script src="../_javascript/preset_test.js?v=20260923-2"></script>
+      
+    
+  </body>
+</html>

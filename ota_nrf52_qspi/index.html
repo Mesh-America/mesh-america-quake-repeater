@@ -1,0 +1,2821 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for the open source MeshCore firmware">
+      
+      
+      
+        <link rel="canonical" href="https://Mesh-America.github.io/mesh-america-quake-repeater/ota_nrf52_qspi/">
+      
+      
+        <link rel="prev" href="../ota_nrf52_bootloader_update/">
+      
+      
+        <link rel="next" href="../ota_meshtower_v2_sdcard/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>nRF52 repeater LoRa OTA with external QSPI - MeshCore Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../_stylesheets/notification_builder.css">
+    
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/extra.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/firmware_picker.css?v=20260929-1">
+    
+      <link rel="stylesheet" href="../_stylesheets/telemetry_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/management_decoder.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/filter_tool.css">
+    
+      <link rel="stylesheet" href="../_stylesheets/preset_test.css?v=20260923-2">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#nrf52-repeater-lora-ota-with-external-qspi" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MeshCore Docs" class="md-header__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MeshCore Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              nRF52 repeater LoRa OTA with external QSPI
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MeshCore Docs" class="md-nav__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    MeshCore Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    Mesh-America/mesh-america-quake-repeater
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware and tools
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware and tools
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firmware_picker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware picker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notifications/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion notification builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../preset_test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Temporary radio test builder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../filter_tool/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Filter policy playground
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../telemetry_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Telemetry decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_decoder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management report decoder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Documentation
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Documentation
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_1" id="__nav_3_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started and features
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started and features
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frequently Asked Questions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../role_feature_switches/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature switches by role — 1.17.1.5 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../full_companion_features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion: turn features on and off
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_radio_full/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Full Companion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../full_companion_usb_switcher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion USB CLI and binary switcher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_offline_queue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Offline Message Queue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../halo_keymind_settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Halo and Keymind Branch Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware updates and partitions
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Firmware updates and partitions
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_user_guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Updating your node over the air (OTA) - user guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_easy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Easy firmware updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../lora_ota_automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scripted LoRa OTA from start to finish
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_nrf52_bootloader_update/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 bootloader updates over LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 repeater LoRa OTA with external QSPI
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 repeater LoRa OTA with external QSPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-repeater-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported repeater families
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supported repeater families">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rak15001-placement-and-module-conflicts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RAK15001 placement and module conflicts
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#one-w25q16-wiring-for-rak4631-or-rak3401-rak13302" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One W25Q16 wiring for RAK4631 or RAK3401 + RAK13302
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#header-only-w25q16-wiring-for-the-unified-rak-images" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Header-only W25Q16 wiring for the unified RAK images
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-time-prerequisite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One-time prerequisite
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#capacity-and-package-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Capacity and package types
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#explicit-xiao-bootloader-updates-over-lora" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Explicit XIAO bootloader updates over LoRa
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-ownership-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage ownership and recovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_meshtower_v2_sdcard/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshTower V2 microSD LoRa OTA
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_partition_catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 release partition lookup table
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../esp32_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP32 legacy-partition migration over Wi-Fi or LoRa
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../heltec_v4_wifi_partition_migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Heltec V4 legacy-partition migration over Wi-Fi
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../host_cli_service/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LoRa CLI Host Service
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Radio, networking, and power
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Radio, networking, and power
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../radio_profiles/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Two LoRa profiles on one radio
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../carrier_wave/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Carrier-wave RF checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../espnow_bridge_setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ESP-NOW bridge: simple setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../WiFi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WiFi and MQTT by Firmware Type
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../flood_filtering/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flood Filtering and Moderation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gps_tracking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GPS Tracking
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nrf52_power_management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 Power Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI and protocol reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    CLI and protocol reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_build_matrix/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Availability by Firmware Build
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_command_availability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Command Availability Matrix
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../terminal_chat_cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terminal Chat CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kiss_modem_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore KISS Modem Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packet_format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packet Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../payloads/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Payload Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ota_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore OTA - .mota container &amp; LoRa protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../management_reports/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Management reports (MGR1)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stats_binary_frames/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stats Binary Frame Structures
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../number_allocations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Number Allocations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../qr_codes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QR Codes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local Documentation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../research/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Research
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Releases
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Current release
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Current release
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releases/1.17.1.8/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    1.17.1.8 USA Cascade
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../test-results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Test Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../old-releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Old Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-repeater-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported repeater families
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supported repeater families">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rak15001-placement-and-module-conflicts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RAK15001 placement and module conflicts
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#one-w25q16-wiring-for-rak4631-or-rak3401-rak13302" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One W25Q16 wiring for RAK4631 or RAK3401 + RAK13302
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#header-only-w25q16-wiring-for-the-unified-rak-images" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Header-only W25Q16 wiring for the unified RAK images
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-time-prerequisite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One-time prerequisite
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#capacity-and-package-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Capacity and package types
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#explicit-xiao-bootloader-updates-over-lora" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Explicit XIAO bootloader updates over LoRa
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-ownership-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage ownership and recovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/Mesh-America/mesh-america-quake-repeater/edit/main/docs/ota_nrf52_qspi.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="nrf52-repeater-lora-ota-with-external-qspi">nRF52 repeater LoRa OTA with external QSPI</h1>
+<p>For <strong>1.17.1.5</strong>, use the exact board/storage profile from
+<a href="https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6">OTAFIX 2.4.6</a>
+for nRF52 OTAFIX installations. New internal-flash hybrid receivers require
+its 64 KiB retained-RAM handoff; QSPI and microSD targets require their own
+matching bootloader profiles. Earlier preview versions mentioned below
+describe compatibility/migration history, not the current recommended download.
+Full Companion is a MOTA source and normally updates itself over USB.</p>
+<p>Selected nRF52840 repeater builds use their dedicated external QSPI NOR flash as
+a raw LoRa OTA staging device. This removes the internal-flash staging conflict:
+the complete <code>.mota</code> stays off-chip, and the bootloader can use the entire
+internal application region while it installs either a full image or an
+in-place delta.</p>
+<p>This is a matched application-and-bootloader feature. A board merely having an
+nRF52840, free RAM, or pins named QSPI is not enough. Both halves must use the
+exact flash wiring, and <code>ota self</code> must confirm the store and bootloader before
+an update is downloaded.</p>
+<h2 id="supported-repeater-families">Supported repeater families</h2>
+<p>QSPI staging is enabled only for explicitly matched repeater-role environments
+(and RS232 bridge variants that directly inherit one of those repeater targets)
+on these currently matched families:</p>
+<ul>
+<li>Seeed XIAO nRF52840 and XIAO nRF52840 Sense modules, including the
+  <code>Xiao_nrf52</code>, SolarXiao 30S/33S, and XIAO-module Ikoka handheld, Nano, and
+  Stick repeaters</li>
+<li>original LilyGo T-Echo</li>
+<li>Elecrow ThinkNode M1 and M6</li>
+<li>Seeed Wio Tracker L1</li>
+<li>Seeed SenseCAP Solar Node P1</li>
+<li>RAK4631 with a RAK15001 in WisBlock sensor slot C, using the dedicated
+  <code>RAK_4631_repeater_rak15001_slot_c_lora_ota</code> application and matching
+  <code>wiscore_rak4631_board_rak15001_slot_c</code> OTAFIX bootloader</li>
+<li>RAK4631 with an externally wired Winbond W25Q16JV breakout on RAK19007,
+  using <code>RAK_4631_repeater_w25q16_lora_ota</code></li>
+<li>RAK3401 with its RAK13302 1 W radio and the same externally wired W25Q16JV
+  breakout on RAK19007, using
+  <code>RAK_3401_repeater_rak13302_w25q16_lora_ota</code></li>
+</ul>
+<p>Heltec T114 is intentionally not in this list. Its public V1, V2.0, and V2.1
+schematics show U9 (MX25R1635F) as an optional QSPI footprint, so standard T114
+application and bootloader targets do not assume that external NOR is populated.</p>
+<p>The XIAO-module derivatives use the matching XIAO or XIAO Sense OTAFIX
+bootloader shown by the module's <code>INFO_UF2.TXT</code>. Do not substitute a similar
+bootloader for a board with different QSPI pins. For example, the T-Echo Card
+and T-Echo Lite have different flash wiring and are not enabled by the original
+T-Echo target.</p>
+<p>Companion builds are intentionally excluded. Some companion targets use the
+same external QSPI as a LittleFS message/data store, where raw OTA staging
+would corrupt the filesystem; other companions simply do not assign that chip
+to OTA. Room-server, sensor, and KISS roles are unchanged. Raw QSPI OTA is
+scoped to the explicitly matched repeater-derived environments.</p>
+<h3 id="rak15001-placement-and-module-conflicts">RAK15001 placement and module conflicts</h3>
+<p><a href="https://docs.rakwireless.com/product-categories/wisblock/rak15001/datasheet/">RAK15001</a>
+is a 2 MiB GD25Q16C <strong>standard SPI</strong> module, not a quad-I/O flash. The dedicated
+RAK4631 target uses the nRF52840 QSPI peripheral in its single-data-line
+FAST_READ/page-program modes at 8 MHz and accepts only the module's exact
+<code>C8 40 15</code> JEDEC ID. <code>ota self</code> reports <code>QSPI store:2048K</code> only when the
+expected module responds. An empty slot or a different SPI device reports
+<code>QSPI store:ERR 0K</code>, and install is refused.</p>
+<p>The module is electrically usable in sensor slot A-D because those slots share
+the SPI signals and RAK15001 has onboard 10 kOhm pull-ups on WP# and HOLD#.
+The supported MeshCore/OTAFIX combination nevertheless requires <strong>slot C</strong>. It
+is the placement that remains safe when a
+<a href="https://docs.rakwireless.com/product-categories/wisblock/rak12501/datasheet/">RAK12501 GNSS</a>
+is fitted in either of its supported slots, A or D: slot C avoids the GNSS
+PPS/reset nets on IO1/IO2 and IO5/IO6. In particular, GPS in A plus flash in B
+would share IO1/IO2 through the modules' auxiliary pins.</p>
+<p>Only one device that uses the shared WisBlock SPI chip-select may be fitted.
+Do not combine this target with RAK13800 Ethernet, RAK15002 SD, or another SPI
+module. RAK13800 and RAK15001 cannot coexist because they use the same SPI
+chip-select. Update a RAK13800 Ethernet build locally over USB using the
+release's <strong>Manual UF2</strong> or <strong>Serial DFU (.zip)</strong> download; it cannot use this
+RAK15001 LoRa-OTA staging target.</p>
+<p>RAK3401 with RAK13302 remains incompatible with <strong>RAK15001</strong>. The 1 W radio
+uses the same WisBlock SPI clock/data pins <strong>and the same chip-select</strong> as
+RAK15001. Firmware cannot independently select or detect those two chips, so a
+stock RAK3401 + RAK15001 assembly cannot provide reliable OTA staging without
+a hardware chip-select rework. This restriction does not apply to the
+separate-CS W25Q16 wiring below.</p>
+<p><a id="one-w25q16-wiring-for-rak4631-or-rak3401--rak13302"></a></p>
+<h3 id="one-w25q16-wiring-for-rak4631-or-rak3401-rak13302">One W25Q16 wiring for RAK4631 or RAK3401 + RAK13302</h3>
+<p>An external Winbond W25Q16JV breakout can remain attached to a RAK19007 while
+the core is changed between RAK4631 and RAK3401 + RAK13302. It shares only the
+WisBlock SPI clock/data nets and has its own chip-select on AIN1:</p>
+<table>
+<thead>
+<tr>
+<th>W25Q16 breakout</th>
+<th>RAK19007 connection</th>
+<th>nRF52840 / Arduino pin</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CLK</code></td>
+<td>IO connector pin 26, <code>SPI_CLK</code></td>
+<td>P0.03 / <code>3</code></td>
+</tr>
+<tr>
+<td><code>DO</code> / MISO</td>
+<td>IO connector pin 27, <code>SPI_MISO</code></td>
+<td>P0.29 / <code>29</code></td>
+</tr>
+<tr>
+<td><code>DI</code> / MOSI</td>
+<td>IO connector pin 28, <code>SPI_MOSI</code></td>
+<td>P0.30 / <code>30</code></td>
+</tr>
+<tr>
+<td><code>CS</code></td>
+<td>J11 <code>AIN1</code></td>
+<td>P0.31 / <code>31</code></td>
+</tr>
+<tr>
+<td><code>VCC</code></td>
+<td>J12 <code>VDD</code></td>
+<td>regulated 3.3 V</td>
+</tr>
+<tr>
+<td><code>GND</code></td>
+<td>J12 <code>GND</code></td>
+<td>ground</td>
+</tr>
+</tbody>
+</table>
+<p>Fit a physical approximately 10 kOhm pull-up from <code>CS</code> to J12 <code>VDD</code>. That
+keeps the flash deselected during reset, bootloader entry, and a core-module
+swap. Power the breakout only from J12 <code>VDD</code>; <strong>never use J11 <code>VBAT</code></strong>, which
+can exceed the flash's supply rating. The six-pin breakout does not expose
+WP#/IO2 or HOLD#/IO3; do not add nRF IO2/IO3 wiring. A breakout with an onboard
+power LED works, but that LED draws continuously and is undesirable for
+low-power or solar operation.</p>
+<p>This arrangement consumes no WisBlock sensor slot. However, <code>SPI_CLK</code>,
+<code>SPI_MISO</code>, and <code>SPI_MOSI</code> are not available on the easy 2.54 mm J10/J11/J12
+headers. Those three signals require a short underside-pad tap or a suitable
+IO-connector interposer at pins 26-28. J11 and J12 alone are not sufficient.</p>
+<p>GPS remains supported in sensor slot A. RAK12500 uses I2C, while RAK12501/L76K
+uses UART plus its auxiliary control signals; neither uses the shared SPI
+clock/data bus. On RAK4631 the built-in SX1262 has a separate private SPI bus.
+On RAK3401 the RAK13302 and flash share clock/data, but have independent
+chip-selects: RAK13302 NSS is P0.26 and flash CS is P0.31. The matched firmware
+holds the radio NSS high while it temporarily hands the bus to the flash, then
+restores the radio SPI interface.</p>
+<p>The breakout target accepts only a 2 MiB W25Q16 with JEDEC ID <code>EF 40 15</code> and
+runs it at 8 MHz in standard single-data-line SPI mode. A substituted W25Q32,
+W25Q64, or W25Q128 fails closed instead of being treated as the OTA store.
+Use the complete application/bootloader identity row that matches the fitted
+core:</p>
+<table>
+<thead>
+<tr>
+<th>Core and radio</th>
+<th>PlatformIO environment</th>
+<th>MOTA hardware identity</th>
+<th>OTAFIX board / DFU device name</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RAK4631 built-in SX1262</td>
+<td><code>RAK_4631_repeater_w25q16_lora_ota</code></td>
+<td><code>RAK4631_W25Q16</code></td>
+<td><code>wiscore_rak4631_w25q16</code> / <code>4631_W25Q16_DFU</code></td>
+</tr>
+<tr>
+<td>RAK3401 + RAK13302 1 W</td>
+<td><code>RAK_3401_repeater_rak13302_w25q16_lora_ota</code></td>
+<td><code>RAK3401_RAK13302_W25Q16</code></td>
+<td><code>wiscore_rak3401_rak13302_w25q16</code> / <code>3401_W25Q16_DFU</code></td>
+</tr>
+</tbody>
+</table>
+<p>The physical flash wiring is identical, but the two application and
+bootloader pairs are not interchangeable.</p>
+<h3 id="header-only-w25q16-wiring-for-the-unified-rak-images">Header-only W25Q16 wiring for the unified RAK images</h3>
+<p>The unified RAK repeater images and matching OTAFIX 2.4.10 compatible bootloaders
+also support a W25Q16 through the RAK19007 2.54 mm headers. This arrangement
+does not need an IO-connector interposer or underside SPI solder points:</p>
+<table>
+<thead>
+<tr>
+<th>W25Q16 breakout</th>
+<th>RAK19007 header</th>
+<th>nRF52840 / Arduino pin</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CLK</code></td>
+<td>J10 <code>TX1</code></td>
+<td>P0.16 / <code>16</code></td>
+</tr>
+<tr>
+<td><code>DO</code> / MISO</td>
+<td>J10 <code>RX1</code></td>
+<td>P0.15 / <code>15</code></td>
+</tr>
+<tr>
+<td><code>DI</code> / MOSI</td>
+<td>J11 <code>IO1</code></td>
+<td>P0.17 / <code>17</code></td>
+</tr>
+<tr>
+<td><code>CS</code></td>
+<td>J11 <code>AIN1</code></td>
+<td>P0.31 / <code>31</code></td>
+</tr>
+<tr>
+<td><code>VCC</code></td>
+<td>J12 <code>VDD</code></td>
+<td>regulated 3.3 V</td>
+</tr>
+<tr>
+<td><code>GND</code></td>
+<td>J12 <code>GND</code></td>
+<td>ground</td>
+</tr>
+</tbody>
+</table>
+<p>Keep the approximately 10 kOhm <code>CS</code>-to-<code>VDD</code> pull-up. This mapping gives up
+the UART1 GPS and PPS pins while the flash is fitted. The unified firmware
+detects the exact <code>EF4015</code> device before GPS discovery and leaves I2C sensor
+pins <code>SDA</code> and <code>SCL</code> available. RAK4631 can still use its UART2 bridge; its
+UART1 bridge is unavailable with header flash. RAK3401 retains its 1 W radio
+and shared sensor/radio power rail. Do not substitute <code>SCL</code> for flash clock or
+use <code>SWCLK</code>, which is the debug clock. The older dedicated W25Q16 images above
+expect the WisBlock SPI connector wiring and do not use this header mapping.</p>
+<h2 id="one-time-prerequisite">One-time prerequisite</h2>
+<p>Install a QSPI-capable OTAFIX 2.4.1 preview.9 or newer bootloader for the exact
+board from the
+<a href="https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases">OTAFIX releases</a>
+before using LoRa OTA. The release notes must explicitly list that board's QSPI
+mode. Also install the SoftDevice version expected by that target. The
+application refuses the install handoff when the bootloader does not advertise
+QSPI support.</p>
+<p>For the external W25Q16 option, install the corresponding bootloader once
+before installing its MeshCore application: <code>wiscore_rak4631_w25q16</code>
+(<code>DEVICE_NAME=4631_W25Q16_DFU</code>) for RAK4631, or
+<code>wiscore_rak3401_rak13302_w25q16</code> (<code>DEVICE_NAME=3401_W25Q16_DFU</code>) for RAK3401
+plus RAK13302. Use only a release that explicitly names that exact pairing. Do
+not substitute the RAK15001 bootloader or swap the two W25Q16 bootloaders
+merely because the base-board wiring is the same.</p>
+<p>For the first migration from the ordinary <code>wiscore_rak4631_board</code> bootloader to
+<code>wiscore_rak4631_board_rak15001_slot_c</code>, use Nordic serial DFU or a compatible
+BLE DFU client with the exact slot-C OTAFIX <strong>combined bootloader + SoftDevice
+DFU package</strong> (or use SWD), then reinstall the slot-C MeshCore application. The
+release filename has this form:</p>
+<pre><code class="language-text">wiscore_rak4631_board_rak15001_slot_c_bootloader-&lt;OTAFIX-version&gt;_s140_6.1.1.zip
+</code></pre>
+<p>Do not copy the slot-C bootloader-update UF2 onto the stock UF2 drive. The
+stock loader is bound to <code>DEVICE_NAME=4631_DFU</code>, while the slot-C image is bound
+to <code>4631_15001C_DFU</code>, so that UF2 is intentionally rejected. After the one-time
+DFU/SWD migration, later canonical slot-C bootloader UF2 files work normally.
+The combined OTAFIX package above is not the MeshCore application's Serial DFU
+<code>.zip</code>; an application package does not migrate the bootloader.</p>
+<p>After installing the repeater application, check:</p>
+<pre><code class="language-text">get bootloader.ver
+ota self
+ota status
+ota qspi
+</code></pre>
+<p>A ready RAK15001 target reports all of the following:</p>
+<pre><code class="language-text">QSPI store:2048K
+bootloader: QSPI apply OK
+bl:QSPI
+QSPI jedec=C84015 size=2048K sr1=00 stage=jedec
+</code></pre>
+<p>A ready external W25Q16 target instead identifies the Winbond part:</p>
+<pre><code class="language-text">QSPI store:2048K
+bootloader: QSPI apply OK
+bl:QSPI
+QSPI jedec=EF4015 size=2048K sr1=00 stage=jedec
+</code></pre>
+<p>Other supported boards can report a capacity different from 2048K; the
+RAK15001 and W25Q16 targets must report exactly 2048K and their respective
+exact JEDEC IDs. <code>QSPI store:ERR 0K</code>, <code>NO QSPI</code>, or <code>bl:NO-QSPI</code> means the flash
+wiring, flash power, chip-select pull-up, application, or bootloader does not
+match. Do not start an install in that state.</p>
+<p><code>ota qspi</code> is a read-only diagnostic probe available on QSPI OTA builds. It
+reports the exact JEDEC ID, status-register byte, last store stage, and the
+first latched storage error. Run it after an immediate <code>storage error</code> before
+starting another pull; later capacity probes preserve that failure detail.</p>
+<h2 id="capacity-and-package-types">Capacity and package types</h2>
+<p>The store reads the JEDEC capacity at runtime and accepts supported 1 MiB
+through 16 MiB devices using 24-bit addressing. QSPI capacity is not the final
+firmware limit. The reconstructed application, including its 56-byte <code>EndF</code>
+trailer, must fit its build's linked application region:</p>
+<table>
+<thead>
+<tr>
+<th>SoftDevice layout</th>
+<th>Application region</th>
+<th>Maximum image</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S140 v7, boot-update-capable XIAO module</td>
+<td><code>0x27000..0xE0000</code></td>
+<td><code>0xB9000</code> (757,760 bytes)</td>
+</tr>
+<tr>
+<td>S140 v7, app base <code>0x27000</code></td>
+<td><code>0x27000..0xED000</code></td>
+<td><code>0xC6000</code> (811,008 bytes)</td>
+</tr>
+<tr>
+<td>S140 v6, app base <code>0x26000</code></td>
+<td><code>0x26000..0xED000</code></td>
+<td><code>0xC7000</code> (815,104 bytes)</td>
+</tr>
+</tbody>
+</table>
+<p>The XIAO limit is deliberately 52 KiB smaller. Its linker and post-link record
+cap every ordinary application at <code>0xE0000</code>; OTAFIX reserves
+<code>0xE0000..0xEA000</code> as a 40 KiB self-update scratch bank, with the remaining gap
+left unused before InternalFS. Full and delta application packages for these
+targets derive their effective application end from that <code>0xE0000</code> record and
+are rejected if their reconstructed image or detools geometry crosses it.</p>
+<p>A full package needs only the new raw <code>firmware.hex</code> or non-merged application
+image. An in-place delta still needs the exact image currently running. The
+automation uses a conservative <code>0xC6000</code> detools workspace for external nRF52
+staging so one package setting is safe for both layouts.</p>
+<p>For online automation, QSPI is detected from <code>ota self</code> or <code>ota status</code>. For
+offline preparation, identify it explicitly:</p>
+<pre><code class="language-bash">./tools/lora_ota/lora_ota.sh ./release.zip target-name \
+  --prepare-only \
+  --platform nrf52 \
+  --nrf-qspi \
+  --target-id 12345678 \
+  --target-hw Xiao_nrf52
+</code></pre>
+<p>Use the real target ID and hardware identity from the destination. A ready
+full <code>.mota</code> normally uses that target ID for discovery and routing. An
+operator can deliberately override the routing target for a role change, so
+<code>target_id</code> is not an apply-time safety assertion; the destination still
+enforces the package's hardware identity before approval.</p>
+<h2 id="explicit-xiao-bootloader-updates-over-lora">Explicit XIAO bootloader updates over LoRa</h2>
+<p>This section documents the deployed XIAO raw-QSPI layout. Curated nRF52840
+targets without external staging use a separate internal-flash layout with the
+same explicit operator safety model; see
+<a href="../ota_nrf52_bootloader_update/">nRF52 bootloader updates over LoRa</a>.</p>
+<p>Bootloader delivery is available only when all of these are already true:</p>
+<ul>
+<li>the application is an <code>OTA_QSPI_BOOTLOADER_UPDATE</code> XIAO-module repeater build
+  linked below <code>0xE0000</code>;</li>
+<li><code>ota bootloader</code> shows a CRC-valid installed <code>XIAO_DFU</code> embedded identity for
+  board ID <code>28860044</code> (base) or <code>28860045</code> (Sense);</li>
+<li>the installed OTAFIX marker reports ABI 3 or newer and both QSPI (<code>0x04</code>) and
+  boot-update (<code>0x08</code>) capability bits;</li>
+<li>the package is the exact signed v3/40-KiB/1-KiB-block profile for that board,
+  and its signer is already in <code>ota key</code>'s trusted allowlist.</li>
+</ul>
+<p>This is not part of normal automation. Bootloader catalog rows are labelled
+<code>bootloader</code>; even a capable node never autofetches or autoinstalls them, and
+ordinary <code>ota install</code> rejects them in every application backend. The
+<code>tools/lora_ota</code> deployment runner also refuses v3 packages. Fetch and arm one
+only with the explicit flow:</p>
+<pre><code class="language-text">ota ls
+ota pull &lt;MID8&gt; flash
+# wait for ota status to report the same bootloader download as ready
+ota bootloader
+# copy the exact mid= and hash= values printed above
+ota bootloader install &lt;MID8&gt; &lt;HASH16&gt;
+</code></pre>
+<p>The pull command is only transport intent; it does not authorize an install.
+The final command must reproduce both the complete staged manifest ID and the
+first eight bytes of its signed image hash. Before approval the application
+again checks package/root/payload/image hashes, Ed25519 signature and trusted
+allowlist, exact signed <code>XIAO_BL_...</code> ID, installed and incoming embedded
+  manifest/CRC/name/board identity, vector table, ABI-3 QSPI+boot-update marker,
+  and the adjacent CRC-covered <code>BLM2</code>/<code>SOFT</code> continuity extension at the exact
+  final-image offset <code>0x9FB4</code>. The embedded
+  boot version must equal the signed outer package version, the SoftDevice
+  family/FWID/application base/layout ABI must match the running platform, and
+  a successor to installed BLM2 must be strictly newer. Low-byte-zero and
+  all-ones versions are invalid. Remote rollback is refused; use local DFU/SWD.</p>
+<p>After the reply drains, GPREGRET <code>0x6B</code> and GPREGRET2 <code>0x51</code> enter the special
+OTAFIX path. <code>APRV</code> carries the app's signature/allowlist and explicit operator
+authorization decision. OTAFIX independently rechecks the strict structure,
+identity/capabilities, vectors, payload SHA, embedded CRC, and copy hashes
+before using the reserved scratch bank to replace its own <code>0xF4000..0xFE000</code> region. The running
+application remains preserved; a rejected candidate returns to it unchanged.
+Post-reboot <code>ota status</code> reports bootloader-update diagnostics as <code>blup:C0</code> to
+<code>blup:CF</code> (<code>blup:C8</code> is success), separately from ordinary application <code>blrc</code>.</p>
+<p>This feature cannot update a stock or old bootloader that lacks the capability
+marker: perform the first exact-board combined bootloader+SoftDevice migration
+over USB/BLE DFU or SWD. Do not attempt to bootstrap it with a v3 package.</p>
+<h2 id="storage-ownership-and-recovery">Storage ownership and recovery</h2>
+<p>The QSPI store is raw, not a file inside LittleFS. It owns the flash from
+offset zero, erases 4 KiB sectors as blocks arrive, writes data before progress
+metadata, and verifies every programmed page. A previously interrupted
+download is reopened only when its header and trailer are valid; every claimed
+block is re-hashed before it is trusted. Between a probe, transfer operation,
+or checkpoint, firmware puts the NOR into deep power-down, deactivates the nRF
+QSPI peripheral, and turns off a board-provided flash power-enable pin. The
+next operation powers the chip, shifts the NOR's <code>0xAB</code> wake command over GPIO,
+then activates the nRF QSPI peripheral and identifies the flash. Waking it
+before peripheral activation is required because a flash in deep power-down
+ignores the activation traffic itself. Merely running <code>ota self</code> therefore does
+not leave QSPI drawing active-mode current or prevent the following operation
+from reactivating it.</p>
+<p>Installing a QSPI repeater build over a former companion build therefore
+repurposes the external flash and destroys companion filesystem data as OTA
+sectors are written. Back up anything important first. Returning to a companion
+build may require formatting its external data store.</p>
+<p>Before changing internal application flash, the application verifies package
+integrity, hardware identity, signature policy, and bootloader capabilities.
+The target ID selects discovery/fetch routing and can be deliberately
+overridden; it is not a second hardware gate. The bootloader then verifies a
+full payload before its first application erase. For a delta, the application
+rejects invalid detools geometry before approval and the bootloader independently
+repeats the base and geometry checks before applying it.
+It clears the one-shot approval marker before invalidating the running image.
+If power is lost after application writes begin, the bank remains invalid and
+OTAFIX enters USB/BLE recovery rather than booting a partial image.</p>
+<p>See <a href="../ota_easy/">Easy firmware updates over LoRa</a> for the transfer commands and
+<a href="../ota_protocol/">the OTA protocol</a> for the container and handoff details.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.action.edit", "content.code.copy", "search.highlight", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../_javascript/notification_builder.js?v=20260930-audio-start"></script>
+      
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      
+        <script src="../_javascript/firmware_picker.js?v=20260929-4"></script>
+      
+        <script src="../_javascript/telemetry_decoder.js"></script>
+      
+        <script src="../_javascript/management_decoder.js"></script>
+      
+        <script src="../_javascript/filter_tool.js?v=20261002-hashbytes-2plus"></script>
+      
+        <script src="../_javascript/preset_test.js?v=20260923-2"></script>
+      
+    
+  </body>
+</html>
