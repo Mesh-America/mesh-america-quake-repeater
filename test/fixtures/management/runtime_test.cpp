@@ -118,7 +118,7 @@ int main() {
     for (unsigned i = 0; i < 9; ++i) {
       const auto& p = f.mesh.packets[i]; assert(validPage(p.payload, p.payload_len));
       assert(p.payload[78] == i && p.payload[80] == 36 && p.flood);
-      assert(!memcmp(p.payload, "MGR3", 4) && read16(p.payload + HEADER) == 61);
+      assert(!memcmp(p.payload, "MGR2", 4) && read16(p.payload + HEADER) == 61);
       assert(!(read16(p.payload + HEADER) & 1024)); // an open reader is not an active logger
       assert(read32(p.payload + HEADER + 3) == 7200);
       assert(read32(p.payload + HEADER + 7) == 3600);
@@ -133,7 +133,7 @@ int main() {
     Fixture f;
     for (unsigned i = 0; i < 7; ++i) { ClientInfo c; c.id.pub_key[0] = i; f.acl.clients.push_back(c); }
     f.configure(false); f.advance(21 * DAY); assert(f.mesh.packets.size() == 1);
-    assert(!memcmp(f.mesh.packets[0].payload, "MGR3", 4));
+    assert(!memcmp(f.mesh.packets[0].payload, "MGR2", 4));
     assert(read16(f.mesh.packets[0].payload + HEADER) == 0); // unsupported is explicit
     test_usb_status.supported = true; test_usb_status.retry_seconds = 999;
     test_usb_status.watchdog_auto = true; test_usb_status.auto_connected_seconds = 100;

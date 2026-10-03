@@ -29,15 +29,16 @@ function hex(text) {
   assert.strictEqual(publicOnly.public.usbLogging, null);
   assert.strictEqual(publicOnly.public.usbWatchdogLast, null);
 
-  // Public MGR2 parsing is additive; actual MGR2 SIV ciphertext is checked
-  // cross-language by test_management_report.py using the production encoder.
+  // MGR2 is the full event-capable layout. The unreleased 98-byte prototype
+  // and MGR3 magic have no compatibility fallback. Actual MGR1/MGR2 SIV
+  // ciphertext is checked cross-language using the production encoder.
   const legacy = Buffer.from(decoder.EXAMPLE_PAGE, "hex");
   const currentHeader = Buffer.from(legacy.subarray(0, 83)); currentHeader[3] = 0x32;
   const usb = Buffer.alloc(15);
   usb.writeUInt16LE(0x07ff, 0); usb[2] = 2 | (8 << 2);
   usb.writeUInt32LE(604800, 3); usb.writeUInt32LE(0xffffffff, 7);
   usb.writeUInt32LE(1209600, 11);
-  const current = Buffer.concat([currentHeader, usb, legacy.subarray(83)]);
+  const current = Buffer.concat([currentHeader, usb, Buffer.alloc(13), legacy.subarray(83)]);
   const currentPublic = await decoder.decodeManagement(current.toString("hex"), "");
   assert.strictEqual(currentPublic.public.protocol, "MGR2");
   assert.strictEqual(currentPublic.public.usbWatchdogLast, null);
@@ -57,7 +58,7 @@ function hex(text) {
   assert.strictEqual(readerWithoutLogger.hostConnected, true);
   assert.strictEqual(readerWithoutLogger.readerConnected, true);
   assert.strictEqual(readerWithoutLogger.loggerActive, false);
-  const badCount = Buffer.from(current); badCount[82] = 6;
+  const badCount = Buffer.from(current); badCount[82] = 5;
   await assert.rejects(decoder.decodeManagement(badCount.toString("hex"), ""), /bounds/);
   await assert.rejects(decoder.decodeManagement(current.subarray(0, 99).toString("hex"), ""), /complete/);
   for (const [offset, value] of [[84, 8], [85, 0xc0]]) {
@@ -65,39 +66,67 @@ function hex(text) {
     await assert.rejects(decoder.decodeManagement(reserved.toString("hex"), ""), /Reserved/);
   }
 
-  // Public MGR3 fields use their own layout; production ciphertext for all
-  // three versions is authenticated cross-language by the Python host test.
-  const mgr3Header = Buffer.from(current.subarray(0, 98)); mgr3Header[3] = 0x33;
+  const prototype = Buffer.concat([currentHeader, usb, legacy.subarray(83)]);
+  await assert.rejects(decoder.decodeManagement(prototype.toString("hex"), ""), /length|Invalid/);
+  const emptyPrototype = Buffer.alloc(98 + 16);
+  currentHeader.copy(emptyPrototype); emptyPrototype[80] = 0; emptyPrototype[82] = 0;
+  await assert.rejects(decoder.decodeManagement(emptyPrototype.toString("hex"), ""), /complete/);
+  const mgr3 = Buffer.from(current); mgr3[3] = 0x33;
+  await assert.rejects(decoder.decodeManagement(mgr3.toString("hex"), ""), /No complete/);
+  await assert.rejects(decoder.decodeManagement("1A00" + mgr3.toString("hex"), ""), /No complete/);
+
+  // Watchdog fields remain at offsets 98..110 in current MGR2.
   const event = Buffer.alloc(13); event[0] = 0xbf;
   event.writeUInt32LE(1700000001, 1); event.writeUInt32LE(777, 5); event.writeUInt32LE(42, 9);
-  const mgr3 = Buffer.concat([mgr3Header, event, current.subarray(98)]);
-  const mgr3Public = await decoder.decodeManagement(mgr3.toString("hex"), "");
-  assert.strictEqual(mgr3Public.public.protocol, "MGR3");
-  assert.strictEqual(mgr3Public.public.usbLogging.loggerActive, true);
-  assert.deepStrictEqual(mgr3Public.public.usbWatchdogLast, {
+  const withEvent = Buffer.from(current); event.copy(withEvent, 98);
+  const eventPublic = await decoder.decodeManagement(withEvent.toString("hex"), "");
+  assert.strictEqual(eventPublic.public.protocol, "MGR2");
+  assert.strictEqual(eventPublic.public.usbLogging.loggerActive, true);
+  assert.deepStrictEqual(eventPublic.public.usbWatchdogLast, {
     reasons: 15, reasonNames: ["host-absent", "reader-absent", "tx-stalled", "client-inactive"],
     actionCode: 3, action: "reboot-requested", persisted: true,
     epoch: 1700000001, uptimeSeconds: 777, sequence: 42,
   });
-  const none = Buffer.from(mgr3); none.fill(0, 98, 111);
+  const none = Buffer.from(withEvent); none.fill(0, 98, 111);
   assert.strictEqual((await decoder.decodeManagement(none.toString("hex"), "")).public.usbWatchdogLast, null);
   for (let action = 1; action <= 4; ++action) {
-    const ramOnly = Buffer.from(mgr3); ramOnly[98] = 15 | (action << 4); ramOnly.writeUInt32LE(0, 99);
+    const ramOnly = Buffer.from(withEvent); ramOnly[98] = 15 | (action << 4); ramOnly.writeUInt32LE(0, 99);
     const decodedEvent = (await decoder.decodeManagement(ramOnly.toString("hex"), "")).public.usbWatchdogLast;
     assert.strictEqual(decodedEvent.actionCode, action);
     assert.strictEqual(decodedEvent.persisted, false);
     assert.strictEqual(decodedEvent.epoch, 0);
   }
-  for (const code of [0x80, 0x8f, 0xdf, 0xef, 0xff]) {
-    const invalid = Buffer.from(mgr3); invalid[98] = code;
+  for (const code of [0x80, 0x8f, 0x90, 0xa0, 0xb0, 0xc0, 0xdf, 0xef, 0xff]) {
+    const invalid = Buffer.from(withEvent); invalid[98] = code;
     await assert.rejects(decoder.decodeManagement(invalid.toString("hex"), ""), /Invalid/);
   }
-  const invalidSequence = Buffer.from(mgr3); invalidSequence.writeUInt32LE(0, 107);
+  const invalidSequence = Buffer.from(withEvent); invalidSequence.writeUInt32LE(0, 107);
   await assert.rejects(decoder.decodeManagement(invalidSequence.toString("hex"), ""), /Invalid/);
-  const fiveEntries = Buffer.from(mgr3); fiveEntries[82] = 5;
+  const fiveEntries = Buffer.from(withEvent); fiveEntries[82] = 5;
   await assert.rejects(decoder.decodeManagement(fiveEntries.toString("hex"), ""), /bounds/);
   for (const size of [99, 110, 126]) {
-    await assert.rejects(decoder.decodeManagement(mgr3.subarray(0, size).toString("hex"), ""), /complete/);
+    await assert.rejects(decoder.decodeManagement(withEvent.subarray(0, size).toString("hex"), ""), /complete/);
+  }
+  // Thirty-six ACL keys use exactly nine current pages, four entries per
+  // page. The unchanged MGR1 layout remains six entries across six pages.
+  for (const [source, header, perPage, pageCount] of [
+    [withEvent, 111, 4, 9], [legacy, 83, 6, 6],
+  ]) {
+    const pages = [];
+    for (let page = 0; page < pageCount; ++page) {
+      const packed = Buffer.alloc(header + perPage * 13 + 16);
+      source.copy(packed, 0, 0, header);
+      packed[78] = page; packed[79] = pageCount; packed[80] = 36;
+      packed[81] = page * perPage; packed[82] = perPage;
+      pages.push(packed.toString("hex"));
+    }
+    const report = await decoder.decodeManagement(pages.join("\n"), "");
+    assert.strictEqual(report.complete, true);
+    assert.strictEqual(report.pageCount, pageCount);
+    assert.strictEqual(report.suppliedPages, pageCount);
+    assert.strictEqual(report.public.protocol, header === 111 ? "MGR2" : "MGR1");
+    const excessive = Buffer.from(pages[0], "hex"); excessive[79] = pageCount + 1;
+    await assert.rejects(decoder.decodeManagement(excessive.toString("hex"), ""), /bounds/);
   }
 
   const decoded = await decoder.decodeManagement(

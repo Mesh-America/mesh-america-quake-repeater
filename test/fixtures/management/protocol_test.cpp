@@ -77,8 +77,8 @@ int main() {
   usb.logger_active = false; encodeUsbStatus(usb_block, usb);
   assert(read16(usb_block) == 1023); // host/reader connection does not imply a logger
   usb.logger_active = true;
-  // Emit all wire versions for independent Python and browser decoders.
-  for (const char* magic : {"MGR1", "MGR2", "MGR3"}) {
+  // Emit both supported wire versions for independent Python/browser decoders.
+  for (const char* magic : {"MGR1", "MGR2"}) {
     const auto* version = reinterpret_cast<const uint8_t*>(magic);
     const bool current = currentPage(version), has_usb = usbPage(version);
     const size_t header = headerSize(version), per_page = entriesPerPage(version);
@@ -120,7 +120,7 @@ int main() {
   }
   // A current report with no recorded event is authenticated, not invented.
   {
-    uint8_t raw[179] = {}, enc[32]; memcpy(raw, "MGR3", 4); memcpy(raw + 4, radio, 16);
+    uint8_t raw[179] = {}, enc[32]; memcpy(raw, "MGR2", 4); memcpy(raw + 4, radio, 16);
     write32(raw + 20, 43); raw[79] = 1;
     deriveKey(root, "MeshCore-MGR1-SIV", radio, enc);
     assert(seal(enc, raw, CURRENT_HEADER, raw + CURRENT_HEADER, 0, raw + CURRENT_HEADER));
@@ -129,7 +129,7 @@ int main() {
   // Every ACL count retains complete coverage and the unchanged flood ceiling.
   for (unsigned total = 0; total <= MAX_KEYS; ++total) {
     for (unsigned page = 0; page < (total ? (total + 3) / 4 : 1); ++page) {
-      uint8_t raw[179] = {}; memcpy(raw, "MGR3", 4);
+      uint8_t raw[179] = {}; memcpy(raw, "MGR2", 4);
       raw[78] = page; raw[79] = total ? (total + 3) / 4 : 1; raw[80] = total;
       raw[81] = page * 4; raw[82] = total - raw[81] < 4 ? total - raw[81] : 4;
       const size_t size = pageSize(raw);
@@ -139,8 +139,23 @@ int main() {
   }
   for (size_t n = 0; n < CURRENT_HEADER + TAG; ++n) {
     std::vector<uint8_t> truncated(n);
-    for (size_t i = 0; i < n && i < 4; ++i) truncated[i] = "MGR3"[i];
+    for (size_t i = 0; i < n && i < 4; ++i) truncated[i] = "MGR2"[i];
     assert(!validPage(truncated.data(), n));
   }
   for (size_t n = 0; n < HEADER + TAG; ++n) assert(!validPage(plain.data(), n));
+  // No third wire version or USB-only 98-byte prototype interpretation.
+  for (uint8_t version : {uint8_t('0'), uint8_t('3'), uint8_t('4'), uint8_t(0xff)}) {
+    uint8_t raw[MAX_PAYLOAD] = {}; memcpy(raw, "MGR2", 4);
+    raw[3] = version; raw[79] = 1;
+    assert(!validPage(raw, CURRENT_HEADER + TAG));
+    assert(!validPage(raw, floodSize(CURRENT_HEADER + TAG), true));
+  }
+  {
+    uint8_t raw[MAX_PAYLOAD] = {}; memcpy(raw, "MGR2", 4); raw[79] = 1;
+    assert(!validPage(raw, 98 + TAG));
+    assert(!validPage(raw, floodSize(98 + TAG), true));
+    raw[80] = raw[82] = 5;
+    assert(!validPage(raw, 98 + TAG + 5 * ENTRY));
+    assert(!validPage(raw, floodSize(98 + TAG + 5 * ENTRY), true));
+  }
 }

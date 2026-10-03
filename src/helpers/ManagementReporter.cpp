@@ -103,7 +103,7 @@ uint32_t ManagementReporter::jitter() const {
 }
 void ManagementReporter::snapshot() {
   auto& w = *work; memset(w.header, 0, sizeof(w.header)); w.acl = AclList();
-  auto* p = w.header; memcpy(p, "MGR3", 4); memcpy(p + 4, mesh.self_id.pub_key, 16);
+  auto* p = w.header; memcpy(p, "MGR2", 4); memcpy(p + 4, mesh.self_id.pub_key, 16);
   const UsbLoggingStatus usb = usbLoggingStatus();
   encodeUsbStatus(p + HEADER, usb);
   encodeUsbWatchdogEvent(p + WATCHDOG_EVENT_OFFSET, usb.last_event);

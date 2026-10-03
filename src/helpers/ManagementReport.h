@@ -10,14 +10,13 @@
 // protocol. See docs/management_reports.md for the byte layout and trust model.
 namespace mesh { namespace management {
 constexpr size_t HEADER = 83, TAG = 16, ENTRY = 13, PER_PAGE = 6;
-constexpr size_t USB_STATUS_SIZE = 15, MGR2_HEADER = HEADER + USB_STATUS_SIZE;
-constexpr size_t MGR2_PER_PAGE = 5;
-constexpr size_t WATCHDOG_EVENT_OFFSET = MGR2_HEADER;
-constexpr size_t CURRENT_HEADER = MGR2_HEADER + USB_WATCHDOG_EVENT_SIZE;
+constexpr size_t USB_STATUS_SIZE = 15;
+constexpr size_t WATCHDOG_EVENT_OFFSET = HEADER + USB_STATUS_SIZE;
+constexpr size_t CURRENT_HEADER = WATCHDOG_EVENT_OFFSET + USB_WATCHDOG_EVENT_SIZE;
 constexpr size_t CURRENT_PER_PAGE = 4;
 constexpr size_t MAX_KEYS = 36, MAX_PAGES = 9;
 constexpr size_t MAX_PAYLOAD = CURRENT_HEADER + TAG + CURRENT_PER_PAGE * ENTRY;
-static_assert(MAX_PAYLOAD == 179, "MGR3 must fit the legacy padded payload budget");
+static_assert(MAX_PAYLOAD == 179, "MGR2 must fit the legacy padded payload budget");
 constexpr uint32_t DAY = 86400, FLOOD_INTERVAL = 21 * DAY;
 enum Feature : uint8_t { WIFI = 1, GPS = 2, NTP = 4, USB = 8, OTA = 16 };
 enum Valid : uint16_t { FIRMWARE = 1, BOOTLOADER = 2, BASE = 4, STORE = 8,
@@ -103,13 +102,13 @@ bool seal(const uint8_t key[32], const uint8_t* aad, size_t aad_len,
 bool open(const uint8_t key[32], const uint8_t* aad, size_t aad_len,
           uint8_t* data, size_t len, const uint8_t tag[16]);
 bool equal(const uint8_t* a, const uint8_t* b, size_t size);
-inline bool currentPage(const uint8_t* p) { return !memcmp(p, "MGR3", 4); }
-inline bool usbPage(const uint8_t* p) { return currentPage(p) || !memcmp(p, "MGR2", 4); }
+inline bool currentPage(const uint8_t* p) { return !memcmp(p, "MGR2", 4); }
+inline bool usbPage(const uint8_t* p) { return currentPage(p); }
 inline size_t headerSize(const uint8_t* p) {
-  return currentPage(p) ? CURRENT_HEADER : usbPage(p) ? MGR2_HEADER : HEADER;
+  return currentPage(p) ? CURRENT_HEADER : HEADER;
 }
 inline size_t entriesPerPage(const uint8_t* p) {
-  return currentPage(p) ? CURRENT_PER_PAGE : usbPage(p) ? MGR2_PER_PAGE : PER_PAGE;
+  return currentPage(p) ? CURRENT_PER_PAGE : PER_PAGE;
 }
 inline size_t pageSize(const uint8_t* p) { return headerSize(p) + p[82] * ENTRY + TAG; }
 inline size_t floodSize(size_t canonical) { return 3 + ((canonical - 3 + 15) / 16) * 16; }
@@ -123,14 +122,13 @@ inline bool validPage(const uint8_t* p, size_t size, bool flood_padding = false)
   const uint32_t magic = read32(p);
   if ((magic & 0xffffffu) != 0x52474du) return false; // exact MGR prefix
   const unsigned version = (magic >> 24) - '1';
-  if (version > 2) return false;
-  const size_t minimum = version == 0 ? HEADER + TAG
-      : version == 1 ? MGR2_HEADER + TAG : CURRENT_HEADER + TAG;
-  const size_t per_page = PER_PAGE - version;
+  if (version > 1) return false;
+  const size_t minimum = (version ? CURRENT_HEADER : HEADER) + TAG;
+  const size_t per_page = version ? CURRENT_PER_PAGE : PER_PAGE;
   if (size < minimum) return false;
   // Reserved bits occupy the upper flag byte and upper two stage bits.
   if (version && (read16(p + HEADER + 1) & 0xc0f8u)) return false;
-  if (version == 2 && !validUsbWatchdogEvent(p + WATCHDOG_EVENT_OFFSET)) return false;
+  if (version && !validUsbWatchdogEvent(p + WATCHDOG_EVENT_OFFSET)) return false;
   const unsigned page = p[78], pages = p[79], total = p[80], first = p[81], count = p[82];
   const unsigned expected_pages = total ? (total + per_page - 1) / per_page : 1;
   if (total > MAX_KEYS || pages != expected_pages || page >= pages || first != page * per_page) return false;
@@ -147,7 +145,7 @@ inline bool validPage(const uint8_t* p, size_t size, bool flood_padding = false)
   return true;
 }
 
-// MGR2/MGR3 public USB snapshot. The AES-SIV AAD authenticates every byte.
+// MGR2 public USB snapshot. The AES-SIV AAD authenticates every byte.
 inline void encodeUsbStatus(uint8_t* p, const UsbLoggingStatus& status) {
   const uint16_t flags = (status.supported ? 1u : 0u) |
       (status.logging_enabled ? 2u : 0u) | (status.watchdog_enabled ? 4u : 0u) |

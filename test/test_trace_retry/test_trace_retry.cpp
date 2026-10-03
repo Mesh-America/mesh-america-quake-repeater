@@ -174,7 +174,7 @@ TEST(ManagementRouting, GroupDataForBothRoutesKeepsPublicHeaderAndLegacyLength) 
   uint8_t raw[mesh::management::CURRENT_HEADER + mesh::management::TAG] = {};
   const uint8_t path[] = {0x12, 0xab};
   uint8_t scope_key[16]; memset(scope_key, 0x42, sizeof(scope_key));
-  for (const char* magic : {"MGR1", "MGR2", "MGR3"}) {
+  for (const char* magic : {"MGR1", "MGR2"}) {
     memset(raw, 0, sizeof(raw));
     memcpy(raw, magic, 4); raw[79] = 1;
     const size_t size = mesh::management::headerSize(raw) + mesh::management::TAG;
@@ -194,7 +194,7 @@ TEST(ManagementRouting, GroupDataForBothRoutesKeepsPublicHeaderAndLegacyLength) 
 }
 
 TEST(ManagementRouting, FloodForwardingDoesNotNeedAKeyAndStillHonorsFilters) {
-  for (const char* magic : {"MGR1", "MGR2", "MGR3"}) {
+  for (const char* magic : {"MGR1", "MGR2"}) {
     TraceTestRadio radio; TraceTestClock clock; TraceTestRNG rng; TraceTestRTC rtc;
     TraceTestTables tables; StaticPoolPacketManager pool(8);
     TraceTestMesh mesh(radio, clock, rng, rtc, pool, tables);
@@ -213,6 +213,31 @@ TEST(ManagementRouting, FloodForwardingDoesNotNeedAKeyAndStillHonorsFilters) {
     EXPECT_FALSE(mesh.groupPacketObserved); // never delivered as decrypted channel data
     mesh.rejectFloods = true;
     EXPECT_EQ(ACTION_RELEASE, mesh.receivePacket(&p));
+  }
+}
+
+TEST(ManagementRouting, RetiredPrototypeLayoutsCannotBeSentAndReleaseTheirPacket) {
+  TraceTestRadio radio; TraceTestClock clock; TraceTestRNG rng; TraceTestRTC rtc;
+  TraceTestTables tables; StaticPoolPacketManager pool(8);
+  TraceTestMesh mesh(radio, clock, rng, rtc, pool, tables);
+  uint8_t scope_key[16]; memset(scope_key, 0x42, sizeof(scope_key));
+  const uint8_t path[] = {0x12};
+  for (unsigned layout = 0; layout < 3; ++layout) {
+    uint8_t raw[mesh::management::MAX_PAYLOAD] = {};
+    memcpy(raw, layout == 0 ? "MGR3" : "MGR2", 4); raw[79] = 1;
+    size_t size = layout == 0 ? mesh::management::CURRENT_HEADER + mesh::management::TAG
+                            : 98 + mesh::management::TAG;
+    if (layout == 2) {
+      raw[80] = raw[82] = 5;
+      size += 5 * mesh::management::ENTRY;
+    }
+    for (bool flood : {false, true}) {
+      auto* packet = mesh.createRawData(raw, size); ASSERT_NE(nullptr, packet);
+      EXPECT_FALSE(mesh.sendManagementData(packet, flood, path, 1, 1,
+                                           flood ? scope_key : nullptr));
+      EXPECT_EQ(0, pool.getOutboundTotal());
+      EXPECT_EQ(8, pool.getFreeCount());
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 # Management report decoder
 
-Paste MGR1, MGR2, or MGR3 management-report payloads or complete GroupData packets from a
+Paste MGR1 or MGR2 management-report payloads or complete GroupData packets from a
 packet analyzer to read a radio's public management information. Everything,
 including password authentication and ACL decryption, happens locally in this
 browser. The report, password, and candidate public key are never uploaded.
@@ -13,13 +13,13 @@ by someone who does not know that password.
 ## Decode a management report
 
 <div class="management-tool" data-management-decoder>
-  <label for="management-packet-input">MGR1/MGR2/MGR3 payload or complete GroupData packet hex</label>
+  <label for="management-packet-input">MGR1/MGR2 payload or complete GroupData packet hex</label>
   <textarea
     id="management-packet-input"
     data-role="input"
     spellcheck="false"
     autocomplete="off"
-    placeholder="Paste analyzer Raw Data, canonical MGR1/MGR2/MGR3 payload hex, or one MQTT raw value per line"
+    placeholder="Paste analyzer Raw Data, canonical MGR1/MGR2 payload hex, or one MQTT raw value per line"
     aria-describedby="management-packet-help"
   ></textarea>
   <p class="management-help" id="management-packet-help">
@@ -69,8 +69,7 @@ by someone who does not know that password.
 - Complete `PAYLOAD_TYPE_GRP_DATA` (`0x06`) analyzer/MQTT packet hex. It checks
   the MeshCore route header, encoded path length, version-specific page bounds, and required
   zero padding.
-- A canonical payload beginning with `4D475231` (`MGR1`), `4D475232` (`MGR2`),
-  or `4D475233` (`MGR3`).
+- A canonical payload beginning with `4D475231` (`MGR1`) or `4D475232` (`MGR2`).
 - One raw packet or canonical payload per line; duplicate observations of an
   identical page are deduplicated.
 
@@ -79,22 +78,26 @@ the report-specific fingerprints and the administrator and/or OTA-signer flags.
 It cannot turn a fingerprint back into a full key. Use the optional candidate
 field to test a specific full public key.
 
-MGR2 and MGR3 also show USB logging, host/reader connection, logger-client activity, stalled/recovering/deferred
+MGR2 also shows USB logging, host/reader connection, logger-client activity, stalled/recovering/deferred
 state, recovery stage, saved backoff, retry interval/inactive seconds, Auto qualification
 seconds, and persistence
 readiness. Unsupported observation is shown explicitly; legacy MGR1 has no
 USB block and shows it as unavailable. These values are the report-start
 snapshot, not proof that a Pi or host application is healthy. Older decoder
-copies require an update for MGR3.
+copies require an update for MGR2.
 
-MGR3 additionally shows the latest USB watchdog action, reason mask and names,
+MGR2 also shows the latest USB watchdog action, reason mask and names,
 advisory node-clock timestamp, recorded-boot uptime seconds, event sequence,
 and whether the record was durably saved. Software recovery and re-enumeration
 mean attempted actions, not successful repairs. A reboot request is not proof
 that a reboot completed; a later cancellation can replace it. The node clock
 can be wrong, even when it resembles a valid date. Event uptime and sequence
-remain useful for ordering. MGR1/MGR2 do not carry this event field and show it
-as unavailable. All 36 ACL entries still fit, using up to nine MGR3 pages.
+remain useful for ordering. MGR1 does not carry this event field and shows it
+as unavailable. All 36 ACL entries still fit, using up to nine MGR2 pages.
+
+The earlier USB-only MGR2 development layout was never released. This decoder
+accepts the finalized MGR2 format with its 111-byte public header and latest
+watchdog event.
 
 Reports contain a frozen latest-event snapshot, not immediate watchdog alerts
 or a complete event history. See [USB logging watchdog](usb_logging_watchdog.md)
