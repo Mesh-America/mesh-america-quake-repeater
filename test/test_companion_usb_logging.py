@@ -51,17 +51,19 @@ int main(){
  strcpy(node._prefs.node_name,"durable node");node._prefs.freq=910.525f;
  node._prefs.ble_pin=876543;node._prefs.bluetooth_enabled=0;
  node._prefs.one_key_dm_enabled=1;node._prefs.usb_logging_enabled=1;
+ node._prefs.gps_sync_interval_hours=257;
  assert(node.savePrefs());
  const auto original=node.store.fs.files["/new_prefs"];
 #if defined(TBEAM_1W)
- assert(original.size()==240);
+ assert(original.size()==242);
 #elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
- assert(original.size()==330);
+ assert(original.size()==332);
 #else
- assert(original.size()==233);
+ assert(original.size()==235);
 #endif
- assert(original.back()==0&&original[original.size()-2]==0);
- assert(original[original.size()-3]==1&&original[158]==1);
+ assert(original.back()==0&&original[original.size()-4]==0);
+ assert(original[original.size()-3]==1&&original[original.size()-2]==1);
+ assert(original[original.size()-5]==1&&original[158]==1);
  char reply[160]={};
  for(const char* malformed : {"set usb.debug","set usb.debug ",
      "set usb.debug 1","set usb.debug ON","set usb.debug on ",
@@ -114,6 +116,7 @@ int main(){
    double lat=0,lon=0;assert(reboot.loadPrefs(loaded,lat,lon));
    assert(loaded.usb_debug_enabled==enabled&&loaded.bluetooth_enabled==0);
    assert(loaded.one_key_dm_enabled==1&&loaded.usb_logging_enabled==1);
+   assert(loaded.gps_sync_interval_hours==257);
    assert(loaded.ble_pin==876543&&loaded.freq==910.525f);
  }
  // Existing complete tails retain their established offsets and always start

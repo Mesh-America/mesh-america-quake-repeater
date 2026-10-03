@@ -1002,6 +1002,7 @@ bool DataStore::loadPrefsInt(const char *filename,
     // Files written before this tail existed always started Bluetooth at boot.
     // Do not inherit a runtime off value when loading one of those images.
     loaded_prefs.bluetooth_enabled = 1;
+    loaded_prefs.gps_sync_interval_hours = 0;
     // Older images have no independent debug preference. Never inherit a
     // runtime-on value when loading one of those images.
     loaded_prefs.usb_debug_enabled = 0;
@@ -1012,7 +1013,7 @@ bool DataStore::loadPrefsInt(const char *filename,
     // actually emitted by those releases, but reject a truncated field/group
     // or an unknown tail before any value reaches the live preferences.
     static const uint32_t MIN_PREFS_SIZE = 84;
-    static const uint32_t KNOWN_PREFS_SIZES[] = {
+    static const uint16_t KNOWN_PREFS_SIZES[] = {
         84, 85, 90, 91, 92, 93, 140, 141, 142, 143, 144, 155,
         156, 157, 158, 159,
         159 + sizeof(loaded_prefs.bluetooth_name),
@@ -1061,11 +1062,18 @@ bool DataStore::loadPrefsInt(const char *filename,
         232,
 #endif
 #ifdef TBEAM_1W
-        240,  // Independent USB debug preference, after the existing tail
+        241,  // GPS time-sync cadence in hours, appended after Bluetooth enable
 #elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
-        330,
+        331,
 #else
-        233,
+        234,
+#endif
+#ifdef TBEAM_1W
+        242,  // Independent USB debug preference, after the published GPS tail
+#elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        332,
+#else
+        235,
 #endif
     };
     const uint32_t prefs_size = file.size();
@@ -1210,6 +1218,8 @@ bool DataStore::loadPrefsInt(const char *filename,
                       sizeof(loaded_prefs.one_key_dm_enabled));
     readOptionalField(&loaded_prefs.bluetooth_enabled,
                       sizeof(loaded_prefs.bluetooth_enabled));
+    readOptionalField(&loaded_prefs.gps_sync_interval_hours,
+                      sizeof(loaded_prefs.gps_sync_interval_hours));
     readOptionalField(&loaded_prefs.usb_debug_enabled,
                       sizeof(loaded_prefs.usb_debug_enabled));
 
@@ -1364,20 +1374,16 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
     success = success && file.write((uint8_t *)_prefs.wifi_pwd,
         sizeof(_prefs.wifi_pwd)) == sizeof(_prefs.wifi_pwd);
 #endif
-    success = success && file.write((uint8_t *)&_prefs.flood_retry_attempts,
-        sizeof(_prefs.flood_retry_attempts)) == sizeof(_prefs.flood_retry_attempts);
-    success = success && file.write((uint8_t *)&_prefs.flood_retry_max_path,
-        sizeof(_prefs.flood_retry_max_path)) == sizeof(_prefs.flood_retry_max_path);
-    success = success && file.write((uint8_t *)&_prefs.flood_retry_group_max_path,
-        sizeof(_prefs.flood_retry_group_max_path)) == sizeof(_prefs.flood_retry_group_max_path);
-    success = success && file.write((uint8_t *)&_prefs.flood_retry_advert_enabled,
-        sizeof(_prefs.flood_retry_advert_enabled)) == sizeof(_prefs.flood_retry_advert_enabled);
-    success = success && file.write((uint8_t *)&_prefs.one_key_dm_enabled,
-        sizeof(_prefs.one_key_dm_enabled)) == sizeof(_prefs.one_key_dm_enabled);
-    success = success && file.write((uint8_t *)&_prefs.bluetooth_enabled,
-        sizeof(_prefs.bluetooth_enabled)) == sizeof(_prefs.bluetooth_enabled);
-    success = success && file.write((uint8_t *)&_prefs.usb_debug_enabled,
-        sizeof(_prefs.usb_debug_enabled)) == sizeof(_prefs.usb_debug_enabled);
+    // Pack only the explicit persisted tail, never the class's padded layout.
+    // memcpy retains the GPS field's established native byte representation.
+    uint8_t tail[9] = {
+        _prefs.flood_retry_attempts, _prefs.flood_retry_max_path,
+        _prefs.flood_retry_group_max_path, _prefs.flood_retry_advert_enabled,
+        _prefs.one_key_dm_enabled, _prefs.bluetooth_enabled, 0, 0,
+        _prefs.usb_debug_enabled};
+    memcpy(tail + 6, &_prefs.gps_sync_interval_hours,
+        sizeof(_prefs.gps_sync_interval_hours));
+    success = success && file.write(tail, sizeof(tail)) == sizeof(tail);
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
     success = file.commit(success);

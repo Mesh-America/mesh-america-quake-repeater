@@ -27,7 +27,7 @@ bool radio_init() {
 
 void NanoG2UltraSensorManager::armGpsPowerSavingCycle() {
   if (!powersaving_enabled || !_location->getGPSPowerSaving()) return;
-  _location->syncTime();
+  _location->syncTimeForPowerSavingCycle();
   _location->setNextGPSOn(0);
   _location->setNextSleep();
 }

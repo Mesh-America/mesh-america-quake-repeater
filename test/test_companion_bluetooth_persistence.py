@@ -32,13 +32,14 @@ int main(){
  assert(mesh.savePrefs());
  const auto on_disk=mesh.store.fs.files["/new_prefs"];
 #if defined(TBEAM_1W)
- assert(on_disk.size()==240);
+ assert(on_disk.size()==242);
 #elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
- assert(on_disk.size()==330);
+ assert(on_disk.size()==332);
 #else
- assert(on_disk.size()==233);
+ assert(on_disk.size()==235);
 #endif
- assert(on_disk[on_disk.size()-2]==1&&on_disk.back()==0);
+ const size_t bluetooth_offset=on_disk.size()-4;
+ assert(on_disk[bluetooth_offset]==1&&on_disk.back()==0);
  // Both choices survive a fresh instance reading the actual on-device image.
  for(bool enabled : {false,true,false}){
    assert(mesh.setBluetoothEnabledPreference(enabled));
@@ -50,7 +51,7 @@ int main(){
    assert(prefs.bluetooth_stealth_mode==2&&prefs.one_key_dm_enabled==1);
    assert(prefs.wifi_enabled==0&&prefs.usb_logging_enabled==1);
    const auto& saved=reboot.fs.files["/new_prefs"];
-   assert(saved[saved.size()-2]==enabled&&saved.back()==0);
+   assert(saved[bluetooth_offset]==enabled&&saved.back()==0);
  }
  const auto off_disk=mesh.store.fs.files["/new_prefs"];
  // The public setter must roll live state back when the atomic save fails.
@@ -70,7 +71,7 @@ int main(){
  assert(mesh.isBluetoothEnabledPreference());
  mesh.store.fs.fail_write=false;
  // Legacy images cannot accidentally inherit an off value from the caller.
- for(unsigned size : {84u,156u,215u,226u,unsigned(on_disk.size()-2)}){
+ for(unsigned size : {84u,156u,215u,226u,unsigned(bluetooth_offset)}){
    DataStore legacy;legacy.fs.files["/new_prefs"]=on_disk;
    legacy.fs.files["/new_prefs"].resize(size);
    CompanionNodePrefs prefs;prefs.bluetooth_enabled=0;
@@ -81,8 +82,7 @@ int main(){
  // Invalid new encoding rejects the transaction rather than partially loading.
  for(uint8_t corrupt : {2,255}){
    DataStore damaged;damaged.fs.files["/new_prefs"]=off_disk;
-   auto& damaged_disk=damaged.fs.files["/new_prefs"];
-   damaged_disk[damaged_disk.size()-2]=corrupt;
+   damaged.fs.files["/new_prefs"][bluetooth_offset]=corrupt;
    CompanionNodePrefs prefs;prefs.bluetooth_enabled=1;
    strcpy(prefs.node_name,"unchanged");double lat=1,lon=2;
    assert(!damaged.loadPrefsInt("/new_prefs",prefs,lat,lon));

@@ -19,6 +19,7 @@ HARNESS = r'''
 #define ATOMIC_FILE_WRITER_IMPLEMENTATION
 #include <helpers/AtomicFileWriter.h>
 #include <helpers/PrefsSaveRouting.h>
+#include <helpers/GpsPowerPolicy.h>
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 #define MIN_LORA_TX_POWER -9
 #define MAX_LORA_TX_POWER 22
@@ -57,6 +58,7 @@ struct CommonCLI {
     prefs.freq=910; prefs.bw=62.5f; prefs.sf=7; prefs.cr=5;
     prefs.tx_power_dbm=30; prefs.primary_radio_preamble=48;
     prefs.espnow_bridge_enabled=1;
+    prefs.gps_sync_interval_hours=336;
     prefs.rx_ps_rx_us=111; prefs.rx_ps_sleep_us=222;
   }
   void savePrefs(FILESYSTEM*,PrefsSaveRouting::Scope);
@@ -84,9 +86,11 @@ int main() {
   auto original=cli.fs.files["/com_prefs"];
   // Appending preferences must not move the established preamble bytes.
   const size_t preamble_offset=866;
-  assert(original.size() >= preamble_offset+2);
+  assert(original.size()==873);
   assert(original[preamble_offset]==48 && original[preamble_offset+1]==0);
   assert(original[preamble_offset+2]==1);
+  assert(original[preamble_offset+3]==0x50 && original[preamble_offset+4]==0x01);
+  assert(original[871]==0 && original[872]==0); // debug and trace remain appended
   Capture capture; assert(writeCommonPrefsImage(capture,&cli.prefs));
   assert(capture.bytes==original); // Both serializers retain the same layout.
   for (int fault : {0,1,2,3,4}) {
@@ -114,6 +118,8 @@ int main() {
   assert(freq==920 && bw==125 && committed[112]==9 && committed[113]==6);
   assert(committed[preamble_offset]==96 && committed[preamble_offset+1]==0);
   assert(committed[preamble_offset+2]==1);
+  assert(committed[preamble_offset+3]==0x50 && committed[preamble_offset+4]==0x01);
+  assert(committed[871]==0 && committed[872]==0);
   assert(cli._radio_profiles.saved==96 && cli.prefs.tx_power_dbm==22);
   assert(cli.prefs.rx_ps_rx_us==900 && cli.prefs.rx_ps_sleep_us==1200);
   // Old and torn tails preserve the imported legacy preamble; valid tails win.
@@ -123,6 +129,8 @@ int main() {
   assert(cli.loadTail({0,7,0})==64);
   assert(cli.loadTail({0,0,0})==0);
   assert(cli.loadTail({0,64,0,0})==64 && cli.prefs.espnow_bridge_enabled==0);
+  assert(cli.loadTail({0,64,0,1,48,0})==64 && cli.prefs.gps_sync_interval_hours==48);
+  assert(cli.loadTail({0,64,0,1,0xff})==64 && cli.prefs.gps_sync_interval_hours==48);
   for(float bad : {NAN,INFINITY,149.0f,2501.0f})
     assert(!cli.savePrimaryRadioParams(bad,125,9,6,0));
   assert(cli.fs.files["/com_prefs"]==committed);

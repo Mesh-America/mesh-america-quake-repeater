@@ -1712,6 +1712,20 @@ void MyMesh::cancelPendingSerialOutput() {
 
 void MyMesh::servicePendingSerialOutput() {
   Stream& console = mesh::usbConsolePort();
+  const auto write_pending = [&]() {
+    const int available = console.availableForWrite();
+    if (available <= 0 || serial_log_pending_size == 0) return;
+    // Retain a larger stored line across low-memory 256/512-byte HWCDC rings.
+    const size_t attempt = serial_log_pending_size < static_cast<size_t>(available)
+        ? serial_log_pending_size : static_cast<size_t>(available);
+    size_t written = console.write(
+        reinterpret_cast<const uint8_t*>(serial_log_pending), attempt);
+    if (written > attempt) written = attempt;
+    serial_log_pending_size -= written;
+    if (written > 0 && serial_log_pending_size > 0) {
+      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
+    }
+  };
   if (serial_acl_next >= 0) {
     if (serial_log_pending_size == 0) {
       if (serial_acl_header) {
@@ -1738,24 +1752,19 @@ void MyMesh::servicePendingSerialOutput() {
         }
       }
     }
-    if (console.availableForWrite() < static_cast<int>(serial_log_pending_size)) return;
-    size_t written = console.write(
-        reinterpret_cast<const uint8_t*>(serial_log_pending), serial_log_pending_size);
-    if (written > serial_log_pending_size) written = serial_log_pending_size;
-    serial_log_pending_size -= written;
-    if (written > 0 && serial_log_pending_size > 0) {
-      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
-    }
+    write_pending();
     return;
   }
   if (!serial_log_active) {
     // CommonCLI's synchronous EOF is suppressed until the queued dump ends.
     static const char eof[] = "  ->    EOF\r\n";
-    if (serial_log_eof_pending
-        && console.availableForWrite() >= static_cast<int>(sizeof(eof) - 1)
-        && console.write(reinterpret_cast<const uint8_t*>(eof), sizeof(eof) - 1)
-            == sizeof(eof) - 1) {
-      serial_log_eof_pending = false;
+    if (serial_log_eof_pending) {
+      if (serial_log_pending_size == 0) {
+        memcpy(serial_log_pending, eof, sizeof(eof) - 1);
+        serial_log_pending_size = sizeof(eof) - 1;
+      }
+      write_pending();
+      if (serial_log_pending_size == 0) serial_log_eof_pending = false;
     }
     return;
   }
@@ -1807,16 +1816,7 @@ void MyMesh::servicePendingSerialOutput() {
       serial_log_pending[serial_log_pending_size++] = '\n';
     }
   }
-  if (serial_log_pending_size > 0
-      && console.availableForWrite() >= static_cast<int>(serial_log_pending_size)) {
-    size_t written = console.write(
-        reinterpret_cast<const uint8_t*>(serial_log_pending), serial_log_pending_size);
-    if (written > serial_log_pending_size) written = serial_log_pending_size;
-    serial_log_pending_size -= written;
-    if (written > 0 && serial_log_pending_size > 0) {
-      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
-    }
-  }
+  write_pending();
   if (serial_log_remaining == 0 && serial_log_pending_size == 0) {
     serial_log_dump.close();
     serial_log_active = false;

@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <helpers/UsbLogging.h>
 
 #include "TouchTapDetector.h"
@@ -37,18 +39,23 @@ public:
   #endif
 
     if (_present) {
-      if (mesh::isUsbDebugLoggingEnabled())
-        mesh::usbDebugPort().printf("Touch: CHSC6X found at 0x%02X\n", CHSC6X_I2C_ADDR);
+      logDiagnostic("Touch: CHSC6X found at 0x%02X\n", CHSC6X_I2C_ADDR);
     } else if (mesh::isUsbDebugLoggingEnabled()) {
       // Report what is actually on the bus, so an unexpected controller or
       // address can be identified from a normal boot log.
-      mesh::usbDebugPort().printf("Touch: idle or absent at 0x%02X; I2C bus currently answers:",
-                    CHSC6X_I2C_ADDR);
+      char record[640];
+      size_t length = snprintf(record, sizeof(record),
+          "Touch: idle or absent at 0x%02X; I2C bus currently answers:",
+          CHSC6X_I2C_ADDR);
       for (uint8_t addr = 8; addr < 0x78; addr++) {
         _wire->beginTransmission(addr);
-        if (_wire->endTransmission() == 0) mesh::usbDebugPort().printf(" 0x%02X", addr);
+        if (_wire->endTransmission() == 0 && length + 6 < sizeof(record)) {
+          length += snprintf(record + length, sizeof(record) - length,
+                             " 0x%02X", addr);
+        }
       }
-      mesh::usbDebugPort().println();
+      record[length++] = '\n';
+      writeDiagnostic(record, length);
     }
     return _present;
   }
@@ -60,12 +67,31 @@ public:
     bool pressed = readPressed();
     if (pressed && !_present) {
       _present = true;   // answered late; the boot probe caught it mid-idle
-      mesh::usbDebugPort().println("Touch: CHSC6X responding");
+      logDiagnostic("Touch: CHSC6X responding\n");
     }
     return _detector.update(now_ms, pressed);
   }
 
 private:
+  static void writeDiagnostic(const char* data, size_t length) {
+    if (!mesh::isUsbDebugLoggingEnabled()) return;
+    Stream& output = mesh::usbLoggingPort();
+    if (output.availableForWrite() < static_cast<int>(length)) return;
+    output.write(reinterpret_cast<const uint8_t*>(data), length);
+  }
+
+  static void logDiagnostic(const char* format, ...) {
+    if (!mesh::isUsbDebugLoggingEnabled()) return;
+    char record[128];
+    va_list args;
+    va_start(args, format);
+    const int length = vsnprintf(record, sizeof(record), format, args);
+    va_end(args);
+    if (length > 0 && static_cast<size_t>(length) < sizeof(record)) {
+      writeDiagnostic(record, static_cast<size_t>(length));
+    }
+  }
+
   TwoWire* _wire = NULL;
   bool _present = false;
   TouchTapDetector _detector;
@@ -113,15 +139,17 @@ private:
     _logged = key;
 
     if (!buf) {
-      mesh::usbDebugPort().printf("Touch: short read (%u of %u bytes)\n", got, CHSC6X_READ_LEN);
+      logDiagnostic("Touch: short read (%u of %u bytes)\n", got, CHSC6X_READ_LEN);
       return;
     }
-    mesh::usbDebugPort().printf("Touch: raw %02X %02X %02X %02X %02X", buf[0], buf[1], buf[2], buf[3], buf[4]);
   #ifdef PIN_TOUCH_INT
     // Pulled up, so an unfitted R13 sits steady HIGH and a wired INT pulses LOW.
-    mesh::usbDebugPort().printf("  INT=%d", digitalRead(PIN_TOUCH_INT));
+    logDiagnostic("Touch: raw %02X %02X %02X %02X %02X  INT=%d\n",
+                  buf[0], buf[1], buf[2], buf[3], buf[4], digitalRead(PIN_TOUCH_INT));
+  #else
+    logDiagnostic("Touch: raw %02X %02X %02X %02X %02X\n",
+                  buf[0], buf[1], buf[2], buf[3], buf[4]);
   #endif
-    mesh::usbDebugPort().println();
   }
 #else
   void logRaw(uint8_t, const uint8_t*) {}

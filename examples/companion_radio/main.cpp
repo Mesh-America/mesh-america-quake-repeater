@@ -628,6 +628,12 @@ static bool usb_host_session_connected = false;
 static bool usb_logging_terminal_mode = false;
 static bool usb_logging_network_parked = false;
 static bool usb_protocol_initialized = false;
+#if MESH_USB_LOGGING_AVAILABLE
+static bool usb_logging_reply_hold = false;
+static bool usb_logging_reply_staged = false;
+static bool usb_logging_reply_pending = false;
+static bool usb_logging_reply_state = false;
+#endif
 static mesh::UsbBinaryStartupProbe usb_binary_startup_probe;
 static mesh::UsbAsciiSessionDefault usb_ascii_session_default;
 #if COMPANION_FEATURE_USB_MOTA_SOURCE
@@ -741,6 +747,10 @@ static bool hasObservableActiveUsbTerminalClient() {
 }
 
 static void cancelUsbSerialOperations() {
+#if MESH_USB_LOGGING_AVAILABLE
+  // A cancelled reply must not enable diagnostics for the next USB host.
+  usb_logging_reply_pending = false;
+#endif
   // Contact enumeration uses the manager's pinned streaming route; delayed
   // single replies capture their own route inside MyMesh. Cancel only USB's
   // ownership so a simultaneous BLE/WiFi operation keeps running.
@@ -1236,11 +1246,67 @@ static void serviceUsbLoggingOwnership(bool logging_enabled) {
 }
 
 void MyMesh::applyUsbLoggingState(bool enabled) {
+#if MESH_USB_LOGGING_AVAILABLE
+  if (usb_logging_reply_hold) {
+    usb_logging_reply_staged = true;
+    usb_logging_reply_state = enabled;
+    return;
+  }
+  // A newer explicit setting (including one from BLE/WiFi) wins over an
+  // earlier USB command whose acknowledgement is still backpressured.
+  usb_logging_reply_pending = false;
+#endif
   // Park the framed transport before opening the diagnostic gate, including
   // TCP/browser commands which execute outside the mesh dispatcher.
   if (enabled && usb_protocol_initialized) serviceUsbLoggingOwnership(true);
   mesh::setUsbLoggingEnabled(enabled);
   if (usb_protocol_initialized) serviceUsbLoggingOwnership(enabled);
+}
+
+void MyMesh::beginUsbLoggingReplyBarrier(BaseSerialInterface* route) {
+#if MESH_USB_LOGGING_AVAILABLE
+  usb_logging_reply_hold = usb_protocol_initialized
+      && route == &usb_serial_interface
+      && !mesh::hasDedicatedUsbLoggingPort()
+      && !usb_serial_interface.isPassthroughMode();
+  usb_logging_reply_staged = false;
+#else
+  (void)route;
+#endif
+}
+
+void MyMesh::endUsbLoggingReplyBarrier(bool reply_queued) {
+#if MESH_USB_LOGGING_AVAILABLE
+  usb_logging_reply_hold = false;
+  if (usb_logging_reply_staged) {
+    // No response fallback: a full queue leaves logging unchanged for this
+    // boot. Its saved preference can still take effect at the next boot.
+    usb_logging_reply_pending = reply_queued;
+    usb_logging_reply_staged = false;
+  }
+#else
+  (void)reply_queued;
+#endif
+}
+
+static void serviceUsbLoggingReplyBarrier() {
+#if MESH_USB_LOGGING_AVAILABLE
+  if (!usb_logging_reply_pending) return;
+  if (!usb_serial_interface.isConnected()
+      || usb_serial_interface.isPassthroughMode()) {
+    usb_logging_reply_pending = false;
+    return;
+  }
+  // One nonblocking transport pass. Never wait on an unread USB host or
+  // include RX parser work in this check: a partial next command cannot hold
+  // the already queued acknowledgement. Once the complete frame is admitted,
+  // the ordered native FIFO sends it before any new terminal/log bytes.
+  usb_serial_interface.loop();
+  if (usb_serial_interface.isWriteBusy()) return;
+  const bool enabled = usb_logging_reply_state;
+  usb_logging_reply_pending = false;
+  the_mesh.applyUsbLoggingState(enabled);
+#endif
 }
 
 static void expireUsbBinaryStartupProbeBeforeDispatch() {
@@ -1263,6 +1329,9 @@ static void expireUsbBinaryStartupProbeBeforeDispatch() {
 void MyMesh::applyUsbLoggingState(bool enabled) {
   mesh::setUsbLoggingEnabled(enabled);
 }
+
+void MyMesh::beginUsbLoggingReplyBarrier(BaseSerialInterface*) {}
+void MyMesh::endUsbLoggingReplyBarrier(bool) {}
 #endif
 
 #if defined(ENABLE_USB_INTERFACE) && (COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG))
@@ -3403,6 +3472,7 @@ void loop() {
 #if defined(ENABLE_USB_INTERFACE)
   serviceUsbTerminalHostSessionReset();
   serviceUsbAsciiSessionDefault();
+  serviceUsbLoggingReplyBarrier();
   serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled()); // Before framed dispatch.
 #endif
   // Identify nRF52 CDC 1 when a terminal opens it. Doing this on the connection

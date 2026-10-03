@@ -223,6 +223,27 @@ int main() {
       drain(radio);
       require(console.output.empty(), "canceled old-session output leaked");
     }
+    // The real HWCDC setup falls back to these ring sizes after allocation
+    // failure. A stored row larger than the ring must finish without omission.
+    for (size_t capacity : {256u, 512u}) {
+      const std::string stored = std::string(639, 's') + "\nnext\n";
+      setupFile(stored);
+      MyMesh radio;
+      radio.dumpLogFile();
+      console.capacity = 0;
+      radio.servicePendingSerialOutput();
+      require(console.output.empty(), "fallback dump wrote to a stalled host");
+      drain(radio, capacity);
+      require(console.output == stored + eof, "small TX ring wedged or truncated a stored line");
+    }
+    setupFile("short\n");
+    {
+      MyMesh radio;
+      radio.dumpLogFile();
+      console.short_limit = 3;
+      drain(radio, 7);
+      require(console.output == "short\n" + eof, "short-write EOF was duplicated or truncated");
+    }
     setupFile("");
     {
       MyMesh radio;
@@ -306,6 +327,47 @@ int main() {
 '''
 
 RECENT_TEST = r'''
+    setupFile("");
+    {
+      MyMesh radio;
+      radio.tables.rows.push_back({{0, 0, 1}, 3, -127});
+      radio.tables.rows.push_back({{0, 0, 2}, 3, -127});
+      console.short_limit = 3;
+      radio.printRecentRepeatersSerial();
+      require(radio.serial_recent_header, "partial header advanced cursor");
+      drain(radio, 7);
+      require(console.output == "Recent repeaters (2):\n000001,-31.75\n000002,-31.75\n",
+          "short-write recent listing duplicated or lost a prefix");
+    }
+    setupFile("");
+    {
+      MyMesh radio;
+      radio.tables.rows.push_back({{0, 0, 1}, 3, -127});
+      radio.printRecentRepeatersSerial();
+      console.short_limit = 3;
+      radio.servicePendingSerialOutput();
+      require(radio.serial_log_pending_size > 0, "partial recent row was not retained");
+      radio.tables.rows[0] = {{0, 0, 9}, 3, 0};
+      console.short_limit = 0;
+      drain(radio, 64);
+      require(console.output == "Recent repeaters (1):\n000001,-31.75\n",
+          "live table update changed a partially emitted recent row");
+    }
+    setupFile("");
+    {
+      MyMesh radio;
+      radio.tables.rows.push_back({{0, 0, 1}, 3, -127});
+      console.short_limit = 3;
+      radio.printRecentRepeatersSerial();
+      radio.cancelPendingSerialOutput();
+      console.output.clear();
+      console.short_limit = 0;
+      radio.tables.rows.clear();
+      radio.printRecentRepeatersSerial();
+      drain(radio, 64);
+      require(console.output == "Recent repeaters (0):\n-none-\r\n",
+          "canceled recent suffix leaked into the next session");
+    }
     setupFile("");
     {
       MyMesh radio;

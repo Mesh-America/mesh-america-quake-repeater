@@ -2422,7 +2422,8 @@ a trace already on air is allowed to finish. Locally initiated traffic and
 management replies are not cancelled.
 
 The dynamic configuration field is `repeat.trace_off` (`0` or `1`). It is
-appended to `/com_prefs`; all previously saved field offsets stay unchanged.
+appended to `/com_prefs`; all field offsets in the published upstream layout
+stay unchanged.
 
 ---
 
@@ -4561,6 +4562,43 @@ On repeaters with device power saving enabled, the automatic GPS cycle wakes
 for up to 10 minutes and repeats seven days after GPS sleeps. A valid GPS time
 can correct the RTC either forward or backward. With device power saving off,
 an enabled GPS refreshes the RTC every 30 minutes.
+These are the legacy defaults; `gps.sync.interval` below overrides them.
+
+---
+
+#### Set the automatic GPS clock-sync interval
+
+```text
+get gps.sync.interval
+set gps.sync.interval 1
+set gps.sync.interval 24
+set gps.sync.interval 336
+```
+
+The interval is a whole number of **hours**, from **1 to 336** (two weeks).
+Larger numbers are capped, not rejected. For example:
+
+```text
+set gps.sync.interval 999
+OK - GPS sync interval 336 hours (saved)
+```
+
+Zero, negative numbers, fractional hours, and nonnumeric values are rejected.
+The setting is saved across reboots and supported by GPS-equipped repeater,
+room-server, sensor, and Companion builds. Until it is explicitly configured,
+the getter reports `default (board GPS sync policy)` and existing board timings
+are retained.
+
+The selected interval controls periodic clock acquisitions both with GPS power
+saving and with a continuously powered receiver. Changing it reschedules a
+sleeping receiver without immediately powering it on. A GPS fix can take time;
+an unsuccessful acquisition retains the existing bounded awake window, then
+backs off before trying again. Device GPS/power switches still apply.
+
+This does not change position-update `gps_interval`, location telemetry/cache
+timings, or mesh/NTP time synchronization. Location requests can still power GPS
+for a fix, but do not bypass the configured clock-sync interval. Explicit
+`gps sync` remains an immediate acquisition request where that command exists.
 
 ---
 

@@ -208,6 +208,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Retry | [`get/set/clear recent.repeater`; `get recent.repeaters`](cli_commands.md#view-seed-or-clear-the-recent-repeater-table) | Repeater | Yes | Yes | Yes |
 | GPS | [`get gps`; `set gps on/off`](cli_commands.md#view-or-change-gps-state) | Compiled GPS | Feature | Feature | Feature |
 | GPS | [`gps sync`](cli_commands.md#sync-this-nodes-clock-with-gps-time) | Compiled GPS | Feature | Feature | Feature |
+| GPS | [`get/set gps.sync.interval`](cli_commands.md#set-the-automatic-gps-clock-sync-interval) | Compiled GPS and provider; 1-336 hours | Feature | Feature | Feature |
 | GPS | [`gps setloc`](cli_commands.md#set-this-nodes-location-based-on-the-gps-coordinates) | Compiled GPS | Feature | Feature | Feature |
 | GPS | [`gps advert [none/share/prefs]`](cli_commands.md#view-or-change-the-gps-advert-policy) | Compiled GPS | Feature | Feature | Feature |
 | Sensors | [`get/set telemetry.access`](cli_commands.md#view-or-change-telemetry-access-mode) | Sensor-capable role | Feature | Feature | Limited |
@@ -382,6 +383,7 @@ should use command `0x42`. See [Companion radio binary protocol](companion_proto
 | Retry | [`get/set/clear recent.repeater`; `get recent.repeaters`](cli_commands.md#view-seed-or-clear-the-recent-repeater-table) | Repeater | Yes | Yes | Yes | Yes | Yes |
 | GPS | [`get gps`; `set gps on/off`](cli_commands.md#view-or-change-gps-state) | Compiled onboard GPS | Feature | Feature | Feature | Feature | Feature |
 | GPS | [`gps sync`](cli_commands.md#sync-this-nodes-clock-with-gps-time) | Compiled onboard GPS | Feature | Feature | Feature | Feature | Feature |
+| GPS | [`get/set gps.sync.interval`](cli_commands.md#set-the-automatic-gps-clock-sync-interval) | Compiled GPS and provider; 1-336 hours | Feature | Feature | Feature | Feature | Feature |
 | GPS | [`gps setloc`](cli_commands.md#set-this-nodes-location-based-on-the-gps-coordinates) | Compiled onboard GPS | Feature | Feature | Feature | Feature | Feature |
 | GPS | [`gps advert [none/share/prefs]`](cli_commands.md#view-or-change-the-gps-advert-policy) | Compiled onboard GPS | Feature | Feature | Feature | Feature | Feature |
 | Sensors | [`get/set telemetry.access`](cli_commands.md#view-or-change-telemetry-access-mode) | Sensor-capable full parser | Feature | Feature | Limited | Feature | Feature |

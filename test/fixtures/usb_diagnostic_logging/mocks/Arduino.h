@@ -48,8 +48,10 @@ extern MockFicr mock_ficr;
 #define WB_IO2 2
 #define OUTPUT 1
 #define HIGH 1
+#define INPUT_PULLUP 2
 inline void pinMode(int, int) {}
 inline void digitalWrite(int, int) {}
+inline int digitalRead(int) { return HIGH; }
 inline void vTaskDelete(void*) {}
 inline void vTaskDelay(uint32_t value) { delay(value); }
 inline uint32_t pdMS_TO_TICKS(uint32_t value) { return value; }

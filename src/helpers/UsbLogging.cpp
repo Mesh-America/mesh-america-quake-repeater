@@ -17,6 +17,8 @@
 #endif
 #if MESH_ESP32_TINYUSB_NONBLOCKING
   #include "esp32-hal-tinyusb.h"
+  // Build-local Arduino hook queries its actual CDC descriptor's IN endpoint.
+  extern "C" bool meshEsp32TinyUsbTxPending();
 #endif
 #if defined(NRF52_PLATFORM) && defined(USE_TINYUSB)
   #include <Adafruit_TinyUSB.h>
@@ -29,6 +31,7 @@
     (defined(USE_TINYUSB) || defined(ENABLE_USB_INTERFACE) || defined(OTA_FOLDER_SERIAL))
   #define MESH_NRF52_PRIMARY_USB_NONBLOCKING 1
   #include <Adafruit_TinyUSB.h>
+  #include <nrf.h>
   // Build-local CDC query installed by scripts/nrf52_usb_power_fix.py. It does
   // not clear/cancel an endpoint or change its USB bulk data-toggle state.
   extern "C" bool mesh_tud_cdc_n_tx_pending(uint8_t instance);
@@ -111,29 +114,50 @@ static std::atomic<bool> esp32_tinyusb_terminal_discard_pending{false};
 static std::atomic<uint32_t> esp32_tinyusb_terminal_dropped_bytes{0};
 static uint32_t esp32_tinyusb_terminal_reported_dropped_bytes = 0;
 static uint32_t esp32_tinyusb_taken_reset_generation = 0;
-static bool esp32_tinyusb_event_handler_registered = false;
-static bool esp32_tinyusb_was_connected = false;
+static std::atomic<bool> esp32_tinyusb_was_connected{false};
+// 0: ordinary; 1: detached; 2: awaiting fresh mount; 3: preparing quarantine.
+static std::atomic<uint8_t> esp32_tinyusb_reenumeration_state{0};
+static std::atomic<bool> esp32_tinyusb_owner_dtr{false};
+static std::atomic<uint32_t> esp32_tinyusb_reattach_after{0};
+static constexpr uint32_t esp32_tinyusb_detach_millis = 20;
 
 static bool canAccessEsp32TinyUsb(void*) {
-  return !xPortInIsrContext() && tud_cdc_n_connected(0)
+  return !xPortInIsrContext()
+      && esp32_tinyusb_reenumeration_state.load(std::memory_order_acquire) == 0
+      && tud_cdc_n_connected(0)
       && esp32_tinyusb_clean_generation.load(std::memory_order_acquire)
           == esp32_tinyusb_reset_generation.load(std::memory_order_acquire);
 }
 
-static void handleEsp32TinyUsbEvent(void*, esp_event_base_t, int32_t event_id,
-                                    void* event_data) {
-  // This is the Arduino event task, not TinyUSB's owner. Only publish an
-  // epoch: queue cleanup and endpoint access remain in application service.
-  if (event_id == ARDUINO_USB_CDC_TX_EVENT) noteUsbLoggingTxComplete();
-  bool closed = event_id == ARDUINO_USB_CDC_DISCONNECTED_EVENT;
-  if (event_id == ARDUINO_USB_CDC_LINE_STATE_EVENT && event_data != nullptr) {
-    const auto* event = static_cast<const arduino_usb_cdc_event_data_t*>(event_data);
-    closed = !event->line_state.dtr;
+static void requestEsp32TinyUsbReenumeration(bool force_reconnect = false) {
+  uint8_t expected = 0;
+  if (!esp32_tinyusb_reenumeration_state.compare_exchange_strong(
+          expected, 3, std::memory_order_acq_rel)) {
+    // A later watchdog stage may restart an already reattached device whose
+    // host never delivered a fresh mount. Owner callbacks never force this.
+    if (!force_reconnect || expected != 2
+        || !esp32_tinyusb_reenumeration_state.compare_exchange_strong(
+            expected, 3, std::memory_order_acq_rel)) return;
   }
-  if (closed) {
-    clearUsbLoggingClientActivity();
-    esp32_tinyusb_reset_generation.fetch_add(1, std::memory_order_acq_rel);
-  }
+  // The pinned ESP32 S2/S3 DCD disconnect is one bounded soft-disconnect
+  // register write, not a send into TinyUSB's owner queue. Isolate an armed
+  // old packet immediately; only the application loop may reattach later.
+  (void)tud_disconnect();
+  esp32_tinyusb_reattach_after.store(millis() + esp32_tinyusb_detach_millis,
+                                    std::memory_order_release);
+  // Publish only a fully prepared detach. The other core must never connect
+  // before this callback has actually disconnected and started its deadline.
+  esp32_tinyusb_reenumeration_state.store(1, std::memory_order_release);
+}
+
+static void purgeEsp32TinyUsbRx() {
+  // Owner-task session hooks run before new-host RX callbacks. A fixed snapshot
+  // bounds this purge even if an application reader consumes bytes concurrently.
+  int pending = Serial.available();
+  while (pending-- > 0) (void)Serial.read();
+  // At unmount the class endpoints have already been reset. read_flush also
+  // rearms OUT, so it must not address an unopened/reset endpoint there.
+  if (tud_mounted()) tud_cdc_n_read_flush(0);
 }
 
 class Esp32TinyUsbFifoStream : public Stream {
@@ -246,18 +270,59 @@ static Esp32TinyUsbBufferedStream<false> buffered_esp32_tinyusb_terminal_port;
 
 static void clearEsp32TinyUsbTx(void*) {
   (void)tud_cdc_n_write_clear(0);
+  if (tud_mounted() && meshEsp32TinyUsbTxPending()) {
+    requestEsp32TinyUsbReenumeration();
+  }
+}
+
+static void closeEsp32TinyUsbSession(bool device_boundary) {
+  clearUsbLoggingClientActivity();
+  esp32_tinyusb_reset_generation.fetch_add(1, std::memory_order_acq_rel);
+  // Do this synchronously in TinyUSB's owner, never in its delayed Arduino
+  // event handler or the main-loop cleanup (which could purge fresh RX).
+  purgeEsp32TinyUsbRx();
+  if (!device_boundary
+      && !nonblocking_esp32_tinyusb_port.tryRunExclusive(clearEsp32TinyUsbTx)) {
+    // A writer already in flight can still arm old bytes after the close.
+    // Physically quarantine it instead of racing an endpoint abort/FIFO purge.
+    requestEsp32TinyUsbReenumeration();
+  }
+}
+
+static void purgeEsp32TinyUsbDetachedQueues(void*) {
+  purgeEsp32TinyUsbRx();
+  (void)tud_cdc_n_write_clear(0);
 }
 
 static void serviceEsp32TinyUsbPorts() {
   if (xPortInIsrContext()) return;
   if (esp32_tinyusb_queue_busy.test_and_set(std::memory_order_acquire)) return;
+  const uint8_t reenumeration =
+      esp32_tinyusb_reenumeration_state.load(std::memory_order_acquire);
+  if (reenumeration != 0) {
+    if (reenumeration == 1
+        && (int32_t)(millis() - esp32_tinyusb_reattach_after.load(
+                          std::memory_order_acquire)) >= 0
+        && (!usb_logging_watchdog_detached
+            || (int32_t)(millis() - usb_logging_watchdog_attach_at) >= 0)
+        && nonblocking_esp32_tinyusb_port.tryRunExclusive(
+            purgeEsp32TinyUsbDetachedQueues)) {
+      // Publish before connect: a fast owner mount callback can run immediately.
+      esp32_tinyusb_reenumeration_state.store(2, std::memory_order_release);
+      (void)tud_connect();
+      usb_logging_watchdog_detached = false;
+    }
+    esp32_tinyusb_queue_busy.clear(std::memory_order_release);
+    return; // Only the fresh owner-task mount hook can reopen this gate.
+  }
   // Polling also catches a physical disconnect without a CDC line-state
   // event. Events capture quick close/reopen pairs between service calls.
   const bool connected = tud_cdc_n_connected(0);
-  if (esp32_tinyusb_was_connected && !connected) {
+  if (esp32_tinyusb_was_connected.exchange(connected,
+                                          std::memory_order_acq_rel) && !connected) {
+    clearUsbLoggingClientActivity();
     esp32_tinyusb_reset_generation.fetch_add(1, std::memory_order_acq_rel);
   }
-  esp32_tinyusb_was_connected = connected;
   const uint32_t generation =
       esp32_tinyusb_reset_generation.load(std::memory_order_acquire);
   if (generation != esp32_tinyusb_clean_generation.load(std::memory_order_acquire)) {
@@ -268,8 +333,8 @@ static void serviceEsp32TinyUsbPorts() {
     esp32_tinyusb_text_queue.discardPending();
     esp32_tinyusb_terminal_reported_dropped_bytes =
         esp32_tinyusb_terminal_dropped_bytes.load(std::memory_order_relaxed);
-    // Do not purge Serial's RX queue here: the new host may already have sent
-    // its first query. Protocol owners reset their partial parser separately.
+    // The synchronous owner hook already purged old RX. Keep the new host's
+    // first query, while protocol owners reset their partial parser separately.
     esp32_tinyusb_clean_generation.store(generation, std::memory_order_release);
   }
   if (esp32_tinyusb_terminal_discard_pending.exchange(false,
@@ -477,6 +542,9 @@ static constexpr uint32_t primary_usb_session_settle_millis = 8;
 static std::atomic<uint32_t> primary_usb_reset_settle_until{0};
 static std::atomic<bool> nrf52_usb_reenumeration_pending{false};
 static std::atomic<uint32_t> nrf52_usb_reattach_after{0};
+// Only the application service loop owns this phase. USB callbacks merely
+// quarantine the pull-up and publish the atomic request below.
+static bool nrf52_usb_stack_detach_issued = false;
 static constexpr uint32_t nrf52_usb_detach_millis = 20;
 
 static void requestNrf52UsbSessionReenumeration() {
@@ -490,9 +558,14 @@ static void requestNrf52UsbSessionReenumeration() {
                                                std::memory_order_acq_rel)) return;
   primary_usb_line_state_dtr.store(false, std::memory_order_release);
   primary_usb_reset_generation.fetch_add(1, std::memory_order_acq_rel);
-  nrf52_usb_reattach_after.store(millis() + nrf52_usb_detach_millis,
-                                std::memory_order_release);
-  TinyUSBDevice.detach();
+  // Match the Nordic driver's bounded physical-disconnect operation now so
+  // an armed packet cannot reach a rapidly reopened host. Do NOT call
+  // TinyUSBDevice.detach() from this CDC/SOF callback: dcd_disconnect also
+  // queues UNPLUGGED with an infinite FreeRTOS send timeout. A full event
+  // queue would then make its sole consumer wait forever on its own queue.
+  NRF_USBD->USBPULLUP = 0;
+  __ISB();
+  __DSB();
 }
 
 static void clearNrf52UsbTxForSession(uint8_t instance) {
@@ -503,8 +576,20 @@ static void clearNrf52UsbTxForSession(uint8_t instance) {
 }
 
 static void serviceNrf52UsbSessionReenumeration() {
-  if (!nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)
-      || (int32_t)(millis() - nrf52_usb_reattach_after.load(
+  if (!nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)) return;
+  if (!nrf52_usb_stack_detach_issued) {
+    // Called only from the application loop, never a TinyUSB owner callback.
+    // The owner can therefore drain a full event queue while this supported
+    // detach operation enqueues the reset, instead of blocking on itself.
+    TinyUSBDevice.detach();
+    nrf52_usb_stack_detach_issued = true;
+    // Start the quiet interval at the actual stack detach, not at a possibly
+    // much earlier callback request while the application loop was occupied.
+    nrf52_usb_reattach_after.store(millis() + nrf52_usb_detach_millis,
+                                  std::memory_order_release);
+    return;
+  }
+  if ((int32_t)(millis() - nrf52_usb_reattach_after.load(
                        std::memory_order_acquire)) < 0
       || tud_mounted()) return;
 #if defined(USE_TINYUSB)
@@ -519,6 +604,7 @@ static void serviceNrf52UsbSessionReenumeration() {
 #if defined(USE_TINYUSB)
   usb_logging_watchdog_detached = false;
 #endif
+  nrf52_usb_stack_detach_issued = false;
   nrf52_usb_reenumeration_pending.store(false, std::memory_order_release);
 }
 
@@ -940,9 +1026,6 @@ void setUsbDebugEnabled(bool enabled) {
 }
 
 void setUsbLoggingEnabled(bool enabled) {
-#if MESH_ESP32_TINYUSB_NONBLOCKING
-  const bool was_enabled = isUsbLoggingEnabled();
-#endif
   usb_logging_enabled.store(enabled, std::memory_order_relaxed);
   if (!enabled) {
     clearUsbLoggingClientActivity();
@@ -950,12 +1033,9 @@ void setUsbLoggingEnabled(bool enabled) {
   }
   usb_logging_preference_known.store(true, std::memory_order_relaxed);
   setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());
-#if MESH_ESP32_TINYUSB_NONBLOCKING
-  // Text shares one chronological queue. When leaving logging mode, discard
-  // its residual application bytes before later Binary/mOTA traffic can start.
-  // An in-flight producer is gated immediately and cleaned by the next service.
-  if (was_enabled && !enabled) discardUsbTerminalOutput();
-#endif
+  // Turning diagnostics off is not a protocol switch. Retain functional
+  // replies in the shared text queue; actual Binary/mOTA ownership changes
+  // explicitly call discardUsbTerminalOutput() after their bounded barrier.
 }
 
 bool saveUsbLoggingBootPreference(bool enabled) {
@@ -994,12 +1074,6 @@ void beginUsbLoggingPort() {
   // ESP32 Companion stream; setUsbLoggingEnabled() restores them only when the
   // saved settings explicitly enable both USB output and debug verbosity.
   setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());
-#if MESH_ESP32_TINYUSB_NONBLOCKING
-  if (!esp32_tinyusb_event_handler_registered) {
-    Serial.onEvent(ARDUINO_USB_CDC_ANY_EVENT, handleEsp32TinyUsbEvent);
-    esp32_tinyusb_event_handler_registered = true;
-  }
-#endif
 #if MESH_ESP32_HWCDC_SESSION_GUARD
   // If every pre-begin resize failed, begin() may have recovered by allocating
   // HWCDC's built-in ring. Discover it without replacing a live ISR-owned ring.
@@ -1039,6 +1113,9 @@ void serviceUsbLoggingPort() {
   // in delay(), Serial.end(), or a host-progress wait.
   if (usb_logging_watchdog_detached
       && int32_t(millis() - usb_logging_watchdog_attach_at) >= 0
+#if MESH_ESP32_TINYUSB_NONBLOCKING
+      && esp32_tinyusb_reenumeration_state.load(std::memory_order_acquire) == 0
+#endif
 #if defined(NRF52_PLATFORM)
       && !nrf52_usb_reenumeration_pending.load(std::memory_order_acquire)
       && !tud_mounted()
@@ -1561,7 +1638,7 @@ UsbLoggingRecoveryResult recoverUsbLoggingTransport(uint8_t stage) {
     probeUsbLoggingTransport();
   } else {
     if (!usb_logging_watchdog_detached) {
-      if (!tud_disconnect()) return UsbLoggingRecoveryResult::Deferred;
+      requestEsp32TinyUsbReenumeration(true);
       usb_logging_watchdog_attach_at = millis() + 50;
       usb_logging_watchdog_detached = true;
     }
@@ -1609,7 +1686,8 @@ bool isUsbLoggingTransportRecoveryPending() {
 #elif defined(NRF52_PLATFORM) && defined(ENABLE_USB_INTERFACE)
   return nrf52_usb_reenumeration_pending.load(std::memory_order_acquire);
 #elif MESH_ESP32_TINYUSB_NONBLOCKING
-  return usb_logging_watchdog_detached;
+  const auto state = esp32_tinyusb_reenumeration_state.load(std::memory_order_acquire);
+  return usb_logging_watchdog_detached || state == 1 || state == 3;
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
   return esp32_hwcdc_cleanup_pending;
 #else
@@ -1626,6 +1704,40 @@ extern "C" void meshTinyUsbLoggingTxComplete(uint8_t instance) {
 #else
   if (instance == 0) mesh::noteUsbLoggingTxComplete();
 #endif
+}
+#endif
+
+#if MESH_ESP32_TINYUSB_NONBLOCKING
+// These strong bridges are called synchronously by the build-local framework
+// copy, not by Arduino's delayed event queue. Do not include weak declarations
+// in this translation unit or these definitions would inherit that attribute.
+extern "C" void meshEsp32TinyUsbTxComplete() {
+  mesh::noteUsbLoggingTxComplete();
+}
+
+extern "C" void meshEsp32TinyUsbCdcLineState(bool dtr) {
+  // Never use USBCDC::dtr here: a delayed framework unplug event can overwrite
+  // that member after a new host opens. These samples come from the owner.
+  const bool previous = mesh::esp32_tinyusb_owner_dtr.exchange(
+      dtr, std::memory_order_acq_rel);
+  if (previous != dtr) mesh::closeEsp32TinyUsbSession(dtr);
+}
+
+extern "C" bool meshEsp32TinyUsbAcceptRx() {
+  // A late old OUT completion while DTR is low is not fresh-host input.
+  return mesh::esp32_tinyusb_reenumeration_state.load(std::memory_order_acquire) == 0
+      && tud_cdc_n_connected(0);
+}
+
+extern "C" void meshEsp32TinyUsbDeviceSessionBoundary(bool mounted) {
+  mesh::closeEsp32TinyUsbSession(true);
+  mesh::esp32_tinyusb_owner_dtr.store(false, std::memory_order_release);
+  mesh::esp32_tinyusb_was_connected.store(false, std::memory_order_release);
+  if (mounted) {
+    uint8_t expected = 2;
+    (void)mesh::esp32_tinyusb_reenumeration_state.compare_exchange_strong(
+        expected, 0, std::memory_order_acq_rel);
+  }
 }
 #endif
 

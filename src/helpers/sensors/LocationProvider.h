@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Mesh.h"
+#include <helpers/GpsPowerPolicy.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -22,6 +23,7 @@ protected:
     unsigned long _next_gps_on = 0;
     unsigned long _gps_on_duration_secs = GPS_POWERSAVING_ON_DURATION_SECS;
     unsigned long _gps_off_duration_secs = GPS_POWERSAVING_OFF_DURATION_SECS;
+    uint16_t _gps_sync_interval_hours = 0; // 0 retains the board's legacy policy
     unsigned long _last_valid_time_sync = 0;
     uint32_t _last_time_sync_request_ms = 0;
     uint32_t _last_time_sync_applied_ms = 0;
@@ -41,6 +43,25 @@ protected:
     }
 
 public:
+    void setTimeSyncIntervalHours(uint16_t hours) {
+        _gps_sync_interval_hours = hours > mesh::gps::MAX_SYNC_INTERVAL_HOURS
+            ? mesh::gps::MAX_SYNC_INTERVAL_HOURS : hours;
+        // A sleeping receiver must adopt a shorter/longer setting now, not
+        // wait for its old (possibly week-long) deadline. No forced GPS wake.
+        if (_next_gps_on != 0) setNextWake();
+    }
+    uint16_t getTimeSyncIntervalHours() const { return _gps_sync_interval_hours; }
+    uint32_t periodicTimeSyncIntervalMillis() const {
+        return _gps_sync_interval_hours != 0
+            ? static_cast<uint32_t>(_gps_sync_interval_hours) * 3600000UL
+            : 1800000UL; // existing always-on receiver policy: 30 minutes
+    }
+    // Position telemetry may power the receiver between scheduled clock
+    // acquisitions. Do not turn that into an early clock-sync request.
+    void syncTimeForPowerSavingCycle() {
+        if (_gps_sync_interval_hours == 0) syncTime();
+        else (void)requestTimeSync(static_cast<uint64_t>(_gps_sync_interval_hours) * 3600UL);
+    }
     virtual void syncTime() { _time_sync_needed = true; }
     virtual bool waitingTimeSync() { return _time_sync_needed; }
     // Telemetry requests share an in-progress acquisition and rate-limit new
@@ -95,7 +116,24 @@ public:
     virtual void enablePowerSaving(bool enabled) { setGPSPowerSaving(enabled); }
     virtual bool isPowerSavingEnabled() { return getGPSPowerSaving(); }
     virtual void setNextWake() {
-        setNextGPSOn(millis() + _gps_off_duration_secs * 1000UL);
+        const uint32_t now = static_cast<uint32_t>(millis());
+        uint32_t wait_ms = _gps_off_duration_secs * 1000UL;
+        if (_gps_sync_interval_hours != 0) {
+            wait_ms = periodicTimeSyncIntervalMillis();
+            // Anchor to clock acquisition, not an unrelated location query's
+            // power-off. Repeated position queries must not postpone sync.
+            uint32_t age = UINT32_MAX;
+            if (_time_sync_applied_seen) age = now - _last_time_sync_applied_ms;
+            if (_time_sync_request_seen) {
+                const uint32_t request_age = now - _last_time_sync_request_ms;
+                if (request_age < age) age = request_age;
+            }
+            if (age < wait_ms) wait_ms -= age;
+            // A failed/timed-out acquisition gets a full interval backoff,
+            // rather than immediately powering back on in a retry loop.
+        }
+        const uint32_t deadline = now + wait_ms;
+        setNextGPSOn(deadline == 0 ? 1 : deadline); // 0 means no deadline
     }
     virtual unsigned long getNextWake() { return getNextGPSOn(); }
     virtual void setNextSleep() {

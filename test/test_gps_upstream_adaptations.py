@@ -392,9 +392,10 @@ int main(){
         rak_provider = rak[rak.index("class RAK12500LocationProvider"):rak.index("static RAK12500LocationProvider")]
         self.assertIn("markTimeSyncApplied();", rak_provider)
         self.assertIn("resetTimeSyncRequestState();", rak_provider)
-        # Preserve deliberate force-sync callers outside telemetry queries.
+        # Explicit CLI sync remains forced; scheduled power cycles honor the
+        # configured hourly cadence, with force-sync retained for legacy0.
         self.assertIn("void syncTime() override { nmea.clear(); LocationProvider::syncTime(); }", provider)
-        self.assertIn("_location->syncTime();", extract_braced(rak, "void EnvironmentSensorManager::armGpsPowerSavingCycle()"))
+        self.assertIn("_location->syncTimeForPowerSavingCycle();", extract_braced(rak, "void EnvironmentSensorManager::armGpsPowerSavingCycle()"))
 
 
 if __name__ == "__main__":

@@ -163,6 +163,10 @@ as immediate alerts. Reading status does not renew the logging-client lease.
 
 ## Verification
 
+The two qualification stages below precede the subsequent upstream USB/GPS
+and repeater trace merge. Their firmware byte margins describe those earlier
+images, not the current merged source.
+
 Initial watchdog qualification on 2026-10-03, before the latest-event extension,
 passed 109 USB regression tests, 143 native test cases, 11 management protocol
 tests, and the browser decoder checks.
@@ -196,3 +200,20 @@ can still exceed that tight budget. No features or filesystem space were cut
 to fit this extension. This is not an all-board release qualification or a
 physical USB recovery test. No hardware was flashed, and verification artifacts
 stayed outside `out`.
+
+The subsequent USB/GPS/repeater-trace merge passed all 1,718 native cases,
+133 USB regression methods, 25 management/event/watchdog methods plus the
+browser decoder, and 10 GPS/trace/persistence methods. Companion preference
+tests exercise six platform/layout variants under fatal sanitizers. The
+compact final preference writer also matches the previous full image for
+256 tail-value sets per variant and preserves committed files through every
+partial-tail write/readback boundary and rename failure.
+
+Compile checks for that merge passed standard XIAO S3 Full Companion, Station
+G2 Repeater and Room Server, native-USB XIAO S3 USB Companion with all five
+session/progress hooks linked, and XIAO nRF52 Repeater. The final compact writer
+passed both the bare STM32 CI recipe and the normal `1.17.1.9` recipe; the
+latter uses 229,020 of 229,376 app flash bytes (356 bytes of margin), retaining
+all features and the 32 KiB filesystem. The bare recipe is tighter still.
+These checks do not qualify every board or physical USB recovery. No device
+was flashed and existing `out` artifacts were not changed.

@@ -4,6 +4,7 @@
 #include "UsbLoggingWatchdog.h"
 #include <helpers/ui/DisplayPowerSettings.h>
 #include "CLICommandUtils.h"
+#include "GpsPowerPolicy.h"
 #include "FloodAdvertCLI.h"
 #include "StorageLayout.h"
 #include "radiolib/RadioPowerLimits.h"
@@ -771,6 +772,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   _prefs->bridge_uart = 0;
 #endif
   _prefs->bridge_format = mesh::bridge::ESPNOW_FORMAT_WRAPPED;
+  _prefs->gps_sync_interval_hours = 0;
 
 #ifdef WITH_MQTT_BRIDGE
   bool node_prefs_needs_migration = false;
@@ -940,6 +942,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
   // from a previous load of a newer image.
   _prefs->usb_debug_enabled = 0;
   _prefs->trace_when_repeat_off = 0;
+  _prefs->gps_sync_interval_hours = 0;
 #if defined(RP2040_PLATFORM)
   File file = fs->open(filename, "r");
 #else
@@ -1329,12 +1332,18 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
                 if (file.available() >= (int)sizeof(_prefs->espnow_bridge_enabled)) {
                   file.read((uint8_t *)&_prefs->espnow_bridge_enabled,
                             sizeof(_prefs->espnow_bridge_enabled));
-                  if (file.available() >= (int)sizeof(_prefs->usb_debug_enabled)) {
-                    file.read((uint8_t *)&_prefs->usb_debug_enabled,
-                              sizeof(_prefs->usb_debug_enabled));
-                    if (file.available() >= (int)sizeof(_prefs->trace_when_repeat_off)) {
-                      file.read((uint8_t *)&_prefs->trace_when_repeat_off,
-                                sizeof(_prefs->trace_when_repeat_off));
+                  if (file.available() >= (int)sizeof(_prefs->gps_sync_interval_hours)) {
+                    uint16_t hours = 0;
+                    if (file.read((uint8_t *)&hours, sizeof(hours)) == sizeof(hours)) {
+                      _prefs->gps_sync_interval_hours = hours;
+                      if (file.available() >= (int)sizeof(_prefs->usb_debug_enabled)) {
+                        file.read((uint8_t *)&_prefs->usb_debug_enabled,
+                                  sizeof(_prefs->usb_debug_enabled));
+                        if (file.available() >= (int)sizeof(_prefs->trace_when_repeat_off)) {
+                          file.read((uint8_t *)&_prefs->trace_when_repeat_off,
+                                    sizeof(_prefs->trace_when_repeat_off));
+                        }
+                      }
                     }
                   }
                 }
@@ -1443,6 +1452,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->reboot_interval = constrain(_prefs->reboot_interval, 0, 255);
 
     _prefs->gps_enabled = constrain(_prefs->gps_enabled, 0, 1);
+    _prefs->gps_sync_interval_hours = constrain(_prefs->gps_sync_interval_hours,
+                                               0, mesh::gps::MAX_SYNC_INTERVAL_HOURS);
     _prefs->advert_loc_policy = constrain(_prefs->advert_loc_policy, 0, 2);
 
     _prefs->rx_boosted_gain = constrain(_prefs->rx_boosted_gain, 0, 1); // boolean
@@ -1665,6 +1676,7 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   WRITE_COMMON_PREFS(&prefs->bridge_format);                   // 863
   WRITE_COMMON_PREFS(&prefs->primary_radio_preamble);          // appended primary tuple field
   WRITE_COMMON_PREFS(&prefs->espnow_bridge_enabled);           // appended Full ESP-NOW intent
+  WRITE_COMMON_PREFS(&prefs->gps_sync_interval_hours);          // published GPS sync cadence
   WRITE_COMMON_PREFS(&prefs->usb_debug_enabled);               // appended USB debug intent
   WRITE_COMMON_PREFS(&prefs->trace_when_repeat_off);            // appended repeater trace exception
 
@@ -1826,6 +1838,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->bridge_format, sizeof(_prefs->bridge_format));                   // 863
     file.write((uint8_t *)&_prefs->primary_radio_preamble, sizeof(_prefs->primary_radio_preamble)); // appended
     file.write((uint8_t *)&_prefs->espnow_bridge_enabled, sizeof(_prefs->espnow_bridge_enabled));   // appended
+    file.write((uint8_t *)&_prefs->gps_sync_interval_hours, sizeof(_prefs->gps_sync_interval_hours)); // published GPS sync cadence
     file.write((uint8_t *)&_prefs->usb_debug_enabled, sizeof(_prefs->usb_debug_enabled));           // appended
     file.write((uint8_t *)&_prefs->trace_when_repeat_off, sizeof(_prefs->trace_when_repeat_off));   // appended
 
@@ -3400,6 +3413,28 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     return;
   }
 #if ENV_INCLUDE_GPS == 1
+  if (strncmp(config, "gps.sync.interval", 17) == 0
+      && (config[17] == 0 || config[17] == ' ' || config[17] == '\t')) {
+    const char* value = config + 17;
+    while (*value == ' ' || *value == '\t') ++value;
+    uint16_t hours = 0;
+    if (!mesh::gps::parseSyncIntervalHours(value, hours)) {
+      strcpy(reply, "Error: GPS sync interval must be 1..336 hours");
+    } else if (_sensors->getLocationProvider() == nullptr) {
+      strcpy(reply, "Error: GPS unavailable");
+    } else {
+      const uint16_t previous = _prefs->gps_sync_interval_hours;
+      _prefs->gps_sync_interval_hours = hours;
+      if (!trySavePrefs()) {
+        _prefs->gps_sync_interval_hours = previous;
+        strcpy(reply, "Error: GPS sync interval could not be saved");
+      } else {
+        _sensors->applyGpsTimeSyncInterval(hours);
+        snprintf(reply, 160, "OK - GPS sync interval %u hours (saved)", (unsigned)hours);
+      }
+    }
+    return;
+  }
   if (strncmp(config, "gps ", 4) == 0) {
     if (strcmp(config + 4, "on") != 0 && strcmp(config + 4, "off") != 0) {
       strcpy(reply, "Error: use set gps on|off");
@@ -4766,6 +4801,17 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     return;
   }
 #if ENV_INCLUDE_GPS == 1
+  if (strcmp(config, "gps.sync.interval") == 0) {
+    auto* provider = _sensors->getLocationProvider();
+    if (provider == nullptr) {
+      strcpy(reply, "Error: GPS unavailable");
+    } else {
+      const uint16_t hours = provider->getTimeSyncIntervalHours();
+      if (hours == 0) strcpy(reply, "> default (board GPS sync policy)");
+      else snprintf(reply, 160, "> %u hours", (unsigned)hours);
+    }
+    return;
+  }
   if (strcmp(config, "gps") == 0) {
     char gps_command[] = "gps";
     handleCommand(sender_timestamp, gps_command, reply);
