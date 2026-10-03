@@ -88,6 +88,9 @@
 
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/AlertReporter.h>
+#if ENV_INCLUDE_D7S
+#include <helpers/sensors/SeismicAlert.h>
+#endif
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/ClientACL.h>
 #include <helpers/CommonCLI.h>
@@ -756,6 +759,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void sendSelfAdvertisementNow(uint32_t delay_millis, bool flood);
   bool sendRepeatersFloodText(const char* text, const TransportKey* scope = nullptr,
                               mesh::Packet** queued_packet = nullptr);
+  bool sendGroupFloodText(const mesh::GroupChannel& channel, const char* text,
+                          const TransportKey* scope = nullptr,
+                          mesh::Packet** queued_packet = nullptr);
   uint8_t getRegionDepth(const RegionEntry* region);
   const RegionEntry* findNarrowestBatteryAlertRegion(bool& ambiguous);
   bool getBatteryAlertScopeForRegion(const RegionEntry& region, TransportKey& scope);
@@ -1656,4 +1662,23 @@ public:
   virtual bool configSideDetectors(const uint8_t sideDetSFs[], uint8_t num, float bw) override;
   #endif
 
+
+#if ENV_INCLUDE_D7S
+  // Earthquake channel alerts (MyMeshQuake.cpp); see docs/earthquake-alerts.md.
+  char quake_channel[24] = {};       // canonical "#name", empty = alerts off
+  uint16_t quake_cooldown_min = 10;
+  seismic::Policy quake_policy;
+  uint32_t quake_last_test_ms = 0;
+  bool quake_last_test_valid = false;
+  uint32_t quake_send_failures = 0;
+  void loadQuakePrefs();
+  bool saveQuakePrefs();
+  void applyQuakePolicyConfig();
+  bool buildQuakeChannel(mesh::GroupChannel& channel, const char*& problem);
+  bool quakeSendBlocker(const char*& why, mesh::GroupChannel& channel, TransportKey& scope);
+  bool sendQuakeMessage(const seismic::Send& values, bool test, const char*& why);
+  void checkQuakeAlert();
+  bool quakeAlertBusy() const;
+  bool handleQuakeCommand(const char* command, char* reply);
+#endif
 };

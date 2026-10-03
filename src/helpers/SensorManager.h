@@ -12,6 +12,17 @@
 
 #define TELEM_CHANNEL_SELF   1   // LPP data channel for 'self' device
 
+// What an earthquake sensor (if the build has one) currently reports, for the repeater's alerts.
+struct SeismicReading {
+  bool sensorPresent = false;  // A sensor has answered like the expected device.
+  bool sensorFaulted = false;  // It reported a self-test or baseline error since boot.
+  bool processing = false;     // It is working on a shaking event right now.
+  bool recordValid = false;    // siRaw/pgaRaw are its latest stored record.
+  uint32_t shakingCount = 0;   // Monotonic count of significant-shaking reports since boot.
+  uint16_t siRaw = 0;          // Tenths of cm/s.
+  uint16_t pgaRaw = 0;         // Tenths of gal.
+};
+
 class SensorManager {
 #if ENV_INCLUDE_GPS
   bool gps_cache_valid = false;
@@ -87,6 +98,7 @@ public:
   virtual bool i2c_probe(TwoWire& wire, uint8_t addr) { return false; }
   virtual bool begin() { return false; }
   virtual bool querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) { return false; }
+  virtual bool getSeismicReading(SeismicReading& out) { (void)out; return false; }
   virtual uint8_t getVoltageSensorChannels(uint8_t channels[],
                                            uint8_t capacity) const {
     (void)channels;

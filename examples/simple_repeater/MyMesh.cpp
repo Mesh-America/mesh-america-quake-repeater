@@ -3673,6 +3673,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
   _cli.beginManagement(*this, _fs);
+#if ENV_INCLUDE_D7S
+  loadQuakePrefs();
+#endif
 #if MESH_ENABLE_TELEMETRY_HISTORY
   loadTelemetryHistoryTxPrefs();
 #endif
@@ -3982,6 +3985,13 @@ bool MyMesh::sendRepeatersFloodText(const char* text, const TransportKey* scope,
   if (!buildRepeatersChannel(channel)) {
     return false;
   }
+  return sendGroupFloodText(channel, text, scope, queued_packet);
+}
+
+bool MyMesh::sendGroupFloodText(const mesh::GroupChannel& channel, const char* text,
+                                const TransportKey* scope, mesh::Packet** queued_packet) {
+  if (queued_packet != NULL) *queued_packet = NULL;
+  if (text == NULL || *text == 0) return false;
 
   uint8_t temp[MAX_PACKET_PAYLOAD];
   uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
@@ -12107,6 +12117,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     reply[0] = 0;
   } else if (handleClientPathCommand(sender, command, reply)) {
     return;
+#if ENV_INCLUDE_D7S
+  } else if (handleQuakeCommand(command, reply)) {
+    // reply filled in by the earthquake alert commands
+#endif
   } else if (strncmp(command, "send text.flood ", 16) == 0) {
     char* text = trimSpaces(command + 16);
     if (*text == 0) {
@@ -12615,6 +12629,9 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
 #endif
 #if !defined(PORTABLE_MQTT_OBSERVER)
   checkBatteryAlert();
+#if ENV_INCLUDE_D7S
+  checkQuakeAlert();
+#endif
   expireRecentRepeatersIfDue();
 #endif
 
@@ -13306,5 +13323,8 @@ bool MyMesh::hasPendingWork() const {
   if (isMillisTimerDue(dirty_contacts_expiry)) return true;
   if (isMillisTimerDue(next_recent_repeater_sweep)) return true;
   if (_prefs.battery_alert_enabled && isMillisTimerDue(next_battery_alert_check)) return true;
+#if ENV_INCLUDE_D7S
+  if (quakeAlertBusy()) return true;  // an event is being handled: stay awake until it is sent or dropped
+#endif
   return hasScheduledRadioWorkDue();
 }
