@@ -100,17 +100,13 @@ bool MyMesh::buildQuakeChannel(mesh::GroupChannel& channel, const char*& problem
   return true;
 }
 
-// The things every send needs: a usable channel, scope, location and clock. `why` says what is missing.
+// The things every send needs: a usable channel, scope and location. The clock is not required. `why` says what is missing.
 bool MyMesh::quakeSendBlocker(const char*& why, mesh::GroupChannel& channel, TransportKey& scope) {
   why = NULL;
   if (!buildQuakeChannel(channel, why)) return true;
   scope = default_scope;  // the repeater's own default region, as for its adverts
   if (!seismic::locationIsSet(_prefs.node_lat, _prefs.node_lon)) {
     why = seismic::blockText(seismic::Block::NoLocation);
-    return true;
-  }
-  if (!seismic::clockIsValid(getRTCClock()->getCurrentTime())) {
-    why = seismic::blockText(seismic::Block::NoClock);
     return true;
   }
   return false;
@@ -152,7 +148,6 @@ void MyMesh::checkQuakeAlert() {
   seismic::Gates gates;
   gates.channelSet = quake_channel[0] != 0;
   gates.locationSet = seismic::locationIsSet(_prefs.node_lat, _prefs.node_lon);
-  gates.clockValid = seismic::clockIsValid(getRTCClock()->getCurrentTime());
 
   const uint32_t jitter = (uint32_t)getRNG()->nextInt(0, (int)quake_policy.jitterMaxMs() + 1);
   seismic::Send send;
@@ -160,7 +155,7 @@ void MyMesh::checkQuakeAlert() {
 
   const char* why = NULL;
   if (!sendQuakeMessage(send, false, why)) {
-    // Channel, location and clock were checked above, so this is a scope or queue problem. The
+    // Channel and location were checked above, so this is a scope or queue problem. The
     // event is not retried: an old alert is worse than none.
     ++quake_send_failures;
     MESH_DEBUG_PRINTLN("quake alert not sent: %s", why);

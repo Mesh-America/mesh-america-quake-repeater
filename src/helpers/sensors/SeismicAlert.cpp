@@ -12,10 +12,6 @@ bool locationIsSet(double lat, double lon) {
   return !(fabs(lat) < 1e-6 && fabs(lon) < 1e-6);
 }
 
-bool clockIsValid(uint32_t unixSeconds) {
-  return unixSeconds >= 1704067200UL;  // 2024-01-01 00:00:00 UTC
-}
-
 Hashtag normalizeHashtag(const char* input, char* out, size_t cap) {
   if (input == nullptr || cap < 2) return Hashtag::Empty;
   while (*input == ' ') ++input;
@@ -86,7 +82,6 @@ const char* blockText(Block block) {
     case Block::SensorFault: return "sensor reported a fault";
     case Block::NoChannel: return "earthquake.channel is not set";
     case Block::NoLocation: return "location is not set (set lat and lon)";
-    case Block::NoClock: return "clock is not set";
   }
   return "";
 }
@@ -145,7 +140,6 @@ bool Policy::update(uint32_t now, const Input& in, const Gates& gates, uint32_t 
     if (in.sensorFaulted) block = Block::SensorFault;
     else if (!gates.channelSet) block = Block::NoChannel;
     else if (!gates.locationSet) block = Block::NoLocation;
-    else if (!gates.clockValid) block = Block::NoClock;
     lastBlocked_ = block;
     if (block != Block::None) {
       ++suppressed_;

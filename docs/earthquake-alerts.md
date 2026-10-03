@@ -1,6 +1,6 @@
 # Earthquake channel alerts
 
-When the D7S feels strong shaking, the repeater can post one short message to a hashtag channel you choose. Nothing is sent unless you set that channel **and** the repeater's location (and its clock is valid).
+When the D7S feels strong shaking, the repeater can post one short message to a hashtag channel you choose. Nothing is sent unless you set that channel **and** the repeater's location.
 
 Status: experimental, first released as an alpha. The alert logic is unit tested on a PC; it has not been exercised against a real shake.
 
@@ -21,16 +21,15 @@ Status: experimental, first released as an alpha. The alert logic is unit tested
    ```
 
    `set earthquake.channel off` turns alerts off again. `#test`, `#bot` and the Public channel are refused, because bots and every nearby phone answer there.
-3. **Check the clock.** `clock` should show today's date (UTC). If it shows 1970, set it with `time <epoch seconds>`, or `gps sync` with a GPS fitted. Without a battery-backed clock module or GPS the time is lost whenever power is lost, and alerts are held until it is set again.
-4. **Send a test.** `earthquake test` posts a message that starts with `TEST:` (at most one every 30 seconds). If it is refused, the reply says which setting is missing.
-5. **Check readiness any time** with `earthquake status`.
+3. **Send a test.** `earthquake test` posts a message that starts with `TEST:` (at most one every 30 seconds). If it is refused, the reply says which setting is missing.
+4. **Check readiness any time** with `earthquake status`.
 
 ## What it does
 
 - **Trigger:** the D7S's own strong-shaking decision (the manufacturer's threshold, roughly JMA intensity 5 Upper, damaging-shaking territory). There is no lower-sensitivity setting yet; that is waiting for real-world recordings.
 - **One message per shake.** After sending, further reports are ignored for `earthquake.cooldown` minutes (default 10, range 1 to 1440).
 - **Final numbers.** The sensor takes about two minutes to finish measuring, so the message waits for the final values (up to four minutes, then sends without them), plus a random 0 to 30 second delay so neighbouring repeaters do not all transmit at once.
-- **Nothing queued for later.** If a requirement is missing at that moment (no channel, no location, no valid clock, a sensor fault) the alert is dropped and `earthquake status` counts it as held. Fixing the setting does not resend an old event.
+- **Nothing queued for later.** If a requirement is missing at that moment (no channel, no location, a sensor fault) the alert is dropped and `earthquake status` counts it as held. Fixing the setting does not resend an old event.
 - **Scope.** The message is flooded with the repeater's own default region (the same one its adverts use), so whatever scoping you have already set up applies. There is no separate alert region.
 - Reports present at power-up are history and are ignored.
 
@@ -52,6 +51,10 @@ Coordinates are rounded to two decimals (about 1 km). Strength is the sensor's s
 | `earthquake status` | Ready or what is missing; sensor state; events, sent and held counts |
 
 Settings are stored in `/quake_prefs`, separate from the shared preferences file.
+
+## The clock
+
+Alerts do not need the clock. A repeater with no battery-backed clock module or GPS starts at 1970 after every power loss and then sends alerts stamped with that date; clients may show them as very old or ignore them. Set the time with `time <epoch seconds>` (or `gps sync` with a GPS fitted) if you want proper timestamps.
 
 ## Not in this version
 

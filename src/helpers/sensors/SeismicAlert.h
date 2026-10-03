@@ -7,7 +7,7 @@
 //
 // Everything here is plain logic with no hardware, radio or filesystem dependency, so it can be
 // tested on a PC. The repeater supplies the facts (what the sensor saw, whether a channel, a
-// location and a clock are set) and sends the message when this says to. See
+// and a location are set) and sends the message when this says to. See
 // docs/earthquake-alerts.md for what it does and why.
 namespace seismic {
 
@@ -16,10 +16,6 @@ namespace seismic {
 // A position counts as set when it is finite, in range, and not exactly 0,0 (the default every
 // repeater starts with, in the ocean off Africa, which nobody means).
 bool locationIsSet(double lat, double lon);
-
-// A repeater with no time source starts at 1970 and its group messages would carry that date.
-// Anything before 2024-01-01 is treated as "the clock has not been set".
-bool clockIsValid(uint32_t unixSeconds);
 
 // ---- Channel name ----------------------------------------------------------------------------
 
@@ -54,10 +50,9 @@ struct Input {
 struct Gates {
   bool channelSet = false;
   bool locationSet = false;
-  bool clockValid = false;
 };
 
-enum class Block : uint8_t { None, NoSensor, SensorFault, NoChannel, NoLocation, NoClock };
+enum class Block : uint8_t { None, NoSensor, SensorFault, NoChannel, NoLocation };
 const char* blockText(Block block);
 
 struct Send {
@@ -73,7 +68,7 @@ struct Send {
 //      values. If they do not arrive in time, send without values.
 //   3. Wait a random delay, so that neighbouring repeaters which all felt the same shaking do not
 //      transmit at the same moment.
-//   4. Check every gate: a sensor that is not faulted, a channel, a location and a clock. If any
+//   4. Check every gate: a sensor that is not faulted, a channel and a location. If any
 //      is missing nothing is sent and the reason is kept (a missing setting never queues an old
 //      alert for later).
 //   5. Send, then ignore further reports until the cooldown has passed.

@@ -34,15 +34,6 @@ TEST(SeismicGates, NonsensePositionsAreNotSet) {
   EXPECT_FALSE(locationIsSet(-91.0, -181.0));
 }
 
-TEST(SeismicGates, ClockMustBeSet) {
-  EXPECT_FALSE(clockIsValid(0));
-  EXPECT_FALSE(clockIsValid(1000000000));    // 2001
-  EXPECT_FALSE(clockIsValid(1704067199));    // one second before 2024
-  EXPECT_TRUE(clockIsValid(1704067200));     // 2024-01-01
-  EXPECT_TRUE(clockIsValid(1790000000));
-  EXPECT_TRUE(clockIsValid(0xffffffffu));
-}
-
 // ---- Channel name ------------------------------------------------------------------------------
 
 namespace {
@@ -188,7 +179,7 @@ struct Rig {
 
   Rig() {
     in.sensorPresent = true;
-    gates.channelSet = gates.locationSet = gates.clockValid = true;
+    gates.channelSet = gates.locationSet = true;
     policy.configure(10 * kMin, 30 * 1000);
   }
   bool step(uint32_t advanceMs = 250) {
@@ -335,14 +326,6 @@ TEST(SeismicPolicy, LocationNotSetMeansNothingIsSent) {
   EXPECT_EQ(r.policy.sent(), 0u);
   EXPECT_EQ(r.policy.lastBlocked(), Block::NoLocation);
   EXPECT_STREQ(blockText(r.policy.lastBlocked()), "location is not set (set lat and lon)");
-}
-
-TEST(SeismicPolicy, ClockNotSetMeansNothingIsSent) {
-  Rig r;
-  r.gates.clockValid = false;
-  r.step();
-  EXPECT_FALSE(r.fullEvent());
-  EXPECT_EQ(r.policy.lastBlocked(), Block::NoClock);
 }
 
 TEST(SeismicPolicy, AFaultedSensorSendsNothing) {
