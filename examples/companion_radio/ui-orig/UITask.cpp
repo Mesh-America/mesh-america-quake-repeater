@@ -212,6 +212,9 @@ bool UITask::shouldPlayMessageTone() const {
 }
 
 void UITask::notify(UIEventType t) {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (_shutdown_pending) return;
+#endif
 #if defined(PIN_BUZZER)
 if (_notification_outputs & mesh::notify::Sound) switch(t){
   case UIEventType::contactMessage:
@@ -588,6 +591,23 @@ void UITask::userLedHandler() {
   hardware-agnostic pre-shutdown activity should be done here 
 */
 void UITask::shutdown(bool restart){
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (_shutdown_pending) return;
+  if (!prepareForShutdown()) {
+    buzzer.speakButton(ButtonVoicePrompt::ActionFailed);
+    return;
+  }
+
+  // Keep the main loop running while the tone and spoken confirmation drain,
+  // so USB, Bluetooth and radio service are not held inside this callback.
+  _shutdown_restart = restart;
+  _shutdown_started_at = millis();
+  _shutdown_pending = true;
+  if (!buzzer.speakButton(restart ? ButtonVoicePrompt::Restarting
+                                  : ButtonVoicePrompt::ShuttingDown)) {
+    buzzer.shutdown();
+  }
+#else
   if (!prepareForShutdown()) return;
 
   #ifdef PIN_BUZZER
@@ -609,7 +629,32 @@ void UITask::shutdown(bool restart){
     // Power off board including radio, display, GPS and components
     _board->powerOff();
   }
+#endif
 }
+
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+void UITask::servicePendingShutdown() {
+  if (!_shutdown_pending) return;
+  if (buzzer.isPlaying()
+      && static_cast<uint32_t>(millis() - _shutdown_started_at) < 5000UL) {
+    return;
+  }
+
+  buzzer.stop();
+  _shutdown_pending = false;
+  // New radio/host work can arrive during the announcement. Flush it too
+  // before entering the board's irreversible shutdown state.
+  if (!prepareForShutdown()) {
+    buzzer.speakButton(ButtonVoicePrompt::ActionFailed);
+    return;
+  }
+  if (_shutdown_restart) {
+    _board->reboot();
+  } else {
+    _board->powerOff();
+  }
+}
+#endif
 
 bool UITask::isPairingScreenActive() const {
   return mesh::ui::isBluetoothPairingPromptActive(
@@ -682,6 +727,9 @@ void UITask::loop() {
 #ifdef PIN_BUZZER
   if (buzzer.isPlaying())  buzzer.loop();
 #endif
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  servicePendingShutdown();
+#endif
 
   if (_display != NULL && _display->isOn()) {
     if (!isPairingScreenActive() && !_alert[0] && !(_origin[0] && _msg[0])
@@ -704,7 +752,13 @@ void UITask::loop() {
 }
 
 void UITask::handleButtonAnyPress() {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (_shutdown_pending) return;
+  _button_notification_cleared = the_mesh.notificationButton()
+      || _button_notification_cleared;
+#else
   the_mesh.notificationButton();
+#endif
   MESH_DEBUG_PRINTLN("UITask: any press triggered");
   // called on any button press before other events, to wake up the display quickly
   // do not refresh the display here, as it may block the button handler
@@ -716,6 +770,15 @@ void UITask::handleButtonAnyPress() {
 }
 
 void UITask::handleButtonShortPress() {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (_shutdown_pending) return;
+  const bool notification_cleared = _button_notification_cleared;
+  _button_notification_cleared = false;
+  if (_display == NULL) {
+    buzzer.speakButton(notification_cleared
+        ? ButtonVoicePrompt::NotificationCleared : ButtonVoicePrompt::Ready);
+  }
+#endif
   MESH_DEBUG_PRINTLN("UITask: short press triggered");
   if (_display != NULL) {
     // Only clear message preview if display was already on before button press
@@ -743,14 +806,32 @@ void UITask::handleButtonShortPress() {
 }
 
 void UITask::handleButtonDoublePress() {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (_shutdown_pending) return;
+  _button_notification_cleared = false;
+#endif
   MESH_DEBUG_PRINTLN("UITask: double press triggered, sending advert");
   // ADVERT
-  #ifdef PIN_BUZZER
-      notify(UIEventType::ack);
-  #endif
-  if (the_mesh.advert()) {
+#if !(defined(PIN_BUZZER) && MESH_GPS_VOICE)
+#ifdef PIN_BUZZER
+  notify(UIEventType::ack);
+#endif
+#endif
+  const bool queued = the_mesh.advert();
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (!buzzer.speakButton(queued ? ButtonVoicePrompt::AdvertQueued
+                               : ButtonVoicePrompt::AdvertFailed)) {
+    notify(UIEventType::ack);
+  }
+#endif
+  if (queued) {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+    MESH_DEBUG_PRINTLN("Advert queued!");
+    sprintf(_alert, "Advert queued!");
+#else
     MESH_DEBUG_PRINTLN("Advert sent!");
     sprintf(_alert, "Advert sent!");
+#endif
   } else {
     MESH_DEBUG_PRINTLN("Advert failed!");
     sprintf(_alert, "Advert failed..");
@@ -759,19 +840,44 @@ void UITask::handleButtonDoublePress() {
 }
 
 void UITask::handleButtonTriplePress() {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (_shutdown_pending) return;
+  _button_notification_cleared = false;
+#endif
   MESH_DEBUG_PRINTLN("UITask: triple press triggered");
 #if defined(PIN_BUZZER) && defined(HAS_DRV2605)
   // cycle alert modes: Buzz+Vibe -> Buzz only -> Vibe only -> Silent
+#if MESH_GPS_VOICE
+  const uint8_t previous_sound = _node_prefs->buzzer_quiet;
+  const uint8_t previous_vibration = _node_prefs->vibe_quiet;
+#endif
   int mode = (_node_prefs->buzzer_quiet ? 2 : 0) | (_node_prefs->vibe_quiet ? 1 : 0);
   mode = (mode + 1) & 3;
   _node_prefs->buzzer_quiet = (mode & 2) ? 1 : 0;
   _node_prefs->vibe_quiet = (mode & 1) ? 1 : 0;
+#if MESH_GPS_VOICE
+  // Announce only committed settings. A failed write must not change either
+  // live alert output, including the notification engine's mute masks.
+  if (!the_mesh.savePrefs()) {
+    _node_prefs->buzzer_quiet = previous_sound;
+    _node_prefs->vibe_quiet = previous_vibration;
+    sprintf(_alert, "Alerts: Save failed");
+    buzzer.speakButton(ButtonVoicePrompt::ActionFailed, true);
+    _need_refresh = true;
+    return;
+  }
+#endif
   buzzer.quiet(_node_prefs->buzzer_quiet);
   vibration.quiet(_node_prefs->vibe_quiet);
+#if MESH_GPS_VOICE
+  if (_node_prefs->vibe_quiet) vibration.stop();
+#endif
   the_mesh.setNotificationOutputMute(mesh::notify::Sound, _node_prefs->buzzer_quiet);
   the_mesh.setNotificationOutputMute(mesh::notify::Vibration, _node_prefs->vibe_quiet);
   // audible/tactile confirmation of the new mode (no screen on some boards)
+#if !MESH_GPS_VOICE
   if (!_node_prefs->buzzer_quiet) notify(UIEventType::ack);
+#endif
   if (!_node_prefs->vibe_quiet) vibration.trigger(true);
   switch (mode) {
     case 0: sprintf(_alert, "Alerts: Buzz+Vibe"); break;
@@ -779,9 +885,42 @@ void UITask::handleButtonTriplePress() {
     case 2: sprintf(_alert, "Alerts: Vibe only"); break;
     default: sprintf(_alert, "Alerts: Silent"); break;
   }
+#if MESH_GPS_VOICE
+  static const ButtonVoicePrompt mode_prompts[] = {
+    ButtonVoicePrompt::AlertsSoundVibration,
+    ButtonVoicePrompt::AlertsSoundOnly,
+    ButtonVoicePrompt::AlertsVibrationOnly,
+    ButtonVoicePrompt::AlertsSilent,
+  };
+  // One courtesy announcement is allowed for vibration-only/silent modes,
+  // without unmuting ordinary notifications or changing the saved mode.
+  buzzer.speakButton(mode_prompts[mode], true);
+#else
   the_mesh.savePrefs();
+#endif
   _need_refresh = true;
 #elif defined(PIN_BUZZER)
+#if MESH_GPS_VOICE
+    const bool previous_quiet = buzzer.isQuiet();
+    const uint8_t previous_preference = _node_prefs->buzzer_quiet;
+    const bool quiet = !previous_quiet;
+    _node_prefs->buzzer_quiet = quiet;
+    if (the_mesh.savePrefs()) {
+      buzzer.quiet(quiet);
+      the_mesh.setNotificationOutputMute(mesh::notify::Sound, quiet);
+      sprintf(_alert, quiet ? "Buzzer: OFF" : "Buzzer: ON");
+      // A user-requested mute gets one final confirmation without changing
+      // the stored quiet state or allowing ordinary notifications through.
+      buzzer.speakButton(quiet ? ButtonVoicePrompt::SoundOff
+                               : ButtonVoicePrompt::SoundOn, true);
+    } else {
+      _node_prefs->buzzer_quiet = previous_preference;
+      buzzer.quiet(previous_quiet);
+      sprintf(_alert, "Buzzer: Save failed");
+      buzzer.speakButton(ButtonVoicePrompt::ActionFailed, true);
+    }
+    _need_refresh = true;
+#else
     if (buzzer.isQuiet()) {
       buzzer.quiet(false);
       notify(UIEventType::ack);
@@ -795,39 +934,147 @@ void UITask::handleButtonTriplePress() {
     the_mesh.savePrefs();
     _need_refresh = true;
 #endif
+#endif
 }
 
 void UITask::handleButtonQuadruplePress() {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (_shutdown_pending) return;
+  _button_notification_cleared = false;
+  bool gps_changed = false;
+  sprintf(_alert, "GPS: Unavailable");
+#endif
   MESH_DEBUG_PRINTLN("UITask: quad press triggered");
+#if ENV_INCLUDE_GPS == 1
   if (_sensors != NULL) {
-    // toggle GPS onn/off
-    int num = _sensors->getNumSettings();
-    for (int i = 0; i < num; i++) {
-      if (strcmp(_sensors->getSettingName(i), "gps") == 0) {
-        if (strcmp(_sensors->getSettingValue(i), "1") == 0) {
-          _sensors->setSettingValue("gps", "0");
-          notify(UIEventType::ack);
-          sprintf(_alert, "GPS: Disabled");
-        } else {
-          _sensors->setSettingValue("gps", "1");
-          notify(UIEventType::ack);
-          sprintf(_alert, "GPS: Enabled");
-        }
-        break;
+    const char* gps = _sensors->getSettingByKey("gps");
+    if (gps != nullptr) {
+      const bool enabled = gps[0] != '1';
+      if (the_mesh.setGpsEnabled(enabled)) {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+        gps_changed = true;
+#endif
+#ifdef PIN_BUZZER
+        if (!buzzer.speakGps(enabled)) notify(UIEventType::ack);
+#else
+        notify(UIEventType::ack);
+#endif
+        sprintf(_alert, enabled ? "GPS: Enabled" : "GPS: Disabled");
+      } else {
+        sprintf(_alert, "GPS: Save failed");
       }
     }
   }
+#endif
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (!gps_changed) buzzer.speakButton(ButtonVoicePrompt::ActionFailed);
+#endif
   _need_refresh = true;
 }
 
 void UITask::handleButtonLongPress() {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  if (_shutdown_pending) return;
+  _button_notification_cleared = false;
+#endif
   MESH_DEBUG_PRINTLN("UITask: long press triggered");
   if (millis() - ui_started_at < 8000) {   // long press in first 8 seconds since startup -> CLI/rescue
     the_mesh.enterCLIRescue();
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+    // enterCLIRescue is supported independently of the framed USB interface.
+    buzzer.speakButton(ButtonVoicePrompt::UsbSetup);
+#endif
   } else {
     shutdown();
   }
 }
+
+#ifdef MESH_BUTTON_AUDIO_HIL
+bool UITask::handleButtonAudioTest(const char* command, char* reply, size_t size) {
+  if (strncmp(command, "hil voice play ", 15) == 0) {
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+    if (_shutdown_pending) {
+      snprintf(reply, size, "Error: shutdown pending; preview refused");
+      return true;
+    }
+    struct Preview {
+      const char* name;
+      ButtonVoicePrompt prompt;
+    };
+    static const Preview previews[] = {
+      {"ready", ButtonVoicePrompt::Ready},
+      {"notificationCleared", ButtonVoicePrompt::NotificationCleared},
+      {"advertQueued", ButtonVoicePrompt::AdvertQueued},
+      {"advertFailed", ButtonVoicePrompt::AdvertFailed},
+      {"soundOn", ButtonVoicePrompt::SoundOn},
+      {"soundOff", ButtonVoicePrompt::SoundOff},
+      {"gpsOn", ButtonVoicePrompt::GpsOn},
+      {"gpsOff", ButtonVoicePrompt::GpsOff},
+      {"actionFailed", ButtonVoicePrompt::ActionFailed},
+      {"usbSetup", ButtonVoicePrompt::UsbSetup},
+      {"shuttingDown", ButtonVoicePrompt::ShuttingDown},
+      {"restarting", ButtonVoicePrompt::Restarting},
+#ifdef HAS_DRV2605
+      {"alertsSoundVibration", ButtonVoicePrompt::AlertsSoundVibration},
+      {"alertsSoundOnly", ButtonVoicePrompt::AlertsSoundOnly},
+      {"alertsVibrationOnly", ButtonVoicePrompt::AlertsVibrationOnly},
+      {"alertsSilent", ButtonVoicePrompt::AlertsSilent},
+#endif
+    };
+    const char* name = command + 15;
+    for (const auto& preview : previews) {
+      if (strcmp(name, preview.name) != 0) continue;
+      // This laboratory path only previews audio. It never invokes the
+      // button action or changes its saved sound/GPS/shutdown preference.
+      if (buzzer.speakButton(preview.prompt, true)) {
+        snprintf(reply, size, "OK - preview only: %s", name);
+      } else {
+        snprintf(reply, size, "Error: voice preview unavailable");
+      }
+      return true;
+    }
+    snprintf(reply, size, "Error: unknown voice preview name");
+#else
+    snprintf(reply, size, "Error: voice preview unsupported");
+#endif
+    return true;
+  }
+  if (strncmp(command, "hil voice gain ", 15) == 0) {
+#ifdef PIN_BUZZER
+    const char* value = command + 15;
+    if (value[0] >= '1' && value[0] <= '8' && value[1] == 0
+        && buzzer.voiceGain(value[0] - '0')) {
+      snprintf(reply, size, "OK - speech gain %c", value[0]);
+      return true;
+    }
+#endif
+    snprintf(reply, size, "Error: voice busy/unavailable or use gain 1..8");
+    return true;
+  }
+  if (strcmp(command, "hil voice status") == 0) {
+#ifdef PIN_BUZZER
+    buzzer.voiceStatus(reply, size);
+#else
+    snprintf(reply, size, "voice unsupported");
+#endif
+    return true;
+  }
+  if (strncmp(command, "hil button ", 11) != 0) return false;
+  const char* action = command + 11;
+  uint8_t clicks = 0;
+  uint32_t hold_ms = 120;
+  if (action[0] >= '1' && action[0] <= '4' && action[1] == 0) clicks = action[0] - '0';
+  else if (strcmp(action, "hold") == 0) { clicks = 1; hold_ms = 3500; }
+#ifdef PIN_USER_BTN
+  if (clicks != 0 && _userButton && _userButton->injectPresses(clicks, hold_ms)) {
+    snprintf(reply, size, "OK - injected %u press(es), hold %lu ms", clicks, (unsigned long)hold_ms);
+    return true;
+  }
+#endif
+  snprintf(reply, size, "Error: button busy or use hil button 1|2|3|4|hold");
+  return true;
+}
+#endif
 
 
 uint8_t UITask::notificationCapabilities() const {
@@ -845,7 +1092,13 @@ uint8_t UITask::notificationCapabilities() const {
 }
 void UITask::notificationMelody(const char* text) {
 #ifdef PIN_BUZZER
-  if (text) buzzer.playNotification(text); else buzzer.stop();
+#if MESH_GPS_VOICE
+  if (_shutdown_pending) return;
+  // The physical sound preference is authoritative even if the separate
+  // programmable-notification settings file could not be saved.
+  if (text && buzzer.isQuiet()) return;
+#endif
+  if (text) buzzer.playNotification(text); else buzzer.stopNotification();
 #endif
 }
 void UITask::notificationScreen(int8_t mode) {
@@ -855,6 +1108,14 @@ void UITask::notificationScreen(int8_t mode) {
 }
 void UITask::notificationVibration(bool on) {
 #ifdef HAS_DRV2605
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  // The saved physical alert mode stays authoritative even if the separate
+  // notification-mask write fails. Off callbacks must still stop the driver.
+  if (on && _node_prefs && _node_prefs->vibe_quiet) {
+    vibration.stop();
+    return;
+  }
+#endif
   vibration.pulse(on);
 #elif defined(PIN_VIBRATION)
   vibration.stop();

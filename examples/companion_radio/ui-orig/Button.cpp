@@ -69,12 +69,35 @@ void Button::update() {
 }
 
 bool Button::readButton() {
+#ifdef MESH_BUTTON_AUDIO_HIL
+    if (_hil_active) {
+        const uint32_t now = millis();
+        if (static_cast<int32_t>(now - _hil_at) >= 0) {
+            _hil_down = !_hil_down;
+            if (!_hil_down && --_hil_remaining == 0) _hil_active = false;
+            _hil_at = now + (_hil_down ? _hil_hold_ms : 120);
+        }
+        return _hil_down;
+    }
+#endif
     if (_isAnalog) {
         return (analogRead(_pin) < _analogThreshold);
     } else {
         return (digitalRead(_pin) == _activeState);
     }
 }
+
+#ifdef MESH_BUTTON_AUDIO_HIL
+bool Button::injectPresses(uint8_t clicks, uint32_t hold_ms) {
+    if (_hil_active || _state != IDLE || clicks < 1 || clicks > 4) return false;
+    _hil_active = true;
+    _hil_down = false;
+    _hil_remaining = clicks;
+    _hil_hold_ms = hold_ms;
+    _hil_at = millis() + 50;
+    return true;
+}
+#endif
 
 void Button::handleStateChange() {
     uint32_t now = millis();
