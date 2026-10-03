@@ -333,6 +333,7 @@ public:
 // must not be displaced just because USB logging is enabled.
 enum class UsbLoggingTerminalAction : uint8_t {
   NO_ACTION,
+  PARK_USB_FOR_NETWORK,
   CLAIM_USB,
   RETURN_TO_BINARY,
   KEEP_ASCII,
@@ -342,8 +343,14 @@ inline UsbLoggingTerminalAction selectUsbLoggingTerminalAction(
     bool has_dedicated_logging_port, bool logging_enabled,
     bool usb_terminal_active, bool usb_logging_terminal_active,
     bool full_companion, bool network_terminal_active) {
-  if (has_dedicated_logging_port || network_terminal_active) {
+  if (has_dedicated_logging_port) {
     return UsbLoggingTerminalAction::NO_ACTION;
+  }
+  if (network_terminal_active) {
+    // Keep the network CLI owner, but never leave framed USB traffic enabled
+    // on the same CDC stream receiving ASCII diagnostics.
+    return logging_enabled ? UsbLoggingTerminalAction::PARK_USB_FOR_NETWORK
+                           : UsbLoggingTerminalAction::NO_ACTION;
   }
   if (logging_enabled) {
     return UsbLoggingTerminalAction::CLAIM_USB;

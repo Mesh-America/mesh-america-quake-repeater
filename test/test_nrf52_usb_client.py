@@ -31,6 +31,10 @@ HARNESS = r'''
 static bool mounted = true, dtr[2] = {false, false}, dfu = false;
 static uint32_t now_ms = 100, rx_count = 0, tx_count = 0;
 static unsigned rx_flushes = 0, tx_clears = 0, log_edges = 0;
+// Model the endpoint separately from the software FIFO. A FIFO clear must
+// leave an armed packet intact; only a real detach + enumeration retires it.
+static bool armed_in[2] = {false, false}, attached = true;
+static unsigned detaches = 0, attaches = 0;
 static bool close_during_rx_sample = false;
 static uint32_t millis() { return now_ms; }
 static bool tud_mounted() { return mounted; }
@@ -46,6 +50,11 @@ static uint32_t tud_cdc_n_available(uint8_t) {
 }
 static void tud_cdc_n_read_flush(uint8_t) { ++rx_flushes; rx_count = 0; }
 static uint32_t tud_cdc_n_write_clear(uint8_t) { ++tx_clears; tx_count = 0; return 0; }
+static bool mesh_tud_cdc_n_tx_pending(uint8_t n) { return armed_in[n]; }
+struct UsbDevice {
+  void detach() { ++detaches; attached = false; }
+  void attach() { ++attaches; attached = true; }
+} TinyUSBDevice;
 static uint32_t tud_cdc_n_write_available(uint8_t) { return 64 - tx_count; }
 static uint32_t tud_cdc_n_write(uint8_t, const void*, uint32_t size) {
   const auto count = std::min(size, 64 - tx_count); tx_count += count; return count;
@@ -144,6 +153,32 @@ int main() {
   // No write waits when the FIFO is full, including with DTR low.
   tx_count = 64;
   assert(mesh::writeTinyUsbCdcOnce(nullptr, bytes, 4) == 0);
+  // A previously submitted IN packet survives FIFO clearing. Quarantine the
+  // entire device immediately, but never wait on the unread endpoint.
+  tx_count = 4; armed_in[0] = true;
+  rx_count = 4;
+  assert(mesh::isUsbCompanionClientConnected());
+  line(false);
+  assert(tx_count == 0 && armed_in[0] && !attached && detaches == 1);
+  assert(!mesh::isUsbCompanionClientConnected());
+  assert(mesh::writeTinyUsbCdcOnce(nullptr, bytes, 4) == 0);
+  // Repeated control callbacks cannot cause a detach/attach storm.
+  meshTinyUsbCdcLineCodingChanged(0);
+  line(false);
+  assert(detaches == 1);
+  now_ms += 100;
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(attaches == 0); // owner has not consumed unplug yet
+  mounted = false; armed_in[0] = false; dtr[0] = false;
+  meshTinyUsbDeviceSessionBoundary();
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(attaches == 1 && attached);
+  mounted = true;
+  meshTinyUsbDeviceSessionBoundary();
+  settle();
+  rx_count = 4;
+  assert(mesh::isUsbCompanionClientConnected());
+  rx_count = 0;
   baud = 1200;
   line(false);
   assert(dfu);
