@@ -836,6 +836,160 @@ TEST(MeshReceiveHooks, FloodTraceAndControlAreNeverForwarded) {
   }
 }
 
+// Admission/egress boundary controls deliberately do not reproduce the role
+// predicate. The Python extraction suite executes the actual repeater methods;
+// these tests exercise the real Mesh/Dispatcher validation and queue ownership.
+class TraceForwardingPolicyMesh : public TraceTestMesh {
+public:
+  using TraceTestMesh::TraceTestMesh;
+  const mesh::Packet* denied = nullptr;
+  unsigned forwarding_checks = 0;
+  bool allowPacketForward(const mesh::Packet*) override {
+    ++forwarding_checks;
+    return forwardFloods;
+  }
+  bool allowPacketTransmit(const mesh::Packet* packet) const override {
+    return packet != denied && mesh::Mesh::allowPacketTransmit(packet);
+  }
+};
+
+static mesh::Packet makeIncomingTrace(const TraceTestMesh& node, uint8_t route,
+                                      uint8_t flags = 0, uint8_t hash_size = 1) {
+  mesh::Packet packet;
+  packet.header = route | (PAYLOAD_TYPE_TRACE << PH_TYPE_SHIFT);
+  packet.path_len = 0;
+  packet.payload_len = 9 + 2 * hash_size;
+  memset(packet.payload, 0, packet.payload_len);
+  packet.payload[8] = flags;
+  memcpy(packet.payload + 9, node.self_id.pub_key, hash_size);
+  memset(packet.payload + 9 + hash_size, 0x98, hash_size);
+  packet._snr = 17;
+  return packet;
+}
+
+TEST(TraceForwardingSafety, MatchingDirectHashesAppendOneSnrAndDuplicateIsRejected) {
+  for (uint8_t route : {ROUTE_TYPE_DIRECT, ROUTE_TYPE_TRANSPORT_DIRECT}) {
+    for (uint8_t code = 0; code < 4; ++code) {
+      TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+      ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+      TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+      node.forwardFloods = true;
+      memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+      mesh::Packet packet = makeIncomingTrace(node, route, code, 1U << code);
+      mesh::Packet duplicate = packet;
+      EXPECT_NE(ACTION_RELEASE, node.receivePacket(&packet));
+      EXPECT_EQ(1, packet.path_len);
+      EXPECT_EQ(17, packet.path[0]);
+      EXPECT_EQ(1, tables.mark_seen_calls);
+      EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&duplicate));
+      EXPECT_EQ(0, duplicate.path_len);
+      EXPECT_EQ(1, tables.mark_seen_calls);
+    }
+  }
+}
+
+TEST(TraceForwardingSafety, MalformedWrongHashAndFullSnrPathNeverReachForwardingGate) {
+  TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+  ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+  TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+  node.forwardFloods = true;
+  memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+  const mesh::Packet valid = makeIncomingTrace(node, ROUTE_TYPE_DIRECT);
+  for (uint8_t length = 0; length < 9; ++length) {
+    mesh::Packet packet = valid;
+    packet.payload_len = length;
+    EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&packet));
+  }
+  mesh::Packet wrong = valid;
+  wrong.payload[9] ^= 0xff;
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&wrong));
+  mesh::Packet truncated = valid;
+  truncated.payload[8] = 3;
+  truncated.payload_len = 10; // neither an eight-byte nor four-byte hash fits
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&truncated));
+  mesh::Packet full = valid;
+  full.path_len = MAX_PATH_SIZE;
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&full));
+  mesh::Packet long_offset = valid;
+  long_offset.path_len = 33;
+  long_offset.payload[8] = 3;
+  long_offset.payload_len = 9 + 160;
+  memset(long_offset.payload + 9, 0x42, 160);
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&long_offset)); // 33*8 must not wrap
+  EXPECT_EQ(0u, node.forwarding_checks);
+  EXPECT_EQ(0, tables.mark_seen_calls);
+}
+
+TEST(TraceForwardingSafety, FinalSnrSlotIsSafeAndDeniedAdmissionDoesNotMarkSeen) {
+  TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+  ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+  TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+  memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+  mesh::Packet blocked = makeIncomingTrace(node, ROUTE_TYPE_DIRECT);
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&blocked));
+  EXPECT_EQ(0, blocked.path_len);
+  EXPECT_EQ(0, tables.mark_seen_calls);
+  node.forwardFloods = true;
+  mesh::Packet last = blocked;
+  last.path_len = MAX_PATH_SIZE - 1;
+  last.payload_len = 9 + MAX_PATH_SIZE;
+  memset(last.payload + 9, 0x42, MAX_PATH_SIZE);
+  EXPECT_NE(ACTION_RELEASE, node.receivePacket(&last));
+  EXPECT_EQ(MAX_PATH_SIZE, last.path_len);
+  EXPECT_EQ(17, last.path[MAX_PATH_SIZE - 1]);
+  EXPECT_EQ(1, tables.mark_seen_calls);
+}
+
+TEST(TraceForwardingSafety, EgressVetoRetiresQueuedRelayAndItsRetryOwner) {
+  TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+  ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+  TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+  node.begin();
+  node.forwardFloods = true;
+  memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+  auto* relay = manager.allocNew(); ASSERT_NE(nullptr, relay);
+  *relay = makeIncomingTrace(node, ROUTE_TYPE_DIRECT);
+  ASSERT_NE(ACTION_RELEASE, node.receivePacket(relay));
+  ASSERT_TRUE(node.sendPacket(relay, 1));
+  node.denied = relay;
+  clock.now = 1000; node.loop();
+  EXPECT_FALSE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  node.denied = nullptr;
+  clock.now = 10000; node.loop();
+  EXPECT_FALSE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  EXPECT_EQ(12, manager.getFreeCount());
+}
+
+TEST(TraceForwardingSafety, AirtimeAlreadyStartedFinishesButQueuedRetryIsRetired) {
+  TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+  ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+  TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+  node.begin();
+  node.forwardFloods = true;
+  memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+  auto* relay = manager.allocNew(); ASSERT_NE(nullptr, relay);
+  *relay = makeIncomingTrace(node, ROUTE_TYPE_DIRECT);
+  ASSERT_NE(ACTION_RELEASE, node.receivePacket(relay));
+  ASSERT_TRUE(node.sendPacket(relay, 1));
+  clock.now = 1; node.loop(); ASSERT_TRUE(radio.sending);
+  node.denied = relay;
+  clock.now = 2; node.loop(); EXPECT_TRUE(radio.sending);
+  radio.complete = true;
+  clock.now = 3; node.loop(); EXPECT_FALSE(radio.sending);
+  ASSERT_EQ(1, manager.getOutboundTotal());
+  node.denied = manager.getOutboundByIdx(0);
+  clock.now = 1000; node.loop();
+  EXPECT_FALSE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  node.denied = nullptr;
+  clock.now = 10000; node.loop();
+  EXPECT_FALSE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  EXPECT_EQ(12, manager.getFreeCount());
+}
+
 static mesh::Packet* makeTrace(TraceTestMesh& node, uint32_t tag, uint32_t auth,
                                const uint8_t* route, uint8_t route_len) {
   mesh::Packet* packet = node.createTrace(tag, auth, 0);

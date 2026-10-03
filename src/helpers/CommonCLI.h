@@ -183,8 +183,11 @@ public:
   // logging artifact's enabled-at-first-boot behavior.
   uint8_t usb_logging_enabled = 1;
   // USB diagnostics are opt-in independently of the packet output gate.
-  // Persisted at the very end of /com_prefs, not beside usb_log.
+  // Appended after ESP-NOW intent in /com_prefs, not beside usb_log.
   uint8_t usb_debug_enabled = 0;
+  // Repeater-only opt-in for routed trace diagnostics while repeat is off.
+  // Appended after usb_debug in /com_prefs; existing images stay disabled.
+  uint8_t trace_when_repeat_off = 0;
   // Runtime UART choice for merged RS-232 repeater artifacts. Appended at
   // /com_prefs offset 862; single-UART builds keep their compiled port here.
   uint8_t bridge_uart = 0;
@@ -377,6 +380,7 @@ private:
   protected:
     void structure() override {
       def("disable", _parent->disable_fwd);
+      def("trace_off", _parent->trace_when_repeat_off);
       def("f_max", _parent->flood_max);
       def("f_max_uns", _parent->flood_max_unscoped);
       def("f_max_adv", _parent->flood_max_advert);

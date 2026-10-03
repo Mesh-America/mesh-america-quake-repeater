@@ -764,6 +764,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   memset(_prefs->extra_sf, 0, sizeof(_prefs->extra_sf));
   _prefs->usb_logging_enabled = 1;
   _prefs->usb_debug_enabled = 0;
+  _prefs->trace_when_repeat_off = 0;
 #ifdef WITH_RS232_BRIDGE
   _prefs->bridge_uart = WITH_RS232_BRIDGE_UART;
 #else
@@ -935,9 +936,10 @@ void CommonCLI::syncOtaConfigFromPrefs() {
 #endif
 
 void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
-  // Older or truncated preference images must never inherit debug opt-in
+  // Older or truncated preference images must never inherit these opt-ins
   // from a previous load of a newer image.
   _prefs->usb_debug_enabled = 0;
+  _prefs->trace_when_repeat_off = 0;
 #if defined(RP2040_PLATFORM)
   File file = fs->open(filename, "r");
 #else
@@ -1330,6 +1332,10 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
                   if (file.available() >= (int)sizeof(_prefs->usb_debug_enabled)) {
                     file.read((uint8_t *)&_prefs->usb_debug_enabled,
                               sizeof(_prefs->usb_debug_enabled));
+                    if (file.available() >= (int)sizeof(_prefs->trace_when_repeat_off)) {
+                      file.read((uint8_t *)&_prefs->trace_when_repeat_off,
+                                sizeof(_prefs->trace_when_repeat_off));
+                    }
                   }
                 }
               }
@@ -1445,6 +1451,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->usb_logging_enabled = constrain(_prefs->usb_logging_enabled, 0, 1); // boolean
     // Only a deliberately saved 1 enables diagnostics; corrupted bytes are OFF.
     _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
+    // Corrupt or unknown values must not enable a repeat-off exception.
+    _prefs->trace_when_repeat_off = _prefs->trace_when_repeat_off == 1 ? 1 : 0;
     _prefs->cad_enabled = constrain(_prefs->cad_enabled, 0, 1); // boolean
     if (!directRetryPrefsValid(_prefs)) {
       setDefaultDirectRetryPrefs(_prefs);
@@ -1658,6 +1666,7 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   WRITE_COMMON_PREFS(&prefs->primary_radio_preamble);          // appended primary tuple field
   WRITE_COMMON_PREFS(&prefs->espnow_bridge_enabled);           // appended Full ESP-NOW intent
   WRITE_COMMON_PREFS(&prefs->usb_debug_enabled);               // appended USB debug intent
+  WRITE_COMMON_PREFS(&prefs->trace_when_repeat_off);            // appended repeater trace exception
 
 #undef WRITE_COMMON_PREFS_BYTES
 #undef WRITE_COMMON_PREFS
@@ -1671,6 +1680,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     _common_save_result_known = true;
     _common_save_succeeded = false;
     _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
+    _prefs->trace_when_repeat_off = _prefs->trace_when_repeat_off == 1 ? 1 : 0;
   }
 #ifdef WITH_MQTT_BRIDGE
   // Observer builds use a verified temp/backup transaction for common prefs.
@@ -1817,6 +1827,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->primary_radio_preamble, sizeof(_prefs->primary_radio_preamble)); // appended
     file.write((uint8_t *)&_prefs->espnow_bridge_enabled, sizeof(_prefs->espnow_bridge_enabled));   // appended
     file.write((uint8_t *)&_prefs->usb_debug_enabled, sizeof(_prefs->usb_debug_enabled));           // appended
+    file.write((uint8_t *)&_prefs->trace_when_repeat_off, sizeof(_prefs->trace_when_repeat_off));   // appended
 
     _common_save_succeeded = file.commit();
     if (!_common_save_succeeded) {
@@ -3349,6 +3360,29 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
 
 void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+  if (strncmp(config, "repeat.trace", 12) == 0
+      && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
+    if (strcmp(_callbacks->getRole(), "repeater") != 0) {
+      strcpy(reply, "Error: repeat.trace is only supported by repeaters");
+      return;
+    }
+    const char* value = config + 12;
+    while (*value == ' ' || *value == '\t') ++value;
+    if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+      strcpy(reply, "Error: usage set repeat.trace on|off");
+      return;
+    }
+    const uint8_t previous = _prefs->trace_when_repeat_off;
+    _prefs->trace_when_repeat_off = strcmp(value, "on") == 0 ? 1 : 0;
+    if (!trySavePrefs()) {
+      _prefs->trace_when_repeat_off = previous;
+      strcpy(reply, "Error: Repeat trace not saved; unchanged");
+      return;
+    }
+    _callbacks->onRetryConfigChanged();
+    snprintf(reply, 160, "OK - repeat.trace %s (saved)", value);
+    return;
+  }
 #if defined(NRF52_POWER_MANAGEMENT)
   if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
 #endif
@@ -4695,6 +4729,17 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 
 void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+  if (strncmp(config, "repeat.trace", 12) == 0
+      && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
+    if (strcmp(_callbacks->getRole(), "repeater") != 0) {
+      strcpy(reply, "Error: repeat.trace is only supported by repeaters");
+    } else if (strcmp(config, "repeat.trace") != 0) {
+      strcpy(reply, "Error: usage get repeat.trace");
+    } else {
+      snprintf(reply, 160, "> %s", _prefs->trace_when_repeat_off == 1 ? "on" : "off");
+    }
+    return;
+  }
 #if defined(NRF52_POWER_MANAGEMENT)
   if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
 #endif

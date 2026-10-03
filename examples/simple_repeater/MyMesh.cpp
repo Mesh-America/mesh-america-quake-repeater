@@ -1022,7 +1022,8 @@ bool MyMesh::floodChannelDataHopApplies(const mesh::Packet* packet) const {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
-  if (_prefs.disable_fwd) return false;
+  if (_prefs.disable_fwd && !(_prefs.trace_when_repeat_off == 1 && packet
+      && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE)) return false;
   if (packet->isRouteFlood()) {
     if (mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max,
                                       _prefs.flood_max_unscoped,
@@ -1084,6 +1085,16 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 #endif
 #endif
   return true;
+}
+
+bool MyMesh::allowPacketTransmit(const mesh::Packet* packet) const {
+  // Forwarded traces have already appended this node's SNR. A locally
+  // originated trace starts with an empty SNR path and is not a relay.
+  // Recheck at egress so a queued relay/retry cannot outlive this opt-in.
+  if (_prefs.disable_fwd && _prefs.trace_when_repeat_off != 1 && packet
+      && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE
+      && packet->path_len > 0) return false;
+  return mesh::Mesh::allowPacketTransmit(packet);
 }
 
 const char *MyMesh::getLogDateTime() {
@@ -1462,7 +1473,9 @@ uint32_t MyMesh::getDirectRetryAttemptStepMillis() const {
 }
 
 bool MyMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash, uint8_t next_hop_hash_len) const {
-  (void)packet;
+  if (_prefs.disable_fwd && _prefs.trace_when_repeat_off != 1 && packet
+      && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE
+      && packet->path_len > 0) return false;
   if (!_prefs.direct_retry_enabled) {
     return false;
   }

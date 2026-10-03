@@ -260,6 +260,9 @@ settings override these defaults. To toggle only MQTT while keeping
 USB logging unchanged, use `set mqtt.enabled off` / `on`. Neither setting
 turns LoRa repeating off. Repeater forwarding uses `set repeat off` / `on`
 and `get repeat` separately.
+Repeaters can opt in to routed trace diagnostics with `set repeat.trace on`
+while `repeat` stays off; the saved exception defaults off and does not relay
+other payload types. See [repeat-off traces](cli_commands.md#allow-routed-traces-while-repeating-is-disabled-repeater-only).
 The selector changes USB master output, not saved `usb.debug` intent. Direct
 WiFi MQTT is independent of that USB verbosity preference.
 
