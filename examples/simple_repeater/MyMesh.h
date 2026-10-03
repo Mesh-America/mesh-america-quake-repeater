@@ -1666,7 +1666,6 @@ public:
 #if ENV_INCLUDE_D7S
   // Earthquake channel alerts (MyMeshQuake.cpp); see docs/earthquake-alerts.md.
   char quake_channel[24] = {};       // canonical "#name", empty = alerts off
-  char quake_region[31] = {};        // optional scope override, empty = the default scope
   uint16_t quake_cooldown_min = 10;
   seismic::Policy quake_policy;
   uint32_t quake_last_test_ms = 0;
@@ -1676,7 +1675,6 @@ public:
   bool saveQuakePrefs();
   void applyQuakePolicyConfig();
   bool buildQuakeChannel(mesh::GroupChannel& channel, const char*& problem);
-  bool resolveQuakeScope(TransportKey& scope);
   bool quakeSendBlocker(const char*& why, mesh::GroupChannel& channel, TransportKey& scope);
   bool sendQuakeMessage(const seismic::Send& values, bool test, const char*& why);
   void checkQuakeAlert();

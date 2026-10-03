@@ -37,31 +37,26 @@ void MyMesh::applyQuakePolicyConfig() {
 // Settings live in their own small file so the shared preferences image keeps its layout.
 void MyMesh::loadQuakePrefs() {
   quake_channel[0] = 0;
-  quake_region[0] = 0;
   quake_cooldown_min = QUAKE_COOLDOWN_MIN_DEFAULT;
   if (_fs != NULL) {
     File file = mesh::openFileRead(_fs, QUAKE_PREFS_FILE);
     if (file) {
       uint8_t header[2];
       char channel[sizeof(quake_channel)];
-      char region[sizeof(quake_region)];
       uint16_t cooldown = 0;
-      const bool ok = file.size() == sizeof(header) + sizeof(channel) + sizeof(region) + sizeof(cooldown)
+      const bool ok = file.size() == sizeof(header) + sizeof(channel) + sizeof(cooldown)
           && file.read(header, sizeof(header)) == sizeof(header)
           && header[0] == QUAKE_PREFS_MAGIC && header[1] == QUAKE_PREFS_VERSION
           && file.read((uint8_t*)channel, sizeof(channel)) == sizeof(channel)
-          && file.read((uint8_t*)region, sizeof(region)) == sizeof(region)
           && file.read((uint8_t*)&cooldown, sizeof(cooldown)) == sizeof(cooldown);
       file.close();
       if (ok) {
         channel[sizeof(channel) - 1] = 0;
-        region[sizeof(region) - 1] = 0;
         // A damaged name must not become a channel nobody chose.
         char canonical[sizeof(quake_channel)];
         if (seismic::normalizeHashtag(channel, canonical, sizeof(canonical)) == seismic::Hashtag::Ok) {
           strcpy(quake_channel, canonical);
         }
-        strcpy(quake_region, region);
         if (cooldown >= 1 && cooldown <= QUAKE_COOLDOWN_MIN_MAX) quake_cooldown_min = cooldown;
       }
     }
@@ -79,12 +74,9 @@ bool MyMesh::saveQuakePrefs() {
   if (!file) return false;
   const uint8_t header[2] = {QUAKE_PREFS_MAGIC, QUAKE_PREFS_VERSION};
   char channel[sizeof(quake_channel)] = {};
-  char region[sizeof(quake_region)] = {};
   strncpy(channel, quake_channel, sizeof(channel) - 1);
-  strncpy(region, quake_region, sizeof(region) - 1);
   file.write(header, sizeof(header));
   file.write((const uint8_t*)channel, sizeof(channel));
-  file.write((const uint8_t*)region, sizeof(region));
   file.write((const uint8_t*)&quake_cooldown_min, sizeof(quake_cooldown_min));
   return file.commit();
 }
@@ -108,24 +100,11 @@ bool MyMesh::buildQuakeChannel(mesh::GroupChannel& channel, const char*& problem
   return true;
 }
 
-bool MyMesh::resolveQuakeScope(TransportKey& scope) {
-  if (quake_region[0] == 0) {
-    scope = default_scope;
-    return true;
-  }
-  const RegionEntry* region = region_map.findByName(quake_region);
-  return region != NULL && !region->isWildcard()
-      && region_map.getTransportKeysFor(*region, &scope, 1) > 0 && !scope.isNull();
-}
-
 // The things every send needs: a usable channel, scope, location and clock. `why` says what is missing.
 bool MyMesh::quakeSendBlocker(const char*& why, mesh::GroupChannel& channel, TransportKey& scope) {
   why = NULL;
   if (!buildQuakeChannel(channel, why)) return true;
-  if (!resolveQuakeScope(scope)) {
-    why = "earthquake.region has no usable transport key";
-    return true;
-  }
+  scope = default_scope;  // the repeater's own default region, as for its adverts
   if (!seismic::locationIsSet(_prefs.node_lat, _prefs.node_lon)) {
     why = seismic::blockText(seismic::Block::NoLocation);
     return true;
@@ -230,34 +209,6 @@ bool MyMesh::handleQuakeCommand(const char* command, char* reply) {
     const bool located = seismic::locationIsSet(_prefs.node_lat, _prefs.node_lon);
     snprintf(reply, 160, "OK - alerts go to %s%s", quake_channel,
              located ? "" : ". Set lat and lon too: nothing is sent until the location is set");
-  } else if (strcmp(command, "get earthquake.region") == 0) {
-    snprintf(reply, 160, "> %s", quake_region[0] ? quake_region : "<default scope>");
-  } else if (strncmp(command, "set earthquake.region ", 22) == 0) {
-    const char* value = skipSpaces(command + 22);
-    char previous[sizeof(quake_region)];
-    strcpy(previous, quake_region);
-    if (strcmp(value, "off") == 0) {
-      quake_region[0] = 0;
-    } else {
-      const RegionEntry* region = region_map.findByName(value);
-      if (region == NULL) {
-        strcpy(reply, "Err - unknown region");
-        return true;
-      }
-      StrHelper::strncpy(quake_region, region->name, sizeof(quake_region));
-      TransportKey scope;
-      if (!resolveQuakeScope(scope)) {
-        strcpy(quake_region, previous);
-        strcpy(reply, "Err - region has no usable transport key");
-        return true;
-      }
-    }
-    if (!saveQuakePrefs()) {
-      strcpy(quake_region, previous);
-      strcpy(reply, "Err - could not save");
-      return true;
-    }
-    strcpy(reply, "OK");
   } else if (strcmp(command, "get earthquake.cooldown") == 0) {
     snprintf(reply, 160, "> %u", (unsigned)quake_cooldown_min);
   } else if (strncmp(command, "set earthquake.cooldown ", 24) == 0) {

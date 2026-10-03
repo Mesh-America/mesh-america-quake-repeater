@@ -21,8 +21,9 @@ Status: experimental, first released as an alpha. The alert logic is unit tested
    ```
 
    `set earthquake.channel off` turns alerts off again. `#test`, `#bot` and the Public channel are refused, because bots and every nearby phone answer there.
-3. **Send a test.** `earthquake test` posts a message that starts with `TEST:` (at most one every 30 seconds). If it is refused, the reply says which setting is missing.
-4. **Check readiness any time** with `earthquake status`.
+3. **Check the clock.** `clock` should show today's date (UTC). If it shows 1970, set it with `time <epoch seconds>`, or `gps sync` with a GPS fitted. Without a battery-backed clock module or GPS the time is lost whenever power is lost, and alerts are held until it is set again.
+4. **Send a test.** `earthquake test` posts a message that starts with `TEST:` (at most one every 30 seconds). If it is refused, the reply says which setting is missing.
+5. **Check readiness any time** with `earthquake status`.
 
 ## What it does
 
@@ -30,7 +31,7 @@ Status: experimental, first released as an alpha. The alert logic is unit tested
 - **One message per shake.** After sending, further reports are ignored for `earthquake.cooldown` minutes (default 10, range 1 to 1440).
 - **Final numbers.** The sensor takes about two minutes to finish measuring, so the message waits for the final values (up to four minutes, then sends without them), plus a random 0 to 30 second delay so neighbouring repeaters do not all transmit at once.
 - **Nothing queued for later.** If a requirement is missing at that moment (no channel, no location, no valid clock, a sensor fault) the alert is dropped and `earthquake status` counts it as held. Fixing the setting does not resend an old event.
-- **Scope.** Flood-scoped with the repeater's default scope. To use a different region, `set earthquake.region <name>`; `off` returns to the default. A region without a usable transport key stops alerts instead of falling back.
+- **Scope.** The message is flooded with the repeater's own default region (the same one its adverts use), so whatever scoping you have already set up applies. There is no separate alert region.
 - Reports present at power-up are history and are ignored.
 
 ## The message
@@ -46,7 +47,6 @@ Coordinates are rounded to two decimals (about 1 km). Strength is the sensor's s
 | Command | Meaning |
 |---|---|
 | `get` / `set earthquake.channel <#name\|off>` | Channel to post to; unset means no messages |
-| `get` / `set earthquake.region <name\|off>` | Optional scope override |
 | `get` / `set earthquake.cooldown <minutes>` | Quiet period after a message |
 | `earthquake test` | Send a `TEST:` message now |
 | `earthquake status` | Ready or what is missing; sensor state; events, sent and held counts |
