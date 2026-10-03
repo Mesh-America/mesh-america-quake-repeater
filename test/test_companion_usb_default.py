@@ -52,6 +52,8 @@ struct Board { bool isUsbHostConnected() const { return data_connected; } } boar
 static bool usb_mota_mode = false, usb_logging_terminal_mode = false;
 static bool usb_logging_network_parked = false;
 static bool usb_protocol_initialized = true;
+static bool usb_logging_reply_hold = false, usb_logging_reply_staged = false;
+static bool usb_logging_reply_pending = false, usb_logging_reply_state = false;
 static bool usb_host_session_connected = false, usb_terminal_discard_line = true;
 static bool usb_terminal_host_reset_completion_pending = false;
 static uint32_t usb_terminal_host_reset_retry_at = 0;
@@ -293,6 +295,7 @@ class CompanionUsbDefaultTest(unittest.TestCase):
         loop = function("\nvoid loop() {")
         self.assertLess(loop.index("serviceUsbTerminalHostSessionReset();"), loop.index("serviceUsbAsciiSessionDefault();"))
         self.assertLess(loop.index("serviceUsbAsciiSessionDefault();"), loop.index("the_mesh.loop();"))
+        self.assertLess(loop.index("serviceUsbLoggingReplyBarrier();"), loop.index("the_mesh.loop();"))
         self.assertLess(loop.index("serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());"), loop.index("the_mesh.loop();"))
         self.assertLess(loop.index("expireUsbBinaryStartupProbeBeforeDispatch();"), loop.index("the_mesh.loop();"))
         self.assertNotIn("COMPANION_RADIO_FULL", MAIN)

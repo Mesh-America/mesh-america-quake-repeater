@@ -118,6 +118,12 @@ The Companion app's `gps=1` / `gps=0` custom setting controls the same GPS.
 Only boards with a compiled GPS provider expose this setting. Sharing location
 with contacts is a separate setting.
 
+Use `set gps.sync.interval <hours>` to save an automatic clock-sync interval of
+1-336 hours (two weeks); `get gps.sync.interval` reports it. Larger inputs are
+capped at 336 and the reply shows the applied value. Existing GPS timings are
+unchanged until configured. This controls clock synchronization, not the
+position-update `gps_interval` or location-sharing policy.
+
 When the exact Full image includes MQTT, use WebConfig's MQTT cards or the
 same CLI settings used by infrastructure, such as `set mqtt1.preset custom`
 and `set mqtt1.server broker.example.com`. `set mqtt.enabled on|off` controls

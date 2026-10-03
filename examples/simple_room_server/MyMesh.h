@@ -412,6 +412,7 @@ protected:
     char interval_str[12];
     sprintf(interval_str, "%u", _prefs.gps_interval);
     sensors.setSettingValue("gps_interval", interval_str);
+    sensors.applyGpsTimeSyncInterval(_prefs.gps_sync_interval_hours);
   }
 #endif
 

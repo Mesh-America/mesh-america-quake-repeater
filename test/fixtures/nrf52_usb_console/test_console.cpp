@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Adafruit_TinyUSB.h>
+#include <nrf.h>
 #include <helpers/UsbLogging.h>
 #include <helpers/UsbLoggingClientActivity.h>
 #include <cassert>
@@ -9,6 +10,7 @@
 
 MockSerial Serial;
 MockUsbDevice TinyUSBDevice;
+MockNrfUsbd mock_usbd;
 static bool mounted = true, dtr = true, dfu = false;
 static bool attached = true, armed_in = false;
 static unsigned detaches = 0, attaches = 0;
@@ -22,8 +24,8 @@ extern "C" void tud_umount_cb();
 bool tud_mounted() { return mounted; }
 bool tud_connect() { mounted = true; return true; }
 bool tud_disconnect() { mounted = false; dtr = false; return true; }
-void MockUsbDevice::detach() { attached = false; ++detaches; }
-void MockUsbDevice::attach() { attached = true; ++attaches; }
+void MockUsbDevice::detach() { attached = false; mock_usbd.USBPULLUP = 0; ++detaches; }
+void MockUsbDevice::attach() { attached = true; mock_usbd.USBPULLUP = 1; ++attaches; }
 extern "C" bool mesh_tud_cdc_n_tx_pending(uint8_t n) {
   assert(n == 0);
   return armed_in;
@@ -141,8 +143,11 @@ int main() {
   armed_in = true;
   dtr = false;
   tud_cdc_line_state_cb(0, false, false);
-  assert(fifo.empty() && armed_in && !attached && detaches == 1);
+  assert(fifo.empty() && armed_in && mock_usbd.USBPULLUP == 0);
+  assert(attached && detaches == 0); // Owner callback only quarantines pull-up.
   assert(mesh::isUsbLoggingTransportRecoveryPending());
+  mesh::serviceUsbLoggingPort(); // Actual stack detach belongs to application loop.
+  assert(!attached && detaches == 1);
   assert(mesh::recoverUsbLoggingTransport(2) == mesh::UsbLoggingRecoveryResult::Attempted);
   const auto detached_at = g_mock_millis;
   g_mock_millis += 20;

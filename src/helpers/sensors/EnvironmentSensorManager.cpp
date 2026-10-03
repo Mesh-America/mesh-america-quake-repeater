@@ -419,7 +419,6 @@ class RAK12500LocationProvider : public LocationProvider {
   unsigned long _next_time_check = 0;
   unsigned long _last_time_sync = 0;
   uint8_t _valid_time_samples = 0;
-  static const unsigned long TIME_SYNC_INTERVAL = 1800000;
   int _pin_en = -1;
 public:
   void setRTCClock(mesh::RTCClock* clock) { _clock = clock; }
@@ -480,7 +479,8 @@ public:
       }
 
       if (!_time_sync_needed && _clock != NULL
-          && (unsigned long)(now - _last_time_sync) > TIME_SYNC_INTERVAL) {
+          && static_cast<uint32_t>(now - _last_time_sync)
+              >= periodicTimeSyncIntervalMillis()) {
         _time_sync_needed = true;
       }
       if (_time_sync_needed && _clock != NULL && _valid_time_samples > 2) {
@@ -1401,7 +1401,7 @@ bool EnvironmentSensorManager::gpsIsAwake(uint8_t ioPin,
 
 void EnvironmentSensorManager::armGpsPowerSavingCycle() {
   if (!powersaving_enabled || !_location->getGPSPowerSaving()) return;
-  _location->syncTime();
+  _location->syncTimeForPowerSavingCycle();
   _location->setNextGPSOn(0);
   _location->setNextSleep();
 }

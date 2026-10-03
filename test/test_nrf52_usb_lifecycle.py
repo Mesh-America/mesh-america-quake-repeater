@@ -130,6 +130,105 @@ int main() {
 '''.replace("@BEGIN@", function("void beginUsbLoggingPort()"))
         self.run_native(source)
 
+    def test_full_owner_event_queue_defers_stack_detach_but_quarantines_packet(self):
+        start = USB.index("static std::atomic<uint32_t> primary_usb_reset_generation")
+        gates = USB[start:USB.index("static void endPrimaryUsbHostSession(", start)]
+        pinned_driver = (ROOT / "test/fixtures/nrf52_usb_power_original.c").read_text()
+        start = pinned_driver.index("void dcd_disconnect(")
+        disconnect = pinned_driver[start:pinned_driver.index("\n}\n", start) + 3]
+        source = r'''
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#define ENABLE_USB_INTERFACE 1
+static bool mounted = true, armed[2] = {false, true};
+static uint32_t now = 100, fifo[2] = {0, 32};
+static bool owner_callback = false;
+static constexpr unsigned DCD_EVENT_UNPLUGGED = 1, queue_capacity = 4;
+static unsigned events[queue_capacity] = {0, 0, 0, 0};
+static unsigned queue_head = 0, queue_tail = 0, queue_count = queue_capacity;
+static unsigned event_sends = 0, detach_count = 0, attach_count = 0;
+static unsigned owner_resets = 0;
+struct Registers { unsigned USBPULLUP = 1; } registers;
+#define NRF_USBD (&registers)
+static void __ISB() {}
+static void __DSB() {}
+static uint32_t millis() { return now; }
+static bool tud_mounted() { return mounted; }
+static uint32_t tud_cdc_n_available(uint8_t) { return 0; }
+static void tud_cdc_n_read_flush(uint8_t) {}
+static bool tud_cdc_n_write_clear(uint8_t n) { fifo[n] = 0; return true; }
+static bool mesh_tud_cdc_n_tx_pending(uint8_t n) { return armed[n]; }
+static void owner_dispatch_one() {
+  assert(!owner_callback && queue_count != 0);
+  owner_callback = true;
+  const unsigned event = events[queue_tail];
+  queue_tail = (queue_tail + 1) % queue_capacity;
+  --queue_count;
+  if (event == DCD_EVENT_UNPLUGGED) {
+    mounted = false;
+    armed[0] = armed[1] = false;
+    ++owner_resets;
+  }
+  owner_callback = false;
+}
+static void dcd_event_bus_signal(unsigned port, unsigned event, bool isr) {
+  assert(port == 0 && event == DCD_EVENT_UNPLUGGED && !isr);
+  // Real osal_queue_send uses an infinite FreeRTOS timeout here. If called
+  // by its sole consumer while full, it could never return. Fail immediately
+  // rather than hanging the test on precisely that regression.
+  assert(!owner_callback);
+  ++event_sends;
+  if (queue_count == queue_capacity) {
+    // A blocked application sender yields to the independent USB owner,
+    // which drains an existing event and releases a slot for UNPLUGGED.
+    owner_dispatch_one();
+  }
+  assert(queue_count < queue_capacity);
+  events[queue_head] = event;
+  queue_head = (queue_head + 1) % queue_capacity;
+  ++queue_count;
+}
+@DISCONNECT@
+struct Device {
+  void detach() { ++detach_count; dcd_disconnect(0); }
+  void attach() { ++attach_count; registers.USBPULLUP = 1; }
+} TinyUSBDevice;
+namespace mesh {
+@GATES@
+}
+int main() {
+  // The owner is servicing a close/SOF callback while IRQ events fill every
+  // available queue slot. The old data is armed in the controller, not FIFO.
+  owner_callback = true;
+  mesh::clearNrf52UsbTxForSession(1);
+  assert(queue_count == queue_capacity && event_sends == 0);
+  assert(registers.USBPULLUP == 0 && armed[1] && fifo[1] == 0);
+  assert(!mesh::canAccessPrimaryUsbSession(nullptr));
+  mesh::requestNrf52UsbSessionReenumeration(); // repeated callback is harmless
+  assert(detach_count == 0 && event_sends == 0);
+  owner_callback = false;
+
+  // A busy application loop can service much later. Its first pass only
+  // issues the stack detach; it must not reuse an expired callback deadline.
+  now += 400;
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(detach_count == 1 && event_sends == 1 && attach_count == 0);
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(detach_count == 1 && attach_count == 0);
+  now += 20;
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(attach_count == 0); // owner has not consumed UNPLUGGED yet
+  while (queue_count != 0) owner_dispatch_one();
+  assert(owner_resets == 1 && !mounted && !armed[1]);
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(attach_count == 1 && registers.USBPULLUP == 1);
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(detach_count == 1 && attach_count == 1); // recovery is one-shot
+}
+'''
+        self.run_native(source.replace("@DISCONNECT@", disconnect).replace("@GATES@", gates))
+
     def test_armed_logging_packet_and_racing_primary_packet_force_clean_bus(self):
         start = USB.index("static std::atomic<uint32_t> primary_usb_reset_generation")
         end_start = USB.index("static void endPrimaryUsbHostSession(", start)
@@ -142,6 +241,10 @@ int main() {
 static bool mounted = true, attached = true, armed[2] = {false, true};
 static uint32_t fifo[2] = {0, 32}, now = UINT32_MAX - 10;
 static unsigned detach_count = 0, attach_count = 0, reset_count = 0;
+struct Registers { unsigned USBPULLUP = 1; } registers;
+#define NRF_USBD (&registers)
+static void __ISB() {}
+static void __DSB() {}
 static uint32_t millis() { return now; }
 static bool tud_mounted() { return mounted; }
 static uint32_t tud_cdc_n_available(uint8_t) { return 0; }
@@ -149,8 +252,8 @@ static void tud_cdc_n_read_flush(uint8_t) {}
 static bool tud_cdc_n_write_clear(uint8_t n) { fifo[n] = 0; return true; }
 static bool mesh_tud_cdc_n_tx_pending(uint8_t n) { return armed[n]; }
 struct Device {
-  void detach() { ++detach_count; attached = false; }
-  void attach() { ++attach_count; attached = true; }
+  void detach() { ++detach_count; attached = false; registers.USBPULLUP = 0; }
+  void attach() { ++attach_count; attached = true; registers.USBPULLUP = 1; }
 } TinyUSBDevice;
 namespace mesh {
 static void clearUsbLoggingClientActivity() {}
@@ -169,9 +272,12 @@ int main() {
   // CDC1 old data is in endpoint RAM, not the software FIFO. No 50-SOF
   // waiting/clearing policy can retract it without re-enumeration.
   mesh::restartDedicatedUsbLoggingHostSession();
-  assert(fifo[1] == 0 && armed[1] && !attached && detach_count == 1);
+  assert(fifo[1] == 0 && armed[1] && registers.USBPULLUP == 0);
+  assert(attached && detach_count == 0); // no owner-task event send
   assert(!mesh::dedicated_usb_logging_port_connected && reset_count == 1);
   assert(!mesh::canAccessPrimaryUsbSession(nullptr)); // both ports gated
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(!attached && detach_count == 1);
   mesh::restartDedicatedUsbLoggingHostSession();
   assert(detach_count == 1); // repeated control requests do not reset timer
   now += 19; mounted = false; armed[1] = false;
@@ -188,8 +294,11 @@ int main() {
   mesh::primary_usb_terminal_taken_reset_generation =
       mesh::primaryUsbSessionGeneration();
   mesh::completePrimaryUsbSessionReset(nullptr);
-  assert(fifo[0] == 0 && armed[0] && !attached && detach_count == 2);
+  assert(fifo[0] == 0 && armed[0] && registers.USBPULLUP == 0);
+  assert(attached && detach_count == 1);
   assert(!mesh::canAccessPrimaryUsbSession(nullptr));
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(!attached && detach_count == 2);
 }
 '''
         source = source.replace("@GATES@", gates)

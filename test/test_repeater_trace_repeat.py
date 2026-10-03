@@ -17,13 +17,15 @@ int main() {
   char reply[160] = {};
   assert(cli.prefs.trace_when_repeat_off == 0);
   cli.prefs.usb_debug_enabled = 1;
+  cli.prefs.gps_sync_interval_hours = 336;
   cli.savePrefs(&cli.fs, PrefsSaveRouting::Scope::Common);
   assert(cli._common_save_succeeded);
   const auto baseline = cli.fs.files["/com_prefs"];
-  assert(baseline.size() == 871);
-  const size_t trace_offset = baseline.size() - 1;
-  const size_t debug_offset = trace_offset - 1;
+  assert(baseline.size() == 873);
+  const size_t trace_offset = 872, debug_offset = 871, gps_offset = 869;
   assert(baseline[trace_offset] == 0 && baseline[debug_offset] == 1);
+  assert(baseline[866] == 48 && baseline[867] == 0 && baseline[868] == 1);
+  assert(baseline[gps_offset] == 0x50 && baseline[gps_offset + 1] == 0x01);
   Capture capture;
   assert(writeCommonPrefsImage(capture, &cli.prefs));
   assert(capture.bytes == baseline);
@@ -123,15 +125,32 @@ int main() {
   }
 
   // Every old or torn image lacks the complete appended preference and must
-  // reset prior RAM intent to OFF. The old debug byte retains its old offset.
+  // reset prior RAM intent to OFF. GPS was published before local debug/trace;
+  // a complete GPS-only image must not reinterpret either GPS byte as intent.
   auto image = enabled;
   for (size_t size = 0; size < image.size(); ++size) {
     CommonCLI reader;
     reader.prefs.trace_when_repeat_off = 1;
+    reader.prefs.usb_debug_enabled = 1;
     reader.fs.files["/com_prefs"] = {image.begin(), image.begin() + size};
     reader.loadPrefsInt(&reader.fs, "/com_prefs");
     assert(reader.prefs.trace_when_repeat_off == 0);
     if (size > debug_offset) assert(reader.prefs.usb_debug_enabled == 1);
+    else assert(reader.prefs.usb_debug_enabled == 0);
+    if (size >= gps_offset + 2) assert(reader.prefs.gps_sync_interval_hours == 336);
+  }
+  // Explicit old GPS-only files with either byte equal to one must not arm
+  // the local boolean preferences, regardless of their previous RAM values.
+  for (uint16_t hours : {1, 256, 257, 336}) {
+    auto legacy = std::vector<uint8_t>(enabled.begin(), enabled.begin() + 871);
+    legacy[gps_offset] = uint8_t(hours);
+    legacy[gps_offset + 1] = uint8_t(hours >> 8);
+    CommonCLI reader;
+    reader.prefs.usb_debug_enabled = reader.prefs.trace_when_repeat_off = 1;
+    reader.fs.files["/com_prefs"] = legacy;
+    reader.loadPrefsInt(&reader.fs, "/com_prefs");
+    assert(reader.prefs.gps_sync_interval_hours == hours);
+    assert(reader.prefs.usb_debug_enabled == 0 && reader.prefs.trace_when_repeat_off == 0);
   }
   for (uint8_t saved : {0, 1, 2, 255}) {
     image[trace_offset] = saved;
@@ -141,6 +160,7 @@ int main() {
     reader.loadPrefsInt(&reader.fs, "/com_prefs");
     assert(reader.prefs.trace_when_repeat_off == (saved == 1 ? 1 : 0));
     assert(reader.prefs.usb_debug_enabled == 1);
+    assert(reader.prefs.gps_sync_interval_hours == 336);
     assert(reader.prefs.freq == 910 && reader.prefs.primary_radio_preamble == 48);
   }
   cli.prefs.trace_when_repeat_off = 1;

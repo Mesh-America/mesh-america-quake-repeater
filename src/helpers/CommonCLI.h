@@ -183,7 +183,7 @@ public:
   // logging artifact's enabled-at-first-boot behavior.
   uint8_t usb_logging_enabled = 1;
   // USB diagnostics are opt-in independently of the packet output gate.
-  // Appended after ESP-NOW intent in /com_prefs, not beside usb_log.
+  // Appended after GPS sync cadence in /com_prefs, not beside usb_log.
   uint8_t usb_debug_enabled = 0;
   // Repeater-only opt-in for routed trace diagnostics while repeat is off.
   // Appended after usb_debug in /com_prefs; existing images stay disabled.
@@ -202,6 +202,8 @@ public:
   // Old preference images did not have this byte; they default to enabled to
   // retain the previous combined-Full behavior after an upgrade.
   uint8_t espnow_bridge_enabled = 1;
+  // Appended after the ESP-NOW intent. Zero keeps the board's legacy cadence.
+  uint16_t gps_sync_interval_hours = 0;
   uint8_t retry_preset = 0;
   uint8_t direct_retry_attempts = 0;
   uint16_t direct_retry_base_ms = 0;
@@ -352,6 +354,7 @@ private:
     void structure() override {
       def("en", _parent->gps_enabled);
       def("int", _parent->gps_interval);
+      def("sync_hours", _parent->gps_sync_interval_hours);
       def("adv_loc", _parent->advert_loc_policy);
     }
 

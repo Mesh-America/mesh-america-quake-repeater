@@ -183,7 +183,7 @@ class Esp32TinyUsbRoleHygieneTest(unittest.TestCase):
                     loop.index("servicePendingSerialOutput();"),
                 )
 
-    def test_recent_list_advances_only_after_whole_row_admission(self):
+    def test_recent_list_advances_only_after_retained_row_finishes(self):
         text = source("examples/simple_repeater/MyMesh.cpp")
         start = text.index("void MyMesh::servicePendingSerialOutput()")
         start = text.index("if (serial_recent_next >= 0)", start)
@@ -194,10 +194,12 @@ class Esp32TinyUsbRoleHygieneTest(unittest.TestCase):
         self.assertNotIn("getRecentRepeaterBySortedIdx", service)
         self.assertNotRegex(service, r"\b(?:while|for)\s*\(")
         self.assertLess(
-            service.index("console.availableForWrite() < length"),
+            service.index("if (serial_log_pending_size != 0) return;"),
             service.index("++serial_recent_next"),
         )
-        self.assertIn("!= static_cast<size_t>(length)) return;", service)
+        self.assertIn("if (serial_log_pending_size == 0)", service)
+        self.assertIn("memcpy(serial_log_pending, record, length);", service)
+        self.assertIn("write_pending();", service)
 
     def test_functional_reserve_fits_default_full_acl_plus_command_echo(self):
         logging = source("src/helpers/UsbLogging.cpp")

@@ -35,6 +35,10 @@ static unsigned rx_flushes = 0, tx_clears = 0, log_edges = 0;
 // leave an armed packet intact; only a real detach + enumeration retires it.
 static bool armed_in[2] = {false, false}, attached = true;
 static unsigned detaches = 0, attaches = 0;
+struct Registers { unsigned USBPULLUP = 1; } registers;
+#define NRF_USBD (&registers)
+static void __ISB() {}
+static void __DSB() {}
 static bool close_during_rx_sample = false;
 static uint32_t millis() { return now_ms; }
 static bool tud_mounted() { return mounted; }
@@ -52,8 +56,8 @@ static void tud_cdc_n_read_flush(uint8_t) { ++rx_flushes; rx_count = 0; }
 static uint32_t tud_cdc_n_write_clear(uint8_t) { ++tx_clears; tx_count = 0; return 0; }
 static bool mesh_tud_cdc_n_tx_pending(uint8_t n) { return armed_in[n]; }
 struct UsbDevice {
-  void detach() { ++detaches; attached = false; }
-  void attach() { ++attaches; attached = true; }
+  void detach() { ++detaches; attached = false; registers.USBPULLUP = 0; }
+  void attach() { ++attaches; attached = true; registers.USBPULLUP = 1; }
 } TinyUSBDevice;
 static uint32_t tud_cdc_n_write_available(uint8_t) { return 64 - tx_count; }
 static uint32_t tud_cdc_n_write(uint8_t, const void*, uint32_t size) {
@@ -167,9 +171,12 @@ int main() {
   rx_count = 4;
   assert(mesh::isUsbCompanionClientConnected());
   line(false);
-  assert(tx_count == 0 && armed_in[0] && !attached && detaches == 1);
+  assert(tx_count == 0 && armed_in[0] && registers.USBPULLUP == 0);
+  assert(attached && detaches == 0); // callback cannot enqueue a stack event
   assert(!mesh::isUsbCompanionClientConnected());
   assert(mesh::writeTinyUsbCdcOnce(nullptr, bytes, 4) == 0);
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(!attached && detaches == 1); // application loop performs stack detach
   // Repeated control callbacks cannot cause a detach/attach storm.
   meshTinyUsbCdcLineCodingChanged(0);
   line(false);

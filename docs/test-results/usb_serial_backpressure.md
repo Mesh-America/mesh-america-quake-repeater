@@ -41,12 +41,14 @@ Run only one PlatformIO process in the checkout at a time.
 
 ```sh
 python test/test_esp32_tinyusb_nonblocking.py
+python test/test_esp32_usb_session_fix.py
 python test/test_esp32_tinyusb_role_hygiene.py
 python test/test_esp32_tinyusb_cooperative_output.py
 python test/test_esp32_usb_serial_hygiene.py
 python test/test_nrf52_usb_logging_contract.py
 python test/test_nrf52_usb_lifecycle.py
 python test/test_common_cli_logging_transaction.py
+python test/test_companion_usb_logging_reply.py
 python test/test_usb_diagnostic_logging.py
 pio test -e native -f test_nrf52_debug_output -f test_serial_packet_log -f test_serial_mode_switch -f test_mesh_tables
 ```
@@ -84,6 +86,28 @@ ownership; USB is log-only during that session. Disabling logging restores USB
 traffic without accepting bytes typed during the log-only interval. A dedicated
 nRF52 logging port does not park the separate Companion port.
 
+A framed USB logging command retains its original requester and queues its
+acknowledgement before changing ownership. The handoff advances without waiting
+for the host: live logging stays unchanged while the complete USB reply is
+backpressured. Disconnect/reset cancels that session's pending handoff; an
+already-saved preference can still take effect at the next boot. BLE/WiFi replies
+are never used as a fallback for a refused USB acknowledgement.
+
+On native ESP32 TinyUSB, build-local framework hooks capture DTR and USB session
+boundaries synchronously in the USB owner task, before Arduino's delayed events.
+They purge old input at the boundary and reject late input while DTR is low,
+without deleting a new host's first query during main-loop cleanup. An armed
+old IN packet (or a racing writer) triggers immediate soft-disconnect, a minimum
+20 ms detached interval, and quarantine until fresh enumeration. Shared SDK
+files are not modified; a changed native-CDC descriptor fails the build closed
+until the hook is reviewed. This path is specific to the pinned Arduino-ESP32
+2.0.17 native CDC implementation; hardware Serial/JTAG and UART are unchanged.
+
+Disabling diagnostics is not itself a protocol change and does not discard
+functional replies from the shared ESP32 text queue. Actual Binary/mOTA changes
+use the explicit terminal-output barrier. Touch and invalid-Ethernet-hostname
+diagnostics also honor the runtime logging gate and bounded USB stream.
+
 Ethernet and enabled MQTT diagnostics honor the runtime logging gate and use
 the bounded USB facade. Infrastructure logging setters commit preferences
 before changing live output; failed saves leave previous settings unchanged.
@@ -95,6 +119,10 @@ advance one row per service pass, using their existing output buffer. Reconnect
 cancels the old listing. The listing is a bounded live view, not an immutable
 snapshot of clients changed during output.
 
+Stored dumps make progress even when HWCDC falls back to 256/512-byte TX rings.
+Recent-repeater headers/rows and EOF retain every unwritten suffix; a short
+write never causes their accepted prefix to be retried.
+
 nRF52 FIFO cleanup also checks for an already-armed IN packet. If one exists
 at a session boundary (including a pending zero-length packet), both USB ports
 briefly detach and re-enumerate: a FIFO clear alone cannot recall endpoint RAM.
@@ -103,3 +131,31 @@ without blocking the mesh loop. Dedicated CDC descriptors are added while
 detached even if the host has not yet completed enumeration. These recovery
 paths have native regression coverage; real host/board timing still requires
 hardware qualification.
+
+The nRF52 callback only drops the pull-up and closes producer gates. The
+application loop sends the stack's unplug event afterward, so a full owner-task
+event queue cannot make its consumer wait on itself. The detach interval starts
+when that application-side stack detach actually occurs. A regression models a
+full finite event queue as well as the separate armed endpoint packet.
+
+## Local qualification (2026-10-03)
+
+These are the upstream USB-session qualification results before the subsequent
+USB watchdog, GPS preference, and repeater trace merge. The byte counts below
+describe those earlier binaries, not the current merged source.
+
+- All 112 USB Python regression methods passed, plus nine logging-transaction,
+  Bluetooth-control, and WiFi-status methods. The native facade includes a
+  threaded close-versus-writer race and an unmount-with-reset-endpoints check.
+- `Xiao_S3_companion_radio_usb` built successfully with its default hardware
+  Serial/JTAG transport: 880,709 flash bytes and 73,244 static RAM bytes.
+- A native-TinyUSB Xiao S3 USB Companion qualification build passed with debug
+  and packet logging enabled: 928,133 flash bytes and 89,312 static RAM bytes.
+  Its linked ELF contains the synchronous session hooks and endpoint query.
+- A RAK4631 Full Companion qualification build with two CDCs, debug/packet
+  logging, and USB/BLE mOTA sources passed: 678,092 flash bytes and 154,428
+  static RAM bytes. The runtime RAM and Bluetooth DFU safety checks also passed.
+
+The two custom qualification builds used the lab profile
+`909.5 MHz / 500 kHz / SF5 / CR5`. No board was flashed, and no physical
+disconnect/reconnect or hardware endpoint recovery was claimed by these checks.

@@ -44,6 +44,7 @@ struct Prefs {
   uint8_t manual_add_contacts=0,telemetry_mode_base=0,telemetry_mode_loc=0;
   uint8_t telemetry_mode_env=0,advert_loc_policy=0,multi_acks=0;
   uint8_t path_hash_mode=0,client_repeat=0,autoadd_config=0,autoadd_max_hops=2,gps_enabled=0;
+  uint16_t gps_sync_interval_hours=0;
   uint8_t rx_boosted_gain=0,powersaving_enabled=0;
   int8_t tx_power_dbm=3;
 };
@@ -52,7 +53,9 @@ struct Sensors {
   std::string gps="0",interval="60",other="old";
   bool accepts=true,gps_available=true;
   bool powersaving_enabled=false;
+  uint16_t gps_sync_hours=0;
   void setPowerSavingEnabled(bool enabled) { powersaving_enabled=enabled; }
+  void applyGpsTimeSyncInterval(uint16_t hours) { gps_sync_hours=hours; }
   const char* getSettingByKey(const char* key) {
     if(!strcmp(key,"gps") && !gps_available)return nullptr;
     return !strcmp(key,"gps") ? gps.c_str() : interval.c_str();

@@ -35,6 +35,7 @@ class TestFS : public MemoryFS {
 #include <helpers/MQTTPrefsAtomicStore.h>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/RepeaterRadioTiming.h>
+#include <helpers/GpsPowerPolicy.h>
 #include <helpers/bridges/ESPNowBridgeFormat.h>
 #include <helpers/radiolib/LR2021SideDetectorConfig.h>
 #define MIN_LORA_TX_POWER -9
@@ -157,13 +158,14 @@ int main() {
   cli.savePrefs(&cli.fs, PrefsSaveRouting::Scope::Common);
   assert(cli._common_save_succeeded);
   const auto baseline = cli.fs.files["/com_prefs"];
-  assert(baseline.size() == 871);
-  const size_t debug_offset = baseline.size() - 2;
-  const size_t logging_offset = baseline.size() - 8;
-  const size_t preamble_offset = baseline.size() - 5;
-  const size_t espnow_offset = baseline.size() - 3;
+  assert(baseline.size() == 873);
+  const size_t debug_offset = 871, trace_offset = 872;
+  const size_t logging_offset = 863, preamble_offset = 866;
+  const size_t espnow_offset = 868, gps_offset = 869;
   assert(baseline[debug_offset] == 0 && baseline[logging_offset] == 1);
   assert(baseline[preamble_offset] == 48 && baseline[espnow_offset] == 1);
+  assert(baseline[gps_offset] == 0 && baseline[gps_offset + 1] == 0);
+  assert(baseline[trace_offset] == 0);
   Capture capture;
   assert(writeCommonPrefsImage(capture, &cli.prefs));
   assert(capture.bytes == baseline); // Checked and ordinary writers agree.
@@ -253,6 +255,7 @@ int main() {
   // after loading debug ON; a missing later trace byte cannot erase debug.
   auto image = baseline;
   image[logging_offset] = 0; image[debug_offset] = 1;
+  image[gps_offset] = 0x50; image[gps_offset + 1] = 0x01;
   for (size_t size = 0; size <= debug_offset; ++size) {
     CommonCLI reader;
     reader.prefs.usb_debug_enabled = 1;
@@ -260,6 +263,8 @@ int main() {
     reader.loadPrefsInt(&reader.fs, "/com_prefs");
     assert(reader.prefs.usb_debug_enabled == 0);
     if (size > logging_offset) assert(reader.prefs.usb_logging_enabled == 0);
+    if (size >= gps_offset + 2) assert(reader.prefs.gps_sync_interval_hours == 336);
+    assert(reader.prefs.trace_when_repeat_off == 0);
   }
   for (uint8_t saved : {0, 1, 2, 255}) {
     image[debug_offset] = saved;
@@ -269,6 +274,7 @@ int main() {
     assert(cli.prefs.usb_debug_enabled == (saved == 1 ? 1 : 0));
     assert(cli.prefs.usb_logging_enabled == 0);
     assert(cli.prefs.primary_radio_preamble == 48 && cli.prefs.espnow_bridge_enabled == 1);
+    assert(cli.prefs.gps_sync_interval_hours == 336);
   }
   cli.prefs.usb_debug_enabled = 1;
   cli.loadPrefsInt(&cli.fs, "/missing");

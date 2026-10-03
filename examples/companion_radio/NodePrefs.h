@@ -110,8 +110,10 @@ public:
   uint8_t one_key_dm_enabled = 0;
   // Appended after all existing fields so older images keep Bluetooth enabled.
   uint8_t bluetooth_enabled = 1;
+  // Published tail: zero retains the board's legacy GPS sync cadence.
+  uint16_t gps_sync_interval_hours = 0;
   // Debug verbosity is independent of the packet/output master switch. Keep
-  // this after every prior persisted field so legacy images default to quiet.
+  // this after the published GPS cadence so legacy images default to quiet.
   uint8_t usb_debug_enabled = 0;
 
 private:

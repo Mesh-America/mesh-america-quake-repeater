@@ -5154,6 +5154,21 @@ void MyMesh::cancelPendingSerialOutput() {
 
 void MyMesh::servicePendingSerialOutput() {
   Stream& console = mesh::usbConsolePort();
+  const auto write_pending = [&]() {
+    const int available = console.availableForWrite();
+    if (available <= 0 || serial_log_pending_size == 0) return;
+    // A low-memory HWCDC setup can have a 256/512-byte ring. Never require a
+    // whole 640-byte stored line to fit that ring: retain and retry its suffix.
+    const size_t attempt = serial_log_pending_size < static_cast<size_t>(available)
+        ? serial_log_pending_size : static_cast<size_t>(available);
+    size_t written = console.write(
+        reinterpret_cast<const uint8_t*>(serial_log_pending), attempt);
+    if (written > attempt) written = attempt;
+    serial_log_pending_size -= written;
+    if (written > 0 && serial_log_pending_size > 0) {
+      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
+    }
+  };
 
   if (serial_acl_next >= 0) {
     if (serial_log_pending_size == 0) {
@@ -5181,63 +5196,58 @@ void MyMesh::servicePendingSerialOutput() {
         }
       }
     }
-    if (console.availableForWrite() < static_cast<int>(serial_log_pending_size)) return;
-    size_t written = console.write(
-        reinterpret_cast<const uint8_t*>(serial_log_pending), serial_log_pending_size);
-    if (written > serial_log_pending_size) written = serial_log_pending_size;
-    serial_log_pending_size -= written;
-    if (written > 0 && serial_log_pending_size > 0) {
-      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
-    }
+    write_pending();
     return;
   }
 
   if (serial_recent_next >= 0) {
-    char record[64];
-    int length = 0;
-    const SimpleMeshTables::RecentRepeaterInfo* next_info = nullptr;
-    int next_index = -1;
-    if (serial_recent_header) {
-      length = snprintf(record, sizeof(record), "Recent repeaters (%d):\n",
-                        serial_recent_count);
-    } else if (serial_recent_count == 0) {
-      length = snprintf(record, sizeof(record), "-none-\r\n");
-    } else if (serial_recent_next < serial_recent_count) {
-      const auto* tables = static_cast<const SimpleMeshTables*>(getTables());
-      const auto* info = tables ? tables->getNextRecentRepeaterBySortKey(
-          serial_recent_has_cursor ? &serial_recent_cursor : nullptr,
-          serial_recent_cursor_index, next_index) : nullptr;
-      if (info == nullptr) {
+    if (serial_log_pending_size == 0) {
+      char record[64];
+      int length = 0;
+      int next_index = -1;
+      if (serial_recent_header) {
+        length = snprintf(record, sizeof(record), "Recent repeaters (%d):\n",
+                          serial_recent_count);
+      } else if (serial_recent_count == 0) {
+        length = snprintf(record, sizeof(record), "-none-\r\n");
+      } else if (serial_recent_next < serial_recent_count) {
+        const auto* tables = static_cast<const SimpleMeshTables*>(getTables());
+        const auto* info = tables ? tables->getNextRecentRepeaterBySortKey(
+            serial_recent_has_cursor ? &serial_recent_cursor : nullptr,
+            serial_recent_cursor_index, next_index) : nullptr;
+        if (info == nullptr) {
+          serial_recent_next = -1;
+          return;
+        }
+        char prefix[MAX_ROUTE_HASH_BYTES * 2 + 1];
+        char snr[12];
+        mesh::Utils::toHex(prefix, info->prefix, info->prefix_len);
+        formatLocalSnrX4(snr, sizeof(snr), info->snr_x4);
+        length = snprintf(record, sizeof(record), "%s,%s%s\n", prefix,
+                          snr[0] == '-' ? "" : " ", snr);
+        // Snapshot the row before a short write. Its next pass must retry only
+        // the retained suffix, even if the live recent-repeater table changes.
+        serial_recent_cursor = *info;
+        serial_recent_cursor_index = next_index;
+        serial_recent_has_cursor = true;
+      } else {
         serial_recent_next = -1;
         return;
       }
-      next_info = info;
-      char prefix[MAX_ROUTE_HASH_BYTES * 2 + 1];
-      char snr[12];
-      mesh::Utils::toHex(prefix, info->prefix, info->prefix_len);
-      formatLocalSnrX4(snr, sizeof(snr), info->snr_x4);
-      length = snprintf(record, sizeof(record), "%s,%s%s\n", prefix,
-                        snr[0] == '-' ? "" : " ", snr);
-    } else {
-      serial_recent_next = -1;
-      return;
+      // One bounded row per pass. HWCDC can return a short write even after a
+      // capacity preflight because another diagnostic task shares its TX ring.
+      if (length <= 0 || static_cast<size_t>(length) >= sizeof(record)) {
+        serial_recent_next = -1;
+        return;
+      }
+      memcpy(serial_log_pending, record, length);
+      serial_log_pending_size = static_cast<size_t>(length);
     }
-    // One complete row per pass, admitted atomically only when it fits.
-    if (length <= 0 || static_cast<size_t>(length) >= sizeof(record)) {
-      serial_recent_next = -1;
-      return;
-    }
-    if (console.availableForWrite() < length
-        || console.write(reinterpret_cast<const uint8_t*>(record), length)
-            != static_cast<size_t>(length)) return;
+    write_pending();
+    if (serial_log_pending_size != 0) return;
     if (serial_recent_header) {
       serial_recent_header = false;
     } else {
-      if (next_info != nullptr) {
-        serial_recent_cursor = *next_info;
-        serial_recent_cursor_index = next_index;
-        serial_recent_has_cursor = true;
-      }
       if (serial_recent_count == 0 || ++serial_recent_next >= serial_recent_count) {
         serial_recent_next = -1;
       }
@@ -5247,11 +5257,13 @@ void MyMesh::servicePendingSerialOutput() {
   if (!serial_log_active) {
     // CommonCLI's synchronous EOF is suppressed until the queued dump ends.
     static const char eof[] = "  ->    EOF\r\n";
-    if (serial_log_eof_pending
-        && console.availableForWrite() >= static_cast<int>(sizeof(eof) - 1)
-        && console.write(reinterpret_cast<const uint8_t*>(eof), sizeof(eof) - 1)
-            == sizeof(eof) - 1) {
-      serial_log_eof_pending = false;
+    if (serial_log_eof_pending) {
+      if (serial_log_pending_size == 0) {
+        memcpy(serial_log_pending, eof, sizeof(eof) - 1);
+        serial_log_pending_size = sizeof(eof) - 1;
+      }
+      write_pending();
+      if (serial_log_pending_size == 0) serial_log_eof_pending = false;
     }
     return;
   }
@@ -5303,16 +5315,7 @@ void MyMesh::servicePendingSerialOutput() {
       serial_log_pending[serial_log_pending_size++] = '\n';
     }
   }
-  if (serial_log_pending_size > 0
-      && console.availableForWrite() >= static_cast<int>(serial_log_pending_size)) {
-    size_t written = console.write(
-        reinterpret_cast<const uint8_t*>(serial_log_pending), serial_log_pending_size);
-    if (written > serial_log_pending_size) written = serial_log_pending_size;
-    serial_log_pending_size -= written;
-    if (written > 0 && serial_log_pending_size > 0) {
-      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
-    }
-  }
+  write_pending();
   if (serial_log_remaining == 0 && serial_log_pending_size == 0) {
     serial_log_dump.close();
     serial_log_active = false;
