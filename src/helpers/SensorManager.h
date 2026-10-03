@@ -73,6 +73,14 @@ protected:
 #endif
 
 public:
+  void applyGpsTimeSyncInterval(uint16_t hours) {
+#if ENV_INCLUDE_GPS
+    LocationProvider* location = getLocationProvider();
+    if (location != nullptr) location->setTimeSyncIntervalHours(hours);
+#else
+    (void)hours;
+#endif
+  }
   struct VoltageSensorReading {
     uint8_t channel;
     float voltage;
@@ -108,6 +116,9 @@ public:
     // for the manager's established transport ownership.
     if (!gps_transport_available || !telemetryGpsDetected()) return false;
     LocationProvider* location = getLocationProvider();
+    if (location != nullptr && location->getTimeSyncIntervalHours() != 0) {
+      min_interval_secs = static_cast<uint64_t>(location->getTimeSyncIntervalHours()) * 3600UL;
+    }
     return location != nullptr && location->getGPSPowerSaving()
         && location->requestTimeSync(min_interval_secs);
 #else

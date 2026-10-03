@@ -25,10 +25,12 @@ class UsbDiagnosticLoggingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="meshcore-usb-diagnostics-") as directory:
             temporary = Path(directory)
             (temporary / "NetworkLoggingMacro.h").write_text(macro, encoding="utf-8")
-            for debug in (None, 0, 1):
-                with self.subTest(mqtt_debug=debug):
+            for debug, touch_debug in ((None, False), (0, False), (1, False), (1, True)):
+                with self.subTest(mqtt_debug=debug, touch_debug=touch_debug):
                     binary = temporary / "usb-diagnostics.exe"
                     defines = [] if debug is None else [f"-DMQTT_DEBUG={debug}"]
+                    if touch_debug:
+                        defines += ["-DDISPLAY_TOUCH_DEBUG=1", "-DPIN_TOUCH_INT=7"]
                     compiled = subprocess.run(
                         [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                          "-DARDUINO=1", "-DETHERNET_ENABLED=1", *defines,
@@ -45,7 +47,8 @@ class UsbDiagnosticLoggingTests(unittest.TestCase):
                     self.assertIn("PASS: gated USB diagnostics", checked.stdout)
 
     def test_no_raw_serial_diagnostic_writes(self):
-        for relative in ("src/helpers/nrf52/EthernetCLI.h", "src/helpers/NetworkLink.cpp"):
+        for relative in ("src/helpers/nrf52/EthernetCLI.h", "src/helpers/NetworkLink.cpp",
+                         "src/helpers/ui/CHSC6XTouch.h", "src/helpers/ethernet/ch390/CH390Config.h"):
             with self.subTest(source=relative):
                 source = (ROOT / relative).read_text(encoding="utf-8")
                 self.assertIn("UsbLogging.h", source)

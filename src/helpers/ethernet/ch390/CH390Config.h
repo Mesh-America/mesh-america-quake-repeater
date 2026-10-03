@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ESP32_CH390.h>
+#include <helpers/UsbLogging.h>
 
 /**
  * Bring up the repository's CH390 lwIP interface from the board build flags.
@@ -16,7 +17,10 @@ static inline bool beginConfiguredCH390(const char* hostname = nullptr) {
   config.int_gpio = ETH_INT_PIN;
   if (hostname && hostname[0] != '\0') {
     if (!CH390.setHostname(hostname)) {
-      Serial.printf("Network: invalid Ethernet hostname %s\n", hostname);
+      if (mesh::isUsbLoggingEnabled()
+          && mesh::usbLoggingPort().availableForWrite() > 0) {
+        mesh::usbLoggingPort().printf("Network: invalid Ethernet hostname %s\n", hostname);
+      }
     }
   }
   if (!CH390.begin(config)) return false;

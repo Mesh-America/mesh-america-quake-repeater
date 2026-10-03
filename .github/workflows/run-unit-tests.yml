@@ -190,6 +190,8 @@ jobs:
         run: |
           python3 -B test/test_gps_status.py
           python3 -B test/test_gps_upstream_adaptations.py -v
+          python3 -B test/test_gps_sync_interval.py -v
+          python3 -B test/test_gps_sync_preferences.py -v
           python3 -B test/test_t1000e_sensor_power.py -v
 
       - name: Verify Companion ASCII defaults and USB session cleanup
@@ -202,6 +204,8 @@ jobs:
           python3 -B test/test_nrf52_usb_logging_contract.py
           python3 -B test/test_esp32_usb_serial_hygiene.py
           python3 -B test/test_esp32_tinyusb_nonblocking.py
+          python3 -B test/test_esp32_usb_session_fix.py
+          python3 -B test/test_companion_usb_logging_reply.py
           python3 -B test/test_esp32_tinyusb_cooperative_output.py
           python3 -B test/test_esp32_tinyusb_role_hygiene.py
           python3 -B test/test_stm32_float_conversion.py

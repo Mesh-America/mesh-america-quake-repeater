@@ -70,6 +70,7 @@
 #endif
 
 #include <helpers/CLICommandUtils.h>
+#include <helpers/GpsPowerPolicy.h>
 #if COMPANION_FEATURE_TEXT_TERMINAL
 #include <helpers/TracePathHelpers.h>
 #endif
@@ -2277,6 +2278,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.buzzer_quiet = DEFAULT_BUZZER_QUIET ? 1 : 0;
   _prefs.gps_enabled = 0;       // GPS disabled by default
   _prefs.gps_interval = 0;      // Use the default 1-second fix-processing interval
+  _prefs.gps_sync_interval_hours = 0; // Retain the board's default time-sync cadence
   _prefs.autoadd_config = DEFAULT_AUTOADD_CONFIG;
   _prefs.path_hash_mode = DEFAULT_PATH_HASH_MODE;
 #ifdef RADIO_FEM_TXGAIN
@@ -2574,6 +2576,8 @@ void MyMesh::begin(bool has_display, bool radio_available,
   _prefs.vibe_quiet = constrain(_prefs.vibe_quiet, 0, 1);
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
+  _prefs.gps_sync_interval_hours = constrain(_prefs.gps_sync_interval_hours,
+                                            0, mesh::gps::MAX_SYNC_INTERVAL_HOURS);
   _prefs.autoadd_config &= AUTO_ADD_OVERWRITE_OLDEST | AUTO_ADD_CHAT | AUTO_ADD_REPEATER | AUTO_ADD_ROOM_SERVER | AUTO_ADD_SENSOR;
   _prefs.path_hash_mode = constrain(_prefs.path_hash_mode, 0, 2);
   _prefs.radio_fem_rxgain_override = constrain(_prefs.radio_fem_rxgain_override, 0, 1);
@@ -3181,6 +3185,37 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   }
 
 #if ENV_INCLUDE_GPS == 1
+  if (strcmp(command, "get gps.sync.interval") == 0) {
+    auto* provider = sensors.getLocationProvider();
+    if (provider == nullptr) {
+      snprintf(reply, reply_size, "Error: GPS unavailable");
+    } else {
+      const uint16_t hours = provider->getTimeSyncIntervalHours();
+      if (hours == 0) snprintf(reply, reply_size, "> default (board GPS sync policy)");
+      else snprintf(reply, reply_size, "> %u hours", (unsigned)hours);
+    }
+    return true;
+  }
+  const char* gps_sync_value = nullptr;
+  if (strncmp(command, "set gps.sync.interval", 21) == 0
+      && (command[21] == 0 || command[21] == ' ' || command[21] == '\t')) {
+    gps_sync_value = command + 21;
+    while (*gps_sync_value == ' ' || *gps_sync_value == '\t') ++gps_sync_value;
+  }
+  if (gps_sync_value) {
+    uint16_t hours = 0;
+    if (!mesh::gps::parseSyncIntervalHours(gps_sync_value, hours)) {
+      snprintf(reply, reply_size, "Error: GPS sync interval must be 1..336 hours");
+    } else if (sensors.getLocationProvider() == nullptr) {
+      snprintf(reply, reply_size, "Error: GPS unavailable");
+    } else if (!savePreference(_prefs.gps_sync_interval_hours, hours)) {
+      snprintf(reply, reply_size, "Error: GPS sync interval could not be saved");
+    } else {
+      sensors.applyGpsTimeSyncInterval(hours);
+      snprintf(reply, reply_size, "OK - GPS sync interval %u hours (saved)", (unsigned)hours);
+    }
+    return true;
+  }
   if (strcmp(command, "get gps") == 0) {
     const char* gps = sensors.getSettingByKey("gps");
     snprintf(reply, reply_size, gps ? "> %s" : "Error: GPS unavailable",
@@ -5134,6 +5169,8 @@ void MyMesh::handleCmdFrame(size_t len) {
     } else {
       text[tlen] = 0; // ensure null
 
+      BaseSerialInterface* reply_route = _serial->captureReplyRoute();
+      beginUsbLoggingReplyBarrier(reply_route);
       reply_buf[0] = 0;
       bool handled = false;
 #if defined(MESHCORE_EXTRAFS_HIL)
@@ -5149,7 +5186,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       out_frame[0] = RESP_CODE_CLI_REPLY;
       int rlen = strlen(reply_buf);
       memcpy(&out_frame[1], reply_buf, rlen);
-      _serial->writeFrame(out_frame, 1 + rlen);
+      const bool reply_queued = _serial->writeFrameToRoute(
+          reply_route, out_frame, 1 + rlen) == static_cast<size_t>(1 + rlen);
+      endUsbLoggingReplyBarrier(reply_queued);
     }
   } else if (cmd_frame[0] == CMD_SEND_TXT_MSG && len >= 14) {
     int i = 1;
