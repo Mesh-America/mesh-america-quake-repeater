@@ -858,9 +858,15 @@ TEST(SerialModeSwitch, SingleTtyLoggingCannotStealNetworkTerminal) {
   using Action = mesh::UsbLoggingTerminalAction;
   EXPECT_EQ(mesh::selectUsbLoggingTerminalAction(
                 false, true, false, false, true, true),
-            Action::NO_ACTION);
+            Action::PARK_USB_FOR_NETWORK);
   EXPECT_EQ(mesh::selectUsbLoggingTerminalAction(
                 false, true, false, false, false, true),
+            Action::PARK_USB_FOR_NETWORK);
+  EXPECT_EQ(mesh::selectUsbLoggingTerminalAction(
+                true, true, false, false, true, true),
+            Action::NO_ACTION);
+  EXPECT_EQ(mesh::selectUsbLoggingTerminalAction(
+                false, false, false, false, true, true),
             Action::NO_ACTION);
 }
 

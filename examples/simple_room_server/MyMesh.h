@@ -189,6 +189,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
   bool serial_log_active = false;
   bool serial_log_eof_pending = false;
   bool serial_log_skip_line = false;
+  int serial_acl_next = -1;
+  int serial_acl_count = 0;
+  bool serial_acl_header = false;
 #endif
   uint32_t last_millis;
   uint64_t uptime_millis;
@@ -492,6 +495,7 @@ public:
   }
 
   void dumpLogFile() override;
+  void printAclSerial();
 #if MESH_USB_CONSOLE_COOPERATIVE
   // Large local-only replies advance between radio service passes.
   bool hasPendingSerialOutput() const;

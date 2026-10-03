@@ -5092,9 +5092,34 @@ void MyMesh::dumpLogFile() {
 #endif
 }
 
+void MyMesh::printAclSerial() {
+#if MESH_USB_CONSOLE_COOPERATIVE
+  if (hasPendingSerialOutput()) {
+    mesh::usbConsolePort().printf("Err - USB output busy\r\n");
+    return;
+  }
+  // Reuse the bounded file-output buffer. Command admission prevents overlapping
+  // USB jobs, and session reset cancels the retained row before a new host reads.
+  serial_acl_next = 0;
+  serial_acl_count = acl.getNumClients();
+  serial_acl_header = true;
+  serial_log_pending_size = 0;
+#else
+  mesh::usbConsolePort().printf("ACL:\r\n");
+  for (int i = 0; i < acl.getNumClients(); i++) {
+    auto c = acl.getClientByIdx(i);
+    if (c->permissions == 0) continue;
+    char public_key[PUB_KEY_SIZE * 2 + 1];
+    mesh::Utils::toHex(public_key, c->id.pub_key, PUB_KEY_SIZE);
+    mesh::usbConsolePort().printf("%02X %s\n", c->permissions, public_key);
+  }
+#endif
+}
+
 #if MESH_USB_CONSOLE_COOPERATIVE
 bool MyMesh::hasPendingSerialOutput() const {
-  return serial_log_active || serial_log_eof_pending || serial_recent_next >= 0;
+  return serial_log_active || serial_log_eof_pending || serial_recent_next >= 0
+      || serial_acl_next >= 0;
 }
 
 void MyMesh::cancelPendingSerialOutput() {
@@ -5104,6 +5129,9 @@ void MyMesh::cancelPendingSerialOutput() {
   serial_log_skip_line = false;
   serial_log_remaining = 0;
   serial_log_pending_size = 0;
+  serial_acl_next = -1;
+  serial_acl_count = 0;
+  serial_acl_header = false;
   serial_recent_next = -1;
   serial_recent_count = 0;
   serial_recent_header = false;
@@ -5113,6 +5141,43 @@ void MyMesh::cancelPendingSerialOutput() {
 
 void MyMesh::servicePendingSerialOutput() {
   Stream& console = mesh::usbConsolePort();
+
+  if (serial_acl_next >= 0) {
+    if (serial_log_pending_size == 0) {
+      if (serial_acl_header) {
+        static const char header[] = "ACL:\r\n";
+        memcpy(serial_log_pending, header, sizeof(header) - 1);
+        serial_log_pending_size = sizeof(header) - 1;
+        serial_acl_header = false;
+      } else {
+        // At most one row per pass; deleted entries can be skipped without
+        // allocating a table-sized response or waiting for USB FIFO space.
+        while (serial_acl_next < serial_acl_count
+            && serial_acl_next < acl.getNumClients()) {
+          auto* client = acl.getClientByIdx(serial_acl_next++);
+          if (!client->permissions) continue;
+          char key[PUB_KEY_SIZE * 2 + 1];
+          mesh::Utils::toHex(key, client->id.pub_key, PUB_KEY_SIZE);
+          serial_log_pending_size = snprintf(serial_log_pending,
+              sizeof(serial_log_pending), "%02X %s\n", client->permissions, key);
+          break;
+        }
+        if (serial_log_pending_size == 0) {
+          serial_acl_next = -1;
+          return;
+        }
+      }
+    }
+    if (console.availableForWrite() < static_cast<int>(serial_log_pending_size)) return;
+    size_t written = console.write(
+        reinterpret_cast<const uint8_t*>(serial_log_pending), serial_log_pending_size);
+    if (written > serial_log_pending_size) written = serial_log_pending_size;
+    serial_log_pending_size -= written;
+    if (written > 0 && serial_log_pending_size > 0) {
+      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
+    }
+    return;
+  }
 
   if (serial_recent_next >= 0) {
     char record[64];
@@ -12093,17 +12158,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       return;
     }
 #endif
-    mesh::usbConsolePort().printf("ACL:\r\n");
-    for (int i = 0; i < acl.getNumClients(); i++) {
-      auto c = acl.getClientByIdx(i);
-      if (c->permissions == 0) continue;  // skip deleted (or guest) entries
-
-      // Admit each line together so concurrent USB diagnostics cannot split
-      // a public key or insert text between its permission prefix and value.
-      char public_key[PUB_KEY_SIZE * 2 + 1];
-      mesh::Utils::toHex(public_key, c->id.pub_key, PUB_KEY_SIZE);
-      mesh::usbConsolePort().printf("%02X %s\n", c->permissions, public_key);
-    }
+    printAclSerial();
     reply[0] = 0;
   } else if (handleClientPathCommand(sender, command, reply)) {
     return;

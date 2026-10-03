@@ -2641,7 +2641,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
 #if MESH_USB_LOGGING_AVAILABLE
   const bool usb_logging_enabled = _prefs.usb_logging_enabled != 0;
   mesh::setUsbDebugEnabled(_prefs.usb_debug_enabled != 0);
-  mesh::setUsbLoggingEnabled(usb_logging_enabled);
+  applyUsbLoggingState(usb_logging_enabled);
   if (!mesh::saveUsbLoggingBootPreference(usb_logging_enabled)) {
     MESH_DEBUG_PRINTLN("Unable to save next-boot USB logging interface state");
   }
@@ -3335,7 +3335,7 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
       snprintf(reply, reply_size, "Error: use set usb.logging <on|off> [reboot]");
     } else {
       _prefs.usb_logging_enabled = enabled ? 1 : 0;
-      mesh::setUsbLoggingEnabled(enabled);
+      applyUsbLoggingState(enabled);
       if (!savePrefs()) {
         snprintf(reply, reply_size, "Error: USB logging changed for this boot but save failed");
       } else if (!mesh::saveUsbLoggingBootPreference(enabled)) {
@@ -3853,11 +3853,14 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
       _mqtt_enabled = wifi;
       if (!wifi) stopMQTT();
       _prefs.usb_logging_enabled = usb ? 1 : 0;
-      mesh::setUsbLoggingEnabled(usb);
+      applyUsbLoggingState(usb);
       if (!savePrefs() || !mesh::saveUsbLoggingBootPreference(usb)) {
         snprintf(reply, reply_size, "Error: logging output changed but USB setting could not be saved");
       } else {
-        snprintf(reply, reply_size, "OK - logging.output %s (saved)", command + 19);
+        // USB ownership changes can clear the terminal's input buffer while
+        // this command is executing. Use parsed values, not that borrowed text.
+        snprintf(reply, reply_size, "OK - logging.output %s (saved)",
+                 mesh::cli::loggingOutputName(usb, wifi));
       }
     }
     return true;

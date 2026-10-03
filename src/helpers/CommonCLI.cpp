@@ -3412,9 +3412,15 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     while (*value == ' ' || *value == '\t') value++;
     bool enabled = false, reboot_if_needed = false;
     if (mesh::cli::parseLoggingToggle(value, enabled, reboot_if_needed)) {
+      const uint8_t previous = _prefs->usb_logging_enabled;
       _prefs->usb_logging_enabled = enabled ? 1 : 0;
+      if (!trySavePrefs()) {
+        _prefs->usb_logging_enabled = previous;
+        strcpy(reply, "Error: USB logging not saved; unchanged");
+        return;
+      }
+      // Commit before changing the stream's live protocol ownership.
       mesh::setUsbLoggingEnabled(enabled);
-      savePrefs();
       snprintf(reply, 160, "OK - USB logging %s (saved)", enabled ? "on" : "off");
     } else {
       strcpy(reply, "Error: usage set usb.logging on|off");
@@ -3454,11 +3460,21 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: usage set logging.output off|usb|wifi|both");
       return;
     }
+    const uint8_t previous_usb = _prefs->usb_logging_enabled;
+    const uint8_t previous_bridge = _prefs->bridge_enabled;
     _prefs->usb_logging_enabled = usb_enabled ? 1 : 0;
     _prefs->bridge_enabled = wifi_enabled ? 1 : 0;
+    if (!trySavePrefs()) {
+      _prefs->usb_logging_enabled = previous_usb;
+      _prefs->bridge_enabled = previous_bridge;
+      strcpy(reply, "Error: logging output not saved; unchanged");
+      return;
+    }
     mesh::setUsbLoggingEnabled(usb_enabled);
-    _callbacks->setMqttBridgeState(wifi_enabled);
-    savePrefs();
+    if (!_callbacks->setMqttBridgeState(wifi_enabled)) {
+      strcpy(reply, "Error: logging output saved, but MQTT runtime change failed");
+      return;
+    }
     snprintf(reply, 160, "OK - logging.output %s (saved)", value);
     return;
   }

@@ -390,7 +390,7 @@ inline char* utoa(unsigned int value,char* output,int base){
         self.assertIn('_prefs.usb_debug_enabled = 0;', source)
         self.assertIn('_prefs.usb_debug_enabled = _prefs.usb_debug_enabled == 1 ? 1 : 0;', source)
         apply = source.index('mesh::setUsbDebugEnabled(_prefs.usb_debug_enabled != 0);')
-        self.assertLess(apply, source.index('mesh::setUsbLoggingEnabled(usb_logging_enabled);'))
+        self.assertLess(apply, source.index('applyUsbLoggingState(usb_logging_enabled);'))
         header = (ROOT / 'examples/companion_radio/MyMesh.h').read_text()
         self.assertIn('const char* getLogDateTime() override;', header)
 

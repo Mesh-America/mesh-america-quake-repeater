@@ -45,6 +45,9 @@ python test/test_esp32_tinyusb_role_hygiene.py
 python test/test_esp32_tinyusb_cooperative_output.py
 python test/test_esp32_usb_serial_hygiene.py
 python test/test_nrf52_usb_logging_contract.py
+python test/test_nrf52_usb_lifecycle.py
+python test/test_common_cli_logging_transaction.py
+python test/test_usb_diagnostic_logging.py
 pio test -e native -f test_nrf52_debug_output -f test_serial_packet_log -f test_serial_mode_switch -f test_mesh_tables
 ```
 
@@ -72,3 +75,31 @@ logins with the relay running, paused, and stopped, including a host that leaves
 USB open without reading. Check LoRa recovery separately from USB OUT recovery;
 fixing transmit backpressure does not prove an unrelated OUT endpoint fault is
 resolved. Do not erase or repartition the radio as part of this test.
+
+## USB logging ownership and session recovery
+
+On a single-port Companion, enabling USB logging parks framed USB traffic
+before opening the diagnostic gate. A TCP/browser terminal retains its CLI
+ownership; USB is log-only during that session. Disabling logging restores USB
+traffic without accepting bytes typed during the log-only interval. A dedicated
+nRF52 logging port does not park the separate Companion port.
+
+Ethernet and enabled MQTT diagnostics honor the runtime logging gate and use
+the bounded USB facade. Infrastructure logging setters commit preferences
+before changing live output; failed saves leave previous settings unchanged.
+A successful save with a failed MQTT runtime change reports those two outcomes
+separately.
+
+ESP32 native-USB repeater and room ACL listings retain short-write suffixes and
+advance one row per service pass, using their existing output buffer. Reconnect
+cancels the old listing. The listing is a bounded live view, not an immutable
+snapshot of clients changed during output.
+
+nRF52 FIFO cleanup also checks for an already-armed IN packet. If one exists
+at a session boundary (including a pending zero-length packet), both USB ports
+briefly detach and re-enumerate: a FIFO clear alone cannot recall endpoint RAM.
+Reattachment waits for the local unplug event and a 20 ms minimum interval,
+without blocking the mesh loop. Dedicated CDC descriptors are added while
+detached even if the host has not yet completed enumeration. These recovery
+paths have native regression coverage; real host/board timing still requires
+hardware qualification.

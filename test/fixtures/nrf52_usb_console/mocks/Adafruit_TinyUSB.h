@@ -15,3 +15,9 @@ uint32_t tud_cdc_n_write_flush(uint8_t);
 uint32_t tud_cdc_n_write_clear(uint8_t);
 void tud_cdc_get_line_coding(cdc_line_coding_t*);
 void TinyUSB_Port_EnterDFU();
+struct MockUsbDevice {
+  void detach();
+  void attach();
+};
+extern MockUsbDevice TinyUSBDevice;
+extern "C" bool mesh_tud_cdc_n_tx_pending(uint8_t);

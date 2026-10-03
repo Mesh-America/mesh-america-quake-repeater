@@ -38,16 +38,20 @@ struct Mesh {
   bool terminal = false, stale_input = true;
   bool isTerminalMode() const { return terminal; }
   void resetUsbHostSessionInput() { stale_input = false; }
+  void applyUsbLoggingState(bool);
 } the_mesh;
 struct SerialInterface {
   bool passthrough = false, old_frame = true;
   uint32_t completed = 7;
   void setPassthroughMode(bool value) { passthrough = value; }
+  bool isPassthroughMode() const { return passthrough; }
   void resetSessionState() { old_frame = false; }
   uint32_t getCompletedFrameCount() const { return completed; }
 } usb_serial_interface;
 struct Board { bool isUsbHostConnected() const { return data_connected; } } board;
 static bool usb_mota_mode = false, usb_logging_terminal_mode = false;
+static bool usb_logging_network_parked = false;
+static bool usb_protocol_initialized = true;
 static bool usb_host_session_connected = false, usb_terminal_discard_line = true;
 static bool usb_terminal_host_reset_completion_pending = false;
 static uint32_t usb_terminal_host_reset_retry_at = 0;
@@ -57,13 +61,27 @@ static mesh::UsbAsciiSessionDefault usb_ascii_session_default;
 static mesh::UsbHostPresenceDebouncer usb_hwcdc_host_presence;
 static constexpr unsigned USB_TRANSPORT_RESET_RETRY_MS = 1000;
 static constexpr unsigned USB_HOST_LOSS_EDGE_MS = 100, USB_HOST_LOSS_GRACE_MS = 2000;
+struct Stream {
+  int pending = 0;
+  int available() const { return pending; }
+  int read() { return pending-- > 0 ? 'x' : -1; }
+  void print(const char*) {}
+} usb_stream;
+static Stream& usbTerminalOutput() { return usb_stream; }
 namespace mesh {
+Stream& usbCompanionPort() { return usb_stream; }
 void discardUsbTerminalOutput() {}
 bool takeUsbTerminalSessionReset() { bool value = reset_event; reset_event = false; return value; }
 bool resetUsbCompanionTransport() { return transport_ready; }
 bool tryCompleteUsbTerminalSessionReset() { return transport_ready; }
 bool hasDedicatedUsbLoggingPort() { return dedicated_logging; }
 bool isUsbLoggingEnabled() { return logging_enabled; }
+void setUsbLoggingEnabled(bool enabled) {
+  if (enabled && usb_protocol_initialized && !dedicated_logging) {
+    assert(usb_serial_interface.passthrough); // Must park before gate opens.
+  }
+  logging_enabled = enabled;
+}
 }
 static bool isUsbTerminalDataConnected() { return data_connected; }
 static bool isNetworkTerminalActive() { return network_active; }
@@ -89,6 +107,7 @@ static void enterUsbLoggingTerminalMode() {
 static void service() {
   serviceUsbTerminalHostSessionReset();
   serviceUsbAsciiSessionDefault();
+  serviceUsbLoggingOwnership(logging_enabled);
 }
 static void boundary(bool event = true) {
   reset_event = event;
@@ -156,6 +175,41 @@ int main() {
   boundary(false);
   assert(the_mesh.terminal);
 #endif
+  // A network CLI must retain ownership while USB diagnostics exclude frames.
+  the_mesh.terminal = false;
+  usb_serial_interface.passthrough = false;
+  network_active = true;
+  logging_enabled = false;
+  the_mesh.applyUsbLoggingState(true);
+  assert(network_active && !the_mesh.terminal);
+  assert(usb_serial_interface.passthrough && usb_logging_network_parked);
+  usb_stream.pending = 5;
+  serviceUsbLoggingOwnership(logging_enabled);
+  assert(usb_stream.pending == 5); // Still log-only; no USB CLI takes ownership.
+  the_mesh.applyUsbLoggingState(false);
+  assert(network_active && !the_mesh.terminal);
+  assert(!usb_serial_interface.passthrough && !usb_logging_network_parked);
+  assert(usb_stream.pending == 0);
+  logging_enabled = true;
+  serviceUsbLoggingOwnership(logging_enabled);
+  network_active = false;
+  usb_stream.pending = 5;
+  serviceUsbLoggingOwnership(logging_enabled);
+  assert(the_mesh.terminal && usb_logging_terminal_mode);
+  assert(usb_serial_interface.passthrough && !usb_logging_network_parked);
+  assert(usb_stream.pending == 0);
+  // An ASCII-restoring network handoff must not accidentally reenable frames.
+  logging_enabled = false;
+  usb_logging_network_parked = true;
+  usb_logging_terminal_mode = false;
+  serviceUsbLoggingOwnership(logging_enabled);
+  assert(the_mesh.terminal && usb_serial_interface.passthrough);
+  // Remote logging cancels exclusive mOTA before the next framed dispatch.
+  usb_mota_mode = true;
+  the_mesh.terminal = false;
+  logging_enabled = true;
+  serviceUsbLoggingOwnership(logging_enabled);
+  assert(!usb_mota_mode && the_mesh.terminal && usb_serial_interface.passthrough);
   logging_enabled = true;
   beginUsbDefaultSession();
   assert(the_mesh.terminal && usb_logging_terminal_mode);
@@ -208,9 +262,11 @@ class CompanionUsbDefaultTest(unittest.TestCase):
         self.assertIn("companion_transport_boot_mode =\n      CompanionTransportMode::Bluetooth;", MAIN)
 
     def test_startup_and_reconnection_for_each_usb_transport(self):
-        functions = "\n".join(function("static void " + name + "(") for name in (
+        functions = "\n".join(function("static void " + name + "() {") for name in (
             "resetUsbTerminalHostSession", "serviceUsbTerminalHostSessionReset",
             "serviceUsbAsciiSessionDefault", "beginUsbDefaultSession"))
+        functions += "\n" + function("static void serviceUsbLoggingOwnership(bool logging_enabled) {")
+        functions += "\n" + function("void MyMesh::applyUsbLoggingState(bool enabled) {").replace("MyMesh::", "Mesh::")
         profiles = {
             "nrf52": ["NRF52_PLATFORM=1"],
             "esp32-tinyusb": ["ESP32=1", "ARDUINO_USB_MODE=0", "ARDUINO_USB_CDC_ON_BOOT=1", "MESH_ESP32_TINYUSB_NONBLOCKING=1"],
@@ -237,8 +293,22 @@ class CompanionUsbDefaultTest(unittest.TestCase):
         loop = function("\nvoid loop() {")
         self.assertLess(loop.index("serviceUsbTerminalHostSessionReset();"), loop.index("serviceUsbAsciiSessionDefault();"))
         self.assertLess(loop.index("serviceUsbAsciiSessionDefault();"), loop.index("the_mesh.loop();"))
+        self.assertLess(loop.index("serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());"), loop.index("the_mesh.loop();"))
         self.assertLess(loop.index("expireUsbBinaryStartupProbeBeforeDispatch();"), loop.index("the_mesh.loop();"))
         self.assertNotIn("COMPANION_RADIO_FULL", MAIN)
+        source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
+        self.assertNotIn("mesh::setUsbLoggingEnabled(", source)
+        logging_reply = source[source.index('if (strncmp(command, "set logging.output ", 19)'):
+                               source.index('if ((strncmp(command, "get ", 4)', source.index('if (strncmp(command, "set logging.output ", 19)'))]
+        self.assertIn("mesh::cli::loggingOutputName(usb, wifi)", logging_reply)
+        terminal = function("static void serviceUsbTerminal() {")
+        self.assertLess(terminal.index("serviceUsbLoggingOwnership("), terminal.index("if (usb_mota_mode)"))
+        leave = function("static void leaveUsbTerminalMode(bool acknowledge) {")
+        self.assertIn("!mesh::hasDedicatedUsbLoggingPort() && mesh::isUsbLoggingEnabled()", leave)
+        browser = function("bool MyMesh::beginStreamTerminal(Stream& output) {")
+        self.assertIn("serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());", browser)
+        tcp = function("static void ota_console_loop() {")
+        self.assertIn("serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());", tcp)
 
 
 if __name__ == "__main__":

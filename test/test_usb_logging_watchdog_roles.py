@@ -35,9 +35,10 @@ struct Store {
  bool hasPendingContactWrites() const{return dirty;}
 };
 struct SerialInterface {
- bool pending=false, connected=false;
+ bool pending=false, connected=false, passthrough=true;
  bool hasPendingIO() const{return pending;}
  bool isConnected() const{return connected;}
+ bool isPassthroughMode() const{return passthrough;}
 };
 struct RoleMesh {
  uint32_t dirty_contacts_expiry=0, _ota_update_at=0, set_radio_at=0,
@@ -212,7 +213,7 @@ class UsbLoggingWatchdogRoleTests(unittest.TestCase):
  // even if the dedicated logging CDC is disconnected or its output is stuck.
  for(unsigned state=0;state<3;++state){
    reset();mesh::status.reader_connected=state!=1;mesh::status.stalled=state==2;
-   the_mesh.terminal=false;usb_connected=true;
+   the_mesh.terminal=false;usb_serial_interface.passthrough=false;usb_connected=true;
    assert(!usbLoggingRecoverySafe(nullptr));
    usb_connected=false;assert(usbLoggingRecoverySafe(nullptr));
    usb_serial_interface.pending=true;assert(!usbLoggingRecoverySafe(nullptr));
@@ -221,6 +222,15 @@ class UsbLoggingWatchdogRoleTests(unittest.TestCase):
    usb_mota_mode=true;assert(!usbLoggingRecoverySafe(nullptr));
    usb_mota_mode=false;
 #endif
+ }
+ // A network CLI owns the role without owning a log-only USB transport.
+ // The new network parking state must not make a stalled logger look like a
+ // live Binary Companion, including a host which keeps DTR asserted.
+ for(unsigned state=0;state<3;++state){
+   reset();the_mesh.terminal=false;usb_connected=true;
+   mesh::status.reader_connected=state!=1;mesh::status.stalled=state==2;
+   assert(usb_serial_interface.isPassthroughMode());
+   assert(usbLoggingRecoverySafe(nullptr));
  }
  reset();usb_terminal_line_len=1;assert(!usbLoggingRecoverySafe(nullptr));
  mesh::status.reader_connected=false;assert(usbLoggingRecoverySafe(nullptr));
