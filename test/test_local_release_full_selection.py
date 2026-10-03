@@ -15,6 +15,17 @@ def record(target: str, profile: str = "full", platform: str = "ESP32_PLATFORM")
 
 
 class ReleaseFullSelectionTest(unittest.TestCase):
+    def test_nrf52_full_and_reduced_ota_pair_is_never_collapsed(self):
+        for role in ('repeater', 'room_server', 'sensor'):
+            target = 'RAK_3401_' + role
+            variants = []
+            for sensor in ('full', 'reduced'):
+                item = record(target, 'auto', 'NRF52_PLATFORM')
+                item['manifest'].update(artifact_target=target + '-' + sensor + '-ota',
+                                        capabilities=['sensor.profile.' + sensor])
+                variants.append(item)
+            self.assertEqual(select_ordinary_full_records(variants), variants)
+
     def test_resume_filters_sibling_full_images_only(self):
         inputs = [
             record("Heltec_v3_repeater_observer_mqtt"),

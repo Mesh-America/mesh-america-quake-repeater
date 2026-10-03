@@ -101,6 +101,20 @@ public:
   }
   virtual void loop() { }
   virtual void setTelemetryLocationAccessAvailable(bool available);
+  bool requestGpsTelemetryTimeSync(uint64_t min_interval_secs) {
+#if ENV_INCLUDE_GPS
+    // A denied request must not consume the provider's throttle or reclaim a
+    // bridge-owned UART. Shared GPS rails make isEnabled() an unsafe substitute
+    // for the manager's established transport ownership.
+    if (!gps_transport_available || !telemetryGpsDetected()) return false;
+    LocationProvider* location = getLocationProvider();
+    return location != nullptr && location->getGPSPowerSaving()
+        && location->requestTimeSync(min_interval_secs);
+#else
+    (void)min_interval_secs;
+    return false;
+#endif
+  }
   void setGpsTelemetryStopAfterFix(bool enabled) {
 #if ENV_INCLUDE_GPS
     gps_stop_after_fix = enabled;

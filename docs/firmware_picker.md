@@ -20,7 +20,7 @@ The picker reads public release metadata from GitHub. It does not upload device
 information. Hardware names, target names, and download links come directly
 from the published firmware assets.
 
-<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.8-runtime-1" data-bootloaders-url="../_data/bootloader_manifest.json?v=20260929-2" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
+<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.8-runtime-1" data-bootloaders-url="../_data/bootloader_manifest.json?v=20261002-1" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
   <div class="firmware-picker-intro" role="note">
     <strong>Current release set</strong>
     <p data-role="release-set">Loading release information...</p>
@@ -171,6 +171,8 @@ from the published firmware assets.
 | No logging | Normal standalone operation without the dedicated logging/MQTT profile |
 | Receives LoRa OTA | Repeater, room server, or sensor image that can stage an exact matching update received over LoRa; any sensor/storage tradeoff appears on the same Firmware profile button |
 | Receives LoRa OTA - Reduced optional sensors | Compact OTA image that omits selected optional environmental/ranging drivers while retaining generic I2C and supported board peripherals |
+| Reduced sensors + LoRa OTA | Qualified nRF52 repeater, room server, or sensor build with the reduced optional sensor recipe and LoRa OTA retained |
+| Full supported sensors + LoRa OTA | Qualified nRF52 build with all sensor drivers supported by that board's full recipe and LoRa OTA retained; does not add support for every possible attached sensor |
 | LoRa OTA source only | Full Companion serving a host-supplied update to another node without self-installing it |
 
 Connection and bridge choices depend on the selected role. Companion firmware
@@ -396,8 +398,13 @@ is available. ESP32 and other chip families do not show this section. The web
 picker checks the latest stable OTAFIX release; the downloadable picker
 includes the bootloader release named in its saved catalog. If a board has no
 verified mapping or a file is missing, the picker explains that instead of
-offering another board's bootloader. MeshTower internal and microSD remain
-separate; RAK3401 and RAK4631 each use their adaptive storage bootloader.
+offering another board's bootloader. OTAFIX 2.4.11 publishes a combined
+MeshTower V2 SD/internal image, mapped only to `Heltec_tower_v2_sdcard`.
+The historical `Heltec_tower_v2` internal-only profile is explicitly retired:
+move to the normal combined image with a one-time local USB/BLE DFU or SWD
+installation, not a cross-profile LoRa bootloader update. The picker does not
+silently substitute its bootloader. RAK3401 and RAK4631 each use their
+board-specific adaptive storage bootloader.
 Ikoka Stick, Nano and Handheld plus SolarXiao use the XIAO bootloader;
 Wio Tracker L1 1W and E-Ink use the L1 bootloader. See the
 [board coverage audit](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/blob/feature/ota-delta-apply/docs/meshcore-hardware-coverage.md)
@@ -420,6 +427,18 @@ buttons. They separate revisions, display type, expansion kit, radio/PA layout,
 pin map, and other physical differences without crowding the Hardware dropdown.
 **Firmware profile** buttons combine OTA support, Full/standard, and choices
 that need a different image or wiring, such as serial port or external storage.
+Future nRF52 repeater, room-server and sensor releases publish two separately
+qualified choices: **Reduced sensors + LoRa OTA** and
+**Full supported sensors + LoRa OTA**, with `-reduced-ota` and `-full-ota` artifact suffixes. Each keeps
+its exact board/role OTA identity and storage layout; the suffix is not a new
+radio or partition identity. Labels come from the release's qualified
+`sensor.profile.reduced` / `sensor.profile.full` metadata and verified LoRa
+receiver, not from the filename alone. Both profiles remain separate in local
+and published releases, including boards whose optional sensor set is small
+enough that the images have little or no size difference. Packaging requires
+both profiles with matching packaged OTA identity and flash geometry, even
+when a matrix is resumed or partial publication is requested. A failed build
+is reported, never presented as a supported download. Companion is unchanged.
 The legacy `no_external_sensors` profile is labeled **Receives LoRa OTA -
 Reduced optional sensors** on the same button. On RAK3401 and RAK4631 this
 compact profile uses internal storage without an external storage board. The

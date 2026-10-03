@@ -17,7 +17,7 @@ import tempfile
 
 from build_esp32_partition_migration import bundle_release, verify_archive
 from package_esp32_partition_migration import BOARDS
-from package_cascade_release import category, collect_artifacts
+from package_cascade_release import category, collect_artifacts, nrf52_sensor_profile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,6 +103,8 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
     Explicit alternate images and old partition identities still belong in
     their separately built migration packages or direct --full-exact builds.
     This also removes stale sibling artifacts when a matrix build is resumed.
+    nRF52 Full/reduced sensor OTA records always pass through independently,
+    even when their logical target ID and storage layout are the same.
     """
     chosen: dict[str, tuple[int, dict]] = {}
     passthrough: list[dict] = []
@@ -169,6 +171,8 @@ def stage_release(work: Path, migration_work: Path, destination: Path, version: 
                 files.append(str(target.relative_to(staging)))
             entries.append({"target": manifest["target"], "artifact_target": manifest["artifact_target"],
                             "platform": manifest["platform"], "profile": manifest["build_profile"],
+                            "sensor_profile": nrf52_sensor_profile(manifest),
+                            "ota_update_methods": manifest.get("ota_update_methods", []),
                             "files": files})
 
         migrations = staging / "esp32-partition-migration"

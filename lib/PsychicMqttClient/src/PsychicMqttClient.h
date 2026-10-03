@@ -350,7 +350,7 @@ public:
      *
      * @note All parameters must be set before calling this method.
      */
-    void connect();
+    esp_err_t connect();
 
     /**
      * @brief Reconnects a previously started MQTT client.
@@ -360,7 +360,7 @@ public:
      * when auto-reconnect is disabled. Updates config before reconnecting
      * so credential changes (e.g., refreshed JWT tokens) take effect.
      */
-    void reconnect();
+    esp_err_t reconnect();
 
     /**
      * @brief Disconnects the MQTT client from the server.
@@ -504,6 +504,9 @@ private:
 
     static void _onMqttEventStatic(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
     void _onMqttEvent(esp_event_base_t base, int32_t event_id, void *event_data);
+    // Configuration is transactional: never start/reconnect on stale credentials
+    // after a failed esp_mqtt_set_config().
+    esp_err_t applyConfig();
     bool _isTopicMatch(const char *topic, const char *subscription);
 
     // Fixed-size callback storage. Each slot is "used" once registered; we never

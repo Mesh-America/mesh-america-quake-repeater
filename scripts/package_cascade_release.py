@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 from urllib.parse import quote, urljoin
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from firmware_memory_manifest import validate_package
@@ -20,11 +21,97 @@ from package_nrf52_font_license import validate_artifact_notice
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools" / "mota"))
+from motalib import parse_endf_ident, parse_nrf52_layout, target_id_for_env
+
 FIRMWARE_SUFFIXES = {".bin", ".uf2", ".hex", ".zip"}
 
 
 def is_companion(target):
     return "companion" in target.lower() or "comp_radio" in target.lower()
+
+
+def nrf52_sensor_profile(manifest):
+    """Read the qualified sensor policy, never infer it from an artifact name."""
+    choices = {value.removeprefix("sensor.profile.")
+               for value in manifest.get("capabilities", []) if value.startswith("sensor.profile.")}
+    if not choices:
+        return ""
+    target = manifest["target"]
+    if len(choices) != 1 or not choices <= {"full", "reduced"}:
+        raise ValueError(f"{target}: ambiguous or unknown sensor profile")
+    verified = {item["capability"] for item in manifest.get("verification", [])
+                if item.get("present") is True and item.get("source") in
+                ("linked image", "packaged application")}
+    if (manifest.get("platform") != "NRF52_PLATFORM" or is_companion(target)
+            or not re.search(r"_(?:repeater|room_server|room_svr|sensor)(?:[_-]|$)", target, re.I)
+            or manifest.get("verified") is not True
+            or manifest.get("ota_update_verified") is not True
+            or "lora" not in manifest.get("ota_update_methods", [])
+            or "ota.update.lora" not in manifest.get("capabilities", [])
+            or "ota.update.lora" not in verified):
+        raise ValueError(f"{target}: sensor profile requires qualified nRF52 infrastructure LoRa OTA")
+    return next(iter(choices))
+
+
+def release_profile_label(manifest):
+    sensor = nrf52_sensor_profile(manifest)
+    if sensor:
+        return ("Full supported sensors" if sensor == "full" else "Reduced sensors") + " + LoRa OTA"
+    return manifest["build_profile"]
+
+
+def validate_nrf52_sensor_pairs(records):
+    """Publish the new sensor policies only as an identity/layout-matched pair.
+
+    The DFU application is the authority for identity and flash geometry. Old
+    releases without the new capability or publication suffix are unchanged.
+    Partial/resumed matrices must not publish just one half of a new pair.
+    """
+    groups = {}
+    for record in records:
+        manifest = record["manifest"]
+        sensor = nrf52_sensor_profile(manifest)
+        artifact_target = manifest.get("artifact_target", manifest["target"])
+        hint = (manifest.get("platform") == "NRF52_PLATFORM"
+                and (re.search(r"-(?:full|reduced)-ota$", artifact_target)
+                     or any(re.search(r"-(?:full|reduced)-ota-v\d+\.", path.name)
+                            for path in record["files"])))
+        if not sensor:
+            if hint:
+                raise ValueError(f"{artifact_target}: sensor pair publication suffix lacks qualified metadata")
+            continue
+        if not artifact_target.endswith("-" + sensor + "-ota"):
+            raise ValueError(f"{artifact_target}: sensor pair publication suffix disagrees with metadata")
+        if any(not path.name.startswith(artifact_target + "-v") for path in record["files"]
+               if path.suffix in FIRMWARE_SUFFIXES):
+            raise ValueError(f"{artifact_target}: sensor pair artifact filename disagrees with metadata")
+        packages = [path for path in record["files"] if path.suffix == ".zip"]
+        if len(packages) != 1:
+            raise ValueError(f"{artifact_target}: sensor pair requires exactly one DFU application package")
+        try:
+            with zipfile.ZipFile(packages[0]) as package:
+                app = json.loads(package.read("manifest.json"))["manifest"]["application"]
+                application = package.read(app["bin_file"])
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+            raise ValueError(f"{artifact_target}: invalid sensor pair DFU application: {exc}") from exc
+        identity = parse_endf_ident(application)
+        layout = parse_nrf52_layout(application)
+        if identity is None or layout is None or not identity.target_id or not identity.hw_id or not identity.fw_version:
+            raise ValueError(f"{artifact_target}: sensor pair needs valid packaged EndF identity and flash layout")
+        if identity.target_id != target_id_for_env(manifest["target"]):
+            raise ValueError(f"{artifact_target}: sensor pair packaged target ID disagrees with logical target")
+        if len(application) > layout.linked_app_end - layout.app_base:
+            raise ValueError(f"{artifact_target}: sensor pair application exceeds its linked flash region")
+        proof = (identity.target_id, identity.hw_id, identity.fw_version,
+                 layout.app_base, layout.linked_app_end, layout.stage_ceiling, layout.flags,
+                 manifest.get("ota_update_requirements", {}), manifest.get("source_commit"))
+        groups.setdefault(manifest["target"], []).append((sensor, proof))
+    for target, pair in groups.items():
+        if sorted(item[0] for item in pair) != ["full", "reduced"]:
+            raise ValueError(f"{target}: sensor pair requires exactly one full and one reduced profile")
+        if pair[0][1] != pair[1][1]:
+            raise ValueError(f"{target}: sensor pair disagrees on packaged target, firmware or storage layout")
 
 
 def validate_manifest(manifest):
@@ -33,6 +120,7 @@ def validate_manifest(manifest):
         raise ValueError(f"{target}: firmware capability qualification failed")
     if not is_companion(target) and not manifest.get("ota_update_verified"):
         raise ValueError(f"{target}: infrastructure has no verified wireless updater")
+    nrf52_sensor_profile(manifest)
     if "companion_radio_full" in target.lower():
         required = {"companion.usb_mota_source", "companion.mota_sender",
                     "companion.temp_radio", "companion.ota_cli"}
@@ -82,6 +170,7 @@ def collect_artifacts(directory, version):
         raise ValueError("firmware without qualification: " + ", ".join(sorted(p.name for p in unaccounted)))
     if not records:
         raise ValueError("no qualified firmware artifacts")
+    validate_nrf52_sensor_pairs(records)
     return records
 
 
@@ -89,6 +178,8 @@ def category(record):
     manifest = record["manifest"]
     if is_companion(manifest["target"]):
         return "companion"
+    if nrf52_sensor_profile(manifest):
+        return "lora-ota"
     if manifest["build_profile"] == "full":
         return "full-profiles"
     if "lora_ota" in manifest["target"].lower():
@@ -227,10 +318,11 @@ def main():
                     label = "merged.bin (USB)" if path.name.endswith("-merged.bin") else path.suffix[1:]
                     file_links.append(f'<a href="{html.escape(url)}">{html.escape(label)}</a>')
             methods = ", ".join(manifest.get("ota_update_methods", [])) or "USB"
-            summaries.append({**manifest, "files": [path.name for path in record["files"]]})
-            rows.append(f"<tr><td>{html.escape(manifest['artifact_target'])}</td><td>{html.escape(manifest['build_profile'])}</td><td>{html.escape(methods)}</td><td>{' · '.join(file_links)}</td></tr>")
+            summaries.append({**manifest, "sensor_profile": nrf52_sensor_profile(manifest),
+                              "files": [path.name for path in record["files"]]})
+            rows.append(f"<tr><td>{html.escape(manifest['artifact_target'])}</td><td>{html.escape(release_profile_label(manifest))}</td><td>{html.escape(methods)}</td><td>{' · '.join(file_links)}</td></tr>")
         (destination / "TARGET-MANIFEST.json").write_text(json.dumps(summaries, indent=2) + "\n")
-        columns = ("artifact_target", "target", "platform", "build_profile",
+        columns = ("artifact_target", "target", "platform", "build_profile", "sensor_profile",
                    "ota_update_methods", "files")
         (destination / "TARGET-MANIFEST.tsv").write_text(
             "\t".join(columns) + "\n" + "".join(

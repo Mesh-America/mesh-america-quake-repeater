@@ -7,11 +7,14 @@ import unittest
 import subprocess
 import sys
 import hashlib
+from unittest.mock import patch
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("package_cascade_release", ROOT / "scripts/package_cascade_release.py")
 package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
+from motalib import FwIdent, Nrf52Layout, ensure_endf, ensure_nrf52_layout, target_id_for_env
 
 
 class ReleaseQualificationTest(unittest.TestCase):
@@ -62,6 +65,25 @@ class ReleaseQualificationTest(unittest.TestCase):
     def test_usb_companion_is_accepted(self):
         package.validate_manifest(self.manifest("test_companion_radio_usb", ota_update_verified=False))
 
+    def test_nrf52_sensor_profiles_require_actual_qualified_lora_receiver(self):
+        for role in ('repeater', 'room_server', 'sensor'):
+            for sensor in ('full', 'reduced'):
+                manifest = self.manifest('test_' + role, platform='NRF52_PLATFORM', build_profile='auto',
+                    capabilities=['sensor.profile.' + sensor, 'ota.update.lora'], ota_update_methods=['lora'],
+                    verification=[dict(capability='ota.update.lora', present=True, source='linked image')])
+                package.validate_manifest(manifest)
+                self.assertEqual(package.nrf52_sensor_profile(manifest), sensor)
+                self.assertIn('sensors + LoRa OTA', package.release_profile_label(manifest))
+                self.assertEqual(package.category({'manifest': manifest}), 'lora-ota')
+                for change in (dict(platform='ESP32_PLATFORM'), dict(target='test_companion_radio_full'),
+                               dict(ota_update_methods=['bluetooth']), dict(verification=[]),
+                               dict(verification=[dict(capability='ota.update.lora', present=True, source='filename')])):
+                    with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'qualified nRF52'):
+                        package.validate_manifest({**manifest, **change})
+                with self.assertRaisesRegex(ValueError, 'ambiguous'):
+                    package.validate_manifest({**manifest, 'capabilities': manifest['capabilities'] +
+                        ['sensor.profile.' + ('reduced' if sensor == 'full' else 'full')]})
+
     def test_full_companion_requires_linked_source_implementation(self):
         manifest = self.manifest("test_companion_radio_full", ota_update_verified=False)
         with self.assertRaisesRegex(ValueError, "MOTA sending"):
@@ -74,6 +96,91 @@ class ReleaseQualificationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MOTA sending"):
             package.validate_manifest(manifest)
 
+    def sensor_record(self, directory, sensor, *, target='test_repeater', target_id=None,
+                      hw_id='TEST', app_base=0x26000, flags=0x10, fw_version=0x01110107):
+        stem = target + '-' + sensor + '-ota-v1.17.1.7-dev-deadbeef'
+        application, _ = ensure_endf(ensure_nrf52_layout(b'OTA: status\0invalid in-place patch geometry\0',
+            Nrf52Layout(app_base, 0xED000, 0xED000, flags)),
+            FwIdent(fw_version, target_id_for_env(target) if target_id is None else target_id, hw_id))
+        path = directory / (stem + '.zip')
+        with zipfile.ZipFile(path, 'w') as archive:
+            archive.writestr('application.bin', application)
+            archive.writestr('manifest.json', json.dumps({'manifest': {
+                'application': {'bin_file': 'application.bin', 'dat_file': 'application.dat'}}}))
+            archive.writestr('application.dat', b'fixture init')
+        manifest = self.manifest(target, artifact_target=target + '-' + sensor + '-ota',
+            platform='NRF52_PLATFORM', build_profile='auto', capabilities=['sensor.profile.' + sensor,
+                'ota.update.lora'], ota_update_methods=['lora'],
+            verification=[dict(capability='ota.update.lora', present=True, source='linked image')],
+            ota_update_requirements={'lora': {'storage': 'internal_flash_and_retained_ram'}})
+        return {'manifest': manifest, 'files': [path]}
+
+    def test_sensor_pair_requires_one_of_each_with_matching_packaged_identity_and_layout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            full = self.sensor_record(directory, 'full')
+            reduced = self.sensor_record(directory, 'reduced')
+            package.validate_nrf52_sensor_pairs([full, reduced])
+            for records in ([full], [reduced], [full, reduced, reduced]):
+                with self.subTest(count=len(records)), self.assertRaisesRegex(ValueError, 'exactly one full'):
+                    package.validate_nrf52_sensor_pairs(records)
+            for change in (dict(target='another_repeater'), dict(target_id=456), dict(hw_id='OTHER'),
+                           dict(app_base=0x27000), dict(flags=0x20), dict(fw_version=0x01110108)):
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'sensor pair'):
+                    package.validate_nrf52_sensor_pairs([full, self.sensor_record(directory, 'reduced', **change)])
+            reduced = self.sensor_record(directory, 'reduced')
+            reduced['manifest']['ota_update_requirements']['lora']['storage'] = 'external_qspi'
+            with self.assertRaisesRegex(ValueError, 'storage layout'):
+                package.validate_nrf52_sensor_pairs([full, reduced])
+            with self.assertRaisesRegex(ValueError, 'target ID disagrees with logical target'):
+                package.validate_nrf52_sensor_pairs([self.sensor_record(directory, 'full', target_id=456),
+                                                    self.sensor_record(directory, 'reduced', target_id=456)])
+
+    def test_sensor_pair_filename_does_not_replace_metadata_or_packaged_layout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            full = self.sensor_record(directory, 'full')
+            missing = {**full, 'manifest': {**full['manifest'], 'capabilities': ['ota.update.lora']}}
+            with self.assertRaisesRegex(ValueError, 'lacks qualified metadata'):
+                package.validate_nrf52_sensor_pairs([missing])
+            missing['manifest']['artifact_target'] = 'test_repeater'
+            with self.assertRaisesRegex(ValueError, 'lacks qualified metadata'):
+                package.validate_nrf52_sensor_pairs([missing])
+            full['manifest']['artifact_target'] = 'test_repeater-reduced-ota'
+            with self.assertRaisesRegex(ValueError, 'disagrees with metadata'):
+                package.validate_nrf52_sensor_pairs([full])
+            full['manifest']['artifact_target'] = 'different_repeater-full-ota'
+            with self.assertRaisesRegex(ValueError, 'filename disagrees'):
+                package.validate_nrf52_sensor_pairs([full])
+            full = self.sensor_record(directory, 'full')
+            with zipfile.ZipFile(full['files'][0], 'w') as archive:
+                archive.writestr('application.bin', b'no EndF identity or layout')
+                archive.writestr('manifest.json', json.dumps({'manifest': {
+                    'application': {'bin_file': 'application.bin'}}}))
+            with self.assertRaisesRegex(ValueError, 'valid packaged EndF'):
+                package.validate_nrf52_sensor_pairs([full])
+            # The new policy is not retroactively applied to historical files.
+            package.validate_nrf52_sensor_pairs([{'manifest': self.manifest('legacy_repeater',
+                platform='NRF52_PLATFORM'), 'files': [directory / 'legacy_repeater-ota-v1.0.zip']}])
+
+    def test_collect_artifacts_always_enforces_sensor_pair_even_for_partial_staging(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            record = self.sensor_record(directory, 'full')
+            stem = record['files'][0].stem
+            (directory / (stem + '.uf2')).write_bytes(b'validated fixture UF2')
+            (directory / (stem + '.capabilities.json')).write_text(json.dumps(record['manifest']))
+            memory = dict(passed=True, available_internal_bytes=100000,
+                          required_heap_bytes=10000, elf_sha256='a' * 64)
+            with patch.object(package, 'check_uf2'), patch.object(package, 'validate_package', return_value=memory), \
+                 patch.object(package, 'validate_artifact_notice', return_value=None):
+                with self.assertRaisesRegex(ValueError, 'exactly one full'):
+                    package.collect_artifacts(directory, 'v1.17.1.7-dev-deadbeef')
+                reduced = self.sensor_record(directory, 'reduced')
+                other = reduced['files'][0].stem
+                (directory / (other + '.uf2')).write_bytes(b'validated fixture UF2')
+                (directory / (other + '.capabilities.json')).write_text(json.dumps(reduced['manifest']))
+                self.assertEqual(len(package.collect_artifacts(directory, 'v1.17.1.7-dev-deadbeef')), 2)
     def test_missing_qualification_and_mixed_versions_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)

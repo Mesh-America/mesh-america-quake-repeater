@@ -30,6 +30,7 @@ AUTO_REDUCED_FALLBACK_TARGET=""
 AUTO_PUBLISH_REDUCED_SECOND_PASS=0
 SKIP_DECLARED_REDUCTIONS=0
 COMPLETE_OTA_FIRST_PASS=0
+NRF52_OTA_SENSOR_PROFILE=""
 FIRMWARE_OUTPUT_ENV_NAME=""
 BUILD_PROFILE_OVERRIDE="${BUILD_PROFILE_OVERRIDE:-auto}"
 BUILD_PROFILE_EXPLICIT="${BUILD_PROFILE_EXPLICIT:-0}"
@@ -139,7 +140,7 @@ Options:
   --firmware-version <version>: Firmware version to embed.
   --radio-preset <name|number>: Override the USA Cascadia radio default. Stable names are usa-cascadia and target; legacy menu numbers remain accepted.
   --profile <default|cascade>: Override runtime settings embedded in the firmware (not its feature set).
-  --build-profile <auto|standard|full>: Select feature/partition policy. Auto uses the combined Full MQTT/USB/WiFi recipe when it covers the plain infrastructure target; otherwise it first builds complete LoRa-OTA-capable firmware with a measured-size fallback. Internal-flash nRF52 repeaters and room servers also publish the reduced image for delta-staging headroom; XIAO nRF52 repeaters with external-QSPI staging publish one combined image. Standard preserves portable images, including the 1.25 MiB slot; full requires the expanded ESP32 recipe.
+  --build-profile <auto|standard|full>: Select feature/partition policy. Every non-Companion nRF52 repeater, room server and sensor builds both Full sensors + LoRa OTA and Reduced sensors + LoRa OTA, in its exact existing storage/layout contract. Both must pass qualification; an oversized full image is an error, not a successful reduced-only fallback. Other platforms retain their existing auto/standard/full policy.
   --auto|--standard|--full: Short forms of --build-profile.
   --full-exact: Build one expanded ESP32 release image under the requested target's own LoRa OTA identity.
   --skip-kiss|--include-kiss: Exclude (default) or include KISS modem targets in bulk builds.
@@ -152,10 +153,9 @@ Options:
                 and status live outside OUTPUT_DIR so --clean cannot erase them.
 
 Examples:
-Build firmware for the "RAK_4631_repeater" device target. Auto first builds
-the complete LoRa OTA recipe, then also publishes the reduced
-no-external-sensors repeater because this nRF52 repeater stages deltas in
-internal flash.
+Build both qualified sensor/LoRa OTA profiles for "RAK_4631_repeater".
+This policy also applies to release matrices, sensors and external-storage
+nRF52 recipes; it does not change their target IDs or flash layouts.
 $ bash build.sh build-firmware RAK_4631_repeater --build-profile auto
 
 Run without arguments to choose an interactive build action/target, an optional
@@ -2124,8 +2124,10 @@ is_xiao_qspi_combined_repeater_target() {
 
 is_xiao_qspi_canonical_repeater_build() {
   is_xiao_qspi_combined_repeater_target "$1" \
-    && [ "$BUILD_PROFILE_FOR_TARGET" = "standard" ] \
-    && [ -z "$FIRMWARE_FILENAME_INFIX" ]
+    && { [ "$BUILD_PROFILE_FOR_TARGET" = "standard" ] \
+         || [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; } \
+    && { [ -z "$FIRMWARE_FILENAME_INFIX" ] \
+         || [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; }
 }
 
 is_lora_ota_no_external_sensors_target() {
@@ -2136,6 +2138,9 @@ is_lora_ota_no_external_sensors_target() {
 is_rak_i2c_voltage_monitor_ota_target() {
   local target_lc=${1,,}
 
+  if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; then
+    case "$target_lc" in rak_3401_*|rak_4631_*) return 0 ;; esac
+  fi
   case "$target_lc" in
     rak_3401_*lora_ota_no_external_sensors|rak_4631_*lora_ota_no_external_sensors)
       return 0
@@ -2149,6 +2154,12 @@ is_rak_i2c_voltage_monitor_ota_target() {
 is_rak_gps_retaining_ota_target() {
   local target_lc=${1,,}
 
+  if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; then
+    case "$target_lc" in
+      rak_4631_*bridge_rs232_serial1*) return 1 ;;
+      rak_3401_*|rak_4631_*) return 0 ;;
+    esac
+  fi
   # Serial1 is the RAK12501 UART on RAK4631. The Serial1 RS-232 bridge owns
   # that port instead, so its reduced profile intentionally uses the INA-only
   # recipe and must not promise or require the WisBlock GPS provider.
@@ -2428,6 +2439,12 @@ get_unified_full_infrastructure_target() {
   # bridge implementation; the Full overlay adds ESP-NOW back in below.
   case "${mqtt_base,,}" in
     *_repeater_bridge_espnow) mqtt_base=${mqtt_base%_bridge_espnow} ;;
+  esac
+  # EoRa's deployed normal identity capitalizes Repeater, while upstream's
+  # observer recipe does not. Normalize only the feature-base lookup, never
+  # the logical target name whose spelling determines the on-air mOTA ID.
+  case "$mqtt_base" in
+    Ebyte_EoRa-S3_Repeater) mqtt_base=Ebyte_EoRa-S3_repeater ;;
   esac
   case "${mqtt_base,,}" in
     *_repeater|*_room_server|*_repeater_observer_mqtt|*_room_server_observer_mqtt) ;;
@@ -2971,7 +2988,8 @@ get_reduced_lora_ota_target() {
     return 0
   fi
   if ! is_repeater_role_target "$target" \
-      && ! is_room_server_role_target "$target"; then
+      && ! is_room_server_role_target "$target" \
+      && ! is_sensor_role_target "$target"; then
     return 1
   fi
 
@@ -2983,6 +3001,47 @@ get_reduced_lora_ota_target() {
   return 1
 }
 
+is_nrf52_sensor_ota_pair_target() {
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$1]:-}" = "NRF52_PLATFORM" ] \
+    && ! is_companion_build "$1" \
+    && ! is_kiss_modem_target "$1" \
+    && { is_repeater_role_target "$1" \
+         || is_room_server_role_target "$1" \
+         || is_sensor_role_target "$1"; }
+}
+
+get_nrf52_sensor_ota_pair_target() {
+  local target=$1
+  local candidate
+  is_nrf52_sensor_ota_pair_target "$target" || return 1
+  # Preserve an explicit/deployed OTA identity and every external-storage
+  # contract. Ordinary internal targets keep the historical auto-build ID of
+  # their reduced alias, so the same pair addresses already installed nodes.
+  if is_lora_ota_only_target "$target" \
+      || [ "${PIO_ENV_QSPI_OTA_BY_NAME[$target]:-0}" = "1" ] \
+      || [ "${PIO_ENV_SD_OTA_BY_NAME[$target]:-0}" = "1" ]; then
+    printf '%s\n' "$target"
+  elif candidate=$(get_reduced_lora_ota_target "$target"); then
+    printf '%s\n' "$candidate"
+  else
+    printf '%s\n' "$target"
+  fi
+}
+
+normalize_nrf52_sensor_ota_pair_targets() {
+  local target candidate
+  local -a normalized=()
+  local -A seen=()
+  for target in "${RESOLVED_BUILD_TARGETS[@]}"; do
+    candidate=$(get_nrf52_sensor_ota_pair_target "$target") || candidate=$target
+    if [ -z "${seen[$candidate]+x}" ]; then
+      normalized+=("$candidate")
+      seen["$candidate"]=1
+    fi
+  done
+  RESOLVED_BUILD_TARGETS=("${normalized[@]}")
+}
+
 is_lora_ota_build() {
   local env_name=$1
   local env_name_lc=${env_name,,}
@@ -2991,6 +3050,13 @@ is_lora_ota_build() {
   # add an application OTA manager or CLI, even under the auto/FULL profiles.
   if is_kiss_modem_target "$env_name"; then
     return 1
+  fi
+
+  # Both required nRF52 sensor profiles include the real self-update path,
+  # regardless of ordinary standard-profile opt-ins or logging overrides.
+  if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ] \
+      && is_nrf52_sensor_ota_pair_target "$env_name"; then
+    return 0
   fi
 
   # ESP32 USB and WiFi companions keep OTA so they can seed a host folder over
@@ -3107,29 +3173,29 @@ is_esp32_full_only_bulk_target() {
   [ "${PIO_ENV_PLATFORM_BY_NAME[$1]:-}" = "ESP32_PLATFORM" ] || return 1
 
   case "$env_name" in
-    heltec_e290_repeater|heltec_e290_repeater_bridge_espnow|heltec_e290_room_server|\
+    heltec_e290_repeater|heltec_e290_repeater_bridge_espnow|heltec_e290_room_server|heltec_e290_repeater_observer_mqtt|heltec_e290_room_server_observer_mqtt|\
     heltec_v3_repeater|heltec_v3_repeater_bridge_rs232|heltec_v3_repeater_bridge_espnow|heltec_v3_repeater_observer_mqtt|heltec_v3_repeater_observer_mqtt_sim|heltec_v3_room_server|heltec_v3_room_server_observer_mqtt|heltec_v3_sensor|\
     heltec_wsl3_repeater|heltec_wsl3_repeater_bridge_rs232|heltec_wsl3_repeater_bridge_espnow|heltec_wsl3_repeater_observer_mqtt|heltec_wsl3_room_server|heltec_wsl3_room_server_observer_mqtt|heltec_wsl3_sensor|\
     lilygo_tbeam_1w_repeater|lilygo_tbeam_1w_repeater_bridge_espnow|lilygo_tbeam_1w_repeater_observer_mqtt|lilygo_tbeam_1w_room_server|lilygo_tbeam_1w_room_server_observer_mqtt|\
-    heltec_rc32_repeater|heltec_rc32_repeater_bridge_espnow|heltec_rc32_room_server|heltec_rc32_sensor|\
-    heltec_rc32_without_display_repeater|heltec_rc32_without_display_repeater_bridge_espnow|heltec_rc32_without_display_room_server|heltec_rc32_without_display_sensor|\
-    heltec_wireless_tracker_repeater|heltec_wireless_tracker_repeater_bridge_espnow|heltec_wireless_tracker_room_server|\
+    heltec_rc32_repeater|heltec_rc32_repeater_bridge_espnow|heltec_rc32_room_server|heltec_rc32_sensor|heltec_rc32_repeater_observer_mqtt|heltec_rc32_room_server_observer_mqtt|\
+    heltec_rc32_without_display_repeater|heltec_rc32_without_display_repeater_bridge_espnow|heltec_rc32_without_display_room_server|heltec_rc32_without_display_sensor|heltec_rc32_without_display_repeater_observer_mqtt|heltec_rc32_without_display_room_server_observer_mqtt|\
+    heltec_wireless_tracker_repeater|heltec_wireless_tracker_repeater_bridge_espnow|heltec_wireless_tracker_room_server|heltec_wireless_tracker_repeater_observer_mqtt|heltec_wireless_tracker_room_server_observer_mqtt|\
     thinknode_m9_repeater_|thinknode_m9_room_server_|\
     heltec_t190_repeater_|heltec_t190_repeater_observer_mqtt|heltec_t190_repeater_bridge_espnow_|heltec_t190_room_server_|heltec_t190_room_server_observer_mqtt|\
-    meshnology_w12_repeater|meshnology_w12_repeater_bridge_espnow|meshnology_w12_room_server|meshnology_w12_sensor|\
+    meshnology_w12_repeater|meshnology_w12_repeater_bridge_espnow|meshnology_w12_room_server|meshnology_w12_sensor|meshnology_w12_repeater_observer_mqtt|meshnology_w12_room_server_observer_mqtt|\
     mke_s3_repeater|mke_s3_repeater_bridge_rs232|mke_s3_repeater_bridge_espnow|mke_s3_room_server|mke_s3_sensor|\
     heltec_v2_repeater|heltec_v2_repeater_bridge_espnow|heltec_v2_room_server|heltec_v2_companion_radio_wifi|\
-    heltec_wireless_paper_repeater|heltec_wireless_paper_repeater_bridge_espnow|heltec_wireless_paper_room_server|\
+    heltec_wireless_paper_repeater|heltec_wireless_paper_repeater_bridge_espnow|heltec_wireless_paper_room_server|heltec_wireless_paper_repeater_observer_mqtt|heltec_wireless_paper_room_server_observer_mqtt|\
     heltec_tracker_v1_1_repeater_observer_mqtt|heltec_tracker_v1_1_room_server_observer_mqtt|\
     heltec_tracker_v2_repeater|heltec_tracker_v2_repeater_bridge_espnow|heltec_tracker_v2_repeater_observer_mqtt|heltec_tracker_v2_room_server|heltec_tracker_v2_room_server_observer_mqtt|heltec_tracker_v2_sensor|\
     t_beam_s3_supreme_sx1262_repeater|t_beam_s3_supreme_sx1262_repeater_bridge_espnow|t_beam_s3_supreme_sx1262_repeater_observer_mqtt|t_beam_s3_supreme_sx1262_room_server|t_beam_s3_supreme_sx1262_room_server_observer_mqtt|\
-    heltec_e213_repeater|heltec_e213_repeater_bridge_espnow|heltec_e213_room_server|\
+    heltec_e213_repeater|heltec_e213_repeater_bridge_espnow|heltec_e213_room_server|heltec_e213_repeater_observer_mqtt|heltec_e213_room_server_observer_mqtt|\
     station_g2_repeater_observer_mqtt|station_g2_room_server_observer_mqtt|\
-    xiao_s3_repeater|xiao_s3_repeater_bridge_espnow|xiao_s3_room_server|xiao_s3_sensor|\
+    xiao_s3_repeater|xiao_s3_repeater_bridge_espnow|xiao_s3_room_server|xiao_s3_sensor|xiao_s3_repeater_observer_mqtt|xiao_s3_room_server_observer_mqtt|\
     heltec_v4_repeater|heltec_v4_repeater_bridge_espnow|heltec_v4_repeater_observer_mqtt|heltec_v4_room_server|heltec_v4_room_server_observer_mqtt|heltec_v4_sensor|\
     heltec_v4_expansionkit_repeater|heltec_v4_expansionkit_repeater_observer_mqtt|heltec_v4_expansionkit_room_server_observer_mqtt|\
     heltec_v4_tft_repeater|heltec_v4_tft_repeater_bridge_espnow|heltec_v4_tft_room_server|heltec_v4_tft_sensor|\
-    lilygo_teth_elite_sx1262_repeater|lilygo_teth_elite_sx1262_room_server|\
+    lilygo_teth_elite_sx1262_repeater|lilygo_teth_elite_sx1262_room_server|lilygo_teth_elite_sx1262_repeater_observer_mqtt|lilygo_teth_elite_sx1262_room_server_observer_mqtt|\
     station_g3_esp32_repeater|station_g3_esp32_logging_repeater|station_g3_esp32_room_server|station_g3_esp32_repeater_observer_mqtt|station_g3_esp32_room_server_observer_mqtt|\
     rak_3112_repeater|rak_3112_repeater_bridge_rs232|rak_3112_repeater_bridge_espnow|rak_3112_repeater_observer_mqtt|rak_3112_room_server|rak_3112_room_server_observer_mqtt|rak_3112_sensor|\
     xiao_s3_wio_repeater|xiao_s3_wio_repeater_bridge_espnow|xiao_s3_wio_repeater_observer_mqtt|xiao_s3_wio_room_server|xiao_s3_wio_room_server_observer_mqtt|xiao_s3_wio_sensor|\
@@ -3239,6 +3305,10 @@ declare_build_capability_contract() {
 
   declare_full_logging_application_contract "$env_name"
   record_build_capability "profile.${BUILD_PROFILE_FOR_TARGET}"
+  if is_nrf52_sensor_ota_pair_target "$env_name" \
+      && [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; then
+    record_build_capability "sensor.profile.${NRF52_OTA_SENSOR_PROFILE}"
+  fi
 
   if [ "$env_platform" = "ESP32_PLATFORM" ] \
       && [ "$BUILD_PROFILE_FOR_TARGET" = "full" ]; then
@@ -3584,6 +3654,12 @@ apply_repeater_neighbor_capacity() {
   if ! is_repeater_role_target "$env_name"; then
     return 0
   fi
+  # Paired nRF52 OTA profiles retain their exact board recipe's capacity.
+  # Enlarging a table here can invalidate the full image's reserved OTA RAM.
+  if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ] \
+      && is_nrf52_sensor_ota_pair_target "$env_name"; then
+    return 0
+  fi
 
   # Repeater discovery uses one-byte indexes, so 254 is the largest usable
   # table. Keep explicitly constrained targets at their measured safe capacity.
@@ -3667,7 +3743,8 @@ apply_lora_ota_no_external_sensors_profile() {
     return 0
   fi
   if ! is_lora_ota_build "$env_name" \
-      || ! is_lora_ota_no_external_sensors_target "$env_name"; then
+      || { ! is_lora_ota_no_external_sensors_target "$env_name" \
+           && [ "${NRF52_OTA_SENSOR_PROFILE:-}" != "reduced" ]; }; then
     return 0
   fi
 
@@ -4210,12 +4287,17 @@ write_build_capability_manifest() {
   local env_platform=$2
   local pio_env_name=$3
   local firmware_filename=$4
+  local artifact_target=${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}
+  if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ] \
+      && is_nrf52_sensor_ota_pair_target "$env_name"; then
+    artifact_target+="-${NRF52_OTA_SENSOR_PROFILE}-ota"
+  fi
   local build_output_dir="${PIO_BUILD_DIR_OVERRIDE:-${PLATFORMIO_BUILD_DIR:-.pio/build}}/${pio_env_name}"
   local -a checker_args=(
     --image "${build_output_dir}/firmware.elf"
     --output "${OUTPUT_DIR}/${firmware_filename}.capabilities.json"
     --target "$env_name"
-    --artifact-target "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}"
+    --artifact-target "$artifact_target"
     --platformio-env "$pio_env_name"
     --platform "$env_platform"
     --build-profile "$BUILD_PROFILE_FOR_TARGET"
@@ -4332,6 +4414,32 @@ output_artifact_exists() {
   [ -s "${OUTPUT_DIR}/$1" ]
 }
 
+nrf52_sensor_profile_manifest_matches() {
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import json, sys
+try:
+    manifest = json.load(open(sys.argv[1]))
+    target, profile, artifact_target = sys.argv[2:]
+    capabilities = set(manifest.get("capabilities", []))
+    sensor = {value for value in capabilities if value.startswith("sensor.profile.")}
+    proven = {item.get("capability") for item in manifest.get("verification", [])
+              if item.get("present") is True}
+    matched = (profile in {"full", "reduced"} and bool(target)
+               and manifest.get("platform") == "NRF52_PLATFORM"
+               and manifest.get("target") == target
+               and manifest.get("artifact_target") == artifact_target
+               and sensor == {"sensor.profile." + profile}
+               and manifest.get("verified") is True
+               and manifest.get("ota_update_verified") is True
+               and "lora" in manifest.get("ota_update_methods", [])
+               and "ota.update.lora" in capabilities
+               and "ota.update.lora" in proven)
+except (OSError, ValueError, TypeError, AttributeError):
+    matched = False
+sys.exit(0 if matched else 1)
+PY
+}
+
 build_artifacts_exist() {
   # Keep the two-argument helper form usable by focused resume tests and
   # external callers. Production builds pass the logical environment as the
@@ -4353,6 +4461,15 @@ build_artifacts_exist() {
     "${OUTPUT_DIR}/${firmware_filename}" >/dev/null 2>&1 || return 1
   grep -q '"verified": true' \
     "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" || return 1
+  if [ "$env_platform" = "NRF52_PLATFORM" ] \
+      && [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; then
+    # A cached pre-pair image may be verified for Bluetooth only, or may carry
+    # no sensor policy. Rebuild it instead of claiming a current OTA option.
+    nrf52_sensor_profile_manifest_matches \
+      "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" "$env_name" \
+      "$NRF52_OTA_SENSOR_PROFILE" \
+      "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}-${NRF52_OTA_SENSOR_PROFILE}-ota" || return 1
+  fi
   # Old manifests can be marked verified while lacking a newly required
   # capability. Never let --resume bypass the current packaged-logging gate.
   python3 - "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" \
@@ -4503,7 +4620,58 @@ run_pio_with_size_detection() {
   return "$build_status"
 }
 
+run_nrf52_sensor_ota_pair() {
+  local target
+  target=$(get_nrf52_sensor_ota_pair_target "$1") || return 1
+  # Dynamic locals keep the pair isolated from subsequent ESP32/Companion
+  # jobs, even when the matrix caller has a different profile or logging mode.
+  local ESP32_FULL_BUILD=0
+  local BUILD_PROFILE_EFFECTIVE="auto"
+  local REQUIRE_OTA_UPDATES=1
+  local FIRMWARE_FILENAME_INFIX=""
+  local FIRMWARE_OUTPUT_ENV_NAME=""
+  local SKIP_DECLARED_REDUCTIONS=0
+  local COMPLETE_OTA_FIRST_PASS=0
+  local NRF52_OTA_SENSOR_PROFILE=""
+  local full_status=0 reduced_status=0
+
+  echo "Required nRF52 OTA pair: ${target}; exact target identity and storage/layout retained."
+  NRF52_OTA_SENSOR_PROFILE="full"
+  FIRMWARE_FILENAME_INFIX="full-ota"
+  SKIP_DECLARED_REDUCTIONS=1
+  COMPLETE_OTA_FIRST_PASS=1
+  if build_firmware_one_profile "$target"; then
+    echo "Qualified Full sensors + LoRa OTA: ${target}."
+  else
+    full_status=$?
+    echo "QUALIFICATION FAILED: ${target}, Full sensors + LoRa OTA (status ${full_status})." >&2
+  fi
+
+  NRF52_OTA_SENSOR_PROFILE="reduced"
+  FIRMWARE_FILENAME_INFIX="reduced-ota"
+  SKIP_DECLARED_REDUCTIONS=0
+  COMPLETE_OTA_FIRST_PASS=0
+  if build_firmware_one_profile "$target"; then
+    echo "Qualified Reduced sensors + LoRa OTA: ${target}."
+  else
+    reduced_status=$?
+    echo "QUALIFICATION FAILED: ${target}, Reduced sensors + LoRa OTA (status ${reduced_status})." >&2
+  fi
+  if [ "$full_status" -ne 0 ] || [ "$reduced_status" -ne 0 ]; then
+    echo "INCOMPLETE nRF52 OTA PAIR: ${target}; both sensor options must qualify. A reduced-only result is not a successful release." >&2
+    return 1
+  fi
+}
+
 build_firmware() {
+  if is_nrf52_sensor_ota_pair_target "$1"; then
+    run_nrf52_sensor_ota_pair "$1"
+  else
+    build_firmware_one_profile "$1"
+  fi
+}
+
+build_firmware_one_profile() {
   local env_name=$1
   local pio_env_name
   local env_platform
@@ -4552,10 +4720,11 @@ build_firmware() {
     return 1
   fi
   pio_env_name=$(get_pio_build_env "$env_name")
-  if [ "$COMPLETE_OTA_FIRST_PASS" = "1" ] \
+  if { [ "$COMPLETE_OTA_FIRST_PASS" = "1" ] \
+       || [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; } \
       && [ -n "${PIO_ENV_COMPLETE_OTA_BASE_BY_NAME[$env_name]+x}" ]; then
     pio_env_name=${PIO_ENV_COMPLETE_OTA_BASE_BY_NAME[$env_name]}
-    echo "Complete OTA pass uses feature-rich base environment ${pio_env_name} with stable target identity ${env_name}."
+    echo "Sensor OTA profile uses feature-rich base environment ${pio_env_name} with stable target identity ${env_name}."
   fi
 
   # Canonical bulk releases omit the redundant portable image for targets
@@ -4626,7 +4795,11 @@ build_firmware() {
   configure_unified_full_infrastructure_output "$pio_env_name"
   echo "Effective feature profile for ${env_name}: ${BUILD_PROFILE_FOR_TARGET}"
 
-  commit_hash=$(git rev-parse --short HEAD)
+  # Publication tools bind artifacts to an explicit eight-character prefix
+  # of the full source commit. Git's adaptive --short length can grow (or be
+  # configured differently), which otherwise makes valid releases look stale.
+  commit_hash=$(git rev-parse HEAD)
+  commit_hash=${commit_hash:0:8}
   firmware_build_date=$(date -u '+%d-%b-%Y')
   firmware_build_epoch=$(date -u '+%s')
   firmware_version=${FIRMWARE_VERSION:-}
@@ -5445,6 +5618,10 @@ resolve_command_targets() {
     echo "OTA required: infrastructure must prove a WiFi, Bluetooth, or LoRa self-update path; Companions may update over USB."
   fi
 
+  # Base and reduced aliases resolve to one exact-identity pair; external
+  # storage and deployed compatibility identities deliberately stay separate.
+  normalize_nrf52_sensor_ota_pair_targets
+
   # Keep one queue so parallel workers stay saturated. The scheduler may pull
   # a later target forward when a generated alias shares an active PlatformIO
   # base environment, so this is a best-effort start order rather than a phase
@@ -5490,6 +5667,10 @@ configure_effective_build_profile() {
       return 1
     fi
     BUILD_PROFILE_EFFECTIVE="full"
+  elif [ -n "$target" ] && is_nrf52_sensor_ota_pair_target "$target"; then
+    BUILD_PROFILE_EFFECTIVE="auto"
+    SINGLE_TARGET_FULL_BUILD=0
+    echo "nRF52 sensor OTA policy: both full and reduced profiles are required in the exact existing layout."
   elif [ "$SINGLE_TARGET_FULL_BUILD" = "1" ]; then
     BUILD_PROFILE_EFFECTIVE="full"
   elif is_automatic_profile_command "$command_name"; then
@@ -6402,6 +6583,12 @@ validate_command() {
 
 run_auto_two_pass_build() {
   local target=$1
+  # nRF52 no longer treats a reduced success as a fallback for a failed full
+  # option. The same strict pairing policy covers explicit and matrix builds.
+  if is_nrf52_sensor_ota_pair_target "$target"; then
+    run_nrf52_sensor_ota_pair "$target"
+    return $?
+  fi
   local fallback_target=$AUTO_REDUCED_FALLBACK_TARGET
   local original_esp32_full_build=$ESP32_FULL_BUILD
   local original_build_profile_effective=$BUILD_PROFILE_EFFECTIVE
