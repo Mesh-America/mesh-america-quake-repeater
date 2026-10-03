@@ -68,7 +68,7 @@ jobs:
       - name: Install PlatformIO and build dependencies
         run: |
           pip install --upgrade platformio -r requirements-build.txt intelhex==2.3.0
-          python -c "import intelhex; print('intelhex', intelhex.__version__)"
+          python -c "import intelhex; print('intelhex importable from', intelhex.__file__)"
 
       - name: Test the release manifest script
         run: python3 -B test/test_quake_release_manifest.py -v
