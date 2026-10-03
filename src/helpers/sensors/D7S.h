@@ -40,6 +40,9 @@ struct Snapshot {
   Reading stored;
   bool storedValid = false;
   uint8_t events = 0;  // Latched software copy of read-to-clear EVENT bits 0..3.
+  // How many EVENT reads have carried the significant-shaking flag since boot. Unlike `events` it is
+  // never cleared, so a consumer that remembers the last value it handled sees each new report once.
+  uint32_t shakingCount = 0;
   uint8_t interrupts = 0;  // Coalesced notifications, not edge counts.
   uint32_t updatedAt = 0;
   uint32_t failures = 0;

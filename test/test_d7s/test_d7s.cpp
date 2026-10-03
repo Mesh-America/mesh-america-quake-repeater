@@ -394,6 +394,34 @@ TEST(D7S, StoredRecordIsRefetchedAfterEveryProcessingEpisodeNotOnlyTheFirst) {
   }
 }
 
+TEST(D7S, ShakingCountCountsEachReportedEventOnceAndNeverResets) {
+  FakeBus bus;
+  d7s::Sensor sensor(bus);
+  ASSERT_TRUE(sensor.service(0));
+  EXPECT_EQ(sensor.snapshot().shakingCount, 0u);
+  bus.registers[0x1002] = d7s::SignificantShaking;
+  ASSERT_TRUE(sensor.service(250));
+  EXPECT_EQ(sensor.snapshot().shakingCount, 1u);
+  ASSERT_TRUE(sensor.service(500));  // EVENT was cleared by the read: the same report is not counted twice.
+  EXPECT_EQ(sensor.snapshot().shakingCount, 1u);
+  bus.registers[0x1002] = d7s::SignificantShaking | d7s::Tilt;
+  ASSERT_TRUE(sensor.service(750));
+  EXPECT_EQ(sensor.snapshot().shakingCount, 2u);
+  sensor.takeEvents();  // Acknowledging the latched flags does not forget how many were seen.
+  EXPECT_EQ(sensor.snapshot().shakingCount, 2u);
+}
+
+TEST(D7S, OnlyTheSignificantShakingFlagIsCounted) {
+  FakeBus bus;
+  d7s::Sensor sensor(bus);
+  ASSERT_TRUE(sensor.service(0));
+  for (uint8_t flags : {uint8_t(d7s::Tilt), uint8_t(d7s::SelfTestError), uint8_t(d7s::BaselineError)}) {
+    bus.registers[0x1002] = flags;
+    ASSERT_TRUE(sensor.service(sensor.snapshot().updatedAt + 250));
+  }
+  EXPECT_EQ(sensor.snapshot().shakingCount, 0u);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
