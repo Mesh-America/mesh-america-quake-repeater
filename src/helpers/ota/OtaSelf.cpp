@@ -27,10 +27,25 @@ namespace ota {
 // Scan the running app partition for the firmware's EndF trailer using esp_partition_read (stable
 // across IDF versions - no mmap). Same rule as find_self_firmware(): the marker's absolute offset
 // must equal its stored body_len, which uniquely identifies the running firmware's own trailer.
+// The active app is immutable until reboot: OTA writes its inactive peer. Cache only a successful
+// read, keyed to the current running partition's geometry, so status polling never rescans the app.
 bool ota_self_firmware(SelfFwInfo& out) {
+  struct MetadataCache {
+    bool valid = false;
+    uint32_t address = 0;
+    uint32_t size = 0;
+    SelfFwInfo info;
+  };
+  static MetadataCache cache;
   out = SelfFwInfo();
   const esp_partition_t* p = esp_ota_get_running_partition();
-  if (!p) return false;
+  if (!p) { cache.valid = false; return false; }
+  if (cache.valid && cache.address == p->address && cache.size == p->size) {
+    out = cache.info;
+    return true;
+  }
+  // Missing/changed partitions and failed scans must not resurrect a previous app's metadata.
+  cache.valid = false;
 
   const uint32_t CH = 512;
   uint8_t buf[CH + ENDF_LEN];                 // overlap so a marker spanning a chunk edge is still seen
@@ -43,20 +58,24 @@ bool ota_self_firmware(SelfFwInfo& out) {
       if (memcmp(buf + i, ENDF_MAGIC, 4) != 0) continue;
       uint32_t body_len = rd_u32le(buf + i + 4);
       if (body_len != base + i) continue;     // must sit immediately after a body of that length
+      // Read the complete fixed trailer before publishing or caching ANY metadata. A transient
+      // failure here must remain retryable, not become a valid entry with missing identity fields.
+      uint8_t tr[ENDF_LEN];
+      if (body_len > p->size - ENDF_LEN ||
+          esp_partition_read(p, body_len, tr, ENDF_LEN) != ESP_OK) return false;
+      if (memcmp(tr, ENDF_MAGIC, 4) != 0 || rd_u32le(tr + 4) != body_len) return false;
       out.valid = true;
       out.endf_offset = body_len;
       out.body_len = body_len;
       out.image_len = body_len + ENDF_LEN;
-      memcpy(out.body_hash, buf + i + 8, 8);
-      // Fixed 56-byte trailer: re-read it whole at the marker (it may straddle the chunk window, so the
-      // identity fields aren't reliably in `buf`) and pull identity from constant offsets (docs Section 2).
-      uint8_t tr[ENDF_LEN];
-      if (body_len + ENDF_LEN <= p->size &&
-          esp_partition_read(p, body_len, tr, ENDF_LEN) == ESP_OK) {
-        out.fw_version = (uint32_t)tr[16] | ((uint32_t)tr[17]<<8) | ((uint32_t)tr[18]<<16) | ((uint32_t)tr[19]<<24);
-        out.target_id  = (uint32_t)tr[20] | ((uint32_t)tr[21]<<8) | ((uint32_t)tr[22]<<16) | ((uint32_t)tr[23]<<24);
-        memcpy(out.hw_id, tr + 24, 32); out.hw_id[32] = 0;
-      }
+      memcpy(out.body_hash, tr + 8, 8);
+      out.fw_version = rd_u32le(tr + 16);
+      out.target_id = rd_u32le(tr + 20);
+      memcpy(out.hw_id, tr + 24, 32); out.hw_id[32] = 0;
+      cache.address = p->address;
+      cache.size = p->size;
+      cache.info = out;
+      cache.valid = true;
       return true;
     }
   }
@@ -159,7 +178,15 @@ bool ota_serve_self(OtaContext& c, uint32_t fw_version) {
   c.serving = false;
   free(c.serve_self_leaves); free(c.serve_self_proof);
   c.serve_self_leaves = (uint8_t*)malloc((size_t)bc * 4);
-  c.serve_self_proof  = (uint8_t*)malloc((size_t)bc * 4);   // proof-gen working buffer (sized to OUR image)
+  size_t proof_size = (size_t)bc * 4;
+#if MESHCORE_OTA_DEVICE_DEFLATE
+  // Proof generation and transport encoding use this buffer at different
+  // times. Small nRF52 images can have <2 KiB of leaves: keep enough room for
+  // a whole encoded block without allocating a second input/output buffer.
+  // Receiver-only/Companion diagnostic raw exports retain the old allocation.
+  if (proof_size < BS) proof_size = BS;
+#endif
+  c.serve_self_proof  = (uint8_t*)malloc(proof_size);
   if (!c.serve_self_leaves || !c.serve_self_proof) {
     free(c.serve_self_leaves); free(c.serve_self_proof);
     c.serve_self_leaves = c.serve_self_proof = nullptr;
@@ -200,7 +227,7 @@ bool ota_serve_self(OtaContext& c, uint32_t fw_version) {
   memcpy(m + 57, out_hw, strlen(out_hw) < 32 ? strlen(out_hw) : 32);   // hw_id[32] (NUL-padded by memset)
   memcpy(m + MOTA_OFF_APPROVAL, APPROVAL_NOT, 4);   // approval (fetching device's apply-gate handles it)
   c.serving = c.manager.serve_self(m, MOTA_MFL, c.serve_self_leaves, bc,
-                                 c.serve_self_proof, (size_t)bc * 4, self_read_cb, nullptr);
+                                 c.serve_self_proof, proof_size, self_read_cb, nullptr);
   return c.serving;
 }
 #endif

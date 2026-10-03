@@ -263,7 +263,9 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         host_check = board[start : board.index("void setInhibitSleep", start)]
 
         self.assertIn("ARDUINO_USB_MODE", host_check)
-        self.assertIn("return Serial.isPlugged();", host_check)
+        self.assertIn("host_connected = Serial.isPlugged();", host_check)
+        self.assertIn("usb_host_sleep_policy.observe(host_connected, millis());", host_check)
+        self.assertIn("return host_connected;", host_check)
 
     def test_hwcdc_retries_tx_kick_after_transient_sof_loss(self):
         logging = source("src/helpers/UsbLogging.cpp")

@@ -4,6 +4,7 @@
  */
 #include "../CompanionReaderConfig.h"
 #include "../ui/Nrf52FontConfig.h"
+#include "OtaDeflateConfig.h"
 #if defined(ENABLE_OTA) || defined(OTA_TRANSPORT_DEFLATE_TEST) || COMPANION_FEATURE_READER \
     || MESHCORE_FONT_DEFLATE
 #if defined(__GNUC__) && !defined(__clang__)
@@ -14,6 +15,11 @@
 #endif
 #define MESHCORE_TINF_IMPLEMENTATION 1
 #include "tinf/tinflate.c"
+#if MESHCORE_OTA_DEVICE_DEFLATE
+// One true-C translation unit for the existing strict decoder and the small
+// bounded encoder. Do not bring uzlib's second decoder or wrapper sources in.
+#include "tinydeflate/deflate.c"
+#endif
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC pop_options
 #endif

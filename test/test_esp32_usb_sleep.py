@@ -16,6 +16,13 @@ HARNESS = r'''
 #include <stdexcept>
 #include <iostream>
 #include <array>
+#include <helpers/UsbHostSleepPolicy.h>
+
+#ifndef MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS
+#define MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS 120000UL
+#endif
+static uint32_t mock_millis = 1000;
+static uint32_t millis() { return mock_millis; }
 
 static void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
@@ -97,6 +104,9 @@ struct MainBoard {
 };
 struct ESP32Board : MainBoard {
   bool inhibit_sleep = false;
+#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+  mesh::UsbHostSleepPolicy usb_host_sleep_policy;
+#endif
   uint32_t irq = 48; // Station G3 LoRa DIO1
   uint32_t getIRQGpio() { return irq; }
 @METHODS@
@@ -133,9 +143,11 @@ int main() {
     require(!board.isUsbHostConnected(), "UART build invented a USB host");
 #endif
 
-    // USB power without an enumerated host must still permit battery saving.
+    // After the bounded host-reboot grace, disconnected USB power must still
+    // permit battery saving. A fresh never-seen host is tested separately.
     attachHost(false);
     Serial.terminal_open = false;
+    mock_millis += MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS;
     board.sleep(30);
     require(sleep_calls == 1 && timer_us == 30000000ULL,
             "disconnected board did not retain its scheduled sleep");
@@ -149,6 +161,7 @@ int main() {
     board.sleep(30);
     require(sleep_calls == 1, "reattached closed terminal failed to inhibit sleep");
     attachHost(false);
+    mock_millis += MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS;
 #endif
 
     board.inhibit_sleep = true;
@@ -245,9 +258,117 @@ class Esp32UsbSleepTest(unittest.TestCase):
                         compiler, "-std=c++17", "-Wall", "-Wextra",
                         f"-DARDUINO_USB_MODE={mode}",
                         f"-DARDUINO_USB_CDC_ON_BOOT={cdc}",
+                        f"-DMESH_ESP32_USB_CONSOLE_COOPERATIVE={int(bool(cdc))}",
                         f"-DMOMENTARY_BUTTON_WAKE_FROM_SLEEP={button}",
                         f"-DMESH_USB_LOGGING_AVAILABLE={logging}", "-DPIN_USER_BTN=38",
-                        "-DCONFIG_TINYUSB_ENABLED=1", str(cpp), "-o", str(binary),
+                        "-DCONFIG_TINYUSB_ENABLED=1", "-I", str(ROOT / "src"),
+                        str(cpp), "-o", str(binary),
+                    ], capture_output=True, text=True)
+                    self.assertEqual(compiled.returncode, 0, compiled.stderr)
+                    result = subprocess.run([str(binary)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_host_reboot_grace_without_logging(self):
+        methods = "\n".join(board_method(signature) for signature in (
+            "void sleep(uint32_t secs) override",
+            "bool isUsbDataConnected() override",
+            "bool isUsbHostConnected() override",
+        ))
+        harness = HARNESS.split("int main()", 1)[0] + r'''
+int main() {
+  try {
+    // Charger-only/battery startup must not create a host-reboot grace.
+    ESP32Board cold;
+    attachHost(false);
+    Serial.terminal_open = false;
+    mock_millis = 0;
+    require(!cold.isUsbHostConnected(), "cold boot invented a host");
+    cold.sleep(30);
+    require(sleep_calls == 1, "never-seen host disabled power saving");
+    mock_millis = 121000;
+    cold.sleep(30);
+    require(sleep_calls == 2, "charger-only boot later armed a grace");
+
+    ESP32Board board;
+    attachHost(true);
+    Serial.terminal_open = true;
+    mock_millis = UINT32_MAX - 60000U;
+    // Only the data getter runs while the terminal is open: the role loop can
+    // skip board.sleep(), but must still remember its actual USB host.
+    require(board.isUsbDataConnected() == bool(ARDUINO_USB_CDC_ON_BOOT),
+            "data getter changed its raw connection meaning");
+    attachHost(false);
+    Serial.terminal_open = false;
+    require(!board.isUsbHostConnected(), "grace falsely reported a present host");
+    const unsigned before = sleep_calls;
+    mock_millis += 6U; // Beyond HWCDC's five-millisecond SOF loss detector.
+    board.sleep(30);
+#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+    require(sleep_calls == before, "SOF loss allowed immediate native USB sleep");
+    mock_millis += MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS - 7U;
+    require(!board.isUsbDataConnected(), "closed data getter changed under grace");
+    board.sleep(30);
+    require(sleep_calls == before, "native grace ended early across millis wrap");
+    ++mock_millis;
+    board.sleep(30);
+    require(sleep_calls == before + 1, "expired native grace never restored sleep");
+    // Disconnected polls must not rearm the window, even after a full millis
+    // cycle appears to bring the old timestamp near again.
+    mock_millis = UINT32_MAX - 59999U;
+    board.sleep(30);
+    require(sleep_calls == before + 2, "expired host revived after clock wrap");
+
+    // A returning closed terminal is a real host and refreshes the grace.
+    attachHost(true);
+    mock_millis = 100;
+    require(board.isUsbHostConnected(), "returning host was not observed");
+    attachHost(false);
+    mock_millis += MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS - 1U;
+    board.sleep(30);
+    require(sleep_calls == before + 2, "reconnect did not renew native grace");
+    ++mock_millis;
+    board.sleep(30);
+    require(sleep_calls == before + 3, "renewed native grace never expired");
+
+    // Observation must also continue while inhibit_sleep short-circuits the
+    // old expression, or a long OTA can miss its last connected host entirely.
+    ESP32Board inhibited;
+    inhibited.inhibit_sleep = true;
+    attachHost(true);
+    mock_millis = 200000;
+    inhibited.sleep(30);
+    inhibited.inhibit_sleep = false;
+    attachHost(false);
+    mock_millis += 6U;
+    const unsigned after = sleep_calls;
+    inhibited.sleep(30);
+    require(sleep_calls == after, "OTA inhibitor hid the host observation");
+#else
+    require(sleep_calls == before + 1, "non-native board gained a USB grace");
+#endif
+  } catch (const std::exception& e) {
+    std::cerr << e.what() << '\n';
+    return 1;
+  }
+}
+'''
+        self.assertIn("mesh::UsbHostSleepPolicy usb_host_sleep_policy;",
+                      (ROOT / "src/helpers/ESP32Board.h").read_text())
+        with tempfile.TemporaryDirectory(prefix="meshcore-usb-reboot-") as temp:
+            cpp = Path(temp) / "reboot.cpp"
+            cpp.write_text(harness.replace("@METHODS@", methods))
+            for mode, cdc, grace in ((0, 1, 120000), (1, 1, 120000),
+                                     (1, 1, 1000), (1, 0, 120000)):
+                with self.subTest(usb_mode=mode, cdc=cdc, grace=grace):
+                    binary = Path(temp) / f"reboot-{mode}-{cdc}-{grace}"
+                    compiled = subprocess.run([
+                        os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
+                        f"-DARDUINO_USB_MODE={mode}", f"-DARDUINO_USB_CDC_ON_BOOT={cdc}",
+                        f"-DMESH_ESP32_USB_CONSOLE_COOPERATIVE={int(bool(cdc))}",
+                        f"-DMESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS={grace}U",
+                        "-DMOMENTARY_BUTTON_WAKE_FROM_SLEEP=0", "-DMESH_USB_LOGGING_AVAILABLE=0",
+                        "-DCONFIG_TINYUSB_ENABLED=1", "-I", str(ROOT / "src"),
+                        str(cpp), "-o", str(binary),
                     ], capture_output=True, text=True)
                     self.assertEqual(compiled.returncode, 0, compiled.stderr)
                     result = subprocess.run([str(binary)], capture_output=True, text=True)

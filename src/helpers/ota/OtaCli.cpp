@@ -4,6 +4,7 @@
 #include "FolderMotaStore.h"   // `ota pull <id> folder` destination (set_mid on the connected folder store)
 #include "OtaVerify.h"
 #include "OtaSelf.h"
+#include "OtaByteIO.h"
 #include "OtaTargets.h"   // ota_target_env_name(): human-readable name for a target_id (no string on the wire)
 #if defined(NRF52_PLATFORM)
   #include "OtaBlInfo.h"  // installed bootloader application/update capability views
@@ -183,30 +184,30 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 #endif
 #elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
     strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | storage | folder | config | key");
+      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | storage | folder | config | key");
 #elif defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
 #if defined(OTA_QSPI_BOOTLOADER_UPDATE)
     strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | "
+      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
       "qspi | folder | config | key");
 #else
     strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | qspi | "
+      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | qspi | "
       "folder | config | key");
 #endif
 #elif defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
 #if defined(OTA_SD_BOOTLOADER_UPDATE)
     strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | "
+      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
       "folder | cache | config | key");
 #else
     strcpy(reply,
-      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | folder | "
+      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | folder | "
       "cache | config | key");
 #endif
 #else
     snprintf(reply, 160,
-      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | folder | "
+      "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | folder | "
       "cache | config | key. `ota ls [page]`; folder [validate].");
 #endif
 
@@ -731,6 +732,28 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
                fstate_char(fs), midhx);
     }
 
+  // ---- public own-image source: reads the app, never saved identity/settings ----
+  } else if (is_cmd(a, "serve", &rest)) {
+    if (*rest == 0 || strcmp(rest, "status") == 0) {
+      const bool own_image = c.manager.servingPrimaryManifest(c.serve_self_manifest);
+      snprintf(reply, 160,
+               "Own firmware: default:%s serving:%s | full unsigned | transfers require TempRadio",
+               c.self_serve_supported ? "on" : "off", own_image ? "on" : "off");
+    } else if (strcmp(rest, "self") != 0) {
+      strcpy(reply, "ERR usage: ota serve [self|status]");
+    } else if (!c.self_serve_supported) {
+      strcpy(reply, "ERR self serve requires ESP32 or external-storage nRF52; host sources use ota folder");
+    } else if (!ota_serve_self(c, 0)) {
+      strcpy(reply, "ERR serve self (invalid running image or insufficient RAM)");
+    } else {
+      char midhx[9]; mesh::Utils::toHex(midhx, c.serve_self_manifest + 20, 4);
+      uint32_t image = rd_u32le(c.serve_self_manifest + 11);
+      c.manager.announce();
+      snprintf(reply, 160,
+               "OK serving own fw mid=%s (%u B, flash-backed, unsigned); transfers require TempRadio",
+               midhx, (unsigned)image);
+    }
+
   // ---- broadcast our tiny beacon so peers discover us. If not already serving, set up flash-backed
   //      self-serve first (so we're a real, fetchable source of our own running firmware). ----
   } else if (is_cmd(a, "announce|adv", &rest)) {
@@ -739,7 +762,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     snprintf(reply, 160, "OK beacon sent (serving=%u host mOTA)",
              (unsigned)c.manager.servedCount());
 #else
-    if (!c.serving) c.serving = ota_serve_self(c, 0);
+    if (c.self_serve_supported && !c.serving) c.serving = ota_serve_self(c, 0);
     c.manager.announce();
     sprintf(reply, "OK beacon sent (serving=%s)", c.serving ? "self fw" : "nothing");
 #endif
@@ -957,7 +980,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     if (strcmp(p, "on") == 0) {
 #if defined(OTA_FOLDER_SERIAL)
 #if !defined(OTA_SEEDER_ONLY)
-      if (!c.serving) c.serving = ota_serve_self(c, 0);   // keep serving our own fw alongside the folder
+      if (c.self_serve_supported && !c.serving) c.serving = ota_serve_self(c, 0);
 #endif
       char m2[120]; c.attach_folder(m2, sizeof(m2)); c.manager.announce();
       strncpy(reply, m2, 159); reply[159] = 0;
@@ -969,7 +992,8 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 #if defined(OTA_SEEDER_ONLY)
       strcpy(reply, "OK folder detached (serving nothing)");
 #else
-      strcpy(reply, "OK folder detached (still serving own fw)");
+      strcpy(reply, c.serving ? "OK folder detached (primary source retained)"
+                              : "OK folder detached (no primary source)");
 #endif
     } else if (*p == 0) {                                 // status + list served entries (* = our own fw)
       uint16_t offered = 0, advertised = 0;

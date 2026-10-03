@@ -521,10 +521,11 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
     bool in_burst = _ota_announce_count < OTA_ANNOUNCE_BURST;
     uint32_t mins = oc.manager.advert_mins();     // periodic cadence in minutes; 0 = disabled (boot burst only)
     if (in_burst || mins != 0) {
-      // Install-capable nodes add their running firmware to the served set.
-      // Seeder-only nodes advertise only host-provided folder entries.
+      // Full-image platforms offer the running app directly from flash. Keep a
+      // manually staged primary source intact; host folder entries coexist.
+      // Internal-only nRF52 diagnostic exports remain explicitly selectable.
 #if !defined(OTA_SEEDER_ONLY)
-      if (!oc.serving) oc.serving = ota::ota_serve_self(oc, 0);
+      if (oc.self_serve_supported && !oc.serving) oc.serving = ota::ota_serve_self(oc, 0);
 #endif
       oc.manager.announce();
       if (_ota_announce_count < 250) _ota_announce_count++;

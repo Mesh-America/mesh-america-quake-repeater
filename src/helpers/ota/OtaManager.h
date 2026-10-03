@@ -333,6 +333,11 @@ public:
   // Stop serving the primary caller-owned image while preserving attached sources.
   // Call this before releasing or overwriting the primary image's backing buffer.
   void clear_primary();
+  // Identify the actual primary backing manifest, not just the view0 catalog
+  // slot: that slot can also contain a manually staged image of another build.
+  bool servingPrimaryManifest(const uint8_t* manifest) const {
+    return _view0.valid && _view0.m.manifest_start == manifest;
+  }
   uint8_t servedCount() const { return _n_serve; }   // total mOTAs we offer (own fw + folder)
   // Per-source enumeration accounting. `offered` is what the attached host/source reported; `advertised`
   // is what fit in this build's serve registry after validation/deduplication/capacity limits.
