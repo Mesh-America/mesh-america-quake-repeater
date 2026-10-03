@@ -29,6 +29,7 @@ git merge keymind/keymindCascade        # conflicts should be limited to the fil
 
 ## Rules
 
+- Keep Keymind merges easy: new behaviour goes in new files (`D7S*`, `SeismicAlert*`, `MyMeshQuake.cpp`, `variants/meshamerica_quake/`). Edits to Keymind-owned files are small, guarded by `ENV_INCLUDE_D7S`, added at the end of a block or class rather than mid-function, and listed in the "Files relative to Keymind Cascade" section of [docs/d7s-integration.md](docs/d7s-integration.md).
 - Do not push to `keymind`. Push only to `origin` (Mesh-America/mesh-america-quake-repeater).
 - Commit metadata is public once pushed. Use the configured identity (`Mesh America`, a noreply address); do not put personal email addresses in commits, files or release notes.
 - One PlatformIO process at a time in a checkout (Keymind's `AGENTS.md`).
