@@ -64,7 +64,7 @@ class ContactCacheTest(unittest.TestCase):
             helper_end = store.index("bool DataStore::readStoredPath(", helper_start)
             implementation = store[helper_start:helper_end]
             header = (ROOT / "examples/companion_radio/DataStore.h").read_text()
-            state_start = header.index("  File _contact_path_reader;")
+            state_start = header.index("  mesh::ContactFileTransaction* _contact_write")
             state_end = header.index("\n#endif", state_start)
             (temp / "contact_write_state_under_test.h").write_text(
                 header[state_start:state_end])
@@ -73,7 +73,7 @@ class ContactCacheTest(unittest.TestCase):
                 functions.extend((
                     "void DataStore::cancelContactWrite(",
                     "bool DataStore::cancelCooperativeWrite(",
-                    "bool DataStore::serviceCachedContactWrite(",
+                    "bool DataStore::serviceContactWrite(",
                     "bool DataStore::markContactDirty(",
                     "bool DataStore::releaseContact(",
                     "bool DataStore::serviceContactWrites(",

@@ -34,6 +34,11 @@ private:
     present = fs->exists(path);
     return true;
   }
+  static bool removeIfPresent(FILESYSTEM* fs, const char* path,
+                              PresenceProbe presence) {
+    bool present = false;
+    return probe(fs, path, present, presence) && (!present || fs->remove(path));
+  }
 public:
   enum class CommitProgress : uint8_t { Pending, Succeeded, Failed };
   static bool recover(FILESYSTEM* fs, const char* target,
@@ -52,7 +57,7 @@ public:
     snprintf(_temp, sizeof(_temp), "%s.tmp", target);
     snprintf(_backup, sizeof(_backup), "%s.bak", target);
     if (!recover(fs, target, presence)) return;
-    if (fs->exists(_temp) && !fs->remove(_temp)) return;
+    if (!removeIfPresent(fs, _temp, presence)) return;
 #if defined(RP2040_PLATFORM)
     _file = fs->open(_temp, "w");
 #else
@@ -63,7 +68,7 @@ public:
   ~ContactFileTransaction() {
     if (_file) _file.close();
     if (_verify) _verify.close();
-    if (!_finished) _fs->remove(_temp);
+    if (!_finished) removeIfPresent(_fs, _temp, _presence);
   }
   operator bool() const { return _ok; }
   bool readyToPublish() const {
@@ -132,8 +137,10 @@ public:
     }
     if (ok) ok = _fs->rename(_temp, _target);
     if (!ok && backed_up) _fs->rename(_backup, _target);
-    if (ok) _fs->remove(_backup);
-    else _fs->remove(_temp);
+    // Cleanup remains best effort after the publish/rollback result, but an
+    // absent file must not trigger the SDK's error log on the shared USB port.
+    if (ok) removeIfPresent(_fs, _backup, _presence);
+    else removeIfPresent(_fs, _temp, _presence);
     _finished = true;
     return ok ? CommitProgress::Succeeded : CommitProgress::Failed;
   }

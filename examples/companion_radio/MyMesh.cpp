@@ -225,8 +225,8 @@ static constexpr uint8_t DEFAULT_FEM_RX_GAIN = 1;
 #define DIRECT_SEND_PERHOP_FACTOR       6.0f
 #define DIRECT_SEND_PERHOP_EXTRA_MILLIS 250
 #define LAZY_CONTACTS_WRITE_DELAY       5000
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
-  // A cached ESP save streams one record/CRC chunk per pass. Keep the full
+#if defined(ESP32_PLATFORM)
+  // An ESP save streams one record/CRC chunk per pass. Keep the full
   // mesh loop responsive between steps without adding seconds of page delay.
   #define CONTACT_PAGE_WRITE_GAP          1
 #else
