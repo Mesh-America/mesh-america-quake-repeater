@@ -733,7 +733,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
   uint8_t handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
   uint8_t handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
-  int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
+  int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len,
+                    size_t reply_capacity = MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1));
   mesh::Packet* createSelfAdvert();
   void processDeferredCliCommand();
   void clearDeferredCliCommand();
@@ -1003,7 +1004,7 @@ protected:
   // OTA mesh-integration is centralized in mesh::Mesh (no per-example onOtaRecv / send adapter / tick).
 
   bool sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
-  void sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
+  bool sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
