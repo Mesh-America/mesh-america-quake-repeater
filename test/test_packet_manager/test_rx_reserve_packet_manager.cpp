@@ -1040,7 +1040,24 @@ TEST(Dispatcher, RadioOutsideReceiveModeEscalatesOnSecondAttempt) {
   TestDispatcher dispatcher(radio, clock, manager);
   dispatcher.begin();
 
+  // The non-RX watchdog starts when loop() first services the radio.
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.soft_recoveries);
+  EXPECT_EQ(0, radio.hard_recoveries);
+  EXPECT_EQ(0, dispatcher.getErrFlags() & ERR_EVENT_STARTRX_TIMEOUT);
+
+  clock.now = 8000;
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.soft_recoveries);
+  EXPECT_EQ(0, radio.hard_recoveries);
+
   clock.now = 8001;
+  dispatcher.loop();
+  EXPECT_EQ(1, radio.soft_recoveries);
+  EXPECT_EQ(0, radio.hard_recoveries);
+  EXPECT_NE(0, dispatcher.getErrFlags() & ERR_EVENT_STARTRX_TIMEOUT);
+
+  clock.now = 16001;
   dispatcher.loop();
   EXPECT_EQ(1, radio.soft_recoveries);
   EXPECT_EQ(0, radio.hard_recoveries);

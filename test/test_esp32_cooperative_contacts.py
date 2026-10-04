@@ -81,10 +81,10 @@ class UncachedESPContactsTest(unittest.TestCase):
                     '"/contacts3", companionPathPresence, true)',
                     '"/contacts3", companionPathPresence, false)')
             elif disable == "crc_batch":
-                self.assertIn("_contact_write->serviceCommit(true, 8)", implementation)
+                anchor = "_contact_write->serviceCommit(true, 8, true)"
+                self.assertEqual(implementation.count(anchor), 1)
                 implementation = implementation.replace(
-                    "_contact_write->serviceCommit(true, 8)",
-                    "_contact_write->serviceCommit()")
+                    anchor, "_contact_write->serviceCommit(true, 1, true)")
             # Only the native SDK stat seam is substituted. The production
             # presence logic still distinguishes ENOENT from metadata failure.
             presence = method(source, "static bool companionPathPresence(")
@@ -109,13 +109,17 @@ class UncachedESPContactsTest(unittest.TestCase):
                 transaction = transaction.replace("ESP_VERIFY_BUFFER_SIZE = 128;",
                                                   "ESP_VERIFY_BUFFER_SIZE = 64;")
             if disable == "writer":
-                self.assertIn("ok = _file.setBufferSize(ESP_WRITE_BUFFER_SIZE);", transaction)
+                anchor = ("ok = _file.setBufferSize(background_contact_write\n"
+                          "            ? ESP_BACKGROUND_WRITE_BUFFER_SIZE : ESP_WRITE_BUFFER_SIZE);")
+                self.assertEqual(transaction.count(anchor), 1)
                 transaction = transaction.replace(
-                    "ok = _file.setBufferSize(ESP_WRITE_BUFFER_SIZE);",
+                    anchor,
                     "ok = true; // Negative control: retain default writer buffer.")
             elif disable == "reader":
-                self.assertIn("ok = ok && _verify.setBufferSize(ESP_VERIFY_BUFFER_SIZE);", transaction)
-                transaction = transaction.replace("ok = ok && _verify.setBufferSize(ESP_VERIFY_BUFFER_SIZE);",
+                anchor = ("ok = ok && _verify.setBufferSize(\n"
+                          "          max_verify_chunks >= 8 ? 512 : ESP_VERIFY_BUFFER_SIZE);")
+                self.assertEqual(transaction.count(anchor), 1)
+                transaction = transaction.replace(anchor,
                     "// Negative control: retain the SDK's default reader buffer.")
             transaction = transaction.replace('#include "IdentityStore.h"',
                                               '#include <helpers/IdentityStore.h>')
@@ -167,7 +171,7 @@ class UncachedESPContactsTest(unittest.TestCase):
                     return measurements
             else:
                 self.assertNotEqual(result.returncode, 0)
-                marker = ("startup_operations" if disable == "begin" else
+                marker = ("SPIFFS.startupOperations() - before == 1" if disable == "begin" else
                           "crc_read_passes == 104" if disable == "crc_batch" else
                           "largest_backend_" + ("write" if disable == "writer" else "read"))
                 self.assertIn(marker, result.stderr)
