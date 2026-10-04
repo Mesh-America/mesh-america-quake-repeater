@@ -270,6 +270,14 @@ struct Fixture {
     memcpy(mesh.cmd_frame + offset, mesh.recipient.id.pub_key, 32);
     mesh.handleRequestFrame(len);
   }
+  void aclCommand() {
+    memset(mesh.cmd_frame, 0, sizeof(mesh.cmd_frame));
+    mesh.cmd_frame[0] = CMD_SEND_BINARY_REQ;
+    memcpy(mesh.cmd_frame + 1, mesh.recipient.id.pub_key, 32);
+    const uint8_t request[] = {5, 0, 0, 0x12, 0x34, 0x56, 0x78};
+    memcpy(mesh.cmd_frame + 33, request, sizeof(request));
+    mesh.handleRequestFrame(33 + sizeof(request));
+  }
 };
 
 static const Kind kinds[] = {Tracker::Login, Tracker::Status, Tracker::Telemetry,
@@ -443,6 +451,73 @@ static void testReservedHistorySurvivesIdle(bool request_service, uint32_t start
 
 int main() {
   unsigned checks = 0;
+  // Exercise the real CMD50 producer and callback with a legacy one-admin ACL
+  // reply after the old estimate + 20% cutoff but inside the app's +5s window.
+  for (bool tcp : {false, true}) for (uint32_t start : {100U, 0xfffffff0U}) {
+    Fixture f(tcp); g_mock_millis = start; f.mesh.direct_timeout = 2000;
+    f.aclCommand(); const uint32_t tag = slot(f, Tracker::Binary).tag;
+    assert(!slot(f, Tracker::Binary).sent_pending);
+    assert(slot(f, Tracker::Binary).radio_deadline == start + 7000U);
+    f.otherRequest(); g_mock_millis = start + 3000U;
+    uint8_t acl[11]; memcpy(acl, &tag, 4);
+    memcpy(acl + 4, f.mesh.recipient.id.pub_key, 6); acl[10] = 3;
+    f.mesh.onContactResponse(f.mesh.recipient, acl, sizeof(acl)); f.drain();
+    assertSentBeforeFinal(f.wire(), Tracker::Binary, tag);
+    Bytes expected = {PUSH_CODE_BINARY_RESPONSE, 0};
+    expected.insert(expected.end(), acl, acl + sizeof(acl));
+    assert(frameWith(f.wire(), PUSH_CODE_BINARY_RESPONSE) == expected);
+    assert(f.other_stream.output.empty()); ++checks;
+  }
+  // Every nonterminal kind shares the host budget. A pending SENT is bounded
+  // for 10s, then successful admission starts the full host window exactly once.
+  for (bool tcp : {false, true}) for (Kind kind : kinds)
+      for (uint32_t start : {100U, 0xfffffff0U}) {
+    Fixture f(tcp); g_mock_millis = start; assert(f.fill() == 4);
+    f.arm(kind, 17, 2000);
+    assert(slot(f, kind).sent_pending);
+    assert(slot(f, kind).radio_deadline == start + Tracker::DELIVERY_GRACE_MS);
+    g_mock_millis = start + 9000U; f.service();
+    assert(slot(f, kind).phase == Tracker::AwaitRadio && slot(f, kind).sent_pending);
+    assert(f.mesh.hasFiniteDelayedReplyForRoute(f.owner));
+    f.drain(); assert(!slot(f, kind).sent_pending);
+    const uint32_t admitted_deadline = start + 9000U + 7000U;
+    assert(slot(f, kind).radio_deadline == admitted_deadline);
+    g_mock_millis = start + 12000U; f.service();
+    assert(slot(f, kind).radio_deadline == admitted_deadline);
+    reply(f, kind); f.drain(); assertSentBeforeFinal(f.wire(), kind); ++checks;
+  }
+  // Radio callbacks may arrive before backpressured SENT admission. Retain the
+  // response without extending the existing pre-SENT/delivery grace.
+  for (bool tcp : {false, true}) for (Kind kind : kinds) {
+    Fixture f(tcp); assert(f.fill() == 4); f.arm(kind, 17, 2000);
+    const uint32_t pre_sent_deadline = slot(f, kind).sent_deadline;
+    g_mock_millis += 9000U; reply(f, kind);
+    assert(slot(f, kind).phase == Tracker::AwaitAdmission);
+    assert(slot(f, kind).delivery_deadline == pre_sent_deadline);
+    f.drain(); assertSentBeforeFinal(f.wire(), kind); ++checks;
+  }
+  // Independent wide arithmetic checks saturation and both exact boundaries.
+  const uint32_t ceiling = 0x7fffffffU - Tracker::DELIVERY_GRACE_MS;
+  for (uint32_t start : {100U, 0xfffffff0U})
+      for (uint32_t timeout : {0U, 1U, 2000U, 25000U, 30000U, ceiling, 0xffffffffU}) {
+    const uint64_t extra = uint64_t(timeout) + timeout / 5U;
+    const uint64_t host = uint64_t(timeout) + 5000U;
+    const uint32_t budget = uint32_t(std::min<uint64_t>(ceiling, std::max(extra, host)));
+    Fixture f; g_mock_millis = start; f.arm(Tracker::Binary, 17, timeout);
+    assert(slot(f, Tracker::Binary).radio_deadline == start + budget);
+    g_mock_millis = start + budget - 1U; f.service();
+    assert(slot(f, Tracker::Binary).phase == Tracker::AwaitRadio);
+    g_mock_millis += 1; reply(f, Tracker::Binary); f.drain();
+    assert(slot(f, Tracker::Binary).phase == Tracker::Empty);
+    assert(count(f.wire(), PUSH_CODE_BINARY_RESPONSE) == 0); ++checks;
+    Fixture blocked; g_mock_millis = start; assert(blocked.fill() == 4);
+    blocked.arm(Tracker::Binary, 17, timeout);
+    g_mock_millis = start + Tracker::DELIVERY_GRACE_MS - 1U; blocked.service();
+    assert(slot(blocked, Tracker::Binary).phase == Tracker::AwaitRadio);
+    g_mock_millis += 1; reply(blocked, Tracker::Binary); blocked.drain();
+    assert(count(blocked.wire(), RESP_CODE_SENT) == 0);
+    assert(count(blocked.wire(), PUSH_CODE_BINARY_RESPONSE) == 0); ++checks;
+  }
   for (bool tcp : {false, true}) for (Kind kind : kinds) {
     Fixture f(tcp); f.arm(kind); assert(f.fill() == 3); f.otherRequest();
     reply(f, kind); const auto& held = slot(f, kind);
@@ -685,6 +760,17 @@ int main() {
     assert(f.other_stream.output.empty()); ++checks;
   }
 #if COMPANION_FEATURE_TEXT_TERMINAL
+  // Terminal login keeps the arm-time +20% deadline printed to the operator.
+  for (uint32_t start : {100U, 0xfffffff0U}) {
+    Fixture f; g_mock_millis = start; f.mesh.direct_timeout = 2000;
+    f.mesh.sendTerminalLogin(f.mesh.recipient, "x");
+    assert(f.mesh._terminal_login_expires_at == start + 2400U);
+    assert(slot(f, Tracker::Login).radio_deadline == start + 2400U);
+    assert(!slot(f, Tracker::Login).sent_pending);
+    g_mock_millis = start + 2400U; reply(f, Tracker::Login);
+    assert(!f.mesh._terminal_login_pending && !f.mesh.hasPendingReqs());
+    f.drain(); assert(f.wire().empty()); ++checks;
+  }
   // The timeout plus retirement grace must stay in the signed half-range.
   // Test the last reachable tripled base estimate and the next estimate,
   // including a millis wrap while a maximum-duration trace is pending.
