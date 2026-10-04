@@ -12,11 +12,6 @@
 #include <string.h>
 #include <stdio.h>
 
-// The product name the `ver` command reports. Set in variants/meshamerica_quake/platformio.ini.
-#ifndef FIRMWARE_PRODUCT
-#define FIRMWARE_PRODUCT "Quake Repeater"
-#endif
-
 namespace {
 
 const char QUAKE_PREFS_FILE[] = "/quake_prefs";
@@ -279,10 +274,10 @@ bool MyMesh::handleClockFloorCommand(const char* command, char* reply) {
 bool MyMesh::handleQuakeCommand(const char* command, char* reply) {
   if (handleClockFloorCommand(command, reply)) return true;
   if (strcmp(command, "ver") == 0) {
-    // Name the product, not just a number: "Quake Repeater v1.17.1.4 (Build: ...)". Only
-    // this reply changes. getFirmwareVer() stays the bare version, because adverts, telemetry, the
+    // Name the product, not just a number: "Quake Repeater v1.17.1.6". No build date: the date in this
+    // build was a fixed default, not the real one. getFirmwareVer() stays the bare version, because adverts, telemetry, the
     // bridges and companion apps all read it and the image's version stamp is parsed from it.
-    snprintf(reply, 160, "%s %s (Build: %s)", FIRMWARE_PRODUCT, getFirmwareVer(), getBuildDate());
+    snprintf(reply, 160, "%s %s", FIRMWARE_PRODUCT, getFirmwareVer());
   } else if (strcmp(command, "get earthquake.channel") == 0) {
     snprintf(reply, 160, "> %s", quake_channel[0] ? quake_channel : "<unset>");
   } else if (strncmp(command, "set earthquake.channel ", 23) == 0) {

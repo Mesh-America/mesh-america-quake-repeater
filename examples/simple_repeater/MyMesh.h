@@ -160,6 +160,14 @@ struct NeighbourInfo {
   #define FIRMWARE_BUILD_EPOCH  0UL
 #endif
 
+#if ENV_INCLUDE_D7S
+  // What a person sees as the firmware's name and version, e.g. "Quake Repeater v1.17.1.6": the `ver`
+  // command and the admin tools' version. FIRMWARE_VERSION itself stays the bare version, because the
+  // image's version stamp, adverts, telemetry and the bridges read it.
+  #ifndef FIRMWARE_PRODUCT
+    #define FIRMWARE_PRODUCT   "Quake Repeater"
+  #endif
+#endif
 #ifndef FIRMWARE_VERSION
   #define FIRMWARE_VERSION   "v1.17.1"
 #endif
