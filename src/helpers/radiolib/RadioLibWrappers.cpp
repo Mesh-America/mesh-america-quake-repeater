@@ -409,9 +409,10 @@ mesh::RadioParamApplyResult RadioLibWrapper::prepareTransmitProfile(uint8_t prof
 mesh::RadioParamApplyResult RadioLibWrapper::tryRestoreCodingRate(uint8_t cr) {
   const uint8_t resume_rx = beginReconfigure();
   if (resume_rx > 1) return mesh::RadioParamApplyResult::BUSY;
-  const bool applied = setCodingRate(cr);
-  if (!applied) _profile_refresh_required = true;
+  bool applied = setCodingRate(cr);
   endReconfigure(resume_rx);
+  applied = applied && (!resume_rx || isInRecvMode());
+  if (!applied) _profile_refresh_required = true;
   return applied ? mesh::RadioParamApplyResult::APPLIED : mesh::RadioParamApplyResult::FAILED;
 }
 
@@ -552,7 +553,11 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetPrimaryParams(const mesh::Rad
     _profiles.primary_temporary = was_temp;
     _profiles.generation[0] = generation;
   } else {
-    _profiles.generation[0] = generation + (previous != p || was_temp != temporary);
+    const bool changed = previous != p || was_temp != temporary;
+    _profiles.generation[0] = generation + changed;
+    // Preamble and lease flags are staged before trySetParams(), so its
+    // setPrimary() cannot detect a change limited to those fields.
+    if (changed) _profiles.resetSwitchTest();
     _profile_generation = _profiles.generation[0];
   }
   return result;
