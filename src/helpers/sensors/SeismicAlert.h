@@ -77,7 +77,7 @@ public:
   enum class Phase : uint8_t { Idle, WaitingForRecord, Delaying, Cooldown };
   // How long the sensor may take to finish processing (it works for about two minutes), and how
   // long to wait for a processing state that never shows before giving up on values.
-  static constexpr uint32_t RecordWaitMs = 4UL * 60 * 1000;
+  static constexpr uint32_t RecordWaitMs = 150UL * 1000;
   static constexpr uint32_t NoProcessingWaitMs = 5UL * 1000;
 
   void configure(uint32_t cooldownMs, uint32_t jitterMaxMs) {
@@ -97,12 +97,14 @@ public:
   uint32_t suppressed() const { return suppressed_; }
   uint32_t ignoredInCooldown() const { return ignored_; }
   uint32_t cooldownRemainingMs(uint32_t now) const;
+  // Time left in the current wait (for the sensor, or before sending), or 0 when idle or in cooldown.
+  uint32_t waitRemainingMs(uint32_t now) const;
 
 private:
   static bool reached(uint32_t now, uint32_t t) { return int32_t(now - t) >= 0; }
 
   uint32_t cooldownMs_ = 10UL * 60 * 1000;
-  uint32_t jitterMaxMs_ = 30UL * 1000;
+  uint32_t jitterMaxMs_ = 2UL * 1000;
   Phase phase_ = Phase::Idle;
   Block lastBlocked_ = Block::None;
   bool baselineSet_ = false;

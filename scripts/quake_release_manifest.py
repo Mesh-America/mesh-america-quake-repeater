@@ -87,8 +87,46 @@ def read_package(zip_path: Path) -> tuple[bytes, dict]:
         raise ManifestError(f"the package is missing {error}") from error
 
 
-def build_manifest(zip_path: Path, env_name: str, commit: str, tag: str | None, built_at: str) -> dict:
+def read_hex_image(hex_path: Path) -> bytes:
+    """Flatten an Intel HEX file into the bytes it describes, from its lowest address to its highest."""
+    memory: dict[int, int] = {}
+    base = 0
+    try:
+        lines = hex_path.read_text(encoding="ascii").splitlines()
+    except (UnicodeDecodeError, OSError) as error:
+        raise ManifestError("the hex file cannot be read") from error
+    for number, line in enumerate(lines, 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            if not line.startswith(":"):
+                raise ValueError
+            record = bytes.fromhex(line[1:])
+            count, offset, kind = record[0], (record[1] << 8) | record[2], record[3]
+            data = record[4:4 + count]
+            if len(record) != count + 5 or sum(record) & 0xFF:
+                raise ValueError
+        except (ValueError, IndexError) as error:
+            raise ManifestError(f"the hex file has a damaged record on line {number}") from error
+        if kind == 0:
+            for index, value in enumerate(data):
+                memory[base + offset + index] = value
+        elif kind == 2 and len(data) == 2:
+            base = ((data[0] << 8) | data[1]) << 4
+        elif kind == 4 and len(data) == 2:
+            base = ((data[0] << 8) | data[1]) << 16
+    if not memory:
+        raise ManifestError("the hex file holds no data")
+    low, high = min(memory), max(memory)
+    return bytes(memory.get(address, 0xFF) for address in range(low, high + 1))
+
+
+def build_manifest(zip_path: Path, env_name: str, commit: str, tag: str | None, built_at: str,
+                   hex_path: Path | None = None) -> dict:
     image, _app = read_package(zip_path)
+    if hex_path is not None and read_hex_image(hex_path) != image:
+        raise ManifestError("the hex file does not hold the same application image as the package")
     identity = read_endf(image)
     expected_target = target_id_for_env(env_name)
     if identity["target_id"] != expected_target:
@@ -103,7 +141,7 @@ def build_manifest(zip_path: Path, env_name: str, commit: str, tag: str | None, 
     if tag is not None and tag != f"{TAG_PREFIX}{version}":
         raise ManifestError(f"tag {tag} does not match the version in the image; expected {TAG_PREFIX}{version}")
     digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
-    return {
+    manifest = {
         "schemaVersion": SCHEMA_VERSION,
         "env": env_name,
         "version": version,
@@ -118,11 +156,21 @@ def build_manifest(zip_path: Path, env_name: str, commit: str, tag: str | None, 
         "targetId": f"0x{identity['target_id']:08x}",
         "hardwareId": identity["hardware_id"],
     }
+    if hex_path is not None:
+        # The exact firmware.hex of this release. A LoRa OTA update is built from the new hex and, for
+        # a delta, from the hex the node is running now (docs/ota_easy.md), so every release keeps it.
+        manifest["hex"] = {
+            "file": f"{env_name}-{version}.hex",
+            "size": hex_path.stat().st_size,
+            "sha256": hashlib.sha256(hex_path.read_bytes()).hexdigest(),
+        }
+    return manifest
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--zip", required=True, type=Path)
+    parser.add_argument("--hex", type=Path, help="the build's firmware.hex, checked against the package and published with it")
     parser.add_argument("--env", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--tag", help="release tag; checked against the version inside the image")
@@ -130,12 +178,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         built_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        manifest = build_manifest(args.zip, args.env, args.commit, args.tag, built_at)
+        manifest = build_manifest(args.zip, args.env, args.commit, args.tag, built_at, args.hex)
     except ManifestError as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1
     args.out.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(args.zip, args.out / manifest["package"]["file"])
+    if args.hex is not None:
+        shutil.copyfile(args.hex, args.out / manifest["hex"]["file"])
     (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(manifest, indent=2))
     return 0

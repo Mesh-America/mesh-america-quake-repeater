@@ -29,6 +29,23 @@ def image(body=b"firmware-body" * 50, version=VERSION, target=None, hw_id=HARDWA
     return body + trailer
 
 
+def intel_hex(data, start=0x26000):
+    """Intel HEX for `data` placed at `start`, 16 bytes a record, as the nRF52 build writes it."""
+    def record(kind, address, payload):
+        body = bytes([len(payload), address >> 8, address & 0xFF, kind]) + payload
+        return ":" + (body + bytes([(-sum(body)) & 0xFF])).hex().upper()
+
+    lines, upper = [], None
+    for offset in range(0, len(data), 16):
+        address = start + offset
+        if address >> 16 != upper:
+            upper = address >> 16
+            lines.append(record(4, 0, upper.to_bytes(2, "big")))
+        lines.append(record(0, address & 0xFFFF, data[offset:offset + 16]))
+    lines.append(record(1, 0, b""))
+    return "\n".join(lines) + "\n"
+
+
 def package(app_image, manifest=None, extra=None):
     manifest = manifest or {"manifest": {"application": {"bin_file": "firmware.bin", "dat_file": "firmware.dat"}}}
     buffer = io.BytesIO()
@@ -98,6 +115,44 @@ class ManifestTest(unittest.TestCase):
         for manifest in (None, [], {"manifest": None}, {"manifest": {}}, {"manifest": {"application": {}}}):
             with self.subTest(manifest), self.assertRaises(qrm.ManifestError):
                 self.build(package(image(), manifest=manifest or {"manifest": manifest}))
+
+    def test_publishes_the_hex_only_when_it_is_the_same_image_as_the_package(self):
+        app = image()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "firmware.zip").write_bytes(package(app))
+            (root / "firmware.hex").write_text(intel_hex(app))
+            manifest = qrm.build_manifest(root / "firmware.zip", ENV, "abc", None, "2026-10-03T00:00:00Z", root / "firmware.hex")
+            self.assertEqual(manifest["hex"]["file"], f"{ENV}-1.17.1.0.hex")
+            self.assertEqual(manifest["hex"]["sha256"], hashlib.sha256((root / "firmware.hex").read_bytes()).hexdigest())
+            (root / "other.hex").write_text(intel_hex(image(body=b"different" * 60)))
+            with self.assertRaises(qrm.ManifestError):
+                qrm.build_manifest(root / "firmware.zip", ENV, "abc", None, "2026-10-03T00:00:00Z", root / "other.hex")
+
+    def test_rejects_a_damaged_hex_file(self):
+        app = image()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "firmware.zip").write_bytes(package(app))
+            text = intel_hex(app).replace(":10", ":11", 1)  # breaks a record's length and checksum
+            (root / "bad.hex").write_text(text)
+            with self.assertRaises(qrm.ManifestError):
+                qrm.build_manifest(root / "firmware.zip", ENV, "abc", None, "2026-10-03T00:00:00Z", root / "bad.hex")
+            (root / "empty.hex").write_text(":00000001FF\n")
+            with self.assertRaises(qrm.ManifestError):
+                qrm.build_manifest(root / "firmware.zip", ENV, "abc", None, "2026-10-03T00:00:00Z", root / "empty.hex")
+
+    def test_main_writes_the_hex_beside_the_package(self):
+        app = image()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "firmware.zip").write_bytes(package(app))
+            (root / "firmware.hex").write_text(intel_hex(app))
+            code = qrm.main(["--zip", str(root / "firmware.zip"), "--hex", str(root / "firmware.hex"), "--env", ENV,
+                             "--commit", "abc", "--out", str(root / "dist")])
+            self.assertEqual(code, 0)
+            written = json.loads((root / "dist" / "manifest.json").read_text())
+            self.assertEqual((root / "dist" / written["hex"]["file"]).read_text(), (root / "firmware.hex").read_text())
 
     def test_main_writes_manifest_and_a_copy_of_the_package(self):
         with tempfile.TemporaryDirectory() as directory:

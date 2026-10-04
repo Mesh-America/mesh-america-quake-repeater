@@ -20,7 +20,7 @@ const uint8_t QUAKE_PREFS_VERSION = 1;
 
 const uint16_t QUAKE_COOLDOWN_MIN_DEFAULT = 10;
 const uint16_t QUAKE_COOLDOWN_MIN_MAX = 1440;
-const uint32_t QUAKE_JITTER_MAX_MS = 30UL * 1000;
+const uint32_t QUAKE_JITTER_MAX_MS = 2UL * 1000;
 const uint32_t QUAKE_TEST_GAP_MS = 30UL * 1000;  // a typo should not be able to flood the channel
 
 const char* skipSpaces(const char* s) {
@@ -243,12 +243,27 @@ bool MyMesh::handleQuakeCommand(const char* command, char* reply) {
     const bool blocked = quakeSendBlocker(why, channel, scope);
     SeismicReading reading;
     const bool sensor = sensors.getSeismicReading(reading);
+    // Where an event is right now: nothing, waiting for the sensor's final numbers, about to send, or quiet.
+    const uint32_t now = millis();
+    char phase[40] = "no event";
+    switch (quake_policy.phase()) {
+      case seismic::Policy::Phase::WaitingForRecord:
+        snprintf(phase, sizeof(phase), "waiting for sensor, %lus", (unsigned long)(quake_policy.waitRemainingMs(now) / 1000));
+        break;
+      case seismic::Policy::Phase::Delaying:
+        snprintf(phase, sizeof(phase), "sending in %lus", (unsigned long)(quake_policy.waitRemainingMs(now) / 1000));
+        break;
+      case seismic::Policy::Phase::Cooldown:
+        snprintf(phase, sizeof(phase), "quiet, %lus left", (unsigned long)(quake_policy.cooldownRemainingMs(now) / 1000));
+        break;
+      default: break;
+    }
     char tail[64] = "";
     if (quake_policy.suppressed() > 0) {
       snprintf(tail, sizeof(tail), "; last held: %s", seismic::blockText(quake_policy.lastBlocked()));
     }
-    snprintf(reply, 160, "%s%s; sensor %s; cooldown %um; events %lu, sent %lu, held %lu%s",
-             blocked ? "NOT READY - " : "ready - ", blocked ? why : (quake_channel),
+    snprintf(reply, 160, "%s%s; %s; sensor %s; cooldown %um; events %lu, sent %lu, held %lu%s",
+             blocked ? "NOT READY - " : "ready - ", blocked ? why : (quake_channel), phase,
              !sensor ? "not found" : reading.sensorFaulted ? "fault" : "ok", (unsigned)quake_cooldown_min,
              (unsigned long)quake_policy.eventsSeen(), (unsigned long)quake_policy.sent(),
              (unsigned long)quake_policy.suppressed(), tail);

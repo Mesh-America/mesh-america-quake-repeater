@@ -89,6 +89,7 @@ jobs:
           fi
           python3 scripts/quake_release_manifest.py \
             --zip ".pio/build/${PIO_ENV}/firmware.zip" \
+            --hex ".pio/build/${PIO_ENV}/firmware.hex" \
             --env "$PIO_ENV" \
             --commit "$GITHUB_SHA" \
             "${TAG_ARGS[@]}" \
@@ -128,6 +129,14 @@ jobs:
             TAG="quake-v$(python3 -c 'import json; print(json.load(open("dist/manifest.json"))["version"])')"
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          # The web flasher requires the manifest to name its release tag. On main the manifest was
+          # built before the tag was known, so record it now.
+          TAG="$TAG" python3 - <<'PY'
+          import json, os
+          m = json.load(open("dist/manifest.json"))
+          m["tag"] = os.environ["TAG"]
+          json.dump(m, open("dist/manifest.json", "w"), indent=2)
+          PY
           if [[ "${GITHUB_REF}" != refs/tags/* ]] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists; nothing to publish."
             echo "publish=false" >> "$GITHUB_OUTPUT"
@@ -150,6 +159,8 @@ jobs:
           print()
           print(f"- Package: `{m['package']['file']}` ({m['package']['size']} bytes)")
           print(f"- SHA-256: `{m['package']['sha256']}`")
+          if "hex" in m:
+              print(f"- Firmware image: `{m['hex']['file']}` ({m['hex']['size']} bytes), SHA-256 `{m['hex']['sha256']}`. Keep it: updating a node over LoRa (OTA) is built from the new `.hex` and, for a delta, from the `.hex` the node runs now.")
           print(f"- OTA target id: `{m['targetId']}`, hardware tag `{m['hardwareId']}`")
           print(f"- Built from commit `{m['commit']}`")
           PY
@@ -159,7 +170,7 @@ jobs:
           else
             TAG_FLAGS=(--target "$GITHUB_SHA")
           fi
-          gh release create "$TAG" dist/*.zip dist/manifest.json \
+          gh release create "$TAG" dist/*.zip dist/*.hex dist/manifest.json \
             --repo "$GITHUB_REPOSITORY" \
             "${TAG_FLAGS[@]}" \
             --prerelease \

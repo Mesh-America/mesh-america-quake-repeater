@@ -91,6 +91,14 @@ uint32_t Policy::cooldownRemainingMs(uint32_t now) const {
   return cooldownUntil_ - now;
 }
 
+uint32_t Policy::waitRemainingMs(uint32_t now) const {
+  uint32_t deadline;
+  if (phase_ == Phase::WaitingForRecord) deadline = eventAt_ + (sawProcessing_ ? RecordWaitMs : NoProcessingWaitMs);
+  else if (phase_ == Phase::Delaying) deadline = sendAt_;
+  else return 0;
+  return reached(now, deadline) ? 0 : deadline - now;
+}
+
 bool Policy::update(uint32_t now, const Input& in, const Gates& gates, uint32_t jitterMs, Send& out) {
   if (!in.sensorPresent) {
     // Nothing to watch. Start over when a sensor appears, so a report that was already waiting in
