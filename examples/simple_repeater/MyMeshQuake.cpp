@@ -20,7 +20,7 @@ const uint8_t QUAKE_PREFS_VERSION = 1;
 
 const uint16_t QUAKE_COOLDOWN_MIN_DEFAULT = 10;
 const uint16_t QUAKE_COOLDOWN_MIN_MAX = 1440;
-const uint32_t QUAKE_JITTER_MAX_MS = 15UL * 1000;
+const uint32_t QUAKE_JITTER_MAX_MS = 2UL * 1000;
 const uint32_t QUAKE_TEST_GAP_MS = 30UL * 1000;  // a typo should not be able to flood the channel
 
 const char* skipSpaces(const char* s) {
@@ -121,8 +121,14 @@ bool MyMesh::sendQuakeMessage(const seismic::Send& values, bool test, const char
   const size_t max_data_len = MAX_PACKET_PAYLOAD - CIPHER_BLOCK_SIZE;
   const size_t budget = max_data_len - 5 - (strnlen(_prefs.node_name, sizeof(_prefs.node_name)) + 2);
   char text[200];
-  if (seismic::formatMessage(text, sizeof(text), budget, _prefs.node_lat, _prefs.node_lon,
-                             values.haveValues, values.siRaw, values.pgaRaw, test) == 0) {
+  size_t length;
+  if (values.kind == seismic::Kind::Followup) {
+    length = seismic::formatFollowup(text, sizeof(text), budget, values.siRaw, values.pgaRaw);
+  } else {
+    // The alert carries no numbers: it goes out at once, before the sensor has finished measuring.
+    length = seismic::formatMessage(text, sizeof(text), budget, _prefs.node_lat, _prefs.node_lon, false, 0, 0, test);
+  }
+  if (length == 0) {
     why = "repeater name is too long for the message";
     return false;
   }
@@ -163,8 +169,7 @@ void MyMesh::checkQuakeAlert() {
 }
 
 bool MyMesh::quakeAlertBusy() const {
-  const auto phase = quake_policy.phase();
-  return phase == seismic::Policy::Phase::WaitingForRecord || phase == seismic::Policy::Phase::Delaying;
+  return quake_policy.phase() == seismic::Policy::Phase::Delaying || quake_policy.followupPending();
 }
 
 bool MyMesh::handleQuakeCommand(const char* command, char* reply) {
@@ -247,14 +252,16 @@ bool MyMesh::handleQuakeCommand(const char* command, char* reply) {
     const uint32_t now = millis();
     char phase[40] = "no event";
     switch (quake_policy.phase()) {
-      case seismic::Policy::Phase::WaitingForRecord:
-        snprintf(phase, sizeof(phase), "waiting for sensor, %lus", (unsigned long)(quake_policy.waitRemainingMs(now) / 1000));
-        break;
       case seismic::Policy::Phase::Delaying:
         snprintf(phase, sizeof(phase), "sending in %lus", (unsigned long)(quake_policy.waitRemainingMs(now) / 1000));
         break;
       case seismic::Policy::Phase::Cooldown:
-        snprintf(phase, sizeof(phase), "quiet, %lus left", (unsigned long)(quake_policy.cooldownRemainingMs(now) / 1000));
+        if (quake_policy.followupPending()) {
+          snprintf(phase, sizeof(phase), "alert sent, numbers due within %lus",
+                   (unsigned long)(quake_policy.waitRemainingMs(now) / 1000));
+        } else {
+          snprintf(phase, sizeof(phase), "quiet, %lus left", (unsigned long)(quake_policy.cooldownRemainingMs(now) / 1000));
+        }
         break;
       default: break;
     }

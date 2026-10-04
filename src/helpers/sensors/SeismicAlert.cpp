@@ -75,6 +75,29 @@ size_t formatMessage(char* out, size_t outCap, size_t budget, double lat, double
   return 0;
 }
 
+size_t formatFollowup(char* out, size_t outCap, size_t budget, uint16_t siRaw, uint16_t pgaRaw) {
+  if (out == nullptr || outCap == 0) return 0;
+  static const char* const disclaimer = "This does not necessarily indicate an earthquake.";
+  const unsigned si = siRaw;
+  const unsigned gal = (unsigned(pgaRaw) + 5u) / 10u;
+  char text[200];
+  for (int form = 0; form < 2; ++form) {
+    int n;
+    if (form == 0) {
+      n = snprintf(text, sizeof(text), "Update: strength %u.%u cm/s, peak acceleration %u gal. %s", si / 10, si % 10, gal,
+                   disclaimer);
+    } else {
+      n = snprintf(text, sizeof(text), "Update: strength %u.%u cm/s, peak %u gal. %s", si / 10, si % 10, gal, disclaimer);
+    }
+    if (n > 0 && size_t(n) <= budget && size_t(n) < outCap) {
+      memcpy(out, text, size_t(n) + 1);
+      return size_t(n);
+    }
+  }
+  out[0] = '\0';
+  return 0;
+}
+
 const char* blockText(Block block) {
   switch (block) {
     case Block::None: return "none";
@@ -93,8 +116,8 @@ uint32_t Policy::cooldownRemainingMs(uint32_t now) const {
 
 uint32_t Policy::waitRemainingMs(uint32_t now) const {
   uint32_t deadline;
-  if (phase_ == Phase::WaitingForRecord) deadline = eventAt_ + (sawProcessing_ ? RecordWaitMs : NoProcessingWaitMs);
-  else if (phase_ == Phase::Delaying) deadline = sendAt_;
+  if (phase_ == Phase::Delaying) deadline = sendAt_;
+  else if (followPending_) deadline = followDeadline();
   else return 0;
   return reached(now, deadline) ? 0 : deadline - now;
 }
@@ -104,6 +127,7 @@ bool Policy::update(uint32_t now, const Input& in, const Gates& gates, uint32_t 
     // Nothing to watch. Start over when a sensor appears, so a report that was already waiting in
     // it is treated as history and not as a new event.
     baselineSet_ = false;
+    followPending_ = false;
     if (phase_ != Phase::Cooldown) phase_ = Phase::Idle;
     return false;
   }
@@ -118,30 +142,18 @@ bool Policy::update(uint32_t now, const Input& in, const Gates& gates, uint32_t 
     seen_ = in.shakingCount;
     ++eventsSeen_;
     if (phase_ == Phase::Idle) {
-      phase_ = Phase::WaitingForRecord;
+      phase_ = Phase::Delaying;
       eventAt_ = now;
+      sendAt_ = now + (jitterMs > jitterMaxMs_ ? jitterMaxMs_ : jitterMs);
       sawProcessing_ = in.processing;
+      followPending_ = false;  // an earlier event's follow-up is not wanted any more
     } else if (phase_ == Phase::Cooldown) {
       ++ignored_;
     }
-    // Reports during the wait or the delay belong to the same shaking and change nothing.
+    // Reports during the delay belong to the same shaking and change nothing.
   }
 
-  if (phase_ == Phase::WaitingForRecord) {
-    if (in.processing) sawProcessing_ = true;
-    const bool done = !in.processing && in.recordValid && sawProcessing_;
-    const uint32_t limit = sawProcessing_ ? RecordWaitMs : NoProcessingWaitMs;
-    const bool timedOut = reached(now, eventAt_ + limit);
-    if (done || timedOut) {
-      // A record read before the sensor finished is the previous event's, so values are only
-      // trusted once processing has been seen to end.
-      haveValues_ = done;
-      si_ = done ? in.siRaw : 0;
-      pga_ = done ? in.pgaRaw : 0;
-      sendAt_ = now + (jitterMs > jitterMaxMs_ ? jitterMaxMs_ : jitterMs);
-      phase_ = Phase::Delaying;
-    }
-  }
+  if (in.processing && (phase_ == Phase::Delaying || followPending_)) sawProcessing_ = true;
 
   if (phase_ == Phase::Delaying && reached(now, sendAt_)) {
     Block block = Block::None;
@@ -154,13 +166,27 @@ bool Policy::update(uint32_t now, const Input& in, const Gates& gates, uint32_t 
       phase_ = Phase::Idle;  // no cooldown: the next event may send once the setting is fixed
       return false;
     }
-    out.haveValues = haveValues_;
-    out.siRaw = si_;
-    out.pgaRaw = pga_;
+    out.kind = Kind::Alert;
+    out.siRaw = out.pgaRaw = 0;
     ++sent_;
     phase_ = Phase::Cooldown;
     cooldownUntil_ = now + cooldownMs_;
+    followPending_ = true;
     return true;
+  }
+
+  if (followPending_) {
+    // A record read before the sensor finished is the previous event's, so numbers are only trusted
+    // once measuring has been seen to end.
+    if (!in.processing && in.recordValid && sawProcessing_) {
+      followPending_ = false;
+      ++followups_;
+      out.kind = Kind::Followup;
+      out.siRaw = in.siRaw;
+      out.pgaRaw = in.pgaRaw;
+      return true;
+    }
+    if (reached(now, followDeadline())) followPending_ = false;
   }
   return false;
 }
