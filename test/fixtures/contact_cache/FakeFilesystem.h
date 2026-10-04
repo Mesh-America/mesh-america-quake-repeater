@@ -57,6 +57,8 @@ public:
   unsigned buffer_config_calls = 0, fail_buffer_config = 0;
   std::string fail_read;
   bool metadata_error = false, fail_create = false, fail_remove = false;
+  bool partial_create_failure = false;
+  unsigned metadata_probes = 0, fail_metadata_probe = 0;
   unsigned removes = 0, missing_remove_logs = 0;
   unsigned fail_rename = 0, renames = 0, writes = 0, reads = 0, opens = 0;
   std::vector<Files> rename_snapshots;
@@ -73,12 +75,18 @@ public:
   File open(const char* path, const char* mode = "r", bool = false) {
     ++opens;
     if (*mode != 'r') {
-      if (fail_create) return File();
+      if (fail_create) {
+        if (partial_create_failure) files[path].clear();
+        return File();
+      }
       files[path].clear();
       return File(this, path, true);
     }
     if (fail_read == path || !exists(path)) return File();
     return File(this, path, false);
+  }
+  unsigned startupOperations() const {
+    return metadata_probes + opens + removes + renames + buffer_config_calls;
   }
   bool rename(const char* from, const char* to) {
     ++renames;

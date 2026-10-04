@@ -28,6 +28,16 @@ private:
   uint32_t _verify_crc = 0xffffffff;
   size_t _verify_remaining = 0;
   PresenceProbe _presence;
+#if defined(ESP32_PLATFORM)
+  enum class BeginStage : uint8_t {
+    Target, Backup, Recover, Temp, Remove, Open, Configure, Ready, Failed
+  };
+  BeginStage _begin_stage = BeginStage::Target;
+  bool _begin_target_exists = false;
+  bool _begin_backup_exists = false;
+  bool _begin_temp_exists = false;
+  bool _owns_temp = false;
+#endif
   static bool probe(FILESYSTEM* fs, const char* path, bool& present,
                     PresenceProbe presence) {
     if (presence) return presence(fs, path, present);
@@ -52,10 +62,21 @@ public:
     return !backup_exists || fs->rename(backup, target);
   }
   ContactFileTransaction(FILESYSTEM* fs, const char* target,
-                         PresenceProbe presence = nullptr)
+                         PresenceProbe presence = nullptr
+#if defined(ESP32_PLATFORM)
+                         , bool defer_begin = false
+#endif
+                         )
       : _fs(fs), _target(target), _presence(presence) {
     snprintf(_temp, sizeof(_temp), "%s.tmp", target);
     snprintf(_backup, sizeof(_backup), "%s.bak", target);
+#if defined(ESP32_PLATFORM)
+    // Explicit durability callers retain synchronous construction. The lazy
+    // contact writer requests one setup operation per transport-serviced pass.
+    if (!defer_begin) {
+      while (serviceBegin() == BeginProgress::Pending) {}
+    }
+#else
     if (!recover(fs, target, presence)) return;
     if (!removeIfPresent(fs, _temp, presence)) return;
 #if defined(RP2040_PLATFORM)
@@ -64,19 +85,75 @@ public:
     _file = fs->open(_temp, "w", true);
 #endif
     _ok = static_cast<bool>(_file);
-#if defined(ESP32_PLATFORM)
-    // Arduino's default 4 KiB stdio buffer hides large SPIFFS writes inside a
-    // single small write() pass. Configure this newly opened stream before
-    // its first I/O, keeping one contact record as the largest buffered batch.
-    _ok = _ok && _file.setBufferSize(storage::CONTACT_RECORD_SIZE);
 #endif
   }
   ~ContactFileTransaction() {
     if (_file) _file.close();
     if (_verify) _verify.close();
-    if (!_finished) removeIfPresent(_fs, _temp, _presence);
+    if (!_finished
+#if defined(ESP32_PLATFORM)
+        && _owns_temp
+#endif
+        ) removeIfPresent(_fs, _temp, _presence);
   }
   operator bool() const { return _ok; }
+#if defined(ESP32_PLATFORM)
+  enum class BeginProgress : uint8_t { Pending, Ready, Failed };
+  BeginProgress serviceBegin() {
+    bool ok = true;
+    switch (_begin_stage) {
+      case BeginStage::Target:
+        ok = probe(_fs, _target, _begin_target_exists, _presence);
+        if (ok) _begin_stage = BeginStage::Backup;
+        break;
+      case BeginStage::Backup:
+        ok = probe(_fs, _backup, _begin_backup_exists, _presence);
+        if (ok) _begin_stage = BeginStage::Recover;
+        break;
+      case BeginStage::Recover:
+        if (!_begin_target_exists && _begin_backup_exists)
+          ok = _fs->rename(_backup, _target);
+        if (ok) _begin_stage = BeginStage::Temp;
+        break;
+      case BeginStage::Temp:
+        ok = probe(_fs, _temp, _begin_temp_exists, _presence);
+        if (ok) _begin_stage = BeginStage::Remove;
+        break;
+      case BeginStage::Remove:
+        if (_begin_temp_exists) ok = _fs->remove(_temp);
+        if (ok) _begin_stage = BeginStage::Open;
+        break;
+      case BeginStage::Open:
+        // The previous stages proved this name absent. Even an unsuccessful
+        // create/open can leave a partial inode belonging to this attempt.
+        // Before this point cancellation must leave an unowned stale temp.
+        _owns_temp = true;
+        _file = _fs->open(_temp, "w", true);
+        ok = static_cast<bool>(_file);
+        if (ok) _begin_stage = BeginStage::Configure;
+        break;
+      case BeginStage::Configure:
+        // Arduino otherwise batches small writes into a 4 KiB stdio buffer.
+        // Configure the newly opened stream before its first I/O.
+        ok = _file.setBufferSize(storage::CONTACT_RECORD_SIZE);
+        if (ok) {
+          _ok = true;
+          _begin_stage = BeginStage::Ready;
+          return BeginProgress::Ready;
+        }
+        break;
+      case BeginStage::Ready:
+        return BeginProgress::Ready;
+      case BeginStage::Failed:
+        return BeginProgress::Failed;
+    }
+    if (!ok) {
+      _begin_stage = BeginStage::Failed;
+      return BeginProgress::Failed;
+    }
+    return BeginProgress::Pending;
+  }
+#endif
   bool readyToPublish() const {
     return !_finished && _commit_stage == CommitStage::Publish;
   }
@@ -92,6 +169,11 @@ public:
   // service its transports between passes without exposing the rename gap.
   // A synchronous durability operation uses commit() to drain the same steps.
   CommitProgress serviceCommit(bool valid = true) {
+#if defined(ESP32_PLATFORM)
+    // A premature commit must not publish, clean up, or implicitly aggregate
+    // the deferred setup operations inside this call.
+    if (_begin_stage != BeginStage::Ready) return CommitProgress::Failed;
+#endif
     if (_finished) return CommitProgress::Failed;
     bool ok = _ok && valid;
     if (ok && _commit_stage == CommitStage::Flush) {

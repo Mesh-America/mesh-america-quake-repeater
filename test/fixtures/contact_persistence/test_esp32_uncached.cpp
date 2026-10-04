@@ -12,7 +12,10 @@ static_assert(MESH_CONTACT_CACHE == 0,
 // Replace only the SDK metadata syscall; the production presence/error logic
 // and transaction implementation are compiled unchanged.
 int fixtureStat(FakeFilesystem* fs, const char* vfs_path, struct stat*) {
-  if (fs->metadata_error) { errno = EIO; return -1; }
+  ++fs->metadata_probes;
+  if (fs->metadata_error || fs->metadata_probes == fs->fail_metadata_probe) {
+    errno = EIO; return -1;
+  }
   assert(strncmp(vfs_path, "/spiffs", 7) == 0);
   if (!fs->exists(vfs_path + 7)) { errno = ENOENT; return -1; }
   return 0;
@@ -63,6 +66,10 @@ public:
   bool hasPendingContactWrites() const;
   bool deleteBlobByKey(const uint8_t[], int);
   bool verifying() const { return _contact_write_verifying; }
+  bool starting() const {
+    return _contact_write == nullptr || !static_cast<bool>(*_contact_write);
+  }
+  bool activeJob() const { return _contact_write != nullptr; }
   bool readyToPublish() const {
     return _contact_write && _contact_write->readyToPublish();
   }
@@ -116,8 +123,12 @@ unsigned drain(DataStore& store, Host& h, Filter filter = nullptr) {
   while (store.hasPendingContactWrites()) {
     const unsigned writes = SPIFFS.writes, reads = SPIFFS.reads;
     const unsigned backend_writes = SPIFFS.backend_writes, backend_reads = SPIFFS.backend_reads;
+    const bool starting = store.starting();
+    const unsigned startup_before = SPIFFS.startupOperations();
     assert(++passes < 5000);
     assert(store.serviceContactWrites(&h, filter));
+    const unsigned startup_operations = SPIFFS.startupOperations() - startup_before;
+    if (starting) assert(startup_operations <= 1);
     assert(SPIFFS.writes - writes <= 1);
     assert(SPIFFS.reads - reads <= 1);
     assert(SPIFFS.backend_writes - backend_writes <= 1);
@@ -163,6 +174,152 @@ void boundedFullTableAndFirstSave() {
   bootCheck(h, keepContact);
 }
 
+void deferredBeginCancellationAndCrashRecovery() {
+  using Writer = mesh::ContactFileTransaction;
+  // Observe/destruct at every startup boundary, including before any recovery
+  // and after open but before setBufferSize. A stale temp is never authoritative.
+  for (unsigned completed = 0; completed <= 7; ++completed) {
+    SPIFFS = FakeFilesystem();
+    SPIFFS.emulate_stdio = true;
+    const Host h = table(1);
+    const auto old = image(h);
+    const std::vector<uint8_t> stale = {9, 8, 7};
+    SPIFFS.files["/contacts3"] = old;
+    SPIFFS.files["/contacts3.tmp"] = stale;
+    unsigned before_destructor = 0;
+    {
+      Writer writer(&SPIFFS, "/contacts3", companionPathPresence, true);
+      assert(SPIFFS.startupOperations() == 0 && !writer);
+      for (unsigned pass = 0; pass < completed; ++pass) {
+        const unsigned before = SPIFFS.startupOperations();
+        const auto progress = writer.serviceBegin();
+        assert(progress != Writer::BeginProgress::Failed);
+        const unsigned startup_operations = SPIFFS.startupOperations() - before;
+        assert(startup_operations <= 1);
+        assert(SPIFFS.files.at("/contacts3") == old);
+        // A physical reset at this boundary sees the prior complete image.
+        FakeFilesystem rebooted;
+        rebooted.files = SPIFFS.files;
+        assert(Writer::recover(&rebooted, "/contacts3", companionPathPresence));
+        assert(rebooted.files.at("/contacts3") == old);
+      }
+      if (completed < 7) {
+        const unsigned before = SPIFFS.startupOperations();
+        assert(!writer);
+        assert(writer.write(old.data(), old.size()) == 0);
+        assert(writer.serviceCommit() == Writer::CommitProgress::Failed);
+        assert(!writer.commit());
+        assert(SPIFFS.startupOperations() == before); // no implicit startup/cleanup
+      } else {
+        assert(writer);
+      }
+      before_destructor = SPIFFS.startupOperations();
+    }
+    if (completed < 6) {
+      assert(SPIFFS.startupOperations() == before_destructor); // never owned a temp
+    }
+    if (completed < 5) assert(SPIFFS.files.at("/contacts3.tmp") == stale);
+    else assert(!SPIFFS.exists("/contacts3.tmp"));
+    assert(SPIFFS.files.at("/contacts3") == old && SPIFFS.missing_remove_logs == 0);
+    bootCheck(h);
+  }
+  // An interrupted prior publication recovers identically with deferred setup.
+  SPIFFS = FakeFilesystem();
+  const Host h = table(1);
+  const auto old = image(h);
+  SPIFFS.files["/contacts3.bak"] = old;
+  {
+    Writer writer(&SPIFFS, "/contacts3", companionPathPresence, true);
+    for (unsigned pass = 0; pass < 7; ++pass) {
+      assert(writer.serviceBegin() != Writer::BeginProgress::Failed);
+      FakeFilesystem rebooted;
+      rebooted.files = SPIFFS.files;
+      assert(Writer::recover(&rebooted, "/contacts3", companionPathPresence));
+      assert(rebooted.files.at("/contacts3") == old);
+    }
+    assert(writer && SPIFFS.files.at("/contacts3") == old);
+  }
+  bootCheck(h);
+}
+
+void deferredBeginFaultsAndSynchronousDefaults() {
+  using Writer = mesh::ContactFileTransaction;
+  for (unsigned fault = 0; fault < 8; ++fault) {
+    SPIFFS = FakeFilesystem();
+    SPIFFS.emulate_stdio = true;
+    const Host h = table(1);
+    const auto old = image(h);
+    const std::vector<uint8_t> stale = {1, 2, 3};
+    SPIFFS.files["/contacts3"] = old;
+    SPIFFS.files["/contacts3.tmp"] = stale;
+    if (fault == 0) SPIFFS.fail_metadata_probe = 1; // target
+    if (fault == 1) SPIFFS.fail_metadata_probe = 2; // backup
+    if (fault == 2) {
+      SPIFFS.files.erase("/contacts3");
+      SPIFFS.files["/contacts3.bak"] = old;
+      SPIFFS.fail_rename = 1; // failed interrupted-publication recovery
+    }
+    if (fault == 3) SPIFFS.fail_metadata_probe = 3; // stale temp
+    if (fault == 4) SPIFFS.fail_remove = true;
+    if (fault == 5 || fault == 6) SPIFFS.fail_create = true;
+    if (fault == 6) SPIFFS.partial_create_failure = true;
+    if (fault == 7) SPIFFS.fail_buffer_config = 1;
+    {
+      Writer writer(&SPIFFS, "/contacts3", companionPathPresence, true);
+      auto progress = Writer::BeginProgress::Pending;
+      for (unsigned pass = 0; pass < 8 && progress == Writer::BeginProgress::Pending; ++pass)
+        progress = writer.serviceBegin();
+      assert(progress == Writer::BeginProgress::Failed && !writer);
+      assert(writer.write(old.data(), old.size()) == 0 && !writer.commit());
+    }
+    if (fault <= 4) assert(SPIFFS.files.at("/contacts3.tmp") == stale);
+    else assert(!SPIFFS.exists("/contacts3.tmp")); // includes a failed partial create
+    if (fault == 2) assert(SPIFFS.files.at("/contacts3.bak") == old);
+    else assert(SPIFFS.files.at("/contacts3") == old);
+    assert(SPIFFS.missing_remove_logs == 0);
+    SPIFFS.fail_metadata_probe = SPIFFS.fail_rename = SPIFFS.fail_buffer_config = 0;
+    SPIFFS.fail_create = SPIFFS.fail_remove = false;
+    // All pre-existing callers still finish initialization inside construction.
+    Writer synchronous(&SPIFFS, "/contacts3", companionPathPresence);
+    assert(synchronous && SPIFFS.files.at("/contacts3") == old);
+    assert(synchronous.write(old.data(), old.size()) == old.size());
+    assert(synchronous.commit());
+    assert(SPIFFS.files.at("/contacts3") == old);
+    bootCheck(h);
+  }
+}
+
+void mutationDuringEveryBeginStage() {
+  for (unsigned completed = 0; completed <= 7; ++completed) {
+    SPIFFS = FakeFilesystem();
+    SPIFFS.emulate_stdio = true;
+    Host h = table();
+    const auto old = image(h);
+    const std::vector<uint8_t> stale = {4, 5, 6};
+    SPIFFS.files["/contacts3"] = old;
+    SPIFFS.files["/contacts3.tmp"] = stale;
+    DataStore store(SPIFFS);
+    assert(store.markContactDirty(h.contacts[0]));
+    assert(store.serviceContactWrites(&h, nullptr)); // allocate only
+    assert(SPIFFS.startupOperations() == 0);
+    for (unsigned pass = 0; pass < completed; ++pass)
+      assert(store.serviceContactWrites(&h, nullptr));
+    const unsigned opens = SPIFFS.opens, configurations = SPIFFS.buffer_config_calls;
+    const unsigned before_cancel = SPIFFS.startupOperations();
+    h.contacts[2] = contact(909);
+    assert(store.markContactDirty(h.contacts[2]));
+    assert(store.serviceContactWrites(&h, nullptr)); // guard precedes every begin step
+    assert(store.hasPendingContactWrites());
+    assert(SPIFFS.opens == opens && SPIFFS.buffer_config_calls == configurations);
+    if (completed < 6) assert(SPIFFS.startupOperations() == before_cancel);
+    if (completed < 5) assert(SPIFFS.files.at("/contacts3.tmp") == stale);
+    else assert(!SPIFFS.exists("/contacts3.tmp"));
+    assert(SPIFFS.files.at("/contacts3") == old);
+    drain(store, h);
+    bootCheck(h);
+  }
+}
+
 void mutationRestart(unsigned phase) {
   SPIFFS = FakeFilesystem();
   SPIFFS.emulate_stdio = true;
@@ -172,7 +329,7 @@ void mutationRestart(unsigned phase) {
   DataStore store(SPIFFS);
   assert(store.markContactDirty(h.contacts[0]));
   unsigned passes = 0;
-  while ((phase == 0 && passes < 5)
+  while ((phase == 0 && SPIFFS.writes < 5)
       || (phase == 1 && (!store.verifying() || SPIFFS.reads == 0))
       || (phase == 2 && !store.readyToPublish())) {
     assert(++passes < 1000);
@@ -222,6 +379,7 @@ void faultAndRetry(unsigned fault) {
     success = store.serviceContactWrites(&h, nullptr);
   }
   assert(injected && !success);
+  assert(!store.activeJob()); // no Ready/_ok=false job can spin in initialization
   assert(store.hasPendingContactWrites());
   assert(SPIFFS.files.at("/contacts3") == old);
   assert(!SPIFFS.exists("/contacts3.tmp"));
@@ -359,6 +517,9 @@ void expectedAbsenceAndRealDeleteFailures() {
 
 int main() {
   boundedFullTableAndFirstSave();
+  deferredBeginCancellationAndCrashRecovery();
+  deferredBeginFaultsAndSynchronousDefaults();
+  mutationDuringEveryBeginStage();
   for (unsigned phase = 0; phase < 3; ++phase) mutationRestart(phase);
   for (unsigned fault = 0; fault < 10; ++fault) faultAndRetry(fault);
   syncFlushAndFilterChange();
