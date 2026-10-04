@@ -887,7 +887,12 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
       return reply_offset;
     }
   } else if (payload[0] == REQ_TYPE_GET_OWNER_INFO) {
+#if ENV_INCLUDE_D7S
+    // The version the admin tools show: the product name and version, like `ver`.
+    sprintf((char *) &reply_data[4], "%s %s\n%s\n%s", FIRMWARE_PRODUCT, FIRMWARE_VERSION, _prefs.node_name, _prefs.owner_info);
+#else
     sprintf((char *) &reply_data[4], "%s\n%s\n%s", FIRMWARE_VERSION, _prefs.node_name, _prefs.owner_info);
+#endif
     return 4 + strlen((char *) &reply_data[4]);
   }
   return 0; // unknown command
