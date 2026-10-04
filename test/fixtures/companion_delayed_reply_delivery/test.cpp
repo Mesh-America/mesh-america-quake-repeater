@@ -79,6 +79,7 @@ struct BaseChatMesh {
   RadioBoundary* _radio = &radio;
   Identity self_id;
   mesh::Packet packet;
+  Bytes transmitted_payload;
   unsigned allocations = 0, transmissions = 0, connection_starts = 0;
   uint32_t txt_send_timeout = 0;
   uint32_t direct_timeout = 5000;
@@ -93,7 +94,8 @@ struct BaseChatMesh {
   bool onContactPathRecv(ContactInfo&, uint8_t*, uint8_t, uint8_t*, uint8_t,
                          uint8_t, uint8_t*, uint8_t);
   mesh::Packet* allocate() { ++allocations; return &packet; }
-  mesh::Packet* createDatagram(uint8_t, const Identity&, const uint8_t*, const uint8_t*, size_t) {
+  mesh::Packet* createDatagram(uint8_t, const Identity&, const uint8_t*, const uint8_t* data, size_t len) {
+    transmitted_payload.assign(data, data + len);
     return allocate();
   }
   mesh::Packet* createAnonDatagram(uint8_t, const Identity&, const Identity&,

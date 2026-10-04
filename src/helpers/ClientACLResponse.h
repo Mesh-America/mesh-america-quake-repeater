@@ -2,15 +2,21 @@
 
 #include <Packet.h>
 #include "DatagramPayloadLimits.h"
+#include "CompanionFrameLimits.h"
 
 namespace mesh {
 
 // Match createDatagram() and createPathReturn() admission limits. A flood
 // request returns its observed path inside the encrypted response, so those
 // bytes must also be reserved before adding legacy seven-byte ACL entries.
-static constexpr size_t CLIENT_ACL_DIRECT_REPLY_CAPACITY =
+static constexpr size_t CLIENT_ACL_DATAGRAM_REPLY_CAPACITY =
     DatagramPayloadLimits::maxPlaintext(
         MAX_PACKET_PAYLOAD, CIPHER_MAC_SIZE, CIPHER_BLOCK_SIZE);
+static constexpr size_t CLIENT_ACL_HOST_REPLY_CAPACITY =
+    companionBinaryPlaintextCapacity(CIPHER_BLOCK_SIZE);
+static constexpr size_t CLIENT_ACL_DIRECT_REPLY_CAPACITY =
+    CLIENT_ACL_DATAGRAM_REPLY_CAPACITY < CLIENT_ACL_HOST_REPLY_CAPACITY
+        ? CLIENT_ACL_DATAGRAM_REPLY_CAPACITY : CLIENT_ACL_HOST_REPLY_CAPACITY;
 
 inline size_t clientACLReplyCapacity(bool flood, uint8_t path_len) {
   if (!Packet::isValidPathLen(path_len)) return 0;

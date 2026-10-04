@@ -71,54 +71,58 @@ def production_methods(source, base, packet, dispatcher):
     return methods
 
 
+def production_delayed_reply_inputs(work):
+    source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
+    base = (ROOT / "src/helpers/BaseChatMesh.cpp").read_text()
+    packet = (ROOT / "src/Packet.cpp").read_text()
+    dispatcher = (ROOT / "src/Dispatcher.cpp").read_text()
+    native = (ROOT / "test/test_serial_mode_switch/test_serial_mode_switch.cpp").read_text()
+    core = (ROOT / "src/MeshCore.h").read_text()
+    constants = "\n".join(re.findall(
+        r"^#define (?:PUSH_CODE_\w+|RESP_CODE_\w+|CMD_SEND_\w+|ERR_CODE_\w+|REQ_TYPE_GET_TELEMETRY_DATA)\s+.+$",
+        source, re.MULTILINE))
+    wanted = ("PUB_KEY_SIZE", "MAX_PACKET_PAYLOAD", "MAX_PATH_SIZE", "OUT_PATH_UNKNOWN",
+              "MSG_SEND_FAILED", "MSG_SEND_SENT_DIRECT", "MSG_SEND_SENT_FLOOD",
+              "PAYLOAD_TYPE_RESPONSE", "PAYLOAD_TYPE_REQ", "PAYLOAD_TYPE_ANON_REQ",
+              "PAYLOAD_TYPE_ACK", "REQ_TYPE_GET_STATUS", "REQ_TYPE_GET_TELEMETRY_DATA",
+              "TELEM_PERM_BASE", "ADV_TYPE_NONE", "ADV_TYPE_ROOM", "RESP_SERVER_LOGIN_OK")
+    for relative in ("examples/companion_radio/MyMesh.h", "src/MeshCore.h", "src/Packet.h", "src/helpers/BaseChatMesh.h",
+                     "src/helpers/ContactInfo.h", "src/helpers/AdvertDataHelpers.h",
+                     "src/helpers/SensorManager.h"):
+        text = (ROOT / relative).read_text()
+        constants += "\n" + "\n".join(re.findall(
+            r"^#define (?:" + "|".join(wanted) + r")\s+.+$", text, re.MULTILINE))
+    constants += "\n#define EXPECTED_ACK_TABLE_SIZE 2\n"
+    clock = "\n".join(extract_braced(core, signature) for signature in (
+        "uint32_t getCurrentTimeUnique()", "void resetUniqueTime(uint32_t time)"))
+    # printf is an Arduino Print operation absent from the lean shared
+    # host mock. Add only this I/O boundary, leaving transport logic real.
+    stream = (ROOT / "test/mocks/Stream.h").read_text()
+    stream = "#include <cstdarg>\n#include <cstdio>\n" + stream.replace(
+        "public:", "public:\n    size_t printf(const char* format, ...) {\n"
+        "      char text[256]; va_list args; va_start(args, format);\n"
+        "      int n=vsnprintf(text,sizeof(text),format,args); va_end(args);\n"
+        "      return n>0 ? write((const uint8_t*)text, (size_t)n<sizeof(text) ? (size_t)n : sizeof(text)-1) : 0;\n"
+        "    }", 1)
+    (work / "production_constants.inc").write_text(constants, encoding="ascii")
+    (work / "production_clock.inc").write_text(clock, encoding="ascii")
+    (work / "production_stream.inc").write_text(
+        extract_braced(native, "class BufferStream") + ";\n", encoding="ascii")
+    (work / "production_replies.inc").write_text(
+        production_methods(source, base, packet, dispatcher), encoding="ascii")
+    (work / "Stream.h").write_text(stream, encoding="ascii")
+    (work / "Arduino.h").write_text(
+        (ROOT / "test/mocks/Arduino.h").read_text(), encoding="ascii")
+
+
 class CompanionDelayedReplyDeliveryTests(unittest.TestCase):
     def test_actual_producers_routes_deadlines_and_required_admission(self):
         compiler = os.environ.get("CXX") or shutil.which("g++") or shutil.which("clang++")
         if compiler is None:
             self.skipTest("a host C++17 compiler is required")
-        source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
-        base = (ROOT / "src/helpers/BaseChatMesh.cpp").read_text()
-        packet = (ROOT / "src/Packet.cpp").read_text()
-        dispatcher = (ROOT / "src/Dispatcher.cpp").read_text()
-        native = (ROOT / "test/test_serial_mode_switch/test_serial_mode_switch.cpp").read_text()
-        core = (ROOT / "src/MeshCore.h").read_text()
-        constants = "\n".join(re.findall(
-            r"^#define (?:PUSH_CODE_\w+|RESP_CODE_\w+|CMD_SEND_\w+|ERR_CODE_\w+|REQ_TYPE_GET_TELEMETRY_DATA)\s+.+$",
-            source, re.MULTILINE))
-        wanted = ("PUB_KEY_SIZE", "MAX_PACKET_PAYLOAD", "MAX_PATH_SIZE", "OUT_PATH_UNKNOWN",
-                  "MSG_SEND_FAILED", "MSG_SEND_SENT_DIRECT", "MSG_SEND_SENT_FLOOD",
-                  "PAYLOAD_TYPE_RESPONSE", "PAYLOAD_TYPE_REQ", "PAYLOAD_TYPE_ANON_REQ",
-                  "PAYLOAD_TYPE_ACK", "REQ_TYPE_GET_STATUS", "REQ_TYPE_GET_TELEMETRY_DATA",
-                  "TELEM_PERM_BASE", "ADV_TYPE_NONE", "ADV_TYPE_ROOM", "RESP_SERVER_LOGIN_OK")
-        for relative in ("examples/companion_radio/MyMesh.h", "src/MeshCore.h", "src/Packet.h", "src/helpers/BaseChatMesh.h",
-                         "src/helpers/ContactInfo.h", "src/helpers/AdvertDataHelpers.h",
-                         "src/helpers/SensorManager.h"):
-            text = (ROOT / relative).read_text()
-            constants += "\n" + "\n".join(re.findall(
-                r"^#define (?:" + "|".join(wanted) + r")\s+.+$", text, re.MULTILINE))
-        constants += "\n#define EXPECTED_ACK_TABLE_SIZE 2\n"
-        clock = "\n".join(extract_braced(core, signature) for signature in (
-            "uint32_t getCurrentTimeUnique()", "void resetUniqueTime(uint32_t time)"))
-        # printf is an Arduino Print operation absent from the lean shared
-        # host mock. Add only this I/O boundary, leaving transport logic real.
-        stream = (ROOT / "test/mocks/Stream.h").read_text()
-        stream = "#include <cstdarg>\n#include <cstdio>\n" + stream.replace(
-            "public:", "public:\n    size_t printf(const char* format, ...) {\n"
-            "      char text[256]; va_list args; va_start(args, format);\n"
-            "      int n=vsnprintf(text,sizeof(text),format,args); va_end(args);\n"
-            "      return n>0 ? write((const uint8_t*)text, (size_t)n<sizeof(text) ? (size_t)n : sizeof(text)-1) : 0;\n"
-            "    }", 1)
         with tempfile.TemporaryDirectory(prefix="meshcore-delayed-replies-") as directory:
             work = Path(directory)
-            (work / "production_constants.inc").write_text(constants, encoding="ascii")
-            (work / "production_clock.inc").write_text(clock, encoding="ascii")
-            (work / "production_stream.inc").write_text(
-                extract_braced(native, "class BufferStream") + ";\n", encoding="ascii")
-            (work / "production_replies.inc").write_text(
-                production_methods(source, base, packet, dispatcher), encoding="ascii")
-            (work / "Stream.h").write_text(stream, encoding="ascii")
-            (work / "Arduino.h").write_text(
-                (ROOT / "test/mocks/Arduino.h").read_text(), encoding="ascii")
+            production_delayed_reply_inputs(work)
             for terminal in (0, 1):
                 with self.subTest(terminal=terminal):
                     binary = work / f"delayed-{terminal}.exe"
