@@ -39,6 +39,9 @@ struct SerialInterface {
  bool pending=false, connected=false, passthrough=true;
  bool hasPendingIO() const{return pending;}
  bool isConnected() const{return connected;}
+ bool isReplyRouteAvailable(const SerialInterface* route) const {
+   return route==this&&connected;
+ }
  bool isPassthroughMode() const{return passthrough;}
 };
 struct RoleMesh {
@@ -54,6 +57,7 @@ struct RoleMesh {
  Store* _store=&store;
  SerialInterface serial;
  SerialInterface* _serial=&serial;
+ SerialInterface* _iter_reply_route=&serial;
  bool hasOutbound() const{return outbound;}
  bool isAnyTempRadioActive() const{return temporary;}
  bool hasPendingOtaApply() const{return ota_apply;}
@@ -84,6 +88,7 @@ void reset(){
  // Assignment copies the fixture's dependency pointers; point them back at
  // the live fixture objects, not the temporary used to reset scalar state.
  the_mesh._store=&the_mesh.store;the_mesh._serial=&the_mesh.serial;
+ the_mesh._iter_reply_route=&the_mesh.serial;
  command[0]=0;command_overflow=false;
 #if defined(ENABLE_USB_INTERFACE)
  usb_serial_interface=SerialInterface{};usb_connected=false;

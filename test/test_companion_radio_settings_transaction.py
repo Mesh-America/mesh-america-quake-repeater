@@ -238,6 +238,9 @@ static uint32_t now_ms=100;
 struct Serial {
   bool hasPendingIO() const { return false; }
   bool isConnected() const { return false; }
+  bool isReplyRouteAvailable(const Serial* route) const {
+    return route==this&&isConnected();
+  }
 };
 struct {
   bool isWatchdogObserving() const { return false; }
@@ -253,6 +256,7 @@ struct MyMesh {
   const void *sign_data=nullptr;
   const void *emergency_client_repeat_packet=nullptr;
   Serial* _serial=nullptr;
+  Serial* _iter_reply_route=nullptr;
 #if COMPANION_FEATURE_TEMP_RADIO
   bool _temp_radio_applied=false;
   uint32_t _temp_radio_set_at=0, _temp_radio_revert_at=0, _temp_radio_retry_at=0;

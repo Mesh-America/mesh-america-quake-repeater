@@ -520,11 +520,8 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
             main.index("static void cancelUsbSerialOperations()"):
             main.index("static void enterUsbTerminalMode(")
         ]
-        route_check = usb_cancel.index(
-            "interface_manager.isReplyRouteFor(&usb_serial_interface)"
-        )
         route_cancel = usb_cancel.index(
-            "the_mesh.cancelSerialResponseStream()"
+            "the_mesh.cancelSerialResponseStream(&usb_serial_interface)"
         )
         delayed_cancel = usb_cancel.index(
             "the_mesh.cancelSerialOperationsForRoute(&usb_serial_interface)"
@@ -532,7 +529,6 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         route_forget = usb_cancel.index(
             "interface_manager.forgetReplyRouteForDisconnected("
         )
-        self.assertLess(route_check, route_cancel)
         self.assertLess(route_cancel, delayed_cancel)
         self.assertLess(delayed_cancel, route_forget)
         self.assertIn("the_mesh.resetUsbHostSessionInput();", reset_helper)

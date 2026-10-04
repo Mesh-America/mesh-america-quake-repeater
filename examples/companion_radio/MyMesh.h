@@ -188,7 +188,7 @@ public:
   void activateRadio();
   bool isRadioReady() const { return _radio_available; }
   void startInterface(BaseSerialInterface &serial);
-  void cancelSerialResponseStream();
+  void cancelSerialResponseStream(BaseSerialInterface* route = NULL);
   void cancelSerialOperationsForRoute(BaseSerialInterface* route);
   bool hasFiniteDelayedReplyForRoute(BaseSerialInterface* route) const;
   void resetUsbHostSessionInput();
@@ -481,7 +481,8 @@ private:
                      BaseSerialInterface* route = nullptr);
   size_t writePendingSerialFrame(const uint8_t frame[], size_t len, uint32_t now);
   void writeDisabledFrame();
-  bool writeContactRespFrame(uint8_t code, const ContactInfo &contact);
+  bool writeContactRespFrame(uint8_t code, const ContactInfo &contact,
+                             BaseSerialInterface* route = NULL);
   void stopContactsIterator();
   bool updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, const uint8_t *frame, int len);
   bool addToOfflineQueue(const uint8_t frame[], int len);
@@ -650,6 +651,7 @@ private:
   AbstractUITask* _ui;
 
   ContactsIterator _iter;
+  BaseSerialInterface* _iter_reply_route;
   ContactInfo _iter_pending_contact;
   uint32_t _iter_filter_since;
   uint32_t _iter_next_frame_at;
