@@ -126,6 +126,7 @@ jobs:
           python3 -B test/test_companion_discovery_correlation.py -v
           python3 -B test/test_pico_ble_queues.py -v
           python3 -B test/test_companion_preferences_transaction.py -v
+          python3 -B test/test_companion_prefs_values.py -v
           python3 -B test/test_companion_prefs_tail.py -v
           python3 -B test/test_companion_radio_settings_transaction.py -v
           python3 -B test/test_companion_prefs_transactions.py -v

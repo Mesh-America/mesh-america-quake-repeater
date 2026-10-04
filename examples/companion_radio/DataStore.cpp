@@ -998,7 +998,11 @@ bool DataStore::loadPrefsInt(const char *filename,
                              double& node_lon) {
   File file = openRead(_fs, filename);
   if (file) {
-    CompanionNodePrefs loaded_prefs = _prefs;
+    CompanionNodePrefs loaded_prefs;
+    if (!loaded_prefs.copyPersistedValuesFrom(_prefs)) {
+      file.close();
+      return false;
+    }
     // Files written before this tail existed always started Bluetooth at boot.
     // Do not inherit a runtime off value when loading one of those images.
     loaded_prefs.bluetooth_enabled = 1;
@@ -1230,7 +1234,7 @@ bool DataStore::loadPrefsInt(const char *filename,
     file.close();
     if (!success) return false;
     loaded_prefs.usb_debug_enabled = loaded_prefs.usb_debug_enabled == 1 ? 1 : 0;
-    _prefs = loaded_prefs;
+    if (!_prefs.copyPersistedValuesFrom(loaded_prefs)) return false;
     node_lat = loaded_lat;
     node_lon = loaded_lon;
     return true;
