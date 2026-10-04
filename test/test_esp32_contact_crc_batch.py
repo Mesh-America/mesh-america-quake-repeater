@@ -103,7 +103,7 @@ class ContactCRCBatchTest(unittest.TestCase):
     def test_large_stdio_read_ahead_is_detected(self):
         self.run_native(negative="stdio")
 
-    def test_pinned_xtensa_frame_and_object_do_not_grow(self):
+    def test_opaque_xtensa_fixture_frame_and_object_sizes(self):
         compiler = os.environ.get("CONTACT_CRC_XTENSA_CXX") or shutil.which("xtensa-esp32s3-elf-g++")
         if not compiler:
             candidate = Path.home() / ".platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-g++"
@@ -111,8 +111,9 @@ class ContactCRCBatchTest(unittest.TestCase):
                 compiler = str(candidate)
         if not compiler:
             self.skipTest("Xtensa S3 compiler is not installed")
-        # Use SDK-compatible opaque File/FS declarations so native vector/mock
-        # internals cannot distort the target frame. The CFT/CRC bodies are real.
+        # Isolate the real CFT/CRC bodies from the native vector/mock internals.
+        # This opaque File has a different layout from Arduino's File/Stream;
+        # these sizes describe this fixture, not the SDK ABI or final firmware.
         with tempfile.TemporaryDirectory(prefix="mesh-contact-crc-stack-") as directory:
             temp = Path(directory)
             (temp / "file_contract.h").write_text(OPAQUE_FILE)
