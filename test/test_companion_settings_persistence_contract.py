@@ -77,8 +77,17 @@ class CompanionSettingsPersistenceContractTests(unittest.TestCase):
         # A failed read must not leave a partly decoded structure in live use.
         self.assertRegex(
             load,
-            r"CompanionNodePrefs\s+\w+\s*=\s*_prefs\s*;",
+            r"CompanionNodePrefs\s+loaded_prefs\s*;",
         )
+        snapshot = function_body(
+            load,
+            "if (!loaded_prefs.copyPersistedValuesFrom(_prefs))",
+        )
+        self.assertIn("file.close();", snapshot)
+        self.assertIn("return false;", snapshot)
+        snapshot_at = load.index("loaded_prefs.copyPersistedValuesFrom(_prefs)")
+        self.assertLess(snapshot_at, load.index("loaded_prefs.bluetooth_enabled ="))
+        self.assertLess(snapshot_at, load.index("readField("))
         self.assertRegex(load, r"double\s+\w+\s*=\s*node_lat\s*;")
         self.assertRegex(load, r"double\s+\w+\s*=\s*node_lon\s*;")
 
@@ -93,10 +102,36 @@ class CompanionSettingsPersistenceContractTests(unittest.TestCase):
         self.assertGreaterEqual(load.count("readOptionalField("), 26)
         self.assertIn("success = success && file.available() == 0;", load)
         failure_at = load.index("if (!success) return false;")
-        commit_at = load.index("_prefs = loaded_prefs;", failure_at)
+        commit_at = load.index("_prefs.copyPersistedValuesFrom(loaded_prefs)", failure_at)
+        self.assertIn(
+            "if (!_prefs.copyPersistedValuesFrom(loaded_prefs)) return false;",
+            load,
+        )
         self.assertLess(failure_at, commit_at)
+        self.assertLess(commit_at, load.index("node_lat = loaded_lat;"))
+        self.assertLess(commit_at, load.index("node_lon = loaded_lon;"))
+        # Whole-object assignment also aliases the snapshot's runtime adapter
+        # owners. Only a validated value snapshot may reach live preferences.
+        self.assertNotRegex(load, r"\b_prefs\s*=")
         self.assertIn("return false;", load)
         self.assertIn("return true;", load)
+
+    def test_preferences_snapshot_excludes_runtime_adapters_before_copy(self):
+        copy = function_body(
+            self.prefs,
+            "bool copyPersistedValuesFrom(const CompanionNodePrefs& source)",
+        )
+        self.assertIn("reinterpret_cast<uintptr_t>(&airtime_factor)", copy)
+        self.assertIn("reinterpret_cast<uintptr_t>(&usb_debug_enabled)", copy)
+        self.assertIn("reinterpret_cast<uintptr_t>(&values.radio)", copy)
+        self.assertIn("reinterpret_cast<uintptr_t>(&values.custom)", copy)
+        self.assertIn("size <= radio_begin - begin", copy)
+        self.assertIn("size <= custom_begin - begin", copy)
+        self.assertIn("size <= sizeof(values) -", copy)
+        guarded_at = copy.index("if (!bounded(*this) || !bounded(source)) return false;")
+        write_at = copy.index("memcpy(&airtime_factor, &source.airtime_factor, size);")
+        self.assertLess(guarded_at, write_at)
+        self.assertNotRegex(copy, r"\b(?:radio|custom)\s*=")
 
     def test_startup_never_rewrites_preferences_after_failed_load(self):
         begin = function_body(self.mesh, "void MyMesh::begin(bool has_display")
