@@ -72,11 +72,12 @@ public:
     return retry_active[key[0]];
   }
   void rememberOneKeyAck(ContactInfo&) { ++one_key_notices; }
-  ContactInfo* checkConnectionsAck(const uint8_t* input) {
+  bool checkConnectionsAck(const uint8_t* input, ContactInfo*& peer) {
     ++connection_ack_calls;
     last_connection_ack_input = input;
     memcpy(&last_connection_ack, input, sizeof(last_connection_ack));
-    return last_connection_ack == connection_ack ? connection_ack_contact : nullptr;
+    peer = last_connection_ack == connection_ack ? connection_ack_contact : nullptr;
+    return peer != nullptr;
   }
   bool hasTerminalOutput() const { return true; }
   Terminal& terminalOutput() { return terminal; }
@@ -89,7 +90,14 @@ public:
   void clearExpectedAck(AckTableEntry&, bool = true);
   void expireExpectedAcks();
   AckTableEntry* findPendingTextMessage(const uint8_t*, uint32_t);
-  ContactInfo* processAck(const uint8_t*);
+  bool processAck(const uint8_t*, ContactInfo*&);
+  // Existing delivery scenarios inspect the optional peer; the lifetime suite
+  // separately exercises ownership with a NULL peer through BaseChatMesh.
+  ContactInfo* processAck(const uint8_t* input) {
+    ContactInfo* peer = nullptr;
+    processAck(input, peer);
+    return peer;
+  }
   void cancelSerialOperationsForRoute(BaseSerialInterface*);
   bool hasFiniteDelayedReplyForRoute(BaseSerialInterface*) const;
   void service();

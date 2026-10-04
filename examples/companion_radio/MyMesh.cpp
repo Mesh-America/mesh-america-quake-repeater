@@ -1060,7 +1060,15 @@ MyMesh::AckTableEntry* MyMesh::findPendingTextMessage(
   return NULL;
 }
 
-ContactInfo*  MyMesh::processAck(const uint8_t *data) {
+void MyMesh::onContactReferenceChanged(const ContactInfo* previous, ContactInfo* replacement) {
+  for (AckTableEntry* entry = expected_ack_table;
+       entry != expected_ack_table + EXPECTED_ACK_TABLE_SIZE; ++entry) {
+    if (entry->ack != 0 && entry->contact == previous) entry->contact = replacement;
+  }
+}
+
+bool MyMesh::processAck(const uint8_t *data, ContactInfo*& peer) {
+  peer = NULL;
   expireExpectedAcks();
   uint32_t incoming;
   memcpy(&incoming, data, sizeof(incoming));
@@ -1090,10 +1098,11 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
       if (contact != NULL && contact->type == ADV_TYPE_CHAT) rememberOneKeyAck(*contact);
 #endif
       expireExpectedAcks();
-      return contact;
+      peer = contact;
+      return true;
     }
   }
-  return checkConnectionsAck(data);
+  return checkConnectionsAck(data, peer);
 }
 
 #if MESH_ENABLE_ONE_KEY_DM
@@ -1260,7 +1269,7 @@ void MyMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
   // A prior anonymous service request may occupy a transient slot for this
   // key. Remove it so regular text lookup finds the durable contact first.
   ContactInfo* transient = lookupTransientContactByPubKey(sender.pub_key, PUB_KEY_SIZE);
-  if (transient != NULL) clearTransientContact(*transient);
+  if (transient != NULL) clearTransientContact(*transient, added);
   onDiscoveredContact(*added, true, OUT_PATH_UNKNOWN, NULL);
 }
 
@@ -5583,7 +5592,7 @@ void MyMesh::handleCmdFrame(size_t len) {
         if (scheduleContactWrite(*recipient)) {
           ContactInfo* transient = lookupTransientContactByPubKey(
               pub_key, PUB_KEY_SIZE);
-          if (transient != NULL) clearTransientContact(*transient);
+          if (transient != NULL) clearTransientContact(*transient, recipient);
           writeOKFrame();
         } else {
           recipient->out_path_len = previous_out_path_len;
@@ -5613,8 +5622,6 @@ void MyMesh::handleCmdFrame(size_t len) {
 
         ContactInfo* transient = lookupTransientContactByPubKey(
             pub_key, PUB_KEY_SIZE);
-        ContactInfo previous_transient = {};
-        if (transient != NULL) previous_transient = *transient;
 
         if (recipient != NULL) {
           const ContactInfo previous = *recipient;
@@ -5622,7 +5629,7 @@ void MyMesh::handleCmdFrame(size_t len) {
           if (scheduleContactWrite(*recipient)) {
             // A prior anonymous request can leave a same-key entry in the
             // reserved prefix. Retire it in place; never compact that prefix.
-            if (transient != NULL) clearTransientContact(*transient);
+            if (transient != NULL) clearTransientContact(*transient, recipient);
             updateGpsTelemetryPolicy();
             writeOKFrame();
           } else {
@@ -5630,22 +5637,20 @@ void MyMesh::handleCmdFrame(size_t len) {
             writeErrFrame(ERR_CODE_FILE_IO_ERROR);
           }
         } else {
-          // Promotion must free the exact transient prefix slot before lookup
-          // of the newly-added persistent record. Restore it on every failure.
-          if (transient != NULL) clearTransientContact(*transient);
+          // Preserve the transient and its pending ACK references until the
+          // persistent destination is accepted. Failure preserves the transient.
           if (addContact(candidate)) {
             ContactInfo* added = lookupPersistentContactByPubKey(
                 candidate.id.pub_key, PUB_KEY_SIZE);
             if (added != NULL && scheduleContactWrite(*added)) {
+              if (transient != NULL) clearTransientContact(*transient, added);
               updateGpsTelemetryPolicy();
               writeOKFrame();
             } else {
               if (added != NULL) removeContact(*added);
-              if (transient != NULL) *transient = previous_transient;
               writeErrFrame(ERR_CODE_FILE_IO_ERROR);
             }
           } else {
-            if (transient != NULL) *transient = previous_transient;
             writeErrFrame(ERR_CODE_TABLE_FULL);
           }
         }

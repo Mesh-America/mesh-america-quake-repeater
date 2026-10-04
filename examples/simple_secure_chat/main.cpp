@@ -240,18 +240,19 @@ protected:
     saveContacts();
   }
 
-  ContactInfo* processAck(const uint8_t *data) override {
-    if (memcmp(data, &expected_ack_crc, 4) == 0) {     // got an ACK from recipient
+  bool processAck(const uint8_t *data, ContactInfo*& peer) override {
+    peer = NULL;
+    if (expected_ack_crc != 0 && memcmp(data, &expected_ack_crc, 4) == 0) {     // got an ACK from recipient
       Serial.printf("   Got ACK! (round trip: %d millis)\n", _ms->getMillis() - last_msg_sent);
       // NOTE: the same ACK can be received multiple times!
       expected_ack_crc = 0;  // reset our expected hash, now that we have received ACK
-      return NULL;  // TODO: really should return ContactInfo pointer 
+      return true; // owned, even without a retained contact pointer
     }
 
     //uint32_t crc;
     //memcpy(&crc, data, 4);
     //MESH_DEBUG_PRINTLN("unknown ACK received: %08X (expected: %08X)", crc, expected_ack_crc);
-    return NULL;
+    return false;
   }
 
   void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t sender_timestamp, const char *text) override {

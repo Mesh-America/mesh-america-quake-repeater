@@ -370,13 +370,14 @@ protected:
   bool canMutateContacts() const override;
   void onContactsFull() override;
   bool onContactOverwrite(const ContactInfo& contact) override;
+  void onContactReferenceChanged(const ContactInfo* previous, ContactInfo* replacement) override;
   bool onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_t in_path_len, uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
   void onContactPathUpdated(const ContactInfo &contact) override;
 #if COMPANION_FEATURE_TEXT_TERMINAL
   void onContactVisit(const ContactInfo& contact) override;
 #endif
-  ContactInfo* processAck(const uint8_t *data) override;
+  bool processAck(const uint8_t *data, ContactInfo*& peer) override;
 #if MESH_ENABLE_ONE_KEY_DM
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
                       const mesh::Identity& sender, uint8_t* data,
