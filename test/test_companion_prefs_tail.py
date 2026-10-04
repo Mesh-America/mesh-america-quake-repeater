@@ -132,18 +132,9 @@ class CompanionPrefsTailTests(unittest.TestCase):
     def test_full_image_parity_and_atomic_tail_faults(self):
         source = (ROOT / 'examples/companion_radio/DataStore.cpp').read_text()
         save = method(source, 'bool DataStore::savePrefs(')
-        tail_start = save.index('    // Pack only the explicit persisted tail')
-        tail_end = save.index('\n#if defined(NRF52_PLATFORM)', tail_start)
-        legacy_save = save[:tail_start] + LEGACY_TAIL + save[tail_end:]
-        legacy_save = legacy_save.replace('DataStore::savePrefs(', 'DataStore::savePrefsLegacy(', 1)
-        # The golden tail serializer must still issue the original scalar
-        # writes, including on STM32 where the production writer now stages
-        # an image. Its prefix emitter forwards directly to the same file.
-        emitter_start = legacy_save.index('#if defined(STM32_PLATFORM)\n    // Keep the explicit wire field list')
-        emitter_end = legacy_save.index('\n    uint8_t pad[8];', emitter_start)
-        legacy_save = legacy_save[:emitter_start] + '''    const auto writeField = [&file](const void* data, size_t size) -> bool {
-      return file.write(static_cast<const uint8_t*>(data), size) == size;
-    };''' + legacy_save[emitter_end:]
+        # Keep the complete original scalar writer independent of any future
+        # production field-table changes, including every native tail byte.
+        legacy_save = (ROOT / 'test/fixtures/companion_prefs_storage/legacy_writer.inc').read_text()
         methods = esp_recovery_helpers(source) + '\n'.join(method(source, signature) for signature in (
             'bool DataStore::loadPrefs(', 'bool DataStore::loadPrefsInt('))
         methods += '\n' + save + '\n' + legacy_save
