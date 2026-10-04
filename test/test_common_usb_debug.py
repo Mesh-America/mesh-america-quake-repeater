@@ -158,7 +158,7 @@ int main() {
   cli.savePrefs(&cli.fs, PrefsSaveRouting::Scope::Common);
   assert(cli._common_save_succeeded);
   const auto baseline = cli.fs.files["/com_prefs"];
-  assert(baseline.size() == 873);
+  assert(baseline.size() == 874);
   const size_t debug_offset = 871, trace_offset = 872;
   const size_t logging_offset = 863, preamble_offset = 866;
   const size_t espnow_offset = 868, gps_offset = 869;
@@ -166,6 +166,7 @@ int main() {
   assert(baseline[preamble_offset] == 48 && baseline[espnow_offset] == 1);
   assert(baseline[gps_offset] == 0 && baseline[gps_offset + 1] == 0);
   assert(baseline[trace_offset] == 0);
+  assert(baseline[873] == 0); // OTA channel follows the established tail.
   Capture capture;
   assert(writeCommonPrefsImage(capture, &cli.prefs));
   assert(capture.bytes == baseline); // Checked and ordinary writers agree.

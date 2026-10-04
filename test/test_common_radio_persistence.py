@@ -86,11 +86,12 @@ int main() {
   auto original=cli.fs.files["/com_prefs"];
   // Appending preferences must not move the established preamble bytes.
   const size_t preamble_offset=866;
-  assert(original.size()==873);
+  assert(original.size()==874);
   assert(original[preamble_offset]==48 && original[preamble_offset+1]==0);
   assert(original[preamble_offset+2]==1);
   assert(original[preamble_offset+3]==0x50 && original[preamble_offset+4]==0x01);
   assert(original[871]==0 && original[872]==0); // debug and trace remain appended
+  assert(original[873]==0); // channel selection does not move the previous fields
   Capture capture; assert(writeCommonPrefsImage(capture,&cli.prefs));
   assert(capture.bytes==original); // Both serializers retain the same layout.
   for (int fault : {0,1,2,3,4}) {

@@ -428,6 +428,24 @@ The browser portal is not compiled into the two 4 MB
 retaining the two app slots required for LoRa OTA. Their normal CLI settings
 remain available.
 
+### Switch the OTA release channel (observer builds)
+
+- `ota branch` — shows the selected channel, the channel this build was made for, and the manifest base `ota check`/`ota update` will use.
+- `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`) — pull future `ota update`s from that channel. The selection is saved; run `ota update` to switch.
+- `ota branch default` — follow the channel this build was made for.
+
+The selector is saved only after the preferences transaction succeeds. A queued
+`ota update` keeps the channel it checked, even if `ota branch` is changed before
+the download starts. Switching channels offers the target image even when its
+commit matches the running image; build numbers are not comparable across channels.
+
+Before an image is made bootable, its compatibility tag must confirm support for
+this fork's saved-settings format and required transports. Upstream observer
+images without the `keymind1` capability are refused, including images that use
+the different `/mqtt.json` format. A refusal leaves the current image running;
+select a compatible channel to continue OTA. Production and beta URLs are supplied
+by the build recipe, not accepted as arbitrary CLI URLs.
+
 ---
 
 ### Erase/Factory Reset

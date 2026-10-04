@@ -233,6 +233,7 @@ public:
   uint8_t legacy_flood_channel_block_max_hops = 0;
   uint8_t flood_channel_data_max_hops = 0;
   uint8_t telemetry_access = 0;
+  uint8_t ota_channel = 0;      // WiFi OTA release channel: 0=native, 1=prod, 2=beta
 
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) were moved out of
   // NodePrefs into MQTTPrefs (persisted to /mqtt_prefs) so this struct stays
@@ -421,6 +422,7 @@ protected:
     def("lat", node_lat);
     def("lon", node_lon);
     def("disc_mod", discovery_mod_timestamp);
+    def("ota_ch", ota_channel);   // WiFi OTA release channel selector
     def("radio", radio);
     def("bridge", bridge);
     def("gps", gps);

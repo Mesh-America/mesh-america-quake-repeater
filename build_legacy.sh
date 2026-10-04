@@ -2632,6 +2632,47 @@ normalize_resolved_targets_for_mqtt() {
   fi
 }
 
+get_firmware_version_string() {
+  local env_name=$1
+  local version=$2
+  local commit_hash=$3
+  local kind=${4:-filename}
+  local build_suffix=""
+  local channel_tag=""
+
+  # Preserve the existing embedded counter hook on all targets. Observer CI
+  # also includes that counter and its channel marker in downloadable names.
+  if [ "$kind" = embedded ] && [ -n "${FIRMWARE_BUILD_NUMBER:-}" ]; then
+    build_suffix=".${FIRMWARE_BUILD_NUMBER}"
+  fi
+  case "$env_name" in
+    *observer*)
+      if [ -n "${FIRMWARE_BUILD_NUMBER:-}" ]; then
+        build_suffix=".${FIRMWARE_BUILD_NUMBER}"
+      fi
+      if [ "$kind" = embedded ]; then
+        channel_tag="-observer${OTA_CHANNEL_TAG:+-${OTA_CHANNEL_TAG}}"
+      else
+        channel_tag="${FILENAME_CHANNEL_TAG:-}"
+      fi
+      ;;
+  esac
+  printf '%s' "${version}${build_suffix}${channel_tag}-${commit_hash}"
+}
+
+apply_observer_ota_channel_flags() {
+  # Channel bases belong to observer pull-OTA. Keep other fork targets' update
+  # destinations and manually configured flags scoped to their own recipes.
+  case "${1:-}" in
+    *observer*) ;;
+    *) return 0 ;;
+  esac
+  local native_url="${OTA_MANIFEST_BASE_URL:-https://observer.gessaman.com/v}"
+  local stable_url="${OTA_MANIFEST_BASE_STABLE_URL:-https://observer.gessaman.com/v}"
+  local dev_url="${OTA_MANIFEST_BASE_DEV_URL:-https://observer.gessaman.com/beta/v}"
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS:-} -DOTA_MANIFEST_BASE='\"${native_url}\"' -DOTA_MANIFEST_BASE_STABLE='\"${stable_url}\"' -DOTA_MANIFEST_BASE_DEV='\"${dev_url}\"'"
+}
+
 disable_debug_flags() {
   local env_name=${1:-}
   local usb_logging_undefs="-UMESH_DEBUG -UMESH_PACKET_LOGGING"
@@ -4840,7 +4881,8 @@ build_firmware_one_profile() {
     echo "FIRMWARE_VERSION not set, using derived default for ${env_name}: ${firmware_version}"
   fi
 
-  firmware_version_string="${firmware_version}-${commit_hash}"
+  firmware_version_string=$(get_firmware_version_string \
+    "$env_name" "$firmware_version" "$commit_hash")
   firmware_filename=$(get_firmware_filename \
     "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}" "$firmware_version_string")
 
@@ -4854,22 +4896,13 @@ build_firmware_one_profile() {
   fi
 
   # Fork CI hooks (consumed by .github/workflows/build-observer*-firmwares.yml).
-  # Tag the *embedded* version for observer builds (v1.0.0-observer-abcdef) so
-  # `ver`, the MQTT firmware_version, and SNMP identify the fork, and stamp the
-  # per-base published-build counter (FIRMWARE_BUILD_NUMBER) as a 4th version
-  # component so `ota check` can show how many builds behind a node is. The
-  # *filename* stays untagged/un-numbered so assets remain <env>-v<base>-<hash>.
+  # Tag the embedded version and observer filenames with the workflow's channel
+  # and published-build counter. Other target filenames retain their fork form.
   # OTA_VARIANT is the env name - it selects the slim per-variant manifest
   # (<OTA_MANIFEST_BASE>/<OTA_VARIANT>.json) that the observer pull-OTA fetches.
-  local embedded_variant_tag=""
-  case "$env_name" in
-    *observer*) embedded_variant_tag="-observer" ;;
-  esac
-  local embedded_build_suffix=""
-  if [ -n "${FIRMWARE_BUILD_NUMBER:-}" ]; then
-    embedded_build_suffix=".${FIRMWARE_BUILD_NUMBER}"
-  fi
-  local embedded_version_string="${firmware_version}${embedded_build_suffix}${embedded_variant_tag}-${commit_hash}"
+  local embedded_version_string
+  embedded_version_string=$(get_firmware_version_string \
+    "$env_name" "$firmware_version" "$commit_hash" embedded)
 
   declare_full_logging_application_contract "$env_name"
   if [ "${PLATFORMIO_BUILD_FLAGS+x}" ]; then
@@ -4914,6 +4947,7 @@ build_firmware_one_profile() {
   # Only builder-generated wall-clock stamps are excluded from the recipe.
   # User-supplied flags remain verbatim, including any timestamp definitions.
   export PLATFORMIO_BUILD_FLAGS="${original_platformio_build_flags} -DFIRMWARE_VERSION='\"${embedded_version_string}\"' -DOTA_VARIANT='\"${env_name}\"'${mota_target_flag}${mota_migration_flag}"
+  apply_observer_ota_channel_flags "$env_name"
   disable_debug_flags "$env_name"
   apply_debug_overrides "$env_name"
   apply_mqtt_bridge_override "$env_name"

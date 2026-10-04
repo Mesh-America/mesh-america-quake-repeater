@@ -447,6 +447,8 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
 #include <esp_sntp.h>
 #include <strings.h>
 #include <time.h>
+#include "NetworkLink.h"
+#include "OtaChannel.h"
 
 // Embedded CA bundle (produced by board_build.embed_files). Weak so non-bundle
 // builds still link; we check for presence at runtime.
@@ -737,6 +739,7 @@ static bool ota_streamFirmware(Client& client, size_t content_length, char reply
   }
 
   uint8_t buffer[2048];
+  OtaCompatScanner compat;
   size_t received_total = 0;
   int progress_decile = -1;
   uint32_t deadline = millis() + 20000;
@@ -761,8 +764,22 @@ static bool ota_streamFirmware(Client& client, size_t content_length, char reply
     if (wanted > sizeof(buffer)) wanted = sizeof(buffer);
     if (wanted > (size_t)available) wanted = (size_t)available;
     int received = client.read(buffer, wanted);
-    if (received <= 0) continue;
+    if (received <= 0) {
+      if (!client.connected()) {
+        strcpy(reply, "ERR: firmware download incomplete");
+        Update.abort();
+        return false;
+      }
+      if ((int32_t)(millis() - deadline) >= 0) {
+        strcpy(reply, "ERR: firmware download timeout");
+        Update.abort();
+        return false;
+      }
+      delay(1);
+      continue;
+    }
     deadline = millis() + 20000;
+    compat.consume(buffer, (size_t)received);
     if (Update.write(buffer, (size_t)received) != (size_t)received) {
       snprintf(reply, 160, "ERR: OTA write: %s", Update.errorString());
       Update.abort();
@@ -773,6 +790,25 @@ static bool ota_streamFirmware(Client& client, size_t content_length, char reply
     if (decile != progress_decile) {
       progress_decile = decile;
       mesh::usbLoggingPort().printf("OTA: %d%%\n", decile * 10);
+    }
+  }
+
+  {
+    OtaCompat own = {0, 0}, target = {0, 0};
+    const char* volatile own_tag = ota_compat_tag;  // retain the tag in the linked image
+    const bool own_valid = ota_compat_parse(own_tag + sizeof(OTA_COMPAT_TAG) - 1, &own);
+    const bool tagged = compat.finish(&target);
+    if (!own_valid || !tagged || !ota_compat_ok(own, target)) {
+      // Update.end() validates the image and selects its boot slot. Refuse before
+      // that commit, so even a reset or power loss cannot boot an unsafe target.
+      Update.abort();
+      if (!own_valid || !tagged) {
+        strcpy(reply, "ERR: OTA refused: invalid or missing compatibility tag; cable flash");
+      } else {
+        snprintf(reply, 160, "ERR: OTA refused: target compat %d/%x cannot preserve node %d/%x; cable flash",
+                 target.gen, (unsigned)target.caps, own.gen, (unsigned)own.caps);
+      }
+      return false;
     }
   }
 
@@ -861,6 +897,7 @@ static void ota_partitionSignature(char* out, size_t out_sz) {
 // which stays valid because that function blocks until the worker signals done.
 struct OtaTaskArgs {
   ESP32Board* self;
+  const char* manifest_base;
   const char* current_ver;
   bool dry_run;
   char* reply;
@@ -870,18 +907,23 @@ struct OtaTaskArgs {
 
 static void ota_task_entry(void* param) {
   OtaTaskArgs* a = static_cast<OtaTaskArgs*>(param);
-  a->result = a->self->otaFromManifestImpl(a->current_ver, a->dry_run, a->reply);
+  a->result = a->self->otaFromManifestImpl(a->manifest_base, a->current_ver, a->dry_run, a->reply);
   a->done = true;        // on a successful `ota update` we reboot before reaching here
   vTaskDelete(nullptr);
 }
 
-bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char reply[]) {
+bool ESP32Board::otaFromManifest(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) {
   // The TLS handshake (cert-bundle verify), JSON parse, and flash stream use far more
   // stack than the ~8 KB loop task offers - especially when reached via the deep
   // mesh-receive call chain (it overflows the loopTask canary). Run the work in a
   // dedicated 24 KB-stack task and block here until it finishes. The big stack is
   // freed when the task exits; on a successful update the chip reboots inside it.
-  OtaTaskArgs args = { this, current_ver, dry_run, reply, false, false };
+  struct NetworkSwitchGuard {
+    NetworkLink& link;
+    NetworkSwitchGuard() : link(activeNetworkLink()) { link.lockSwitching(); }
+    ~NetworkSwitchGuard() { link.unlockSwitching(); }
+  } network_guard;
+  OtaTaskArgs args = { this, manifest_base, current_ver, dry_run, reply, false, false };
   TaskHandle_t handle = nullptr;
   BaseType_t ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", 24576, &args, 5, &handle, 1);
   if (ok != pdPASS) {
@@ -894,11 +936,15 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
   return args.result;
 }
 
-bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char reply[]) {
+bool ESP32Board::otaFromManifestImpl(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) {
 #if !defined(OTA_MANIFEST_BASE) || !defined(OTA_VARIANT)
   strcpy(reply, "ERR: OTA not configured (build via build.sh)");
   return false;
 #else
+  if (manifest_base == nullptr || *manifest_base == 0) {
+    strcpy(reply, "ERR: OTA manifest base missing");
+    return false;
+  }
   if (WiFi.status() != WL_CONNECTED) {
     strcpy(reply, "ERR: WiFi not connected");
     return false;
@@ -931,10 +977,15 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
     // and the handshake + the bridge both fail). This only reads version info; the
     // firmware download below (ota update) is always TLS-verified. Requires the
     // manifest host to serve /v over HTTP (no forced HTTPS redirect).
-    if (strncmp(OTA_MANIFEST_BASE, "https://", 8) == 0) {
-      snprintf(murl, sizeof(murl), "http://%s/%s.json", OTA_MANIFEST_BASE + 8, OTA_VARIANT);
+    int url_len;
+    if (strncmp(manifest_base, "https://", 8) == 0) {
+      url_len = snprintf(murl, sizeof(murl), "http://%s/%s.json", manifest_base + 8, OTA_VARIANT);
     } else {
-      snprintf(murl, sizeof(murl), "%s/%s.json", OTA_MANIFEST_BASE, OTA_VARIANT);
+      url_len = snprintf(murl, sizeof(murl), "%s/%s.json", manifest_base, OTA_VARIANT);
+    }
+    if (url_len < 0 || (size_t)url_len >= sizeof(murl)) {
+      strcpy(reply, "ERR: manifest URL too long");
+      return false;
     }
     WiFiClient mclient;
     if (!ota_fetchManifest(mclient, murl, false, doc, reply)) {
@@ -949,7 +1000,11 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
 #else
     mclient.setCACertBundle(rootca_crt_bundle_start);
 #endif
-    snprintf(murl, sizeof(murl), "%s/%s.json", OTA_MANIFEST_BASE, OTA_VARIANT);
+    const int url_len = snprintf(murl, sizeof(murl), "%s/%s.json", manifest_base, OTA_VARIANT);
+    if (url_len < 0 || (size_t)url_len >= sizeof(murl)) {
+      strcpy(reply, "ERR: manifest URL too long");
+      return false;
+    }
     mesh::usbLoggingPort().printf("OTA: downloading manifest %s\n", murl);
     if (!ota_fetchManifest(mclient, murl, true, doc, reply)) {
       return false;
@@ -958,7 +1013,12 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
 
   // Copy fields out before the document is reused/cleared.
   char file_url[200] = {0}, avail_version[40] = {0}, avail_base[40] = {0}, avail_hash[24] = {0};
-  strncpy(file_url, doc["file"] | "", sizeof(file_url) - 1);
+  const char* manifest_file = doc["file"] | "";
+  if (strlen(manifest_file) >= sizeof(file_url)) {
+    strcpy(reply, "ERR: firmware URL too long");
+    return false;
+  }
+  strncpy(file_url, manifest_file, sizeof(file_url) - 1);
   strncpy(avail_version, doc["version"] | "", sizeof(avail_version) - 1);
   strncpy(avail_base, doc["baseVersion"] | "", sizeof(avail_base) - 1);
   strncpy(avail_hash, doc["hash"] | "", sizeof(avail_hash) - 1);
@@ -1009,10 +1069,15 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   bool same_base = (own_base[0] && avail_base[0] && strcmp(own_base, avail_base) == 0);
   bool have_builds = (own_build >= 0 && avail_build >= 0);
   bool diff_base = (own_base[0] && avail_base[0] && !same_base);
+  // Another channel's image always differs (its native base does), even from the same
+  // commit; build counters are per channel, so build numbers only compare natively.
+  bool cross_channel = (strcmp(manifest_base, OTA_MANIFEST_BASE) != 0);
 
   int behind = 0;
   bool up_to_date;
-  if (same_base && have_builds) {
+  if (cross_channel) {
+    up_to_date = false;
+  } else if (same_base && have_builds) {
     behind = avail_build - own_build;
     up_to_date = (behind <= 0);
   } else if (diff_base) {
@@ -1037,6 +1102,8 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   if (dry_run) {
     if (up_to_date) {
       snprintf(reply, 160, "up to date: %s", avail_disp);
+    } else if (cross_channel) {
+      snprintf(reply, 160, "update available: %s -> %s (channel switch)%s", own_disp, avail_disp, pc_note);
     } else if (same_base && have_builds) {
       snprintf(reply, 160, "update available: %s -> %s (%d behind)%s", own_disp, avail_disp, behind, pc_note);
     } else if (diff_base) {
@@ -1105,7 +1172,7 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
 #endif  // OTA_MANIFEST_BASE && OTA_VARIANT
 }
 #else
-bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char reply[]) {
+bool ESP32Board::otaFromManifest(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) {
   strcpy(reply, "ERR: not supported");
   return false;
 }

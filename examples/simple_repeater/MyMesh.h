@@ -569,6 +569,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   unsigned long scheduled_radio_save_retry_at;
   uint8_t scheduled_radio_retry_failures;
   ScheduledRadioSetting scheduled_radio_settings[MAX_SCHEDULED_RADIO_SETTINGS];
+  uint8_t _ota_update_channel = 0;  // Snapshot: later ota branch commands cannot retarget a queued update
   int  matching_peer_indexes[MAX_CLIENTS];
 #if defined(WITH_MQTT_BRIDGE)
   MQTTBridge* mqtt_bridge;
@@ -1549,6 +1550,7 @@ public:
   bool beginDeferredOtaUpdate() override {
     _ota_update_at = millis() + 2500;
     if (_ota_update_at == 0) _ota_update_at = 1;  // 0 means "none"
+    _ota_update_channel = _prefs.ota_channel;
 #if defined(WITH_MQTT_BRIDGE)
     // Broadcast START now, while the loop still runs (the 2.5 s reply window):
     // the deferred flash blocks the loop and, on success, reboots -- so a start

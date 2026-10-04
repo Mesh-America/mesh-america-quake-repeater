@@ -22,6 +22,7 @@
 #ifdef WITH_WEBCONFIG
 #include <WiFi.h>
 #endif
+#include <helpers/OtaChannel.h>
 
 static uint32_t nextRadioApplyRetryDelay(uint8_t& failure_count) {
   uint8_t shift = failure_count < 5 ? failure_count : 5;
@@ -2773,7 +2774,7 @@ void MyMesh::loop() {
     }
 
     char ota_reply[160];
-    if (may_flash && !_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+    if (may_flash && !_cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, ota_reply)) {
       mesh::usbConsolePort().printf("OTA: aborted - %s\r\n", ota_reply);
       may_flash = false;
     }

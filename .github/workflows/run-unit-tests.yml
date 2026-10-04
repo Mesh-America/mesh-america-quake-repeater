@@ -89,7 +89,14 @@ jobs:
           python3 -B scripts/check_arduinojson_pin.py
 
       - name: Run Unit Tests
-        run: pio test -e native -e native_kiss_modem -vv
+        run: pio test -e native -e native_kiss_modem -e native_ota_channel -vv
+
+      - name: Verify OTA channel persistence and published image tags
+        run: |
+          python3 -B test/test_ota_channel_persistence.py -v
+          python3 -B test/test_observer_ota_channel.py -v
+          python3 -B test/test_observer_build_channels.py -v
+          python3 -B scripts/verify_ota_channel.py --self-test
 
       - name: Verify build output cleanup safety
         run: python3 -B test/test_build_output_safety.py -v

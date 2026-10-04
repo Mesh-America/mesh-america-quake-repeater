@@ -766,6 +766,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   _prefs->usb_logging_enabled = 1;
   _prefs->usb_debug_enabled = 0;
   _prefs->trace_when_repeat_off = 0;
+  _prefs->ota_channel = 0;
 #ifdef WITH_RS232_BRIDGE
   _prefs->bridge_uart = WITH_RS232_BRIDGE_UART;
 #else
@@ -943,6 +944,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
   _prefs->usb_debug_enabled = 0;
   _prefs->trace_when_repeat_off = 0;
   _prefs->gps_sync_interval_hours = 0;
+  _prefs->ota_channel = 0;
 #if defined(RP2040_PLATFORM)
   File file = fs->open(filename, "r");
 #else
@@ -1342,6 +1344,10 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
                         if (file.available() >= (int)sizeof(_prefs->trace_when_repeat_off)) {
                           file.read((uint8_t *)&_prefs->trace_when_repeat_off,
                                     sizeof(_prefs->trace_when_repeat_off));
+                          if (file.available() >= (int)sizeof(_prefs->ota_channel)) {
+                            file.read((uint8_t *)&_prefs->ota_channel,
+                                      sizeof(_prefs->ota_channel));
+                          }
                         }
                       }
                     }
@@ -1500,6 +1506,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->direct_retry_recent_enabled = constrain(_prefs->direct_retry_recent_enabled, 0, 1);
     _prefs->flood_channel_data_enabled = constrain(_prefs->flood_channel_data_enabled, 0, 1);
     _prefs->telemetry_access = constrain(_prefs->telemetry_access, 0, 1);
+    if (_prefs->ota_channel > 2) _prefs->ota_channel = 0;
     if (_prefs->legacy_flood_channel_block_max_hops != FLOOD_CHANNEL_HOPS_ALL
         && (_prefs->legacy_flood_channel_block_max_hops < 1
             || _prefs->legacy_flood_channel_block_max_hops > 7)) {
@@ -1679,6 +1686,7 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   WRITE_COMMON_PREFS(&prefs->gps_sync_interval_hours);          // published GPS sync cadence
   WRITE_COMMON_PREFS(&prefs->usb_debug_enabled);               // appended USB debug intent
   WRITE_COMMON_PREFS(&prefs->trace_when_repeat_off);            // appended repeater trace exception
+  WRITE_COMMON_PREFS(&prefs->ota_channel);                     // appended WiFi OTA channel; never shift older fields
 
 #undef WRITE_COMMON_PREFS_BYTES
 #undef WRITE_COMMON_PREFS
@@ -1841,6 +1849,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->gps_sync_interval_hours, sizeof(_prefs->gps_sync_interval_hours)); // published GPS sync cadence
     file.write((uint8_t *)&_prefs->usb_debug_enabled, sizeof(_prefs->usb_debug_enabled));           // appended
     file.write((uint8_t *)&_prefs->trace_when_repeat_off, sizeof(_prefs->trace_when_repeat_off));   // appended
+    file.write((uint8_t *)&_prefs->ota_channel, sizeof(_prefs->ota_channel));                       // appended WiFi OTA channel
 
     _common_save_succeeded = file.commit();
     if (!_common_save_succeeded) {
