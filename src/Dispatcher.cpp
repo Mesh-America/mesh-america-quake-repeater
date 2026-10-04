@@ -48,6 +48,7 @@ void Dispatcher::setRadioAvailable(bool available) {
   if (radio_available == available) return;
 
   radio_available = available;
+  radio_nonrx_timer_armed = false;
   if (!dispatcher_started || !radio_available) return;
 
   const unsigned long now = _ms->getMillis();
@@ -78,6 +79,7 @@ void Dispatcher::begin() {
   outbound_cancellation = OutboundCancellation::None;
   ota_tx_airtime = 0;
   radio_nonrx_start = _ms->getMillis();
+  radio_nonrx_timer_armed = false;
 
   duty_cycle_window_ms = getDutyCycleWindowMs();
   float duty_cycle = 1.0f / (1.0f + getAirtimeBudgetFactor());
@@ -368,6 +370,13 @@ void Dispatcher::loop() {
   if (_radio->isCarrierWaveActive()) return;
 
   const unsigned long now = _ms->getMillis();
+  if (!radio_nonrx_timer_armed) {
+    // Application setup can outlast the watchdog after begin() leaves the
+    // radio in standby. Start observing when loop service actually begins,
+    // giving checkRecv() below its first normal opportunity to enter RX.
+    radio_nonrx_start = now;
+    radio_nonrx_timer_armed = true;
+  }
   // check for radio 'stuck' in mode other than Rx
   bool is_recv = _radio->isInRecvMode();
   if (is_recv != prev_isrecv_mode) {
