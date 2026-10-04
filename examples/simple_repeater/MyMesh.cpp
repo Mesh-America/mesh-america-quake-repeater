@@ -3670,6 +3670,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();   // also starts OTA (ota_ctx().begin) for all roles
   _fs = fs;
+#if ENV_INCLUDE_D7S
+  restoreClockFloor();  // before anything reads the time
+#endif
   // load persisted prefs
   _cli.loadPrefs(_fs);
   _cli.beginManagement(*this, _fs);
@@ -12631,6 +12634,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   checkBatteryAlert();
 #if ENV_INCLUDE_D7S
   checkQuakeAlert();
+  serviceClockFloor();
 #endif
   expireRecentRepeatersIfDue();
 #endif

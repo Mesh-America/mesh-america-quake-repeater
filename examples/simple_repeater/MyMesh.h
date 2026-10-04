@@ -90,6 +90,7 @@
 #include <helpers/AlertReporter.h>
 #if ENV_INCLUDE_D7S
 #include <helpers/sensors/SeismicAlert.h>
+#include <helpers/sensors/ClockFloor.h>
 #endif
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/ClientACL.h>
@@ -1680,5 +1681,12 @@ public:
   void checkQuakeAlert();
   bool quakeAlertBusy() const;
   bool handleQuakeCommand(const char* command, char* reply);
+  // Keeps the clock from going backwards across a restart (ClockFloor.h, docs/clock-floor.md).
+  clockfloor::Keeper clock_keeper;
+  uint32_t clock_boot_from = 0, clock_boot_to = 0;  // set when the clock was restored at boot
+  void restoreClockFloor();
+  void serviceClockFloor(bool now = false);
+  bool writeClockFloor(const clockfloor::Record& record);
+  bool handleClockFloorCommand(const char* command, char* reply);
 #endif
 };

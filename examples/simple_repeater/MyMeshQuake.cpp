@@ -172,7 +172,112 @@ bool MyMesh::quakeAlertBusy() const {
   return phase == seismic::Policy::Phase::WaitingForRecord || phase == seismic::Policy::Phase::Delaying;
 }
 
+// ---- Clock floor: keep the clock from going backwards across a restart --------------------------------
+
+namespace {
+const char CLOCK_FLOOR_FILE[] = "/clock_floor";
+}
+
+void MyMesh::restoreClockFloor() {
+  clockfloor::Record saved;
+  if (_fs != NULL) {
+    File file = mesh::openFileRead(_fs, CLOCK_FLOOR_FILE);
+    if (file) {
+      uint8_t bytes[clockfloor::kRecordSize];
+      const size_t size = file.size();
+      const bool whole = size == sizeof(bytes) && file.read(bytes, sizeof(bytes)) == (int)sizeof(bytes);
+      file.close();
+      clockfloor::Record decoded;
+      if (whole && clockfloor::decode(bytes, sizeof(bytes), decoded)) saved = decoded;  // else: ignore a damaged file
+    }
+  }
+  clock_keeper.begin(saved);
+  const uint32_t found = getRTCClock()->getCurrentTime();
+  const uint32_t target = clockfloor::restoreTime(found, saved);
+  if (target != 0) {
+    getRTCClock()->setCurrentTime(target);
+    clock_boot_from = found;
+    clock_boot_to = target;
+  }
+}
+
+bool MyMesh::writeClockFloor(const clockfloor::Record& record) {
+  if (_fs == NULL) return false;
+  uint8_t bytes[clockfloor::kRecordSize];
+  clockfloor::encode(record, bytes);
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  mesh::AtomicFileWriter file(_fs, CLOCK_FLOOR_FILE);
+#else
+  mesh::ContactFileTransaction file(_fs, CLOCK_FLOOR_FILE);
+#endif
+  if (!file) return false;
+  file.write(bytes, sizeof(bytes));
+  return file.commit();
+}
+
+// `now` skips the once-a-second throttle (used right before a planned restart).
+void MyMesh::serviceClockFloor(bool now) {
+  static uint32_t lastSecond = 0;
+  const uint32_t second = millis() / 1000;
+  if (!now && second == lastSecond) return;
+  lastSecond = second;
+  clockfloor::Record out;
+  if (!clock_keeper.update(getRTCClock()->getCurrentTime(), second, out)) return;
+  if (writeClockFloor(out)) clock_keeper.saved(out);
+  else clock_keeper.failed();
+}
+
+bool MyMesh::handleClockFloorCommand(const char* command, char* reply) {
+  // A planned restart or update: save the time first, so it comes back right. Not handled here: the
+  // command carries on to its normal handler.
+  if (strncmp(command, "reboot", 6) == 0 || strncmp(command, "clkreboot", 9) == 0
+      || strncmp(command, "start ota", 9) == 0) {
+    clock_keeper.requestSave();
+    serviceClockFloor(true);
+    return false;
+  }
+  if (strcmp(command, "get clock.floor") == 0) {
+    const clockfloor::Record& r = clock_keeper.record();
+    char saved[20] = "never";
+    if (r.renewedAt != 0) clockfloor::formatUtc(saved, sizeof(saved), r.renewedAt);
+    char boot[64] = "not restored";
+    if (clock_boot_to != 0) {
+      char from[20], to[20];
+      clockfloor::formatUtc(from, sizeof(from), clock_boot_from);
+      clockfloor::formatUtc(to, sizeof(to), clock_boot_to);
+      snprintf(boot, sizeof(boot), "restored %s -> %s", from, to);
+    }
+    snprintf(reply, 160, "> %s, every %u min; saved %s UTC; %lu writes (%lu failed); boot: %s", r.enabled ? "on" : "off",
+             (unsigned)r.intervalMin, saved, (unsigned long)clock_keeper.writes(), (unsigned long)clock_keeper.failures(),
+             boot);
+  } else if (strcmp(command, "get clock.floor.interval") == 0) {
+    snprintf(reply, 160, "> %u", (unsigned)clock_keeper.record().intervalMin);
+  } else if (strncmp(command, "set clock.floor ", 16) == 0) {
+    const char* value = skipSpaces(command + 16);
+    if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+      strcpy(reply, "Err - usage: set clock.floor <on|off>");
+      return true;
+    }
+    clock_keeper.setEnabled(strcmp(value, "on") == 0);
+    strcpy(reply, writeClockFloor(clock_keeper.record()) ? "OK" : "Err - could not save");
+  } else if (strncmp(command, "set clock.floor.interval ", 25) == 0) {
+    const long minutes = atol(skipSpaces(command + 25));
+    if (minutes < clockfloor::kMinIntervalMin || minutes > clockfloor::kMaxIntervalMin) {
+      snprintf(reply, 160, "Err - minutes between saves, %u to %u (the default %u is 4 a day)",
+               (unsigned)clockfloor::kMinIntervalMin, (unsigned)clockfloor::kMaxIntervalMin,
+               (unsigned)clockfloor::kDefaultIntervalMin);
+      return true;
+    }
+    clock_keeper.setIntervalMin((unsigned)minutes);
+    strcpy(reply, writeClockFloor(clock_keeper.record()) ? "OK" : "Err - could not save");
+  } else {
+    return false;
+  }
+  return true;
+}
+
 bool MyMesh::handleQuakeCommand(const char* command, char* reply) {
+  if (handleClockFloorCommand(command, reply)) return true;
   if (strcmp(command, "ver") == 0) {
     // Name the product, not just a number: "Quake Repeater v1.17.1.4 (Build: ...)". Only
     // this reply changes. getFirmwareVer() stays the bare version, because adverts, telemetry, the
