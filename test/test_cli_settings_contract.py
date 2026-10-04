@@ -195,6 +195,7 @@ class CLISettingsContractTest(unittest.TestCase):
             'key.backup.transport',                  # Identity-backup transport capability
             'mqtt', 'mqtt.running',                  # MQTT connection status
             'password', 'prv.key',                   # Local secret/identity reads
+            'public.key',                            # Read-only public identity
             'pwrmgt.bootreason', 'role',             # Boot/build facts
             'radio.rxps.config',                     # Detail view of radio.rxps
             'wifi.status', 'wifi.ip',                # Live WiFi link state
