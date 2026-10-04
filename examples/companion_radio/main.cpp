@@ -192,7 +192,21 @@ static bool isNetworkTerminalActive();
 #if defined(SERIAL_RX)
   #include <helpers/ArduinoSerialInterface.h>
   ArduinoSerialInterface hardware_serial_interface;
+  #if defined(ENABLE_USB_INTERFACE) && defined(CONFIG_IDF_TARGET_ESP32S3) \
+      && (!defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT)
+  // USB-UART boards can name the same pins as an additional serial transport.
+  // Give that physical port only one parser and TX owner; native USB is separate.
+  static constexpr bool companion_serial_shares_usb_port =
+      SERIAL_RX == SOC_RX0 && SERIAL_TX == SOC_TX0;
+  #else
+  static constexpr bool companion_serial_shares_usb_port = false;
+  #endif
+  #if defined(CONFIG_IDF_TARGET_ESP32S3) && ENV_INCLUDE_GPS == 1
+  // GPS owns UART1. The S3's spare UART2 can use the same Companion pins.
+  HardwareSerial companion_serial(2);
+  #else
   HardwareSerial companion_serial(1);
+  #endif
 #endif
 
 // platform file system
@@ -3490,11 +3504,13 @@ void setup() {
 
 // add hardware serial interface
 #if defined(SERIAL_RX)
-  companion_serial.setPins(SERIAL_RX, SERIAL_TX);
-  companion_serial.begin(115200);
-  hardware_serial_interface.begin(companion_serial);
-  hardware_serial_interface.enableFlowControl(true);
-  interface_manager.addInterface(InterfaceType::HardwareSerial, &hardware_serial_interface);
+  if (!companion_serial_shares_usb_port) {
+    companion_serial.setPins(SERIAL_RX, SERIAL_TX);
+    companion_serial.begin(115200);
+    hardware_serial_interface.begin(companion_serial);
+    hardware_serial_interface.enableFlowControl(true);
+    interface_manager.addInterface(InterfaceType::HardwareSerial, &hardware_serial_interface);
+  }
 #endif
 
   the_mesh.startInterface(interface_manager);

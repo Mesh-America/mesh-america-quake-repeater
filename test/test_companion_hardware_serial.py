@@ -175,7 +175,7 @@ class CompanionHardwareSerialTest(unittest.TestCase):
                     binary = work / f"{name}.exe"
                     built = subprocess.run([
                         compiler, "-std=c++17", "-Werror", *SANITIZERS,
-                        "-DD6=6", "-DD7=7", *[f"-D{define}" for define in defines],
+                        "-DD6=43", "-DD7=44", *[f"-D{define}" for define in defines],
                         f"-I{ROOT / 'test/mocks'}", f"-I{ROOT / 'src'}",
                         str(cpp), str(ROOT / "src/helpers/ArduinoSerialInterface.cpp"),
                         "-o", str(binary),
