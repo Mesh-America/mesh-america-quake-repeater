@@ -74,9 +74,9 @@ BUILD_PROFILE_EXPLICIT=0
 # Use the same explicit source prefix as canonical release packaging, not
 # Git's repository-dependent/adaptive abbreviated hash length.
 worker_source=$(declare -f build_firmware_one_profile)
-[[ "$worker_source" == *'commit_hash=$(git rev-parse HEAD)'* ]] \
+[[ "$worker_source" == *'full_source_commit=$(git rev-parse HEAD)'* ]] \
   || fail "builder does not derive publication prefix from full source identity"
-[[ "$worker_source" == *'commit_hash=${commit_hash:0:8}'* ]] \
+[[ "$worker_source" == *'commit_hash=${full_source_commit:0:8}'* ]] \
   || fail "builder publication hash disagrees with canonical release prefix"
 
 calls=()
