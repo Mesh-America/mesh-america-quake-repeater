@@ -627,15 +627,15 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         self.assertIn(
             "entry.reply_route = _serial->captureReplyRoute();", source
         )
-        self.assertIn(
-            "_serial->writeFrameToRoute(expected_ack_table[i].reply_route,",
-            source,
-        )
         self.assertIn("expected_ack_table[i].reply_route == route", source)
         ack_expiry = source[
             source.index("void MyMesh::expireExpectedAcks()") :
             source.index("MyMesh::AckTableEntry* MyMesh::findPendingTextMessage(")
         ]
+        self.assertIn(
+            "_serial->writeFrameToRoute(entry.reply_route, confirmation, 9) == 9",
+            ack_expiry,
+        )
         self.assertIn("entry.reply_route = NULL;", ack_expiry)
         self.assertNotIn("clearExpectedAck(entry);", ack_expiry)
         route_cancel = source[

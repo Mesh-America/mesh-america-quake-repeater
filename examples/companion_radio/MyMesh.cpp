@@ -227,6 +227,8 @@ static constexpr uint8_t DEFAULT_FEM_RX_GAIN = 1;
 #define LAZY_CONTACTS_WRITE_DELAY       5000
 #define CONTACT_PAGE_WRITE_GAP          100
 #define EXPECTED_ACK_RETRY_RECHECK_MILLIS 1000
+#define EXPECTED_ACK_HOST_GRACE_MILLIS 10000
+#define EXPECTED_ACK_HOST_RECHECK_MILLIS 10
 
 // The encrypted body of an ANON_REQ starts with its usual four-byte tag.
 // A distinct marker after that tag prevents a contact introduction from being
@@ -968,7 +970,7 @@ void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
 }
 
 void MyMesh::clearExpectedAck(AckTableEntry& entry, bool cancel_retries) {
-  if (cancel_retries && entry.ack != 0) {
+  if (cancel_retries && entry.ack != 0 && !entry.confirmed) {
     cancelActiveRetries(entry.retry_key);
   }
   memset(&entry, 0, sizeof(entry));
@@ -976,11 +978,11 @@ void MyMesh::clearExpectedAck(AckTableEntry& entry, bool cancel_retries) {
 
 void MyMesh::expireExpectedAcks() {
   unsigned long now = _ms->getMillis();
-  unsigned long nearest_delay = 0;
-  has_next_ack_expiry = false;
+  uint32_t nearest_delay = UINT32_MAX;
 
-  for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
-    AckTableEntry& entry = expected_ack_table[i];
+  for (AckTableEntry* cursor = expected_ack_table;
+       cursor != expected_ack_table + EXPECTED_ACK_TABLE_SIZE; ++cursor) {
+    AckTableEntry& entry = *cursor;
     if (entry.ack == 0) {
       continue;
     }
@@ -994,7 +996,27 @@ void MyMesh::expireExpectedAcks() {
       entry.reply_route = NULL;
     }
 
-    if (entry.expires_at == now || millisHasNowPassed(entry.expires_at)) {
+    // Use one 32-bit clock snapshot for this pass, including counter wrap.
+    const bool expired = (int32_t)((uint32_t)now - (uint32_t)entry.expires_at) >= 0;
+    if (entry.confirmed) {
+      // The radio delivery is complete. Retain only this captured transport's
+      // notification, with a fixed deadline independent of duplicate ACKs.
+      if (entry.reply_route == NULL || expired) {
+        clearExpectedAck(entry, false);
+        continue;
+      }
+      // Align both 32-bit fields while keeping the nine-byte wire format.
+      alignas(uint32_t) uint8_t storage[12];
+      uint8_t* confirmation = storage + 3;
+      confirmation[0] = PUSH_CODE_SEND_CONFIRMED;
+      memcpy(&confirmation[1], &entry.ack, 4);
+      uint32_t trip_time = entry.msg_sent;
+      memcpy(&confirmation[5], &trip_time, 4);
+      if (_serial->writeFrameToRoute(entry.reply_route, confirmation, 9) == 9) {
+        clearExpectedAck(entry, false);
+        continue;
+      }
+    } else if (expired) {
       if (!hasActiveRetries(entry.retry_key)) {
 #if COMPANION_FEATURE_TEXT_TERMINAL
         if (entry.terminal_origin && hasTerminalOutput()) {
@@ -1006,28 +1028,29 @@ void MyMesh::expireExpectedAcks() {
       }
       // Keep the semantic match alive while its lower-level retry sequence is
       // active, so a newer app submission can replace that sequence cleanly.
-      entry.expires_at = futureMillis(EXPECTED_ACK_RETRY_RECHECK_MILLIS);
+      entry.expires_at = (uint32_t)(now + EXPECTED_ACK_RETRY_RECHECK_MILLIS);
     }
 
-    unsigned long delay = entry.expires_at - now;
-    if (!has_next_ack_expiry || delay < nearest_delay) {
+    uint32_t delay = (uint32_t)(entry.expires_at - now);
+    if (entry.confirmed && delay > EXPECTED_ACK_HOST_RECHECK_MILLIS) {
+      delay = EXPECTED_ACK_HOST_RECHECK_MILLIS;
+    }
+    if (delay < nearest_delay) {
       nearest_delay = delay;
-      next_ack_expiry = entry.expires_at;
-      has_next_ack_expiry = true;
     }
   }
 
-  if (!has_next_ack_expiry) {
-    next_ack_expiry = 0;
-  }
+  has_next_ack_expiry = nearest_delay != UINT32_MAX;
+  next_ack_expiry = has_next_ack_expiry ? (uint32_t)(now + nearest_delay) : 0;
 }
 
 MyMesh::AckTableEntry* MyMesh::findPendingTextMessage(
     const uint8_t text_fingerprint[MAX_HASH_SIZE], uint32_t message_timestamp) {
   expireExpectedAcks();
-  for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
-    AckTableEntry& entry = expected_ack_table[i];
-    if (entry.ack != 0
+  for (AckTableEntry* cursor = expected_ack_table;
+       cursor != expected_ack_table + EXPECTED_ACK_TABLE_SIZE; ++cursor) {
+    AckTableEntry& entry = *cursor;
+    if (entry.ack != 0 && !entry.confirmed
         && entry.message_timestamp != message_timestamp
         && memcmp(entry.text_fingerprint, text_fingerprint, MAX_HASH_SIZE) == 0
         && hasActiveRetries(entry.retry_key)) {
@@ -1039,33 +1062,33 @@ MyMesh::AckTableEntry* MyMesh::findPendingTextMessage(
 
 ContactInfo*  MyMesh::processAck(const uint8_t *data) {
   expireExpectedAcks();
+  uint32_t incoming;
+  memcpy(&incoming, data, sizeof(incoming));
 
   // see if matches any in a table
-  for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
-    if (expected_ack_table[i].ack != 0
-        && memcmp(data, &expected_ack_table[i].ack, 4) == 0) { // got an ACK from recipient
-      out_frame[0] = PUSH_CODE_SEND_CONFIRMED;
-      memcpy(&out_frame[1], data, 4);
-      uint32_t trip_time = _ms->getMillis() - expected_ack_table[i].msg_sent;
-      memcpy(&out_frame[5], &trip_time, 4);
-      if (expected_ack_table[i].reply_route != NULL) {
-        _serial->writeFrameToRoute(expected_ack_table[i].reply_route,
-                                   out_frame, 9);
-      }
-
+  for (AckTableEntry* cursor = expected_ack_table;
+       cursor != expected_ack_table + EXPECTED_ACK_TABLE_SIZE; ++cursor) {
+    AckTableEntry& entry = *cursor;
+    if (entry.ack != 0
+        && incoming == entry.ack) { // got an ACK from recipient
+      // A duplicate must not cancel a newer chat timeout or learn another
+      // return path merely because its host notification is still queued.
+      if (entry.confirmed) continue;
+      ContactInfo* contact = entry.contact;
+      const unsigned long now = _ms->getMillis();
+      entry.msg_sent = (uint32_t)(now - entry.msg_sent);
+      entry.expires_at = (uint32_t)(now + EXPECTED_ACK_HOST_GRACE_MILLIS);
+      entry.confirmed = true;
+      cancelActiveRetries(entry.retry_key);
 #if COMPANION_FEATURE_TEXT_TERMINAL
-      if (expected_ack_table[i].terminal_origin && hasTerminalOutput()) {
+      if (entry.terminal_origin && hasTerminalOutput()) {
         terminalOutput().printf("\r\n  Got ACK! (round trip: %lu ms)\r\n> ",
-                                (unsigned long)trip_time);
+                                entry.msg_sent);
       }
 #endif
-
-      // NOTE: the same ACK can be received multiple times!
-      ContactInfo* contact = expected_ack_table[i].contact;
 #if MESH_ENABLE_ONE_KEY_DM
       if (contact != NULL && contact->type == ADV_TYPE_CHAT) rememberOneKeyAck(*contact);
 #endif
-      clearExpectedAck(expected_ack_table[i]);
       expireExpectedAcks();
       return contact;
     }

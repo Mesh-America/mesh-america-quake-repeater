@@ -754,17 +754,18 @@ private:
 #endif
 
   struct AckTableEntry {
+    uint8_t retry_key[MAX_HASH_SIZE];
+    bool confirmed; // msg_sent holds the frozen RTT while host admission is pending
+#if COMPANION_FEATURE_TEXT_TERMINAL
+    bool terminal_origin;
+#endif
     unsigned long msg_sent;
     unsigned long expires_at;
     uint32_t ack;
     uint32_t message_timestamp;
     ContactInfo* contact;
     uint8_t text_fingerprint[MAX_HASH_SIZE];
-    uint8_t retry_key[MAX_HASH_SIZE];
     BaseSerialInterface* reply_route;
-#if COMPANION_FEATURE_TEXT_TERMINAL
-    bool terminal_origin;
-#endif
   };
   #define EXPECTED_ACK_TABLE_SIZE 8
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table
