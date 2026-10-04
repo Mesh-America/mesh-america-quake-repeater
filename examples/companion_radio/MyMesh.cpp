@@ -2671,7 +2671,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
   _prefs.rx_powersaving_enabled = constrain(_prefs.rx_powersaving_enabled, 0, 1);
   _prefs.powersaving_enabled = constrain(_prefs.powersaving_enabled, 0, 1);
   _prefs.wifi_enabled = constrain(_prefs.wifi_enabled, 0, 1);
-  _prefs.usb_logging_enabled = constrain(_prefs.usb_logging_enabled, 0, 1);
+  _prefs.usb_logging_enabled = constrain(_prefs.usb_logging_enabled, 0, 2);
   _prefs.usb_debug_enabled = _prefs.usb_debug_enabled == 1 ? 1 : 0;
   _prefs.cad_enabled = constrain(_prefs.cad_enabled, 0, 1);
   if (_prefs.cad_scan_timeout_ms != 0
@@ -2694,6 +2694,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
   }
 #if MESH_USB_LOGGING_AVAILABLE
   const bool usb_logging_enabled = _prefs.usb_logging_enabled != 0;
+  mesh::configureUsbLoggingPacketStream(_prefs.usb_logging_enabled == 2);
   mesh::setUsbDebugEnabled(_prefs.usb_debug_enabled != 0);
   applyUsbLoggingState(usb_logging_enabled);
   if (!mesh::saveUsbLoggingBootPreference(usb_logging_enabled)) {
@@ -3404,9 +3405,13 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   }
   if (strcmp(command, "get usb.logging") == 0) {
     snprintf(reply, reply_size, "usb.logging %s; port: %s%s",
-             mesh::isUsbLoggingEnabled() ? "on" : "off",
+             mesh::isUsbLoggingEnabled()
+                 ? (mesh::isUsbLoggingPacketStream() ? "stream" : "on") : "off",
              mesh::usbLoggingPortDescription(),
-             mesh::usbLoggingInterfaceRestartRequired()
+             (mesh::usbLoggingInterfaceRestartRequired()
+              || (_prefs.usb_logging_enabled != 0
+                  && (_prefs.usb_logging_enabled == 2)
+                      != mesh::isUsbLoggingPacketStream()))
                  ? " (reboot required to change USB interfaces)" : "");
     return true;
   }
@@ -3416,29 +3421,37 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     while (*value == ' ' || *value == '\t') value++;
     bool enabled = false;
     bool reboot_if_needed = false;
-    if (!mesh::cli::parseLoggingToggle(value, enabled, reboot_if_needed)) {
-      snprintf(reply, reply_size, "Error: use set usb.logging <on|off> [reboot]");
+    const bool packet_stream = strcmp(value, "stream") == 0
+        || strcmp(value, "stream reboot") == 0;
+    if (packet_stream) {
+      enabled = true;
+      reboot_if_needed = value[6] != 0;
+    }
+    if (!packet_stream
+        && !mesh::cli::parseLoggingToggle(value, enabled, reboot_if_needed)) {
+      snprintf(reply, reply_size, "Error: use set usb.logging <on|off|stream> [reboot]");
     } else {
-      _prefs.usb_logging_enabled = enabled ? 1 : 0;
+      _prefs.usb_logging_enabled = enabled ? (packet_stream ? 2 : 1) : 0;
       applyUsbLoggingState(enabled);
       if (!savePrefs()) {
         snprintf(reply, reply_size, "Error: USB logging changed for this boot but save failed");
       } else if (!mesh::saveUsbLoggingBootPreference(enabled)) {
         snprintf(reply, reply_size, "Error: setting saved, but next-boot USB interface state could not be saved");
-      } else if (mesh::usbLoggingInterfaceRestartRequired()) {
+      } else if (mesh::usbLoggingInterfaceRestartRequired()
+          || (enabled && packet_stream != mesh::isUsbLoggingPacketStream())) {
         if (reboot_if_needed) {
           snprintf(reply, reply_size,
               "OK - USB logging %s (saved); rebooting to change USB interfaces",
-              enabled ? "on" : "off");
+              enabled ? (packet_stream ? "stream" : "on") : "off");
           _scheduled_reboot_at = futureMillis(1000);
         } else {
           snprintf(reply, reply_size,
               "OK - USB logging %s (saved); reboot required to change USB interfaces",
-              enabled ? "on" : "off");
+              enabled ? (packet_stream ? "stream" : "on") : "off");
         }
       } else {
         snprintf(reply, reply_size, "OK - USB logging %s (saved)",
-                 enabled ? "on" : "off");
+                 enabled ? (packet_stream ? "stream" : "on") : "off");
       }
     }
     return true;
@@ -3937,7 +3950,8 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     } else {
       _mqtt_enabled = wifi;
       if (!wifi) stopMQTT();
-      _prefs.usb_logging_enabled = usb ? 1 : 0;
+      _prefs.usb_logging_enabled = usb
+          ? (_prefs.usb_logging_enabled == 2 ? 2 : 1) : 0;
       applyUsbLoggingState(usb);
       if (!savePrefs() || !mesh::saveUsbLoggingBootPreference(usb)) {
         snprintf(reply, reply_size, "Error: logging output changed but USB setting could not be saved");
@@ -8831,16 +8845,18 @@ void MyMesh::handleTerminalCommand(char* command) {
   if (mesh::handleReaderCommand(command, terminalOutput())) return;
 #endif
 
+  // Match the repeater ASCII reply envelope so unmodified serial packet
+  // bridges can query this role. Framed/BLE replies retain their payloads.
   char local_reply[160];
   if (handleCompanionWirelessCommand(command, local_reply, sizeof(local_reply),
                                      _terminal_mode ? CompanionWirelessSource::Usb : CompanionWirelessSource::Network)
       || handleCompanionBluetoothCommand(command, local_reply, sizeof(local_reply),
                                       CompanionBluetoothCommandSource::Terminal)) {
-    terminalOutput().printf("  %s\r\n", local_reply);
+    terminalOutput().printf("  -> %s\r\n", local_reply);
     return;
   }
   if (handleDirectCommand(command, local_reply, sizeof(local_reply))) {
-    terminalOutput().printf("  %s\r\n", local_reply);
+    terminalOutput().printf("  -> %s\r\n", local_reply);
     return;
   }
 #if COMPANION_FEATURE_USB_MOTA_SOURCE
@@ -8851,7 +8867,7 @@ void MyMesh::handleTerminalCommand(char* command) {
 #endif
   if (!usb_mota_owner_transition
       && handleLocalControlCommand(command, local_reply, sizeof(local_reply))) {
-    terminalOutput().printf("  %s\r\n", local_reply);
+    terminalOutput().printf("  -> %s\r\n", local_reply);
     return;
   }
 
@@ -9090,7 +9106,7 @@ void MyMesh::handleTerminalCommand(char* command) {
   } else if (strncmp(command, "powersaving ", 12) == 0) {
     char reply[160];
     applyAndSavePowerSaving(command + 12, reply);
-    terminalOutput().printf("  %s\r\n", reply);
+    terminalOutput().printf("  -> %s\r\n", reply);
   } else if (strcmp(command, "get radio.rxps.config") == 0) {
     if (!radio_driver.supportsRxPowerSaving()) {
       terminalOutput().print("  ERROR: RX power saving is unsupported on this radio\r\n");
@@ -9155,7 +9171,7 @@ void MyMesh::handleTerminalCommand(char* command) {
   } else if (strcmp(command, "get wifi.powersave") == 0) {
     char reply[160];
     formatWiFiPowerSaving(reply, sizeof(reply));
-    terminalOutput().printf("  %s\r\n", reply);
+    terminalOutput().printf("  -> %s\r\n", reply);
 #endif
   } else if (strcmp(command, "get radio.rxgain") == 0) {
     if (!radio_driver.supportsRxBoostedGainMode()) {
@@ -9187,11 +9203,11 @@ void MyMesh::handleTerminalCommand(char* command) {
     if (strncmp(config, "powersaving ", 12) == 0) {
       char reply[160];
       applyAndSavePowerSaving(config + 12, reply);
-      terminalOutput().printf("  %s\r\n", reply);
+      terminalOutput().printf("  -> %s\r\n", reply);
     } else if (strncmp(config, "radio.rxps ", 11) == 0) {
       char reply[160];
       applyAndSaveRxPowerSaving(config + 11, reply);
-      terminalOutput().printf("  %s\r\n", reply);
+      terminalOutput().printf("  -> %s\r\n", reply);
 #if defined(ESP32) && defined(WIFI_SSID)
     } else if (strncmp(config, "wifi.powersave", 14) == 0
                && (config[14] == 0 || config[14] == ' '
@@ -9200,7 +9216,7 @@ void MyMesh::handleTerminalCommand(char* command) {
       while (*value == ' ' || *value == '\t') value++;
       char reply[160];
       applyAndSaveWiFiPowerSaving(value, reply, sizeof(reply));
-      terminalOutput().printf("  %s\r\n", reply);
+      terminalOutput().printf("  -> %s\r\n", reply);
 #endif
     } else if (strncmp(config, "radio.rxgain", 12) == 0
                && (config[12] == 0 || config[12] == ' '
@@ -9248,10 +9264,10 @@ void MyMesh::handleTerminalCommand(char* command) {
       }
     } else if (strncmp(config, "tx ", 3) == 0) {
       handleCommand(command, 0, local_reply);
-      terminalOutput().printf("  %s\r\n", local_reply);
+      terminalOutput().printf("  -> %s\r\n", local_reply);
     } else if (strncmp(config, "freq ", 5) == 0) {
       handleCommand(command, 0, local_reply);
-      terminalOutput().printf("  %s\r\n", local_reply);
+      terminalOutput().printf("  -> %s\r\n", local_reply);
     } else if (strncmp(config, "radio.fem.rxgain", 16) == 0
                && (config[16] == 0 || config[16] == ' '
                    || config[16] == '\t')) {
@@ -9290,7 +9306,7 @@ void MyMesh::handleTerminalCommand(char* command) {
       // changing the established terminal behavior of `set tx`, `set name`,
       // or the WiFi commands.
       if (handleCommand(command, 0, local_reply)) {
-        terminalOutput().printf("  %s\r\n", local_reply);
+        terminalOutput().printf("  -> %s\r\n", local_reply);
       } else {
         terminalOutput().printf("  ERROR: unknown setting: %s\r\n", config);
       }
@@ -9305,7 +9321,7 @@ void MyMesh::handleTerminalCommand(char* command) {
     scanInternalExtraFS(terminalOutput());
 #endif
   } else if (strcmp(command, "ver") == 0) {
-    terminalOutput().printf("Companion %s (protocol %u, build %s)\r\n",
+    terminalOutput().printf("  -> Companion %s (protocol %u, build %s)\r\n",
                   FIRMWARE_VERSION, (unsigned)FIRMWARE_VER_CODE, FIRMWARE_BUILD_DATE);
   } else if (strcmp(command, "help") == 0) {
     terminalOutput().print(
@@ -9363,7 +9379,7 @@ void MyMesh::handleTerminalCommand(char* command) {
 #if MESH_USB_LOGGING_AVAILABLE
     terminalOutput().print(
         "  get usb.logging\r\n"
-        "  set usb.logging <on|off> [reboot]\r\n"
+        "  set usb.logging <on|off|stream> [reboot]\r\n"
         "  get usb.debug\r\n"
         "  set usb.debug <on|off>\r\n"
 #if MESH_USB_CONSOLE_COOPERATIVE
@@ -9465,7 +9481,7 @@ void MyMesh::handleTerminalCommand(char* command) {
     // Fill the same safe shared-command surface for getters (`get name`,
     // `get radio`, `get tx`, and variant commands).  Terminal-only commands
     // above still win, including the richer `ver` response and reboot flow.
-    terminalOutput().printf("  %s\r\n", local_reply);
+    terminalOutput().printf("  -> %s\r\n", local_reply);
   } else {
     terminalOutput().printf("  ERROR: unknown command: %s\r\n", command);
   }

@@ -724,7 +724,17 @@ that a reboot is required. Use `set usb.logging on reboot` to save it and have
 the node reboot automatically after the reply. The second interface appears
 after that reboot. Likewise, `set usb.logging off reboot` removes interface
 `02`. The optional `reboot` word is accepted only in these exact command forms
-and triggers a reboot only when the descriptor actually needs to change.
+and triggers a reboot only when the USB logging mode or descriptor needs to change.
+
+For serial bridges that use one port for both commands and packets, including
+unmodified Cisien/meshcoretomqtt, use `set usb.logging stream reboot` instead.
+This saved packet-stream mode keeps only interface `00` and emits plaintext
+RAW/RX/TX records together with repeater-style `  -> ` CLI replies. Configure
+the bridge with the stable `*-if00` path. Binary Companion and serial mOTA are
+unavailable on that port while logging is enabled; `set usb.logging off` stops
+the stream and leaves the ASCII terminal active. BLE remains available.
+`get usb.logging` reports `stream` and the primary port after reboot. To return
+to separate logging, use `set usb.logging on reboot`.
 
 These are Full Companion **text-terminal** commands. The superficially similar
 `meshcli ... get usb.logging` command uses the Binary Companion parameter

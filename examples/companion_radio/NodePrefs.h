@@ -72,7 +72,7 @@ public:
   uint8_t powersaving_enabled = 0;
   uint8_t wifi_enabled = 0;
   uint8_t powersaving_policy_version = 0;
-  uint8_t usb_logging_enabled = 0;
+  uint8_t usb_logging_enabled = 0;  // 0=off, 1=separate where supported, 2=primary packet stream
   char bluetooth_name[mesh::companion::BLUETOOTH_NAME_SIZE] = {};
   uint16_t display_rotation_degrees = 0;
   uint8_t cad_enabled = 0;
