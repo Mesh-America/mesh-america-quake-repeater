@@ -108,8 +108,15 @@ protected:
     sort_array = sort_array_fallback;
     contact_capacity = CONTACT_PSRAM_FALLBACK_TOTAL_SLOTS;
 #endif
-    contact_table_revision = 0;
-    resetContacts();
+    // No live references exist during base construction. Seed the initially
+    // empty prefix directly; runtime resets also notify reference owners.
+#if defined(NRF52_PLATFORM)
+    for (int i = 0; i < MAX_ANON_CONTACTS; i++) {
+      contacts[i].storage_slot = mesh::storage::CONTACT_SLOT_NONE;
+    }
+#endif
+    num_contacts = MAX_ANON_CONTACTS;
+    contact_table_revision = 1;
 
   #ifdef MAX_GROUP_CHANNELS
     memset(channels, 0, sizeof(channels));
@@ -122,9 +129,13 @@ protected:
 
   void bootstrapRTCfromContacts();
   bool initializeContactStorage();
+  static void resetContactValue(ContactInfo& contact);
 
   void resetContacts() {
-    for (int i = 0; i < num_contacts; ++i) contacts[i] = ContactInfo();
+    for (int i = 0; i < num_contacts; ++i) {
+      onContactReferenceChanged(&contacts[i], NULL);
+      resetContactValue(contacts[i]);
+    }
 #if defined(NRF52_PLATFORM)
     for (int i = 0; i < MAX_ANON_CONTACTS; i++) {
       contacts[i].storage_slot = mesh::storage::CONTACT_SLOT_NONE;
@@ -147,8 +158,14 @@ protected:
   // safely retire its associated persistent state. A refusal must not mutate
   // the contact or its backing state.
   virtual bool onContactOverwrite(const ContactInfo&) { return true; };
+  // A replacement is already initialized with the same identity. Notify after
+  // copying it, before the old slot is cleared/reused; NULL retires an identity.
+  // Subclasses that retain no contact pointers need no relocation work.
+  virtual void onContactReferenceChanged(const ContactInfo*, ContactInfo*) {}
   virtual void onDiscoveredContact(ContactInfo& contact, bool is_new, uint8_t path_len, const uint8_t* path) = 0;
-  virtual ContactInfo* processAck(const uint8_t *data) = 0;
+  // Ownership does not require a surviving contact. Set peer to NULL when the
+  // expected ACK belongs to us but its recipient was removed or overwritten.
+  virtual bool processAck(const uint8_t *data, ContactInfo*& peer) = 0;
   virtual void onContactPathUpdated(const ContactInfo& contact) = 0;
   virtual bool onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_t in_path_len, uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len);
   virtual void onMessageRecv(const ContactInfo& contact, mesh::Packet* pkt, uint32_t sender_timestamp, const char *text) = 0;
@@ -190,7 +207,7 @@ protected:
   void stopConnection(const uint8_t* pub_key);
   bool hasConnectionTo(const uint8_t* pub_key);
   void markConnectionActive(const ContactInfo& contact);
-  ContactInfo* checkConnectionsAck(const uint8_t* data);
+  bool checkConnectionsAck(const uint8_t* data, ContactInfo*& peer);
   void checkConnections();
 
 public:
@@ -221,7 +238,8 @@ public:
   ContactInfo* lookupTransientContactByPubKey(const uint8_t* pub_key, int prefix_len);
   ContactInfo* lookupPersistentContactByPubKey(const uint8_t* pub_key, int prefix_len);
   bool isTransientContact(const ContactInfo& contact) const;
-  bool clearTransientContact(ContactInfo& contact);
+  // Supply a live same-identity replacement when promoting a transient peer.
+  bool clearTransientContact(ContactInfo& contact, ContactInfo* replacement = NULL);
   bool  removeContact(ContactInfo& contact);
   bool  addContact(const ContactInfo& contact);
   int getTotalContactSlots() const { return num_contacts; }

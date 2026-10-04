@@ -31,7 +31,7 @@ class CompanionAckDeliveryTests(unittest.TestCase):
         functions = "\n".join(extract_braced(source, signature) for signature in (
             "void MyMesh::clearExpectedAck(", "void MyMesh::expireExpectedAcks(",
             "MyMesh::AckTableEntry* MyMesh::findPendingTextMessage(",
-            "ContactInfo*  MyMesh::processAck(",
+            "bool MyMesh::processAck(",
             "void MyMesh::cancelSerialOperationsForRoute(",
             "bool MyMesh::hasFiniteDelayedReplyForRoute(",
         ))
