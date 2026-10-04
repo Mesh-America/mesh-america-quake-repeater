@@ -64,6 +64,12 @@ public:
     _file = fs->open(_temp, "w", true);
 #endif
     _ok = static_cast<bool>(_file);
+#if defined(ESP32_PLATFORM)
+    // Arduino's default 4 KiB stdio buffer hides large SPIFFS writes inside a
+    // single small write() pass. Configure this newly opened stream before
+    // its first I/O, keeping one contact record as the largest buffered batch.
+    _ok = _ok && _file.setBufferSize(storage::CONTACT_RECORD_SIZE);
+#endif
   }
   ~ContactFileTransaction() {
     if (_file) _file.close();
@@ -95,7 +101,13 @@ public:
     }
     if (ok && _commit_stage == CommitStage::Open) {
       _verify = _fs->open(_temp, "r");
-      ok = _verify && _verify.size() == _size;
+      ok = static_cast<bool>(_verify);
+#if defined(ESP32_PLATFORM)
+      // fread() otherwise reads ahead up to 4 KiB while the caller requests
+      // only one 64-byte CRC chunk. A failed configuration cannot publish.
+      ok = ok && _verify.setBufferSize(64);
+#endif
+      ok = ok && _verify.size() == _size;
       if (ok) {
         _verify_remaining = _size;
         _commit_stage = CommitStage::Verify;

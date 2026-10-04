@@ -20,6 +20,10 @@ class File {
   bool _write = false;
   unsigned _read_generation = 0;
   std::vector<uint8_t> _read_inode;
+  size_t _stdio_size = 4096, _backend_position = 0;
+  std::vector<uint8_t> _stdio_buffer;
+  size_t _read_buffer_position = 0;
+  void flushWriteBuffer();
 public:
   File() = default;
   explicit File(FakeFilesystem& fs) : _fs(&fs) {}
@@ -30,8 +34,9 @@ public:
   size_t write(const uint8_t* bytes, size_t length);
   size_t size() const;
   bool seek(size_t position);
-  void flush() {}
-  void close() { _fs = nullptr; }
+  bool setBufferSize(size_t size);
+  void flush();
+  void close();
 };
 
 class FakeFilesystem {
@@ -43,6 +48,13 @@ public:
   size_t capacity = 1024 * 1024;
   size_t max_write = std::numeric_limits<size_t>::max();
   size_t largest_read = 0, largest_write = 0;
+  // ESP's File wrapper is a buffered FILE*. Enable its 4 KiB default in
+  // production transaction tests, and count backend I/O separately from
+  // fwrite/fread calls so logical record/chunk bounds cannot hide batching.
+  bool emulate_stdio = false;
+  size_t largest_backend_read = 0, largest_backend_write = 0;
+  unsigned backend_reads = 0, backend_writes = 0;
+  unsigned buffer_config_calls = 0, fail_buffer_config = 0;
   std::string fail_read;
   bool metadata_error = false, fail_create = false, fail_remove = false;
   unsigned removes = 0, missing_remove_logs = 0;
@@ -116,6 +128,29 @@ size_t File::read(uint8_t* bytes, size_t length) {
   // opened on the same name observes the replacement, as SPIFFS/POSIX do.
   auto& data = _fs->generations[_path] == _read_generation
       ? _fs->files.at(_path) : _read_inode;
+  if (_fs->emulate_stdio) {
+    size_t copied = 0;
+    while (copied < length) {
+      if (_read_buffer_position == _stdio_buffer.size()) {
+        const size_t available = data.size() - std::min(data.size(), _backend_position);
+        const size_t count = std::min(_stdio_size, available);
+        if (count == 0) break;
+        ++_fs->backend_reads;
+        _fs->largest_backend_read = std::max(_fs->largest_backend_read, count);
+        _stdio_buffer.assign(data.begin() + _backend_position,
+                             data.begin() + _backend_position + count);
+        _backend_position += count;
+        _read_buffer_position = 0;
+      }
+      const size_t count = std::min(length - copied,
+          _stdio_buffer.size() - _read_buffer_position);
+      memcpy(bytes + copied, _stdio_buffer.data() + _read_buffer_position, count);
+      _read_buffer_position += count;
+      copied += count;
+    }
+    _position += copied;
+    return copied;
+  }
   const size_t count = std::min(length, data.size() - std::min(data.size(), _position));
   if (count) memcpy(bytes, data.data() + _position, count);
   _position += count;
@@ -126,6 +161,17 @@ size_t File::write(const uint8_t* bytes, size_t length) {
   ++_fs->writes;
   _fs->largest_write = std::max(_fs->largest_write, length);
   const size_t count = std::min(length, _fs->max_write);
+  if (_fs->emulate_stdio) {
+    size_t consumed = 0;
+    while (consumed < count) {
+      if (_stdio_buffer.size() == _stdio_size) flushWriteBuffer();
+      const size_t part = std::min(count - consumed, _stdio_size - _stdio_buffer.size());
+      _stdio_buffer.insert(_stdio_buffer.end(), bytes + consumed, bytes + consumed + part);
+      consumed += part;
+    }
+    _position += count;
+    return count;
+  }
   auto& data = _fs->files[_path];
   data.resize(_position + count);
   memcpy(data.data() + _position, bytes, count);
@@ -140,5 +186,27 @@ size_t File::size() const {
 bool File::seek(size_t pos) {
   if (!_fs || pos > size()) return false;
   _position = pos;
+  _backend_position = pos;
+  _stdio_buffer.clear();
+  _read_buffer_position = 0;
   return true;
 }
+bool File::setBufferSize(size_t size) {
+  assert(_position == 0 && _stdio_buffer.empty()); // before the stream's first I/O
+  if (!_fs || size == 0) return false;
+  if (++_fs->buffer_config_calls == _fs->fail_buffer_config) return false;
+  _stdio_size = size;
+  return true;
+}
+void File::flushWriteBuffer() {
+  if (!_fs || !_write || _stdio_buffer.empty()) return;
+  ++_fs->backend_writes;
+  _fs->largest_backend_write = std::max(_fs->largest_backend_write, _stdio_buffer.size());
+  auto& data = _fs->files[_path];
+  data.resize(_backend_position + _stdio_buffer.size());
+  memcpy(data.data() + _backend_position, _stdio_buffer.data(), _stdio_buffer.size());
+  _backend_position += _stdio_buffer.size();
+  _stdio_buffer.clear();
+}
+void File::flush() { if (_fs && _fs->emulate_stdio && _write) flushWriteBuffer(); }
+void File::close() { flush(); _fs = nullptr; }

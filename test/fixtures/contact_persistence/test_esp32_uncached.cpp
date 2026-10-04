@@ -115,10 +115,13 @@ unsigned drain(DataStore& store, Host& h, Filter filter = nullptr) {
   unsigned passes = 0;
   while (store.hasPendingContactWrites()) {
     const unsigned writes = SPIFFS.writes, reads = SPIFFS.reads;
+    const unsigned backend_writes = SPIFFS.backend_writes, backend_reads = SPIFFS.backend_reads;
     assert(++passes < 5000);
     assert(store.serviceContactWrites(&h, filter));
     assert(SPIFFS.writes - writes <= 1);
     assert(SPIFFS.reads - reads <= 1);
+    assert(SPIFFS.backend_writes - backend_writes <= 1);
+    assert(SPIFFS.backend_reads - backend_reads <= 1);
     // Transport service runs here, between every production pass. It must
     // never observe an unpublished replacement or a target-name gap.
     if (store.hasPendingContactWrites()) {
@@ -143,6 +146,7 @@ void bootCheck(const Host& expected, Filter filter = nullptr) {
 
 void boundedFullTableAndFirstSave() {
   SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
   Host h = table(350);
   for (unsigned i = 0; i < h.contacts.size(); i += 7) h.contacts[i].type = 0;
   DataStore store(SPIFFS);
@@ -151,6 +155,8 @@ void boundedFullTableAndFirstSave() {
   const auto passes = drain(store, h, keepContact);
   assert(passes > expected.size() / 64);
   assert(SPIFFS.largest_read <= 64);
+  assert(SPIFFS.largest_backend_read <= 64);
+  assert(SPIFFS.largest_backend_write <= mesh::storage::CONTACT_RECORD_SIZE);
   assert(SPIFFS.largest_write == mesh::storage::CONTACT_RECORD_SIZE);
   assert(SPIFFS.removes == 0); // first publication has no backup/temp to delete
   assert(h.copies >= h.contacts.size());
@@ -159,6 +165,7 @@ void boundedFullTableAndFirstSave() {
 
 void mutationRestart(unsigned phase) {
   SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
   Host h = table();
   SPIFFS.files["/contacts3"] = image(h);
   const auto old = SPIFFS.files.at("/contacts3");
@@ -187,6 +194,7 @@ void mutationRestart(unsigned phase) {
 
 void faultAndRetry(unsigned fault) {
   SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
   Host h = table();
   SPIFFS.files["/contacts3"] = image(h);
   const auto old = SPIFFS.files.at("/contacts3");
@@ -196,10 +204,12 @@ void faultAndRetry(unsigned fault) {
   if (fault == 0) SPIFFS.max_write = 50;
   if (fault == 1) SPIFFS.fail_create = true;
   if (fault == 7) SPIFFS.metadata_error = true;
-  bool injected = fault == 0 || fault == 1 || fault == 7;
+  if (fault == 8 || fault == 9) SPIFFS.fail_buffer_config = fault - 7;
+  bool injected = fault == 0 || fault == 1 || fault >= 7;
   bool success = true;
   for (unsigned pass = 0; pass < 1000 && success; ++pass) {
-    if (!injected && store.verifying()) {
+    if (!injected && store.verifying()
+        && SPIFFS.files.at("/contacts3.tmp").size() == image(h).size()) {
       if (fault == 2) SPIFFS.fail_read = "/contacts3.tmp";
       if (fault == 3) SPIFFS.files.at("/contacts3.tmp")[20] ^= 1;
       if (fault == 4) SPIFFS.files.at("/contacts3.tmp").pop_back();
@@ -220,12 +230,14 @@ void faultAndRetry(unsigned fault) {
   SPIFFS.fail_create = SPIFFS.metadata_error = false;
   SPIFFS.fail_read.clear();
   SPIFFS.fail_rename = 0;
+  SPIFFS.fail_buffer_config = 0;
   drain(store, h);
   bootCheck(h);
 }
 
 void syncFlushAndFilterChange() {
   SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
   Host h = table();
   SPIFFS.files["/contacts3"] = image(h);
   DataStore store(SPIFFS);
@@ -254,6 +266,7 @@ void syncFlushAndFilterChange() {
 
 void realBackupCleanupFailure() {
   SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
   Host h = table();
   const auto old = image(h);
   SPIFFS.files["/contacts3"] = old;
@@ -278,6 +291,7 @@ void realBackupCleanupFailure() {
 
 void rebootAbortRecoveryAndDurableRemoval() {
   SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
   Host h = table();
   const auto old = image(h);
   SPIFFS.files["/contacts3"] = old;
@@ -312,6 +326,7 @@ void rebootAbortRecoveryAndDurableRemoval() {
 
 void expectedAbsenceAndRealDeleteFailures() {
   SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
   DataStore store(SPIFFS);
   uint8_t key[32] = {1, 2, 3};
   char path[64];
@@ -345,7 +360,7 @@ void expectedAbsenceAndRealDeleteFailures() {
 int main() {
   boundedFullTableAndFirstSave();
   for (unsigned phase = 0; phase < 3; ++phase) mutationRestart(phase);
-  for (unsigned fault = 0; fault < 8; ++fault) faultAndRetry(fault);
+  for (unsigned fault = 0; fault < 10; ++fault) faultAndRetry(fault);
   syncFlushAndFilterChange();
   realBackupCleanupFailure();
   rebootAbortRecoveryAndDurableRemoval();

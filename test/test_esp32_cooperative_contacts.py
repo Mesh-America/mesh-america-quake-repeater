@@ -16,7 +16,13 @@ class UncachedESPContactsTest(unittest.TestCase):
     def test_explicit_uncached_qualification_configuration(self):
         self.run_fixture(["-DMESH_CONTACT_CACHE=0"])
 
-    def run_fixture(self, policy):
+    def test_default_stdio_writer_batch_is_detected(self):
+        self.run_fixture(["-DBOARD_HAS_PSRAM=1"], disable="writer")
+
+    def test_default_stdio_reader_readahead_is_detected(self):
+        self.run_fixture(["-DBOARD_HAS_PSRAM=1"], disable="reader")
+
+    def run_fixture(self, policy, disable=None):
         with tempfile.TemporaryDirectory(prefix="mesh-esp-inline-contacts-") as directory:
             temp = Path(directory)
             source = (ROOT / "examples/companion_radio/DataStore.cpp").read_text()
@@ -56,6 +62,25 @@ class UncachedESPContactsTest(unittest.TestCase):
             implementation += 'static const char hex_chars[] = "0123456789ABCDEF";\n'
             implementation += method(utils, "void Utils::toHex(") + "\n}\n"
             (temp / "store_under_test.h").write_text(implementation)
+            transaction = (ROOT / "src/helpers/ContactFileTransaction.h").read_text()
+            if disable == "writer":
+                self.assertIn("_ok = _ok && _file.setBufferSize(storage::CONTACT_RECORD_SIZE);", transaction)
+                transaction = transaction.replace(
+                    "_ok = _ok && _file.setBufferSize(storage::CONTACT_RECORD_SIZE);",
+                    "// Negative control: retain the SDK's default writer buffer.")
+            elif disable == "reader":
+                self.assertIn("ok = ok && _verify.setBufferSize(64);", transaction)
+                transaction = transaction.replace("ok = ok && _verify.setBufferSize(64);",
+                    "// Negative control: retain the SDK's default reader buffer.")
+            transaction = transaction.replace('#include "IdentityStore.h"',
+                                              '#include <helpers/IdentityStore.h>')
+            transaction = transaction.replace('#include "PersistentStoreFormat.h"',
+                                              '#include <helpers/PersistentStoreFormat.h>')
+            (temp / "transaction_under_test.h").write_text(transaction)
+            fixture = (ROOT / "test/fixtures/contact_persistence/test_esp32_uncached.cpp").read_text()
+            fixture = fixture.replace('#include <helpers/ContactFileTransaction.h>',
+                                      '#include "transaction_under_test.h"')
+            (temp / "test.cpp").write_text(fixture)
             packet = (ROOT / "src/Packet.cpp").read_text()
             (temp / "packet_under_test.h").write_text("namespace mesh {\n" + "\n".join(
                 method(packet, signature) for signature in (
@@ -71,12 +96,17 @@ class UncachedESPContactsTest(unittest.TestCase):
                 "-I", str(ROOT / "test/fixtures/contact_cache"),
                 "-I", str(ROOT / "lib/ed25519"), "-I", str(ROOT / "src"),
                 "-I", str(temp),
-                str(ROOT / "test/fixtures/contact_persistence/test_esp32_uncached.cpp"),
+                str(temp / "test.cpp"),
                 "-lcrypto", "-o", str(binary),
             ], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            if disable is None:
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            else:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("largest_backend_" + ("write" if disable == "writer" else "read"),
+                              result.stderr)
 
 
 if __name__ == "__main__":
