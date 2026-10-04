@@ -39,6 +39,7 @@
 #ifdef WITH_WEBCONFIG
 #include <WiFi.h>
 #endif
+#include <helpers/OtaChannel.h>
 #if MESH_ENABLE_TELEMETRY_HISTORY && defined(STM32_PLATFORM)
 #include <sys/types.h>
 extern "C" caddr_t _sbrk(int increment);
@@ -12794,7 +12795,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
       mesh::usbConsolePort().printf("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge\r\n");
       otaAlert("OTA aborted: MQTT stop unclean, bridge resumed");
       setBridgeState(true);
-    } else if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+    } else if (!_cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, ota_reply)) {
       mesh::usbConsolePort().printf("OTA: aborted, resuming bridge - %s\r\n", ota_reply);
       char ota_alert_msg[160];
       snprintf(ota_alert_msg, sizeof(ota_alert_msg), "OTA aborted: %s", ota_reply);

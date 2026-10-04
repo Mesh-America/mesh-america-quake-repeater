@@ -21,7 +21,7 @@ int main() {
   cli.savePrefs(&cli.fs, PrefsSaveRouting::Scope::Common);
   assert(cli._common_save_succeeded);
   const auto baseline = cli.fs.files["/com_prefs"];
-  assert(baseline.size() == 873);
+  assert(baseline.size() == 874);
   const size_t trace_offset = 872, debug_offset = 871, gps_offset = 869;
   assert(baseline[trace_offset] == 0 && baseline[debug_offset] == 1);
   assert(baseline[866] == 48 && baseline[867] == 0 && baseline[868] == 1);
@@ -69,7 +69,7 @@ int main() {
   assert(cli.prefs.trace_when_repeat_off == 0);
 
   // Both enable and disable must preserve the saved and requested state when
-  // staging, the new final-byte write, readback or publication fails.
+  // staging, the trace-byte write, readback or publication fails.
   for (uint8_t desired : {1, 0}) {
     cli.set(desired ? "repeat.trace off" : "repeat.trace on", reply);
     assert(cli.prefs.trace_when_repeat_off == uint8_t(!desired));
@@ -128,7 +128,7 @@ int main() {
   // reset prior RAM intent to OFF. GPS was published before local debug/trace;
   // a complete GPS-only image must not reinterpret either GPS byte as intent.
   auto image = enabled;
-  for (size_t size = 0; size < image.size(); ++size) {
+  for (size_t size = 0; size <= trace_offset; ++size) {
     CommonCLI reader;
     reader.prefs.trace_when_repeat_off = 1;
     reader.prefs.usb_debug_enabled = 1;
@@ -139,6 +139,12 @@ int main() {
     else assert(reader.prefs.usb_debug_enabled == 0);
     if (size >= gps_offset + 2) assert(reader.prefs.gps_sync_interval_hours == 336);
   }
+  // An old image containing trace but lacking the later channel byte keeps trace ON.
+  CommonCLI old_reader;
+  old_reader.prefs.ota_channel = 2;
+  old_reader.fs.files["/com_prefs"] = {image.begin(), image.begin() + trace_offset + 1};
+  old_reader.loadPrefsInt(&old_reader.fs, "/com_prefs");
+  assert(old_reader.prefs.trace_when_repeat_off == 1 && old_reader.prefs.ota_channel == 0);
   // Explicit old GPS-only files with either byte equal to one must not arm
   // the local boolean preferences, regardless of their previous RAM values.
   for (uint16_t hours : {1, 256, 257, 336}) {
