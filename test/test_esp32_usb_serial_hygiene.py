@@ -356,18 +356,21 @@ int main() {
         )
         self.assertIn("return Serial.write(data, size);", guarded_write)
 
-        kick_start = logging.index(
-            "static void serviceEsp32HwcdcTxKickExclusive"
-        )
-        kick_end = logging.index("#endif", kick_start)
-        kick = logging[kick_start:kick_end]
+        # Extract complete functions: their pinned-SDK/fallback branches now
+        # contain nested #endif directives inside the outer platform guard.
+        kick = "\n".join(extract_braced(logging, signature) for signature in (
+            "static void serviceEsp32HwcdcTxKickExclusive(void*)",
+            "static void serviceEsp32HwcdcTxKick()",
+        ))
         self.assertIn("Serial.availableForWrite()", kick)
         self.assertIn("esp32_hwcdc_tx_buffer_capacity.load(", kick)
+        self.assertIn("meshEsp32HwcdcTxPending()", kick)
         self.assertIn("canAccessEsp32Hwcdc(nullptr)", kick)
         self.assertIn("Serial.isPlugged()", kick)
         self.assertIn("usb_serial_jtag_ll_txfifo_flush();", kick)
         self.assertIn("USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY", kick)
         self.assertIn("portENTER_CRITICAL(&esp32_hwcdc_session_mux)", kick)
+        self.assertIn("meshEsp32HwcdcKickTx();", kick)
         self.assertIn("tryRunExclusive(", kick)
 
         event_start = logging.index("static void handleEsp32HwcdcEvent")
