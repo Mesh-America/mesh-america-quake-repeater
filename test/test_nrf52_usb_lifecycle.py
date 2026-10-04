@@ -100,6 +100,7 @@ static std::atomic<bool> usb_logging_preference_known{false};
 static bool enabled = false, dedicated_usb_logging_port_started = false;
 static bool dedicated_usb_logging_port_configured = false;
 static bool isUsbLoggingEnabled() { return enabled; }
+static bool isUsbLoggingPacketStream() { return false; }
 static bool isUsbDebugLoggingEnabled() { return false; }
 static void setPlatformDebugOutputEnabled(bool) {}
 struct Port {
@@ -257,6 +258,8 @@ struct Device {
 } TinyUSBDevice;
 namespace mesh {
 static void clearUsbLoggingClientActivity() {}
+static bool isUsbLoggingPacketStream() { return false; }
+@DEDICATED@
 @GATES@
 static std::atomic<bool> dedicated_usb_logging_port_connected{true};
 static std::atomic<uint32_t> dedicated_usb_logging_reset_generation{0};
@@ -302,6 +305,7 @@ int main() {
 }
 '''
         source = source.replace("@GATES@", gates)
+        source = source.replace("@DEDICATED@", function("bool hasDedicatedUsbLoggingPort("))
         source = source.replace("@RESTART@", function("static void restartDedicatedUsbLoggingHostSession()"))
         source = source.replace("@COMPLETE@", function("static void completePrimaryUsbSessionReset("))
         self.run_native(source)
