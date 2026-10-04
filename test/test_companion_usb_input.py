@@ -575,6 +575,17 @@ int main() {
 '''
 
 
+def bind_production_input_constants(harness):
+    terminal_line = re.search(r"static char usb_terminal_line\[[^\n]+;", MAIN).group()
+    rx_capacity = re.search(r"#define MESH_ESP32_USB_RX_BUFFER_SIZE (\d+)",
+                            (ROOT / "src/helpers/UsbLogging.h").read_text()).group(1)
+    max_trans_unit = re.search(r"#define MAX_TRANS_UNIT\s+(\d+)",
+                               (ROOT / "src/MeshCore.h").read_text()).group(1)
+    return (harness.replace("@TERMINAL_LINE_DECL@", terminal_line)
+                   .replace("@HWCDC_RX_CAPACITY@", rx_capacity)
+                   .replace("@MAX_TRANS_UNIT@", max_trans_unit))
+
+
 class CompanionUsbInputTests(unittest.TestCase):
     def test_actual_usb_input_state_machines(self):
         functions = "\n".join(extract_braced(MAIN, signature)
@@ -596,18 +607,11 @@ class CompanionUsbInputTests(unittest.TestCase):
         functions = functions.replace("static void enterUsbTerminalMode(bool show_banner)",
                                       "static void enterUsbTerminalMode(bool show_banner = true)")
         accessor = extract_braced(CONTEXT, "static SerialMotaSource& serialFolderSource()")
-        terminal_line = re.search(r"static char usb_terminal_line\[[^\n]+;", MAIN).group()
-        rx_capacity = re.search(r"#define MESH_ESP32_USB_RX_BUFFER_SIZE (\d+)",
-                                (ROOT / "src/helpers/UsbLogging.h").read_text()).group(1)
-        max_trans_unit = re.search(r"#define MAX_TRANS_UNIT\s+(\d+)",
-                                  (ROOT / "src/MeshCore.h").read_text()).group(1)
         with tempfile.TemporaryDirectory() as directory:
             cpp = Path(directory) / "usb-input.cpp"
-            cpp.write_text(HARNESS.replace("@FUNCTIONS@", functions)
-                           .replace("@SOURCE_ACCESSOR@", accessor)
-                           .replace("@TERMINAL_LINE_DECL@", terminal_line)
-                           .replace("@HWCDC_RX_CAPACITY@", rx_capacity)
-                           .replace("@MAX_TRANS_UNIT@", max_trans_unit))
+            cpp.write_text(bind_production_input_constants(
+                HARNESS.replace("@FUNCTIONS@", functions)
+                       .replace("@SOURCE_ACCESSOR@", accessor)))
             for sanitizer in (False, True):
                 with self.subTest(sanitizer=sanitizer):
                     binary = Path(directory) / ("usb-input-" + str(sanitizer))

@@ -6,7 +6,9 @@ import subprocess
 import tempfile
 import unittest
 
-from test_companion_usb_input import CONTEXT, HARNESS, MAIN, ROOT
+from test_companion_usb_input import (
+    CONTEXT, HARNESS, MAIN, ROOT, bind_production_input_constants,
+)
 from test_replay_reset_integration import extract_braced
 
 
@@ -196,9 +198,9 @@ class CompanionUsbLoggingHandoffTests(unittest.TestCase):
             "static bool usb_terminal_host_reset_completion_pending=false;\n"
             "static bool isNetworkTerminalActive() { return network; }\n"
             "static void serviceUsbLoggingOwnership(bool);")
-        source = harness.replace("@FUNCTIONS@", functions).replace(
+        source = bind_production_input_constants(harness.replace("@FUNCTIONS@", functions).replace(
             "@SOURCE_ACCESSOR@",
-            extract_braced(CONTEXT, "static SerialMotaSource& serialFolderSource()"))
+            extract_braced(CONTEXT, "static SerialMotaSource& serialFolderSource()")))
         with tempfile.TemporaryDirectory() as directory:
             cpp = Path(directory) / "usb-handoff.cpp"
             cpp.write_text(source + CASES, encoding="ascii")
