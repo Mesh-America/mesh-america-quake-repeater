@@ -9634,6 +9634,11 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     while (*command == ' ' || *command == '\t') command++;
   }
 
+#if COMPANION_FEATURE_READER
+  if (sender_timestamp == 0
+      && mesh::handleReaderReply(command, reply, reply_capacity)) return true;
+#endif
+
 #if defined(NRF52_POWER_MANAGEMENT)
   if (mesh::power::handleVoltagePolicyCommand(command, reply,
                                                reply_capacity)) return true;
@@ -9935,6 +9940,11 @@ void MyMesh::checkCLIRescueCmd() {
     cli_command[len - 1] = 0;  // replace newline with C string null terminator
 
     reply_buf[0] = 0;
+#if COMPANION_FEATURE_READER
+    if (mesh::handleReaderCommand(cli_command, output)) {
+      // USB rescue is a text stream and can print the complete verse.
+    } else
+#endif
     if (handleCommand(cli_command, 0, reply_buf)) {
       // command was handled, print reply output
       output.print("  "); output.print(reply_buf); output.println();

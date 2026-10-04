@@ -116,11 +116,72 @@ class CompanionReaderTest(unittest.TestCase):
         start = source.index("void MyMesh::handleTerminalCommand(")
         end = source.index("\nvoid MyMesh::enterCLIRescue()", start)
         terminal = source[start:end]
-        self.assertEqual(source.count("mesh::handleReaderCommand("), 1)
+        self.assertEqual(source.count("mesh::handleReaderCommand("), 2)
         self.assertLess(terminal.index("mesh::handleReaderCommand("),
                         terminal.index("char local_reply[160]"))
         self.assertIn("get reader <chapter>:<verse> (World English Bible, offline)", terminal)
         self.assertEqual(terminal.count("#if COMPANION_FEATURE_READER"), 2)
+        rescue = extract_braced(source, "void MyMesh::checkCLIRescueCmd()")
+        self.assertLess(rescue.index("mesh::handleReaderCommand(cli_command, output)"),
+                        rescue.index("handleCommand(cli_command, 0, reply_buf)"))
+
+    def test_production_bounded_reader_dispatch_preserves_tags_and_local_access(self):
+        cc, cxx = shutil.which("gcc"), shutil.which("g++")
+        if not cc or not cxx:
+            self.skipTest("host GCC and G++ required")
+        source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="utf-8")
+        handler = extract_braced(source, "bool MyMesh::handleCommand(")
+        # Compile the actual dispatch prefix, including its AA| correlation
+        # handling and local-console gate, against the real Reader handler.
+        handler = handler[:handler.index("#if defined(NRF52_POWER_MANAGEMENT)")]
+        handler += "  return false;\n}\n"
+        harness = r'''
+#include <Arduino.h>
+#include <helpers/CompanionReader.h>
+#include <cassert>
+#include <cstring>
+#include <string>
+struct MyMesh {
+  bool handleCommand(const char*, uint32_t, char*);
+};
+@HANDLER@
+int main() {
+  MyMesh mesh;
+  struct Guarded { char reply[160]; uint32_t after; } out{};
+  out.after = 0xaabbccdd;
+  assert(mesh.handleCommand("AA|get reader 3:16", 0, out.reply));
+  assert(std::string(out.reply).find("AA|Reader 3:16 (WEB)\n") == 0);
+  assert(std::string(out.reply).find("eternal life.") != std::string::npos);
+  assert(std::string(out.reply).find("Next:") == std::string::npos);
+  assert(strlen(out.reply) < sizeof(out.reply) && out.after == 0xaabbccdd);
+  assert(mesh.handleCommand("B2|get reader 21:17", 0, out.reply));
+  assert(std::string(out.reply).find("B2|Reader 21:17 [1/") == 0);
+  assert(std::string(out.reply).find("Next: get reader 21:17 2") != std::string::npos);
+  assert(strlen(out.reply) < sizeof(out.reply) && out.after == 0xaabbccdd);
+  assert(mesh.handleCommand("C3|get reader 21:17 2", 0, out.reply));
+  assert(std::string(out.reply).find("C3|Reader 21:17 [2/") == 0);
+  assert(strlen(out.reply) < sizeof(out.reply) && out.after == 0xaabbccdd);
+  assert(mesh.handleCommand("D4|get reader", 0, out.reply));
+  assert(std::string(out.reply).find("D4|ERROR: use get reader") == 0);
+  assert(!mesh.handleCommand("get reader 3:16", 123, out.reply));
+  assert(!mesh.handleCommand("AA|get reader 3:16", 123, out.reply));
+  assert(!mesh.handleCommand("get name", 0, out.reply));
+}
+'''.replace("@HANDLER@", handler)
+        with tempfile.TemporaryDirectory(prefix="meshcore-reader-dispatch-") as directory:
+            directory = Path(directory)
+            generated = directory / "dispatch.cpp"
+            generated.write_text(harness)
+            for platform in ("ESP32_PLATFORM", "NRF52_PLATFORM"):
+                flags = [f"-D{platform}=1", "-DCOMPANION_RADIO_FULL=1", "-DENABLE_USB_INTERFACE=1"]
+                obj, binary = directory / "tinf.o", directory / "dispatch.exe"
+                self.run_checked([cc, "-std=c11", "-Os", *flags, "-c",
+                                  str(ROOT / "src/helpers/ota/OtaTinf.c"), "-o", str(obj)])
+                self.run_checked([cxx, "-std=c++17", "-Os", "-Wall", "-Wextra", "-Werror",
+                                  *flags, "-I" + str(ROOT / "src"), "-I" + str(FIXTURE),
+                                  str(generated), str(ROOT / "src/helpers/CompanionReader.cpp"),
+                                  str(obj), "-o", str(binary)])
+                self.run_checked([str(binary)])
 
     def test_reader_navigation_and_bookmark_recovery(self):
         cc, cxx = shutil.which("gcc"), shutil.which("g++")
