@@ -48,6 +48,11 @@ using DataStoreHost = Host;
 // all save/load/dirty/transaction bodies below come from production sources.
 class DataStore {
   FakeFilesystem* _fs;
+  // Advert queue behavior is covered by its dedicated production fixture;
+  // these hardware seams keep this test focused on contacts and disk delete.
+  struct { bool synchronous_io = false; } _advert_write;
+  void invalidateAdvertWrite(const uint8_t[], int) {}
+  void retireAdvertWrite(const uint8_t[], int) {}
   bool _channel_load_incomplete = false;
   bool _uncached_contact_load_incomplete = false;
 #include "contact_write_state_under_test.h"
@@ -166,8 +171,8 @@ void boundedFullTableAndFirstSave() {
   const auto passes = drain(store, h, keepContact);
   assert(passes > expected.size() / 64);
   assert(SPIFFS.largest_read <= 64);
-  assert(SPIFFS.largest_backend_read <= 64);
-  assert(SPIFFS.largest_backend_write <= mesh::storage::CONTACT_RECORD_SIZE);
+  assert(SPIFFS.largest_backend_read <= 128);
+  assert(SPIFFS.largest_backend_write <= 251);
   assert(SPIFFS.largest_write == mesh::storage::CONTACT_RECORD_SIZE);
   assert(SPIFFS.removes == 0); // first publication has no backup/temp to delete
   assert(h.copies >= h.contacts.size());
@@ -515,8 +520,80 @@ void expectedAbsenceAndRealDeleteFailures() {
   assert(SPIFFS.removes == 2 && SPIFFS.missing_remove_logs == 0);
 }
 
+// Use the production transaction and the same complete 347-contact image for
+// old/new stdio admission measurements. Backend calls model fwrite/fread
+// buffering, not physical SPIFFS flash operations or hardware latency.
+void bufferedAdmissionBenchmark() {
+  SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
+  const auto bytes = image(table(347));
+  mesh::ContactFileTransaction writer(&SPIFFS, "/contacts3", companionPathPresence);
+  assert(writer);
+  for (size_t offset = 0; offset < bytes.size(); offset += mesh::storage::CONTACT_RECORD_SIZE) {
+    const auto before = SPIFFS.backend_writes;
+    assert(writer.write(bytes.data() + offset, mesh::storage::CONTACT_RECORD_SIZE)
+           == mesh::storage::CONTACT_RECORD_SIZE);
+    assert(SPIFFS.backend_writes - before <= 1);
+  }
+  auto progress = mesh::ContactFileTransaction::CommitProgress::Pending;
+  unsigned passes = 0;
+  while (progress == mesh::ContactFileTransaction::CommitProgress::Pending) {
+    const auto before_reads = SPIFFS.backend_reads, before_writes = SPIFFS.backend_writes;
+    assert(++passes < 1000);
+    progress = writer.serviceCommit();
+    assert(SPIFFS.backend_reads - before_reads <= 1);
+    assert(SPIFFS.backend_writes - before_writes <= 1);
+  }
+  assert(progress == mesh::ContactFileTransaction::CommitProgress::Succeeded);
+  assert(SPIFFS.files.at("/contacts3") == bytes);
+  assert(SPIFFS.largest_read == 64);
+  assert(SPIFFS.largest_write == mesh::storage::CONTACT_RECORD_SIZE);
+  printf("{\"bytes\":%zu,\"logical_writes\":%u,\"logical_reads\":%u,"
+         "\"backend_writes\":%u,\"backend_reads\":%u,\"max_backend_write\":%zu,"
+         "\"max_backend_read\":%zu,\"commit_passes\":%u,\"transaction_size\":%zu}\n",
+         bytes.size(), SPIFFS.writes, SPIFFS.reads, SPIFFS.backend_writes,
+         SPIFFS.backend_reads, SPIFFS.largest_backend_write,
+         SPIFFS.largest_backend_read, passes, sizeof(writer));
+}
+
+void boundedCancellationFlush() {
+  // 251 records land exactly on a 251-byte stdio boundary because the record
+  // size is 152. Both sides of that boundary must preserve the committed
+  // image and flush at most one partial buffer when abandoning the temp.
+  for (unsigned records : {1U, 250U, 251U, 252U}) {
+    SPIFFS = FakeFilesystem();
+    SPIFFS.emulate_stdio = true;
+    const auto old = image(table(1));
+    const auto bytes = image(table(records));
+    SPIFFS.files["/contacts3"] = old;
+    unsigned before_cancel = 0;
+    {
+      mesh::ContactFileTransaction writer(&SPIFFS, "/contacts3", companionPathPresence);
+      assert(writer);
+      for (size_t offset = 0; offset < bytes.size(); offset += mesh::storage::CONTACT_RECORD_SIZE) {
+        const auto before = SPIFFS.backend_writes;
+        assert(writer.write(bytes.data() + offset, mesh::storage::CONTACT_RECORD_SIZE)
+               == mesh::storage::CONTACT_RECORD_SIZE);
+        assert(SPIFFS.backend_writes - before <= 1);
+      }
+      assert(SPIFFS.backend_writes == bytes.size() / 251);
+      assert(SPIFFS.files.at("/contacts3") == old);
+      before_cancel = SPIFFS.backend_writes;
+    }
+    assert(SPIFFS.backend_writes - before_cancel == (bytes.size() % 251 != 0));
+    assert(SPIFFS.backend_writes == (bytes.size() + 250) / 251);
+    assert(SPIFFS.largest_backend_write <= 251);
+    assert(SPIFFS.files.at("/contacts3") == old);
+    assert(!SPIFFS.exists("/contacts3.tmp"));
+  }
+}
+
 int main() {
+#if defined(CONTACT_BUFFER_BENCHMARK)
+  bufferedAdmissionBenchmark();
+#else
   boundedFullTableAndFirstSave();
+  boundedCancellationFlush();
   deferredBeginCancellationAndCrashRecovery();
   deferredBeginFaultsAndSynchronousDefaults();
   mutationDuringEveryBeginStage();
@@ -526,4 +603,5 @@ int main() {
   realBackupCleanupFailure();
   rebootAbortRecoveryAndDurableRemoval();
   expectedAbsenceAndRealDeleteFailures();
+#endif
 }

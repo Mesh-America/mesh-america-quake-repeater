@@ -29,6 +29,13 @@ private:
   size_t _verify_remaining = 0;
   PresenceProbe _presence;
 #if defined(ESP32_PLATFORM)
+  // Pinned ESP SPIFFS uses 256-byte pages with a 5-byte data-page header.
+  // This bounded stdio buffer coalesces records without the SDK's 4 KiB burst;
+  // one logical record can flush at most one full buffer per write pass.
+  static constexpr size_t ESP_WRITE_BUFFER_SIZE = 251;
+  static constexpr size_t ESP_VERIFY_BUFFER_SIZE = 128;
+  static_assert(storage::CONTACT_RECORD_SIZE <= ESP_WRITE_BUFFER_SIZE,
+                "Contact records must fit one bounded writer buffer");
   enum class BeginStage : uint8_t {
     Target, Backup, Recover, Temp, Remove, Open, Configure, Ready, Failed
   };
@@ -135,7 +142,7 @@ public:
       case BeginStage::Configure:
         // Arduino otherwise batches small writes into a 4 KiB stdio buffer.
         // Configure the newly opened stream before its first I/O.
-        ok = _file.setBufferSize(storage::CONTACT_RECORD_SIZE);
+        ok = _file.setBufferSize(ESP_WRITE_BUFFER_SIZE);
         if (ok) {
           _ok = true;
           _begin_stage = BeginStage::Ready;
@@ -186,8 +193,10 @@ public:
       ok = static_cast<bool>(_verify);
 #if defined(ESP32_PLATFORM)
       // fread() otherwise reads ahead up to 4 KiB while the caller requests
-      // only one 64-byte CRC chunk. A failed configuration cannot publish.
-      ok = ok && _verify.setBufferSize(64);
+      // only one 64-byte CRC chunk. A bounded two-chunk read-ahead buffer
+      // halves backend reads without growing that scratch buffer or allowing
+      // more than one backend refill per pass. Configuration must succeed.
+      ok = ok && _verify.setBufferSize(ESP_VERIFY_BUFFER_SIZE);
 #endif
       ok = ok && _verify.size() == _size;
       if (ok) {
