@@ -1,11 +1,17 @@
 """Production crypto vs RFC vector + independent Python decoder, no AES mocks."""
 from pathlib import Path
+import contextlib
 import importlib.util
+import io
+import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
+from test_replay_reset_integration import extract_braced
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("management", ROOT / "tools/management/report.py")
@@ -89,6 +95,154 @@ class ManagementTests(unittest.TestCase):
         private = (bytes(12) + b"\x01") * count
         ciphertext, tag = cipher.encrypt_and_digest(private)
         return bytes(header) + ciphertext + tag
+
+    def _run_cli(self, path, *options):
+        output, errors = io.StringIO(), io.StringIO()
+        status = 0
+        with mock.patch.object(sys, "argv", ["report.py", str(path), *options]), \
+                mock.patch.object(report.getpass, "getpass", return_value="management test password"), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            try:
+                report.main()
+            except SystemExit as error:
+                status = error.code
+        return status, output.getvalue(), errors.getvalue()
+
+    @classmethod
+    def _acl_pages(cls, entries, current=True):
+        from Crypto.Cipher import AES
+        base = cls.empty_event_pages[0][:111] if current else cls.legacy_pages[0][:83]
+        per_page = 4 if current else 6
+        count = max(1, (len(entries) + per_page - 1) // per_page)
+        pages = []
+        for index in range(count):
+            header = bytearray(base)
+            block = entries[index * per_page:(index + 1) * per_page]
+            header[78:83] = bytes((index, count, len(entries), index * per_page, len(block)))
+            key = report.derive(report.password_key("management test password"),
+                                "MeshCore-MGR1-SIV", header[4:20])
+            cipher = AES.new(key, AES.MODE_SIV); cipher.update(header)
+            ciphertext, tag = cipher.encrypt_and_digest(b"".join(token + bytes((flags,)) for token, flags in block))
+            pages.append(bytes(header) + ciphertext + tag)
+        return pages
+
+    def test_authenticated_duplicate_acl_fingerprints_are_rejected(self):
+        password = "management test password"
+        for current in (False, True):
+            duplicate = self._acl_pages([(bytes(12), 1), (bytes(12), 2)], current)
+            with self.assertRaisesRegex(ValueError, "[Dd]uplicate"):
+                report.decode_page(duplicate[0], password)
+            with self.assertRaisesRegex(ValueError, "[Dd]uplicate"):
+                report.decode_report(duplicate, password)
+            per_page = 4 if current else 6
+            unique = [(index.to_bytes(12, "little"), 3) for index in range(per_page)]
+            duplicate = self._acl_pages([*unique, (unique[0][0], 2)], current)
+            for page in duplicate:
+                report.decode_page(page, password)  # No duplicates within either page.
+            with self.assertRaisesRegex(ValueError, "[Dd]uplicate"):
+                report.decode_report(duplicate, password)
+            messages = []
+            for page in duplicate:
+                padded = page + bytes(3 + ((len(page) - 3 + 15) // 16) * 16 - len(page))
+                messages.append(dict(type="PACKET", direction="rx", raw=(b"\x1a\x00" + padded).hex()))
+            with self.assertRaisesRegex(ValueError, "[Dd]uplicate"):
+                report.mqtt_reports(messages, password)
+            valid = self._acl_pages([*unique, (per_page.to_bytes(12, "little"), 3)], current)
+            decoded = report.decode_report(valid, password)
+            self.assertEqual(len(decoded["acl"]), per_page + 1)
+            self.assertTrue(all(entry["admin"] and entry["ota_signer"] for entry in decoded["acl"]))
+
+    def test_cli_matches_administrator_for_each_mqtt_report(self):
+        from Crypto.Cipher import AES
+        administrator = bytes(range(32))
+        messages = []
+        for radio in (bytes(range(16)), bytes(range(16, 32))):
+            header = bytearray(self.empty_event_pages[0][:111])
+            header[4:20] = radio
+            header[78:83] = bytes((0, 1, 1, 0, 1))
+            key = report.derive(report.password_key("management test password"),
+                                "MeshCore-MGR1-SIV", radio)
+            private = report.fingerprint("management test password", radio, administrator) + b"\x03"
+            cipher = AES.new(key, AES.MODE_SIV); cipher.update(header)
+            ciphertext, tag = cipher.encrypt_and_digest(private)
+            page = bytes(header) + ciphertext + tag
+            padded = page + bytes(3 + ((len(page) - 3 + 15) // 16) * 16 - len(page))
+            messages.append(dict(type="PACKET", direction="rx", raw=(b"\x1a\x00" + padded).hex()))
+        path = Path(self.work.name) / "cli-mqtt.json"
+        for jsonl in (False, True):
+            path.write_text("\n".join(json.dumps(message) for message in messages)
+                            if jsonl else json.dumps(messages), encoding="ascii")
+            status, output, errors = self._run_cli(path, "--mqtt", "--match-admin", administrator.hex())
+            self.assertEqual((status, errors), (0, ""))
+            decoded = json.loads(output)
+            self.assertEqual(len(decoded), 2)
+            for item in decoded:
+                self.assertEqual(item.get("matching_acl"), item["acl"])
+                self.assertEqual(len(item["matching_acl"]), 1)
+                self.assertTrue(item["matching_acl"][0]["admin"] and item["matching_acl"][0]["ota_signer"])
+            status, output, errors = self._run_cli(path, "--mqtt", "--match-admin", "ff" * 32)
+            self.assertEqual((status, errors), (0, ""))
+            self.assertEqual([item.get("matching_acl") for item in json.loads(output)], [[], []])
+
+    def test_cli_rejects_invalid_match_key_even_with_no_mqtt_reports(self):
+        path = Path(self.work.name) / "cli-empty.json"
+        path.write_text("[]", encoding="ascii")
+        for candidate in ("not-hex", "00", ""):
+            status, output, errors = self._run_cli(path, "--mqtt", "--match-admin", candidate)
+            self.assertEqual(status, 2)
+            self.assertEqual(output, "")
+            self.assertIn("error:", errors)
+
+    def test_cli_file_read_errors_are_reported_without_tracebacks(self):
+        for path in (Path(self.work.name) / "missing.json", Path(self.work.name)):
+            status, output, errors = self._run_cli(path)
+            self.assertEqual(status, 2)
+            self.assertEqual(output, "")
+            self.assertIn("error:", errors)
+            self.assertNotIn("Traceback", errors)
+
+    def test_cli_closed_stdin_reports_input_errors_without_tracebacks(self):
+        path = Path(self.work.name) / "cli-no-password.json"
+        path.write_text(json.dumps([page.hex() for page in self.pages]), encoding="ascii")
+        for arguments, expected in (([str(path)], "password input unavailable"),
+                                    ([str(path.parent / "absent.json")], "No such file"),
+                                    ([str(path), "--match-admin", "00"], "administrator key")):
+            result = subprocess.run([sys.executable, "-B", str(ROOT / "tools/management/report.py"),
+                                     *arguments], input="", capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn(expected, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            if expected != "password input unavailable":
+                self.assertNotIn("Management password:", result.stderr)
+
+    def test_cli_canonical_match_and_input_errors(self):
+        path = Path(self.work.name) / "cli-pages.json"
+        path.write_text(json.dumps([page.hex() for page in self.pages]), encoding="ascii")
+        status, output, errors = self._run_cli(path, "--match-admin", "00" * 32)
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(json.loads(output)["matching_acl"], [])
+        for malformed in ("{", '["not hex"]'):
+            path.write_text(malformed, encoding="ascii")
+            status, output, errors = self._run_cli(path)
+            self.assertEqual(status, 2)
+            self.assertEqual(output, "")
+            self.assertIn("error:", errors)
+
+    def test_cli_rejects_excessive_json_nesting_before_password_prompt(self):
+        path = Path(self.work.name) / "cli-deep.json"
+        path.write_text("[" * 10000 + "0" + "]" * 10000, encoding="ascii")
+        for options in ((), ("--mqtt",)):
+            with mock.patch.object(report.getpass, "getpass") as password_prompt:
+                with mock.patch.object(sys, "argv", ["report.py", str(path), *options]), \
+                        contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()) as errors:
+                    with self.assertRaises(SystemExit) as failure:
+                        report.main()
+                self.assertEqual(failure.exception.code, 2)
+                self.assertIn("nested too deeply", errors.getvalue())
+                self.assertNotIn("Traceback", errors.getvalue())
+                password_prompt.assert_not_called()
 
     def test_interoperable_full_report(self):
         decoded = report.decode_report(list(reversed(self.pages)), "management test password")
@@ -241,6 +395,29 @@ process.stdin.on('end', async () => {
 
     def test_runtime_storage_scheduling_rollover_and_failures(self):
         subprocess.run([str(self.runtime)], check=True)
+
+    def test_actual_legacy_route_adoption_persistence_and_precedence(self):
+        source = (ROOT / "src/helpers/CommonCLI_Management.cpp").read_text(encoding="utf-8")
+        state = source[source.index("static constexpr char DATA_ROUTE_FILE[]"):
+                       source.index("static uint32_t readRoute32(")]
+        generated = ("namespace mesh {\n" + state +
+                     extract_braced(source, "static uint8_t nibble(") + "\n" +
+                     extract_braced(source, "static char* trimDataRoute(") + "\n" +
+                     extract_braced(source, "static bool parseDataPath(") + "\n" +
+                     extract_braced(source, "static void writeRoute32(") + "\n" +
+                     extract_braced(source, "static bool dataRouteSave(") + "\n}\n" +
+                     extract_braced(source, "bool CommonCLI::adoptLegacyDataTxPath(") + "\n")
+        (Path(self.work.name) / "production_route.inc").write_text(generated, encoding="ascii")
+        executable = Path(self.work.name) / "route-test"
+        sanitizers = [] if os.name == "nt" else ["-DHOST_BUILD", "-fsanitize=address,undefined",
+                                               "-fno-sanitize-recover=all", "-fno-omit-frame-pointer"]
+        compiled = subprocess.run([shutil.which("g++") or "g++", "-std=c++17", "-O1", "-g",
+                                   "-Wall", "-Wextra", "-DRP2040_PLATFORM", *sanitizers,
+                                   "-I", self.work.name,
+                                   str(ROOT / "test/fixtures/management/route_test.cpp"),
+                                   "-o", str(executable)], capture_output=True, text=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        subprocess.run([str(executable)], check=True)
 
     def test_tampering_and_wrong_password(self):
         for position in (4, 20, 28, 74, 76, 83, 85, 86, 90, 94, *range(98, 111), 111, -1):

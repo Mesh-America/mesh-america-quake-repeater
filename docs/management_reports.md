@@ -32,13 +32,17 @@ Use a long randomly generated password. There is no password getter. Firmware
 stores the derived 32-byte key, not the plaintext password. That stored key is
 equivalent authority to decrypt reports and must also be protected. Passwords
 entered into terminal programs may still be recorded by those programs.
+The recognized firmware password command wipes its value from the input buffer
+on success and error, including unavailable management or allocation failure.
 
 `data.tx` is the single shared route for management reports, telemetry history,
 and future scheduled data producers. Its fresh-install defaults are `path=direct`
 (zero hops) and `region=auto`; configuring it never enables a producer. Paths
 use `1:`, `2:` or `3:` followed by complete hop hashes without separators, or
-the comma-separated form accepted by `set outpath`. `none` removes the path.
+the comma-separated form accepted by `set outpath`. Empty hops, including a
+trailing comma, are rejected. `none` removes the path.
 `get/set mgmt.path` remain compatibility aliases for `get/set data.tx path`.
+Alias expansion that exceeds the command buffer is rejected, not truncated.
 
 `region=auto` uses the radio's configured default region when it is usable;
 otherwise it resolves the unique deepest flood-enabled entry in the region
@@ -59,7 +63,10 @@ shared path. Flood accepts 21-90 days and requires a resolvable shared region.
 At least one route must remain active while reporting is enabled. The legacy
 `set mgmt.interval N` shorthand enables both, setting direct to `N` and flood to
 `max(21,N)`. No transmission is sent merely by configuring a password. Initial
-reporting waits for the configured schedules. Reports have deterministic
+reporting waits for the configured schedules. Invalid settings leave saved
+configuration, countdowns, and any report pages already in progress unchanged.
+Day counts must be unsigned decimal integers; signs and trailing text are rejected.
+Reports have deterministic
 per-radio/per-sequence jitter of up to an hour; pages are spaced at least a
 minute apart. Watchdog events appear in the next scheduled snapshot, not as
 immediate radio alerts. Multiple events between snapshots can replace the
@@ -83,6 +90,12 @@ password changes do not reset the flood limit. Corrupt/unreadable state or faile
 writes stop reporting; `get mgmt` shows `FAULT(no TX)` until storage is repaired
 and the radio restarted. `/management` and the shared `/data_tx` are versioned,
 CRC-protected, and replaced transactionally.
+
+On upgrade, an existing saved `data.tx` route takes precedence over the legacy
+management-only path. Otherwise that path must be saved successfully to
+`/data_tx` before reporting resumes. A failed migration leaves the old
+`/management` file intact for retry after storage is repaired and the radio
+restarted.
 
 Weekly history is collected once a minute while enabled. Hour-bucket extrema
 cover 7 days to 7 days + 1 hour (conservative boundary bucket). The first report
@@ -126,8 +139,11 @@ python tools/management/report.py --mqtt capture.jsonl
 
 The password is prompted, not supplied as a process argument. Input may be JSONL
 or a JSON array of MQTT messages. Alternatively omit `--mqtt` for a JSON array
-of canonical payload hex strings. `--match-admin FULL_PUBLIC_KEY` in canonical
-payload mode matches a known administrator against the encrypted fingerprints.
+of canonical payload hex strings. `--match-admin FULL_PUBLIC_KEY` matches a known
+administrator against the encrypted fingerprints in either input mode. MQTT
+captures match each radio's fingerprints separately. Invalid files or keys are
+rejected before the password prompt; an unavailable password input gives a
+command-line error instead of a traceback.
 This is an offline capture decoder, not a broker subscriber or downlink service.
 
 For a browser-local decoder that also decrypts and authenticates ACL entries,
@@ -237,7 +253,10 @@ six entries per page and up to six pages, with no USB block. Its absent USB
 status is decoded as unavailable, not as all switches off.
 
 Each private entry is a per-radio 12-byte keyed fingerprint followed by flags:
-bit 0 administrator, bit 1 trusted OTA signer. Duplicate entries combine flags.
+bit 0 administrator, bit 1 trusted OTA signer. The firmware combines permissions
+for the same fingerprint before paging, so every transmitted entry is unique.
+Decoders reject authenticated duplicate fingerprints within or across pages;
+repeated identical packet copies from multiple uplinks are still deduplicated.
 An oversized ACL fails closed rather than silently truncating. The reported
 allowlist includes all current full administrators and all four possible trusted
 OTA signing keys; region/filter managers and ordinary clients are excluded.
