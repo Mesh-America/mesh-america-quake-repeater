@@ -5771,20 +5771,65 @@ configure_effective_build_profile() {
 
 prepare_output_dir() {
   local output_dir="$OUTPUT_DIR"
+  local canonical_output_dir
+  local checkout_dir
 
-  if [ -z "$output_dir" ] || [ "$output_dir" == "/" ] || [ "$output_dir" == "." ]; then
-    echo "Refusing to clean unsafe output directory: $output_dir"
+  checkout_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
+  if ! canonical_output_dir=$(python3 - "$output_dir" "$checkout_dir" "$RESUME_BUILD_OUTPUT" <<'PY'
+from pathlib import Path
+import os
+import subprocess
+import sys
+
+try:
+    raw, checkout, resume = sys.argv[1:]
+    if not raw or '\n' in raw or '\r' in raw:
+        raise ValueError("empty or multiline output path")
+    requested = Path(raw)
+    output = requested.resolve()
+    checkout = Path(checkout).resolve()
+    protected = (Path.cwd().resolve(), checkout, Path.home().resolve())
+    if any(output == path or output in path.parents for path in protected):
+        raise ValueError("output is a protected directory or its ancestor")
+    if resume != "1" and requested.is_symlink():
+        raise ValueError("cleaning a symlink would replace it; use --resume or its explicit target")
+    if requested.exists() and not requested.is_dir():
+        raise ValueError("output already exists and is not a directory")
+    def git_path(*arguments):
+        value = subprocess.check_output(["git", "-C", str(checkout), *arguments],
+                                        stderr=subprocess.PIPE).rstrip(b'\n')
+        return (checkout / os.fsdecode(value)).resolve()
+    metadata = {checkout / ".git", git_path("rev-parse", "--absolute-git-dir"),
+                git_path("rev-parse", "--git-common-dir")}
+    if any(output == path or output in path.parents or path in output.parents
+           for path in metadata):
+        raise ValueError("output overlaps Git metadata")
+    tracked = subprocess.check_output(["git", "-C", str(checkout), "ls-files", "-z"],
+                                      stderr=subprocess.PIPE)
+    if any(output == path or output in path.parents
+           for name in tracked.split(b'\0') if name
+           for path in [(checkout / os.fsdecode(name)).resolve()]):
+        raise ValueError("output contains tracked checkout files")
+    print(output)
+except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+    print(f"Unsafe build output path: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+  ); then
+    echo "Refusing unsafe output directory: $output_dir" >&2
     exit 1
   fi
 
   if [ "$RESUME_BUILD_OUTPUT" == "1" ]; then
-    mkdir -p -- "$output_dir"
+    mkdir -p -- "$output_dir" || exit 1
     echo "Resuming build output in ${output_dir}; existing artifacts will be skipped."
     return 0
   fi
 
-  rm -rf -- "$output_dir"
-  mkdir -p -- "$output_dir"
+  # Resolve aliases before deletion, and never replace a user's output symlink.
+  # Parent symlinks may still point to a legitimate isolated output directory.
+  rm -rf -- "$canonical_output_dir" || exit 1
+  mkdir -p -- "$canonical_output_dir" || exit 1
 }
 
 run_resolved_build_targets() {
