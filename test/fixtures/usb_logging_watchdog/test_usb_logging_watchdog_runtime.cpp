@@ -1011,10 +1011,20 @@ static void check_event_snapshot_is_coherent_with_concurrent_readers() {
   std::atomic<unsigned> snapshots{0};
   std::thread reader([&] {
     while (running.load()) {
-      const auto event = mesh::usbLoggingStatus().last_event;
+      const auto status = mesh::usbLoggingStatus();
+      const auto event = status.last_event;
       if (event.sequence) {
+        assert(status.persistence_ready && status.watchdog_enabled);
+        assert(status.recovery_count == event.sequence);
+        assert(status.backoff_step == 0 && status.retry_seconds == 3600);
         assert(event.epoch == 2000000000U + event.sequence);
         assert(event.action == Event::SOFT_RECOVERY && event.reasons == 3 && event.persisted);
+      } else if (!status.persistence_ready) {
+        // A bounded busy-reader fallback has no mixed partial journal/tier.
+        assert(status.supported && status.logging_enabled && status.watchdog_enabled);
+        assert(status.reader_connected && !status.stalled && status.recovery_deferred);
+        assert(status.backoff_step == 8 && status.retry_seconds == 604800);
+        assert(!status.recovery_count && !status.reboot_count && !status.auto_connected_seconds);
       }
       ++snapshots;
     }
