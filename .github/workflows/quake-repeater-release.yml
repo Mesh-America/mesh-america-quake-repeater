@@ -5,8 +5,8 @@ name: Quake Repeater Build and Release
 #
 #   pull request / push to next  ->  build and verify only
 #   push to main                 ->  build and verify, then, if the version inside the image has no
-#                                    release yet, create the tag quake-vX.Y.Z.W and a pre-release
-#   tag quake-vX.Y.Z.W           ->  build, verify, then create a pre-release (manual tagging)
+#                                    release yet, create the tag quake-vX.Y.Z.W and a release
+#   tag quake-vX.Y.Z.W           ->  build, verify, then create a release (manual tagging)
 #   manual run                   ->  build and verify, upload the result as a workflow artifact
 #
 # Work lands on `next`; a pull request from `next` to `main` is the release. The tag always names
@@ -155,7 +155,7 @@ jobs:
           m = json.load(open("dist/manifest.json"))
           print(f"Mesh America Quake Repeater firmware {m['version']} for the RAK3401 (RAK12027 earthquake sensor in sensor slot A).")
           print()
-          print("**Pre-release.** This firmware has not been fully tested. Install it with the web flasher at https://apps.meshamerica.com/quake-repeater/ and read its warnings first.")
+          print("Install it with the web flasher at https://apps.meshamerica.com/quake-repeater/, which also has the over-the-air update files and a guide. Already running this firmware? The same page configures it over USB.")
           print()
           print(f"- Package: `{m['package']['file']}` ({m['package']['size']} bytes)")
           print(f"- SHA-256: `{m['package']['sha256']}`")
@@ -173,6 +173,7 @@ jobs:
           gh release create "$TAG" dist/*.zip dist/*.hex dist/manifest.json \
             --repo "$GITHUB_REPOSITORY" \
             "${TAG_FLAGS[@]}" \
-            --prerelease \
+            --latest \
+            --generate-notes \
             --title "Quake Repeater ${TAG#quake-v}" \
             --notes-file notes.md

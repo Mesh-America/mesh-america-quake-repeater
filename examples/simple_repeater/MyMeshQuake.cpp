@@ -14,7 +14,7 @@
 
 // The product name the `ver` command reports. Set in variants/meshamerica_quake/platformio.ini.
 #ifndef FIRMWARE_PRODUCT
-#define FIRMWARE_PRODUCT "Mesh America Quake Repeater"
+#define FIRMWARE_PRODUCT "Quake Repeater"
 #endif
 
 namespace {
@@ -174,7 +174,7 @@ bool MyMesh::quakeAlertBusy() const {
 
 bool MyMesh::handleQuakeCommand(const char* command, char* reply) {
   if (strcmp(command, "ver") == 0) {
-    // Name the product, not just a number: "Mesh America Quake Repeater v1.17.1.3 (Build: ...)". Only
+    // Name the product, not just a number: "Quake Repeater v1.17.1.4 (Build: ...)". Only
     // this reply changes. getFirmwareVer() stays the bare version, because adverts, telemetry, the
     // bridges and companion apps all read it and the image's version stamp is parsed from it.
     snprintf(reply, 160, "%s %s (Build: %s)", FIRMWARE_PRODUCT, getFirmwareVer(), getBuildDate());
