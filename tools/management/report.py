@@ -121,11 +121,15 @@ def decode_page(payload, password):
     cipher.update(payload[:header])
     private = cipher.decrypt_and_verify(payload[header:-TAG], payload[-TAG:])
     entries = []
+    seen = set()
     for i in range(count):
         token = private[i * ENTRY:i * ENTRY + 12]
         flags = private[i * ENTRY + 12]
         if not flags or flags & ~3:
             raise ValueError("invalid ACL role flags")
+        if token in seen:
+            raise ValueError("duplicate ACL fingerprint")
+        seen.add(token)
         entries.append(dict(fingerprint=token.hex(), admin=bool(flags & 1), ota_signer=bool(flags & 2)))
     return entries
 
@@ -210,6 +214,9 @@ def decode_report(payloads, password):
     if any(p[:78] != first[:78] or p[79:81] != first[79:81] or
            p[HEADER:header] != first[HEADER:header] for p, _ in decoded):
         raise ValueError("mixed report snapshots")
+    acl = [entry for _, entries in decoded for entry in entries]
+    if len({entry["fingerprint"] for entry in acl}) != len(acl):
+        raise ValueError("duplicate ACL fingerprint")
     fields = struct.unpack_from("<IIIII", first, 20)
     sequence, timestamp, firmware, bootloader, target = fields
     valid = int.from_bytes(first[76:78], "little")
@@ -233,7 +240,7 @@ def decode_report(payloads, password):
                   temperature_source="MCU" if valid & 64 else "unknown",
                   usb_logging=_usb_status(first),
                   usb_watchdog_last=_watchdog_event(first),
-                  acl=[entry for _, entries in decoded for entry in entries])
+                  acl=acl)
     return result
 
 
@@ -243,20 +250,34 @@ def main():
     parser.add_argument("--match-admin", help="full public key to match against private ACL fingerprints")
     parser.add_argument("--mqtt", action="store_true", help="input is JSON array or JSONL of saved MQTT uplinks")
     args = parser.parse_args()
-    password = getpass.getpass("Management password: ")
     try:
-        text = args.pages.read_text()
+        administrator = None
+        if args.match_admin is not None:
+            administrator = bytes.fromhex(args.match_admin)
+            if len(administrator) != 32:
+                raise ValueError("administrator key must be 32 bytes")
+        text = args.pages.read_text(encoding="utf-8")
         if args.mqtt:
             messages = json.loads(text) if text.lstrip().startswith("[") else [json.loads(line) for line in text.splitlines() if line.strip()]
-            print(json.dumps(mqtt_reports(messages, password), indent=2))
-            return
-        report = decode_report([bytes.fromhex(p) for p in json.loads(text)], password)
-        if args.match_admin:
-            match = fingerprint(password, bytes.fromhex(report["radio_id"]), bytes.fromhex(args.match_admin)).hex()
-            report["matching_acl"] = [entry for entry in report["acl"] if entry["fingerprint"] == match]
-    except (ValueError, TypeError, KeyError) as exc:
+        else:
+            payloads = [bytes.fromhex(p) for p in json.loads(text)]
+        password = getpass.getpass("Management password: ")
+        if args.mqtt:
+            reports = mqtt_reports(messages, password)
+        else:
+            reports = [decode_report(payloads, password)]
+        if administrator is not None:
+            for report in reports:
+                match = fingerprint(password, bytes.fromhex(report["radio_id"]), administrator).hex()
+                report["matching_acl"] = [entry for entry in report["acl"] if entry["fingerprint"] == match]
+        output = json.dumps(reports if args.mqtt else reports[0], indent=2)
+    except EOFError:
+        parser.error("management password input unavailable; run in an interactive terminal")
+    except RecursionError:
+        parser.error("input JSON is nested too deeply")
+    except (OSError, ValueError, TypeError, KeyError) as exc:
         parser.error(str(exc))
-    print(json.dumps(report, indent=2))
+    print(output)
 
 
 if __name__ == "__main__":
