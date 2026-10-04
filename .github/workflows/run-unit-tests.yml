@@ -130,6 +130,7 @@ jobs:
           python3 -B test/test_companion_prefs_transactions.py -v
           python3 -B test/test_companion_primary_radio_persistence.py -v
           python3 -B test/test_companion_response_bounds.py -v
+          python3 -B test/test_companion_ack_delivery.py -v
           python3 -B test/test_companion_identity_cli.py -v
           python3 -B test/test_companion_uncached_storage.py -v
           python3 -B test/test_companion_ota_config.py -v
