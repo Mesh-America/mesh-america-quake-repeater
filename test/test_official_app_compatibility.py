@@ -20,6 +20,7 @@ import urllib.request
 
 from test_client_acl_response import production_acl_methods
 from test_companion_primary_radio_persistence import production_primary_radio_harness
+from test_companion_delayed_reply_delivery import production_delayed_reply_inputs
 from test_replay_reset_integration import extract_braced
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,7 +58,7 @@ def checked(command, timeout=60):
     return result.stdout
 
 
-def acl_outputs(work, compiler, app_request):
+def acl_outputs(work, compiler, request_plaintext):
     source = production_acl_methods()
     packet = (ROOT / "src/Packet.cpp").read_text()
     source += "namespace mesh {\n" + "\n".join(extract_braced(packet, signature) for signature in (
@@ -66,19 +67,18 @@ def acl_outputs(work, compiler, app_request):
     (work / "production.inc").write_text(source, encoding="ascii")
     fixture = (ROOT / "test/fixtures/client_acl_response/test_client_acl_response.cpp").read_text()
     fixture = fixture[:fixture.index("int main()")]
-    request = ",".join(str(byte) for byte in bytes.fromhex(app_request))
+    request = ",".join(str(byte) for byte in bytes.fromhex(request_plaintext))
     fixture += r'''
 int main() {
-  uint8_t app_query[] = {APP_QUERY};
-  static_assert(sizeof(app_query) == 7, "Exact stock app ACL request schema");
+  uint8_t plaintext[] = {APP_QUERY};
+  static_assert(sizeof(plaintext) == 11, "Actual Companion tag plus stock seven-byte query");
+  uint32_t tag; memcpy(&tag, plaintext, 4);
   for (bool flood : {false, true}) for (uint8_t path_len : {0, 0x60})
       for (unsigned clients : {0, 1, 22, 23, 24, 25, 32, 256}) {
     MyMesh target; fill(target.acl, clients);
-    target.sender.last_timestamp = 50;
+    target.sender.last_timestamp = tag - 1;
     mesh::Packet request; request.header = flood ? ROUTE_TYPE_FLOOD : ROUTE_TYPE_DIRECT;
     request.path_len = path_len;
-    uint8_t plaintext[11]; uint32_t tag = 51;
-    memcpy(plaintext, &tag, 4); memcpy(plaintext + 4, app_query, sizeof(app_query));
     uint8_t secret[PUB_KEY_SIZE] = {};
     auto* transmitted = target.createDatagram(PAYLOAD_TYPE_REQ, target.sender.id,
                                              secret, plaintext, sizeof(plaintext));
@@ -92,7 +92,7 @@ int main() {
     const unsigned capacity = mesh::clientACLReplyCapacity(flood, path_len);
     const unsigned entries = std::min(clients, (capacity - 4) / 7);
     const unsigned route_bytes = (path_len & 63) * ((path_len >> 6) + 1);
-    const size_t body_offset = 2 * PATH_HASH_SIZE + CIPHER_MAC_SIZE + 4
+    const size_t body_offset = 2 * PATH_HASH_SIZE + CIPHER_MAC_SIZE
         + (flood ? 2 + route_bytes : 0);
     if (!flood && clients == 1) {
       assert(sizeof(plaintext) == 11 && reply->payload_len == 20 && reply->getRawLength() == 22);
@@ -112,11 +112,97 @@ int main() {
     records = []
     for line in output.splitlines():
         if line.startswith("LEGACY:"):
-            _, entries, body = line.split(":")
-            records.append({"entries": int(entries), "body": body})
+            _, entries, plaintext = line.split(":")
+            records.append({"entries": int(entries), "plaintext": plaintext})
     if len(records) != 32:
         raise AssertionError(output)
     return records
+
+
+def companion_pipeline(work, compiler, command):
+    production_delayed_reply_inputs(work)
+    fixture = (ROOT / "test/fixtures/companion_delayed_reply_delivery/test.cpp").read_text()
+    fixture = fixture[:fixture.index("int main()")]
+    fixture += r'''
+static Bytes fromHex(const char* text) {
+  Bytes bytes;
+  for (size_t at = 0; text[at]; at += 2) {
+    unsigned byte; assert(text[at + 1]); assert(sscanf(text + at, "%2x", &byte) == 1);
+    bytes.push_back(uint8_t(byte));
+  }
+  return bytes;
+}
+static void printHex(const char* prefix, const Bytes& bytes) {
+  printf("%s:", prefix); for (uint8_t byte : bytes) printf("%02x", byte); printf("\n");
+}
+int main(int argc, char** argv) {
+  assert(argc == 2 || argc == 4);
+  const Bytes command = fromHex(argv[1]); assert(command.size() == 40);
+  Fixture f; f.mesh.direct_timeout = 2000;
+  memcpy(f.mesh.recipient.id.pub_key, command.data() + 1, 32);
+  memcpy(f.mesh.cmd_frame, command.data(), command.size());
+  f.mesh.handleRequestFrame(command.size());
+  const auto& payload = f.mesh.transmitted_payload;
+  assert(payload.size() == 11 && !memcmp(payload.data() + 4, command.data() + 33, 7));
+  uint32_t tag; memcpy(&tag, payload.data(), 4);
+  assert(tag == slot(f, Tracker::Binary).tag && !slot(f, Tracker::Binary).sent_pending);
+  if (argc == 2) { printHex("REQUEST", payload); return 0; }
+  Bytes radio = fromHex(argv[2]);
+  if (atoi(argv[3]) == 0) {
+    // The old 23-row direct reply was 165 bytes before zero padding. The
+    // decrypted 176 bytes exceed Companion's 174-byte callback envelope.
+    radio.assign(176, 0); memcpy(radio.data(), &tag, 4);
+    for (unsigned entry = 0; entry < 23; ++entry) {
+      for (unsigned byte = 0; byte < 6; ++byte) radio[4 + entry * 7 + byte] = entry + byte + 1;
+      radio[4 + entry * 7 + 6] = 3;
+    }
+  }
+  assert(radio.size() <= 255 && !memcmp(radio.data(), &tag, 4));
+  f.otherRequest(); g_mock_millis += 3000;
+  f.mesh.onContactResponse(f.mesh.recipient, radio.data(), uint8_t(radio.size())); f.drain();
+  const bool admitted = atoi(argv[3]) != 0;
+  assert(count(f.wire(), PUSH_CODE_BINARY_RESPONSE) == (admitted ? 1U : 0U));
+  assert(count(f.wire(), RESP_CODE_SENT) == 1 && f.other_stream.output.empty());
+  if (admitted) {
+    assertSentBeforeFinal(f.wire(), Tracker::Binary, tag);
+    assert(frameWith(f.wire(), PUSH_CODE_BINARY_RESPONSE).size() <= MAX_FRAME_SIZE);
+  } else assert(radio.size() == 176);
+  for (const auto& frame : frames(f.wire())) printHex("FRAME", frame);
+}
+'''
+    (work / "companion.cpp").write_text(fixture, encoding="ascii")
+    binary = work / "companion.exe"
+    checked([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+        "-Wno-unused-parameter", "-Wno-unused-function", "-Wno-sign-compare", "-Wno-class-memaccess",
+        *SANITIZERS, "-DCOMPANION_FEATURE_TEXT_TERMINAL=0", "-DMESH_ENABLE_ONE_KEY_DM=0",
+        f"-I{work}", f"-I{ROOT / 'test/mocks'}",
+        f"-I{ROOT / 'test/fixtures/serial_wifi_sessions/mocks'}", f"-I{ROOT / 'src'}",
+        str(work / "companion.cpp"), *[str(ROOT / "src/helpers" / name) for name in (
+            "CompanionDelayedReplies.cpp", "ArduinoSerialInterface.cpp",
+            "wifi/SerialWifiInterface.cpp", "TxtDataHelpers.cpp")], "-o", str(binary)])
+    output = checked([str(binary), command], timeout=20)
+    plaintext = output.strip().removeprefix("REQUEST:")
+    if len(bytes.fromhex(plaintext)) != 11:
+        raise AssertionError(output)
+
+    def deliver(records):
+        forwarded = []
+        for record in records:
+            output = checked([str(binary), command, record["plaintext"], "1"], timeout=20)
+            frames = [line.removeprefix("FRAME:") for line in output.splitlines() if line.startswith("FRAME:")]
+            if len(frames) != 2:
+                raise AssertionError(output)
+            forwarded.append({"entries": record["entries"], "sent": frames[0], "frame": frames[1],
+                              "body": record["plaintext"][8:]})
+        # The unmodified production callback must reject the historical padded
+        # 23-entry reply. The app therefore cannot falsely decode this fixture.
+        output = checked([str(binary), command, plaintext, "0"], timeout=20)
+        rejected = [line.removeprefix("FRAME:") for line in output.splitlines() if line.startswith("FRAME:")]
+        if len(rejected) != 1 or bytes.fromhex(rejected[0])[0] != 6:
+            raise AssertionError(output)
+        return forwarded
+
+    return plaintext, deliver
 
 
 def radio_outputs(work, compiler):
@@ -177,8 +263,10 @@ class OfficialAppCompatibilityTests(unittest.TestCase):
             config = work / "input.json"
             config.write_text(json.dumps({"bundle": str(bundle), "mode": "build"}), encoding="ascii")
             generated = json.loads(checked([node, str(JS), str(config)], timeout=20))
+            plaintext, deliver = companion_pipeline(work, compiler, generated["command"])
+            acl = deliver(acl_outputs(work, compiler, plaintext))
             config.write_text(json.dumps({"bundle": str(bundle), "mode": "check",
-                "acl": acl_outputs(work, compiler, generated["request"]),
+                "acl": acl,
                 "radio": radio_outputs(work, compiler)}), encoding="ascii")
             result = json.loads(checked([node, str(JS), str(config)], timeout=20))
             self.assertEqual(result["acl_cases"], 32)

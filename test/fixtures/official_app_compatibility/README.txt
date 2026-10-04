@@ -33,13 +33,23 @@ widget state/localization and RNG. The app's schema/tag matching/decoders are
 not reimplemented. The deterministic RNG only makes a synthetic request
 repeatable; its random value is not the Companion's replay timestamp.
 
-The exact app-generated seven-byte ACL query is passed to the production
-repeater receive/ACL handler, with actual packet budget/admission/serialization.
-Only the crypto primitive and radio queue are mocked in that native fixture;
-zero padding reflects the production cipher block size, not crypto validation.
+The exact app-generated CMD50 frame goes through the production Companion
+command handler and BaseChat request producer. Its real unique-clock-tagged
+11-byte plaintext reaches the production repeater receive/ACL handler, with
+actual packet budget/admission/serialization. The server's reflected tag and
+full padded plaintext then go through the production Companion response
+callback, delayed reply owner and bounded serial transport. Only admitted SENT
+and Binary frame bytes reach the stock app frame parser/listener/ACL decoder.
+The crypto primitive and radio queue are mocked; zero padding reflects the
+production cipher block size, not encryption/authentication validation.
 The one-admin direct case asserts 11-byte plaintext, 16-byte padded ciphertext,
 20-byte payload and 22-byte zero-path wire size. All 32 decoded cases cover
 0/1/22/23/24/25/32/256 entries, direct/flood and zero/maximum return path.
+Direct replies are bounded to 22 rows: 23 rows create 176 padded plaintext
+bytes, exceeding Companion's 174-byte Binary envelope. An explicit historical
+23-row negative uses all 176 bytes and verifies that the real Companion callback
+admits no Binary frame. Flood replies include their returned path before cipher
+padding; their actual padded extra data also passes through the callback.
 Large ACLs retain legacy one-packet truncation, not a complete list guarantee.
 Actual Companion and CommonCLI radio replies cover saved automatic/explicit
 preambles and an active temporary/secondary profile. A fifth field must invoke

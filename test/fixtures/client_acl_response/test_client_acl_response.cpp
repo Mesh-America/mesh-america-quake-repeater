@@ -153,6 +153,11 @@ int main() {
                                       PAYLOAD_TYPE_RESPONSE, mesh.reply_data, length)
               : mesh.createDatagram(PAYLOAD_TYPE_RESPONSE, mesh.sender.id, secret, mesh.reply_data, length);
           assert(packet && packet->payload_len <= MAX_PACKET_PAYLOAD);
+          const size_t cipher_bytes = packet->payload_len - 2 * PATH_HASH_SIZE - CIPHER_MAC_SIZE;
+          const size_t path_prefix = flood
+              ? 2 + (path_len & 63) * ((path_len >> 6) + 1) : 0;
+          assert(cipher_bytes >= path_prefix);
+          assert(cipher_bytes - path_prefix + 2 <= MAX_FRAME_SIZE);
           if (path_len == 0 && !sparse) {
             // Decode the actual zero-padded encrypted response body, with the
             // reflected tag and flood path envelope removed by Companion.
@@ -174,7 +179,7 @@ int main() {
   mesh.sender.permissions = 3;
   uint8_t app_query[] = {REQ_TYPE_GET_ACCESS_LIST, 0, 0, 0xA1, 0xB2, 0xC3, 0xD4};
   const int app_reply = mesh.handleRequest(&mesh.sender, 51, app_query, sizeof(app_query));
-  assert(verify_entries(mesh, app_reply, mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY) == 23);
+  assert(verify_entries(mesh, app_reply, mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY) == 22);
   assert(mesh.handleRequest(nullptr, 51, query, sizeof(query)) == 0);
   for (size_t length : {0, 1, 2}) assert(mesh.handleRequest(&mesh.sender, 51, query, length) == 0);
   for (unsigned index : {1, 2}) {

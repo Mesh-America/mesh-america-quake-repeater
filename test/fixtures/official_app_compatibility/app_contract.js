@@ -149,10 +149,11 @@ async function main() {
   let decoded = 0;
   for (const reply of input.acl) {
     const client = connection(); const promise = client.aQ1(key); await settle();
-    client.aL9(sent(51)); await settle();
+    assert.equal(client.writes[0].toString("hex"), builder.writes[0].toString("hex"));
+    client.aL9(Buffer.from(reply.sent, "hex")); await settle();
     const timer = timers[timers.length - 1]; assert.equal(timer.due - now, 7000);
     // Valid matching ACL data remains accepted past the old 2400ms deadline.
-    await advance(3000); client.aL9(binary(51, reply.body)); await settle();
+    await advance(3000); client.aL9(Buffer.from(reply.frame, "hex")); await settle();
     const result = await promise;
     assert.equal(result.a.length, reply.entries);
     for (let index = 0; index < result.a.length; ++index) {

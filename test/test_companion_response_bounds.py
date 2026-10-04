@@ -148,7 +148,7 @@ class CompanionResponseBoundsTest(unittest.TestCase):
     def test_response_envelopes(self):
         source = (ROOT / 'examples/companion_radio/MyMesh.cpp').read_text(encoding='utf-8')
         codes = '\n'.join(re.findall(r'^#define PUSH_CODE_\w+\s+0x[0-9A-Fa-f]+', source, re.M))
-        interface = (ROOT / 'src/helpers/BaseSerialInterface.h').read_text(encoding='utf-8')
+        interface = (ROOT / 'src/helpers/CompanionFrameLimits.h').read_text(encoding='utf-8')
         frame_limit = re.search(r'^#define MAX_FRAME_SIZE\s+\d+', interface, re.M).group(0)
         methods = '\n'.join(extract_braced(source, signature) for signature in (
             'void MyMesh::onContactResponse(', 'void MyMesh::onControlDataRecv(',
