@@ -190,7 +190,15 @@ class CompanionIdentityCliTests(unittest.TestCase):
         framed = source[start:end]
         self.assertIn('handled = handleCommand(text, 0, reply_buf);', framed)
         self.assertIn('out_frame[0] = RESP_CODE_CLI_REPLY;', framed)
-        self.assertIn('_serial->writeFrame(out_frame, 1 + rlen);', framed)
+        # CLI setters may change transport ownership while they execute. The
+        # reply must use the captured requester and check complete admission.
+        capture = 'BaseSerialInterface* reply_route = _serial->captureReplyRoute();'
+        self.assertIn(capture, framed)
+        self.assertLess(framed.index(capture), framed.index('handleCommand(text, 0, reply_buf)'))
+        self.assertRegex(framed, r'_serial->writeFrameToRoute\(\s*'
+                         r'reply_route,\s*out_frame,\s*1 \+ rlen\)\s*==\s*'
+                         r'static_cast<size_t>\(1 \+ rlen\)')
+        self.assertNotIn('_serial->writeFrame(out_frame, 1 + rlen);', framed)
         local = method(source, 'bool MyMesh::handleLocalControlCommand(')
         branch = local[:local.index('  if (handleTxRoutingCommand(')]
         self.assertIn('strcmp(command, "get public.key") == 0', branch)
