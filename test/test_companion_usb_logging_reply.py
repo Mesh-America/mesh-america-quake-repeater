@@ -83,6 +83,7 @@ void discardUsbTerminalOutput() {}
 Stream& usbCompanionPort() { return stream; }
 bool saveUsbLoggingBootPreference(bool) { return true; }
 bool usbLoggingInterfaceRestartRequired() { return false; }
+bool isUsbLoggingPacketStream() { return false; }
 }
 namespace CompanionMqttSetupPortal {
 static bool saveEnabled(bool) { return true; }

@@ -51,6 +51,7 @@ editor does not necessarily forward them.
 | External FEM TX gain | `set radio.fem.txgain on` | `set radio.fem.txgain off` | Immediately; saved; controllable PA only |
 | ESP32 USB packet/debug logging | For 1.17.1.5: `set powersaving off`, then `set usb.logging on` | `set usb.logging off` | Immediately; saved; logging owns the USB terminal |
 | nRF52 separate USB logging port | `set usb.logging on reboot` | `set usb.logging off reboot` | Saves and reboots to add/remove the second USB port |
+| nRF52 one-port packet stream | `set usb.logging stream reboot` | `set usb.logging off` | Saved; CLI and packets share the primary port for stock serial bridges |
 | ESP32 browser settings | `set webui on` | `set webui off` | Saved; starts/stops WebConfig |
 | ESP32 temporary setup portal | `start webconfig ap` | `stop webconfig` | This session; opens a setup network/QR where available |
 | ESP32 WiFi firmware uploader | `start ota` or `start ota ap` | `stop ota` | This session; only usable with two application slots |

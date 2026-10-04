@@ -675,9 +675,7 @@ static void endPrimaryUsbHostSession(bool clear_cdc_fifos) {
       millis() + primary_usb_session_settle_millis,
       std::memory_order_release);
   primary_usb_reset_generation.fetch_add(1, std::memory_order_acq_rel);
-#if !defined(MESH_DUAL_CDC_LOGGING)
-  clearUsbLoggingClientActivity();
-#endif
+  if (!hasDedicatedUsbLoggingPort()) clearUsbLoggingClientActivity();
   if (clear_cdc_fifos) {
     // The line-state callback runs before TinyUSB resets the device. A device
     // unmount/remount boundary has already reset these class FIFOs.
@@ -711,11 +709,8 @@ static size_t writeTinyUsbCdcOnce(void* context, const uint8_t* data,
   const size_t available = tud_cdc_n_write_available(instance);
   const size_t attempt = size < available ? size : available;
   if (attempt == 0) return 0;
-#if defined(MESH_DUAL_CDC_LOGGING)
-  if (instance == 1) noteUsbLoggingTxAttempt();
-#else
-  if (instance == 0) noteUsbLoggingTxAttempt();
-#endif
+  if (instance == (hasDedicatedUsbLoggingPort() ? 1 : 0))
+    noteUsbLoggingTxAttempt();
   return tud_cdc_n_write(instance, data, attempt);
 }
 
@@ -1020,7 +1015,8 @@ void serviceDedicatedUsbLoggingFromUsbTask() {
   usb_task_dedicated_usb_logging_port.drainOne();
   (void)tud_cdc_n_write_flush(1);
 }
-#elif defined(NRF52_PLATFORM)
+#endif
+#if defined(NRF52_PLATFORM)
 // Single-CDC nRF52 roles need the same protection. In particular, BLE debug
 // callbacks and packet logging write through usbLoggingPort() without going
 // through MeshCore's formatted-debug helper.
@@ -1067,6 +1063,16 @@ void setUsbLoggingEnabled(bool enabled) {
 bool saveUsbLoggingBootPreference(bool enabled) {
   (void)enabled;
   return true;
+}
+
+static std::atomic<bool> usb_logging_packet_stream{false};
+
+void configureUsbLoggingPacketStream(bool enabled) {
+  usb_logging_packet_stream.store(enabled, std::memory_order_release);
+}
+
+bool isUsbLoggingPacketStream() {
+  return usb_logging_packet_stream.load(std::memory_order_acquire);
 }
 
 void setUsbCompanionTxBufferCapacity(size_t capacity) {
@@ -1126,7 +1132,7 @@ void beginUsbLoggingPort() {
   }
 #endif
 #if defined(MESH_DUAL_CDC_LOGGING)
-  if (dedicated_usb_logging_port_started
+  if (isUsbLoggingPacketStream() || dedicated_usb_logging_port_started
       || !usb_logging_preference_known.load(std::memory_order_relaxed)
       || !isUsbLoggingEnabled()) {
     return;
@@ -1174,6 +1180,7 @@ void serviceUsbLoggingPort() {
   serviceEsp32HwcdcTxKick();
 #endif
 #if defined(MESH_DUAL_CDC_LOGGING)
+  if (isUsbLoggingPacketStream()) return;
   const bool connected = dedicated_usb_logging_port_started
       && dedicated_usb_logging_port.dtr();
   const bool should_service = connected && isUsbLoggingEnabled();
@@ -1367,12 +1374,14 @@ bool resetUsbCompanionTransport() {
 
 Stream& usbLoggingPort() {
 #if defined(MESH_DUAL_CDC_LOGGING)
-  if (isUsbLoggingEnabled() && dedicated_usb_logging_port_started
-      && dedicated_usb_logging_port_connected.load(std::memory_order_acquire)) {
-    return nonblocking_dedicated_usb_logging_port;
+  if (!isUsbLoggingPacketStream()) {
+    if (isUsbLoggingEnabled() && dedicated_usb_logging_port_started
+        && dedicated_usb_logging_port_connected.load(std::memory_order_acquire)) {
+      return nonblocking_dedicated_usb_logging_port;
+    }
+    return null_usb_logging_stream;
   }
-  return null_usb_logging_stream;
-#else
+#endif
   if (!isUsbLoggingEnabled()) return null_usb_logging_stream;
   #if MESH_ESP32_TINYUSB_NONBLOCKING
     return buffered_esp32_tinyusb_logging_port;
@@ -1383,7 +1392,6 @@ Stream& usbLoggingPort() {
   #else
     return Serial;
   #endif
-#endif
 }
 
 Stream& usbDebugPort() {
@@ -1600,7 +1608,7 @@ bool tryCompleteUsbTerminalSessionReset() {
 
 bool hasDedicatedUsbLoggingPort() {
 #if defined(MESH_DUAL_CDC_LOGGING)
-  return true;
+  return !isUsbLoggingPacketStream();
 #else
   return false;
 #endif
@@ -1616,7 +1624,8 @@ bool isDedicatedUsbLoggingPortConfigured() {
 
 bool usbLoggingInterfaceRestartRequired() {
 #if defined(MESH_DUAL_CDC_LOGGING)
-  return dedicated_usb_logging_port_configured != isUsbLoggingEnabled();
+  return dedicated_usb_logging_port_configured
+      != (isUsbLoggingEnabled() && hasDedicatedUsbLoggingPort());
 #else
   return false;
 #endif
@@ -1624,10 +1633,10 @@ bool usbLoggingInterfaceRestartRequired() {
 
 const char* usbLoggingPortDescription() {
 #if defined(MESH_DUAL_CDC_LOGGING)
-  return "dedicated USB CDC 1, interface 02 (Linux: *-if02; tty/COM name is host-assigned)";
-#else
-  return "primary USB serial port (tty/COM name is host-assigned)";
+  if (hasDedicatedUsbLoggingPort())
+    return "dedicated USB CDC 1, interface 02 (Linux: *-if02; tty/COM name is host-assigned)";
 #endif
+  return "primary USB serial port (tty/COM name is host-assigned)";
 }
 
 UsbLoggingObservation observeUsbLoggingTransport() {
@@ -1660,7 +1669,9 @@ UsbLoggingObservation observeUsbLoggingTransport() {
   result.pending = usb_logging_tx_waiting.load(std::memory_order_acquire)
       || tud_cdc_n_write_available(instance) < CFG_TUD_CDC_TX_BUFSIZE;
 #if defined(MESH_DUAL_CDC_LOGGING)
-  result.pending = result.pending || usb_task_dedicated_usb_logging_port.queuedRecordCount() != 0;
+  result.pending = result.pending || (hasDedicatedUsbLoggingPort()
+      ? usb_task_dedicated_usb_logging_port.queuedRecordCount() != 0
+      : hasPendingUsbTerminalOutput());
 #else
   result.pending = result.pending || hasPendingUsbTerminalOutput();
 #endif
@@ -1721,16 +1732,19 @@ UsbLoggingRecoveryResult recoverUsbLoggingTransport(uint8_t stage) {
 #elif defined(NRF52_PLATFORM) && defined(USE_TINYUSB)
   if (stage == 1) {
 #if defined(MESH_DUAL_CDC_LOGGING)
-    // Only publish a request. FIFO/identity/queue mutation remains in CDC1's
-    // existing TinyUSB-owner SOF service, never in this application call.
-    dedicated_usb_logging_watchdog_reset_requested.store(true, std::memory_order_release);
-    dedicated_usb_logging_port_connected.store(false, std::memory_order_release);
-    if (tud_cdc_n_connected(1)) tud_sof_cb_enable(true);
-#else
-    endPrimaryUsbHostSession(false);
-    clearNrf52UsbTxForSession(0);
-    probeUsbLoggingTransport();
+    if (hasDedicatedUsbLoggingPort()) {
+      // Only publish a request. FIFO/identity/queue mutation remains in
+      // CDC1's existing TinyUSB-owner SOF service, never in this call.
+      dedicated_usb_logging_watchdog_reset_requested.store(true, std::memory_order_release);
+      dedicated_usb_logging_port_connected.store(false, std::memory_order_release);
+      if (tud_cdc_n_connected(1)) tud_sof_cb_enable(true);
+    } else
 #endif
+    {
+      endPrimaryUsbHostSession(false);
+      clearNrf52UsbTxForSession(0);
+      probeUsbLoggingTransport();
+    }
   } else if (!usb_logging_watchdog_detached) {
     if (!tud_disconnect()) return UsbLoggingRecoveryResult::Deferred;
     usb_logging_watchdog_attach_at = millis() + 50;
@@ -1762,11 +1776,8 @@ bool isUsbLoggingTransportRecoveryPending() {
 
 #if defined(NRF52_PLATFORM) && defined(USE_TINYUSB)
 extern "C" void meshTinyUsbLoggingTxComplete(uint8_t instance) {
-#if defined(MESH_DUAL_CDC_LOGGING)
-  if (instance == 1) mesh::noteUsbLoggingTxComplete();
-#else
-  if (instance == 0) mesh::noteUsbLoggingTxComplete();
-#endif
+  if (instance == (mesh::hasDedicatedUsbLoggingPort() ? 1 : 0))
+    mesh::noteUsbLoggingTxComplete();
 }
 #endif
 

@@ -90,6 +90,11 @@ inline bool isUsbDebugLoggingEnabled() {
 // descriptor mirror; nRF52 selects its optional second interface after loading
 // the normal role preferences.
 bool saveUsbLoggingBootPreference(bool enabled);
+// Select the saved Companion packet-stream mode before preferences enable
+// logging and before the optional second CDC is configured. This keeps CLI
+// replies and packet records on one port for stock serial packet bridges.
+void configureUsbLoggingPacketStream(bool enabled);
+bool isUsbLoggingPacketStream();
 
 // Record the HWCDC TX ring size actually allocated during early setup. A zero
 // value keeps reset cleanup quarantined and eligible for a minimum-size retry
