@@ -3493,6 +3493,7 @@ void setup() {
   companion_serial.setPins(SERIAL_RX, SERIAL_TX);
   companion_serial.begin(115200);
   hardware_serial_interface.begin(companion_serial);
+  hardware_serial_interface.enableFlowControl(true);
   interface_manager.addInterface(InterfaceType::HardwareSerial, &hardware_serial_interface);
 #endif
 
