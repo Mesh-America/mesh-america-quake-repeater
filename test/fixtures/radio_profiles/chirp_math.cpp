@@ -1,13 +1,82 @@
 #include <RadioProfiles.h>
 #include <cassert>
 #include <cmath>
+#include <limits>
+#include <cstring>
 #include <utility>
 
 using Profiles=mesh::RadioProfiles;
 mesh::RadioProfileParams params(unsigned sf,float bw) {
   mesh::RadioProfileParams p; p.freq=909.5;p.sf=sf;p.bw=bw;p.cr=5;return p;
 }
+static bool originalSafePreamble(const mesh::RadioProfileParams& p, uint16_t symbols) {
+  const double symbol = Profiles::symbolUs(p);
+  if (symbol <= 0) return false;
+  const int de = symbol >= 16000 ? 1 : 0;
+  const double payload = 8 + std::ceil((8.0 * 255 - 4 * p.sf
+      + (p.sf <= 6 ? 20 : 28) + 16) / (4 * (p.sf - 2 * de))) * 8;
+  return (symbols + (p.sf <= 6 ? 6.25 : 4.25) + payload) * symbol * 4 <= UINT32_MAX;
+}
+static void checkSafePreamble(unsigned sf, float bw, uint16_t symbols) {
+  const auto p = params(sf, bw);
+  assert(Profiles::safePreamble(p, symbols) == originalSafePreamble(p, symbols));
+}
 int main() {
+  // Sharing the read-only validation table must preserve every supported
+  // value and the strict float tolerance on both sides of its boundary.
+  for (float bw : {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f,
+                   62.5f, 125.0f, 250.0f, 500.0f, 1000.0f, 812.5f, 1625.0f}) {
+    auto p = params(7, bw);
+    assert(Profiles::valid(p));
+    const float lower = bw - 0.01f, upper = bw + 0.01f;
+    for (float inside : {std::nextafter(lower, bw), std::nextafter(upper, bw)}) {
+      p.bw = inside;
+      assert(std::fabs(inside - bw) < 0.01f && Profiles::valid(p));
+    }
+    for (float outside : {std::nextafter(lower, -std::numeric_limits<float>::infinity()),
+                          std::nextafter(upper, std::numeric_limits<float>::infinity())}) {
+      p.bw = outside;
+      assert(std::fabs(outside - bw) >= 0.01f && !Profiles::valid(p));
+    }
+  }
+  for (float unsupported : {0.0f, 1.0f, 8.0f, 12.0f, 100.0f, 1500.0f, 2000.0f})
+    assert(!Profiles::valid(params(7, unsupported)));
+  for (float nonfinite : {std::numeric_limits<float>::quiet_NaN(),
+                          std::numeric_limits<float>::infinity(),
+                          -std::numeric_limits<float>::infinity()}) {
+    assert(!Profiles::valid(params(7, nonfinite)));
+    auto p = params(7, 125);
+    p.freq = nonfinite;
+    assert(!Profiles::valid(p));
+  }
+  // Compare the production integer ceiling with the original double formula,
+  // including invalid SFs where zero/negative denominators were observable.
+  for (unsigned sf = 0; sf < 256; ++sf) {
+    const float transition = float(double(1u << (sf & 31)) * 1000 / 16000);
+    for (float bw : {0.0f, -0.0f, -1.0f, 7.8f, 62.5f, 125.0f, 500.0f,
+                     1000.0f, transition, std::nextafter(transition, 0.0f),
+                     std::nextafter(transition, std::numeric_limits<float>::infinity()),
+                     std::numeric_limits<float>::min(), std::numeric_limits<float>::max(),
+                     std::numeric_limits<float>::denorm_min(),
+                     std::numeric_limits<float>::quiet_NaN(),
+                     std::numeric_limits<float>::infinity(),
+                     -std::numeric_limits<float>::infinity()}) {
+      for (uint16_t symbols : {0, 1, 8, 16, 32, 128, 1024, 65528, 65535})
+        checkSafePreamble(sf, bw, symbols);
+    }
+  }
+  for (unsigned sf = 0; sf <= 12; ++sf)
+    for (float bw : {0.001f, 7.8f, 125.0f})
+      for (unsigned symbols = 0; symbols <= UINT16_MAX; ++symbols)
+        checkSafePreamble(sf, bw, uint16_t(symbols));
+  uint32_t random = 0x89abcdef;
+  for (unsigned i = 0; i < 16384; ++i) {
+    random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+    float bw;
+    static_assert(sizeof(bw) == sizeof(random), "Radio bandwidth is a 32-bit float");
+    std::memcpy(&bw, &random, sizeof(bw));
+    checkSafePreamble((i & 1) ? i % 13 : random & 255, bw, uint16_t(random >> 16));
+  }
   assert(Profiles::MinListenSymbols==4.6);
   assert(Profiles::SlowListenSymbols==4.6);
   assert(Profiles::MinFastListenSymbols==4.6);
