@@ -9,6 +9,18 @@
 #if MESH_ESP32_HWCDC_SESSION_GUARD
   #include "esp_idf_version.h"
   #include "hal/usb_serial_jtag_ll.h"
+  #include "esp_arduino_version.h"
+  #if ESP_ARDUINO_VERSION_MAJOR == 2 && ESP_ARDUINO_VERSION_MINOR == 0 \
+      && ESP_ARDUINO_VERSION_PATCH == 17 \
+      && (CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3)
+    #define MESH_HWCDC_PINNED_TX_BACKPORT 1
+    extern "C" void meshEsp32HwcdcSetTxAllowed(bool allowed);
+    extern "C" void meshEsp32HwcdcKickTx();
+    extern "C" bool meshEsp32HwcdcTxPending();
+    extern "C" bool meshEsp32HwcdcDiscardTxStash();
+  #else
+    #define MESH_HWCDC_PINNED_TX_BACKPORT 0
+  #endif
 #endif
 
 #if defined(NRF52_PLATFORM) || MESH_ESP32_HWCDC_SESSION_GUARD \
@@ -418,8 +430,12 @@ static void handleEsp32HwcdcEvent(void*, esp_event_base_t, int32_t event_id,
         1, std::memory_order_acq_rel);
     esp32_hwcdc_tx_kick_pending.store(false, std::memory_order_release);
     esp32_hwcdc_tx_primed.store(false, std::memory_order_release);
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+    meshEsp32HwcdcSetTxAllowed(false);
+#else
     usb_serial_jtag_ll_disable_intr_mask(
         USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+#endif
     portEXIT_CRITICAL(&esp32_hwcdc_session_mux);
     Serial.setDebugOutput(false);
     esp32_hwcdc_bus_reset_generation.fetch_add(
@@ -501,7 +517,11 @@ static void serviceEsp32HwcdcTxKickExclusive(void*) {
   // Sample it while the shared producer gate excludes every MeshCore writer.
   const size_t tx_capacity = esp32_hwcdc_tx_buffer_capacity.load(
       std::memory_order_acquire);
-  if (tx_capacity != 0 && Serial.availableForWrite() >= tx_capacity) {
+  if (tx_capacity != 0 && Serial.availableForWrite() >= tx_capacity
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+      && !meshEsp32HwcdcTxPending()
+#endif
+      ) {
     esp32_hwcdc_tx_kick_pending.store(false, std::memory_order_release);
     return;
   }
@@ -513,9 +533,13 @@ static void serviceEsp32HwcdcTxKickExclusive(void*) {
   portENTER_CRITICAL(&esp32_hwcdc_session_mux);
   if (esp32_hwcdc_tx_kick_pending.load(std::memory_order_acquire)
       && canAccessEsp32Hwcdc(nullptr) && Serial.isPlugged()) {
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+    meshEsp32HwcdcKickTx();
+#else
     usb_serial_jtag_ll_txfifo_flush();
     usb_serial_jtag_ll_ena_intr_mask(
         USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+#endif
   }
   portEXIT_CRITICAL(&esp32_hwcdc_session_mux);
 }
@@ -1232,6 +1256,10 @@ static void purgeEsp32HwcdcQueues(void* opaque) {
     return;
   }
 
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+  // The producer gate and driver TX gate are closed while pads are detached.
+  if (!meshEsp32HwcdcDiscardTxStash()) return;
+#endif
   const uint32_t purge_started = millis();
   uint8_t flush_attempts = 0;
   do {
@@ -1241,7 +1269,11 @@ static void purgeEsp32HwcdcQueues(void* opaque) {
     Serial.flush();
     ++flush_attempts;
     result->tx_empty = flush_attempts >= 2 && tx_capacity != 0
-        && Serial.availableForWrite() >= tx_capacity;
+        && Serial.availableForWrite() >= tx_capacity
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+        && !meshEsp32HwcdcTxPending()
+#endif
+        ;
     if (!result->tx_empty) delay(1);
   } while (!result->tx_empty
            && (uint32_t)(millis() - purge_started) < 100U);
@@ -1269,8 +1301,12 @@ bool resetUsbCompanionTransport() {
             1, std::memory_order_acq_rel) + 1U;
     esp32_hwcdc_tx_kick_pending.store(false, std::memory_order_release);
     esp32_hwcdc_tx_primed.store(false, std::memory_order_release);
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+    meshEsp32HwcdcSetTxAllowed(false);
+#else
     usb_serial_jtag_ll_disable_intr_mask(
         USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+#endif
     portEXIT_CRITICAL(&esp32_hwcdc_session_mux);
     setPlatformDebugOutputEnabled(false);
 
@@ -1313,6 +1349,13 @@ bool resetUsbCompanionTransport() {
   esp32_hwcdc_tx_kick_pending.store(false, std::memory_order_release);
   esp32_hwcdc_allowed_generation.store(
       esp32_hwcdc_cleanup_generation, std::memory_order_release);
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+  // A newer BUS_RESET remains quarantined until its own cleanup epoch.
+  if (esp32_hwcdc_cleanup_generation
+      == esp32_hwcdc_access_generation.load(std::memory_order_acquire)) {
+    meshEsp32HwcdcSetTxAllowed(true);
+  }
+#endif
   portEXIT_CRITICAL(&esp32_hwcdc_session_mux);
   esp32_hwcdc_cleanup_pending = false;
   // A concurrent runtime preference change is authoritative; never restore a
@@ -1604,7 +1647,11 @@ UsbLoggingObservation observeUsbLoggingTransport() {
   result.reader_connected = result.host_connected && bool(Serial);
   const size_t capacity = esp32_hwcdc_tx_buffer_capacity.load(std::memory_order_acquire);
   result.pending = usb_logging_tx_waiting.load(std::memory_order_acquire)
-      || (capacity != 0 && Serial.availableForWrite() < int(capacity));
+      || (capacity != 0 && Serial.availableForWrite() < int(capacity))
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+      || meshEsp32HwcdcTxPending()
+#endif
+      ;
 #elif defined(NRF52_PLATFORM) && defined(USE_TINYUSB)
   result.supported = true;
   const uint8_t instance = hasDedicatedUsbLoggingPort() ? 1 : 0;
