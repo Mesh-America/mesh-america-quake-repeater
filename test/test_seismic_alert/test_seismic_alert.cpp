@@ -164,33 +164,6 @@ TEST(SeismicMessage, ATestMessageIsMarkedAndCarriesNoValues) {
   EXPECT_EQ(m, "TEST: Shaking detected near 47.61,-122.33. This does not necessarily indicate an earthquake.");
 }
 
-// ---- Follow-up message --------------------------------------------------------------------------
-
-TEST(SeismicFollowup, CarriesTheNumbersAndTheDisclaimer) {
-  char out[200];
-  const size_t n = formatFollowup(out, sizeof(out), 163, 433, 1481);
-  EXPECT_STREQ(out,
-               "Update: strength 43.3 cm/s, peak acceleration 148 gal. This does not necessarily indicate an earthquake.");
-  EXPECT_EQ(n, strlen(out));
-}
-
-TEST(SeismicFollowup, ShortensBeforeCuttingTheDisclaimerAndNeverSendsAFragment) {
-  char out[200];
-  const size_t full = formatFollowup(out, sizeof(out), 200, 433, 1481);
-  const size_t shorter = formatFollowup(out, sizeof(out), full - 1, 433, 1481);
-  ASSERT_GT(shorter, 0u);
-  EXPECT_LT(shorter, full);
-  EXPECT_NE(strstr(out, "This does not necessarily indicate an earthquake."), nullptr);
-  EXPECT_EQ(formatFollowup(out, sizeof(out), shorter - 1, 433, 1481), 0u);
-  EXPECT_STREQ(out, "");
-}
-
-TEST(SeismicFollowup, FitsAfterTheLongestRepeaterName) {
-  char out[200];
-  // 163 characters of room minus a 31-character name and ": ".
-  EXPECT_GT(formatFollowup(out, sizeof(out), 163 - 33, 65535, 65535), 0u);
-}
-
 // ---- Policy ------------------------------------------------------------------------------------
 
 namespace {
@@ -203,20 +176,17 @@ struct Rig {
   uint32_t now = 1000;
   uint32_t jitter = 0;
   Send sent;
-  int alerts = 0, followups = 0;
 
   Rig() {
     in.sensorPresent = true;
     gates.channelSet = gates.locationSet = true;
-    policy.configure(10 * kMin, 2000);
+    policy.configure(10 * kMin, 30 * 1000);
   }
   bool step(uint32_t advanceMs = 250) {
     now += advanceMs;
-    const bool send = policy.update(now, in, gates, jitter, sent);
-    if (send) (sent.kind == Kind::Alert ? alerts : followups)++;
-    return send;
+    return policy.update(now, in, gates, jitter, sent);
   }
-  // Steps until `ms` have passed and reports whether anything was sent in between.
+  // Steps until `ms` have passed and reports whether a send happened in between.
   bool run(uint32_t ms) {
     bool any = false;
     for (uint32_t t = 0; t < ms; t += 250) any |= step();
@@ -230,13 +200,14 @@ struct Rig {
     in.siRaw = si;
     in.pgaRaw = pga;
   }
-  // A complete, ordinary event: shaking is reported while the sensor measures, then the record lands.
-  void fullEvent(uint16_t si = 433, uint16_t pga = 1481) {
+  // A complete, ordinary event: shaking is reported while the sensor processes it, then the record lands.
+  bool fullEvent(uint16_t si = 433, uint16_t pga = 1481) {
     shake();
     processingStarts();
-    run(3000);
+    bool any = run(2000);
     processingEnds(si, pga);
-    run(3000);
+    any |= run(40 * 1000);
+    return any;
   }
 };
 }  // namespace
@@ -257,113 +228,105 @@ TEST(SeismicPolicy, ReportsFromBeforeItStartedWatchingAreHistory) {
   EXPECT_EQ(r.policy.sent(), 0u);
 }
 
-TEST(SeismicPolicy, TheAlertGoesOutImmediatelyWithoutWaitingForTheSensor) {
+TEST(SeismicPolicy, SendsOneMessageWithTheFinalValuesAfterTheSensorFinishes) {
   Rig r;
-  r.step();  // baseline
-  r.shake();
-  r.processingStarts();  // the sensor is still measuring
-  EXPECT_TRUE(r.step());
-  EXPECT_EQ(r.sent.kind, Kind::Alert);
-  EXPECT_EQ(r.sent.siRaw, 0);
-  EXPECT_EQ(r.alerts, 1);
+  ASSERT_FALSE(r.step());  // baseline
+  EXPECT_TRUE(r.fullEvent(433, 1481));
+  EXPECT_TRUE(r.sent.haveValues);
+  EXPECT_EQ(r.sent.siRaw, 433);
+  EXPECT_EQ(r.sent.pgaRaw, 1481);
+  EXPECT_EQ(r.policy.sent(), 1u);
   EXPECT_EQ(r.policy.phase(), Policy::Phase::Cooldown);
 }
 
-TEST(SeismicPolicy, OnlyAShortRandomDelaySeparatesTheReportFromTheAlert) {
+TEST(SeismicPolicy, DoesNotSendWhileTheSensorIsStillProcessing) {
   Rig r;
   r.step();
-  r.jitter = 1500;
   r.shake();
-  EXPECT_FALSE(r.step());  // the report is seen; the delay starts
+  r.processingStarts();
+  EXPECT_FALSE(r.run(90 * 1000));  // well inside the sensor's two-minute window
+  EXPECT_EQ(r.policy.phase(), Policy::Phase::WaitingForRecord);
+  EXPECT_EQ(r.policy.sent(), 0u);
+}
+
+TEST(SeismicPolicy, WaitsTheRandomDelayBeforeSending) {
+  Rig r;
+  r.step();
+  r.jitter = 7000;
+  r.shake();
+  r.processingStarts();
+  r.run(1000);
+  r.processingEnds(100, 200);
+  r.step();  // the record is seen here; the delay starts
   EXPECT_EQ(r.policy.phase(), Policy::Phase::Delaying);
-  EXPECT_FALSE(r.run(1000));
-  EXPECT_TRUE(r.run(1000));
+  EXPECT_FALSE(r.run(6000));
+  EXPECT_TRUE(r.run(1500));
 }
 
 TEST(SeismicPolicy, ClampsTheDelayToItsMaximum) {
   Rig r;
   r.step();
-  r.jitter = 10 * kMin;  // a bad random value cannot hold the alert back
-  r.shake();
-  EXPECT_TRUE(r.run(3000));
-}
-
-TEST(SeismicPolicy, AFollowupWithTheFinalNumbersComesWhenTheSensorFinishes) {
-  Rig r;
-  r.step();
+  r.jitter = 10 * kMin;  // a bad random value cannot hold the message back for long
   r.shake();
   r.processingStarts();
-  r.run(60 * 1000);  // alert sent early; the sensor is still measuring
-  EXPECT_EQ(r.followups, 0);
-  EXPECT_TRUE(r.policy.followupPending());
-  r.processingEnds(433, 1481);
-  EXPECT_TRUE(r.step());
-  EXPECT_EQ(r.sent.kind, Kind::Followup);
-  EXPECT_EQ(r.sent.siRaw, 433);
-  EXPECT_EQ(r.sent.pgaRaw, 1481);
-  EXPECT_EQ(r.policy.followupsSent(), 1u);
-  EXPECT_FALSE(r.policy.followupPending());
-  EXPECT_FALSE(r.run(5 * kMin));  // and only one
+  r.run(500);
+  r.processingEnds(100, 200);
+  EXPECT_TRUE(r.run(31 * 1000));
 }
 
-TEST(SeismicPolicy, NoFollowupIfTheSensorNeverFinishes) {
-  Rig r;
-  r.step();
-  r.shake();
-  r.processingStarts();
-  EXPECT_FALSE(r.run(Policy::RecordWaitMs + 10 * 1000) && r.followups > 0);
-  EXPECT_EQ(r.alerts, 1);
-  EXPECT_EQ(r.followups, 0);
-  EXPECT_FALSE(r.policy.followupPending());
-}
-
-TEST(SeismicPolicy, NeverSendsARecordItDidNotSeeBeingWritten) {
+TEST(SeismicPolicy, NeverUsesARecordItDidNotSeeBeingWritten) {
   Rig r;
   r.step();
   r.in.recordValid = true;  // the previous event's record, sitting in the sensor
   r.in.siRaw = 999;
   r.in.pgaRaw = 999;
-  r.shake();  // reported, but measuring is never observed
-  r.run(Policy::NoProcessingWaitMs + 5000);
-  EXPECT_EQ(r.alerts, 1);
-  EXPECT_EQ(r.followups, 0);  // no follow-up rather than stale numbers
-}
-
-TEST(SeismicPolicy, AReportThatArrivesWhileAlreadyMeasuringStillGetsItsFollowup) {
-  Rig r;
-  r.step();
-  r.in.processing = true;  // measuring was already underway on the poll that saw the flag
-  r.shake();
-  r.run(5000);
-  r.processingEnds(55, 66);
-  r.run(1000);
-  EXPECT_EQ(r.followups, 1);
-  EXPECT_EQ(r.sent.siRaw, 55);
+  r.shake();  // reported, but processing is never observed
+  EXPECT_FALSE(r.run(Policy::NoProcessingWaitMs - 1000));
+  EXPECT_TRUE(r.run(2000 + 31 * 1000));
+  EXPECT_FALSE(r.sent.haveValues);  // sends without values rather than stale ones
 }
 
 TEST(SeismicPolicy, ReportsWhereAnEventIsAndHowLongIsLeft) {
   Rig r;
   r.step();
   EXPECT_EQ(r.policy.waitRemainingMs(r.now), 0u);  // no event
-  r.jitter = 1500;
   r.shake();
   r.processingStarts();
   r.step();
-  EXPECT_EQ(r.policy.phase(), Policy::Phase::Delaying);
-  EXPECT_GT(r.policy.waitRemainingMs(r.now), 0u);
-  EXPECT_LE(r.policy.waitRemainingMs(r.now), 1500u);
-  r.run(2000);  // alert sent; waiting for the sensor's numbers
-  EXPECT_TRUE(r.policy.followupPending());
-  EXPECT_GT(r.policy.waitRemainingMs(r.now), 200 * 1000u);
+  EXPECT_EQ(r.policy.phase(), Policy::Phase::WaitingForRecord);
+  EXPECT_GT(r.policy.waitRemainingMs(r.now), Policy::RecordWaitMs - 2000);
   EXPECT_LE(r.policy.waitRemainingMs(r.now), Policy::RecordWaitMs);
+  r.run(Policy::RecordWaitMs - 2000);
+  EXPECT_LE(r.policy.waitRemainingMs(r.now), 2000u);
+}
+
+TEST(SeismicPolicy, SendsWithoutValuesIfTheSensorNeverFinishes) {
+  Rig r;
+  r.step();
+  r.shake();
+  r.processingStarts();
+  EXPECT_FALSE(r.run(Policy::RecordWaitMs - 2000));
+  EXPECT_TRUE(r.run(2000 + 31 * 1000));
+  EXPECT_FALSE(r.sent.haveValues);
+}
+
+TEST(SeismicPolicy, AReportThatArrivesWhileAlreadyProcessingStillGetsItsValues) {
+  Rig r;
+  r.step();
+  r.in.processing = true;  // processing was already underway on the poll that saw the flag
+  r.shake();
+  r.run(1000);
+  r.processingEnds(55, 66);
+  EXPECT_TRUE(r.run(40 * 1000));
+  EXPECT_TRUE(r.sent.haveValues);
+  EXPECT_EQ(r.sent.siRaw, 55);
 }
 
 TEST(SeismicPolicy, ChannelNotSetMeansNothingIsSent) {
   Rig r;
   r.gates.channelSet = false;
   r.step();
-  r.fullEvent();
-  EXPECT_EQ(r.alerts + r.followups, 0);
+  EXPECT_FALSE(r.fullEvent());
   EXPECT_EQ(r.policy.sent(), 0u);
   EXPECT_EQ(r.policy.suppressed(), 1u);
   EXPECT_EQ(r.policy.lastBlocked(), Block::NoChannel);
@@ -373,8 +336,8 @@ TEST(SeismicPolicy, LocationNotSetMeansNothingIsSent) {
   Rig r;
   r.gates.locationSet = false;
   r.step();
-  r.fullEvent();
-  EXPECT_EQ(r.alerts + r.followups, 0);
+  EXPECT_FALSE(r.fullEvent());
+  EXPECT_EQ(r.policy.sent(), 0u);
   EXPECT_EQ(r.policy.lastBlocked(), Block::NoLocation);
   EXPECT_STREQ(blockText(r.policy.lastBlocked()), "location is not set (set lat and lon)");
 }
@@ -383,8 +346,7 @@ TEST(SeismicPolicy, AFaultedSensorSendsNothing) {
   Rig r;
   r.in.sensorFaulted = true;
   r.step();
-  r.fullEvent();
-  EXPECT_EQ(r.alerts + r.followups, 0);
+  EXPECT_FALSE(r.fullEvent());
   EXPECT_EQ(r.policy.lastBlocked(), Block::SensorFault);
 }
 
@@ -392,85 +354,68 @@ TEST(SeismicPolicy, AMissingSettingIsCheckedWhenSendingSoFixingItBeforehandIsEno
   Rig r;
   r.gates.locationSet = false;
   r.step();
-  r.jitter = 1500;
   r.shake();
-  r.step();
-  r.gates.locationSet = true;  // set during the short delay
-  EXPECT_TRUE(r.run(2000));
+  r.processingStarts();
+  r.run(500);
+  r.processingEnds(1, 2);
+  r.gates.locationSet = true;  // set during the wait
+  EXPECT_TRUE(r.run(40 * 1000));
 }
 
 TEST(SeismicPolicy, ASuppressedAlertIsNeverSentLateAndDoesNotStartACooldown) {
   Rig r;
   r.gates.locationSet = false;
   r.step();
-  r.fullEvent();
+  EXPECT_FALSE(r.fullEvent());
   r.gates.locationSet = true;  // fixed afterwards
   EXPECT_FALSE(r.run(5 * kMin));  // the old event is not resurrected
   EXPECT_EQ(r.policy.phase(), Policy::Phase::Idle);
-  r.fullEvent();  // the next real event is reported straight away: no cooldown was started
-  EXPECT_EQ(r.alerts, 1);
+  EXPECT_TRUE(r.fullEvent());  // the next real event is reported straight away: no cooldown was started
 }
 
 TEST(SeismicPolicy, IgnoresFurtherReportsDuringTheCooldownThenAlertsAgain) {
   Rig r;
   r.step();
-  r.fullEvent();
-  ASSERT_EQ(r.alerts, 1);
+  ASSERT_TRUE(r.fullEvent());
   r.shake();
   r.shake();
-  r.run(5 * kMin);
+  EXPECT_FALSE(r.run(5 * kMin));
   EXPECT_EQ(r.policy.ignoredInCooldown(), 1u);  // reports arriving in the same poll count once
   EXPECT_EQ(r.policy.sent(), 1u);
   EXPECT_GT(r.policy.cooldownRemainingMs(r.now), 0u);
   r.run(6 * kMin);  // the ten minutes are over
   EXPECT_EQ(r.policy.cooldownRemainingMs(r.now), 0u);
-  r.fullEvent();
-  EXPECT_EQ(r.alerts, 2);
+  EXPECT_TRUE(r.fullEvent());
+  EXPECT_EQ(r.policy.sent(), 2u);
 }
 
-TEST(SeismicPolicy, ReportsDuringTheDelayAreTheSameShaking) {
+TEST(SeismicPolicy, ReportsDuringTheWaitAndTheDelayAreTheSameShaking) {
   Rig r;
-  r.step();
-  r.jitter = 1500;
-  r.shake();
-  r.step();
-  r.shake();  // more reports while waiting to send
-  r.shake();
-  r.run(5000);
-  EXPECT_EQ(r.alerts, 1);
-  r.run(5 * kMin);
-  EXPECT_EQ(r.alerts, 1);
-}
-
-TEST(SeismicPolicy, ANewEventDropsTheOldEventsFollowup) {
-  Rig r;
-  r.policy.configure(1 * kMin, 2000);  // cooldown shorter than the sensor's measuring time
   r.step();
   r.shake();
   r.processingStarts();
-  r.run(2000);  // first alert out, follow-up pending
-  ASSERT_TRUE(r.policy.followupPending());
-  r.run(70 * 1000);  // cooldown over, still measuring
-  r.jitter = 1500;
-  r.shake();         // a second event
+  r.run(1000);
+  r.shake();  // more reports while processing
+  r.run(1000);
+  r.processingEnds(200, 300);
+  r.jitter = 5000;
   r.step();
-  EXPECT_FALSE(r.policy.followupPending());  // the first event's follow-up is no longer wanted
-  r.run(3000);
-  EXPECT_EQ(r.alerts, 2);
+  r.shake();  // and during the delay
+  EXPECT_TRUE(r.run(10 * 1000));
+  EXPECT_EQ(r.policy.sent(), 1u);
+  EXPECT_FALSE(r.run(5 * kMin));
+  EXPECT_EQ(r.policy.sent(), 1u);
 }
 
 TEST(SeismicPolicy, WorksAcrossTheMillisecondCounterWrapping) {
   Rig r;
-  r.now = 0xffffffffu - 2 * 1000;  // wraps during the event
+  r.now = 0xffffffffu - 20 * 1000;  // wraps during the event
   r.step();
-  r.fullEvent(433, 1481);
-  EXPECT_EQ(r.alerts, 1);
-  EXPECT_EQ(r.followups, 1);
+  EXPECT_TRUE(r.fullEvent(433, 1481));
   EXPECT_EQ(r.sent.siRaw, 433);
   r.run(11 * kMin);
   EXPECT_EQ(r.policy.cooldownRemainingMs(r.now), 0u);
-  r.fullEvent();
-  EXPECT_EQ(r.alerts, 2);
+  EXPECT_TRUE(r.fullEvent());
 }
 
 TEST(SeismicPolicy, ASensorThatDisappearsAndReturnsStartsFromScratch) {
@@ -482,15 +427,13 @@ TEST(SeismicPolicy, ASensorThatDisappearsAndReturnsStartsFromScratch) {
   r.in.sensorPresent = true;
   EXPECT_FALSE(r.run(kMin));
   EXPECT_EQ(r.policy.eventsSeen(), 0u);  // treated as history
-  r.fullEvent();                         // but a new one is reported
-  EXPECT_EQ(r.alerts, 1);
+  EXPECT_TRUE(r.fullEvent());            // but a new one is reported
 }
 
 TEST(SeismicPolicy, ACooldownSurvivesTheSensorBlinking) {
   Rig r;
   r.step();
-  r.fullEvent();
-  ASSERT_EQ(r.alerts, 1);
+  ASSERT_TRUE(r.fullEvent());
   r.in.sensorPresent = false;
   r.step();
   r.in.sensorPresent = true;

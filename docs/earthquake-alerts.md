@@ -28,27 +28,18 @@ Status: experimental, first released as an alpha. The alert logic is unit tested
 
 - **Trigger:** the D7S's own strong-shaking decision (the manufacturer's threshold, roughly JMA intensity 5 Upper, damaging-shaking territory). There is no lower-sensitivity setting yet; that is waiting for real-world recordings.
 - **One message per shake.** After sending, further reports are ignored for `earthquake.cooldown` minutes (default 10, range 1 to 1440).
-- **Immediate.** The alert is sent as soon as the sensor reports strong shaking, after a random delay of up to 2 seconds so neighbouring repeaters do not all transmit in the same instant. It does not wait for the sensor to finish measuring.
-- **Follow-up with numbers.** The sensor takes about two minutes to finish measuring. When it has, the repeater sends one follow-up message with the final strength and peak acceleration. If the sensor never finishes (it is given 4 minutes), or its numbers cannot be trusted, no follow-up is sent.
+- **Final numbers.** The sensor takes about two minutes to finish measuring, so the message waits for the final values (up to two and a half minutes, then sends without them), plus a random 0 to 15 second delay so neighbouring repeaters do not all transmit at once.
 - **Nothing queued for later.** If a requirement is missing at that moment (no channel, no location, a sensor fault) the alert is dropped and `earthquake status` counts it as held. Fixing the setting does not resend an old event.
 - **Scope.** The message is flooded with the repeater's own default region (the same one its adverts use), so whatever scoping you have already set up applies. There is no separate alert region.
 - Reports present at power-up are history and are ignored.
 
-## The messages
-
-The alert, sent at once:
+## The message
 
 ```
-Shaking detected near 47.61,-122.33. This does not necessarily indicate an earthquake.
+Shaking detected near 47.61,-122.33. Strength 43.3 cm/s, peak acceleration 148 gal. This does not necessarily indicate an earthquake.
 ```
 
-Then, about two minutes later, the follow-up with the sensor's final numbers:
-
-```
-Update: strength 43.3 cm/s, peak acceleration 148 gal. This does not necessarily indicate an earthquake.
-```
-
-Coordinates are rounded to two decimals (about 1 km). Strength is the sensor's spectrum intensity (SI) and peak acceleration its PGA. Both texts are built to fit after the repeater's name; if the name is very long, the follow-up is shortened (`peak 148 gal`), but the closing sentence is never cut. It is a vibration reading from one sensor, not an earthquake report. The follow-up is not subject to the cooldown, and a new shake that starts a new alert replaces a follow-up that was still due.
+Coordinates are rounded to two decimals (about 1 km). Strength is the sensor's spectrum intensity (SI) and peak acceleration its PGA. The text is built to fit after the repeater's name; if the name is very long, detail is shortened (`peak 148 gal`, then values dropped) but the closing sentence is never cut. It is a vibration reading from one sensor, not an earthquake report.
 
 ## Commands
 
