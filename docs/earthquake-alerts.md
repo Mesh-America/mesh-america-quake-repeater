@@ -43,7 +43,7 @@ Coordinates are rounded to two decimals (about 1 km). Strength is the sensor's s
 
 ## Telling which firmware a repeater runs
 
-`ver` answers with the product name and version, for example `Mesh America Quake Repeater v1.17.1.3 (Build: 04 Oct 2026)`, so it is clear this is the earthquake firmware and not stock MeshCore or Keymind Cascade. The same text is what a remote admin sees when it asks for the version. Earlier releases (1.17.1.2 and before) answered with the bare version number.
+`ver` answers with the product name and version, for example `Quake Repeater v1.17.1.4 (Build: 04 Oct 2026)`, so it is clear this is the earthquake firmware and not stock MeshCore or Keymind Cascade. The same text is what a remote admin sees when it asks for the version. Release 1.17.1.3 answered `Mesh America Quake Repeater v1.17.1.3`, and earlier releases (1.17.1.2 and before) answered with the bare version number.
 
 ## Commands
 
