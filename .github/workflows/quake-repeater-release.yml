@@ -89,6 +89,7 @@ jobs:
           fi
           python3 scripts/quake_release_manifest.py \
             --zip ".pio/build/${PIO_ENV}/firmware.zip" \
+            --hex ".pio/build/${PIO_ENV}/firmware.hex" \
             --env "$PIO_ENV" \
             --commit "$GITHUB_SHA" \
             "${TAG_ARGS[@]}" \
@@ -158,6 +159,8 @@ jobs:
           print()
           print(f"- Package: `{m['package']['file']}` ({m['package']['size']} bytes)")
           print(f"- SHA-256: `{m['package']['sha256']}`")
+          if "hex" in m:
+              print(f"- Firmware image: `{m['hex']['file']}` ({m['hex']['size']} bytes), SHA-256 `{m['hex']['sha256']}`. Keep it: updating a node over LoRa (OTA) is built from the new `.hex` and, for a delta, from the `.hex` the node runs now.")
           print(f"- OTA target id: `{m['targetId']}`, hardware tag `{m['hardwareId']}`")
           print(f"- Built from commit `{m['commit']}`")
           PY
@@ -167,7 +170,7 @@ jobs:
           else
             TAG_FLAGS=(--target "$GITHUB_SHA")
           fi
-          gh release create "$TAG" dist/*.zip dist/manifest.json \
+          gh release create "$TAG" dist/*.zip dist/*.hex dist/manifest.json \
             --repo "$GITHUB_REPOSITORY" \
             "${TAG_FLAGS[@]}" \
             --prerelease \
