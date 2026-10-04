@@ -1,5 +1,6 @@
 import ctypes
 import hashlib
+import random
 import subprocess
 import tempfile
 import unittest
@@ -23,22 +24,84 @@ SOURCES = [
 ]
 
 
+class SHA512Context(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_uint64),
+        ("state", ctypes.c_uint64 * 8),
+        ("curlen", ctypes.c_size_t),
+        ("buf", ctypes.c_ubyte * 128),
+    ]
+
+
 class Ed25519CompactTest(unittest.TestCase):
-    def test_compact_sha512_matches_hashlib_at_block_boundaries(self):
+    def build_sha512_library(self, temp_dir, compact):
+        library = Path(temp_dir) / f"sha512-{int(compact)}.so"
+        flags = ["-DED25519_COMPACT_SHA512=1"] if compact else []
+        subprocess.run(["cc", "-std=c99", "-O2", "-shared", "-fPIC",
+                        *flags, str(ED25519 / "sha512.c"),
+                        "-o", str(library)], check=True)
+        sha = ctypes.CDLL(str(library))
+        sha.sha512.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+        sha.sha512.restype = ctypes.c_int
+        sha.sha512_init.argtypes = [ctypes.POINTER(SHA512Context)]
+        sha.sha512_init.restype = ctypes.c_int
+        sha.sha512_update.argtypes = [ctypes.POINTER(SHA512Context),
+                                     ctypes.c_void_p, ctypes.c_size_t]
+        sha.sha512_update.restype = ctypes.c_int
+        sha.sha512_final.argtypes = [ctypes.POINTER(SHA512Context), ctypes.c_void_p]
+        sha.sha512_final.restype = ctypes.c_int
+        return sha
+
+    def test_sha512_matches_hashlib_at_block_boundaries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            library = Path(temp_dir) / "sha512.so"
-            subprocess.run(["cc", "-std=c99", "-O2", "-shared", "-fPIC",
-                            "-DED25519_COMPACT_SHA512=1", str(ED25519 / "sha512.c"),
-                            "-o", str(library)], check=True)
-            sha = ctypes.CDLL(str(library)).sha512
-            sha.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
-            sha.restype = ctypes.c_int
-            for length in (0, 1, 63, 64, 111, 112, 127, 128, 129, 255, 256, 1024, 4097):
-                data = bytes((i * 73 + 19) % 256 for i in range(length))
-                output = ctypes.create_string_buffer(64)
-                with self.subTest(length=length):
-                    self.assertEqual(sha(data, len(data), output), 0)
-                    self.assertEqual(output.raw, hashlib.sha512(data).digest())
+            for compact in (False, True):
+                sha = self.build_sha512_library(temp_dir, compact)
+                for length in (0, 1, 63, 64, 111, 112, 127, 128, 129,
+                               239, 240, 255, 256, 257, 1024, 4097):
+                    data = bytes((i * 73 + 19) % 256 for i in range(length))
+                    output = ctypes.create_string_buffer(64)
+                    with self.subTest(compact=compact, length=length):
+                        self.assertEqual(sha.sha512(data, len(data), output), 0)
+                        self.assertEqual(output.raw, hashlib.sha512(data).digest())
+
+    def test_sha512_streaming_contexts_match_hashlib(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for compact in (False, True):
+                sha = self.build_sha512_library(temp_dir, compact)
+                rng = random.Random(0x512)
+                lengths = [0, 1, 111, 112, 127, 128, 129, 255, 256, 257,
+                           4096, 16385]
+                lengths.extend(rng.randrange(1, 32769) for _ in range(20))
+                for length in lengths:
+                    with self.subTest(compact=compact, length=length):
+                        # Interleave two live contexts and irregular updates,
+                        # including empty updates and multiple full blocks.
+                        messages = [bytes(rng.randrange(256) for _ in range(n))
+                                    for n in (length, length + 137)]
+                        contexts = [SHA512Context(), SHA512Context()]
+                        positions = [0, 0]
+                        for context in contexts:
+                            self.assertEqual(sha.sha512_init(ctypes.byref(context)), 0)
+                            self.assertEqual(sha.sha512_update(ctypes.byref(context),
+                                                              b"", 0), 0)
+                        while any(position < len(message)
+                                  for position, message in zip(positions, messages)):
+                            for index, (context, message) in enumerate(zip(contexts, messages)):
+                                position = positions[index]
+                                if position == len(message):
+                                    continue
+                                size = rng.choice((1, 7, 63, 64, 111, 112, 127,
+                                                   128, 129, 257, 1024))
+                                chunk = message[position:position + size]
+                                self.assertEqual(sha.sha512_update(ctypes.byref(context),
+                                                                  chunk, len(chunk)), 0)
+                                positions[index] += len(chunk)
+                        for context, message in zip(contexts, messages):
+                            output = ctypes.create_string_buffer(64)
+                            self.assertEqual(sha.sha512_update(ctypes.byref(context),
+                                                              b"", 0), 0)
+                            self.assertEqual(sha.sha512_final(ctypes.byref(context), output), 0)
+                            self.assertEqual(output.raw, hashlib.sha512(message).digest())
 
     def test_stm32_builds_enable_compact_base_table(self):
         platformio = (ROOT / "platformio.ini").read_text()
@@ -50,8 +113,9 @@ class Ed25519CompactTest(unittest.TestCase):
             for label, extra_flags in (
                 ("standard", []),
                 ("compact", ["-DED25519_COMPACT_BASE=1"]),
-                ("compact_sha512", ["-DED25519_COMPACT_BASE=1",
-                                    "-DED25519_COMPACT_SHA512=1"]),
+                ("compact_sha512", ["-DED25519_COMPACT_SHA512=1"]),
+                ("compact_base_sha512", ["-DED25519_COMPACT_BASE=1",
+                                         "-DED25519_COMPACT_SHA512=1"]),
             ):
                 executable = Path(temp_dir) / label
                 subprocess.run(
