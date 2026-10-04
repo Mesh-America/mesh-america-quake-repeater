@@ -172,10 +172,11 @@ public:
     _crc = storage::updateCRC32(_crc, data, wrote);
     return wrote;
   }
-  // Each verification pass reads at most one small chunk. The caller can
-  // service its transports between passes without exposing the rename gap.
-  // A synchronous durability operation uses commit() to drain the same steps.
-  CommitProgress serviceCommit(bool valid = true) {
+  // The default verification pass reads one 64-byte chunk. ESP background
+  // callers may request up to eight chunks while reusing the same scratch
+  // buffer. Transports run between passes without exposing the rename gap;
+  // synchronous commit() and other platforms retain the one-chunk default.
+  CommitProgress serviceCommit(bool valid = true, unsigned max_verify_chunks = 1) {
 #if defined(ESP32_PLATFORM)
     // A premature commit must not publish, clean up, or implicitly aggregate
     // the deferred setup operations inside this call.
@@ -194,8 +195,8 @@ public:
 #if defined(ESP32_PLATFORM)
       // fread() otherwise reads ahead up to 4 KiB while the caller requests
       // only one 64-byte CRC chunk. A bounded two-chunk read-ahead buffer
-      // halves backend reads without growing that scratch buffer or allowing
-      // more than one backend refill per pass. Configuration must succeed.
+      // halves backend reads without growing that scratch buffer. The caller's
+      // separate chunk budget bounds each pass. Configuration must succeed.
       ok = ok && _verify.setBufferSize(ESP_VERIFY_BUFFER_SIZE);
 #endif
       ok = ok && _verify.size() == _size;
@@ -210,12 +211,21 @@ public:
       const size_t count = _verify_remaining < sizeof(buf)
           ? _verify_remaining : sizeof(buf);
       if (count != 0) {
-        ok = _verify.read(buf, count) == count;
-        if (ok) {
-          _verify_crc = storage::updateCRC32(_verify_crc, buf, count);
-          _verify_remaining -= count;
-          return CommitProgress::Pending;
-        }
+#if defined(ESP32_PLATFORM)
+        if (max_verify_chunks == 0) max_verify_chunks = 1;
+        if (max_verify_chunks > 8) max_verify_chunks = 8;
+#else
+        max_verify_chunks = 1;
+#endif
+        do {
+          const size_t chunk = _verify_remaining < sizeof(buf)
+              ? _verify_remaining : sizeof(buf);
+          ok = _verify.read(buf, chunk) == chunk;
+          if (!ok) break;
+          _verify_crc = storage::updateCRC32(_verify_crc, buf, chunk);
+          _verify_remaining -= chunk;
+        } while (--max_verify_chunks != 0 && _verify_remaining != 0);
+        if (ok) return CommitProgress::Pending;
       } else {
         _verify.close();
         ok = _verify_crc == _crc;

@@ -26,6 +26,9 @@ class UncachedESPContactsTest(unittest.TestCase):
     def test_synchronous_startup_batch_is_detected(self):
         self.run_fixture(["-DBOARD_HAS_PSRAM=1"], disable="begin")
 
+    def test_default_background_crc_cadence_is_detected(self):
+        self.run_fixture(["-DBOARD_HAS_PSRAM=1"], disable="crc_batch")
+
     def test_bounded_buffers_reduce_backend_work_without_stack_growth(self):
         previous = self.run_fixture(["-DBOARD_HAS_PSRAM=1"], benchmark="previous")
         current = self.run_fixture(["-DBOARD_HAS_PSRAM=1"], benchmark="current")
@@ -77,6 +80,11 @@ class UncachedESPContactsTest(unittest.TestCase):
                 implementation = implementation.replace(
                     '"/contacts3", companionPathPresence, true)',
                     '"/contacts3", companionPathPresence, false)')
+            elif disable == "crc_batch":
+                self.assertIn("_contact_write->serviceCommit(true, 8)", implementation)
+                implementation = implementation.replace(
+                    "_contact_write->serviceCommit(true, 8)",
+                    "_contact_write->serviceCommit()")
             # Only the native SDK stat seam is substituted. The production
             # presence logic still distinguishes ENOENT from metadata failure.
             presence = method(source, "static bool companionPathPresence(")
@@ -159,8 +167,9 @@ class UncachedESPContactsTest(unittest.TestCase):
                     return measurements
             else:
                 self.assertNotEqual(result.returncode, 0)
-                marker = "startup_operations" if disable == "begin" else (
-                    "largest_backend_" + ("write" if disable == "writer" else "read"))
+                marker = ("startup_operations" if disable == "begin" else
+                          "crc_read_passes == 104" if disable == "crc_batch" else
+                          "largest_backend_" + ("write" if disable == "writer" else "read"))
                 self.assertIn(marker, result.stderr)
 
 

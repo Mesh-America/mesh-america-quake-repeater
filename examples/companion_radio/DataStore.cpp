@@ -2579,7 +2579,9 @@ bool DataStore::serviceContactWrite(DataStoreHost* host,
     _contact_path_reader.close();
   }
 #endif
-  const auto progress = _contact_write->serviceCommit();
+  // Keep the 64-byte CRC scratch while verifying at most 512 bytes per
+  // background pass; transports run between these bounded batches.
+  const auto progress = _contact_write->serviceCommit(true, 8);
   if (progress == mesh::ContactFileTransaction::CommitProgress::Pending) {
     return true;
   }

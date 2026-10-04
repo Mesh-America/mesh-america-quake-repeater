@@ -135,9 +135,9 @@ unsigned drain(DataStore& store, Host& h, Filter filter = nullptr) {
     const unsigned startup_operations = SPIFFS.startupOperations() - startup_before;
     if (starting) assert(startup_operations <= 1);
     assert(SPIFFS.writes - writes <= 1);
-    assert(SPIFFS.reads - reads <= 1);
+    assert(SPIFFS.reads - reads <= 8);
     assert(SPIFFS.backend_writes - backend_writes <= 1);
-    assert(SPIFFS.backend_reads - backend_reads <= 1);
+    assert(SPIFFS.backend_reads - backend_reads <= 4);
     // Transport service runs here, between every production pass. It must
     // never observe an unpublished replacement or a target-name gap.
     if (store.hasPendingContactWrites()) {
@@ -169,7 +169,7 @@ void boundedFullTableAndFirstSave() {
   assert(store.markContactDirty(h.contacts[0]));
   const auto expected = image(h, keepContact);
   const auto passes = drain(store, h, keepContact);
-  assert(passes > expected.size() / 64);
+  assert(passes > h.contacts.size()); // serialization and CRC both yield
   assert(SPIFFS.largest_read <= 64);
   assert(SPIFFS.largest_backend_read <= 128);
   assert(SPIFFS.largest_backend_write <= 251);
@@ -177,6 +177,35 @@ void boundedFullTableAndFirstSave() {
   assert(SPIFFS.removes == 0); // first publication has no backup/temp to delete
   assert(h.copies >= h.contacts.size());
   bootCheck(h, keepContact);
+}
+
+void backgroundCRCVerificationUsesBoundedBatches() {
+  SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
+  Host h = table(347);
+  DataStore store(SPIFFS);
+  assert(store.markContactDirty(h.contacts[0]));
+  unsigned crc_read_passes = 0, max_reads = 0, max_backend_reads = 0;
+  unsigned passes = 0;
+  while (store.hasPendingContactWrites()) {
+    const unsigned reads = SPIFFS.reads, backend_reads = SPIFFS.backend_reads;
+    assert(++passes < 2000);
+    assert(store.serviceContactWrites(&h, nullptr));
+    const unsigned read_count = SPIFFS.reads - reads;
+    const unsigned backend_count = SPIFFS.backend_reads - backend_reads;
+    if (read_count != 0) ++crc_read_passes;
+    max_reads = std::max(max_reads, read_count);
+    max_backend_reads = std::max(max_backend_reads, backend_count);
+    assert(read_count <= 8 && backend_count <= 4);
+  }
+  // These are actual production DataStore calls, not a direct transaction
+  // benchmark. Default one-chunk verification fails this cadence witness.
+  assert(SPIFFS.reads == 825);
+  assert(crc_read_passes == 104);
+  assert(max_reads == 8 && max_backend_reads == 4);
+  assert(SPIFFS.largest_read == 64 && SPIFFS.largest_backend_read == 128);
+  assert(SPIFFS.files.at("/contacts3") == image(h));
+  bootCheck(h);
 }
 
 void deferredBeginCancellationAndCrashRecovery() {
@@ -593,6 +622,7 @@ int main() {
   bufferedAdmissionBenchmark();
 #else
   boundedFullTableAndFirstSave();
+  backgroundCRCVerificationUsesBoundedBatches();
   boundedCancellationFlush();
   deferredBeginCancellationAndCrashRecovery();
   deferredBeginFaultsAndSynchronousDefaults();
