@@ -22,18 +22,24 @@ enum class VoiceCodec : uint8_t { Ima, G72616, G72624 };
 #endif
 
 // Low nibble first, independent IMA ADPCM stream starting at predictor/index 0.
+// An optional shared prefix and the data span form ONE encoded stream. Never
+// reset adaptive state between them: the spans can even divide a G.726 code.
 // The samples live in flash; playback only needs two small DMA buffers in RAM.
 struct VoiceClip {
   const uint8_t* data;
   size_t bytes;
   uint32_t samples;
   uint32_t sample_rate;
+  const uint8_t* prefix;
+  size_t prefix_bytes;
 #if defined(MESH_GPS_VOICE_G726_BITRATE)
   VoiceCodec codec;
   constexpr VoiceClip(const uint8_t* data = nullptr, size_t bytes = 0,
                       uint32_t samples = 0, uint32_t sample_rate = 8000,
-                      VoiceCodec codec = VoiceCodec::Ima)
-      : data(data), bytes(bytes), samples(samples), sample_rate(sample_rate), codec(codec) {}
+                      VoiceCodec codec = VoiceCodec::Ima,
+                      const uint8_t* prefix = nullptr, size_t prefix_bytes = 0)
+      : data(data), bytes(bytes), samples(samples), sample_rate(sample_rate),
+        prefix(prefix), prefix_bytes(prefix_bytes), codec(codec) {}
   unsigned bits() const {
     if (codec == VoiceCodec::Ima) return 4;
 #if MESH_GPS_VOICE_G726_BITRATE == 16
@@ -50,15 +56,30 @@ struct VoiceClip {
     return (count / 8) * b + ((count % 8) * b + 7) / 8;
   }
   bool valid() const {
-    return data && samples && bits() && bytes >= requiredBytes(samples)
+    return data && (!prefix_bytes || prefix) && samples && bits()
+        && hasBytes(requiredBytes(samples))
         && (codec == VoiceCodec::Ima ? (sample_rate == 8000 || sample_rate == 16000)
                                     : sample_rate == 8000);
   }
 #else
   constexpr VoiceClip(const uint8_t* data = nullptr, size_t bytes = 0,
-                      uint32_t samples = 0, uint32_t sample_rate = 8000)
-      : data(data), bytes(bytes), samples(samples), sample_rate(sample_rate) {}
+                      uint32_t samples = 0, uint32_t sample_rate = 8000,
+                      const uint8_t* prefix = nullptr, size_t prefix_bytes = 0)
+      : data(data), bytes(bytes), samples(samples), sample_rate(sample_rate),
+        prefix(prefix), prefix_bytes(prefix_bytes) {}
+  bool valid() const {
+    return data && (!prefix_bytes || prefix) && samples
+        && hasBytes(samples / 2 + (samples & 1))
+        && (sample_rate == 8000 || sample_rate == 16000);
+  }
 #endif
+  // Subtract instead of adding the spans, so SIZE_MAX metadata cannot wrap.
+  bool hasBytes(size_t count) const {
+    return count <= prefix_bytes || count - prefix_bytes <= bytes;
+  }
+  uint8_t byteAt(size_t position) const {
+    return position < prefix_bytes ? prefix[position] : data[position - prefix_bytes];
+  }
 };
 
 class VoiceDecoder {
@@ -82,11 +103,12 @@ public:
   uint32_t position() const { return position_; }
   bool done() const {
 #if defined(MESH_GPS_VOICE_G726_BITRATE)
-    return !clip_.data || !clip_.bits() || position_ >= clip_.samples
-        || clip_.requiredBytes(position_ + 1) > clip_.bytes;
+    return !clip_.data || (clip_.prefix_bytes && !clip_.prefix) || !clip_.bits()
+        || position_ >= clip_.samples
+        || !clip_.hasBytes(clip_.requiredBytes(position_ + 1));
 #else
-    return !clip_.data || position_ >= clip_.samples
-        || position_ / 2 >= clip_.bytes;
+    return !clip_.data || (clip_.prefix_bytes && !clip_.prefix)
+        || position_ >= clip_.samples || !clip_.hasBytes(position_ / 2 + 1);
 #endif
   }
   int16_t next() {
@@ -105,17 +127,17 @@ public:
       const unsigned bits = clip_.bits();
       const unsigned bit = ((position_ % 8) * bits) % 8;
       const size_t byte = (position_ / 8) * bits + ((position_ % 8) * bits) / 8;
-      unsigned word = clip_.data[byte];
+      unsigned word = clip_.byteAt(byte);
       unsigned shift;
       if (bit + bits > 8) {
-        word = (word << 8) | clip_.data[byte + 1];
+        word = (word << 8) | clip_.byteAt(byte + 1);
         shift = 16 - bit - bits;
       } else shift = 8 - bit - bits;
       ++position_;
       return g726_decode(&g726_, (word >> shift) & ((1u << bits) - 1), bits);
     }
 #endif
-    const uint8_t code = (clip_.data[position_ / 2]
+    const uint8_t code = (clip_.byteAt(position_ / 2)
         >> ((position_ & 1) * 4)) & 15;
     ++position_;
     const int32_t step = steps[index_];

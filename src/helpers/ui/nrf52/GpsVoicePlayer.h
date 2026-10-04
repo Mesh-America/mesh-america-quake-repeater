@@ -78,13 +78,7 @@ class GpsVoicePlayer {
 public:
   bool start(VoiceClip clip) {
     stop();
-#if defined(MESH_GPS_VOICE_G726_BITRATE)
     if (!clip.valid() || !HwPWM3.takeOwnership(OWNER)) return false;
-#else
-    if (!clip.data || !clip.samples || clip.samples > clip.bytes * 2
-        || (clip.sample_rate != 8000 && clip.sample_rate != 16000)
-        || !HwPWM3.takeOwnership(OWNER)) return false;
-#endif
     owned_ = true;
     if (!HwPWM3.addPin(PIN_BUZZER)) { stop(); return false; }
     decoder_.begin(clip);

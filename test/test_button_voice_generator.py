@@ -1,6 +1,7 @@
 """Validate the fixed prerecorded catalog without speech synthesis or hardware."""
 from pathlib import Path
 import hashlib
+import importlib.util
 import re
 import shutil
 import struct
@@ -64,22 +65,69 @@ def write_wav(path, samples, *, rate=8000, channels=1, width=2):
         wav.writeframes(payload)
 
 
-def parse_header(source):
-    arrays = {
+def select_vibration(source, enabled=True):
+    """Select the generated catalog's HAS_DRV2605 branches for asset tests."""
+    lines = []
+    stack = [True]
+    for line in source.splitlines():
+        if line == '#ifdef HAS_DRV2605':
+            stack.append(stack[-1] and enabled)
+        elif line == '#else' and len(stack) > 1:
+            stack[-1] = stack[-2] and not stack[-1]
+        elif line == '#endif // HAS_DRV2605':
+            stack.pop()
+        elif stack[-1]:
+            lines.append(line)
+    assert len(stack) == 1
+    return '\n'.join(lines)
+
+
+def parse_header(source, has_drv2605=True):
+    source = select_vibration(source, has_drv2605)
+    spans = {
         name: bytes(int(value, 16) for value in re.findall(r"0x([0-9a-fA-F]{2})", body))
         for name, body in re.findall(
             r"static const uint8_t (\w+)Data\[\] = \{(.*?)\};", source, re.S)
     }
-    clips = {
-        name: (data, size, int(samples), int(rate))
-        for name, data, size, samples, rate in re.findall(
+    arrays, clips = {}, {}
+    for name, data, size, samples, rate, prefix, prefix_size in re.findall(
             r"static constexpr VoiceClip (\w+)Clip = \{\s*"
-            r"(\w+)Data, sizeof\((\w+)Data\), (\d+), (\d+)\s*\};", source)
-    }
+            r"(\w+)Data, sizeof\((\w+)Data\), (\d+), (\d+)"
+            r"(?:, (\w+)Data, sizeof\((\w+)Data\))?\s*\};", source):
+        assert data == size and prefix == prefix_size
+        clips[name] = (data, size, int(samples), int(rate))
+        arrays[name] = (spans[prefix] if prefix else b'') + spans[data]
     return arrays, clips
 
 
 class EncoderTests(unittest.TestCase):
+    def test_profitable_prefix_groups_regenerate_exact_phrases_for_both_board_policies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            samples = self.fixtures(directory)
+            common = [((i*997)%18001)-9000 for i in range(257)]
+            for name, tail in (('advertQueued',[1000,-1000]), ('advertFailed',[-3000,3000]),
+                               ('soundOff',[2000,-2000]), ('alertsSoundOnly',[-4000,4000])):
+                samples[name] = common+tail*80
+                write_wav(directory/(name+'.wav'), samples[name])
+            source = directory/'shared.h'
+            self.assertEqual(self.generate(directory,source).returncode,0)
+            header = source.read_text()
+            self.assertIn('advertPrefixData',header)
+            self.assertIn('soundPrefixData',header)
+            # Compare to the original independently encoded fixture bytes.
+            spec = importlib.util.spec_from_file_location(
+                'fixture_gps_encoder',ROOT/'scripts/generate_gps_voice.py')
+            encoder = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(encoder)
+            for vibration in (False,True):
+                arrays, clips = parse_header(header,vibration)
+                names = CATALOG if vibration else CATALOG[:10]
+                for name,_ in names:
+                    self.assertEqual(arrays[name],encoder.encode(samples[name]))
+                    self.assertEqual(clips[name],(name,name,len(samples[name]),8000))
+                self.assertEqual('soundPrefixData' in select_vibration(header,vibration),vibration)
+
     def fixtures(self, directory):
         samples = {}
         for index, (name, _) in enumerate(CATALOG):
@@ -175,12 +223,12 @@ class EncoderTests(unittest.TestCase):
                 self.assertEqual(clips[name], (name, name, samples, 8000))
 
     def assert_x1_only_recordings_are_guarded(self, source):
-        start = source.index('#ifdef HAS_DRV2605')
-        end = source.index('#endif', start)
-        self.assertLess(source.index('restartingClip'), start)
-        for name, _ in CATALOG[10:]:
-            self.assertLess(start, source.index(name+'Data'))
-            self.assertLess(source.index(name+'Clip'), end)
+        arrays, clips = parse_header(source, has_drv2605=False)
+        self.assertEqual(tuple(arrays), tuple(name for name, _ in CATALOG[:10]))
+        self.assertEqual(tuple(clips), tuple(arrays))
+        # The optional shared Sound prefix must not add storage on boards
+        # which have no sound-only alert-mode announcement.
+        self.assertNotIn('soundPrefixData', select_vibration(source, False))
 
     def test_changed_source_wav_replaces_only_its_matching_clip(self):
         with tempfile.TemporaryDirectory() as temporary:

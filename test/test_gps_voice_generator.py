@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from test_button_voice_generator import parse_header, write_wav
+import importlib.util
 
 ROOT = Path(__file__).resolve().parents[1]
 POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
@@ -33,6 +34,37 @@ ZIRA_GPS_RECORDINGS = {
 
 
 class AssetTests(unittest.TestCase):
+    def test_generator_shares_only_profitable_exact_encoded_prefixes(self):
+        spec = importlib.util.spec_from_file_location('gps_encoder', ROOT/'scripts/generate_gps_voice.py')
+        encoder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(encoder)
+        for rate in (8000, 16000):
+            with self.subTest(rate=rate), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                common = [((i*997)%18001)-9000 for i in range(257)]
+                phrases = {'gpsOn': common+[1000,-1000]*80,
+                           'gpsOff': common+[-3000,3000]*77}
+                for name, samples in phrases.items():
+                    write_wav(directory/(name+'.wav'), samples, rate=rate)
+                output = directory/'shared.h'
+                command = [sys.executable, str(ROOT/'scripts/generate_gps_voice.py'),
+                           '--on', str(directory/'gpsOn.wav'), '--off', str(directory/'gpsOff.wav'),
+                           '--rate', str(rate), '--output', str(output)]
+                subprocess.run(command, check=True, capture_output=True, timeout=30)
+                source = output.read_text()
+                self.assertEqual(source.count('static const uint8_t '), 3)
+                arrays, clips = parse_header(source)
+                for name, samples in phrases.items():
+                    self.assertEqual(arrays[name], encoder.encode(samples))
+                    self.assertEqual(clips[name], (name,name,len(samples),rate))
+                # A completely different second phrase must not add a useless
+                # shared/empty blob merely to keep the nominal count at three.
+                write_wav(directory/'gpsOff.wav', [3000,-3000]*80, rate=rate)
+                subprocess.run(command, check=True, capture_output=True, timeout=30)
+                source = output.read_text()
+                self.assertEqual(source.count('static const uint8_t '), 2)
+                self.assertNotIn('gpsData', source)
+
     def test_production_gps_recordings_are_the_approved_zira_audio_and_metadata(self):
         source = (ROOT / 'src/helpers/ui/GpsVoiceData.h').read_text(encoding='utf-8')
         self.assertEqual([line for line in source.splitlines() if line.startswith('// Voice:')],

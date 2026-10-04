@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Encode 8/16 kHz mono 16-bit WAV speech as independent IMA ADPCM clips."""
+"""Encode GPS phrases, sharing their identical encoded prefix without loss."""
 import argparse
 from pathlib import Path
 import struct
@@ -41,6 +41,25 @@ def read(path, rate=8000):
         data = wav.readframes(wav.getnframes())
     return struct.unpack('<' + 'h' * (len(data)//2),data)
 
+def shared_prefix(on, off):
+    """Return three spans whose concatenations exactly restore both streams.
+
+    A split is byte-based, not a word/codec boundary. Playback must preserve
+    adaptive codec state and bit position at the seam. Leave a nonempty tail
+    for both phrases, including identical or very short fixture recordings.
+    """
+    limit = min(len(on), len(off)) - 1
+    split = 0
+    while split < limit and on[split] == off[split]:
+        split += 1
+    return on[:split], on[split:], off[split:]
+
+def emit_array(lines, name, data):
+    lines.append(f'static const uint8_t {name}Data[] = {{')
+    for i in range(0,len(data),20):
+        lines.append('  '+','.join(f'0x{b:02x}' for b in data[i:i+20])+',')
+    lines.append('};')
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--on',type=Path,required=True)
@@ -57,15 +76,25 @@ def main():
         'namespace mesh { namespace audio {']
     if args.voice is not None:
         lines.insert(2, f'// Voice: {args.voice}')
-    for name,path in (('On',args.on),('Off',args.off)):
-        samples = read(path,args.rate)
-        encoded = encode(samples)
-        lines.append(f'static const uint8_t gps{name}Data[] = {{')
-        for i in range(0,len(encoded),20):
-            lines.append('  '+','.join(f'0x{b:02x}' for b in encoded[i:i+20])+',')
-        lines.extend(['};',f'static constexpr VoiceClip gps{name}Clip = {{',
-            f'  gps{name}Data, sizeof(gps{name}Data), {len(samples)}, {args.rate}', '};'])
-        print(f'GPS {name.lower()}: {len(samples)/args.rate:.3f}s, {len(encoded)} bytes')
+    phrases = [read(path,args.rate) for path in (args.on,args.off)]
+    if any(not samples or len(samples) > args.rate * 4 for samples in phrases):
+        raise ValueError('GPS phrases must be nonempty clips under four seconds')
+    encoded = [encode(samples) for samples in phrases]
+    prefix, on, off = shared_prefix(*encoded)
+    if len(prefix) < 64:
+        prefix, on, off = b'', *encoded
+    if prefix:
+        lines.append('// Three stored spans; preserve decoder state across the shared prefix.')
+        emit_array(lines, 'gps', prefix)
+    for name,samples,data in zip(('On','Off'),phrases,(on,off)):
+        emit_array(lines, 'gps'+name, data)
+        fields = f'  gps{name}Data, sizeof(gps{name}Data), {len(samples)}, {args.rate}'
+        if prefix:
+            fields += ', gpsData, sizeof(gpsData)'
+        lines.extend([f'static constexpr VoiceClip gps{name}Clip = {{',
+                      fields, '};'])
+        print(f'GPS {name.lower()}: {len(samples)/args.rate:.3f}s, {len(data)} tail bytes')
+    print(f'GPS shared prefix: {len(prefix)} bytes; audio saved: {len(prefix)} bytes')
     lines.append('}} // namespace mesh::audio')
     args.output.write_text('\n'.join(lines)+'\n',encoding='utf-8')
 
