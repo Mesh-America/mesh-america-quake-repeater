@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <deque>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "helpers/ArduinoSerialInterface.h"
@@ -716,6 +717,109 @@ TEST(SerialModeSwitch, NewlineStartsAFreshControlLine) {
   EXPECT_TRUE(interface.takeControlSequence());
 }
 
+TEST(SerialModeSwitch, EmptyNullAndIndependentControlConfigurations) {
+  uint8_t frame[MAX_FRAME_SIZE] = {};
+  for (const char* primary : {(const char*)nullptr, ""}) {
+    for (const char* secondary : {(const char*)nullptr, ""}) {
+      BufferStream stream;
+      ArduinoSerialInterface interface;
+      interface.begin(stream, primary, secondary);
+      stream.push("\r\nwrong\r\n");
+      EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+      EXPECT_FALSE(interface.takeControlSequence());
+      EXPECT_FALSE(interface.takeSecondaryControlSequence());
+    }
+  }
+  for (bool secondary : {false, true}) {
+    BufferStream stream;
+    ArduinoSerialInterface interface;
+    interface.begin(stream, secondary ? nullptr : "token",
+                    secondary ? "token" : nullptr);
+    stream.push("token\r\n");
+    EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+    EXPECT_EQ(interface.takeControlSequence(), !secondary);
+    EXPECT_EQ(interface.takeSecondaryControlSequence(), secondary);
+  }
+}
+
+TEST(SerialModeSwitch, IdenticalAndPrefixControlTokensRemainIndependent) {
+  uint8_t frame[MAX_FRAME_SIZE] = {};
+  for (bool identical : {false, true}) {
+    BufferStream stream;
+    ArduinoSerialInterface interface;
+    interface.begin(stream, "abc", identical ? "abc" : "abcd");
+    stream.push("ab");
+    EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+    EXPECT_FALSE(interface.takeControlSequence());
+    EXPECT_FALSE(interface.takeSecondaryControlSequence());
+    stream.push("c\n");
+    EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+    EXPECT_TRUE(interface.takeControlSequence());
+    EXPECT_EQ(interface.takeSecondaryControlSequence(), identical);
+    EXPECT_FALSE(interface.takeControlSequence());
+    EXPECT_FALSE(interface.takeSecondaryControlSequence());
+    stream.push("abcd\n");
+    EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+    EXPECT_FALSE(interface.takeControlSequence());
+    EXPECT_EQ(interface.takeSecondaryControlSequence(), !identical);
+  }
+}
+
+TEST(SerialModeSwitch, ArbitraryLengthControlTokensAndHighBitBytesArePreserved) {
+  uint8_t frame[MAX_FRAME_SIZE] = {};
+  // The public token API is not limited by an 8-bit or 16-bit position.
+  std::string token(70000, 'x');
+  token.back() = 'z';
+  const char high_bit[] = {'a', (char)0x80, (char)0xFF, 0};
+  BufferStream stream;
+  ArduinoSerialInterface interface;
+  interface.begin(stream, token.c_str(), high_bit);
+  for (size_t offset = 0; offset < token.size(); offset += 113) {
+    stream.push((const uint8_t*)token.data() + offset,
+                std::min((size_t)113, token.size() - offset));
+    EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+    EXPECT_FALSE(interface.takeControlSequence());
+    EXPECT_FALSE(interface.takeSecondaryControlSequence());
+  }
+  stream.push("\r");
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  EXPECT_TRUE(interface.takeControlSequence());
+  EXPECT_FALSE(interface.takeSecondaryControlSequence());
+  const uint8_t high_bit_line[] = {'a', 0x80, 0xFF, '\n'};
+  stream.push(high_bit_line, sizeof(high_bit_line));
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  EXPECT_FALSE(interface.takeControlSequence());
+  EXPECT_TRUE(interface.takeSecondaryControlSequence());
+}
+
+TEST(SerialModeSwitch, ResetAndMutableControlStorageRemainCompatible) {
+  uint8_t frame[MAX_FRAME_SIZE] = {};
+  char token[] = "ab";
+  BufferStream stream;
+  ArduinoSerialInterface interface;
+  interface.begin(stream, token);
+  stream.push("a");
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  token[1] = 'c';
+  stream.push("c\n");
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  EXPECT_TRUE(interface.takeControlSequence());
+  token[0] = 0;
+  interface.resetSessionState();
+  stream.push("\n");
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  EXPECT_FALSE(interface.takeControlSequence());
+  token[0] = 'a';
+  interface.setPassthroughMode(false);
+  stream.push("a");
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  interface.begin(stream, "replacement", "second");
+  stream.push("c\nreplacement\n");
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  EXPECT_TRUE(interface.takeControlSequence());
+  EXPECT_FALSE(interface.takeSecondaryControlSequence());
+}
+
 TEST(SerialModeSwitch, PassthroughLeavesInputAndSuppressesBinaryOutput) {
   BufferStream stream;
   ArduinoSerialInterface interface;
@@ -768,6 +872,227 @@ TEST(SerialModeSwitch, AsciiStartupProbeRequiresAnEmptyPrompt) {
   EXPECT_FALSE(probe.shouldStart(true, true, '<'));
   EXPECT_FALSE(probe.shouldStart(true, false, 'h'));
   EXPECT_FALSE(probe.shouldStart(true, false, -1));
+}
+
+TEST(SerialModeSwitch, OversizedFramesDoNotDispatchOrConfirmBinaryMode) {
+  for (uint16_t declared : {uint16_t(MAX_FRAME_SIZE + 1), uint16_t(65535)}) {
+    SCOPED_TRACE(declared);
+    resetArduinoMock();
+    BufferStream stream;
+    ArduinoSerialInterface interface;
+    interface.begin(stream, START_TOKEN, SEEDER_TOKEN);
+    mesh::UsbBinaryStartupProbe probe;
+    probe.start(millis(), interface.getCompletedFrameCount());
+    uint8_t frame[MAX_FRAME_SIZE];
+    std::fill(frame, frame + sizeof(frame), 0xCC);
+
+    const uint8_t header[] = {'<', uint8_t(declared), uint8_t(declared >> 8)};
+    stream.push(header, sizeof(header));
+    std::vector<uint8_t> body(declared, 0x16); // A plausible command prefix.
+    const char embedded[] = "\r\n+++MESHCORE-TERM-START\r\nota folder on\r\n";
+    std::copy(embedded, embedded + sizeof(embedded) - 1, body.begin() + 8);
+    stream.push(body.data(), body.size());
+
+    EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+    EXPECT_TRUE(std::all_of(frame, frame + sizeof(frame),
+                           [](uint8_t byte) { return byte == 0xCC; }));
+    EXPECT_FALSE(interface.isReadBusy());
+    EXPECT_FALSE(interface.hasReceivedFrame());
+    EXPECT_EQ(interface.getCompletedFrameCount(), 0u);
+    EXPECT_EQ(interface.getLastFrameMillis(), 0u);
+    EXPECT_FALSE(interface.takeControlSequence());
+    EXPECT_FALSE(interface.takeSecondaryControlSequence());
+    EXPECT_EQ(probe.poll(millis(), interface.getCompletedFrameCount(),
+                         interface.getLastFrameMillis()),
+              mesh::UsbBinaryStartupProbe::Result::WAITING);
+    delay(1000);
+    EXPECT_EQ(probe.poll(millis(), interface.getCompletedFrameCount(),
+                         interface.getLastFrameMillis()),
+              mesh::UsbBinaryStartupProbe::Result::RETURN_TO_ASCII);
+  }
+}
+
+TEST(SerialModeSwitch, FragmentedOversizedBodyKeepsFollowingFrameSynchronized) {
+  for (uint16_t declared : {uint16_t(MAX_FRAME_SIZE + 1), uint16_t(65535)}) {
+    SCOPED_TRACE(declared);
+    resetArduinoMock();
+    BufferStream stream;
+    ArduinoSerialInterface interface;
+    interface.begin(stream, START_TOKEN);
+    mesh::UsbBinaryStartupProbe probe;
+    probe.start(millis(), interface.getCompletedFrameCount());
+    uint8_t frame[MAX_FRAME_SIZE] = {};
+    const uint8_t header[] = {'<', uint8_t(declared), uint8_t(declared >> 8)};
+    for (uint8_t byte : header) {
+      stream.push(&byte, 1);
+      EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+      EXPECT_TRUE(interface.isReadBusy());
+      delay(1);
+    }
+    const std::vector<uint8_t> body(declared, '<');
+    for (size_t offset = 0; offset < body.size();) {
+      const size_t chunk = std::min(size_t(2048), body.size() - offset);
+      stream.push(body.data() + offset, chunk);
+      offset += chunk;
+      EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+      EXPECT_EQ(interface.isReadBusy(), offset < body.size());
+      EXPECT_FALSE(interface.hasReceivedFrame());
+      EXPECT_EQ(interface.getCompletedFrameCount(), 0u);
+      delay(1);
+    }
+
+    const uint8_t valid[] = {'<', 2, 0, 0x16, 0x03};
+    stream.push(valid, sizeof(valid));
+    ASSERT_EQ(interface.checkRecvFrame(frame), 2u);
+    EXPECT_EQ(frame[0], 0x16);
+    EXPECT_EQ(frame[1], 0x03);
+    EXPECT_EQ(interface.getCompletedFrameCount(), 1u);
+    EXPECT_EQ(interface.getLastFrameMillis(), millis());
+    EXPECT_TRUE(interface.hasReceivedFrame());
+    EXPECT_EQ(probe.poll(millis(), interface.getCompletedFrameCount(),
+                         interface.getLastFrameMillis()),
+              mesh::UsbBinaryStartupProbe::Result::BINARY_CONFIRMED);
+  }
+}
+
+TEST(SerialModeSwitch, ValidFrameImmediatelyAfterOversizedBodyDispatchesAlone) {
+  for (uint16_t declared : {uint16_t(MAX_FRAME_SIZE + 1), uint16_t(65535)}) {
+    SCOPED_TRACE(declared);
+    BufferStream stream;
+    ArduinoSerialInterface interface;
+    interface.begin(stream);
+    const uint8_t header[] = {'<', uint8_t(declared), uint8_t(declared >> 8)};
+    stream.push(header, sizeof(header));
+    const std::vector<uint8_t> body(declared, 0x16);
+    stream.push(body.data(), body.size());
+    const uint8_t valid[] = {'<', 1, 0, 0xA5};
+    stream.push(valid, sizeof(valid));
+    uint8_t frame[MAX_FRAME_SIZE] = {};
+    ASSERT_EQ(interface.checkRecvFrame(frame), 1u);
+    EXPECT_EQ(frame[0], 0xA5);
+    EXPECT_EQ(interface.getCompletedFrameCount(), 1u);
+    EXPECT_EQ(stream.available(), 0);
+  }
+}
+
+TEST(SerialModeSwitch, MaximumValidFrameStillDispatchesWithoutTruncation) {
+  BufferStream stream;
+  ArduinoSerialInterface interface;
+  interface.begin(stream);
+  const uint8_t header[] = {'<', MAX_FRAME_SIZE, 0};
+  stream.push(header, sizeof(header));
+  std::vector<uint8_t> body(MAX_FRAME_SIZE, 0xA5);
+  stream.push(body.data(), body.size());
+  uint8_t frame[MAX_FRAME_SIZE] = {};
+  EXPECT_EQ(interface.checkRecvFrame(frame), size_t(MAX_FRAME_SIZE));
+  EXPECT_TRUE(std::equal(body.begin(), body.end(), frame));
+  EXPECT_EQ(interface.getCompletedFrameCount(), 1u);
+}
+
+static uint32_t rejected_completion_at = 0;
+static bool rejectCompletedFrame(uint32_t completed_at) {
+  rejected_completion_at = completed_at;
+  return false;
+}
+
+TEST(SerialModeSwitch, OptionalCompletionGateRejectsBeforeDispatchAndProof) {
+  resetArduinoMock();
+  BufferStream stream;
+  ArduinoSerialInterface interface;
+  interface.begin(stream);
+  interface.setReceiveFrameCheck(rejectCompletedFrame);
+  g_mock_millis = 1234;
+  const uint8_t valid[] = {'<', 1, 0, 0xA5};
+  stream.push(valid, sizeof(valid));
+  uint8_t frame[MAX_FRAME_SIZE];
+  std::fill(frame, frame + sizeof(frame), 0xCC);
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  EXPECT_EQ(rejected_completion_at, 1234u);
+  EXPECT_TRUE(std::all_of(frame, frame + sizeof(frame),
+                         [](uint8_t byte) { return byte == 0xCC; }));
+  EXPECT_FALSE(interface.isReadBusy());
+  EXPECT_FALSE(interface.hasReceivedFrame());
+  EXPECT_EQ(interface.getCompletedFrameCount(), 0u);
+  EXPECT_EQ(interface.getLastFrameMillis(), 0u);
+
+  // Clearing the optional callback restores ordinary transport behavior.
+  interface.setReceiveFrameCheck(nullptr);
+  stream.push(valid, sizeof(valid));
+  EXPECT_EQ(interface.checkRecvFrame(frame), 1u);
+  EXPECT_EQ(frame[0], 0xA5);
+  EXPECT_TRUE(interface.hasReceivedFrame());
+  EXPECT_EQ(interface.getCompletedFrameCount(), 1u);
+  EXPECT_EQ(interface.getLastFrameMillis(), 1234u);
+  interface.setReceiveFrameCheck(rejectCompletedFrame);
+  ++g_mock_millis;
+  stream.push(valid, sizeof(valid));
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  EXPECT_TRUE(interface.hasReceivedFrame());
+  EXPECT_EQ(interface.getCompletedFrameCount(), 1u);
+  EXPECT_EQ(interface.getLastFrameMillis(), 1234u);
+}
+
+static unsigned completion_checks = 0;
+static bool rejectFirstCompletedFrame(uint32_t) {
+  return ++completion_checks > 1;
+}
+
+TEST(SerialModeSwitch, RejectedFrameLeavesFollowingAllowedFrameForNextRead) {
+  resetArduinoMock();
+  completion_checks = 0;
+  BufferStream stream;
+  ArduinoSerialInterface interface;
+  interface.begin(stream);
+  interface.setReceiveFrameCheck(rejectFirstCompletedFrame);
+  const uint8_t frames[] = {'<', 1, 0, 0xA5, '<', 1, 0, 0xB6};
+  stream.push(frames, sizeof(frames));
+  uint8_t frame[MAX_FRAME_SIZE] = {};
+  EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+  EXPECT_EQ(completion_checks, 1u);
+  EXPECT_EQ(interface.getCompletedFrameCount(), 0u);
+  EXPECT_EQ(interface.checkRecvFrame(frame), 1u);
+  EXPECT_EQ(frame[0], 0xB6);
+  EXPECT_EQ(completion_checks, 2u);
+  EXPECT_EQ(interface.getCompletedFrameCount(), 1u);
+  EXPECT_EQ(stream.available(), 0);
+}
+
+TEST(SerialModeSwitch, ContinuouslyRefillingIdleInputYieldsToTheMeshLoop) {
+  class RefillingStream : public BufferStream {
+  public:
+    unsigned read_count = 0;
+    unsigned refill_remaining = 512;
+    int read() override {
+      const int value = BufferStream::read();
+      if (value >= 0) {
+        ++read_count;
+        if (refill_remaining) {
+          --refill_remaining;
+          input.push_back('x');
+        }
+      }
+      return value;
+    }
+  } stream;
+  ArduinoSerialInterface interface;
+  interface.begin(stream, START_TOKEN);
+  stream.push("xxxx");
+  uint8_t frame[MAX_FRAME_SIZE] = {};
+
+  for (unsigned pass = 0; pass < 16; ++pass) {
+    const unsigned before = stream.read_count;
+    EXPECT_EQ(interface.checkRecvFrame(frame), 0u);
+    EXPECT_EQ(stream.read_count, before + 4);
+    EXPECT_EQ(stream.available(), 4);
+    EXPECT_FALSE(interface.hasReceivedFrame());
+    EXPECT_EQ(interface.getCompletedFrameCount(), 0u);
+  }
+  stream.refill_remaining = 0;
+  stream.push("\r\n");
+  const uint8_t valid[] = {'<', 1, 0, 0xA5};
+  stream.push(valid, sizeof(valid));
+  ASSERT_EQ(interface.checkRecvFrame(frame), 1u);
+  EXPECT_EQ(frame[0], 0xA5);
 }
 
 TEST(SerialModeSwitch, IncompleteBinaryProbeReturnsToAsciiAfterTimeout) {

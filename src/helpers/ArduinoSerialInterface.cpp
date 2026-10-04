@@ -7,12 +7,12 @@
 #define RECV_STATE_LEN2_FOUND  3
 
 void ArduinoSerialInterface::resetControlSequenceState() {
-  _controlSequencePos = 0;
-  _secondaryControlSequencePos = 0;
-  _controlSequenceCandidate =
-      _controlSequence != nullptr && _controlSequence[0] != 0;
-  _secondaryControlSequenceCandidate =
-      _secondaryControlSequence != nullptr && _secondaryControlSequence[0] != 0;
+  _controlSequenceCursor =
+      _controlSequence != nullptr && _controlSequence[0] != 0
+          ? _controlSequence : nullptr;
+  _secondaryControlSequenceCursor =
+      _secondaryControlSequence != nullptr && _secondaryControlSequence[0] != 0
+          ? _secondaryControlSequence : nullptr;
 }
 
 void ArduinoSerialInterface::resetReceiveState() {
@@ -121,35 +121,39 @@ void ArduinoSerialInterface::serviceTransmit() {
 
 bool ArduinoSerialInterface::checkControlLineByte(uint8_t c) {
   if (c == '\r' || c == '\n') {
-    const bool primary = _controlSequenceCandidate
-        && _controlSequence[_controlSequencePos] == 0;
-    const bool secondary = _secondaryControlSequenceCandidate
-        && _secondaryControlSequence[_secondaryControlSequencePos] == 0;
+    const bool primary = _controlSequenceCursor != nullptr
+        && *_controlSequenceCursor == 0;
+    const bool secondary = _secondaryControlSequenceCursor != nullptr
+        && *_secondaryControlSequenceCursor == 0;
     resetControlSequenceState();
     if (primary) _controlSequenceReceived = true;
     if (secondary) _secondaryControlSequenceReceived = true;
     return primary || secondary;
   }
 
-  if (_controlSequenceCandidate) {
-    if (_controlSequence[_controlSequencePos] != 0
-        && c == (uint8_t)_controlSequence[_controlSequencePos]) {
-      ++_controlSequencePos;
+  if (_controlSequenceCursor != nullptr) {
+    if (*_controlSequenceCursor != 0
+        && c == (uint8_t)*_controlSequenceCursor) {
+      ++_controlSequenceCursor;
     } else {
-      _controlSequenceCandidate = false;
+      _controlSequenceCursor = nullptr;
     }
   }
-  if (_secondaryControlSequenceCandidate) {
-    if (_secondaryControlSequence[_secondaryControlSequencePos] != 0
-        && c == (uint8_t)_secondaryControlSequence[_secondaryControlSequencePos]) {
-      ++_secondaryControlSequencePos;
+  if (_secondaryControlSequenceCursor != nullptr) {
+    if (*_secondaryControlSequenceCursor != 0
+        && c == (uint8_t)*_secondaryControlSequenceCursor) {
+      ++_secondaryControlSequenceCursor;
     } else {
-      _secondaryControlSequenceCandidate = false;
+      _secondaryControlSequenceCursor = nullptr;
     }
   }
   return false;
 }
 
+#if defined(STM32_PLATFORM) && defined(__GNUC__) && !defined(__clang__)
+// Keep repeated host-ownership resets shared on flash-constrained STM32.
+__attribute__((noinline, noclone))
+#endif
 void ArduinoSerialInterface::setPassthroughMode(bool enabled) {
   _passthroughMode = enabled;
   _controlSequenceReceived = false;
@@ -158,6 +162,9 @@ void ArduinoSerialInterface::setPassthroughMode(bool enabled) {
   resetTransmitState();
 }
 
+#if defined(STM32_PLATFORM) && defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, noclone))
+#endif
 void ArduinoSerialInterface::resetSessionState() {
   _controlSequenceReceived = false;
   _secondaryControlSequenceReceived = false;
@@ -250,7 +257,10 @@ size_t ArduinoSerialInterface::checkRecvFrame(uint8_t dest[]) {
   serviceTransmit();
   if (_passthroughMode) return 0;
 
-  while (_serial->available()) {
+  // Newly arriving bytes belong to the next mesh loop; a continuously writing
+  // host must not keep the radio/watchdog loop trapped in this parser.
+  int pending = _serial->available();
+  while (pending-- > 0) {
     int c = _serial->read();
     if (c < 0) break;
     _last_rx_byte_ms = millis();
@@ -281,11 +291,24 @@ size_t ArduinoSerialInterface::checkRecvFrame(uint8_t dest[]) {
         }
         rx_len++;
         if (rx_len >= _frame_len) {  // received a complete frame?
-          if (_frame_len > MAX_FRAME_SIZE) _frame_len = MAX_FRAME_SIZE;    // truncate
+          if (_frame_len > MAX_FRAME_SIZE) {
+            // Consume the entire declared body to preserve framing, but never
+            // execute a truncated command or grant Binary-client proof for an
+            // invalid frame. A following valid frame may still be dispatched.
+            resetReceiveState();
+            break;
+          }
+          // The final read already captured its completion time above.
+          const uint32_t completed_at = _last_rx_byte_ms;
+          if (_receive_frame_check != nullptr
+              && !_receive_frame_check(completed_at)) {
+            resetReceiveState();
+            return 0;
+          }
           memcpy(dest, rx_buf, _frame_len);
           _state = RECV_STATE_IDLE;  // reset state, for next frame
           resetControlSequenceState();
-          _last_frame_ms = millis();   // a real client is talking to us
+          _last_frame_ms = completed_at;   // a real client is talking to us
           ++_completed_frame_count;
           _has_received_frame = true;
           return _frame_len;
