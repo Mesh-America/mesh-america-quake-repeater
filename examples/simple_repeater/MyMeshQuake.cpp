@@ -12,6 +12,11 @@
 #include <string.h>
 #include <stdio.h>
 
+// The product name the `ver` command reports. Set in variants/meshamerica_quake/platformio.ini.
+#ifndef FIRMWARE_PRODUCT
+#define FIRMWARE_PRODUCT "Mesh America Quake Repeater"
+#endif
+
 namespace {
 
 const char QUAKE_PREFS_FILE[] = "/quake_prefs";
@@ -168,7 +173,12 @@ bool MyMesh::quakeAlertBusy() const {
 }
 
 bool MyMesh::handleQuakeCommand(const char* command, char* reply) {
-  if (strcmp(command, "get earthquake.channel") == 0) {
+  if (strcmp(command, "ver") == 0) {
+    // Name the product, not just a number: "Mesh America Quake Repeater v1.17.1.3 (Build: ...)". Only
+    // this reply changes. getFirmwareVer() stays the bare version, because adverts, telemetry, the
+    // bridges and companion apps all read it and the image's version stamp is parsed from it.
+    snprintf(reply, 160, "%s %s (Build: %s)", FIRMWARE_PRODUCT, getFirmwareVer(), getBuildDate());
+  } else if (strcmp(command, "get earthquake.channel") == 0) {
     snprintf(reply, 160, "> %s", quake_channel[0] ? quake_channel : "<unset>");
   } else if (strncmp(command, "set earthquake.channel ", 23) == 0) {
     const char* value = skipSpaces(command + 23);
