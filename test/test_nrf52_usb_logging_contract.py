@@ -664,8 +664,9 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         self.assertEqual(source.count("finishPendingRequest(result, tag, est_timeout);"), 6)
         delayed = (ROOT / "src/helpers/CompanionDelayedReplies.cpp").read_text()
         arm = extract_braced(delayed, "void CompanionDelayedReplies::arm(")
-        self.assertIn("timeout + timeout / 5", arm)
-        self.assertIn("reply.radio_deadline = now + budget;", arm)
+        # Exact timeout windows and delayed SENT admission are exercised by
+        # test_companion_delayed_reply_delivery.py against real callbacks.
+        self.assertIn("radioBudget(reply)", arm)
         self.assertIn("reply.sent_deadline = now + DELIVERY_GRACE_MS;", arm)
         self.assertIn("servicePendingSerialReply();", source)
         self.assertIn(
