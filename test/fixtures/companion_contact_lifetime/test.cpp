@@ -116,6 +116,8 @@ public:
   uint8_t max_hops = 0;
   unsigned discoveries = 0, full_notices = 0, path_updates = 0;
   std::vector<uint8_t> path_notices;
+  std::vector<uint8_t> path_notice_lengths;
+  std::vector<std::vector<uint8_t>> path_notice_bytes;
 
   BaseChatMesh() {
 #include "production_base_constructor.inc"
@@ -142,8 +144,12 @@ public:
   void onContactsFull() { ++full_notices; }
   void onContactPathUpdated(const ContactInfo&) { ++path_updates; }
   void onContactResponse(const ContactInfo&, const uint8_t*, uint8_t) {}
-  void handleReturnPathRetry(const ContactInfo& peer, const uint8_t*, uint8_t) {
+  void handleReturnPathRetry(const ContactInfo& peer, const uint8_t* path, uint8_t path_len) {
+    uint8_t bytes[MAX_PATH_SIZE];
+    const size_t size = mesh::Packet::writePath(bytes, path, path_len);
     path_notices.push_back(peer.id.pub_key[0]);
+    path_notice_lengths.push_back(path_len);
+    path_notice_bytes.emplace_back(bytes, bytes + size);
   }
   void resetContacts();
   static void resetContactValue(ContactInfo&);
@@ -291,15 +297,21 @@ struct Fixture {
   bool ack(uint32_t crc, ContactInfo*& peer) {
     return node.processAck(reinterpret_cast<const uint8_t*>(&crc), peer);
   }
-  void received(uint32_t crc) {
+  void received(uint32_t crc, uint8_t expected_peer = 0, uint8_t route = ROUTE_TYPE_FLOOD) {
     mesh::Packet packet;
-    packet.header = ROUTE_TYPE_FLOOD;
+    packet.header = route | (PAYLOAD_TYPE_ACK << PH_TYPE_SHIFT);
+    packet.setPathHashSizeAndCount(2, 2);
+    const uint8_t path[] = {0xa1, 0xa2, 0xb1, 0xb2};
+    memcpy(packet.path, path, sizeof(path));
+    const auto notices = node.path_notices.size();
     node.txt_send_timeout = 9000;
     node.onAckRecv(&packet, crc);
     assert(packet.isMarkedDoNotRetransmit() && node.txt_send_timeout == 0);
-    // Actual Packet marking replaces the route header. Preserve the current
-    // (separately audited) no-return-path behavior rather than a fake Packet.
-    assert(node.path_notices.empty());
+    if (expected_peer != 0) {
+      assert(node.path_notices.size() == notices + 1 && node.path_notices.back() == expected_peer);
+      assert(node.path_notice_lengths.back() == packet.path_len);
+      assert(node.path_notice_bytes.back() == std::vector<uint8_t>(path, path + sizeof(path)));
+    } else assert(node.path_notices.size() == notices);
   }
   void drain() {
     usb_stream.write_capacity = other_stream.write_capacity = 4096;
@@ -382,7 +394,7 @@ int main() {
     uint8_t path[MAX_PATH_SIZE];
     assert(first.contact->copyPathTo(path) && path[0] == 2);
     assert(second.contact->copyPathTo(path) && path[0] == 3);
-    f.received(first.ack); f.received(second.ack); f.received(same_peer.ack);
+    f.received(first.ack, 2); f.received(second.ack, 3); f.received(same_peer.ack, 2);
     if (MESH_ENABLE_ONE_KEY_DM) assert((f.node.learned == std::vector<uint8_t>{2, 3, 2}));
     else assert(f.node.learned.empty());
     ++checks;
@@ -640,10 +652,44 @@ int main() {
     else assert(f.node.learned.empty());
     ++checks;
   }
+  const struct { uint8_t route, expected_peer; } routes[] = {
+    {ROUTE_TYPE_FLOOD, 1}, {ROUTE_TYPE_TRANSPORT_FLOOD, 1},
+    {ROUTE_TYPE_DIRECT, 0}, {ROUTE_TYPE_TRANSPORT_DIRECT, 0},
+  };
+  for (const auto& route : routes) {
+    Fixture f; auto* peer = f.add(1); auto& entry = f.pending(peer);
+    f.received(entry.ack, route.expected_peer, route.route);
+    assert(entry.ack == 0 && f.node.cancellations == 1);
+    ++checks;
+  }
+  {
+    Fixture f; auto* peer = f.add(9); auto& entry = f.pending(peer);
+    assert(peer->out_path_len == OUT_PATH_UNKNOWN);
+    f.received(entry.ack);
+    assert(entry.ack == 0 && f.node.cancellations == 1);
+    ++checks;
+  }
+  {
+    Fixture f; auto* peer = f.add(1); auto& entry = f.pending(peer); f.blockUsb();
+    f.received(entry.ack, 1);
+    assert(entry.confirmed && f.node.path_notices.size() == 1);
+    const auto prior = entry;
+    for (uint32_t crc : {entry.ack, uint32_t(0xdeadbeef)}) {
+      mesh::Packet packet;
+      packet.header = ROUTE_TYPE_FLOOD | (PAYLOAD_TYPE_ACK << PH_TYPE_SHIFT);
+      f.node.txt_send_timeout = 9000;
+      f.node.onAckRecv(&packet, crc);
+      assert(!packet.isMarkedDoNotRetransmit() && packet.isRouteFlood());
+      assert(f.node.txt_send_timeout == 9000 && f.node.path_notices.size() == 1);
+      assert(f.node.cancellations == 1);
+      unchanged(entry, prior);
+    }
+    ++checks;
+  }
 #if defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
-  assert(checks == 31);
+  assert(checks == 37);
 #else
-  assert(checks == 28);
+  assert(checks == 34);
 #endif
   assert(outstanding_allocations.empty());
   printf("PASS: %u production contact lifetime checks\n", checks);

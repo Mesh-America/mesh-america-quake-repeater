@@ -134,7 +134,7 @@ class CompanionContactLifetimeTests(unittest.TestCase):
                     self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
                     checked = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
                     self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
-                    expected_checks = 31 if platform == "psram" else 28
+                    expected_checks = 37 if platform == "psram" else 34
                     self.assertIn(f"PASS: {expected_checks} production contact lifetime checks", checked.stdout)
 
 
