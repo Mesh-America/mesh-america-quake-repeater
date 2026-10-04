@@ -186,46 +186,51 @@ int main() {
 '''
 
 
+def production_primary_radio_harness():
+    companion = (ROOT/'examples/companion_radio/MyMesh.cpp').read_text(encoding='utf-8')
+    header = (ROOT/'examples/companion_radio/MyMesh.h').read_text(encoding='utf-8')
+    infra = (ROOT/'src/helpers/CommonCLI.cpp').read_text(encoding='utf-8')
+    datastore = (ROOT/'examples/companion_radio/DataStore.cpp').read_text(encoding='utf-8')
+    handler = extract_braced(companion, 'bool MyMesh::handleCommand(')
+    # Keep the complete preprocessing sequence through the shared primary
+    # tuple validation. Only unrelated dispatch routes are omitted.
+    dispatch = handler[:handler.index('  if (sender_timestamp == 0 && handleDirectCommand')]
+    dispatch += extract_braced(handler, 'if (isCompanionRadioPrefsCommand(command))')
+    dispatch += '\nreturn false;\n}'
+
+    def boot_checks(source, member):
+        nonfinite = re.search(r'if \(!isfinite\(' + re.escape(member) + r'\)\)[^;]+;', source)
+        clamp = re.search(re.escape(member) + r' = constrain\([^;]+;', source)
+        assert nonfinite is not None
+        assert clamp is not None
+        return nonfinite.group() + '\n' + clamp.group()
+
+    support = PREFERENCES_HARNESS[:PREFERENCES_HARNESS.index('int main(')]
+    support = support.replace('@METHODS@', esp_recovery_helpers(datastore) + '\n'.join(extract_braced(datastore, sig) for sig in (
+        'bool DataStore::loadPrefs(', 'bool DataStore::loadPrefsInt(', 'bool DataStore::savePrefs(')))
+    replacements = {
+        '@SAVE_PREFS@': extract_braced(header, 'bool savePrefs()'),
+        '@COMMAND_FILTER@': extract_braced(companion, 'static bool isCompanionRadioPrefsCommand('),
+        '@DISPATCH@': dispatch,
+        '@COMPANION_SANITIZE@': boot_checks(companion, '_prefs.airtime_factor'),
+        '@INFRA_SANITIZE@': boot_checks(infra, '_prefs->airtime_factor'),
+        '@INFRA_SETTER@': extract_braced(infra, 'if (memcmp(config, "dutycycle ", 10) == 0)'),
+        '@INFRA_RADIO@': extract_braced(infra, 'if (configKeyEquals(config, "radio"))').split('{', 1)[1].rsplit('}', 1)[0],
+    }
+    harness = support + HARNESS
+    for marker, value in replacements.items():
+        harness = harness.replace(marker, value)
+    # Saving an unrelated field must not resurrect a failed tuple later.
+    harness = harness.replace('static bool error(', '''static bool saveUnrelated(MyMesh& m) {
+      m._prefs.ble_pin=654321;return m.savePrefs();
+    }
+    static bool error(''')
+    return harness
+
+
 class CompanionPrimaryRadioPersistenceTests(unittest.TestCase):
     def test_production_validation_rollback_and_dutycycle_boot(self):
-        companion = (ROOT/'examples/companion_radio/MyMesh.cpp').read_text(encoding='utf-8')
-        header = (ROOT/'examples/companion_radio/MyMesh.h').read_text(encoding='utf-8')
-        infra = (ROOT/'src/helpers/CommonCLI.cpp').read_text(encoding='utf-8')
-        datastore = (ROOT/'examples/companion_radio/DataStore.cpp').read_text(encoding='utf-8')
-        handler = extract_braced(companion, 'bool MyMesh::handleCommand(')
-        # Keep the complete preprocessing sequence through the shared primary
-        # tuple validation. Only unrelated dispatch routes are omitted.
-        dispatch = handler[:handler.index('  if (sender_timestamp == 0 && handleDirectCommand')]
-        dispatch += extract_braced(handler, 'if (isCompanionRadioPrefsCommand(command))')
-        dispatch += '\nreturn false;\n}'
-
-        def boot_checks(source, member):
-            nonfinite = re.search(r'if \(!isfinite\(' + re.escape(member) + r'\)\)[^;]+;', source)
-            clamp = re.search(re.escape(member) + r' = constrain\([^;]+;', source)
-            self.assertIsNotNone(nonfinite)
-            self.assertIsNotNone(clamp)
-            return nonfinite.group() + '\n' + clamp.group()
-
-        support = PREFERENCES_HARNESS[:PREFERENCES_HARNESS.index('int main(')]
-        support = support.replace('@METHODS@', esp_recovery_helpers(datastore) + '\n'.join(extract_braced(datastore, sig) for sig in (
-            'bool DataStore::loadPrefs(', 'bool DataStore::loadPrefsInt(', 'bool DataStore::savePrefs(')))
-        replacements = {
-            '@SAVE_PREFS@': extract_braced(header, 'bool savePrefs()'),
-            '@COMMAND_FILTER@': extract_braced(companion, 'static bool isCompanionRadioPrefsCommand('),
-            '@DISPATCH@': dispatch,
-            '@COMPANION_SANITIZE@': boot_checks(companion, '_prefs.airtime_factor'),
-            '@INFRA_SANITIZE@': boot_checks(infra, '_prefs->airtime_factor'),
-            '@INFRA_SETTER@': extract_braced(infra, 'if (memcmp(config, "dutycycle ", 10) == 0)'),
-            '@INFRA_RADIO@': extract_braced(infra, 'if (configKeyEquals(config, "radio"))').split('{', 1)[1].rsplit('}', 1)[0],
-        }
-        harness = support + HARNESS
-        for marker, value in replacements.items():
-            harness = harness.replace(marker, value)
-        # Saving an unrelated field must not resurrect a failed tuple later.
-        harness = harness.replace('static bool error(', '''static bool saveUnrelated(MyMesh& m) {
-  m._prefs.ble_pin=654321;return m.savePrefs();
-}
-static bool error(''')
+        harness = production_primary_radio_harness()
         compiler = shutil.which('g++') or shutil.which('clang++')
         self.assertIsNotNone(compiler)
         with tempfile.TemporaryDirectory(prefix='companion-primary-radio-') as directory:
