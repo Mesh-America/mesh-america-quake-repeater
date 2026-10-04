@@ -592,8 +592,10 @@ switches to the first home page, and keeps the active six-digit PIN visible
 until Bluetooth connects or the two-minute pairing window expires. USB, WiFi,
 Ethernet, and hardware-serial connections do not suppress this screen. With no
 saved BLE PIN, display builds generate a new PIN at boot; builds without a
-physical display use `123456`. A PIN saved through the Companion protocol takes
-effect after reboot.
+physical display use `123456`. Use `set pin 654321` in the Companion CLI to save
+a fixed pairing PIN, then `reboot` to activate it. `set pin 0` restores the
+default/generated PIN policy. A PIN saved through the Companion protocol also
+takes effect after reboot. See the [PIN command reference](cli_commands.md#set-the-bluetooth-pairing-pin-companion).
 
 The Bluetooth device name is independently configurable. In the text terminal,
 use `get bluetooth.name` and `set bluetooth.name <name>`; use

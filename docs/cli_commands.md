@@ -1757,6 +1757,37 @@ the frame and reply format.
 
 ---
 
+#### Set the Bluetooth pairing PIN (Companion)
+
+**Usage:**
+
+- `set pin <0-999999>`
+
+Choose a six-digit code for a fixed Bluetooth pairing PIN. For example:
+
+```text
+set pin 654321
+reboot
+```
+
+The command saves the PIN across reboots and replies `> pin is now 654321`.
+Reboot to activate the new code; the current Bluetooth session keeps its
+existing PIN until then. A failed save reports an error and retains the
+previous saved setting.
+
+`set pin 0` clears the saved override, rather than setting the pairing code to
+`000000` or disabling Bluetooth. After reboot, the build's default policy
+applies: normally `123456` without a display, or a generated PIN on eligible
+display-equipped builds.
+
+This command is available in the Companion text terminal, binary command
+`0x42` (`CMD_RUN_CLI_COMMAND`), and authorized LoRa CLI; a Bluetooth-capable build
+is needed to use the PIN. Existing bonded clients may reconnect without being
+asked for a PIN.
+Forget the device on the phone and pair again if you need to enter the new code.
+
+---
+
 #### View or change the Bluetooth address (BLE Companion)
 
 **Usage:**
