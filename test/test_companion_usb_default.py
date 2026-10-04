@@ -71,6 +71,20 @@ struct Stream {
 } usb_stream;
 static Stream& usbTerminalOutput() { return usb_stream; }
 namespace mesh {
+namespace ota {
+struct SerialFolderSource {
+  bool pending_response = false;
+  unsigned resets = 0;
+  bool hasPendingResponse() const { return pending_response; }
+  void resetSessionState() { ++resets; pending_response = false; }
+};
+struct OtaContext {
+  static SerialFolderSource& serialFolderSource() {
+    static SerialFolderSource source;
+    return source;
+  }
+};
+}
 Stream& usbCompanionPort() { return usb_stream; }
 void discardUsbTerminalOutput() {}
 bool takeUsbTerminalSessionReset() { bool value = reset_event; reset_event = false; return value; }
@@ -117,6 +131,7 @@ static void boundary(bool event = true) {
   service();
 }
 int main() {
+  auto& source = mesh::ota::OtaContext::serialFolderSource();
   // No Full macro is required: ordinary USB Companions also boot in ASCII.
   beginUsbDefaultSession();
   assert(the_mesh.terminal && usb_serial_interface.passthrough);
@@ -129,7 +144,10 @@ int main() {
     usb_serial_interface.old_frame = true;
     line_length = 5;
     usb_binary_startup_probe.start(clock_ms, usb_serial_interface.completed);
+    source.pending_response = true;
+    const unsigned previous_resets = source.resets;
     boundary();
+    assert(!source.hasPendingResponse() && source.resets == previous_resets + 1);
     assert(the_mesh.terminal && usb_serial_interface.passthrough);
     assert(!announced_ascii);
     assert(!the_mesh.stale_input && !usb_serial_interface.old_frame);
@@ -200,6 +218,33 @@ int main() {
   assert(the_mesh.terminal && usb_logging_terminal_mode);
   assert(usb_serial_interface.passthrough && !usb_logging_network_parked);
   assert(usb_stream.pending == 0);
+  // Software handoff must preserve the late mOTA boundary in both output
+  // modes; only a physical session reset may abandon the source response.
+  for (bool logging_after_handoff : {false, true}) {
+    the_mesh.terminal = false;
+    usb_serial_interface.passthrough = false;
+    usb_logging_terminal_mode = false;
+    network_active = true;
+    logging_enabled = true;
+    serviceUsbLoggingOwnership(logging_enabled);
+    assert(usb_logging_network_parked && usb_serial_interface.passthrough);
+    source.pending_response = true;
+    const unsigned previous_resets = source.resets;
+    usb_stream.pending = 5;
+    logging_enabled = logging_after_handoff;
+    network_active = false;
+    serviceUsbLoggingOwnership(logging_enabled);
+    assert(source.hasPendingResponse() && source.resets == previous_resets);
+    assert(usb_stream.pending == 5 && usb_serial_interface.passthrough);
+    assert(!usb_logging_network_parked);
+    assert(the_mesh.terminal == logging_after_handoff);
+    // A boundary-aware consumer completing the response can release the
+    // software quarantine without pretending it was a physical reset.
+    source.pending_response = false;
+    usb_stream.pending = 0;
+  }
+  the_mesh.terminal = true;
+  usb_serial_interface.passthrough = true;
   // An ASCII-restoring network handoff must not accidentally reenable frames.
   logging_enabled = false;
   usb_logging_network_parked = true;
