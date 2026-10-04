@@ -2518,7 +2518,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
       && _notifications.validSettings(notification_settings))) {
     if (!(mesh::notify::readSettings(notification_fs, "/notify_prefs.bak", notification_settings)
         && _notifications.validSettings(notification_settings)))
-      notification_settings = mesh::notify::Settings();
+      mesh::notify::resetSettings(notification_settings);
   }
 
 #endif
