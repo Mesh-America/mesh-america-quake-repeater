@@ -28,6 +28,7 @@ public:
   size_t write(const uint8_t* bytes, size_t length);
   size_t size() const;
   int available() const { return static_cast<int>(size() - position); }
+  bool setBufferSize(size_t size) { return size != 0; }
   void flush() {}
   void close() { fs = nullptr; }
 };

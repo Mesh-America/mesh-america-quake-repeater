@@ -22,6 +22,7 @@ class File {
   bool isDirectory() const { return false; }
   int read(uint8_t* data, size_t size);
   size_t write(const uint8_t* data, size_t size);
+  bool setBufferSize(size_t size) { return size != 0; }
   void flush() {}
   void close() { fs_ = nullptr; }
 };
