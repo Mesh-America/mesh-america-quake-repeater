@@ -176,6 +176,7 @@ size_t File::write(const uint8_t* bytes, size_t length) {
       const size_t part = std::min(count - consumed, _stdio_size - _stdio_buffer.size());
       _stdio_buffer.insert(_stdio_buffer.end(), bytes + consumed, bytes + consumed + part);
       consumed += part;
+      if (_stdio_buffer.size() == _stdio_size) flushWriteBuffer();
     }
     _position += count;
     return count;

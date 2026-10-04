@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run production ESP contact transactions with inline paths, including PSRAM."""
 from pathlib import Path
+import json
 import subprocess
 import tempfile
 import unittest
@@ -25,7 +26,28 @@ class UncachedESPContactsTest(unittest.TestCase):
     def test_synchronous_startup_batch_is_detected(self):
         self.run_fixture(["-DBOARD_HAS_PSRAM=1"], disable="begin")
 
-    def run_fixture(self, policy, disable=None):
+    def test_bounded_buffers_reduce_backend_work_without_stack_growth(self):
+        previous = self.run_fixture(["-DBOARD_HAS_PSRAM=1"], benchmark="previous")
+        current = self.run_fixture(["-DBOARD_HAS_PSRAM=1"], benchmark="current")
+        for result in (previous, current):
+            self.assertEqual(result["bytes"], 347 * 152)
+            self.assertEqual(result["logical_writes"], 347)
+            self.assertEqual(result["logical_reads"], 825)
+        self.assertEqual(previous["backend_writes"], 347)
+        self.assertEqual(current["backend_writes"], 211)
+        self.assertEqual(previous["backend_reads"], 825)
+        self.assertEqual(current["backend_reads"], 413)
+        self.assertEqual(current["max_backend_write"], 251)
+        self.assertEqual(current["max_backend_read"], 128)
+        self.assertEqual(current["commit_passes"], previous["commit_passes"])
+        self.assertEqual(current["transaction_size"], previous["transaction_size"])
+        # Actual production methods are compiled out of line with identical
+        # options. Buffer changes must not increase their native stack frames.
+        self.assertEqual(current["stack_frames"], previous["stack_frames"])
+        self.assertTrue(any("serviceCommit" in method for method in current["stack_frames"]))
+        self.assertTrue(any("serviceBegin" in method for method in current["stack_frames"]))
+
+    def run_fixture(self, policy, disable=None, benchmark=None):
         with tempfile.TemporaryDirectory(prefix="mesh-esp-inline-contacts-") as directory:
             temp = Path(directory)
             source = (ROOT / "examples/companion_radio/DataStore.cpp").read_text()
@@ -71,14 +93,21 @@ class UncachedESPContactsTest(unittest.TestCase):
             implementation += method(utils, "void Utils::toHex(") + "\n}\n"
             (temp / "store_under_test.h").write_text(implementation)
             transaction = (ROOT / "src/helpers/ContactFileTransaction.h").read_text()
+            if benchmark == "previous":
+                self.assertIn("ESP_WRITE_BUFFER_SIZE = 251;", transaction)
+                self.assertIn("ESP_VERIFY_BUFFER_SIZE = 128;", transaction)
+                transaction = transaction.replace("ESP_WRITE_BUFFER_SIZE = 251;",
+                                                  "ESP_WRITE_BUFFER_SIZE = 152;")
+                transaction = transaction.replace("ESP_VERIFY_BUFFER_SIZE = 128;",
+                                                  "ESP_VERIFY_BUFFER_SIZE = 64;")
             if disable == "writer":
-                self.assertIn("ok = _file.setBufferSize(storage::CONTACT_RECORD_SIZE);", transaction)
+                self.assertIn("ok = _file.setBufferSize(ESP_WRITE_BUFFER_SIZE);", transaction)
                 transaction = transaction.replace(
-                    "ok = _file.setBufferSize(storage::CONTACT_RECORD_SIZE);",
+                    "ok = _file.setBufferSize(ESP_WRITE_BUFFER_SIZE);",
                     "ok = true; // Negative control: retain default writer buffer.")
             elif disable == "reader":
-                self.assertIn("ok = ok && _verify.setBufferSize(64);", transaction)
-                transaction = transaction.replace("ok = ok && _verify.setBufferSize(64);",
+                self.assertIn("ok = ok && _verify.setBufferSize(ESP_VERIFY_BUFFER_SIZE);", transaction)
+                transaction = transaction.replace("ok = ok && _verify.setBufferSize(ESP_VERIFY_BUFFER_SIZE);",
                     "// Negative control: retain the SDK's default reader buffer.")
             transaction = transaction.replace('#include "IdentityStore.h"',
                                               '#include <helpers/IdentityStore.h>')
@@ -96,10 +125,12 @@ class UncachedESPContactsTest(unittest.TestCase):
                     "uint8_t Packet::copyPath("))
                 + "\n}\n")
             binary = temp / "test"
+            benchmark_options = (["-DCONTACT_BUFFER_BENCHMARK=1", "-fstack-usage", "-fno-inline"]
+                                 if benchmark else [])
             result = subprocess.run([
                 "c++", "-std=c++17", "-O1", "-g", "-Wall", "-Wextra",
                 "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-                "-DESP32_PLATFORM=1", "-DCOMPANION_RADIO_FULL=1", *policy,
+                "-DESP32_PLATFORM=1", "-DCOMPANION_RADIO_FULL=1", *policy, *benchmark_options,
                 "-I", str(ROOT / "test/fixtures/contact_cache/mocks"),
                 "-I", str(ROOT / "test/fixtures/contact_cache"),
                 "-I", str(ROOT / "lib/ed25519"), "-I", str(ROOT / "src"),
@@ -111,6 +142,21 @@ class UncachedESPContactsTest(unittest.TestCase):
             result = subprocess.run([str(binary)], capture_output=True, text=True)
             if disable is None:
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if benchmark:
+                    measurements = json.loads(result.stdout)
+                    frames = {}
+                    for usage in temp.glob("*.su"):
+                        for line in usage.read_text().splitlines():
+                            fields = line.split("\t")
+                            if len(fields) == 3 and "ContactFileTransaction::" in fields[0]:
+                                # Strip the generated path/line prefix; all
+                                # method frames (including CRC verification)
+                                # must remain unchanged between both builds.
+                                name = fields[0].split("mesh::ContactFileTransaction", 1)[1]
+                                frames[name] = [int(fields[1]), fields[2]]
+                    self.assertTrue(frames)
+                    measurements["stack_frames"] = frames
+                    return measurements
             else:
                 self.assertNotEqual(result.returncode, 0)
                 marker = "startup_operations" if disable == "begin" else (
