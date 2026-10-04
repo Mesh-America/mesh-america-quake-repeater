@@ -2,7 +2,11 @@
 
 import re
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+
+from test_replay_reset_integration import extract_braced
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +17,62 @@ def source(path: str) -> str:
 
 
 class Esp32UsbSerialHygieneTest(unittest.TestCase):
+    def test_hwcdc_rx_allocation_failure_keeps_stream_quarantined(self):
+        logging = source("src/helpers/UsbLogging.cpp")
+        functions = "\n".join(extract_braced(logging, signature) for signature in (
+            "static bool canAccessEsp32Hwcdc(void*)",
+            "void prepareUsbLoggingPort()",
+        ))
+        harness = r'''
+#include <atomic>
+#include <cassert>
+#include <cstddef>
+#define MESH_ESP32_HWCDC_SESSION_GUARD 1
+#define MESH_ESP32_USB_RX_BUFFER_SIZE 1024
+#define MESH_ESP32_USB_TX_BUFFER_SIZE 4096
+static std::atomic<bool> esp32_hwcdc_rx_queue_ready{false};
+static std::atomic<unsigned> esp32_hwcdc_allowed_generation{0};
+static std::atomic<unsigned> esp32_hwcdc_access_generation{0};
+static size_t tx_capacity=0;
+static void setUsbCompanionTxBufferCapacity(size_t capacity) { tx_capacity=capacity; }
+struct SerialMock {
+  bool live=false, fail_rx=false;
+  size_t rx=0, rx_calls=0, tx=0, timeout=0;
+  size_t setRxBufferSize(size_t size) {
+    assert(!live); ++rx_calls; rx=fail_rx?0:size; return rx;
+  }
+  size_t setTxBufferSize(size_t size) { assert(!live); return tx=size; }
+  void setTxTimeoutMs(size_t value) { timeout=value; }
+} Serial;
+@FUNCTIONS@
+int main() {
+  assert(!canAccessEsp32Hwcdc(nullptr));
+  prepareUsbLoggingPort();
+  assert(Serial.rx==1024 && Serial.rx_calls==1 && Serial.tx==4096 && Serial.timeout==5);
+  assert(tx_capacity==4096 && canAccessEsp32Hwcdc(nullptr));
+  ++esp32_hwcdc_access_generation;
+  assert(!canAccessEsp32Hwcdc(nullptr));
+  ++esp32_hwcdc_allowed_generation;
+  assert(canAccessEsp32Hwcdc(nullptr));
+  // A separate failed boot must not let the SDK's later 256-byte fallback
+  // reopen the application parser after the requested RX allocation failed.
+  Serial=SerialMock(); Serial.fail_rx=true;
+  prepareUsbLoggingPort();
+  assert(!canAccessEsp32Hwcdc(nullptr) && Serial.rx_calls==1);
+  Serial.live=true; Serial.rx=256;
+  assert(!canAccessEsp32Hwcdc(nullptr));
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            cpp, binary = Path(directory) / "rx-init.cpp", Path(directory) / "rx-init"
+            cpp.write_text(harness.replace("@FUNCTIONS@", functions))
+            build = subprocess.run(["g++", "-std=c++17", "-fsanitize=address,undefined",
+                                    "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
+                                    str(cpp), "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+            run = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
     def test_operational_wifi_diagnostics_use_runtime_logging_port(self):
         for relative in (
             "src/helpers/ESP32Board.cpp",
@@ -163,6 +223,12 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
             "void beginUsbLoggingPort()", prepare_start
         )]
         self.assertIn("static const size_t usb_tx_sizes[]", prepare)
+        self.assertIn("Serial.setRxBufferSize(MESH_ESP32_USB_RX_BUFFER_SIZE)", prepare)
+        self.assertIn("MESH_ESP32_USB_RX_BUFFER_SIZE >= 1024", prepare)
+        self.assertLess(prepare.index("Serial.setRxBufferSize("),
+                        prepare.index("Serial.setTxBufferSize("))
+        header = source("src/helpers/UsbLogging.h")
+        self.assertRegex(header, r"#define MESH_ESP32_USB_RX_BUFFER_SIZE 1024\b")
         self.assertIn("Serial.setTxBufferSize(candidate)", prepare)
         self.assertIn("Serial.setTxTimeoutMs(5);", prepare)
         begin_start = logging.index("void beginUsbLoggingPort()")
@@ -170,6 +236,7 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
             "void serviceUsbLoggingPort()", begin_start
         )]
         self.assertIn("Serial.availableForWrite()", begin)
+        self.assertNotIn("Serial.setRxBufferSize(", begin)
         self.assertIn("setUsbCompanionTxBufferCapacity(", begin)
 
         debug_start = logging.index(

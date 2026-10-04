@@ -56,6 +56,9 @@ namespace mesh {
 #ifndef MESH_ESP32_USB_TX_BUFFER_SIZE
   #define MESH_ESP32_USB_TX_BUFFER_SIZE 4096
 #endif
+#ifndef MESH_ESP32_USB_RX_BUFFER_SIZE
+  #define MESH_ESP32_USB_RX_BUFFER_SIZE 1024
+#endif
 
 namespace detail {
 
@@ -93,8 +96,11 @@ bool saveUsbLoggingBootPreference(bool enabled);
 // instead of mistaking an allocation failure for a permanently non-empty ring.
 void setUsbCompanionTxBufferCapacity(size_t capacity);
 
-// Configure ESP32 HWCDC's bounded write timeout and TX ring before Serial.begin
-// creates its mutex and enables the USB ISR. Safe as a no-op on other ports.
+// Configure ESP32 HWCDC's RX queue, bounded write timeout and TX ring before
+// Serial.begin creates its mutex and enables the USB ISR. HWCDC silently drops
+// incoming bytes when its queue is full; hosts must wait for each command reply
+// rather than pipeline bursts larger than the bounded queue. Safe as a no-op
+// on other ports.
 void prepareUsbLoggingPort();
 
 // Start the optional dedicated USB logging interface. Ordinary and single-TTY

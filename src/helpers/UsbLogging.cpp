@@ -385,6 +385,7 @@ static portMUX_TYPE esp32_hwcdc_session_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t esp32_hwcdc_taken_bus_reset_generation = 0;
 static bool esp32_hwcdc_event_handler_registered = false;
 static std::atomic<size_t> esp32_hwcdc_tx_buffer_capacity{0};
+static std::atomic<bool> esp32_hwcdc_rx_queue_ready{false};
 // A busy writer or temporary allocation failure may require more than one main
 // loop to purge. Keep the original detach state/generation across retries so a
 // failed attempt never reattaches stale bytes or turns into a reboot loop.
@@ -393,7 +394,8 @@ static bool esp32_hwcdc_restore_pad_enabled = false;
 static uint32_t esp32_hwcdc_cleanup_generation = 0;
 
 static bool canAccessEsp32Hwcdc(void*) {
-  return esp32_hwcdc_allowed_generation.load(std::memory_order_acquire)
+  return esp32_hwcdc_rx_queue_ready.load(std::memory_order_acquire)
+      && esp32_hwcdc_allowed_generation.load(std::memory_order_acquire)
       == esp32_hwcdc_access_generation.load(std::memory_order_acquire);
 }
 
@@ -1053,6 +1055,20 @@ void setUsbCompanionTxBufferCapacity(size_t capacity) {
 
 void prepareUsbLoggingPort() {
 #if MESH_ESP32_HWCDC_SESSION_GUARD
+  // The SDK's 256-byte default can lose the CR of an oversized ASCII setter
+  // before the Companion's line-length check can reject it. Retain an
+  // oversized command and exceed the terminal's 542-byte line buffer so
+  // still larger single lines enter discard mode before this queue fills.
+  // RX events report only admitted bytes, with no reliable overflow signal.
+  // Like the TX ring, this queue must never be replaced under a live USB ISR.
+  static_assert(MESH_ESP32_USB_RX_BUFFER_SIZE >= 1024,
+                "HWCDC RX queue must retain oversized terminal commands");
+  // On allocation failure, begin() may fall back to the unsafe SDK default.
+  // Keep the application stream quarantined instead of parsing damaged input.
+  esp32_hwcdc_rx_queue_ready.store(
+      Serial.setRxBufferSize(MESH_ESP32_USB_RX_BUFFER_SIZE)
+          == MESH_ESP32_USB_RX_BUFFER_SIZE,
+      std::memory_order_release);
   // HWCDC::setTxBufferSize() deletes/recreates its ring without taking the TX
   // mutex or masking the USB ISR. Resize only during early setup, before
   // Serial.begin() creates that mutex and enables the interrupt handler.
