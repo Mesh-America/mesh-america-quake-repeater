@@ -1,5 +1,6 @@
 #include "ManagementReporter.h"
 #include "CommonCLI.h"
+#include "PersistentStoreFormat.h"
 #include <cassert>
 #include <cstdio>
 #include <memory>
@@ -29,7 +30,7 @@ struct Fixture {
     if (!strncmp(text, "set ", 4) && ((!strncmp(reply, "OK", 2)) != ok)) {
       fprintf(stderr, "%s: %s\n", text, reply); assert(false);
     }
-    if (!strncmp(text, "set mgmt.password ", 18) && strlen(text + 18) >= 12) assert(b[18] == 0);
+    if (!strncmp(text, "set mgmt.password ", 18)) assert(b[18] == 0);
     return reply;
   }
   void advance(uint32_t seconds) {
@@ -48,6 +49,13 @@ struct Fixture {
     if (!direct) cli.path_len = 0xff;
     const auto& file = fs.files["/management"];
     assert(std::string(file.begin(), file.end()).find("management test password") == std::string::npos);
+  }
+  std::vector<uint8_t> installLegacyRoute() {
+    auto legacy = fs.files["/management"];
+    memcpy(legacy.data(), "MGC1", 4); legacy[7] = 1; legacy[8] = 0x12;
+    write32(legacy.data() + 116, storage::updateCRC32(0xffffffff, legacy.data(), 116));
+    fs.files["/management"] = legacy;
+    return legacy;
   }
 };
 int main() {
@@ -165,5 +173,102 @@ int main() {
   {
     Fixture f; f.configure(false); f.cmd("set mgmt.flood 90"); f.advance(89 * DAY); assert(f.mesh.packets.empty());
     f.advance(DAY); assert(f.mesh.packets.size() == 1);
+  }
+  {
+    Fixture f; f.configure();
+    const auto saved = f.fs.files;
+    const std::string state = f.cmd("get mgmt");
+    for (const char* field : {"direct", "flood", "interval"}) {
+      for (const char* value : {"", "-", "-5", "-4294967291", "-4294967275", "+21",
+                               " 21", "21 ", "21x", "4294967301", "4294967317",
+                               "18446744073709551637", "999999999999999999999999"}) {
+        const std::string command = std::string("set mgmt.") + field + " " + value;
+        f.cmd(command.c_str(), false);
+        assert(f.cmd("get mgmt") == state && f.fs.files == saved);
+      }
+    }
+    f.cmd("set mgmt.direct 0005"); f.cmd("set mgmt.flood 0021"); f.cmd("set mgmt.interval 0005");
+    assert(f.cmd("get mgmt").find("direct=5d") != std::string::npos);
+    assert(f.cmd("get mgmt").find("flood=21d") != std::string::npos);
+    f.cmd("set mgmt.direct 90"); f.cmd("set mgmt.flood 90");
+    f.cmd("set mgmt.direct 4", false); f.cmd("set mgmt.flood 20", false);
+    f.cmd("set mgmt.interval 91", false);
+  }
+  {
+    Fixture f;
+    for (unsigned i = 0; i < 36; ++i) { ClientInfo c; c.id.pub_key[0] = i; f.acl.clients.push_back(c); }
+    f.configure(false); f.advance(21 * DAY); assert(f.mesh.packets.size() == 1);
+    const auto saved = f.fs.files;
+    const std::string state = f.cmd("get mgmt");
+    for (const char* command : {"set mgmt.unknown value", "set mgmt.enabled maybe",
+                               "set mgmt.direct 4", "set mgmt.flood 20", "set mgmt.interval 91",
+                               "set mgmt.password short", "set mgmt.direct 5", "set mgmt.enabled on"}) {
+      f.cmd(command, false);
+      assert(f.cmd("get mgmt") == state && f.fs.files == saved);
+    }
+    f.cli.scope_available = false;
+    const std::string unscoped = f.cmd("get mgmt");
+    f.cmd("set mgmt.flood 21", false);
+    assert(f.cmd("get mgmt") == unscoped && f.fs.files == saved);
+    f.cli.scope_available = true;
+    f.advance(60); assert(f.mesh.packets.size() == 2);
+    f.advance(7 * 60); assert(f.mesh.packets.size() == 9 && usb_status_calls == 1);
+    for (unsigned page = 0; page < 9; ++page) assert(f.mesh.packets[page].payload[78] == page);
+  }
+  for (bool fail_save : {false, true}) {
+    Fixture f;
+    for (unsigned i = 0; i < 8; ++i) { ClientInfo c; c.id.pub_key[0] = i; f.acl.clients.push_back(c); }
+    f.configure(false); f.advance(21 * DAY); assert(f.mesh.packets.size() == 1);
+    const auto saved = f.fs.files;
+    f.fs.fail_write = fail_save;
+    f.cmd("set mgmt.flood 30", !fail_save);
+    f.advance(3600); assert(f.mesh.packets.size() == 1);
+    assert((f.cmd("get mgmt").find("FAULT") != std::string::npos) == fail_save);
+    if (fail_save) assert(f.fs.files == saved);
+    else assert(f.cmd("get mgmt").find("flood=30d") != std::string::npos);
+  }
+  {
+    Fixture f; f.configure(false);
+    f.fs.files["/management"][72] ^= 1; f.reboot();
+    assert(f.cmd("get mgmt").find("FAULT") != std::string::npos);
+    const auto saved = f.fs.files;
+    f.cmd("set mgmt.password another valid secret", false);
+    f.cmd("set mgmt.password short", false);
+    assert(f.fs.files == saved);
+  }
+  for (bool migration_succeeds : {false, true}) {
+    Fixture f; f.configure();
+    const auto legacy = f.installLegacyRoute();
+    f.cli.adoption_succeeds = migration_succeeds;
+    f.reboot(); f.advance(3600);
+    assert(f.cli.adoption_calls == 1 && f.mesh.packets.empty());
+    if (!migration_succeeds) {
+      // The route write alone failed, while management writes still work.
+      // Do not let an hourly MGC2 rewrite destroy the only saved legacy path.
+      assert(f.fs.files["/management"] == legacy);
+      const std::string fault = f.cmd("get mgmt");
+      assert(fault.find("FAULT") != std::string::npos);
+      assert(fault.find("> off key=unset") != std::string::npos);
+      f.cli.adoption_succeeds = true;
+      f.reboot(); f.advance(3600);
+      assert(f.cli.adoption_calls == 2);
+    }
+    const uint8_t* path = nullptr; uint8_t path_len = OUT_PATH_UNKNOWN;
+    assert(f.cli.getDataTxPath(path, path_len) && path_len == 1 && path[0] == 0x12);
+    assert(!memcmp(f.fs.files["/management"].data(), "MGC2", 4));
+    assert(f.cmd("get mgmt").find("FAULT") == std::string::npos);
+    const auto calls = f.cli.adoption_calls;
+    f.reboot(); assert(f.cli.adoption_calls == calls); // no repeated migration
+  }
+  {
+    Fixture f; f.configure(); f.installLegacyRoute();
+    const uint8_t explicit_path[] = {0x34};
+    assert(f.cli.adoptLegacyDataTxPath(explicit_path, 1)); // already saved /data_tx
+    f.cli.adoption_succeeds = false; // no additional route write should be needed
+    f.reboot(); f.advance(3600);
+    const uint8_t* path = nullptr; uint8_t path_len = OUT_PATH_UNKNOWN;
+    assert(f.cli.getDataTxPath(path, path_len) && path_len == 1 && path[0] == 0x34);
+    assert(f.cmd("get mgmt").find("FAULT") == std::string::npos);
+    assert(!memcmp(f.fs.files["/management"].data(), "MGC2", 4));
   }
 }
