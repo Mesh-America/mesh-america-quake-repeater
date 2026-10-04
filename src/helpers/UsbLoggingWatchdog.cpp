@@ -108,22 +108,24 @@ void publish(const UsbLoggingObservation& observation) {
       | (policy.deferred() || backend_deferred ? 128U : 0U)
       | (persistence_ready ? 256U : 0U) | (config.mode == 2 ? 512U : 0U)
       | (reader_seen ? 1024U : 0U) | (logger_active ? 2048U : 0U);
+  // Bracket the entire status, not just its event. A counter/tier read from
+  // one publication must never be paired with another event's journal.
+  status_event_guard.fetch_add(1);
   status_stage_step.store(uint32_t(policy.stage()) | (uint32_t(config.step) << 8));
   status_retry.store(Policy::intervalMs(config.step) / 1000);
   status_inactive.store(policy.inactiveSeconds());
   status_recoveries.store(config.recoveries);
   status_reboots.store(config.reboots);
   status_auto_seconds.store(auto_arm.connectedSeconds());
-  // A bounded sequence guard prevents mixing fields from different events.
-  // All words are atomic, and seq_cst keeps the guard around their publication.
-  status_event_guard.fetch_add(1);
+  // Every shared word remains atomic: the sequence guard alone would not make
+  // concurrent non-atomic reads/writes legal in the C++ memory model.
   status_event_code.store(config.last_event.reasons | (uint32_t(config.last_event.action) << 4)
       | (config.last_event.persisted ? 128U : 0U));
   status_event_epoch.store(config.last_event.epoch);
   status_event_uptime.store(config.last_event.uptime_seconds);
   status_event_sequence.store(config.last_event.sequence);
-  status_event_guard.fetch_add(1);
   status_flags.store(flags, std::memory_order_release);
+  status_event_guard.fetch_add(1);
 }
 
 ReadResult readImage(const char* path, uint8_t* image, size_t* read_size = nullptr) {
@@ -206,31 +208,31 @@ bool keyMatches(const char* command, const char* key) {
 }  // namespace
 
 UsbLoggingStatus usbLoggingStatus() {
-  UsbLoggingStatus status;
-  const uint32_t flags = status_flags.load(std::memory_order_acquire);
-  const uint32_t stage_step = status_stage_step.load();
-  status.supported = flags & 1U;
-  status.logging_enabled = flags & 2U;
-  status.watchdog_enabled = flags & 4U;
-  status.host_connected = flags & 8U;
-  status.reader_connected = flags & 16U;
-  status.stalled = flags & 32U;
-  status.recovering = flags & 64U;
-  status.recovery_deferred = flags & 128U;
-  status.persistence_ready = flags & 256U;
-  status.watchdog_auto = flags & 512U;
-  status.logger_active = flags & 2048U;
-  status.stage = stage_step & 0xff;
-  status.backoff_step = (stage_step >> 8) & 0xff;
-  status.retry_seconds = status_retry.load();
-  status.inactive_seconds = status_inactive.load();
-  status.recovery_count = status_recoveries.load();
-  status.reboot_count = status_reboots.load();
-  status.auto_connected_seconds = status_auto_seconds.load();
   for (uint8_t attempt = 0; attempt < 3; ++attempt) {
     const uint32_t before = status_event_guard.load();
     if (before & 1U) continue;
-    Event event;
+    UsbLoggingStatus status;
+    const uint32_t flags = status_flags.load(std::memory_order_acquire);
+    const uint32_t stage_step = status_stage_step.load();
+    status.supported = flags & 1U;
+    status.logging_enabled = flags & 2U;
+    status.watchdog_enabled = flags & 4U;
+    status.host_connected = flags & 8U;
+    status.reader_connected = flags & 16U;
+    status.stalled = flags & 32U;
+    status.recovering = flags & 64U;
+    status.recovery_deferred = flags & 128U;
+    status.persistence_ready = flags & 256U;
+    status.watchdog_auto = flags & 512U;
+    status.logger_active = flags & 2048U;
+    status.stage = stage_step & 0xff;
+    status.backoff_step = (stage_step >> 8) & 0xff;
+    status.retry_seconds = status_retry.load();
+    status.inactive_seconds = status_inactive.load();
+    status.recovery_count = status_recoveries.load();
+    status.reboot_count = status_reboots.load();
+    status.auto_connected_seconds = status_auto_seconds.load();
+    auto& event = status.last_event;
     const uint32_t code = status_event_code.load();
     event.reasons = code & 15U;
     event.action = (code >> 4) & 7U;
@@ -238,21 +240,38 @@ UsbLoggingStatus usbLoggingStatus() {
     event.epoch = status_event_epoch.load();
     event.uptime_seconds = status_event_uptime.load();
     event.sequence = status_event_sequence.load();
-    if (before == status_event_guard.load()) {
-      status.last_event = event;
-      break;
-    }
+    if (before == status_event_guard.load()) return status;
   }
+  // A writer may be preempted, so retries must stay bounded. This is an
+  // unavailable/conservative snapshot, not fresh physical measurements.
+  // Keep published hardware/logging/mode intent; never pretend unsupported.
+  // A possibly live reader must still protect functional CLI work. No durable
+  // authorization or event is claimed until a coherent snapshot is available.
+  UsbLoggingStatus status;
+  const uint32_t flags = status_flags.load(std::memory_order_acquire);
+  status.supported = flags & 1U;
+  status.logging_enabled = flags & 2U;
+  status.watchdog_enabled = flags & 4U;
+  status.watchdog_auto = flags & 512U;
+  status.reader_connected = true;
+  status.recovery_deferred = true;
+  status.backoff_step = Policy::MAX_STEP;
+  status.retry_seconds = Policy::MAX_MS / 1000;
   return status;
 }
 
 bool isUsbLoggingWatchdogArmed() {
   if (isUsbLoggingTransportRecoveryPending()) return true;
-  const auto status = usbLoggingStatus();
-  const bool seen = status_flags.load(std::memory_order_acquire) & 1024U;
-  return status.supported && status.logging_enabled
-      && (status.watchdog_enabled || (status.watchdog_auto && seen && status.stage < 2))
-      && status.persistence_ready;
+  // This is only an awake/service hint, never reset authorization. Keep a
+  // previously durable policy awake if publication is busy; falling back to
+  // an unavailable snapshot here could allow sleep to restart its deadline.
+  const uint32_t before = status_event_guard.load();
+  const uint32_t flags = status_flags.load(std::memory_order_acquire);
+  const uint32_t stage = status_stage_step.load() & 0xffU;
+  const bool busy = (before & 1U) || before != status_event_guard.load();
+  const bool ready = (flags & (1U | 2U | 256U)) == (1U | 2U | 256U);
+  return ready && ((flags & 4U)
+      || ((flags & 512U) && (flags & 1024U) && (busy || stage < 2)));
 }
 
 void loadUsbLoggingWatchdog(FILESYSTEM* fs, bool durable, uint32_t (*epoch_seconds)()) {

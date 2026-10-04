@@ -161,6 +161,14 @@ Python and browser decoders retain released MGR1 support; older decoder copies
 must be updated to read MGR2. Events appear on the normal management schedule, not
 as immediate alerts. Reading status does not renew the logging-client lease.
 
+Concurrent readers receive one coherent status publication, including its tier,
+counters, and latest event. Reads never wait for a writer. If three bounded
+attempts cannot obtain a snapshot, status conservatively reports deferred
+recovery and no verified persistence, ages, counters, or event. It preserves
+published hardware/logging/mode intent and protects a possibly active reader.
+This temporary fallback cannot authorize a reset. The separate awake hint keeps
+an already durable watchdog policy serviced while publication is busy.
+
 ## Verification
 
 The two qualification stages below precede the subsequent upstream USB/GPS
