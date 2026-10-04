@@ -110,6 +110,7 @@ public:
     return _contact_write != nullptr && !static_cast<bool>(*_contact_write);
   }
   bool activeJob() const { return _contact_write != nullptr; }
+  bool verifying() const { return _contact_write_verifying; }
   bool readyToPublish() const {
     return _contact_write && _contact_write->readyToPublish();
   }
@@ -469,6 +470,38 @@ static void cooperative_save_services_commands_and_preserves_snapshots() {
   }
 }
 
+static void background_crc_verification_uses_bounded_batches() {
+  Fixture f(347);
+  SPIFFS.emulate_stdio = true;
+  snprintf(f.host.contacts[0].name, sizeof(f.host.contacts[0].name), "CRC cadence");
+  assert(f.store.markContactDirty(f.host.contacts[0]));
+  unsigned crc_read_passes = 0, total_crc_reads = 0;
+  unsigned max_reads = 0, max_backend_reads = 0, passes = 0;
+  while (f.store.hasPendingContactWrites()) {
+    const bool verifying = f.store.verifying() && !f.store.readyToPublish();
+    const unsigned reads = SPIFFS.reads, backend_reads = SPIFFS.backend_reads;
+    assert(++passes < 2000);
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+    if (!verifying) continue; // serialization also reads cold cached paths
+    const unsigned read_count = SPIFFS.reads - reads;
+    const unsigned backend_count = SPIFFS.backend_reads - backend_reads;
+    if (read_count != 0) ++crc_read_passes;
+    total_crc_reads += read_count;
+    max_reads = std::max(max_reads, read_count);
+    max_backend_reads = std::max(max_backend_reads, backend_count);
+    assert(read_count <= 8 && backend_count <= 4);
+  }
+  assert(total_crc_reads == 825);
+  assert(crc_read_passes == 104);
+  assert(max_reads == 8 && max_backend_reads == 4);
+  assert(!SPIFFS.exists("/contacts3.tmp"));
+  f.host.contacts.clear();
+  f.store.loadContacts(&f.host);
+  assert(!f.store.hasIncompleteContactLoad() && f.host.contacts.size() == 347);
+  assert(strcmp(f.host.contacts[0].name, "CRC cadence") == 0);
+  for (unsigned i = 0; i < 347; ++i) f.check(i, route(i));
+}
+
 static void cooperative_mutations_never_publish_obsolete_indices() {
   for (unsigned mutation_step : {4u, 46u, 110u, 0u}) {
     Fixture f(40);
@@ -789,6 +822,7 @@ int main() {
   contact_tx_policy_round_trips_without_growing_records();
 #if defined(ESP32_PLATFORM)
   cooperative_save_services_commands_and_preserves_snapshots();
+  background_crc_verification_uses_bounded_batches();
   cooperative_mutations_never_publish_obsolete_indices();
   cooperative_failures_keep_the_old_file_and_pending_mutations();
   synchronous_flush_cancels_pending_jobs_and_stays_durable();
