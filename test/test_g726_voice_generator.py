@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from test_button_voice_generator import CATALOG, ZIRA_RECORDINGS
+from test_button_voice_generator import CATALOG, ZIRA_RECORDINGS, select_vibration
 from test_gps_voice_generator import ZIRA_GPS_RECORDINGS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,8 +114,9 @@ class CatalogTests(unittest.TestCase):
                 for name in names:
                     count=len(source_samples[name])
                     self.assertIn(f'{name}Data, sizeof({name}Data), {count}, 8000, VoiceCodec::G726{bitrate}',body)
-                self.assertEqual(body.count('#ifdef HAS_DRV2605'),4)
-                self.assertEqual(body.count('#endif // HAS_DRV2605'),4)
+                plain = select_vibration(body, False)
+                for name in names:
+                    self.assertEqual(f'{name}Clip' in plain, not name.startswith('alerts'))
 
     def test_invalid_source_lengths_preserve_existing_experimental_header(self):
         for count in (0,32001):
@@ -143,30 +144,28 @@ class CatalogTests(unittest.TestCase):
             with self.subTest(bitrate=bitrate):
                 body=source.split(f'#if MESH_GPS_VOICE_G726_BITRATE == {bitrate}\n',1)[1]
                 body=body.split(f'#endif // {bitrate} kbps',1)[0]
-                arrays={name:bytes(int(value,16) for value in re.findall(r'0x([0-9a-fA-F]{2})',data))
-                        for name,data in re.findall(r'static const uint8_t (\w+)Data\[\] = \{(.*?)\};',body,re.S)}
-                clips={name:(data,size,int(count),int(rate),int(codec))
-                       for name,data,size,count,rate,codec in re.findall(
+                selected = select_vibration(body)
+                spans={name:bytes(int(value,16) for value in re.findall(r'0x([0-9a-fA-F]{2})',data))
+                       for name,data in re.findall(r'static const uint8_t (\w+)Data\[\] = \{(.*?)\};',selected,re.S)}
+                arrays, clips = {}, {}
+                for name,data,size,count,rate,codec,prefix,prefix_size in re.findall(
                            r'static constexpr VoiceClip (\w+)Clip = \{\s*'
-                           r'(\w+)Data, sizeof\((\w+)Data\), (\d+), (\d+), VoiceCodec::G726(\d+)\s*\};',body)}
+                           r'(\w+)Data, sizeof\((\w+)Data\), (\d+), (\d+), VoiceCodec::G726(\d+)'
+                           r'(?:, (\w+)Data, sizeof\((\w+)Data\))?\s*\};',selected):
+                    self.assertEqual(data,size)
+                    self.assertEqual(prefix,prefix_size)
+                    arrays[name]=(spans[prefix] if prefix else b'')+spans[data]
+                    clips[name]=(data,size,int(count),int(rate),int(codec))
                 self.assertEqual(tuple(arrays),names)
                 self.assertEqual(tuple(clips),names)
                 for name in names:
                     self.assertEqual(clips[name],(name,name,samples[name],8000,bitrate))
                     self.assertEqual(len(arrays[name]),(samples[name]*(bitrate//8)+7)//8)
                     self.assertEqual(hashlib.sha256(arrays[name]).hexdigest(),GOLDENS[name][index],name)
-                # Each optional mode must be inside a HAS_DRV2605 guard; the
-                # common twelve clips must remain outside those guards.
-                guarded=False
-                for line in body.splitlines():
-                    if line=='#ifdef HAS_DRV2605':
-                        self.assertFalse(guarded);guarded=True
-                    elif line=='#endif // HAS_DRV2605':
-                        self.assertTrue(guarded);guarded=False
-                    else:
-                        match=re.match(r'static const uint8_t (\w+)Data',line)
-                        if match:self.assertEqual(guarded,match[1].startswith('alerts'),match[1])
-                self.assertFalse(guarded)
+                plain=select_vibration(body,False)
+                self.assertNotIn('soundPrefixData',plain)
+                for name in names:
+                    self.assertEqual(f'{name}Clip' in plain,not name.startswith('alerts'))
 
     def test_cli_refuses_production_filenames_and_invalid_voice_without_touching_existing_files(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -451,7 +451,7 @@ class Tests(unittest.TestCase):
         self.build(PLAYER_PDM)
         source=PLAYER_PDM.replace('gpsOnClip', 'clip')
         source=source.replace('GpsVoicePlayer player;',
-                              'GpsVoicePlayer player; VoiceClip clip{gpsOnClip.data,gpsOnClip.bytes,gpsOnClip.samples,16000};')
+                              'GpsVoicePlayer player; auto clip=gpsOnClip; clip.sample_rate=16000;')
         source=source.replace('interpolator.begin();','interpolator.begin(clip.sample_rate);')
         source=source.replace('clip.samples*8','clip.samples*4')
         self.build(source)

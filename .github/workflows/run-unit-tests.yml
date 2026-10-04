@@ -346,7 +346,10 @@ jobs:
           python3 -B test/test_button_voice_generator.py -v
           python3 -B test/test_button_voice_preview.py -v
           python3 -B test/test_g726_voice.py -v
+          MESH_G726_TEST_SANITIZERS=1 python3 -B test/test_g726_voice.py -v
           python3 -B test/test_g726_voice_generator.py -v
+          python3 -B test/test_voice_prefixes.py -v
+          MESH_VOICE_TEST_SANITIZERS=1 python3 -B test/test_voice_prefixes.py -v
           python3 -B test/test_nimble_companion.py
           python3 -B test/test_bluetooth_pairing_ui.py
           python3 -B test/test_companion_pairing_display.py

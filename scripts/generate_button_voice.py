@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from generate_gps_voice import encode, read
+from generate_gps_voice import encode, read, shared_prefix, emit_array
 
 PHRASES = (
     ('ready', 'Ready'),
@@ -22,6 +22,64 @@ PHRASES = (
     ('alertsSilent', 'Silent'),
 )
 
+# Only meaningful byte-identical prefixes are shared. These retain the exact
+# approved phrase prosody; adaptive compressed tails are not standalone words.
+PREFIX_GROUPS = (
+    ('advertPrefix', 'advertQueued', 'advertFailed'),
+    ('soundPrefix', 'soundOff', 'alertsSoundOnly'),
+)
+
+def split_catalog(encoded):
+    tails = dict(encoded)
+    prefixes = {}
+    references = {}
+    for prefix_name, first, second in PREFIX_GROUPS:
+        prefix, one, two = shared_prefix(encoded[first], encoded[second])
+        # Tiny shared silence does not justify additional metadata/storage.
+        if len(prefix) < 64:
+            continue
+        prefixes[prefix_name] = prefix
+        tails[first], tails[second] = one, two
+        references[first] = references[second] = prefix_name
+    return prefixes, tails, references
+
+def emit_clip(lines, name, data, count, rate=8000, *, prefix=None, codec=None):
+    emit_array(lines, name, data)
+    fields = f'  {name}Data, sizeof({name}Data), {count}, {rate}'
+    if codec:
+        fields += f', VoiceCodec::{codec}'
+    if prefix:
+        fields += f', {prefix}Data, sizeof({prefix}Data)'
+    lines.extend([f'static constexpr VoiceClip {name}Clip = {{', fields, '};'])
+
+def emit_catalog(lines, samples, encoded, *, codec=None):
+    prefixes, tails, references = split_catalog(encoded)
+    for prefix_name, data in prefixes.items():
+        if prefix_name == 'soundPrefix':
+            lines.append('#ifdef HAS_DRV2605')
+        lines.append('// Shared encoded prefix; keep adaptive state at the seam.')
+        emit_array(lines, prefix_name, data)
+        if prefix_name == 'soundPrefix':
+            lines.append('#endif // HAS_DRV2605')
+    for name, phrase in PHRASES:
+        if name == 'alertsSoundVibration':
+            lines.append('#ifdef HAS_DRV2605')
+        lines.append(f'// "{phrase}"')
+        if name == 'soundOff' and name in references:
+            # Non-vibration boards have no second consumer for this prefix.
+            # Keep their original contiguous phrase, without extra span data.
+            lines.append('#ifdef HAS_DRV2605')
+            emit_clip(lines, name, tails[name], len(samples[name]),
+                      prefix=references[name], codec=codec)
+            lines.append('#else')
+            emit_clip(lines, name, encoded[name], len(samples[name]), codec=codec)
+            lines.append('#endif // HAS_DRV2605')
+        else:
+            emit_clip(lines, name, tails[name], len(samples[name]),
+                      prefix=references.get(name), codec=codec)
+    lines.append('#endif // HAS_DRV2605')
+    return sum(map(len, prefixes.values()))
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -39,27 +97,21 @@ def main():
     ]
     if args.voice is not None:
         lines.insert(2, f'// Voice: {args.voice}')
-    total = 0
+    samples_by_name = {}
+    encoded_by_name = {}
     for name, phrase in PHRASES:
         samples = read(args.directory / (name + '.wav'))
         # Shutdown drains audio nonblockingly for at most five seconds.
         if not samples or len(samples) > 32000:
             raise ValueError(f'{phrase}: expected a nonempty clip under four seconds')
         encoded = encode(samples)
-        total += len(encoded)
-        if name == 'alertsSoundVibration':
-            # Only buzzer+vibration devices need the additional mode catalog.
-            lines.append('#ifdef HAS_DRV2605')
-        lines.extend([f'// "{phrase}"', f'static const uint8_t {name}Data[] = {{'])
-        for offset in range(0, len(encoded), 20):
-            lines.append('  ' + ','.join(f'0x{b:02x}' for b in encoded[offset:offset + 20]) + ',')
-        lines.extend(['};', f'static constexpr VoiceClip {name}Clip = {{',
-                      f'  {name}Data, sizeof({name}Data), {len(samples)}, 8000', '};'])
+        samples_by_name[name] = samples
+        encoded_by_name[name] = encoded
         print(f'{phrase}: {len(samples) / 8000:.3f}s, {len(encoded)} bytes')
-    lines.append('#endif // HAS_DRV2605')
+    saved = emit_catalog(lines, samples_by_name, encoded_by_name)
     lines.append('}} // namespace mesh::audio')
     args.output.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    print(f'Button confirmations: {total} audio bytes')
+    print(f'Button confirmations: {sum(map(len, encoded_by_name.values())) - saved} audio bytes')
 
 
 if __name__ == '__main__':

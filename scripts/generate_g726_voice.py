@@ -10,8 +10,8 @@ import struct
 import subprocess
 from pathlib import Path
 
-from generate_button_voice import PHRASES
-from generate_gps_voice import read
+from generate_button_voice import PHRASES, emit_catalog, emit_clip
+from generate_gps_voice import read, shared_prefix, emit_array
 
 
 def encode(samples, bitrate, ffmpeg="ffmpeg"):
@@ -59,22 +59,21 @@ def main():
     ]
     for bitrate in (16, 24):
         lines.append(f"#if MESH_GPS_VOICE_G726_BITRATE == {bitrate}")
-        total = 0
-        for name, phrase, pcm in samples:
-            mode = name.startswith("alerts")
-            if mode:
-                lines.append("#ifdef HAS_DRV2605")
-            data = encode(pcm, bitrate, args.ffmpeg)
-            total += len(data)
-            lines += [f'// "{phrase}"', f"static const uint8_t {name}Data[] = {{"]
-            for offset in range(0, len(data), 20):
-                lines.append("  " + ",".join(f"0x{b:02x}" for b in data[offset:offset + 20]) + ",")
-            lines += ["};", f"static constexpr VoiceClip {name}Clip = {{",
-                      f"  {name}Data, sizeof({name}Data), {len(pcm)}, 8000, VoiceCodec::G726{bitrate}", "};"]
-            if mode:
-                lines.append("#endif // HAS_DRV2605")
+        pcm_by_name = {name: pcm for name, _, pcm in samples}
+        encoded = {name: encode(pcm, bitrate, args.ffmpeg) for name, _, pcm in samples}
+        saved = emit_catalog(lines, pcm_by_name, encoded, codec=f'G726{bitrate}')
+        prefix, on, off = shared_prefix(encoded['gpsOn'], encoded['gpsOff'])
+        if len(prefix) < 64:
+            prefix, on, off = b'', encoded['gpsOn'], encoded['gpsOff']
+        if prefix:
+            lines.append('// GPS spans form one continuous stream, including cross-byte codes.')
+            emit_array(lines, 'gps', prefix)
+        for name, data in (('gpsOn', on), ('gpsOff', off)):
+            emit_clip(lines, name, data, len(pcm_by_name[name]),
+                      prefix='gps' if prefix else None, codec=f'G726{bitrate}')
         lines.append(f"#endif // {bitrate} kbps")
-        print(f"G.726-{bitrate}: {total} bytes across all 16 clips")
+        total = sum(map(len, encoded.values())) - saved - len(prefix)
+        print(f"G.726-{bitrate}: {total} bytes across all 16 phrases")
     lines.append("}} // namespace mesh::audio")
     args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

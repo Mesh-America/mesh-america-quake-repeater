@@ -59,8 +59,9 @@ int main(){
  for(const auto& entry:mappings){
    auto actual=buttonVoiceClip(entry.prompt);
    assert(actual.data==entry.clip.data&&actual.bytes==entry.clip.bytes);
+   assert(actual.prefix==entry.clip.prefix&&actual.prefix_bytes==entry.clip.prefix_bytes);
    assert(actual.samples==entry.clip.samples&&actual.sample_rate==entry.clip.sample_rate);
-   assert(actual.data&&actual.bytes==(actual.samples+1)/2);
+   assert(actual.valid()&&actual.bytes+actual.prefix_bytes==(actual.samples+1)/2);
    assert(actual.sample_rate==8000||actual.sample_rate==16000);
    VoiceDecoder decoder;decoder.begin(actual);
    unsigned count=0,nonzero=0;

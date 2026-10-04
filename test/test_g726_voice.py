@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CC = shutil.which('gcc')
 CXX = shutil.which('g++')
 DECODER = ROOT / 'src/helpers/ui/g726/g726_decoder.c'
-SANITIZERS = (['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
+SANITIZERS = (['-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+               '-fno-omit-frame-pointer', '-fno-pie', '-no-pie']
               if os.environ.get('MESH_G726_TEST_SANITIZERS') == '1' else [])
 
 # FFmpeg 7.1 g726 encoder/decoder, 8 kHz mono, continuous MSB-first packing.
@@ -229,6 +230,38 @@ class Tests(unittest.TestCase):
     def test_g726_shares_existing_pwm_interpolation_and_dma_lifecycle(self):
         for bitrate in VECTORS:
             with self.subTest(bitrate=bitrate):self.build(self.fixture(PLAYER_MAIN,bitrate),bitrate)
+
+    def test_segmented_stream_preserves_cross_byte_codes_adaptive_state_and_bounds(self):
+        source = DECODE_MAIN.split('int main(){', 1)[1].split(' assert(full.valid()', 1)[0]
+        source = 'int main(){' + source + r'''
+ for(size_t split=0;split<sizeof(data);++split){
+   VoiceClip clip{data+split,sizeof(data)-split,count,8000,codec,data,split};
+   assert(clip.valid());VoiceDecoder decoder;decoder.begin(clip);
+   for(unsigned i=0;i<count;++i){assert(!decoder.done());assert(decoder.next()==expected[i]);}
+   assert(decoder.done()&&decoder.position()==count);
+   for(size_t tail=0;tail<sizeof(data)-split;++tail){
+     std::vector<uint8_t> prefix(data,data+split),suffix(data+split,data+split+tail);
+     // A non-null placeholder is legal when the suffix's declared length is
+     // zero. ASan bounds the actual prefix/tail allocation independently.
+     VoiceClip short_clip{tail?suffix.data():data,tail,count,8000,codec,
+                          split?prefix.data():nullptr,split};
+     assert(!short_clip.valid());decoder.begin(short_clip);
+     const unsigned available=static_cast<unsigned>((split+tail)*8/bits);
+     for(unsigned i=0;i<available;++i){assert(!decoder.done());assert(decoder.next()==expected[i]);}
+     assert(decoder.done()&&decoder.position()==available&&decoder.next()==0);
+   }
+ }
+ VoiceClip missing_prefix{data,sizeof(data),count,8000,codec,nullptr,1};
+ assert(!missing_prefix.valid());VoiceDecoder decoder;decoder.begin(missing_prefix);
+ assert(decoder.done()&&decoder.next()==0);
+ VoiceClip huge{data,std::numeric_limits<size_t>::max(),
+                std::numeric_limits<uint32_t>::max(),8000,codec,data,1};
+ assert(huge.valid()&&huge.hasBytes(std::numeric_limits<size_t>::max()));
+ GpsVoicePlayer player;assert(!player.start(missing_prefix)&&!player.active());
+}
+'''
+        for bitrate in VECTORS:
+            with self.subTest(bitrate=bitrate):self.build(self.fixture(source,bitrate),bitrate)
 
     def test_invalid_bitrates_or_missing_laboratory_gate_cannot_compile(self):
         for flags,error in (
