@@ -9,7 +9,7 @@
 #include <helpers/ContactSecretCache.h>
 #endif
 #include <helpers/CompanionReaderConfig.h>
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
 namespace mesh { class ContactFileTransaction; }
 #endif
 #if COMPANION_FEATURE_READER
@@ -47,6 +47,18 @@ class DataStore
 #if defined(ESP32_PLATFORM)
   const char* _prefs_recovery_source = nullptr;
   const char* _channel_recovery_source = nullptr;
+  mesh::ContactFileTransaction* _contact_write = nullptr;
+  DataStoreHost* _contact_write_host = nullptr;
+  bool (*_contact_write_filter)(const ContactInfo&) = nullptr;
+  uint32_t _contact_write_revision = 0;
+  uint32_t _contact_write_active_revision = 0;
+  uint32_t _contact_write_index = 0;
+  bool _contact_write_verifying = false;
+  bool _contact_write_requested = false;
+  bool _contact_write_servicing = false;
+  void cancelContactWrite();
+  bool serviceContactWrite(DataStoreHost* host,
+                          bool (*filter)(const ContactInfo&));
 #endif
 #if !defined(NRF52_PLATFORM)
   bool _channel_load_incomplete = false;
@@ -59,18 +71,6 @@ class DataStore
   bool _cache_load_incomplete = false;
 #if defined(ESP32_PLATFORM)
   File _contact_path_reader;
-  mesh::ContactFileTransaction* _contact_write = nullptr;
-  DataStoreHost* _contact_write_host = nullptr;
-  bool (*_contact_write_filter)(const ContactInfo&) = nullptr;
-  uint32_t _contact_write_revision = 0;
-  uint32_t _contact_write_active_revision = 0;
-  uint32_t _contact_write_index = 0;
-  bool _contact_write_verifying = false;
-  bool _contact_write_requested = false;
-  bool _contact_write_servicing = false;
-  void cancelContactWrite();
-  bool serviceCachedContactWrite(DataStoreHost* host,
-                                 bool (*filter)(const ContactInfo&));
 #endif
   bool readStoredPath(uint16_t source, uint8_t path[64]) override;
   bool flushCachedPaths() override;

@@ -55,7 +55,7 @@ DataStore::DataStore(FILESYSTEM& fs, mesh::RTCClock& clock) : _fs(&fs), _fsExtra
 }
 
 DataStore::~DataStore() {
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   cancelContactWrite();
 #endif
 }
@@ -144,11 +144,13 @@ static bool contactPathPresence(FILESYSTEM* fs, const char* path,
 #endif
 
 void DataStore::begin() {
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   // Reinitialization must not retain a streaming transaction or an inode
   // opened through an earlier filesystem route. Dirty mutations stay pending.
   cancelContactWrite();
+#if MESH_CONTACT_CACHE
   _contact_path_reader.close();
+#endif
 #endif
 #if defined(RP2040_PLATFORM)
   identity_store.begin();
@@ -561,9 +563,11 @@ void DataStore::useVolatilePrimaryFS(FILESYSTEM& fs) {
 #endif
 
 void DataStore::disableSecondaryFS(bool authority_unknown) {
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   cancelContactWrite();
+#if MESH_CONTACT_CACHE
   _contact_path_reader.close();
+#endif
 #endif
   _fsExtra = nullptr;
 #if defined(NRF52_PLATFORM)
@@ -724,9 +728,11 @@ bool DataStore::removeFile(FILESYSTEM* fs, const char* filename) {
 }
 
 bool DataStore::formatFileSystem() {
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   cancelContactWrite();
+#if MESH_CONTACT_CACHE
   _contact_path_reader.close();
+#endif
 #endif
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   #if defined(NRF52_PLATFORM)
@@ -795,9 +801,9 @@ bool DataStore::formatFileSystem() {
     _channel_load_incomplete = false;
     _prefs_recovery_source = nullptr;
     _channel_recovery_source = nullptr;
+    _contact_write_requested = false;
 #if MESH_CONTACT_CACHE
     _cache_load_incomplete = false;
-    _contact_write_requested = false;
 #else
     _uncached_contact_load_incomplete = false;
 #endif
@@ -1919,7 +1925,7 @@ bool DataStore::writeContactPage(DataStoreHost* host, uint8_t page,
 #endif
 
 void DataStore::loadContacts(DataStoreHost* host) {
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   cancelContactWrite();
 #endif
 #if !defined(NRF52_PLATFORM) && !MESH_CONTACT_CACHE
@@ -2229,7 +2235,7 @@ void DataStore::loadContacts(DataStoreHost* host) {
 }
 
 bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactInfo& c)) {
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   cancelContactWrite();
 #endif
   if (hasIncompleteContactLoad()) return false;
@@ -2242,10 +2248,11 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
     success = markContactDirty(*contact) && success;
   }
   return flushContactWrites(host, filter) && success;
-#elif MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#elif defined(ESP32_PLATFORM)
   // Explicit save/flush callers require a fully durable current table. An
   // unfinished lazy transaction may contain an earlier revision: discard it
   // before synchronously writing the current contacts through the same format.
+#if MESH_CONTACT_CACHE
   auto& paths = mesh::contactPathStorage();
   paths.beginCommit();
   for (uint32_t i = 0;; ++i) {
@@ -2258,6 +2265,7 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
     _contact_write_requested = true;
     return false;
   }
+#endif
   // The cold-path reader reuses one SPIFFS File during this streaming write.
   // Close it before replacing the original name so later reads reopen the
   // committed file. No complete contact-table copy is needed in RAM.
@@ -2266,14 +2274,23 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
   bool success = writer;
   uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
   for (uint32_t i = 0; success; ++i) {
+#if MESH_CONTACT_CACHE
     auto* c = host->getContactForStore(i);
     if (!c) break;
+#else
+    ContactInfo snapshot;
+    if (!host->getContactForSave(i, snapshot)) break;
+    const auto* c = &snapshot;
+#endif
     if (filter && !filter(*c)) continue;
     success = serializeContactRecord(*c, record)
         && writer.write(record, sizeof(record)) == sizeof(record);
   }
+#if MESH_CONTACT_CACHE
   _contact_path_reader.close();
+#endif
   success = writer.commit(success);
+#if MESH_CONTACT_CACHE
   if (success) {
     uint16_t index = 0;
     for (uint32_t i = 0;; ++i) {
@@ -2284,6 +2301,7 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
     }
   }
   paths.endCommit(success);
+#endif
   _contact_write_requested = !success;
   return success;
 #else
@@ -2340,7 +2358,7 @@ bool DataStore::markContactDirty(const ContactInfo& contact) {
   return _dirty_contact_pages.mark(slot / mesh::storage::CONTACTS_PER_PAGE);
 #else
   (void)contact;
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   ++_contact_write_revision;
   _contact_write_requested = true;
 #endif
@@ -2357,7 +2375,7 @@ bool DataStore::releaseContact(const ContactInfo& contact) {
   return _dirty_contact_pages.mark(slot / mesh::storage::CONTACTS_PER_PAGE);
 #else
   (void)contact;
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   ++_contact_write_revision;
   _contact_write_requested = true;
 #endif
@@ -2428,17 +2446,20 @@ bool DataStore::truncateLegacyContacts(uint16_t remaining_contacts) {
 }
 #endif
 
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
 void DataStore::cancelContactWrite() {
   if (_contact_write == nullptr) return;
   delete _contact_write;
   _contact_write = nullptr;
+#if MESH_CONTACT_CACHE
   _contact_path_reader.close();
   mesh::contactPathStorage().endCommit(false);
+#endif
   _contact_write_host = nullptr;
   _contact_write_filter = nullptr;
 }
 
+#if MESH_CONTACT_CACHE
 bool DataStore::cancelCooperativeWrite() {
   // Cache pressure inside serialization/snapshot preservation must keep the
   // reentrancy veto. Only an app/radio path update between service passes can
@@ -2447,9 +2468,10 @@ bool DataStore::cancelCooperativeWrite() {
   cancelContactWrite();
   return true;
 }
+#endif
 
-bool DataStore::serviceCachedContactWrite(DataStoreHost* host,
-                                         bool (*filter)(const ContactInfo&)) {
+bool DataStore::serviceContactWrite(DataStoreHost* host,
+                                   bool (*filter)(const ContactInfo&)) {
   struct ServiceGuard {
     bool& active;
     explicit ServiceGuard(bool& value) : active(value) { active = true; }
@@ -2469,8 +2491,11 @@ bool DataStore::serviceCachedContactWrite(DataStoreHost* host,
     cancelContactWrite();
     return true;
   }
+#if MESH_CONTACT_CACHE
   auto& paths = mesh::contactPathStorage();
+#endif
   if (_contact_write == nullptr) {
+#if MESH_CONTACT_CACHE
     paths.beginCommit();
     for (uint32_t i = 0;; ++i) {
       auto* contact = host->getContactForStore(i);
@@ -2481,12 +2506,15 @@ bool DataStore::serviceCachedContactWrite(DataStoreHost* host,
       paths.endCommit(false);
       return false;
     }
+#endif
     _contact_write = new (std::nothrow) mesh::ContactFileTransaction(
         _getContactsChannelsFS(), "/contacts3", companionPathPresence);
     if (_contact_write == nullptr || !static_cast<bool>(*_contact_write)) {
       delete _contact_write;
       _contact_write = nullptr;
+#if MESH_CONTACT_CACHE
       paths.endCommit(false);
+#endif
       return false;
     }
     _contact_write_host = host;
@@ -2497,10 +2525,19 @@ bool DataStore::serviceCachedContactWrite(DataStoreHost* host,
     return true;
   }
   if (!_contact_write_verifying) {
+#if MESH_CONTACT_CACHE
     ContactInfo* contact;
     do {
       contact = host->getContactForStore(_contact_write_index++);
     } while (contact != nullptr && filter && !filter(*contact));
+#else
+    ContactInfo snapshot;
+    bool available;
+    do {
+      available = host->getContactForSave(_contact_write_index++, snapshot);
+    } while (available && filter && !filter(snapshot));
+    const ContactInfo* contact = available ? &snapshot : nullptr;
+#endif
     if (contact != nullptr) {
       uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
       if (serializeContactRecord(*contact, record)
@@ -2510,10 +2547,13 @@ bool DataStore::serviceCachedContactWrite(DataStoreHost* host,
       cancelContactWrite();
       return false;
     }
+#if MESH_CONTACT_CACHE
     _contact_path_reader.close();
+#endif
     _contact_write_verifying = true;
     return true;
   }
+#if MESH_CONTACT_CACHE
   if (_contact_write->readyToPublish()
       && !paths.preserveSnapshots(0, 0x8000)) {
     cancelContactWrite();
@@ -2524,6 +2564,7 @@ bool DataStore::serviceCachedContactWrite(DataStoreHost* host,
     // inode during verification. Close it at the actual publication boundary.
     _contact_path_reader.close();
   }
+#endif
   const auto progress = _contact_write->serviceCommit();
   if (progress == mesh::ContactFileTransaction::CommitProgress::Pending) {
     return true;
@@ -2532,6 +2573,7 @@ bool DataStore::serviceCachedContactWrite(DataStoreHost* host,
     cancelContactWrite();
     return false;
   }
+#if MESH_CONTACT_CACHE
   // serviceCommit's final name replacement and this handle publication are
   // one non-yielding section. Every later cold read sees the corresponding
   // committed file and source indices, including retained ContactInfo copies.
@@ -2542,6 +2584,7 @@ bool DataStore::serviceCachedContactWrite(DataStoreHost* host,
     if (!filter || filter(*contact)) paths.publish(contact->path_ref.handle(), index++);
   }
   paths.endCommit(true);
+#endif
   delete _contact_write;
   _contact_write = nullptr;
   _contact_write_host = nullptr;
@@ -2604,8 +2647,8 @@ bool DataStore::serviceContactWrites(DataStoreHost* host,
   if (!writeContactPage(host, (uint8_t)page, filter)) return false;
   _dirty_contact_pages.clear((uint8_t)page);
   return true;
-#elif MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
-  return serviceCachedContactWrite(host, filter);
+#elif defined(ESP32_PLATFORM)
+  return serviceContactWrite(host, filter);
 #else
   return saveContacts(host, filter);
 #endif
@@ -2613,7 +2656,7 @@ bool DataStore::serviceContactWrites(DataStoreHost* host,
 
 bool DataStore::flushContactWrites(DataStoreHost* host,
                                    bool (*filter)(const ContactInfo& c)) {
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   cancelContactWrite();
 #endif
   if (hasIncompleteContactLoad()) return false;
@@ -2631,7 +2674,7 @@ bool DataStore::hasPendingContactWrites() const {
 #if defined(NRF52_PLATFORM)
   return !hasIncompleteContactLoad()
       && (!_dirty_contact_pages.empty() || _legacy_contacts_pending_cleanup);
-#elif MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#elif defined(ESP32_PLATFORM)
   return _contact_write_requested || _contact_write != nullptr;
 #else
   return false;
@@ -2906,7 +2949,7 @@ void DataStore::checkAdvBlobFile() {
 }
 
 bool DataStore::migrateToSecondaryFS() {
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
   cancelContactWrite();
 #endif
   if (_fsExtra == nullptr) return false;
@@ -3741,9 +3784,18 @@ bool DataStore::deleteBlobByKey(const uint8_t key[], int key_len) {
   char path[64];
   makeBlobPath(key, key_len, path, sizeof(path));
 
+#if defined(ESP32_PLATFORM)
+  // VFS remove() logs an error for normal absence, contaminating the binary
+  // USB stream. Distinguish absence from metadata failure before calling it;
+  // a real deletion failure must preserve the live contact for rollback.
+  bool present = false;
+  if (!companionPathPresence(_fs, path, present)) return false;
+  return !present || _fs->remove(path);
+#else
   _fs->remove(path);
   
   return true; // return true even if file did not exist
+#endif
 }
 #endif
 

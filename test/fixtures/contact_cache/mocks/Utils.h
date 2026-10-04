@@ -8,6 +8,7 @@
 namespace mesh {
 class Utils {
 public:
+  static void toHex(char* out, const uint8_t* bytes, size_t length);
   static void sha256(uint8_t* out, size_t size, const uint8_t* data, int length) {
     uint8_t digest[32];
     SHA256(data, length, digest);
@@ -15,4 +16,3 @@ public:
   }
 };
 }
-
