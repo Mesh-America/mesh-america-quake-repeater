@@ -41,6 +41,7 @@ public:
   unsigned config_calls = 0, closes = 0, renames = 0;
   unsigned fail_config = 0, short_read_call = 0, fail_rename = 0;
   size_t largest_read = 0, largest_backend_read = 0, max_write = SIZE_MAX;
+  size_t backend_read_bytes = 0, reader_buffer_size = 0;
   bool fail_open_read = false, fail_open_write = false;
   std::vector<Files> rename_snapshots;
   bool exists(const char* path) { return files.count(path) != 0; }
@@ -65,6 +66,7 @@ bool File::setBufferSize(size_t size) {
   if (++stream->fs->config_calls == stream->fs->fail_config) return false;
   assert(stream->buffer.empty() && stream->position == 0);
   stream->buffer_size = size;
+  if (!stream->writing) stream->fs->reader_buffer_size = size;
   return true;
 }
 size_t File::size() const { return stream ? stream->fs->files.at(stream->path).size() : 0; }
@@ -104,6 +106,7 @@ size_t File::read(uint8_t* data, size_t length) {
       const size_t n = std::min(stream->buffer_size, available);
       if (!n) break;
       ++fs.backend_reads;
+      fs.backend_read_bytes += n;
       fs.largest_backend_read = std::max(fs.largest_backend_read, n);
       stream->buffer.assign(source.begin() + stream->backend_position,
                             source.begin() + stream->backend_position + n);
@@ -147,6 +150,7 @@ unsigned effectiveBudget(unsigned requested) {
 
 struct Measurement {
   unsigned passes, logical_reads, backend_reads, max_pass_reads, max_pass_refills;
+  size_t max_pass_backend_bytes, reader_buffer_size;
 };
 Measurement verify(size_t bytes, unsigned budget, bool use_default = false) {
   FileSystem fs;
@@ -156,19 +160,28 @@ Measurement verify(size_t bytes, unsigned budget, bool use_default = false) {
   assert(writer);
   writeImage(writer, next);
   unsigned passes = 0, max_reads = 0, max_refills = 0, data_passes = 0;
+  size_t max_backend_bytes = 0;
+#if defined(ESP32_PLATFORM)
+  // Selection is made once in Open, independently of the later read loop.
+  const size_t selected = !use_default && budget >= 8 ? 512 : 128;
+#endif
   Progress result = Progress::Pending;
   while (result == Progress::Pending) {
     const unsigned before_reads = fs.reads, before_backend = fs.backend_reads;
+    const size_t before_backend_bytes = fs.backend_read_bytes;
     const bool was_ready = writer.readyToPublish();
     result = use_default ? writer.serviceCommit() : writer.serviceCommit(true, budget);
     assert(++passes < 10000);
     const unsigned reads = fs.reads - before_reads, refills = fs.backend_reads - before_backend;
     max_reads = std::max(max_reads, reads);
     max_refills = std::max(max_refills, refills);
+    const size_t backend_bytes = fs.backend_read_bytes - before_backend_bytes;
+    max_backend_bytes = std::max(max_backend_bytes, backend_bytes);
     const unsigned bound = use_default ? 1 : effectiveBudget(budget);
     assert(reads <= bound);
 #if defined(ESP32_PLATFORM)
-    assert(refills <= (bound + 1) / 2);
+    assert(refills <= (64 * bound + selected - 1) / selected);
+    assert(backend_bytes <= 512); // FILE refill admissions, not NOR operations or time
 #endif
     if (reads) {
       ++data_passes;
@@ -185,10 +198,12 @@ Measurement verify(size_t bytes, unsigned budget, bool use_default = false) {
   assert(fs.reads == (bytes + 63) / 64);
   assert(fs.largest_read <= 64);
 #if defined(ESP32_PLATFORM)
-  assert(fs.largest_backend_read <= 128);
-  assert(fs.backend_reads == (bytes + 127) / 128);
+  assert(fs.reader_buffer_size == selected);
+  assert(fs.largest_backend_read <= selected);
+  assert(fs.backend_reads == (bytes + selected - 1) / selected);
 #endif
-  return {passes, fs.reads, fs.backend_reads, max_reads, max_refills};
+  return {passes, fs.reads, fs.backend_reads, max_reads, max_refills,
+          max_backend_bytes, fs.reader_buffer_size};
 }
 void limitsAndTails() {
   for (size_t bytes : {size_t(0), size_t(1), size_t(63), size_t(64), size_t(65),
@@ -203,6 +218,9 @@ void limitsAndTails() {
   fixture_commit_calls = 0;
   assert(writer.commit());
   assert(fixture_commit_calls == 829); // actual commit() drains default-one passes
+#if defined(ESP32_PLATFORM)
+  assert(fs.reader_buffer_size == 128 && fs.backend_reads == 413);
+#endif
 }
 void readFailureAndCorruption() {
   const auto old = image(19), next = image(1536);
@@ -300,7 +318,11 @@ int main() {
 #endif
   const auto one = verify(347 * 152, 1), eight = verify(347 * 152, 8);
   printf("{\"one_passes\":%u,\"eight_passes\":%u,\"logical_reads\":%u,"
-         "\"backend_reads\":%u,\"max_pass_reads\":%u,\"max_pass_refills\":%u}\n",
+         "\"backend_reads\":%u,\"max_pass_reads\":%u,\"max_pass_refills\":%u,"
+         "\"max_pass_backend_bytes\":%zu,\"reader_buffer_size\":%zu,"
+         "\"one_backend_reads\":%u,\"one_reader_buffer_size\":%zu}\n",
          one.passes, eight.passes, eight.logical_reads, eight.backend_reads,
-         eight.max_pass_reads, eight.max_pass_refills);
+         eight.max_pass_reads, eight.max_pass_refills,
+         eight.max_pass_backend_bytes, eight.reader_buffer_size,
+         one.backend_reads, one.reader_buffer_size);
 }

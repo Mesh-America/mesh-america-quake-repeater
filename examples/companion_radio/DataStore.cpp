@@ -2531,7 +2531,7 @@ bool DataStore::serviceContactWrite(DataStoreHost* host,
     // The revision/session guard above also applies to every setup step.
     // Keep initialization separate from serialization, including its final
     // buffer configuration, so transports are serviced between operations.
-    const auto progress = _contact_write->serviceBegin();
+    const auto progress = _contact_write->serviceBegin(true);
     if (progress == mesh::ContactFileTransaction::BeginProgress::Failed) {
       cancelContactWrite();
       return false;
@@ -2581,7 +2581,7 @@ bool DataStore::serviceContactWrite(DataStoreHost* host,
 #endif
   // Keep the 64-byte CRC scratch while verifying at most 512 bytes per
   // background pass; transports run between these bounded batches.
-  const auto progress = _contact_write->serviceCommit(true, 8);
+  const auto progress = _contact_write->serviceCommit(true, 8, true);
   if (progress == mesh::ContactFileTransaction::CommitProgress::Pending) {
     return true;
   }

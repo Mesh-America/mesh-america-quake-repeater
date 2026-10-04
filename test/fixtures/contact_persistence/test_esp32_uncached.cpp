@@ -137,7 +137,7 @@ unsigned drain(DataStore& store, Host& h, Filter filter = nullptr) {
     assert(SPIFFS.writes - writes <= 1);
     assert(SPIFFS.reads - reads <= 8);
     assert(SPIFFS.backend_writes - backend_writes <= 1);
-    assert(SPIFFS.backend_reads - backend_reads <= 4);
+    assert(SPIFFS.backend_reads - backend_reads <= 1);
     // Transport service runs here, between every production pass. It must
     // never observe an unpublished replacement or a target-name gap.
     if (store.hasPendingContactWrites()) {
@@ -171,8 +171,8 @@ void boundedFullTableAndFirstSave() {
   const auto passes = drain(store, h, keepContact);
   assert(passes > h.contacts.size()); // serialization and CRC both yield
   assert(SPIFFS.largest_read <= 64);
-  assert(SPIFFS.largest_backend_read <= 128);
-  assert(SPIFFS.largest_backend_write <= 251);
+  assert(SPIFFS.largest_backend_read <= 512); // background selected at Open
+  assert(SPIFFS.largest_backend_write <= 502); // background selected at Configure
   assert(SPIFFS.largest_write == mesh::storage::CONTACT_RECORD_SIZE);
   assert(SPIFFS.removes == 0); // first publication has no backup/temp to delete
   assert(h.copies >= h.contacts.size());
@@ -196,14 +196,16 @@ void backgroundCRCVerificationUsesBoundedBatches() {
     if (read_count != 0) ++crc_read_passes;
     max_reads = std::max(max_reads, read_count);
     max_backend_reads = std::max(max_backend_reads, backend_count);
-    assert(read_count <= 8 && backend_count <= 4);
+    assert(read_count <= 8 && backend_count <= 1);
   }
   // These are actual production DataStore calls, not a direct transaction
   // benchmark. Default one-chunk verification fails this cadence witness.
   assert(SPIFFS.reads == 825);
   assert(crc_read_passes == 104);
-  assert(max_reads == 8 && max_backend_reads == 4);
-  assert(SPIFFS.largest_read == 64 && SPIFFS.largest_backend_read == 128);
+  assert(max_reads == 8 && max_backend_reads == 1);
+  assert(SPIFFS.largest_read == 64 && SPIFFS.largest_backend_read == 512);
+  assert(SPIFFS.backend_reads == 104);
+  assert(SPIFFS.backend_writes == 106); // actual347-contact background502 job
   assert(SPIFFS.files.at("/contacts3") == image(h));
   bootCheck(h);
 }
@@ -324,7 +326,7 @@ void deferredBeginFaultsAndSynchronousDefaults() {
 }
 
 void mutationDuringEveryBeginStage() {
-  for (unsigned completed = 0; completed <= 7; ++completed) {
+  for (unsigned completed = 0; completed <= 8; ++completed) {
     SPIFFS = FakeFilesystem();
     SPIFFS.emulate_stdio = true;
     Host h = table();
@@ -345,8 +347,8 @@ void mutationDuringEveryBeginStage() {
     assert(store.serviceContactWrites(&h, nullptr)); // guard precedes every begin step
     assert(store.hasPendingContactWrites());
     assert(SPIFFS.opens == opens && SPIFFS.buffer_config_calls == configurations);
-    if (completed < 6) assert(SPIFFS.startupOperations() == before_cancel);
-    if (completed < 5) assert(SPIFFS.files.at("/contacts3.tmp") == stale);
+    if (completed < 7) assert(SPIFFS.startupOperations() == before_cancel);
+    if (completed < 6) assert(SPIFFS.files.at("/contacts3.tmp") == stale);
     else assert(!SPIFFS.exists("/contacts3.tmp"));
     assert(SPIFFS.files.at("/contacts3") == old);
     drain(store, h);
@@ -474,8 +476,9 @@ void realBackupCleanupFailure() {
   assert(!success && store.hasPendingContactWrites());
   assert(SPIFFS.files.at("/contacts3") == old);
   assert(SPIFFS.files.at("/contacts3.bak") == std::vector<uint8_t>({42}));
-  // Best-effort temp cleanup cannot hide the primary remove failure.
-  assert(SPIFFS.exists("/contacts3.tmp") && SPIFFS.missing_remove_logs == 0);
+  // Retirement fails before this transaction owns or opens a new temp.
+  assert(!SPIFFS.exists("/contacts3.tmp") && SPIFFS.missing_remove_logs == 0);
+  assert(SPIFFS.writes == 0 && SPIFFS.opens == 0 && !store.activeJob());
   SPIFFS.fail_remove = false;
   drain(store, h);
   bootCheck(h);
@@ -617,10 +620,46 @@ void boundedCancellationFlush() {
   }
 }
 
+
+void deferredCleanupThroughActualDataStore() {
+  SPIFFS = FakeFilesystem();
+  SPIFFS.emulate_stdio = true;
+  Host h = table(32);
+  const auto old = image(h);
+  const std::vector<uint8_t> older = {9, 8, 7};
+  SPIFFS.files["/contacts3"] = old;
+  SPIFFS.files["/contacts3.bak"] = older;
+  DataStore store(SPIFFS);
+  h.contacts[0] = contact(904);
+  assert(store.markContactDirty(h.contacts[0]));
+  assert(store.serviceContactWrites(&h, nullptr)); // allocation only
+  for (unsigned step = 0; step < 3; ++step)
+    assert(store.serviceContactWrites(&h, nullptr)); // Target, Backup, Recover
+  assert(SPIFFS.files.at("/contacts3.bak") == older);
+  const unsigned before = SPIFFS.startupOperations();
+  assert(store.serviceContactWrites(&h, nullptr)); // standalone RetireBackup
+  assert(SPIFFS.startupOperations() - before == 1);
+  assert(SPIFFS.files.at("/contacts3") == old && !SPIFFS.exists("/contacts3.bak"));
+  drain(store, h);
+  assert(SPIFFS.exists("/contacts3.bak"));
+  assert(!store.hasPendingContactWrites() && SPIFFS.files.at("/contacts3.bak") == old);
+  // A mutation after the completed job must retire that backup before replacing
+  // the newest authoritative target, with no stale index publication.
+  const auto prior = image(h);
+  h.contacts.erase(h.contacts.begin() + 4);
+  assert(store.releaseContact(contact(4)));
+  h.contacts[0] = contact(905);
+  assert(store.markContactDirty(h.contacts[0]));
+  drain(store, h);
+  assert(SPIFFS.files.at("/contacts3.bak") == prior);
+  bootCheck(h);
+}
+
 int main() {
 #if defined(CONTACT_BUFFER_BENCHMARK)
   bufferedAdmissionBenchmark();
 #else
+  deferredCleanupThroughActualDataStore();
   boundedFullTableAndFirstSave();
   backgroundCRCVerificationUsesBoundedBatches();
   boundedCancellationFlush();
