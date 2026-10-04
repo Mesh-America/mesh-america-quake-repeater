@@ -47,6 +47,14 @@ history is entirely zero are treated as disconnected and are not sent. The
 command requires at least one collected base sample and works even when the
 automatic schedule is off.
 
+Schedule changes are saved transactionally; a failed write does not truncate
+the previous preferences. A legacy route must be successfully migrated into
+`data.tx` before its schedule can run. Corrupt, unreadable, or ambiguously
+committed preferences stop automatic and pending sends. `get telemetry.tx`
+shows `fault=prefs`, and manual sends return an error instead of acknowledging
+work that cannot run. Such a storage fault must be repaired before settings
+can be changed; the firmware does not overwrite an unmigrated legacy file.
+
 ## Decode a packet
 
 <div class="telemetry-tool" data-telemetry-decoder>
