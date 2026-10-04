@@ -491,7 +491,12 @@ private:
     return _store->getBlobByKey(key, key_len, dest_buf);
   }
   bool putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], int len) override {
+#if defined(ESP32_PLATFORM)
+    return len > 0 && len <= 255
+        && _store->queueAdvertByKey(key, key_len, src_buf, len);
+#else
     return _store->putBlobByKey(key, key_len, src_buf, len);
+#endif
   }
 
   void checkCLIRescueCmd();
@@ -596,6 +601,9 @@ private:
   // helpers, short-cuts
   bool saveChannels() { return _store->saveChannels(this); }
   void saveContacts();
+#if defined(ESP32_PLATFORM)
+  void servicePersistence();
+#endif
   void scheduleContactWriteRetry();
   bool isContactWriteDue() const;
   bool flushContactsBeforeReboot();
@@ -722,6 +730,9 @@ private:
   unsigned long sign_data_deadline;
   unsigned long dirty_contacts_expiry;
   uint8_t dirty_contacts_failures;
+#if defined(ESP32_PLATFORM)
+  bool _advert_write_next = true;
+#endif
 
   TransportKey send_scope;
 

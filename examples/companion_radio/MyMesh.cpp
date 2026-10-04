@@ -6809,6 +6809,11 @@ bool MyMesh::isContactWriteDue() const {
 }
 
 bool MyMesh::flushContactsBeforeReboot() {
+#if defined(ESP32_PLATFORM)
+  const uint32_t now = _ms->getMillis();
+  if (_store->hasPendingAdvertWrites() && !_store->isAdvertWriteDue(now)) return false;
+  if (!_store->flushAdvertWrites(now)) return false;
+#endif
   // Non-nRF stores use the legacy monolithic file and therefore do not report
   // dirty pages. The lazy-write deadline still proves that RAM may be newer.
   if (!dirty_contacts_expiry && !_store->hasPendingContactWrites()) return true;
@@ -10316,6 +10321,9 @@ void MyMesh::loop() {
   if (held_dm_count != 0 || verified_pending_count != 0) releaseHeldOneKeyDMs();
 #endif
 
+#if defined(ESP32_PLATFORM)
+  servicePersistence();
+#else
   // is there are pending dirty contacts write needed?
   if (isContactWriteDue()) {
     const bool success = _store->serviceContactWrites(this, save_filter);
@@ -10330,6 +10338,7 @@ void MyMesh::loop() {
           dirty_contacts_expiry, dirty_contacts_failures);
     }
   }
+#endif
 
 #ifdef DISPLAY_CLASS
   if (_ui) {
@@ -10343,6 +10352,38 @@ void MyMesh::loop() {
   }
 #endif
 }
+
+#if defined(ESP32_PLATFORM)
+void MyMesh::servicePersistence() {
+  // Advert crypto runs before serial service. Defer its cache I/O until here,
+  // and alternate with due contact work so neither job can starve the other.
+  // Only one persistence job is serviced in a loop pass.
+  if (_store->consumeSynchronousAdvertIO()) return;
+  const bool contact_write_due = isContactWriteDue();
+  const bool advert_write_due = _store->isAdvertWriteDue(_ms->getMillis());
+  const bool service_advert = advert_write_due
+      && (!contact_write_due || _advert_write_next);
+  if (service_advert) {
+    _store->serviceAdvertWrites(_ms->getMillis());
+    _advert_write_next = false;
+    return;
+  }
+  _advert_write_next = true;
+  if (isContactWriteDue()) {
+    const bool success = _store->serviceContactWrites(this, save_filter);
+    if (!success) {
+      scheduleContactWriteRetry();
+    } else if (_store->hasPendingContactWrites()) {
+      dirty_contacts_failures = 0;
+      dirty_contacts_expiry = mesh::nonzeroLazyPersistenceDeadline(
+          futureMillis(CONTACT_PAGE_WRITE_GAP));
+    } else {
+      mesh::resetLazyPersistenceAfterSuccess(
+          dirty_contacts_expiry, dirty_contacts_failures);
+    }
+  }
+}
+#endif
 
 bool MyMesh::advert() {
   mesh::Packet* pkt;
@@ -10364,6 +10405,9 @@ bool MyMesh::canRecoverUsbLogging() const {
   // Do not discard dirty pages or interrupt a protocol/flash/radio operation.
   // Normal lazy writes resolve this veto without adding writes to each poll.
   return dirty_contacts_expiry == 0 && !_store->hasPendingContactWrites()
+#if defined(ESP32_PLATFORM)
+      && !_store->hasPendingAdvertWrites()
+#endif
       && !hasOutbound() && !isAnyTempRadioActive() && !hasPendingOtaApply()
       && !command_radio_apply_pending && !saved_radio_apply_pending
       && _scheduled_reboot_at == 0 && !hasPendingReqs()
@@ -10418,6 +10462,9 @@ bool MyMesh::hasPendingWork() const {
 #endif
           && (!radio_apply_retry_at || millisHasNowPassed(radio_apply_retry_at)))
       || contact_write_needs_polling
+#if defined(ESP32_PLATFORM)
+      || _store->hasPendingAdvertWrites()
+#endif
       || (emergency_client_repeat_packet != NULL
           && millisHasNowPassed(emergency_client_repeat_send_at))
 #if COMPANION_FEATURE_TEMP_RADIO

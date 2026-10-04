@@ -6,6 +6,7 @@
 #include "PrefsStorageLayout.h"
 #include <helpers/FileRead.h>
 #include <helpers/AdvertDataHelpers.h>
+#include <helpers/LazyPersistence.h>
 #if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
 #include <helpers/ContactFileTransaction.h>
 #endif
@@ -145,6 +146,7 @@ static bool contactPathPresence(FILESYSTEM* fs, const char* path,
 
 void DataStore::begin() {
 #if defined(ESP32_PLATFORM)
+  _advert_write.clear();
   // Reinitialization must not retain a streaming transaction or an inode
   // opened through an earlier filesystem route. Dirty mutations stay pending.
   cancelContactWrite();
@@ -729,6 +731,8 @@ bool DataStore::removeFile(FILESYSTEM* fs, const char* filename) {
 
 bool DataStore::formatFileSystem() {
 #if defined(ESP32_PLATFORM)
+  // A failed format keeps the latest accepted RAM packets available to retry.
+  _advert_write.pause();
   cancelContactWrite();
 #if MESH_CONTACT_CACHE
   _contact_path_reader.close();
@@ -796,6 +800,7 @@ bool DataStore::formatFileSystem() {
   bool fs_success = ((fs::SPIFFSFS *)_fs)->format();
   esp_err_t nvs_err = nvs_flash_erase(); // no need to reinit, will be done by reboot
   if (fs_success && nvs_err == ESP_OK) {
+    _advert_write.clear();
     _identity_creation_blocked = false;
     _prefs_load_incomplete = false;
     _channel_load_incomplete = false;
@@ -3761,9 +3766,34 @@ inline void makeBlobPath(const uint8_t key[], int key_len, char* path, size_t pa
 
 uint8_t DataStore::getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]) {
   char path[64];
+#if defined(ESP32_PLATFORM)
+  if (key_len <= 0) return 0;
+#endif
   makeBlobPath(key, key_len, path, sizeof(path));
 
-  if (_fs->exists(path)) {
+#if defined(ESP32_PLATFORM)
+  const int prefix_len = key_len > 8 ? 8 : key_len;
+  for (const auto& slot : _advert_write.slots) {
+    if (slot.len && slot.key_len == prefix_len
+        && memcmp(slot.key, key, prefix_len) == 0) {
+      memcpy(dest_buf, slot.bytes, slot.len);
+      return slot.len;
+    }
+  }
+  // SPIFFS cannot rename over an existing file. A reset between the staged
+  // target->backup and temp->target renames leaves the prior valid cache here.
+  _advert_write.synchronous_io = true;
+  bool present = false;
+  if (!companionPathPresence(_fs, path, present)) return 0;
+  if (!present) {
+    const size_t used = strlen(path);
+    strcpy(path + used, ".bak");
+    if (!companionPathPresence(_fs, path, present)) return 0;
+  }
+#else
+  const bool present = _fs->exists(path);
+#endif
+  if (present) {
     File f = openRead(_fs, path);
     if (f) {
       int len = f.read(dest_buf, 255); // currently MAX 255 byte blob len supported!!
@@ -3777,12 +3807,21 @@ uint8_t DataStore::getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_b
 bool DataStore::putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], uint8_t len) {
   char path[64];
   makeBlobPath(key, key_len, path, sizeof(path));
+#if defined(ESP32_PLATFORM)
+  _advert_write.synchronous_io = true;
+  invalidateAdvertWrite(key, key_len);
+#endif
 
   File f = openWrite(_fs, path);
   if (f) {
     int n = f.write(src_buf, len);
     f.close();
-    if (n == len) return true; // success!
+    if (n == len) {
+#if defined(ESP32_PLATFORM)
+      retireAdvertWrite(key, key_len);
+#endif
+      return true;
+    }
 
     _fs->remove(path); // blob was only partially written!
   }
@@ -3794,17 +3833,295 @@ bool DataStore::deleteBlobByKey(const uint8_t key[], int key_len) {
   makeBlobPath(key, key_len, path, sizeof(path));
 
 #if defined(ESP32_PLATFORM)
+  _advert_write.synchronous_io = true;
+  invalidateAdvertWrite(key, key_len);
   // VFS remove() logs an error for normal absence, contaminating the binary
   // USB stream. Distinguish absence from metadata failure before calling it;
   // a real deletion failure must preserve the live contact for rollback.
-  bool present = false;
-  if (!companionPathPresence(_fs, path, present)) return false;
-  return !present || _fs->remove(path);
+  char backup[68];
+  snprintf(backup, sizeof(backup), "%s.bak", path);
+  bool present = false, backup_present = false;
+  // Probe both before mutating either; removing the backup first preserves
+  // the authoritative target if a later deletion fails and the contact rolls
+  // back. A successful deletion invalidates publication before staged cleanup.
+  if (!companionPathPresence(_fs, path, present)
+      || !companionPathPresence(_fs, backup, backup_present)) return false;
+  if (backup_present && !_fs->remove(backup)) return false;
+  if (present && !_fs->remove(path)) return false;
+  retireAdvertWrite(key, key_len);
+  return true;
 #else
   _fs->remove(path);
   
   return true; // return true even if file did not exist
 #endif
+}
+#endif
+
+#if defined(ESP32_PLATFORM)
+bool DataStore::queueAdvertByKey(const uint8_t key[], int key_len,
+                                const uint8_t src_buf[], uint8_t len) {
+  if (key_len <= 0 || len == 0) return false;
+  const uint8_t prefix_len = key_len > 8 ? 8 : key_len;
+  AdvertWriteState::Slot* chosen = nullptr;
+  for (auto& slot : _advert_write.slots) {
+    if (slot.len && slot.key_len == prefix_len
+        && memcmp(slot.key, key, prefix_len) == 0) {
+      chosen = &slot;
+      break;
+    }
+    if (!slot.len && chosen == nullptr) chosen = &slot;
+  }
+  // Never force a filesystem flush or allocate another packet on overflow.
+  if (chosen == nullptr) return false;
+  memcpy(chosen->key, key, prefix_len);
+  memcpy(chosen->bytes, src_buf, len);
+  chosen->key_len = prefix_len;
+  chosen->len = len;
+  chosen->revision = ++_advert_write.revision;
+  return true;
+}
+
+void DataStore::retireAdvertWrite(const uint8_t key[], int key_len) {
+  if (key_len <= 0) return;
+  const int prefix_len = key_len > 8 ? 8 : key_len;
+  for (auto& slot : _advert_write.slots) {
+    if (slot.len && slot.key_len == prefix_len
+        && memcmp(slot.key, key, prefix_len) == 0) {
+      slot.len = 0;
+      slot.revision = ++_advert_write.revision;
+    }
+  }
+}
+
+void DataStore::invalidateAdvertWrite(const uint8_t key[], int key_len) {
+  if (key_len <= 0) return;
+  const int prefix_len = key_len > 8 ? 8 : key_len;
+  auto& job = _advert_write;
+  for (auto& slot : job.slots) {
+    if (slot.len && slot.key_len == prefix_len
+        && memcmp(slot.key, key, prefix_len) == 0) {
+      slot.revision = ++job.revision;
+    }
+  }
+  if (job.stage != AdvertWriteState::Stage::Idle
+      && job.active_key_len == prefix_len
+      && memcmp(job.active_key, key, prefix_len) == 0) {
+    // A synchronous API may have changed target/backup even when it returned
+    // failure. Re-probe the independent active key before recovery/publication.
+    job.cancelling = true;
+    job.stage = AdvertWriteState::Stage::CancelClose;
+    job.retry_at = 0;
+  }
+}
+
+bool DataStore::consumeSynchronousAdvertIO() {
+  const bool result = _advert_write.synchronous_io;
+  _advert_write.synchronous_io = false;
+  return result;
+}
+
+bool DataStore::hasPendingAdvertWrites() const {
+  if (_advert_write.stage != AdvertWriteState::Stage::Idle) return true;
+  for (const auto& slot : _advert_write.slots) if (slot.len) return true;
+  return false;
+}
+
+bool DataStore::isAdvertWriteDue(uint32_t now) const {
+  return hasPendingAdvertWrites() && (_advert_write.retry_at == 0
+      || static_cast<int32_t>(now - _advert_write.retry_at) >= 0);
+}
+
+bool DataStore::serviceAdvertWrites(uint32_t now) {
+  auto& job = _advert_write;
+  using Stage = AdvertWriteState::Stage;
+  static const char* const temp = "/advert.tmp";
+  if (!isAdvertWriteDue(now)) return true;
+  job.retry_at = 0;
+  if (job.stage == Stage::Idle) {
+    for (uint8_t n = 0; n < AdvertWriteState::CAPACITY; ++n) {
+      const uint8_t i = (job.next + n) % AdvertWriteState::CAPACITY;
+      if (!job.slots[i].len) continue;
+      job.active = i;
+      job.next = (i + 1) % AdvertWriteState::CAPACITY;
+      job.active_revision = job.slots[i].revision;
+      job.active_key_len = job.slots[i].key_len;
+      memcpy(job.active_key, job.slots[i].key, job.active_key_len);
+      makeBlobPath(job.slots[i].key, job.slots[i].key_len,
+                   job.target, sizeof(job.target));
+      snprintf(job.backup, sizeof(job.backup), "%s.bak", job.target);
+      job.offset = 0;
+      job.cancelling = false;
+      job.stage = Stage::TargetProbe;
+      break;
+    }
+    if (job.stage == Stage::Idle) return true;
+  }
+  auto& slot = job.slots[job.active];
+  if (!job.cancelling && (!slot.len || slot.revision != job.active_revision)) {
+    job.cancelling = true;
+    job.stage = Stage::CancelClose;
+  }
+  const auto retry = [&]() {
+    const uint32_t delay = mesh::recordLazyPersistenceSaveFailure(
+        job.failures, 1000, mesh::LAZY_PERSISTENCE_MAX_RETRY_DELAY_MILLIS);
+    job.retry_at = now + delay;
+    if (job.retry_at == 0) job.retry_at = 1;
+    return false;
+  };
+  const auto fail = [&]() {
+    job.cancelling = true;
+    job.stage = Stage::CancelClose;
+    return retry();
+  };
+  const auto prepared = [&]() {
+    if (job.cancelling) {
+      job.stage = Stage::Idle;
+      job.active = AdvertWriteState::CAPACITY;
+    } else job.stage = Stage::OpenWrite;
+  };
+  // Exactly one filesystem API operation in each arm. In particular, open,
+  // fclose (which may flush stdio), crypto in BaseChatMesh, and contact-file
+  // work must not accumulate in the same serviced loop pass. SPIFFS may still
+  // spend an unbounded amount of wall time inside one individual operation.
+  switch (job.stage) {
+    case Stage::TargetProbe:
+      if (!companionPathPresence(_fs, job.target, job.target_present)) return fail();
+      job.stage = Stage::BackupProbe;
+      break;
+    case Stage::BackupProbe:
+      if (!companionPathPresence(_fs, job.backup, job.backup_present)) return fail();
+      job.stage = job.backup_present ? (job.target_present ? Stage::RemoveBackup
+                                                         : Stage::RestoreBackup)
+                                     : Stage::TempProbe;
+      break;
+    case Stage::RestoreBackup:
+      if (!_fs->rename(job.backup, job.target)) return fail();
+      job.stage = Stage::TempProbe;
+      break;
+    case Stage::RemoveBackup:
+      if (!_fs->remove(job.backup)) return fail();
+      job.stage = Stage::TempProbe;
+      break;
+    case Stage::TempProbe:
+      if (!companionPathPresence(_fs, temp, job.temp_present)) return fail();
+      if (job.temp_present) job.stage = Stage::RemoveTemp;
+      else prepared();
+      break;
+    case Stage::RemoveTemp:
+      if (!_fs->remove(temp)) return fail();
+      prepared();
+      break;
+    case Stage::OpenWrite:
+      job.file = openWrite(_fs, temp);
+      if (!job.file) return fail();
+      job.stage = Stage::ConfigureWrite;
+      break;
+    case Stage::ConfigureWrite:
+      if (!job.file.setBufferSize(sizeof(job.scratch))) return fail();
+      job.stage = Stage::Write;
+      break;
+    case Stage::Write: {
+      const uint8_t count = static_cast<size_t>(slot.len - job.offset) > sizeof(job.scratch)
+          ? sizeof(job.scratch) : slot.len - job.offset;
+      if (job.file.write(slot.bytes + job.offset, count) != count) return fail();
+      job.offset += count;
+      if (job.offset == slot.len) job.stage = Stage::CloseWrite;
+      break;
+    }
+    case Stage::CloseWrite:
+      job.file.close();
+      job.stage = Stage::OpenVerify;
+      break;
+    case Stage::OpenVerify:
+      job.file = openRead(_fs, temp);
+      if (!job.file) return fail();
+      job.stage = Stage::ConfigureVerify;
+      break;
+    case Stage::ConfigureVerify:
+      if (!job.file.setBufferSize(sizeof(job.scratch))) return fail();
+      job.stage = Stage::VerifySize;
+      break;
+    case Stage::VerifySize:
+      if (job.file.size() != slot.len) return fail();
+      job.offset = 0;
+      job.stage = Stage::Verify;
+      break;
+    case Stage::Verify: {
+      const uint8_t count = static_cast<size_t>(slot.len - job.offset) > sizeof(job.scratch)
+          ? sizeof(job.scratch) : slot.len - job.offset;
+      if (job.file.read(job.scratch, count) != count
+          || memcmp(job.scratch, slot.bytes + job.offset, count) != 0) return fail();
+      job.offset += count;
+      if (job.offset == slot.len) job.stage = Stage::CloseVerify;
+      break;
+    }
+    case Stage::CloseVerify:
+      job.file.close();
+      job.stage = Stage::PublishTargetProbe;
+      break;
+    case Stage::PublishTargetProbe:
+      if (!companionPathPresence(_fs, job.target, job.target_present)) return fail();
+      job.stage = Stage::PublishBackupProbe;
+      break;
+    case Stage::PublishBackupProbe:
+      if (!companionPathPresence(_fs, job.backup, job.backup_present)) return fail();
+      job.stage = job.target_present ? (job.backup_present ? Stage::PublishRemoveBackup
+                                                         : Stage::PublishBackup)
+                                     : Stage::Publish;
+      break;
+    case Stage::PublishRemoveBackup:
+      if (!_fs->remove(job.backup)) return fail();
+      job.stage = Stage::PublishBackup;
+      break;
+    case Stage::PublishBackup:
+      if (!_fs->rename(job.target, job.backup)) return fail();
+      job.backup_present = true;
+      job.stage = Stage::Publish;
+      break;
+    case Stage::Publish:
+      // SPIFFS rejects rename over an existing destination. The two renames
+      // have an explicit gap; RAM serves the new packet and disk readers after
+      // a reset use the old backup. No unverified temp is ever a visible blob.
+      if (!_fs->rename(temp, job.target)) return fail();
+      job.stage = Stage::PublishCleanup;
+      break;
+    case Stage::PublishCleanup:
+      if (job.backup_present && !_fs->remove(job.backup)) return retry();
+      slot.len = 0;
+      job.failures = 0;
+      job.stage = Stage::Idle;
+      job.active = AdvertWriteState::CAPACITY;
+      break;
+    case Stage::CancelClose:
+      job.file.close();
+      job.stage = Stage::TargetProbe;
+      break;
+    case Stage::Idle:
+      break;
+  }
+  return true;
+}
+
+bool DataStore::flushAdvertWrites(uint32_t now) {
+  // Explicit reboot/shutdown/import paths require durability and may block.
+  // On failure keep accepted packets in RAM, but never leave a file open.
+  _advert_write.synchronous_io = hasPendingAdvertWrites()
+      || _advert_write.synchronous_io;
+  for (unsigned pass = 0; hasPendingAdvertWrites() && pass < 512; ++pass) {
+    _advert_write.retry_at = 0;
+    if (!serviceAdvertWrites(now)) {
+      const uint32_t retry_at = _advert_write.retry_at;
+      _advert_write.pause();
+      _advert_write.retry_at = retry_at;
+      return false;
+    }
+  }
+  if (hasPendingAdvertWrites()) {
+    _advert_write.pause();
+    return false;
+  }
+  return true;
 }
 #endif
 
