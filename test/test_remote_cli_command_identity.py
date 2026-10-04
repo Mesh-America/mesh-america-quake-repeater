@@ -40,12 +40,16 @@ class RemoteCliCommandIdentityTest(unittest.TestCase):
         completion = extract_braced(source, "bool MyMesh::completeHostCliRequest(")
         serial_reply = extract_braced(source, "bool MyMesh::handleHostCliSerialReply(")
         clear = extract_braced(source, "void MyMesh::clearDeferredCliCommand()")
+        packet = (ROOT / "src/Packet.cpp").read_text(encoding="utf-8")
+        packet_methods = "namespace mesh {\n" + "\n".join(
+            extract_braced(packet, signature) for signature in (
+                "Packet::Packet()", "bool Packet::isValidPathLen(")) + "\n}\n"
         with tempfile.TemporaryDirectory(prefix="meshcore-cli-identity-") as directory:
             work = Path(directory)
             (work / "normalization.inc").write_text(generated, encoding="utf-8")
             (work / "acl_delete.inc").write_text(acl[delete_start:delete_end], encoding="utf-8")
             (work / "production.inc").write_text("\n".join(
-                (receive, dispatch, completion, serial_reply, clear)), encoding="utf-8")
+                (packet_methods, receive, dispatch, completion, serial_reply, clear)), encoding="utf-8")
             binary = work / "cli-identity.exe"
             sanitizer = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                          "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else []
