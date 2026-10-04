@@ -247,6 +247,44 @@ private:
 public:
   CompanionNodePrefs() : radio(this), custom(&radio) { }
 
+  // Only the scalar/array value prefix is a snapshot. Copying the complete
+  // object also copies adapter owner/fallback pointers and costs two large
+  // memberwise copies in the transactional loader. Keep both live adapters
+  // untouched, and leave a normally constructed snapshot's adapters local.
+  bool copyPersistedValuesFrom(const CompanionNodePrefs& source) {
+    if (&source == this) return true;
+    static_assert(sizeof(usb_debug_enabled) == sizeof(uint8_t),
+                  "The published USB debug preference is one byte");
+    const uintptr_t first = reinterpret_cast<uintptr_t>(&airtime_factor);
+    const uintptr_t last = reinterpret_cast<uintptr_t>(&usb_debug_enabled);
+    if (last < first
+        || last - first > sizeof(*this) - sizeof(usb_debug_enabled)) {
+      return false;
+    }
+    const size_t size = static_cast<size_t>(last - first)
+        + sizeof(usb_debug_enabled);
+    const auto bounded = [size](const CompanionNodePrefs& values) -> bool {
+      const uintptr_t object = reinterpret_cast<uintptr_t>(&values);
+      const uintptr_t begin =
+          reinterpret_cast<uintptr_t>(&values.airtime_factor);
+      const uintptr_t end =
+          reinterpret_cast<uintptr_t>(&values.usb_debug_enabled);
+      const uintptr_t radio_begin = reinterpret_cast<uintptr_t>(&values.radio);
+      const uintptr_t custom_begin = reinterpret_cast<uintptr_t>(&values.custom);
+      // Subtractions happen only after the corresponding ordering checks.
+      // Never include either runtime adapter, even if this layout is changed.
+      return begin >= object && begin - object <= sizeof(values)
+          && size <= sizeof(values) - static_cast<size_t>(begin - object)
+          && end >= begin
+          && end - begin == size - sizeof(values.usb_debug_enabled)
+          && radio_begin >= begin && size <= radio_begin - begin
+          && custom_begin >= begin && size <= custom_begin - begin;
+    };
+    if (!bounded(*this) || !bounded(source)) return false;
+    memcpy(&airtime_factor, &source.airtime_factor, size);
+    return true;
+  }
+
   bool isRepeatEn() const { return client_repeat != 0; }
   void setRepeatEn(bool enabled) { client_repeat = enabled ? 1 : 0; }
 
