@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <initializer_list>
 #include "DataStore.h"
+#include "PrefsStorageLayout.h"
 #include <helpers/FileRead.h>
 #include <helpers/AdvertDataHelpers.h>
 #if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
@@ -1094,6 +1095,19 @@ bool DataStore::loadPrefsInt(const char *filename,
       return false;
     }
     bool success = true;
+#if defined(STM32_PLATFORM) && defined(__GNUC__)
+    using namespace mesh::companion_prefs;
+    uint8_t pad[4];
+    for (size_t i = 0; i < FIELD_COUNT; ++i) {
+      const PrefField& field = PREF_FIELDS[i];
+      if (i >= MANDATORY_FIELDS && file.available() == 0) continue;
+      // Only this normally constructed, mutable snapshot is a destination.
+      void* destination = const_cast<void*>(prefValue(field, loaded_prefs,
+          loaded_lat, loaded_lon, pad));
+      if (success && file.read(static_cast<uint8_t*>(destination), field.length)
+          != field.length) success = false;
+    }
+#else
     auto readField = [&file, &success](void* dest, size_t size) -> bool {
       if (!success
           || file.read(static_cast<uint8_t*>(dest), size) != size) {
@@ -1226,6 +1240,7 @@ bool DataStore::loadPrefsInt(const char *filename,
                       sizeof(loaded_prefs.gps_sync_interval_hours));
     readOptionalField(&loaded_prefs.usb_debug_enabled,
                       sizeof(loaded_prefs.usb_debug_enabled));
+#endif
 
     // Any bytes left over form only part of a historically appended field.
     // Preserve the file and defaults rather than treating that tail as EOF.
@@ -1260,6 +1275,24 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
   File file = openWrite(_fs, "/new_prefs");
 #endif
   if (file) {
+#if defined(STM32_PLATFORM) && defined(__GNUC__)
+    using namespace mesh::companion_prefs;
+    uint8_t image[235];
+    const uint8_t pad[4] = {};
+    size_t used = 0;
+    for (const PrefField& field : PREF_FIELDS) {
+      if (field.length > sizeof(image) - used) {
+        // Latch failure and stop before any out-of-bounds pointer arithmetic.
+        used = sizeof(image) + 1;
+        break;
+      }
+      memcpy(image + used, prefValue(field, _prefs, node_lat, node_lon, pad),
+          field.length);
+      used += field.length;
+    }
+    bool success = used == sizeof(image)
+        && file.write(image, sizeof(image)) == sizeof(image);
+#else
 #if defined(STM32_PLATFORM)
     // Keep the explicit wire field list, but make one bounded atomic write.
     // Other platforms retain direct writes and their existing stack footprint.
@@ -1405,6 +1438,7 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
 #if defined(STM32_PLATFORM)
     success = success && image_length == sizeof(image)
         && file.write(image, sizeof(image)) == sizeof(image);
+#endif
 #endif
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
     success = file.commit(success);

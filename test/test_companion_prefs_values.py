@@ -114,11 +114,35 @@ int main() {
         auto actual_adapters = adapterBytes(actual);
         auto legacy_adapters = adapterBytes(legacy);
         double lat = 1, lon = 2, legacy_lat = 1, legacy_lon = 2;
+        READ_CALLS.clear(); AVAILABLE_CALLS = 0;
         const bool expected = legacy_store.loadPrefsLegacy(
             "/new_prefs", legacy, legacy_lat, legacy_lon);
+        const auto expected_reads = READ_CALLS;
+        const unsigned expected_available = AVAILABLE_CALLS;
+        READ_CALLS.clear(); AVAILABLE_CALLS = 0;
         const bool got = actual_store.loadPrefsInt(
             "/new_prefs", actual, lat, lon);
         assert(got == expected);
+        assert(READ_CALLS == expected_reads);
+        assert(AVAILABLE_CALLS == expected_available);
+        if (length == 84 && quota == 84) {
+          // The original mandatory prefix has 21 reads, ending at ble_pin.
+          // This order is an independent wire contract, not the new table.
+          const std::vector<size_t> mandatory = {
+              4, 32, 4, 8, 8, 4, 1, 1, 1, 1, 4, 1, 1, 1, 1,
+              4, 1, 1, 1, 1, 4};
+          assert(expected && READ_CALLS == mandatory);
+          unsigned optional_fields = 45;
+#ifdef TBEAM_1W
+          optional_fields += 3;
+#endif
+#if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+          optional_fields += 2;
+#endif
+          // Every absent optional field observes EOF, then the completed
+          // image receives the existing final trailing-byte check.
+          assert(AVAILABLE_CALLS == optional_fields + 1);
+        }
         equalValues(actual, legacy);
         assert(!memcmp(&lat, &legacy_lat, sizeof(lat)));
         assert(!memcmp(&lon, &legacy_lon, sizeof(lon)));
@@ -145,15 +169,9 @@ class CompanionPrefsValuesTests(unittest.TestCase):
     def test_value_only_copy_and_full_loader_match_legacy(self):
         source = (ROOT / 'examples/companion_radio/DataStore.cpp').read_text()
         loader = method(source, 'bool DataStore::loadPrefsInt(')
-        legacy = loader.replace('DataStore::loadPrefsInt(', 'DataStore::loadPrefsLegacy(', 1)
-        legacy = legacy.replace('''    CompanionNodePrefs loaded_prefs;
-    if (!loaded_prefs.copyPersistedValuesFrom(_prefs)) {
-      file.close();
-      return false;
-    }''', '    CompanionNodePrefs loaded_prefs = _prefs;')
-        legacy = legacy.replace(
-            '    if (!_prefs.copyPersistedValuesFrom(loaded_prefs)) return false;',
-            '    _prefs = loaded_prefs;')
+        # A frozen sequential reader, not a clone of the current field table,
+        # is the authority for all old/torn images and read failure traces.
+        legacy = (ROOT / 'test/fixtures/companion_prefs_storage/legacy_loader.inc').read_text()
         self.assertNotIn('copyPersistedValuesFrom', legacy)
         methods = esp_recovery_helpers(source) + '\n'.join((loader, legacy,
             method(source, 'bool DataStore::savePrefs(')))
@@ -211,6 +229,19 @@ inline char* utoa(unsigned int value,char* output,int base){
             transaction = (ROOT / 'src/helpers/ContactFileTransaction.h').read_text()
             (work / 'ContactFileTransaction.h').write_text(transaction.replace(
                 '#include "IdentityStore.h"', '#include <helpers/IdentityStore.h>'))
+            # Instrument only the existing filesystem boundary. Both actual
+            # readers and the real transactional writer remain unchanged.
+            fs = (ROOT / 'test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h').read_text()
+            fs = fs.replace('class MemoryFS;',
+                            'static std::vector<size_t> READ_CALLS;\n'
+                            'static unsigned AVAILABLE_CALLS = 0;\nclass MemoryFS;')
+            fs = fs.replace('size_t available() const { return size() - cursor_; }',
+                            'size_t available() const { ++AVAILABLE_CALLS;return size() - cursor_; }')
+            fs = fs.replace('inline int File::read(uint8_t* data, size_t size) {',
+                            'inline int File::read(uint8_t* data, size_t size) {\n'
+                            '  READ_CALLS.push_back(size);')
+            (work / 'helpers').mkdir()
+            (work / 'helpers/IdentityStore.h').write_text(fs)
             cpp = work / 'test.cpp'
             cpp.write_text(code + tests)
             for platform in ('STM32_PLATFORM', 'NRF52_PLATFORM', 'ESP32_PLATFORM', 'RP2040_PLATFORM',

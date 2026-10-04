@@ -22,6 +22,7 @@ HARNESS = r'''
 #include <helpers/AtomicFileWriter.h>
 #endif
 #include "examples/companion_radio/NodePrefs.h"
+#include "examples/companion_radio/PrefsStorageLayout.h"
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 struct DataStore {
  MemoryFS fs;
