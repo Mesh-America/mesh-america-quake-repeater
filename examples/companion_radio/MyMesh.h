@@ -42,6 +42,7 @@
 #include <RTClib.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/BaseSerialInterface.h>
+#include <helpers/CompanionDelayedReplies.h>
 #include <helpers/CompanionMotaControl.h>
 #include <helpers/IdentityStore.h>
 #include <helpers/LogicalMessageCache.h>
@@ -414,6 +415,7 @@ protected:
   uint32_t calcFloodTimeoutMillisFor(uint32_t pkt_airtime_millis) const override;
   uint32_t calcDirectTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t path_len) const override;
   void onSendTimeout() override;
+  bool allowRequestTag(uint32_t tag) override;
 
   // DataStoreHost methods
   bool onContactLoaded(const ContactInfo& contact) override { return addContact(contact); }
@@ -477,7 +479,7 @@ private:
   void writeOKFrame(BaseSerialInterface* route = nullptr);
   void writeErrFrame(uint8_t err_code,
                      BaseSerialInterface* route = nullptr);
-  size_t writePendingSerialFrame(const uint8_t frame[], size_t len);
+  size_t writePendingSerialFrame(const uint8_t frame[], size_t len, uint32_t now);
   void writeDisabledFrame();
   bool writeContactRespFrame(uint8_t code, const ContactInfo &contact);
   void stopContactsIterator();
@@ -544,13 +546,17 @@ private:
                                const ContactInfo& recipient, int result,
                                uint32_t timeout_millis);
   void clearTerminalLogin();
+  void clearTerminalLogin(uint32_t now);
   void serviceTerminalLogin();
+  void serviceTerminalLogin(uint32_t now);
   void sendTerminalLogin(ContactInfo& recipient, const char* password);
   void clearTerminalCommand();
   void serviceTerminalCommand();
   void sendTerminalCommand(ContactInfo& recipient, const char* command);
   void clearTerminalTrace();
+  void clearTerminalTrace(uint32_t now);
   void serviceTerminalTrace();
+  void serviceTerminalTrace(uint32_t now);
   void sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
                               uint8_t hop_count, const char* target);
   void sendTerminalTrace(ContactInfo& recipient);
@@ -568,8 +574,15 @@ private:
   void cancelPendingRadioParamApply();
   void servicePendingRadioParamApply();
   void servicePendingSerialReply();
+  void servicePendingSerialReply(uint32_t now);
+  bool beginPendingRequest(mesh::CompanionDelayedReplies::Kind kind,
+                           const ContactInfo& contact, bool terminal = false);
+  void armPendingRequest(uint32_t tag, uint32_t timeout, bool flood);
+  void finishPendingRequest(int result, uint32_t tag, uint32_t timeout);
+  void abandonPendingRequest();
   void clearBinaryTraceReply();
   void serviceBinaryTraceReply();
+  void serviceBinaryTraceReply(uint32_t now);
   void cancelSigningSession();
   void serviceSigningSession();
 #if COMPANION_FEATURE_TEMP_RADIO
@@ -626,12 +639,8 @@ private:
   bool _wc_mqtt_dirty;
   bool _wc_batch_active = false;
 #endif
-  uint32_t pending_login;
-  uint32_t pending_status;
-  uint32_t pending_telemetry, pending_discovery;   // pending _TELEMETRY_REQ
-  uint32_t pending_req;   // pending _BINARY_REQ
-  BaseSerialInterface* pending_serial_reply_route;
-  unsigned long pending_serial_reply_deadline;
+  mesh::CompanionDelayedReplies _delayed_replies;
+  bool _request_tag_rejected = false;
   BaseSerialInterface* private_key_backup_route = nullptr;
   unsigned long private_key_backup_deadline = 0;
   char private_key_backup_nonce[17] = {};
@@ -661,12 +670,13 @@ private:
   uint8_t _terminal_recipient_key[PUB_KEY_SIZE];
   uint8_t _terminal_tmp_buf[MAX_TRANS_UNIT];
   bool _terminal_login_pending;
-  uint8_t _terminal_login_key[4];
+  uint8_t _terminal_login_key[PUB_KEY_SIZE];
   unsigned long _terminal_login_expires_at;
   char _terminal_login_target[32];
   mesh::TerminalCommandTracker<PUB_KEY_SIZE> _terminal_command;
   char _terminal_command_target[32];
   bool _terminal_trace_pending;
+  uint8_t _terminal_trace_history = mesh::CompanionDelayedReplies::NO_HISTORY;
   uint8_t _terminal_trace_hash_size;
   uint32_t _terminal_trace_tag;
   uint32_t _terminal_trace_auth;
@@ -686,11 +696,6 @@ private:
   uint8_t command_radio_repeat;
   unsigned long command_radio_apply_deadline;
   BaseSerialInterface* command_radio_reply_route;
-  bool binary_trace_pending;
-  uint32_t binary_trace_tag;
-  uint32_t binary_trace_auth;
-  unsigned long binary_trace_deadline;
-  BaseSerialInterface* binary_trace_reply_route;
   // Deferred so USB/TCP terminals can transmit the acknowledgement before
   // the transport disappears. Also used by USB interface changes.
   unsigned long _scheduled_reboot_at;

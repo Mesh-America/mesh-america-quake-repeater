@@ -79,9 +79,15 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         mesh = source("examples/companion_radio/MyMesh.cpp")
         start = mesh.index("bool MyMesh::hasFiniteDelayedReplyForRoute(")
         body = mesh[start : mesh.index("void MyMesh::servicePendingSerialReply()", start)]
-        self.assertIn("pending_serial_reply_route == route", body)
+        self.assertIn("_delayed_replies.hasReplyForRoute(route, _ms->getMillis())", body)
         self.assertIn("command_radio_reply_route == route", body)
-        self.assertIn("binary_trace_reply_route == route", body)
+        delayed = source("src/helpers/CompanionDelayedReplies.cpp")
+        lease = delayed[delayed.index("bool CompanionDelayedReplies::hasReplyForRoute("):]
+        self.assertIn("{ &request, &trace }", lease)
+        self.assertIn("reply->route == route", lease)
+        self.assertIn("reply->phase >= AwaitRadio", lease)
+        self.assertIn("reply->delivery_deadline : reply->radio_deadline", lease)
+        self.assertIn("reply->sent_deadline", lease)
         self.assertIn("expected_ack_table[i].reply_route == route", body)
         self.assertNotIn("_iter_started", body)
         self.assertNotIn("lockReplyRoute", body)

@@ -357,9 +357,10 @@ void MyMesh::writeErrFrame(uint8_t err_code, BaseSerialInterface* route) {
   }
 }
 
-size_t MyMesh::writePendingSerialFrame(const uint8_t frame[], size_t len) {
-  if (_serial == NULL || pending_serial_reply_route == NULL) return 0;
-  return _serial->writeFrameToRoute(pending_serial_reply_route, frame, len);
+size_t MyMesh::writePendingSerialFrame(const uint8_t frame[], size_t len, uint32_t now) {
+  if (!_delayed_replies.storeRequest(frame, len, now)) return 0;
+  _delayed_replies.serviceRequest(_serial, now);
+  return len;  // Retained by the producer, not necessarily admitted yet.
 }
 
 void MyMesh::writeDisabledFrame() {
@@ -1935,6 +1936,8 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 }
 
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
+  const uint32_t now = _ms->getMillis();
+  servicePendingSerialReply(now);  // Expire before considering any radio callback.
   if (data == NULL || len < 4) return;
 
 #if MESH_ENABLE_ONE_KEY_DM
@@ -1961,10 +1964,21 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
   uint32_t tag;
   memcpy(&tag, data, 4);
 
-  if (pending_login && memcmp(&pending_login, contact.id.pub_key, 4) == 0) { // check for login response
+  const bool matched = _delayed_replies.requestMatches(contact.id.pub_key, tag);
+  const auto kind = _delayed_replies.request.kind;
+  if (matched && _delayed_replies.request.phase != mesh::CompanionDelayedReplies::AwaitRadio) return;
+  // Login has no reflected nonce. Known old request replies take precedence
+  // over its permissive envelope; exact newer reflected replies remain valid
+  // immediately after a successful login despite the login quarantine.
+  if (matched && kind == mesh::CompanionDelayedReplies::Login
+      && _delayed_replies.blocksResponse(contact.id.pub_key, tag, now)) return;
+
+  if (matched && kind == mesh::CompanionDelayedReplies::Login) {
+    if (len < 6 || (data[4] == RESP_SERVER_LOGIN_OK && len < 13)) return;
     // yes, is response to pending sendLogin()
+    uint16_t keep_alive_secs = 0;
 #if COMPANION_FEATURE_TEXT_TERMINAL
-    const bool terminal_login_response = _terminal_login_pending
+    const bool terminal_login_response = _delayed_replies.request.terminal && _terminal_login_pending
         && memcmp(_terminal_login_key, contact.id.pub_key,
                   sizeof(_terminal_login_key)) == 0;
 #endif
@@ -1986,10 +2000,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       login_success = true;
       modern_login = true;
 #endif
-      uint16_t keep_alive_secs = ((uint16_t)data[5]) * 16;
-      if (keep_alive_secs > 0) {
-        startConnection(contact, keep_alive_secs);
-      }
+      keep_alive_secs = ((uint16_t)data[5]) * 16;
       out_frame[i++] = PUSH_CODE_LOGIN_SUCCESS;
       out_frame[i++] = data[6]; // permissions (eg. is_admin)
       memcpy(&out_frame[i], contact.id.pub_key, 6);
@@ -2007,7 +2018,9 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     // Terminal login has its own text destination and deliberately captures
     // no Binary route. Binary logins retain their exact requester even if a
     // different transport has issued a command in the meantime.
-    writePendingSerialFrame(out_frame, i);
+    _delayed_replies.rememberLoginTag(tag);
+    if (writePendingSerialFrame(out_frame, i, now) != (size_t)i) return;
+    if (keep_alive_secs > 0) startConnection(contact, keep_alive_secs);
 #if COMPANION_FEATURE_TEXT_TERMINAL
     if (terminal_login_response) {
       if (hasTerminalOutput()) {
@@ -2024,11 +2037,10 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
                         _terminal_login_target);
         }
       }
-      clearTerminalLogin();
+      clearTerminalLogin(now);
     }
 #endif
-    clearPendingReqs();
-  } else if (mesh::companionStatusTagMatches(pending_status, tag)) {
+  } else if (matched && kind == mesh::CompanionDelayedReplies::Status) {
     // Require a complete response that also fits its host-protocol envelope.
     // The app parses at least 48 bytes and otherwise throws a RangeError.
     if (!mesh::companionStatusResponseIsLongEnough(len)
@@ -2037,7 +2049,6 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
           "onContactResponse(), invalid status response size: len=%u, expected>=%u",
           (unsigned)len,
           (unsigned)mesh::COMPANION_MIN_STATUS_RESPONSE_SIZE);
-      clearPendingReqs();
       return;
     }
 
@@ -2048,11 +2059,9 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     i += 6; // pub_key_prefix
     memcpy(&out_frame[i], &data[4], len - 4);
     i += (len - 4);
-    writePendingSerialFrame(out_frame, i);
-    clearPendingReqs();
-  } else if (pending_telemetry && len > 4 && tag == pending_telemetry) {  // check for matching response tag
-    if (len > MAX_FRAME_SIZE - 4) {
-      clearPendingReqs();
+    writePendingSerialFrame(out_frame, i, now);
+  } else if (matched && kind == mesh::CompanionDelayedReplies::Telemetry) {
+    if (len <= 4 || len > MAX_FRAME_SIZE - 4) {
       return;
     }
     int i = 0;
@@ -2062,11 +2071,9 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     i += 6; // pub_key_prefix
     memcpy(&out_frame[i], &data[4], len - 4);
     i += (len - 4);
-    writePendingSerialFrame(out_frame, i);
-    clearPendingReqs();
-  } else if (pending_req && len > 4 && tag == pending_req) {  // check for matching response tag
-    if (len > MAX_FRAME_SIZE - 2) {
-      clearPendingReqs();
+    writePendingSerialFrame(out_frame, i, now);
+  } else if (matched && kind == mesh::CompanionDelayedReplies::Binary) {
+    if (len <= 4 || len > MAX_FRAME_SIZE - 2) {
       return;
     }
     int i = 0;
@@ -2076,18 +2083,14 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     i += 4;
     memcpy(&out_frame[i], &data[4], len - 4);
     i += (len - 4);
-    writePendingSerialFrame(out_frame, i);
-    clearPendingReqs();
+    writePendingSerialFrame(out_frame, i, now);
   } else {
     // Forward unsolicited responses, including pushed telemetry, to the app.
     // Pending requests above retain their captured reply route.
     // A matching tag with no response body is malformed, not an unsolicited
     // push, and must not escape through the app's generic response path.
-    if (len == 4 && ((pending_telemetry && tag == pending_telemetry)
-                     || (pending_req && tag == pending_req))) {
-      clearPendingReqs();
-      return;
-    }
+    if (matched || _delayed_replies.blocksResponse(contact.id.pub_key, tag,
+                                                   now)) return;
     if (_serial != NULL && _serial->isConnected() && len <= MAX_FRAME_SIZE - 2) {
       int i = 0;
       out_frame[i++] = PUSH_CODE_BINARY_RESPONSE;
@@ -2100,12 +2103,17 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
 }
 
 bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t in_path_len, uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) {
-  if (extra_type == PAYLOAD_TYPE_RESPONSE && extra_len > 4) {
+  const uint32_t now = _ms->getMillis();
+  servicePendingSerialReply(now);
+  if (extra_type == PAYLOAD_TYPE_RESPONSE && extra != NULL && extra_len >= 4) {
     uint32_t tag;
     memcpy(&tag, extra, 4);
 
-    if (pending_discovery != 0 && tag == pending_discovery) {  // match an active discovery
-      if (!mesh::Packet::isValidPathLen(in_path_len) || !mesh::Packet::isValidPathLen(out_path_len)) {
+    if (_delayed_replies.request.kind == mesh::CompanionDelayedReplies::Discovery
+        && _delayed_replies.requestMatches(contact.id.pub_key, tag)) {
+      if (_delayed_replies.request.phase != mesh::CompanionDelayedReplies::AwaitRadio) return false;
+      if (extra_len <= 4 || !mesh::Packet::isValidPathLen(in_path_len)
+          || !mesh::Packet::isValidPathLen(out_path_len)) {
         MESH_DEBUG_PRINTLN("onContactPathRecv, invalid path sizes: %d, %d", in_path_len, out_path_len);
       } else {
         int i = 0;
@@ -2119,9 +2127,8 @@ bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t i
         i += mesh::Packet::writePath(&out_frame[i], in_path, in_path_len);
         // NOTE: telemetry data in 'extra' is discarded at present
 
-        writePendingSerialFrame(out_frame, i);
+        writePendingSerialFrame(out_frame, i, now);
       }
-      clearPendingReqs();
       return false;  // DON'T send reciprocal path!
     }
   }
@@ -2174,12 +2181,19 @@ void MyMesh::onRawDataRecv(mesh::Packet *packet) {
 
 void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,
                          const uint8_t *path_snrs, const uint8_t *path_hashes, uint8_t path_len) {
-  const bool binary_trace_match = binary_trace_pending
-      && tag == binary_trace_tag && auth_code == binary_trace_auth;
+  const uint32_t now = _ms->getMillis();
+  serviceBinaryTraceReply(now);
+#if COMPANION_FEATURE_TEXT_TERMINAL
+  serviceTerminalTrace(now);
+#endif
+  if (_delayed_replies.blocksTrace(tag, auth_code, now)) return;
+  const bool binary_trace_match = _delayed_replies.hasBinaryTrace()
+      && tag == _delayed_replies.trace.tag && auth_code == _delayed_replies.trace.auth;
+  if (binary_trace_match
+      && _delayed_replies.trace.phase != mesh::CompanionDelayedReplies::AwaitRadio) return;
   uint8_t path_sz = flags & 0x03;  // NEW v1.11+
   if (12 + path_len + (path_len >> path_sz) + 1 > MAX_FRAME_SIZE) {
     MESH_DEBUG_PRINTLN("onTraceRecv(), path_len is too long: %d", (uint32_t)path_len);
-    if (binary_trace_match) clearBinaryTraceReply();
     return;
   }
   int i = 0;
@@ -2205,14 +2219,14 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
     const uint8_t hash_size = _terminal_trace_hash_size;
     const uint8_t hop_count = hash_size == 0 ? 0 : path_len / hash_size;
     const uint8_t response_hash_size = 1 << (flags & 0x03);
-    const unsigned long elapsed = _ms->getMillis() - _terminal_trace_sent_at;
-    output.printf("\r\nTRACE -> %s (%lu ms)\r\n",
-                  _terminal_trace_target, elapsed);
+    const unsigned long elapsed = (uint32_t)(now - _terminal_trace_sent_at);
     if (hash_size == 0 || response_hash_size != hash_size
         || path_len % hash_size != 0
         || hop_count >= MAX_PATH_SIZE) {
-      output.print("  ERROR: malformed trace response\r\n> ");
+      return;  // A malformed match must not consume a later valid response.
     } else {
+      output.printf("\r\nTRACE -> %s (%lu ms)\r\n",
+                    _terminal_trace_target, elapsed);
       output.print("  ");
       for (uint8_t hop = 0; hop < hop_count; hop++) {
         output.print(((float)(int8_t)path_snrs[hop]) / 4.0f, 2);
@@ -2224,13 +2238,13 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
       output.print(packet->getSNR(), 2);
       output.print(" dB\r\n> ");
     }
-    clearTerminalTrace();
+    clearTerminalTrace(now);
   }
 #endif
 
   if (binary_trace_match) {
-    _serial->writeFrameToRoute(binary_trace_reply_route, out_frame, i);
-    clearBinaryTraceReply();
+    _delayed_replies.storeBinaryTrace(out_frame, i, now);
+    serviceBinaryTraceReply(now);
   }
 }
 
@@ -2273,6 +2287,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _terminal_login_expires_at = 0;
   _terminal_login_target[0] = 0;
   clearTerminalCommand();
+  _terminal_trace_pending = false;
   clearTerminalTrace();
 #endif
   saved_radio_apply_pending = false;
@@ -2287,11 +2302,6 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   command_radio_repeat = 0;
   command_radio_apply_deadline = 0;
   command_radio_reply_route = NULL;
-  binary_trace_pending = false;
-  binary_trace_tag = 0;
-  binary_trace_auth = 0;
-  binary_trace_deadline = 0;
-  binary_trace_reply_route = NULL;
   _scheduled_reboot_at = 0;
 #if COMPANION_FEATURE_TEMP_RADIO
   _temp_radio_set_at = 0;
@@ -2312,7 +2322,6 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   offline_queue_capacity = OFFLINE_QUEUE_PSRAM_FALLBACK_SIZE;
 #endif
   app_target_ver = 0;
-  clearPendingReqs();
   memset(expected_ack_table, 0, sizeof(expected_ack_table));
   next_ack_idx = 0;
   next_ack_expiry = 0;
@@ -5075,22 +5084,52 @@ void MyMesh::startInterface(BaseSerialInterface &serial) {
 }
 
 void MyMesh::clearPendingReqs() {
-  pending_login = pending_status = pending_telemetry = pending_discovery =
-      pending_req = 0;
-  pending_serial_reply_route = NULL;
-  pending_serial_reply_deadline = 0;
+  _delayed_replies.retireRequest(_ms->getMillis());
 }
 
 bool MyMesh::hasPendingReqs() const {
-  return pending_login != 0 || pending_status != 0 || pending_telemetry != 0
-      || pending_discovery != 0 || pending_req != 0;
+  return _delayed_replies.hasRequest();
+}
+
+bool MyMesh::beginPendingRequest(mesh::CompanionDelayedReplies::Kind kind,
+                                  const ContactInfo& contact, bool terminal) {
+  servicePendingSerialReply();
+  _request_tag_rejected = false;
+  return _delayed_replies.reserveRequest(kind, contact.id.pub_key,
+      terminal || _serial == NULL ? NULL : _serial->captureReplyRoute(),
+      terminal, _ms->getMillis());
+}
+
+bool MyMesh::allowRequestTag(uint32_t tag) {
+  // Other internal Base callers need no host correlation reservation.
+  if (_delayed_replies.request.phase != mesh::CompanionDelayedReplies::Reserved) return true;
+  _request_tag_rejected = !_delayed_replies.allowRequestTag(tag);
+  return !_request_tag_rejected;
+}
+
+void MyMesh::armPendingRequest(uint32_t tag, uint32_t timeout, bool flood) {
+  const uint32_t now = _ms->getMillis();
+  _delayed_replies.armRequest(tag, timeout, flood, now);
+  servicePendingSerialReply(now);
+}
+
+void MyMesh::finishPendingRequest(int result, uint32_t tag, uint32_t timeout) {
+  if (result == MSG_SEND_FAILED) {
+    abandonPendingRequest();
+    writeErrFrame(_request_tag_rejected ? ERR_CODE_BAD_STATE : ERR_CODE_TABLE_FULL);
+  } else {
+    armPendingRequest(tag, timeout, result == MSG_SEND_SENT_FLOOD);
+  }
+}
+
+void MyMesh::abandonPendingRequest() {
+  _delayed_replies.abandonRequest();
 }
 
 bool MyMesh::hasFiniteDelayedReplyForRoute(BaseSerialInterface* route) const {
   if (route == NULL) return false;
-  if (pending_serial_reply_route == route
-      || (command_radio_apply_pending && command_radio_reply_route == route)
-      || (binary_trace_pending && binary_trace_reply_route == route)) {
+  if (_delayed_replies.hasReplyForRoute(route, _ms->getMillis())
+      || (command_radio_apply_pending && command_radio_reply_route == route)) {
     return true;
   }
   for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; ++i) {
@@ -5103,29 +5142,26 @@ bool MyMesh::hasFiniteDelayedReplyForRoute(BaseSerialInterface* route) const {
 }
 
 void MyMesh::servicePendingSerialReply() {
-  if (pending_serial_reply_route == NULL) return;
-  if (!_serial->isReplyRouteAvailable(pending_serial_reply_route)
-      || pending_serial_reply_deadline == _ms->getMillis()
-      || millisHasNowPassed(pending_serial_reply_deadline)) {
-    clearPendingReqs();
-  }
+  servicePendingSerialReply(_ms->getMillis());
+}
+
+void MyMesh::servicePendingSerialReply(uint32_t now) {
+#if COMPANION_FEATURE_TEXT_TERMINAL
+  serviceTerminalLogin(now);
+#endif
+  _delayed_replies.serviceRequest(_serial, now);
 }
 
 void MyMesh::clearBinaryTraceReply() {
-  binary_trace_pending = false;
-  binary_trace_tag = 0;
-  binary_trace_auth = 0;
-  binary_trace_deadline = 0;
-  binary_trace_reply_route = NULL;
+  _delayed_replies.retireBinaryTrace(_ms->getMillis());
 }
 
 void MyMesh::serviceBinaryTraceReply() {
-  if (!binary_trace_pending) return;
-  if (!_serial->isReplyRouteAvailable(binary_trace_reply_route)
-      || binary_trace_deadline == _ms->getMillis()
-      || millisHasNowPassed(binary_trace_deadline)) {
-    clearBinaryTraceReply();
-  }
+  serviceBinaryTraceReply(_ms->getMillis());
+}
+
+void MyMesh::serviceBinaryTraceReply(uint32_t now) {
+  _delayed_replies.serviceBinaryTrace(_serial, now);
 }
 
 void MyMesh::cancelSigningSession() {
@@ -5157,9 +5193,9 @@ void MyMesh::cancelSerialOperationsForRoute(BaseSerialInterface* route) {
     memset(private_key_backup_nonce, 0, sizeof(private_key_backup_nonce));
     memset(private_key_backup_sender, 0, sizeof(private_key_backup_sender));
   }
-  if (pending_serial_reply_route == route) clearPendingReqs();
+  if (_delayed_replies.request.route == route) clearPendingReqs();
   if (command_radio_reply_route == route) cancelPendingRadioParamApply();
-  if (binary_trace_reply_route == route) clearBinaryTraceReply();
+  if (_delayed_replies.trace.route == route) clearBinaryTraceReply();
   if (sign_data_reply_route == route) cancelSigningSession();
   for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; ++i) {
     if (expected_ack_table[i].reply_route == route) {
@@ -5185,6 +5221,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     return;
   }
 
+  servicePendingSerialReply();
   const bool starts_long_lived_request =
       (cmd_frame[0] == CMD_SEND_LOGIN && len >= 1 + PUB_KEY_SIZE)
       || (cmd_frame[0] == CMD_SEND_ANON_REQ && len > 1 + PUB_KEY_SIZE)
@@ -6010,22 +6047,14 @@ void MyMesh::handleCmdFrame(size_t len) {
     char *password = (char *)&cmd_frame[1 + PUB_KEY_SIZE];
     cmd_frame[len] = 0; // ensure null terminator in password
     if (recipient) {
-      uint32_t est_timeout;
-      int result = sendLogin(*recipient, password, est_timeout);
-      if (result == MSG_SEND_FAILED) {
-        writeErrFrame(ERR_CODE_TABLE_FULL);
-      } else {
-        clearPendingReqs();
-        pending_serial_reply_route = _serial->captureReplyRoute();
-        pending_serial_reply_deadline =
-            futureMillis(est_timeout + est_timeout / 5);
-        memcpy(&pending_login, recipient->id.pub_key, 4); // match this to onContactResponse()
-        out_frame[0] = RESP_CODE_SENT;
-        out_frame[1] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
-        memcpy(&out_frame[2], &pending_login, 4);
-        memcpy(&out_frame[6], &est_timeout, 4);
-        _serial->writeFrame(out_frame, 10);
+      if (!beginPendingRequest(mesh::CompanionDelayedReplies::Login, *recipient)) {
+        writeErrFrame(ERR_CODE_BAD_STATE);
+        return;
       }
+      uint32_t tag, est_timeout = 0;
+      memcpy(&tag, recipient->id.pub_key, 4);
+      int result = sendLogin(*recipient, password, est_timeout);
+      finishPendingRequest(result, tag, est_timeout);
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // contact not found
     }
@@ -6047,22 +6076,13 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
     uint8_t *data = &cmd_frame[1 + PUB_KEY_SIZE];
     if (recipient) {
-      uint32_t tag, est_timeout;
-      int result = sendAnonReq(*recipient, data, len - (1 + PUB_KEY_SIZE), tag, est_timeout);
-      if (result == MSG_SEND_FAILED) {
-        writeErrFrame(ERR_CODE_TABLE_FULL);
-      } else {
-        clearPendingReqs();
-        pending_serial_reply_route = _serial->captureReplyRoute();
-        pending_serial_reply_deadline =
-            futureMillis(est_timeout + est_timeout / 5);
-        pending_req = tag; // match this to onContactResponse()
-        out_frame[0] = RESP_CODE_SENT;
-        out_frame[1] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
-        memcpy(&out_frame[2], &tag, 4);
-        memcpy(&out_frame[6], &est_timeout, 4);
-        _serial->writeFrame(out_frame, 10);
+      if (!beginPendingRequest(mesh::CompanionDelayedReplies::Binary, *recipient)) {
+        writeErrFrame(ERR_CODE_BAD_STATE);
+        return;
       }
+      uint32_t tag = 0, est_timeout = 0;
+      int result = sendAnonReq(*recipient, data, len - (1 + PUB_KEY_SIZE), tag, est_timeout);
+      finishPendingRequest(result, tag, est_timeout);
     } else {
       writeErrFrame(ERR_CODE_TABLE_FULL); // contacts full
     }
@@ -6070,22 +6090,13 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint8_t *pub_key = &cmd_frame[1];
     ContactInfo *recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     if (recipient) {
-      uint32_t tag, est_timeout;
-      int result = sendRequest(*recipient, REQ_TYPE_GET_STATUS, tag, est_timeout);
-      if (result == MSG_SEND_FAILED) {
-        writeErrFrame(ERR_CODE_TABLE_FULL);
-      } else {
-        clearPendingReqs();
-        pending_serial_reply_route = _serial->captureReplyRoute();
-        pending_serial_reply_deadline =
-            futureMillis(est_timeout + est_timeout / 5);
-        pending_status = tag; // match the reflected tag in onContactResponse()
-        out_frame[0] = RESP_CODE_SENT;
-        out_frame[1] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
-        memcpy(&out_frame[2], &tag, 4);
-        memcpy(&out_frame[6], &est_timeout, 4);
-        _serial->writeFrame(out_frame, 10);
+      if (!beginPendingRequest(mesh::CompanionDelayedReplies::Status, *recipient)) {
+        writeErrFrame(ERR_CODE_BAD_STATE);
+        return;
       }
+      uint32_t tag = 0, est_timeout = 0;
+      int result = sendRequest(*recipient, REQ_TYPE_GET_STATUS, tag, est_timeout);
+      finishPendingRequest(result, tag, est_timeout);
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // contact not found
     }
@@ -6093,7 +6104,11 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint8_t *pub_key = &cmd_frame[2];
     ContactInfo *recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     if (recipient) {
-      uint32_t tag, est_timeout;
+      if (!beginPendingRequest(mesh::CompanionDelayedReplies::Discovery, *recipient)) {
+        writeErrFrame(ERR_CODE_BAD_STATE);
+        return;
+      }
+      uint32_t tag = 0, est_timeout = 0;
       // 'Path Discovery' is just a special case of flood + Telemetry req
       uint8_t req_data[9];
       req_data[0] = REQ_TYPE_GET_TELEMETRY_DATA;
@@ -6104,20 +6119,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       recipient->out_path_len = OUT_PATH_UNKNOWN;
       int result = sendRequest(*recipient, req_data, sizeof(req_data), tag, est_timeout);
       recipient->out_path_len = save;
-      if (result == MSG_SEND_FAILED) {
-        writeErrFrame(ERR_CODE_TABLE_FULL);
-      } else {
-        clearPendingReqs();
-        pending_serial_reply_route = _serial->captureReplyRoute();
-        pending_serial_reply_deadline =
-            futureMillis(est_timeout + est_timeout / 5);
-        pending_discovery = tag; // match this in onContactResponse()
-        out_frame[0] = RESP_CODE_SENT;
-        out_frame[1] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
-        memcpy(&out_frame[2], &tag, 4);
-        memcpy(&out_frame[6], &est_timeout, 4);
-        _serial->writeFrame(out_frame, 10);
-      }
+      finishPendingRequest(result, tag, est_timeout);
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // contact not found
     }
@@ -6125,22 +6127,13 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint8_t *pub_key = &cmd_frame[4];
     ContactInfo *recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     if (recipient) {
-      uint32_t tag, est_timeout;
-      int result = sendRequest(*recipient, REQ_TYPE_GET_TELEMETRY_DATA, tag, est_timeout);
-      if (result == MSG_SEND_FAILED) {
-        writeErrFrame(ERR_CODE_TABLE_FULL);
-      } else {
-        clearPendingReqs();
-        pending_serial_reply_route = _serial->captureReplyRoute();
-        pending_serial_reply_deadline =
-            futureMillis(est_timeout + est_timeout / 5);
-        pending_telemetry = tag; // match this in onContactResponse()
-        out_frame[0] = RESP_CODE_SENT;
-        out_frame[1] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
-        memcpy(&out_frame[2], &tag, 4);
-        memcpy(&out_frame[6], &est_timeout, 4);
-        _serial->writeFrame(out_frame, 10);
+      if (!beginPendingRequest(mesh::CompanionDelayedReplies::Telemetry, *recipient)) {
+        writeErrFrame(ERR_CODE_BAD_STATE);
+        return;
       }
+      uint32_t tag = 0, est_timeout = 0;
+      int result = sendRequest(*recipient, REQ_TYPE_GET_TELEMETRY_DATA, tag, est_timeout);
+      finishPendingRequest(result, tag, est_timeout);
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // contact not found
     }
@@ -6169,22 +6162,13 @@ void MyMesh::handleCmdFrame(size_t len) {
     ContactInfo *recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     if (recipient) {
       uint8_t *req_data = &cmd_frame[1 + PUB_KEY_SIZE];
-      uint32_t tag, est_timeout;
-      int result = sendRequest(*recipient, req_data, len - (1 + PUB_KEY_SIZE), tag, est_timeout);
-      if (result == MSG_SEND_FAILED) {
-        writeErrFrame(ERR_CODE_TABLE_FULL);
-      } else {
-        clearPendingReqs();
-        pending_serial_reply_route = _serial->captureReplyRoute();
-        pending_serial_reply_deadline =
-            futureMillis(est_timeout + est_timeout / 5);
-        pending_req = tag; // match this in onContactResponse()
-        out_frame[0] = RESP_CODE_SENT;
-        out_frame[1] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
-        memcpy(&out_frame[2], &tag, 4);
-        memcpy(&out_frame[6], &est_timeout, 4);
-        _serial->writeFrame(out_frame, 10);
+      if (!beginPendingRequest(mesh::CompanionDelayedReplies::Binary, *recipient)) {
+        writeErrFrame(ERR_CODE_BAD_STATE);
+        return;
       }
+      uint32_t tag = 0, est_timeout = 0;
+      int result = sendRequest(*recipient, req_data, len - (1 + PUB_KEY_SIZE), tag, est_timeout);
+      finishPendingRequest(result, tag, est_timeout);
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND); // contact not found
     }
@@ -6292,7 +6276,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
   } else if (cmd_frame[0] == CMD_SEND_TRACE_PATH && len > 10 && len - 10 <= MAX_PACKET_PAYLOAD - 9) {
     serviceBinaryTraceReply();
-    if (binary_trace_pending) {
+    if (_delayed_replies.hasBinaryTrace()) {
       writeErrFrame(ERR_CODE_BAD_STATE);
       return;
     }
@@ -6305,6 +6289,11 @@ void MyMesh::handleCmdFrame(size_t len) {
       uint32_t tag, auth;
       memcpy(&tag, &cmd_frame[1], 4);
       memcpy(&auth, &cmd_frame[5], 4);
+      if (!_delayed_replies.reserveBinaryTrace(tag, auth,
+              _serial->captureReplyRoute(), _ms->getMillis())) {
+        writeErrFrame(ERR_CODE_BAD_STATE);
+        return;
+      }
       auto pkt = createTrace(tag, auth, flags);
       if (pkt) {
         // Compute before handing ownership to sendDirect(), which releases the
@@ -6312,21 +6301,14 @@ void MyMesh::handleCmdFrame(size_t len) {
         uint32_t t = _radio->getEstAirtimeFor(9 + path_len + 2);
         uint32_t est_timeout = calcDirectTimeoutMillisFor(t, path_len >> path_sz);
         if (sendDirect(pkt, &cmd_frame[10], path_len)) {
-          binary_trace_pending = true;
-          binary_trace_tag = tag;
-          binary_trace_auth = auth;
-          binary_trace_deadline =
-              futureMillis(est_timeout + est_timeout / 5);
-          binary_trace_reply_route = _serial->captureReplyRoute();
-          out_frame[0] = RESP_CODE_SENT;
-          out_frame[1] = 0;
-          memcpy(&out_frame[2], &tag, 4);
-          memcpy(&out_frame[6], &est_timeout, 4);
-          _serial->writeFrame(out_frame, 10);
+          _delayed_replies.armBinaryTrace(est_timeout, _ms->getMillis());
+          serviceBinaryTraceReply();
         } else {
+          _delayed_replies.abandonBinaryTrace();
           writeErrFrame(ERR_CODE_TABLE_FULL);
         }
       } else {
+        _delayed_replies.abandonBinaryTrace();
         writeErrFrame(ERR_CODE_TABLE_FULL);
       }
     }
@@ -8494,10 +8476,14 @@ void MyMesh::printTerminalSendStatus(const char* operation,
 }
 
 void MyMesh::clearTerminalLogin() {
-  if (_terminal_login_pending && pending_login != 0
-      && memcmp(&pending_login, _terminal_login_key,
-                sizeof(_terminal_login_key)) == 0) {
-    pending_login = 0;
+  clearTerminalLogin(_ms->getMillis());
+}
+
+void MyMesh::clearTerminalLogin(uint32_t now) {
+  if (_terminal_login_pending && _delayed_replies.request.terminal
+      && _delayed_replies.request.kind == mesh::CompanionDelayedReplies::Login
+      && _delayed_replies.requestMatches(_terminal_login_key, 0)) {
+    _delayed_replies.retireRequest(now);
   }
   _terminal_login_pending = false;
   memset(_terminal_login_key, 0, sizeof(_terminal_login_key));
@@ -8506,10 +8492,12 @@ void MyMesh::clearTerminalLogin() {
 }
 
 void MyMesh::serviceTerminalLogin() {
+  serviceTerminalLogin(_ms->getMillis());
+}
+
+void MyMesh::serviceTerminalLogin(uint32_t now) {
   if (!_terminal_login_pending) return;
-  const unsigned long now = _ms->getMillis();
-  if (_terminal_login_expires_at != now
-      && !millisHasNowPassed(_terminal_login_expires_at)) {
+  if ((int32_t)(now - (uint32_t)_terminal_login_expires_at) < 0) {
     return;
   }
 
@@ -8517,12 +8505,12 @@ void MyMesh::serviceTerminalLogin() {
     terminalOutput().printf("\r\n  ERROR: login to %s timed out (wrong password or no response).\r\n> ",
                   _terminal_login_target);
   }
-  clearTerminalLogin();
+  clearTerminalLogin(now);
 }
 
 void MyMesh::sendTerminalLogin(ContactInfo& recipient,
                                const char* password) {
-  serviceTerminalLogin();
+  servicePendingSerialReply();
   if (_terminal_login_pending) {
     terminalOutput().printf("  ERROR: login to %s is still pending\r\n",
                   _terminal_login_target);
@@ -8540,20 +8528,27 @@ void MyMesh::sendTerminalLogin(ContactInfo& recipient,
     return;
   }
 
+  if (!beginPendingRequest(mesh::CompanionDelayedReplies::Login, recipient, true)) {
+    terminalOutput().print("  ERROR: login is quarantined or reply history is full\r\n");
+    return;
+  }
   uint32_t est_timeout = 0;
   const int result = sendLogin(recipient, password, est_timeout);
   if (result == MSG_SEND_FAILED) {
+    abandonPendingRequest();
     terminalOutput().print("  ERROR: unable to send login\r\n");
     return;
   }
 
-  clearPendingReqs();
-  memcpy(&pending_login, recipient.id.pub_key, sizeof(pending_login));
+  uint32_t tag;
+  memcpy(&tag, recipient.id.pub_key, 4);
+  _delayed_replies.armRequest(tag, est_timeout,
+      result == MSG_SEND_SENT_FLOOD, _ms->getMillis());
   _terminal_login_pending = true;
   memcpy(_terminal_login_key, recipient.id.pub_key,
          sizeof(_terminal_login_key));
   const uint32_t timeout = est_timeout + est_timeout / 5;
-  _terminal_login_expires_at = futureMillis(timeout);
+  _terminal_login_expires_at = _delayed_replies.request.radio_deadline;
   StrHelper::strzcpy(_terminal_login_target, recipient.name,
                      sizeof(_terminal_login_target));
   printTerminalSendStatus("Login", recipient, result, timeout);
@@ -8639,6 +8634,15 @@ void MyMesh::sendTerminalCommand(ContactInfo& recipient,
 }
 
 void MyMesh::clearTerminalTrace() {
+  clearTerminalTrace(_ms->getMillis());
+}
+
+void MyMesh::clearTerminalTrace(uint32_t now) {
+  if (_terminal_trace_pending) {
+    _delayed_replies.retireTrace(_terminal_trace_history, now,
+                                _terminal_trace_expires_at);
+  }
+  _terminal_trace_history = mesh::CompanionDelayedReplies::NO_HISTORY;
   _terminal_trace_pending = false;
   _terminal_trace_hash_size = 0;
   _terminal_trace_tag = 0;
@@ -8649,10 +8653,12 @@ void MyMesh::clearTerminalTrace() {
 }
 
 void MyMesh::serviceTerminalTrace() {
+  serviceTerminalTrace(_ms->getMillis());
+}
+
+void MyMesh::serviceTerminalTrace(uint32_t now) {
   if (!_terminal_trace_pending) return;
-  const unsigned long now = _ms->getMillis();
-  if (_terminal_trace_expires_at != now
-      && !millisHasNowPassed(_terminal_trace_expires_at)) {
+  if ((int32_t)(now - (uint32_t)_terminal_trace_expires_at) < 0) {
     return;
   }
 
@@ -8660,7 +8666,7 @@ void MyMesh::serviceTerminalTrace() {
     terminalOutput().printf("\r\n  ERROR: trace to %s timed out.\r\n> ",
                   _terminal_trace_target);
   }
-  clearTerminalTrace();
+  clearTerminalTrace(now);
 }
 
 void MyMesh::sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
@@ -8697,7 +8703,9 @@ void MyMesh::sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
       calcDirectTimeoutMillisFor(airtime, hop_count);
   uint32_t trace_timeout = 0;
   if (!mesh::calculateTerminalTraceTimeoutMillis(base_timeout,
-                                                 trace_timeout)) {
+                                                 trace_timeout)
+      || trace_timeout > 0x7FFFFFFFU
+          - mesh::CompanionDelayedReplies::DELIVERY_GRACE_MS) {
     terminalOutput().print("  ERROR: trace timeout is out of range\r\n");
     return;
   }
@@ -8706,18 +8714,26 @@ void MyMesh::sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
   uint32_t auth = 0;
   getRNG()->random((uint8_t*)&tag, sizeof(tag));
   getRNG()->random((uint8_t*)&auth, sizeof(auth));
+  const uint8_t history = _delayed_replies.reserveTrace(tag, auth, _ms->getMillis());
+  if (history == mesh::CompanionDelayedReplies::NO_HISTORY) {
+    terminalOutput().print("  ERROR: trace tag is quarantined or reply history is full\r\n");
+    return;
+  }
   mesh::Packet* packet = createTrace(tag, auth, flags);
   if (packet == NULL) {
+    _delayed_replies.abandonTrace(history);
     terminalOutput().print("  ERROR: unable to allocate trace packet\r\n");
     return;
   }
 
   if (!sendDirect(packet, route, static_cast<uint8_t>(route_byte_len))) {
+    _delayed_replies.abandonTrace(history);
     terminalOutput().print("  ERROR: unable to send trace\r\n");
     return;
   }
 
   _terminal_trace_pending = true;
+  _terminal_trace_history = history;
   _terminal_trace_hash_size = hash_size;
   _terminal_trace_tag = tag;
   _terminal_trace_auth = auth;
@@ -10324,8 +10340,11 @@ bool MyMesh::canRecoverUsbLogging() const {
   return dirty_contacts_expiry == 0 && !_store->hasPendingContactWrites()
       && !hasOutbound() && !isAnyTempRadioActive() && !hasPendingOtaApply()
       && !command_radio_apply_pending && !saved_radio_apply_pending
-      && _scheduled_reboot_at == 0 && pending_serial_reply_route == NULL
-      && !binary_trace_pending && sign_data == NULL
+      && _scheduled_reboot_at == 0 && !hasPendingReqs()
+      && !_delayed_replies.hasBinaryTrace() && sign_data == NULL
+#if COMPANION_FEATURE_TEXT_TERMINAL
+      && !_terminal_trace_pending
+#endif
       && !(_serial && _serial->hasPendingIO())
       && !(_iter_started && _serial && _serial->isConnected());
 }
@@ -10355,8 +10374,11 @@ bool MyMesh::hasPendingWork() const {
       || hasPendingOtaApply()
       || command_radio_apply_pending
       || _scheduled_reboot_at != 0
-      || pending_serial_reply_route != NULL
-      || binary_trace_pending
+      || hasPendingReqs()
+      || _delayed_replies.hasBinaryTrace()
+#if COMPANION_FEATURE_TEXT_TERMINAL
+      || _terminal_trace_pending
+#endif
       || sign_data != NULL
       || hasQueuedWorkDue() || hasRetryWorkDue()
       || (saved_radio_apply_pending

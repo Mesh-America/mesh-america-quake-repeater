@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import unittest
 
+from test_replay_reset_integration import extract_braced
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -546,7 +548,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
             mesh_source.index("void MyMesh::handleCmdFrame(")
         ]
         self.assertIn(
-            "pending_serial_reply_route == route", session_operations
+            "_delayed_replies.request.route == route", session_operations
         )
         self.assertIn(
             "command_radio_reply_route == route", session_operations
@@ -560,21 +562,31 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
 
         # Every delayed Binary mesh response uses a captured requester. A
         # missing/disconnected route fails closed instead of broadcasting.
-        self.assertEqual(
-            mesh_source.count(
-                "pending_serial_reply_route = _serial->captureReplyRoute();"
-            ),
-            6,
-        )
+        delayed_source = (ROOT / "src/helpers/CompanionDelayedReplies.cpp").read_text()
+        begin = extract_braced(mesh_source, "bool MyMesh::beginPendingRequest(")
+        self.assertIn("_serial->captureReplyRoute()", begin)
+        self.assertIn("_delayed_replies.reserveRequest(kind, contact.id.pub_key,", begin)
+        for command, kind in (("LOGIN", "Login"), ("ANON_REQ", "Binary"),
+                              ("STATUS_REQ", "Status"), ("PATH_DISCOVERY_REQ", "Discovery"),
+                              ("TELEMETRY_REQ", "Telemetry"), ("BINARY_REQ", "Binary")):
+            branch = extract_braced(mesh_source, "} else if (cmd_frame[0] == CMD_SEND_" + command)
+            self.assertIn(f"beginPendingRequest(mesh::CompanionDelayedReplies::{kind}, *recipient)", branch)
+            self.assertIn("finishPendingRequest(result, tag, est_timeout);", branch)
         self.assertGreaterEqual(
-            mesh_source.count("writePendingSerialFrame(out_frame, i);"), 5
+            mesh_source.count("writePendingSerialFrame(out_frame, i, now)"), 5
         )
         pending_writer = mesh_source[
             mesh_source.index("size_t MyMesh::writePendingSerialFrame("):
             mesh_source.index("void MyMesh::writeDisabledFrame(")
         ]
-        self.assertIn("pending_serial_reply_route == NULL", pending_writer)
-        self.assertIn("writeFrameToRoute(", pending_writer)
+        self.assertIn("_delayed_replies.storeRequest(frame, len, now)", pending_writer)
+        self.assertIn("_delayed_replies.serviceRequest(_serial, now);", pending_writer)
+        reserve = extract_braced(delayed_source, "bool CompanionDelayedReplies::reserveRequest(")
+        self.assertIn("(!terminal && route == nullptr)", reserve)
+        service = extract_braced(delayed_source, "bool CompanionDelayedReplies::service(")
+        self.assertIn("serial->isReplyRouteAvailable(reply.route)", service)
+        self.assertIn("serial->writeFrameToRoute(reply.route,", service)
+        self.assertNotRegex(service, r"serial->writeFrame\(")
         self.assertNotIn("_serial->writeFrame(out_frame, i);", pending_writer)
         self.assertIn(
             "command_radio_reply_route = _serial->captureReplyRoute();",
@@ -653,26 +665,23 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         self.assertIn(
             "starts_long_lived_request && hasPendingReqs()", source
         )
-        self.assertEqual(
-            source.count(
-                "pending_serial_reply_deadline =\n"
-                "            futureMillis(est_timeout + est_timeout / 5);"
-            ),
-            6,
-        )
+        self.assertEqual(source.count("finishPendingRequest(result, tag, est_timeout);"), 6)
+        delayed = (ROOT / "src/helpers/CompanionDelayedReplies.cpp").read_text()
+        arm = extract_braced(delayed, "void CompanionDelayedReplies::arm(")
+        self.assertIn("timeout + timeout / 5", arm)
+        self.assertIn("reply.radio_deadline = now + budget;", arm)
+        self.assertIn("reply.sent_deadline = now + DELIVERY_GRACE_MS;", arm)
         self.assertIn("servicePendingSerialReply();", source)
         self.assertIn(
             "another Companion request is still pending", source
         )
 
-        self.assertIn(
-            "binary_trace_reply_route = _serial->captureReplyRoute();",
-            source,
-        )
-        self.assertIn(
-            "_serial->writeFrameToRoute(binary_trace_reply_route,", source
-        )
-        self.assertIn("binary_trace_reply_route == route", source)
+        trace = extract_braced(source, "} else if (cmd_frame[0] == CMD_SEND_TRACE_PATH")
+        self.assertIn("_delayed_replies.reserveBinaryTrace(tag, auth,", trace)
+        self.assertIn("_serial->captureReplyRoute(), _ms->getMillis())", trace)
+        self.assertIn("_delayed_replies.armBinaryTrace(est_timeout, _ms->getMillis());", trace)
+        self.assertIn("_delayed_replies.serviceBinaryTrace(_serial, now);", source)
+        self.assertIn("_delayed_replies.trace.route == route", source)
 
         self.assertIn("sign_data_reply_route != signing_route", source)
         self.assertIn("sign_data_reply_route == route", source)
