@@ -2,6 +2,7 @@
 """Run actual Companion ASCII/probe and mOTA input handlers on host streams."""
 
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -26,6 +27,7 @@ HARNESS = r'''
 #include "helpers/ota/MotaSourceSerial.h"
 #include "helpers/UsbAsciiBinarySwitch.h"
 #include "helpers/CLICommandUtils.h"
+#define MAX_TRANS_UNIT @MAX_TRANS_UNIT@
 #define COMPANION_FEATURE_USB_MOTA_SOURCE 1
 #define COMPANION_FEATURE_NETWORK_TERMINAL 0
 #define MESH_USB_LOGGING_AVAILABLE 1
@@ -37,6 +39,7 @@ struct Input : Stream {
   bool replenish=false;
   uint32_t advance_per_read=0;
   unsigned reads=0;
+  unsigned rx_dropped=0;
   int available() override { return static_cast<int>(bytes.size()); }
   int read() override {
     if(bytes.empty()) return -1;
@@ -59,6 +62,17 @@ struct Input : Stream {
     output.append(reinterpret_cast<const char*>(p),n); return n;
   }
   void push(const char* p) { while(*p) bytes.push_back(uint8_t(*p++)); }
+  // The real HWCDC ISR reads a 64-byte FIFO packet, then abandons its
+  // remaining bytes when xQueueSendFromISR finds the RX queue full.
+  void hwcdcBurst(const std::string& wire,size_t capacity) {
+    for(size_t start=0;start<wire.size();start+=64) {
+      const size_t end=std::min(start+64,wire.size());
+      for(size_t i=start;i<end;++i) {
+        if(bytes.size()==capacity) { rx_dropped+=end-i; break; }
+        bytes.push_back(uint8_t(wire[i]));
+      }
+    }
+  }
   void frame(uint8_t tail=3) {
     const uint8_t frame[]={'<',2,0,0x16,tail};
     for(uint8_t c : frame) bytes.push_back(c);
@@ -114,7 +128,8 @@ struct Mesh {
     return true;
   }
 } the_mesh;
-static char usb_terminal_line[400]={};
+@TERMINAL_LINE_DECL@
+static constexpr size_t hwcdc_rx_capacity=@HWCDC_RX_CAPACITY@;
 static size_t usb_terminal_line_len=0;
 static bool usb_terminal_discard_line=false;
 static bool usb_logging_terminal_mode=false,usb_logging_network_parked=false;
@@ -306,6 +321,52 @@ int main() {
   assert(the_mesh.commands.size()==1 && the_mesh.commands[0]=="get name");
   assert(!usb_terminal_discard_line && !usb_mota_mode && the_mesh.attaches==0);
 
+  // Reproduce the hardware failure with the SDK's old 256-byte queue: the
+  // oversized setter loses its CR before reaching the actual line limit.
+  // A later ordinary Enter would dispatch a truncated mutating command.
+  const std::string oversized_setter="set name "+std::string(600,'X')+"\r";
+  assert(oversized_setter.size()==610);
+  reset(); input.hwcdcBurst(oversized_setter,256); serviceUsbTerminal();
+  assert(input.rx_dropped==354 && input.output.size()==256+6); // Silent banner is revealed.
+  assert(the_mesh.commands.empty() && usb_terminal_line_len==256);
+  assert(!usb_terminal_discard_line && input.output.find("ERROR")==std::string::npos);
+  input.push("\r"); serviceUsbTerminal();
+  assert(the_mesh.commands==std::vector<std::string>{oversized_setter.substr(0,256)});
+
+  // The configured pre-begin RX queue preserves the complete unpaced burst.
+  // Production parsing rejects it and its delimiter produces the real prompt.
+  static_assert(hwcdc_rx_capacity>sizeof(usb_terminal_line));
+  reset(); input.hwcdcBurst(oversized_setter,hwcdc_rx_capacity); serviceUsbTerminal();
+  assert(!input.rx_dropped && input.available()==0 && the_mesh.commands.empty());
+  assert(!usb_terminal_discard_line && !usb_terminal_line_len);
+  assert(input.output.find("ERROR: command too long")!=std::string::npos);
+  assert(input.output.substr(input.output.size()-2)=="> ");
+  input.push("get name\r"); serviceUsbTerminal();
+  assert(the_mesh.commands==std::vector<std::string>{"get name"});
+
+  // Even a single line exceeding the RX queue reaches discard mode before
+  // any CR is lost. Recovery Enter cannot execute its retained setter prefix.
+  // Hosts must still use request/reply rather than overflow a multi-line batch.
+  for(size_t size : {hwcdc_rx_capacity+64,hwcdc_rx_capacity*4}) {
+    reset();
+    input.hwcdcBurst("set name "+std::string(size,'X')+"\r",hwcdc_rx_capacity);
+    serviceUsbTerminal();
+    assert(input.rx_dropped && input.available()==0 && the_mesh.commands.empty());
+    assert(usb_terminal_discard_line && !usb_terminal_line_len);
+    assert(input.output.find("ERROR: command too long")!=std::string::npos);
+    input.push("\rget name\r"); serviceUsbTerminal();
+    assert(!usb_terminal_discard_line && the_mesh.commands==std::vector<std::string>{"get name"});
+  }
+
+  // Embedded NUL rejection remains whole-line with the real HWCDC burst path.
+  reset();
+  std::string nul_setter="set name MUST-NOT-CHANGE";
+  nul_setter.push_back(0); nul_setter+="ignored\r";
+  input.hwcdcBurst(nul_setter,hwcdc_rx_capacity); serviceUsbTerminal();
+  assert(!input.rx_dropped && the_mesh.commands.empty() && !usb_terminal_discard_line);
+  assert(input.output.find("ERROR: invalid command")!=std::string::npos);
+  assert(input.output.substr(input.output.size()-2)=="> ");
+
   // Every accepted byte, UTF-8 erase, and invalid-line discard preserves the
   // terminated-length invariant; only complete valid lines prove a reader.
   reset();
@@ -377,7 +438,7 @@ int main() {
   // The ordinary ASCII handler yields too, including while discarding an
   // overlong command from a host that never stops writing.
   reset(); input.bytes={'x','x','x','x'}; input.replenish=true;
-  for(unsigned pass=0;pass<128;++pass) {
+  for(unsigned pass=0;pass<sizeof(usb_terminal_line)/4+2;++pass) {
     const unsigned before=input.reads; serviceUsbTerminal();
     assert(input.reads==before+4 && input.available()==4);
   }
@@ -535,10 +596,18 @@ class CompanionUsbInputTests(unittest.TestCase):
         functions = functions.replace("static void enterUsbTerminalMode(bool show_banner)",
                                       "static void enterUsbTerminalMode(bool show_banner = true)")
         accessor = extract_braced(CONTEXT, "static SerialMotaSource& serialFolderSource()")
+        terminal_line = re.search(r"static char usb_terminal_line\[[^\n]+;", MAIN).group()
+        rx_capacity = re.search(r"#define MESH_ESP32_USB_RX_BUFFER_SIZE (\d+)",
+                                (ROOT / "src/helpers/UsbLogging.h").read_text()).group(1)
+        max_trans_unit = re.search(r"#define MAX_TRANS_UNIT\s+(\d+)",
+                                  (ROOT / "src/MeshCore.h").read_text()).group(1)
         with tempfile.TemporaryDirectory() as directory:
             cpp = Path(directory) / "usb-input.cpp"
             cpp.write_text(HARNESS.replace("@FUNCTIONS@", functions)
-                           .replace("@SOURCE_ACCESSOR@", accessor))
+                           .replace("@SOURCE_ACCESSOR@", accessor)
+                           .replace("@TERMINAL_LINE_DECL@", terminal_line)
+                           .replace("@HWCDC_RX_CAPACITY@", rx_capacity)
+                           .replace("@MAX_TRANS_UNIT@", max_trans_unit))
             for sanitizer in (False, True):
                 with self.subTest(sanitizer=sanitizer):
                     binary = Path(directory) / ("usb-input-" + str(sanitizer))

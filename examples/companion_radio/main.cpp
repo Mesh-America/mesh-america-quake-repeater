@@ -3026,8 +3026,8 @@ bool handleCompanionWirelessCommand(const char* command, char* reply, size_t siz
 
 void setup() {
 #if MESH_ESP32_HWCDC_SESSION_GUARD
-  // HWCDC's TX ring is resized before Serial.begin() creates its mutex and
-  // enables the USB ISR. This is deliberately before the nRF52 ordering below:
+  // HWCDC's RX queue and TX ring are resized before Serial.begin() creates its
+  // mutex and enables the USB ISR. This is before the nRF52 ordering below:
   // prepareUsbLoggingPort() is otherwise a no-op outside ESP32 HWCDC.
   mesh::prepareUsbLoggingPort();
 #endif
