@@ -47,6 +47,9 @@ class DataStore : public mesh::ContactPathBackend, public mesh::ContactSecretBac
   DataStoreHost* _cache_host;
   bool _cache_load_incomplete = false;
 #if defined(ESP32_PLATFORM)
+  // Advert queue lifecycle has a dedicated production fixture. The contact
+  // reinitialization test needs only this unrelated hardware lifecycle seam.
+  struct { void clear() {} } _advert_write;
   File _contact_path_reader;
 #include "contact_write_state_under_test.h"
   FakeFilesystem* _fs = &SPIFFS;
