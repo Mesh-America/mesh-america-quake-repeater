@@ -216,6 +216,7 @@ jobs:
           python3 -B test/test_ota_device_deflate_encoder.py -v
           python3 -B test/test_ota_device_deflate_role.py -v
           python3 -B test/test_client_acl_spiffs.py
+          python3 -B test/test_client_acl_metadata.py -v
           python3 -B test/test_client_acl_cli.py -v
           python3 -B test/test_client_acl_response.py -v
 
