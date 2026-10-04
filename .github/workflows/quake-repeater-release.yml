@@ -128,6 +128,14 @@ jobs:
             TAG="quake-v$(python3 -c 'import json; print(json.load(open("dist/manifest.json"))["version"])')"
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          # The web flasher requires the manifest to name its release tag. On main the manifest was
+          # built before the tag was known, so record it now.
+          TAG="$TAG" python3 - <<'PY'
+          import json, os
+          m = json.load(open("dist/manifest.json"))
+          m["tag"] = os.environ["TAG"]
+          json.dump(m, open("dist/manifest.json", "w"), indent=2)
+          PY
           if [[ "${GITHUB_REF}" != refs/tags/* ]] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists; nothing to publish."
             echo "publish=false" >> "$GITHUB_OUTPUT"
