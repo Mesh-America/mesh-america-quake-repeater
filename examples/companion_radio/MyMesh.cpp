@@ -2104,7 +2104,7 @@ bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t i
     uint32_t tag;
     memcpy(&tag, extra, 4);
 
-    if (tag == pending_discovery) {  // check for matching response tag)
+    if (pending_discovery != 0 && tag == pending_discovery) {  // match an active discovery
       if (!mesh::Packet::isValidPathLen(in_path_len) || !mesh::Packet::isValidPathLen(out_path_len)) {
         MESH_DEBUG_PRINTLN("onContactPathRecv, invalid path sizes: %d, %d", in_path_len, out_path_len);
       } else {
