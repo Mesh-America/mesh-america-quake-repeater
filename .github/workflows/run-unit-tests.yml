@@ -25,6 +25,7 @@ jobs:
       - name: Verify protocol, encryption, scheduling and MQTT decoding
         run: |
           python3 -B test/test_management_report.py -v
+          python3 -B test/test_management_cli_wrapper.py -v
           node test/test_management_decoder.js
 
   stm32-companion-smoke:
@@ -90,6 +91,9 @@ jobs:
       - name: Run Unit Tests
         run: pio test -e native -e native_kiss_modem -vv
 
+      - name: Verify serial mOTA response deadlines and RX fairness
+        run: python3 -B test/test_mota_serial_deadline.py -v
+
       - name: Verify filter playground modes and built-in defaults
         run: node scripts/test_filter_tool.js
 
@@ -100,6 +104,12 @@ jobs:
         run: |
           python3 -B test/test_repeater_trace_repeat.py -v
           python3 -B test/test_repeater_trace_forwarding.py -v
+
+      - name: Verify telemetry schedule input and persistence rollback
+        run: python3 -B test/test_telemetry_tx_command.py -v
+
+      - name: Verify transactional telemetry preferences and legacy route recovery
+        run: python3 -B test/test_telemetry_tx_persistence.py -v
 
       - name: Verify MQTT start results and connection-attempt accounting
         run: python3 -B test/test_mqtt_transport_results.py -v
@@ -204,6 +214,10 @@ jobs:
       - name: Verify Companion ASCII defaults and USB session cleanup
         run: |
           python3 -B test/test_companion_usb_default.py
+          python3 -B test/test_companion_usb_input.py
+          python3 -B test/test_companion_ota_includes.py
+          python3 -B test/test_companion_usb_logging_handoff.py
+          python3 -B test/test_companion_usb_mota_exit.py
           python3 -B test/test_common_cli_logging_transaction.py
           python3 -B test/test_usb_diagnostic_logging.py
           python3 -B test/test_nrf52_usb_client.py
