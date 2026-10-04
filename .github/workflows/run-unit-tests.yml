@@ -159,6 +159,7 @@ jobs:
 
       - name: Verify receive recovery and pinned radio status transport
         run: |
+          python3 -B test/test_dispatcher_startup_watchdog.py -v
           python3 -B test/test_radio_receive_contract.py
           python3 - <<'PY'
           from pathlib import Path
@@ -244,13 +245,21 @@ jobs:
           python3 -B test/test_esp32_usb_serial_hygiene.py
           python3 -B test/test_esp32_tinyusb_nonblocking.py
           python3 -B test/test_esp32_usb_session_fix.py
+          python3 -B test/test_hwcdc_tx_backport.py -v
+          python3 -B test/test_esp32_file_buffer_fix.py -v
           python3 -B test/test_companion_usb_logging_reply.py
           python3 -B test/test_esp32_tinyusb_cooperative_output.py
           python3 -B test/test_esp32_tinyusb_role_hygiene.py
           python3 -B test/test_stm32_float_conversion.py
 
       - name: Verify Companion contact persistence and OTA sleep guards
-        run: python3 -B test/test_companion_contact_sleep_contract.py -v
+        run: |
+          python3 -B test/test_companion_contact_sleep_contract.py -v
+          python3 -B test/test_esp32_cooperative_contacts.py -v
+          python3 -B test/test_esp32_contact_writer_batch.py -v
+          python3 -B test/test_esp32_contact_crc_batch.py -v
+          python3 -B test/test_esp32_contact_publication.py -v
+          python3 -B test/test_esp32_advert_cache.py -v
 
       - name: Verify Companion Bluetooth CLI connection protection
         run: python3 -B test/test_companion_bluetooth_control.py -v
