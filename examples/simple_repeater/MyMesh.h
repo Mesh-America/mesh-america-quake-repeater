@@ -542,6 +542,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #if MESH_ENABLE_TELEMETRY_HISTORY
   mesh::TelemetryHistory telemetry_history;
   mesh::ExternalVoltageHistory external_voltage_history;
+  bool telemetry_history_tx_prefs_healthy;
   bool telemetry_history_tx_enabled;
   uint8_t telemetry_history_tx_interval_days;
   uint8_t telemetry_history_tx_pending;

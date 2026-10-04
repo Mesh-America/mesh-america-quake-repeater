@@ -1,6 +1,14 @@
 #include "MyMesh.h"
 #include <helpers/UsbLogging.h>
 #include <helpers/FileRead.h>
+#if MESH_ENABLE_TELEMETRY_HISTORY
+#include <helpers/FilePresence.h>
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+#include <helpers/AtomicFileWriter.h>
+#else
+#include <helpers/ContactFileTransaction.h>
+#endif
+#endif
 #include <helpers/radiolib/RadioPowerLimits.h>
 #include <helpers/radiolib/RxBoostedGainDefaults.h>
 #include <algorithm>
@@ -3537,6 +3545,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   clock_sync_next_attempt_uptime = CLOCK_SYNC_STARTUP_DELAY_MILLIS;
 
 #if MESH_ENABLE_TELEMETRY_HISTORY
+  telemetry_history_tx_prefs_healthy = false;
   telemetry_history_tx_enabled = false;
   telemetry_history_tx_interval_days = TELEMETRY_HISTORY_TX_DEFAULT_DAYS;
   telemetry_history_tx_pending = 0;
@@ -11577,6 +11586,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       strcpy(reply, "Err - not permitted");
       return;
     }
+    if (!telemetry_history_tx_prefs_healthy) {
+      strcpy(reply, "Err - telemetry.tx prefs unavailable");
+      return;
+    }
     const uint8_t* data_path = NULL;
     uint8_t data_path_len = OUT_PATH_UNKNOWN;
     if (!_cli.getDataTxPath(data_path, data_path_len)) {
@@ -11642,6 +11655,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     if (strcmp(spec, "off") == 0) {
       enable = false;
     } else {
+      // strtoul accepts a minus sign and negates modulo unsigned-long width;
+      // a large negative input can otherwise wrap into a valid day count.
+      if (*spec < '0' || *spec > '9') {
+        strcpy(reply, "Err - use: set telemetry.tx schedule <off|1-30d>");
+        return;
+      }
       char* end = NULL;
       days = strtoul(spec, &end, 10);
       if (end == spec) days = 0;
@@ -12398,7 +12417,36 @@ uint8_t MyMesh::resizeTelemetryGpsDays(uint8_t requested_days) {
 }
 #endif
 
+static bool recoverTelemetryHistoryTxPrefs(FILESYSTEM* fs) {
+  if (fs == NULL) return false;
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+  return mesh::ContactFileTransaction::recover(
+      fs, TELEMETRY_HISTORY_TX_PREFS_FILE, mesh::filePresence<FILESYSTEM>);
+#else
+  return true;
+#endif
+}
+
+static bool readTelemetryHistoryTxPrefsImage(FILESYSTEM* fs,
+                                            uint8_t image[7 + MAX_PATH_SIZE],
+                                            size_t& size) {
+  File file = openFloodSettingsRead(fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
+  if (!file) return false;
+  size = file.size();
+  const bool complete = (size == 6 || size == 7 + MAX_PATH_SIZE)
+      && file.read(image, size) == size;
+  file.close();
+  if (!complete) return false;
+  const bool legacy = size == 7 + MAX_PATH_SIZE;
+  if (memcmp(image, legacy ? "THT2" : "THT3", 4) || image[4] > 1) return false;
+  const uint8_t days = image[legacy ? 6 : 5];
+  if (days < 1 || days > TELEMETRY_HISTORY_TX_MAX_DAYS) return false;
+  return !legacy || (image[5] == OUT_PATH_UNKNOWN ? image[4] == 0
+      : image[5] != OUT_PATH_FORCE_FLOOD && mesh::Packet::isValidPathLen(image[5]));
+}
+
 void MyMesh::loadTelemetryHistoryTxPrefs() {
+  telemetry_history_tx_prefs_healthy = false;
   telemetry_history_tx_enabled = false;
   telemetry_history_tx_interval_days = TELEMETRY_HISTORY_TX_DEFAULT_DAYS;
   telemetry_history_tx_pending = 0;
@@ -12408,60 +12456,59 @@ void MyMesh::loadTelemetryHistoryTxPrefs() {
   telemetry_history_next_tx_uptime = 0;
   telemetry_history_tx_resume_uptime = 0;
 
-  if (_fs == NULL || !_fs->exists(TELEMETRY_HISTORY_TX_PREFS_FILE)) return;
-  File file = openFloodSettingsRead(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
-  if (!file) return;
-
-  uint8_t magic[4] = {};
-  uint8_t enabled = 0;
-  uint8_t path_len = OUT_PATH_UNKNOWN;
-  uint8_t interval_days = TELEMETRY_HISTORY_TX_DEFAULT_DAYS;
-  uint8_t path[MAX_PATH_SIZE] = {};
-  bool valid = file.read(magic, sizeof(magic)) == sizeof(magic);
-  const bool legacy = valid && memcmp(magic, "THT2", sizeof(magic)) == 0;
-  if (legacy) {
-    valid = file.read(&enabled, sizeof(enabled)) == sizeof(enabled)
-        && file.read(&path_len, sizeof(path_len)) == sizeof(path_len)
-        && file.read(&interval_days, sizeof(interval_days)) == sizeof(interval_days)
-        && file.read(path, sizeof(path)) == sizeof(path);
-  } else if (valid && memcmp(magic, "THT3", sizeof(magic)) == 0) {
-    valid = file.read(&enabled, sizeof(enabled)) == sizeof(enabled)
-        && file.read(&interval_days, sizeof(interval_days)) == sizeof(interval_days);
-  } else {
-    valid = false;
-  }
-  file.close();
-
-  valid = valid && enabled <= 1 && interval_days >= 1
-      && interval_days <= TELEMETRY_HISTORY_TX_MAX_DAYS;
-  if (legacy && enabled != 0) {
-    valid = valid && path_len != OUT_PATH_UNKNOWN
-        && path_len != OUT_PATH_FORCE_FLOOD
-        && mesh::Packet::isValidPathLen(path_len);
-  }
-  if (!valid) return;
-
-  telemetry_history_tx_enabled = enabled != 0;
-  telemetry_history_tx_interval_days = interval_days;
-  if (legacy && path_len != OUT_PATH_UNKNOWN
-      && mesh::Packet::isValidPathLen(path_len)) {
-    _cli.adoptLegacyDataTxPath(path, path_len);
-  }
+  if (!recoverTelemetryHistoryTxPrefs(_fs)) return;
+  bool present = false;
+  if (!mesh::filePresence(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE, present)) return;
+  if (!present) { telemetry_history_tx_prefs_healthy = true; return; }
+  uint8_t image[7 + MAX_PATH_SIZE]; size_t size = 0;
+  if (!readTelemetryHistoryTxPrefsImage(_fs, image, size)) return;
+  const bool legacy = size == sizeof(image);
+  // Preserve the only durable old route until shared-route adoption succeeds.
+  // Otherwise an enabled legacy producer would silently use fresh zero-hop.
+  if (legacy && image[5] != OUT_PATH_UNKNOWN
+      && !_cli.adoptLegacyDataTxPath(image + 7, image[5])) return;
+  telemetry_history_tx_enabled = image[4] != 0;
+  telemetry_history_tx_interval_days = image[legacy ? 6 : 5];
+  telemetry_history_tx_prefs_healthy = true;
 }
 
 bool MyMesh::saveTelemetryHistoryTxPrefs() {
-  if (_fs == NULL) return false;
-  File file = openFloodSettingsWrite(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
-  if (!file) return false;
-
-  const uint8_t magic[4] = {'T', 'H', 'T', '3'};
-  const uint8_t enabled = telemetry_history_tx_enabled ? 1 : 0;
-  bool success = file.write(magic, sizeof(magic)) == sizeof(magic)
-      && file.write(&enabled, sizeof(enabled)) == sizeof(enabled)
-      && file.write(&telemetry_history_tx_interval_days,
-                    sizeof(telemetry_history_tx_interval_days))
-             == sizeof(telemetry_history_tx_interval_days);
-  file.close();
+  if (!telemetry_history_tx_prefs_healthy) return false;
+  bool previous_present = false;
+  uint8_t previous[7 + MAX_PATH_SIZE]; size_t previous_size = 0;
+  if (!recoverTelemetryHistoryTxPrefs(_fs)
+      || !mesh::filePresence(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE, previous_present)
+      || (previous_present && !readTelemetryHistoryTxPrefsImage(_fs, previous, previous_size))) {
+    telemetry_history_tx_prefs_healthy = false; return false;
+  }
+  const uint8_t image[] = {'T', 'H', 'T', '3', uint8_t(telemetry_history_tx_enabled),
+                           telemetry_history_tx_interval_days};
+  bool success;
+  {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+    mesh::AtomicFileWriter writer(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
+#else
+    mesh::ContactFileTransaction writer(
+        _fs, TELEMETRY_HISTORY_TX_PREFS_FILE, mesh::filePresence<FILESYSTEM>);
+#endif
+    success = writer && writer.write(image, sizeof(image)) == sizeof(image) && writer.commit();
+  }
+  uint8_t verify[7 + MAX_PATH_SIZE]; size_t verify_size = 0;
+  if (success) {
+    success = readTelemetryHistoryTxPrefsImage(_fs, verify, verify_size)
+        && verify_size == sizeof(image) && !memcmp(verify, image, sizeof(image));
+    telemetry_history_tx_prefs_healthy = success;
+  } else {
+    // Permit an administrator retry only when the old durable state is
+    // demonstrably intact/recoverable. An ambiguous publish/readback must not
+    // keep a producer running or overwrite an unmigrated/corrupt statefile.
+    bool present = false;
+    telemetry_history_tx_prefs_healthy = recoverTelemetryHistoryTxPrefs(_fs)
+        && mesh::filePresence(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE, present)
+        && present == previous_present
+        && (!present || (readTelemetryHistoryTxPrefsImage(_fs, verify, verify_size)
+            && verify_size == previous_size && !memcmp(verify, previous, previous_size)));
+  }
   return success;
 }
 
@@ -12476,11 +12523,12 @@ void MyMesh::formatTelemetryHistoryTxStatus(char* reply,
   char path_reply[132];
   formatPathReply(data_path, have_path ? data_path_len : OUT_PATH_UNKNOWN,
                   path_reply, sizeof(path_reply));
-  snprintf(reply, reply_size, "> %s%ud id=%s i2c=%u p=%s",
+  snprintf(reply, reply_size, "> %s%ud id=%s i2c=%u%s p=%s",
            telemetry_history_tx_enabled ? "on " : "off ",
            (unsigned)telemetry_history_tx_interval_days,
            source_id,
            (unsigned)external_voltage_history.populatedChannelCount(),
+           telemetry_history_tx_prefs_healthy ? "" : " fault=prefs",
            path_reply[0] == '>' && path_reply[1] == ' '
                ? path_reply + 2 : path_reply);
 }
@@ -12525,6 +12573,7 @@ bool MyMesh::sendExternalVoltageHistorySnapshot(uint8_t channel_index,
 }
 
 void MyMesh::serviceTelemetryHistoryTx() {
+  if (!telemetry_history_tx_prefs_healthy) return;
   const uint64_t current_uptime_millis =
       uptime_millis + (uint32_t)(millis() - last_millis);
   if (telemetry_history_next_tx_uptime != 0
