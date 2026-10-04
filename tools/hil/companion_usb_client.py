@@ -101,7 +101,7 @@ def run(args):
             assert not initial, 'Fresh connection emitted unsolicited text or stale data'
             tty.write(b'ver\r')
             response = drain(tty, 0.4)
-            assert b'Companion v' in response, 'Default ASCII terminal did not answer'
+            assert b'Companion ' in response and b'(protocol ' in response, 'Default ASCII terminal did not answer'
             results['checks'].append('default ASCII accepts ver without START')
             tty.write(b'+++MESHCORE-TERM-STOP\r')
             assert b'OK - Binary mode' in drain(tty, 0.3), 'STOP acknowledgement missing'

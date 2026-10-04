@@ -7,6 +7,8 @@ from contextlib import redirect_stdout
 import io
 import json
 import struct
+import sys
+import types
 import unittest
 from unittest import mock
 
@@ -212,6 +214,35 @@ class PayloadValidationTest(unittest.TestCase):
 
 
 class StressModesTest(unittest.TestCase):
+    def test_selected_control_lines_are_set_while_port_is_closed(self) -> None:
+        class Serial:
+            def __init__(self):
+                self.is_open = False
+
+            def __setattr__(self, name, value):
+                if name in ("dtr", "rts"):
+                    assert not self.is_open
+                object.__setattr__(self, name, value)
+
+            def open(self):
+                assert self.rts is False
+                self.is_open = True
+
+        with mock.patch.dict(sys.modules, {"serial": types.SimpleNamespace(Serial=Serial)}):
+            factory = hil._make_pyserial_factory()
+            for dtr in (False, True):
+                with self.subTest(dtr=dtr):
+                    port = factory(fast_config(dtr=dtr))
+                    self.assertIs(port.dtr, dtr)
+                    self.assertTrue(port.is_open)
+
+    def test_dtr_cli_opt_in_preserves_default_and_rejects_non_boolean_config(self) -> None:
+        parser = hil.build_argument_parser()
+        self.assertEqual(parser.parse_args(["--port", "FAKE"]).dtr, "off")
+        self.assertEqual(parser.parse_args(["--port", "FAKE", "--dtr", "on"]).dtr, "on")
+        with self.assertRaisesRegex(ValueError, "dtr must be a boolean"):
+            hil._validate_config(fast_config(dtr="on"))
+
     def test_persistent_mode_uses_one_synchronously_closed_port(self) -> None:
         factory = FakeFactory(prefix=b"startup> ")
         config = fast_config(mode="persistent", count=3)
