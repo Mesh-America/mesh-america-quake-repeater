@@ -20,7 +20,7 @@ import sys
 import tempfile
 import zipfile
 
-from package_esp32_partition_migration import BOARDS
+from package_esp32_partition_migration import BOARDS, resolve_pio_build_dir
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -184,12 +184,18 @@ def main() -> None:
         if not shutil.which(executable):
             parser.error(f"{executable} is unavailable in this environment")
 
+    environment = os.environ.copy()
+    try:
+        utility_build_dir = resolve_pio_build_dir(environment=environment, project_dir=ROOT)
+    except ValueError as error:
+        parser.error(str(error))
+    environment["PLATFORMIO_BUILD_DIR"] = str(utility_build_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     for command, full in steps:
-        environment = os.environ.copy()
+        build_environment = environment.copy()
         if full:
-            environment["OUTPUT_DIR"] = str(build_dir)
-        subprocess.run(command, cwd=ROOT, env=environment, check=True)
+            build_environment["OUTPUT_DIR"] = str(build_dir)
+        subprocess.run(command, cwd=ROOT, env=build_environment, check=True)
 
     # Package in a fresh directory so an interruption never leaves a partial
     # release ZIP at the final path. Existing identical ZIPs are reusable.
@@ -198,11 +204,12 @@ def main() -> None:
         command = [
             sys.executable, "-B", "scripts/package_esp32_partition_migration.py",
             "--build-dir", str(build_dir), "--output-dir", str(staging),
+            "--pio-build-dir", str(utility_build_dir),
             "--version", args.version, "--source", source,
         ]
         for name in boards:
             command.extend(("--board", name))
-        subprocess.run(command, cwd=ROOT, check=True)
+        subprocess.run(command, cwd=ROOT, env=environment, check=True)
         archives = sorted(staging.glob("*.zip"))
         if len(archives) != len(boards):
             raise ValueError("packager did not produce one ZIP per selected board")

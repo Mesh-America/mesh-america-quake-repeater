@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import zipfile
 
@@ -279,6 +281,56 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def resolve_pio_build_dir(pio_build_dir: Path | None = None, *,
+                          environment: dict[str, str] | None = None,
+                          project_dir: Path | None = None) -> Path:
+    """Use PlatformIO's resolved directory, never an unrelated default tree."""
+    root = (ROOT if project_dir is None else project_dir).resolve()
+    try:
+        if pio_build_dir is not None:
+            selected = str(pio_build_dir)
+        else:
+            metadata_environment = (os.environ if environment is None else environment).copy()
+            # Expose this defaulted option in project-config JSON without
+            # overriding a configured workspace/build_dir. PIO ignores an
+            # empty environment override but enumerates its option name.
+            metadata_environment.setdefault("PLATFORMIO_BUILD_DIR", "")
+            result = subprocess.run(
+                ["pio", "project", "config", "--json-output", "--project-dir", str(root)],
+                cwd=root, env=metadata_environment, capture_output=True, text=True,
+                check=True, timeout=30,
+            )
+            if result.returncode:
+                raise ValueError("metadata query failed")
+            options = json.loads(result.stdout)
+            if (not isinstance(options, list)
+                    or any(not isinstance(entry, list) or len(entry) != 2
+                           or not isinstance(entry[0], str)
+                           or not isinstance(entry[1], list) for entry in options)):
+                raise ValueError("invalid metadata")
+            sections = [entry for entry in options if entry[0] == "platformio"]
+            if len(sections) != 1:
+                raise ValueError("missing or duplicate platformio section")
+            if any(not isinstance(entry, list) or len(entry) != 2
+                   or not isinstance(entry[0], str) for entry in sections[0][1]):
+                raise ValueError("invalid platformio options")
+            directories = [entry[1] for entry in sections[0][1]
+                           if entry[0] == "build_dir"]
+            if len(directories) != 1:
+                raise ValueError("missing or duplicate build directory")
+            selected = directories[0]
+        if (not isinstance(selected, str) or not selected.strip()
+                or "\0" in selected or "${" in selected):
+            raise ValueError("invalid build directory")
+        path = Path(selected).expanduser()
+        return (path if path.is_absolute() else root / path).resolve()
+    except (OSError, RuntimeError, ValueError, TypeError,
+            subprocess.SubprocessError):
+        # Config JSON and command diagnostics can contain WiFi credentials.
+        # Never include their contents in the public error.
+        raise ValueError("cannot resolve the PlatformIO build directory") from None
+
+
 def partition_entries(table: bytes) -> dict[str, tuple[int, int]]:
     entries = {}
     for offset in range(0, len(table) - 31, 32):
@@ -483,7 +535,9 @@ example of the same board first.
 
 
 def package_board(name: str, spec: dict, build_dir: Path, output_dir: Path,
-                  version: str, source: str) -> Path:
+                  version: str, source: str,
+                  pio_build_dir: Path | None = None) -> Path:
+    utility_build_dir = resolve_pio_build_dir(pio_build_dir)
     target = spec["target"]
     target_id = target_id_for_env(target)
     hw_id = hardware_id_for_env(target)
@@ -520,7 +574,7 @@ def package_board(name: str, spec: dict, build_dir: Path, output_dir: Path,
             or full_ident.hw_id != hw_id or len(full_image) >= slot_bytes):
         raise ValueError(f"{name}: Full image identity or partition fit failed")
 
-    wifi_bridge = (ROOT / ".pio" / "build" / spec["wifi_bridge"] / "firmware.bin").read_bytes()
+    wifi_bridge = (utility_build_dir / spec["wifi_bridge"] / "firmware.bin").read_bytes()
     bridge_ident = FwIdent(pack_version(version.split("-", 1)[0]), target_id, hw_id)
     if len(wifi_bridge) > LEGACY_SLOT_BYTES:
         raise ValueError(f"{name}: bridge does not fit the 1.25 MiB legacy slot")
@@ -534,7 +588,7 @@ def package_board(name: str, spec: dict, build_dir: Path, output_dir: Path,
         "capabilities.json": capability_path.read_bytes(),
     }
     if spec.get("expander_bridge"):
-        expander_body = (ROOT / ".pio" / "build" / spec["expander_bridge"] /
+        expander_body = (utility_build_dir / spec["expander_bridge"] /
                          "firmware.bin").read_bytes()
         expander_image = bridge_with_successor_endf(expander_body, bridge_ident)
         if len(expander_image) > LEGACY_SLOT_BYTES:
@@ -556,7 +610,7 @@ def package_board(name: str, spec: dict, build_dir: Path, output_dir: Path,
     elif spec["lora_bridge"]:
         raise ValueError(f"{name}: LoRa Full image exceeds the mOTA block limit")
     if spec["lora_bridge"]:
-        lora_bridge_body = (ROOT / ".pio" / "build" / spec["lora_bridge"] / "firmware.bin").read_bytes()
+        lora_bridge_body = (utility_build_dir / spec["lora_bridge"] / "firmware.bin").read_bytes()
         lora_bridge = bridge_with_successor_endf(lora_bridge_body, bridge_ident)
         if len(lora_bridge) > LEGACY_SLOT_BYTES:
             raise ValueError(f"{name}: LoRa bridge does not fit the legacy slot")
@@ -603,18 +657,25 @@ def package_board(name: str, spec: dict, build_dir: Path, output_dir: Path,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, required=True)
+    parser.add_argument("--pio-build-dir", type=Path,
+                        help="explicit utility build tree (default: actual resolved PlatformIO "
+                             "build directory; relative paths use the project root)")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--source", required=True, help="eight-character source commit")
     parser.add_argument("--board", action="append", choices=tuple(BOARDS),
                         help="board to package; repeat for multiple boards (default: all)")
     args = parser.parse_args()
+    try:
+        utility_build_dir = resolve_pio_build_dir(args.pio_build_dir)
+    except ValueError as error:
+        parser.error(str(error))
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         parser.error("output directory must be empty")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     selected = dict.fromkeys(args.board or BOARDS)
     archives = [package_board(name, BOARDS[name], args.build_dir, args.output_dir,
-                              args.version, args.source)
+                              args.version, args.source, utility_build_dir)
                 for name in selected]
     for archive in archives:
         print(f"{archive}: {archive.stat().st_size} bytes")
