@@ -20,6 +20,9 @@ class File {
   size_t size() const;
   size_t read(uint8_t* buffer, size_t count);
   size_t write(const uint8_t* buffer, size_t count);
+  // This in-memory file has no stdio buffering; valid handles accept the
+  // configuration used by the production contact transaction.
+  bool setBufferSize(size_t) { return _fs != nullptr; }
   void flush() {}
   void close() { _fs = nullptr; }
  private:
