@@ -74,6 +74,8 @@ static bool usb_logging_watchdog_detached = false;
 static uint32_t usb_logging_watchdog_attach_at = 0;
 #endif
 static bool isUsbLoggingEnabled() { return true; }
+static bool isUsbLoggingPacketStream() { return false; }
+@DEDICATED@
 static void clearUsbLoggingClientActivity() {}
 @ATTEMPT@
 @GATES@
@@ -348,6 +350,7 @@ int main() {
         end_start = USB.index('static void endPrimaryUsbHostSession(', start)
         gates = USB[start:end_start] + function(USB, 'static void endPrimaryUsbHostSession(')
         source = HARNESS.replace('@GATES@', gates)
+        source = source.replace('@DEDICATED@', function(USB, 'bool hasDedicatedUsbLoggingPort('))
         source = source.replace('@ATTEMPT@', function(USB, 'static void noteUsbLoggingTxAttempt('))
         for marker, signature in (
             ('@WRITE@', 'static size_t writeTinyUsbCdcOnce('),
