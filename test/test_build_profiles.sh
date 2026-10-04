@@ -9,6 +9,31 @@ fail() {
   exit 1
 }
 
+# Optional debug settings must remain usable by strict shell callers before
+# any PlatformIO flags have been initialized.
+(
+  unset DISABLE_DEBUG PLATFORMIO_BUILD_FLAGS
+  disable_debug_flags
+  [ -z "${PLATFORMIO_BUILD_FLAGS+x}" ] \
+    || fail "default debug policy unexpectedly set build flags"
+  DISABLE_DEBUG=0
+  PLATFORMIO_BUILD_FLAGS=-DKEEP_CALLER_FLAG=1
+  disable_debug_flags
+  [ "$PLATFORMIO_BUILD_FLAGS" = -DKEEP_CALLER_FLAG=1 ] \
+    || fail "disabled debug override changed caller flags"
+  DISABLE_DEBUG=1
+  unset PLATFORMIO_BUILD_FLAGS
+  disable_debug_flags
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-UMESH_DEBUG -UMESH_PACKET_LOGGING"* ]] \
+    || fail "explicit debug disable lost the USB debug undefines"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DCFG_DEBUG=0"* ]] \
+    || fail "explicit debug disable lost CFG_DEBUG"
+  PLATFORMIO_BUILD_FLAGS=-DKEEP_CALLER_FLAG=1
+  disable_debug_flags
+  [[ "$PLATFORMIO_BUILD_FLAGS" == -DKEEP_CALLER_FLAG=1* ]] \
+    || fail "explicit debug disable discarded caller flags"
+)
+
 [ "$OPTION3_BUILD_WORKERS" -eq 1 ] \
   || fail "logging matrix permits concurrent PlatformIO target builds"
 
