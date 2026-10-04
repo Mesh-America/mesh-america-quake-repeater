@@ -8,6 +8,36 @@ fail() { echo "test_full_infrastructure_selection: $*" >&2; exit 1; }
 # Resolve real board inheritance, but never compile or flash firmware.
 init_project_context >/dev/null
 
+# No fixture assertion is allowed to fall through into a firmware build. The
+# sole PlatformIO operation above resolves board metadata; all later calls are
+# errors, including dependency preflight before the compiler entry point.
+pio() { fail "selection fixture attempted PlatformIO after metadata resolution"; }
+prepare_esp32_arduino3_framework() { fail "selection fixture reached build preflight"; }
+run_pio_with_size_detection() { fail "selection fixture attempted compilation"; }
+collect_build_artifacts() { fail "selection fixture attempted artifact publication"; }
+
+use_qualified_resume_fixture() {
+  fixture_output_dir=$(mktemp -d "${TMPDIR:-/tmp}/mesh-full-selection.XXXXXX")
+  OUTPUT_DIR=$fixture_output_dir
+  trap 'rm -rf -- "$fixture_output_dir"' EXIT
+  # These tests mock package qualification to inspect target selection. Supply
+  # a real, schema-valid receipt for the new recipe gate too; its actual
+  # occupied/matches helpers run normally. Recipe hashing and package sealing
+  # are exercised independently by test_firmware_build_recipe.py.
+  compute_build_recipe_digest() {
+    python3 - "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" "$1" "$3" <<'PY'
+import json
+from pathlib import Path
+import sys
+digest = "a" * 64
+manifest = {"target": sys.argv[2], "platformio_env": sys.argv[3],
+            "build_recipe": {"schema_version": 1, "sha256": digest}}
+Path(sys.argv[1]).write_text(json.dumps(manifest) + "\n")
+print(digest)
+PY
+  }
+}
+
 assert_auto_unified() (
   local plain=$1 expected=$2
   BUILD_PROFILE_OVERRIDE=auto
@@ -180,8 +210,9 @@ done
 
 # Direct observer promotion must use the matrix's exact output recipe even if
 # interactive flags previously requested MQTT without USB logging. Stop at the
-# existing-artifact check to exercise the real build entry point without pio run.
+# matching-recipe/qualified-artifact check without entering compilation.
 (
+  use_qualified_resume_fixture
   ESP32_FULL_BUILD=0
   BUILD_PROFILE_EFFECTIVE=standard
   BUILD_PROFILE_OVERRIDE=auto
@@ -211,6 +242,7 @@ done
 # A canonical bulk build promotes an audited target in-place, retaining its
 # environment/mOTA identity. Explicit standard builds remain untouched above.
 (
+  use_qualified_resume_fixture
   ESP32_FULL_BUILD=0
   BUILD_PROFILE_EFFECTIVE=standard
   BUILD_PROFILE_OVERRIDE=auto
@@ -232,6 +264,7 @@ done
     || fail "FULL-only bulk target lost its exact identity"
 )
 (
+  use_qualified_resume_fixture
   ESP32_FULL_BUILD=0
   BUILD_PROFILE_EFFECTIVE=standard
   BUILD_PROFILE_OVERRIDE=auto
@@ -250,6 +283,7 @@ done
     || fail "V4 Full did not keep its identity and unified feature recipe"
 )
 (
+  use_qualified_resume_fixture
   ESP32_FULL_BUILD=0
   BUILD_PROFILE_EFFECTIVE=standard
   BUILD_PROFILE_OVERRIDE=standard

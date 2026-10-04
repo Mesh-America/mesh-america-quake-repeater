@@ -107,7 +107,7 @@ FALLBACK_VERSION_PREFIX="dev"
 FALLBACK_VERSION_DATE_FORMAT='+%Y-%m-%d-%H-%M'
 
 # External programs invoked by this script:
-#   bash, cat, cp, date, env, find, flock, git, grep, head, mkdir, mv, pgrep,
+#   bash, cat, cp, date, env, find, flock, git, grep, head, mkdir, mktemp, mv, pgrep,
 #   pio, python3, rm, sed, sleep, sort, systemctl, systemd-run, tee, wc
 # Keep this list in sync when adding or removing non-builtin command usage.
 
@@ -4332,7 +4332,10 @@ write_build_capability_manifest() {
     checker_args+=(--expect-application "$item")
   done
 
-  python3 scripts/check_firmware_capabilities.py "${checker_args[@]}"
+  python3 scripts/check_firmware_capabilities.py "${checker_args[@]}" || return $?
+  python3 scripts/firmware_build_recipe.py attach \
+    "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" \
+    "$BUILD_RECIPE_SHA256"
 }
 
 collect_esp32_artifacts() {
@@ -4412,6 +4415,26 @@ collect_rp2040_artifacts() {
 
 output_artifact_exists() {
   [ -s "${OUTPUT_DIR}/$1" ]
+}
+
+compute_build_recipe_digest() {
+  local env_name=$1 env_platform=$2 pio_env_name=$3 embedded_version=$4
+  local original_flags=$5 full_source_commit=$6 artifact_target checkout_dir
+  artifact_target=${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}
+  if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ] \
+      && is_nrf52_sensor_ota_pair_target "$env_name"; then
+    artifact_target+="-${NRF52_OTA_SENSOR_PROFILE}-ota"
+  fi
+  checkout_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+  MESHCORE_RECIPE_ORIGINAL_FLAGS="$original_flags" \
+    python3 "${checkout_dir}/scripts/firmware_build_recipe.py" digest \
+      --root "$checkout_dir" --output "$OUTPUT_DIR" \
+      --source-commit "$full_source_commit" \
+      --target "$env_name" --artifact-target "$artifact_target" \
+      --pio-env "$pio_env_name" --platform "$env_platform" \
+      --embedded-version "$embedded_version" --profile "$BUILD_PROFILE_FOR_TARGET" \
+      --sensor-profile "${NRF52_OTA_SENSOR_PROFILE:-}" \
+      --ota-policy "${REQUIRE_OTA_UPDATES:-}" <<<"$PIO_CONFIG_JSON"
 }
 
 nrf52_sensor_profile_manifest_matches() {
@@ -4676,6 +4699,7 @@ build_firmware_one_profile() {
   local pio_env_name
   local env_platform
   local commit_hash
+  local full_source_commit
   local firmware_build_date
   local firmware_build_epoch
   local firmware_version
@@ -4694,6 +4718,9 @@ build_firmware_one_profile() {
   local had_platformio_build_src_filter=0
   local had_platformio_extra_scripts=0
   local build_status
+  local BUILD_RECIPE_SHA256
+  local recipe_build_flags
+  local completed_recipe
   local platformio_package_lock_fd=""
   local -a pio_run_args=()
   local -a BUILD_CAPABILITIES=()
@@ -4798,8 +4825,8 @@ build_firmware_one_profile() {
   # Publication tools bind artifacts to an explicit eight-character prefix
   # of the full source commit. Git's adaptive --short length can grow (or be
   # configured differently), which otherwise makes valid releases look stale.
-  commit_hash=$(git rev-parse HEAD)
-  commit_hash=${commit_hash:0:8}
+  full_source_commit=$(git rev-parse HEAD) || return 1
+  commit_hash=${full_source_commit:0:8}
   firmware_build_date=$(date -u '+%d-%b-%Y')
   firmware_build_epoch=$(date -u '+%s')
   firmware_version=${FIRMWARE_VERSION:-}
@@ -4845,11 +4872,6 @@ build_firmware_one_profile() {
   local embedded_version_string="${firmware_version}${embedded_build_suffix}${embedded_variant_tag}-${commit_hash}"
 
   declare_full_logging_application_contract "$env_name"
-  if [ "$RESUME_BUILD_OUTPUT" == "1" ] && build_artifacts_exist "$env_name" "$env_platform" "$firmware_filename"; then
-    echo "Skipping ${env_name}; existing artifacts found for ${firmware_filename}."
-    return 0
-  fi
-
   if [ "${PLATFORMIO_BUILD_FLAGS+x}" ]; then
     had_platformio_build_flags=1
     original_platformio_build_flags=$PLATFORMIO_BUILD_FLAGS
@@ -4875,7 +4897,23 @@ build_firmware_one_profile() {
     original_platformio_extra_scripts=""
   fi
 
-  export PLATFORMIO_BUILD_FLAGS="${original_platformio_build_flags} -DFIRMWARE_BUILD_DATE='\"${firmware_build_date}\"' -DFIRMWARE_BUILD_EPOCH=${firmware_build_epoch} -DFIRMWARE_VERSION='\"${embedded_version_string}\"' -DOTA_VARIANT='\"${env_name}\"'${mota_target_flag}${mota_migration_flag}"
+  # Scope the ambient values and their export attributes to this target. In
+  # particular, a resume skip/conflict must not leak its computed profile into
+  # the next target or convert an unset/unexported caller variable to exported.
+  local PLATFORMIO_BUILD_FLAGS="$original_platformio_build_flags"
+  local PLATFORMIO_BUILD_UNFLAGS="$original_platformio_build_unflags"
+  local PLATFORMIO_BUILD_SRC_FILTER="$original_platformio_build_src_filter"
+  local PLATFORMIO_EXTRA_SCRIPTS="$original_platformio_extra_scripts"
+  local MESHCORE_ESP32_FULL_BUILD="${MESHCORE_ESP32_FULL_BUILD-}"
+  local MESHCORE_REQUIRE_PACKET_LOGGING="${MESHCORE_REQUIRE_PACKET_LOGGING-}"
+  local MESHCORE_COMPANION_RADIO_FULL="${MESHCORE_COMPANION_RADIO_FULL-}"
+  local MESHCORE_ESP32_FULL_PARTITION_TABLE="${MESHCORE_ESP32_FULL_PARTITION_TABLE-}"
+  local MESHCORE_NRF52_INTERNAL_BOOTLOADER_UPDATE="${MESHCORE_NRF52_INTERNAL_BOOTLOADER_UPDATE-}"
+  local MESHCORE_FORCE_LORA_OTA="${MESHCORE_FORCE_LORA_OTA-}"
+
+  # Only builder-generated wall-clock stamps are excluded from the recipe.
+  # User-supplied flags remain verbatim, including any timestamp definitions.
+  export PLATFORMIO_BUILD_FLAGS="${original_platformio_build_flags} -DFIRMWARE_VERSION='\"${embedded_version_string}\"' -DOTA_VARIANT='\"${env_name}\"'${mota_target_flag}${mota_migration_flag}"
   disable_debug_flags "$env_name"
   apply_debug_overrides "$env_name"
   apply_mqtt_bridge_override "$env_name"
@@ -4943,6 +4981,29 @@ build_firmware_one_profile() {
     append_platformio_extra_script "post:scripts/check_firmware_ram.py"
   fi
 
+  recipe_build_flags=$PLATFORMIO_BUILD_FLAGS
+  BUILD_RECIPE_SHA256=$(compute_build_recipe_digest "$env_name" "$env_platform" \
+    "$pio_env_name" "$embedded_version_string" "$original_platformio_build_flags" \
+    "$full_source_commit") || return 1
+  if [ "$RESUME_BUILD_OUTPUT" == "1" ]; then
+    if python3 scripts/firmware_build_recipe.py occupied "${OUTPUT_DIR}/${firmware_filename}"; then
+      if python3 scripts/firmware_build_recipe.py matches \
+          "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" "$BUILD_RECIPE_SHA256" \
+          >/dev/null 2>&1 \
+          && build_artifacts_exist "$env_name" "$env_platform" "$firmware_filename"; then
+        echo "Skipping ${env_name}; matching recipe and qualified artifacts found for ${firmware_filename}."
+        return 0
+      fi
+      echo "Cannot resume ${firmware_filename}: existing package has a missing/different recipe or failed qualification." >&2
+      echo "Existing files were preserved. Use a fresh OUTPUT_DIR or a different --firmware-version." >&2
+      return 1
+    elif [ "$?" -ne 1 ]; then
+      echo "Cannot inspect the existing package safely; refusing to build over OUTPUT_DIR." >&2
+      return 1
+    fi
+  fi
+
+  export PLATFORMIO_BUILD_FLAGS="${recipe_build_flags} -DFIRMWARE_BUILD_DATE='\"${firmware_build_date}\"' -DFIRMWARE_BUILD_EPOCH=${firmware_build_epoch}"
   print_build_flags "$pio_env_name" "$env_name"
   build_status=0
   if [ "$env_platform" = "ESP32_PLATFORM" ]; then
@@ -4977,6 +5038,16 @@ build_firmware_one_profile() {
   if [ "$build_status" -eq 0 ]; then
     run_pio_with_size_detection "${pio_run_args[@]}"
     build_status=$?
+  fi
+  if [ "$build_status" -eq 0 ]; then
+    completed_recipe=$(PLATFORMIO_BUILD_FLAGS="$recipe_build_flags" \
+      compute_build_recipe_digest "$env_name" "$env_platform" "$pio_env_name" \
+      "$embedded_version_string" "$original_platformio_build_flags" \
+      "$full_source_commit") || build_status=1
+    if [ "$build_status" -eq 0 ] && [ "$completed_recipe" != "$BUILD_RECIPE_SHA256" ]; then
+      echo "Source or build inputs changed during compilation; refusing to publish this package." >&2
+      build_status=1
+    fi
   fi
   if [ "$build_status" -eq 0 ]; then
     collect_build_artifacts "$env_name" "$env_platform" "$pio_env_name" "$firmware_filename"
@@ -5926,15 +5997,26 @@ run_logged_build_targets() {
     for env in "${targets[@]}"; do
       log_path="${log_dir}/${env}-${profile}.log"
       log_tmp="${log_path}.tmp"
+      if [ "$RESUME_BUILD_OUTPUT" = "1" ]; then
+        log_tmp=$(mktemp "${log_path%.log}-resume-attempt.XXXXXX.log") || {
+          BATCH_BUILD_MODE=$previous_batch_build_mode
+          return 1
+        }
+      fi
       preserved_log=0
       echo "Building ${env} (${profile}); log: ${log_path}"
       build_firmware "$env" > "$log_tmp" 2>&1
       build_status=$?
       if [ "$build_status" -eq 0 ] \
-          && grep -q "^Skipping ${env}; existing artifacts found" "$log_tmp" \
+          && grep -Eq "^Skipping ${env}; (existing artifacts found|matching recipe and qualified artifacts found)" "$log_tmp" \
           && [ -s "$log_path" ]; then
         rm -f -- "$log_tmp"
         preserved_log=1
+      elif [ "$build_status" -ne 0 ] \
+          && [ "$RESUME_BUILD_OUTPUT" = "1" ] && [ -s "$log_path" ]; then
+        # Keep the original compile log. This already-unique attempt file is
+        # the failure's real diagnostic log, including in summary/report paths.
+        log_path=$log_tmp
       else
         mv -f -- "$log_tmp" "$log_path"
       fi
@@ -5948,7 +6030,7 @@ run_logged_build_targets() {
       elif [ "$build_status" -ne 0 ]; then
         overall_status=1
         LOGGING_MATRIX_FAILURES+=("${env} (${profile}) -> ${log_path}")
-        echo "FAILED: ${env} (${profile}), status ${build_status}"
+        echo "FAILED: ${env} (${profile}), status ${build_status}; log: ${log_path}"
         echo "FAILED: ${env} (${profile}), status ${build_status}" >> "$log_path"
       else
         echo "SUCCEEDED: ${env} (${profile})"
@@ -5993,6 +6075,15 @@ run_logged_build_targets() {
       pio_env_key=$candidate_key
       log_path="${log_dir}/${env}-${profile}.log"
       log_tmp="${log_path}.tmp"
+      if [ "$RESUME_BUILD_OUTPUT" = "1" ]; then
+        log_tmp=$(mktemp "${log_path%.log}-resume-attempt.XXXXXX.log") || {
+          for interrupt_pid in "${running_pids[@]}"; do terminate_process_tree "$interrupt_pid"; done
+          for interrupt_pid in "${running_pids[@]}"; do wait "$interrupt_pid" 2>/dev/null || true; done
+          BATCH_BUILD_MODE=$previous_batch_build_mode
+          trap - INT TERM
+          return 1
+        }
+      fi
       echo "Building ${env} (${profile}); log: ${log_path}"
       (
         BATCH_BUILD_MODE=1
@@ -6050,10 +6141,13 @@ run_logged_build_targets() {
     log_tmp=${job_tmp_by_pid[$pid]}
     preserved_log=0
     if [ "$build_status" -eq 0 ] \
-        && grep -q "^Skipping ${env}; existing artifacts found" "$log_tmp" \
+        && grep -Eq "^Skipping ${env}; (existing artifacts found|matching recipe and qualified artifacts found)" "$log_tmp" \
         && [ -s "$log_path" ]; then
       rm -f -- "$log_tmp"
       preserved_log=1
+    elif [ "$build_status" -ne 0 ] \
+        && [ "$RESUME_BUILD_OUTPUT" = "1" ] && [ -s "$log_path" ]; then
+      log_path=$log_tmp
     else
       mv -f -- "$log_tmp" "$log_path"
     fi
@@ -6067,7 +6161,7 @@ run_logged_build_targets() {
     elif [ "$build_status" -ne 0 ]; then
       overall_status=1
       LOGGING_MATRIX_FAILURES+=("${env} (${profile}) -> ${log_path}")
-      echo "FAILED: ${env} (${profile}), status ${build_status}"
+      echo "FAILED: ${env} (${profile}), status ${build_status}; log: ${log_path}"
       echo "FAILED: ${env} (${profile}), status ${build_status}" >> "$log_path"
     else
       echo "SUCCEEDED: ${env} (${profile})"

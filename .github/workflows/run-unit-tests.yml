@@ -296,6 +296,7 @@ jobs:
           python3 -B test/test_full_build_flag_dedup.py
           python3 -B test/test_full_logging_compile.py
           python3 -B test/test_full_logging_resume.py
+          python3 -B test/test_firmware_build_recipe.py -v
           python3 -B test/test_firmware_capabilities.py
           MESHCORE_TEST_REAL_PIO_PATHS=1 python3 -B test/test_esp32_partition_migration_build_dir.py -v
           bash test/test_build_profiles.sh
