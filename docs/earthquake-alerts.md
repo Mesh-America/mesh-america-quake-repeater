@@ -41,6 +41,10 @@ Shaking detected near 47.61,-122.33. Strength 43.3 cm/s, peak acceleration 148 g
 
 Coordinates are rounded to two decimals (about 1 km). Strength is the sensor's spectrum intensity (SI) and peak acceleration its PGA. The text is built to fit after the repeater's name; if the name is very long, detail is shortened (`peak 148 gal`, then values dropped) but the closing sentence is never cut. It is a vibration reading from one sensor, not an earthquake report.
 
+## Telling which firmware a repeater runs
+
+`ver` answers with the product name and version, for example `Mesh America Quake Repeater v1.17.1.3 (Build: 04 Oct 2026)`, so it is clear this is the earthquake firmware and not stock MeshCore or Keymind Cascade. The same text is what a remote admin sees when it asks for the version. Earlier releases (1.17.1.2 and before) answered with the bare version number.
+
 ## Commands
 
 | Command | Meaning |
