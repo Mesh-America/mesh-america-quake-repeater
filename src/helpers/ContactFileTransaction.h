@@ -18,10 +18,15 @@ private:
   char _temp[48];
   char _backup[48];
   File _file;
+  File _verify;
   size_t _size = 0;
   uint32_t _crc = 0xffffffff;
   bool _ok = false;
   bool _finished = false;
+  enum class CommitStage : uint8_t { Flush, Open, Verify, Publish };
+  CommitStage _commit_stage = CommitStage::Flush;
+  uint32_t _verify_crc = 0xffffffff;
+  size_t _verify_remaining = 0;
   PresenceProbe _presence;
   static bool probe(FILESYSTEM* fs, const char* path, bool& present,
                     PresenceProbe presence) {
@@ -30,6 +35,7 @@ private:
     return true;
   }
 public:
+  enum class CommitProgress : uint8_t { Pending, Succeeded, Failed };
   static bool recover(FILESYSTEM* fs, const char* target,
                       PresenceProbe presence = nullptr) {
     char backup[48];
@@ -56,33 +62,65 @@ public:
   }
   ~ContactFileTransaction() {
     if (_file) _file.close();
+    if (_verify) _verify.close();
     if (!_finished) _fs->remove(_temp);
   }
   operator bool() const { return _ok; }
+  bool readyToPublish() const {
+    return !_finished && _commit_stage == CommitStage::Publish;
+  }
   size_t write(const uint8_t* data, size_t len) {
-    if (!_ok) return 0;
+    if (!_ok || _finished || _commit_stage != CommitStage::Flush) return 0;
     const size_t wrote = _file.write(data, len);
     _ok = wrote == len;
     _size += wrote;
     _crc = storage::updateCRC32(_crc, data, wrote);
     return wrote;
   }
-  bool commit(bool valid = true) {
-    if (_finished) return false;
-    if (_file) { _file.flush(); _file.close(); }
+  // Each verification pass reads at most one small chunk. The caller can
+  // service its transports between passes without exposing the rename gap.
+  // A synchronous durability operation uses commit() to drain the same steps.
+  CommitProgress serviceCommit(bool valid = true) {
+    if (_finished) return CommitProgress::Failed;
     bool ok = _ok && valid;
-    File verify = _fs->open(_temp, "r");
-    ok = ok && verify && verify.size() == _size;
-    uint32_t crc = 0xffffffff;
-    size_t remaining = _size;
-    uint8_t buf[64];
-    while (ok && remaining) {
-      const size_t count = remaining < sizeof(buf) ? remaining : sizeof(buf);
-      ok = verify.read(buf, count) == count;
-      if (ok) { crc = storage::updateCRC32(crc, buf, count); remaining -= count; }
+    if (ok && _commit_stage == CommitStage::Flush) {
+      if (_file) { _file.flush(); _file.close(); }
+      _commit_stage = CommitStage::Open;
+      return CommitProgress::Pending;
     }
-    if (verify) verify.close();
-    ok = ok && crc == _crc;
+    if (ok && _commit_stage == CommitStage::Open) {
+      _verify = _fs->open(_temp, "r");
+      ok = _verify && _verify.size() == _size;
+      if (ok) {
+        _verify_remaining = _size;
+        _commit_stage = CommitStage::Verify;
+        return CommitProgress::Pending;
+      }
+    }
+    if (ok && _commit_stage == CommitStage::Verify) {
+      uint8_t buf[64];
+      const size_t count = _verify_remaining < sizeof(buf)
+          ? _verify_remaining : sizeof(buf);
+      if (count != 0) {
+        ok = _verify.read(buf, count) == count;
+        if (ok) {
+          _verify_crc = storage::updateCRC32(_verify_crc, buf, count);
+          _verify_remaining -= count;
+          return CommitProgress::Pending;
+        }
+      } else {
+        _verify.close();
+        ok = _verify_crc == _crc;
+        if (ok) {
+          _commit_stage = CommitStage::Publish;
+          return CommitProgress::Pending;
+        }
+      }
+    }
+    // Keep both renames and any rollback in this pass. Cold-path readers must
+    // not run between removing the target name and installing its replacement.
+    if (_file) _file.close();
+    if (_verify) _verify.close();
     bool backup_exists = false, target_exists = false;
     if (ok) ok = probe(_fs, _backup, backup_exists, _presence)
         && probe(_fs, _target, target_exists, _presence);
@@ -97,7 +135,13 @@ public:
     if (ok) _fs->remove(_backup);
     else _fs->remove(_temp);
     _finished = true;
-    return ok;
+    return ok ? CommitProgress::Succeeded : CommitProgress::Failed;
+  }
+  bool commit(bool valid = true) {
+    CommitProgress progress;
+    do { progress = serviceCommit(valid); }
+    while (progress == CommitProgress::Pending);
+    return progress == CommitProgress::Succeeded;
   }
 };
 } // namespace mesh

@@ -9,6 +9,9 @@
 #include <helpers/ContactSecretCache.h>
 #endif
 #include <helpers/CompanionReaderConfig.h>
+#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+namespace mesh { class ContactFileTransaction; }
+#endif
 #if COMPANION_FEATURE_READER
 #include <helpers/bible/Reader.h>
 #endif
@@ -56,9 +59,24 @@ class DataStore
   bool _cache_load_incomplete = false;
 #if defined(ESP32_PLATFORM)
   File _contact_path_reader;
+  mesh::ContactFileTransaction* _contact_write = nullptr;
+  DataStoreHost* _contact_write_host = nullptr;
+  bool (*_contact_write_filter)(const ContactInfo&) = nullptr;
+  uint32_t _contact_write_revision = 0;
+  uint32_t _contact_write_active_revision = 0;
+  uint32_t _contact_write_index = 0;
+  bool _contact_write_verifying = false;
+  bool _contact_write_requested = false;
+  bool _contact_write_servicing = false;
+  void cancelContactWrite();
+  bool serviceCachedContactWrite(DataStoreHost* host,
+                                 bool (*filter)(const ContactInfo&));
 #endif
   bool readStoredPath(uint16_t source, uint8_t path[64]) override;
   bool flushCachedPaths() override;
+#if defined(ESP32_PLATFORM)
+  bool cancelCooperativeWrite() override;
+#endif
 #if MESH_CONTACT_SECRET_FLASH_CACHE
   uint32_t _secret_retry_at = 0;
   bool readSavedSecret(const uint8_t peer[32], const uint8_t identity[32],
@@ -103,6 +121,7 @@ class DataStore
 
 public:
   DataStore(FILESYSTEM& fs, mesh::RTCClock& clock);
+  ~DataStore();
   DataStore(FILESYSTEM& fs, FILESYSTEM& fsExtra, mesh::RTCClock& clock);
   void begin();
   bool formatFileSystem();
