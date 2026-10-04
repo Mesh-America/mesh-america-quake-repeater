@@ -19,7 +19,9 @@ extern "C" BaseType_t __real_xTaskCreate(
 // The Adafruit nRF52 core hard-codes the Arduino loop task to 1024 32-bit
 // words (4 KiB). Mesh packet verification and authenticated remote commands
 // can legitimately enter Ed25519 routines whose stack peaks do not fit there.
-// Wrap task creation so only the framework's "loop" task receives 8 KiB; all
+// nrf52_loop_stack_fix.py explicitly directs that core call here: GNU --wrap
+// alone is bypassed when the caller and FreeRTOS share the LTO graph.
+// Only the framework's "loop" task receives the configured 8 KiB; all
 // BLE, timer, callback, and application-created tasks retain their requested
 // sizes.
 extern "C" BaseType_t __wrap_xTaskCreate(
