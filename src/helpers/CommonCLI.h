@@ -850,6 +850,8 @@ public:
   bool resolveDataTxScope(TransportKey& scope, char* resolved_name = nullptr,
                           size_t resolved_name_size = 0,
                           bool* ambiguous = nullptr) const;
+  // True if a saved shared route already takes precedence or the legacy path
+  // was committed. False means migration failed and reporting must stop.
   bool adoptLegacyDataTxPath(const uint8_t* path, uint8_t path_len);
   bool setDataTxPath(const char* spec, char* reply, size_t reply_size);
   bool saveCommonPrefs();

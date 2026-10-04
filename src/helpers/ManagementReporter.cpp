@@ -3,7 +3,6 @@
 #include "FileRead.h"
 #include "PersistentStoreFormat.h"
 #include <new>
-#include <stdlib.h>
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
 #include "AtomicFileWriter.h"
 #else
@@ -22,6 +21,19 @@ namespace mesh {
 using namespace management;
 static constexpr char STATE_FILE[] = "/management";
 static constexpr size_t STATE_SIZE = 120;
+// Return zero for malformed/out-of-range input before any integer can wrap.
+// Signs, whitespace and suffixes are not decimal day counts; leading zeroes
+// remain valid. All management intervals have the same upper bound.
+static unsigned parseDays(const char* text) {
+  unsigned days = 0;
+  if (!*text) return 0;
+  do {
+    if (*text < '0' || *text > '9') return 0;
+    days = days * 10 + (*text++ - '0');
+    if (days > 90) return 0;
+  } while (*text);
+  return days;
+}
 struct ManagementReporter::Working {
   History history;
   Extrema during_report;
@@ -70,9 +82,13 @@ bool ManagementReporter::load() {
         !direct_valid || !flood_valid || (b[4] && (!b[6] || (!b[5] && !b[7]))) ||
         read32(b + 116) != storage::updateCRC32(0xffffffff, b, 116) ||
         read32(b + 104) > 90 * DAY + 3600 || read32(b + 108) > 90 * DAY + 3600) continue;
+    // Do not discard the only durable legacy route in a later MGC2 checkpoint
+    // unless the shared route was successfully adopted (or already saved).
+    if (legacy && b[7] != OUT_PATH_UNKNOWN && !common_cli.adoptLegacyDataTxPath(b + 8, b[7])) {
+      erase(b, sizeof(b)); return false;
+    }
     enabled = b[4]; direct_days = b[5]; keyed = b[6];
     flood_days = legacy ? (direct_days < 21 ? 21 : direct_days) : b[7];
-    if (legacy && b[7] != OUT_PATH_UNKNOWN) common_cli.adoptLegacyDataTxPath(b + 8, b[7]);
     memcpy(key, b + 72, 32);
     schedule.direct = read32(b + 104); schedule.flood = read32(b + 108);
     if (!direct_days) schedule.direct = 0;
@@ -320,9 +336,10 @@ bool ManagementReporter::command(char* command, char* reply, size_t size) {
     return true;
   }
   ++value;
-  if (!healthy) { snprintf(reply, size, "ERR: management state fault; repair storage/reboot first"); return true; }
-  // Failed persistence stops reporting; no uncommitted state is transmitted.
-  cancel();
+  if (!healthy) {
+    if (!strncmp(command, "set mgmt.password ", 18)) erase(value, strlen(value));
+    snprintf(reply, size, "ERR: management state fault; repair storage/reboot first"); return true;
+  }
   if (!strncmp(command, "set mgmt.password ", 18)) {
     const size_t len = strlen(value);
     if (len < 12 || len > 96) { snprintf(reply, size, "ERR: password must be 12..96 bytes"); erase(value, len); return true; }
@@ -352,9 +369,9 @@ bool ManagementReporter::command(char* command, char* reply, size_t size) {
       }
       direct_days = 0; schedule.direct = 0;
     } else {
-      char* end; const unsigned long n = strtoul(value, &end, 10);
+      const unsigned n = parseDays(value);
       const uint8_t* route_path = nullptr; uint8_t route_path_len = OUT_PATH_UNKNOWN;
-      if (!*value || *end || !Schedule::validDirect(n)
+      if (!Schedule::validDirect(n)
           || !common_cli.getDataTxPath(route_path, route_path_len)) {
         snprintf(reply, size, "ERR: direct needs data.tx path and 5..90 days"); return true;
       }
@@ -367,19 +384,19 @@ bool ManagementReporter::command(char* command, char* reply, size_t size) {
       }
       flood_days = 0; schedule.flood = 0;
     } else {
-      char* end; const unsigned long n = strtoul(value, &end, 10);
+      const unsigned n = parseDays(value);
       TransportKey scope;
-      if (!*value || *end || !Schedule::validFlood(n)
+      if (!Schedule::validFlood(n)
           || !common_cli.resolveDataTxScope(scope)) {
         snprintf(reply, size, "ERR: flood needs data.tx region and 21..90 days"); return true;
       }
       flood_days = n; schedule.flood = flood_days * DAY;
     }
   } else if (!strncmp(command, "set mgmt.interval ", 18)) {
-    char* end; const unsigned long n = strtoul(value, &end, 10);
+    const unsigned n = parseDays(value);
     const uint8_t* route_path = nullptr; uint8_t route_path_len = OUT_PATH_UNKNOWN;
     TransportKey scope;
-    if (!*value || *end || !Schedule::validDirect(n)
+    if (!Schedule::validDirect(n)
         || !common_cli.getDataTxPath(route_path, route_path_len)
         || !common_cli.resolveDataTxScope(scope)) {
       snprintf(reply, size, "ERR: interval needs path, region and 5..90 days"); return true;
@@ -388,6 +405,10 @@ bool ManagementReporter::command(char* command, char* reply, size_t size) {
     direct_days = n; flood_days = n < 21 ? 21 : n;
     schedule.direct = direct_days * DAY; schedule.flood = flood_days * DAY;
   } else { snprintf(reply, size, "ERR: unknown management setting"); return true; }
+  // Only accepted changes abandon a frozen report. Invalid commands must not
+  // discard its remaining pages after the multi-day budget was reserved.
+  // Failed persistence still stops reporting; no uncommitted state leaves.
+  cancel();
   if (!save()) { healthy = false; snprintf(reply, size, "ERR: save failed; reporting stopped"); return true; }
   if (!enabled) { delete work; work = nullptr; }
   snprintf(reply, size, "OK"); return true;

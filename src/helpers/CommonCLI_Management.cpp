@@ -89,7 +89,10 @@ static bool parseDataPath(char* raw, uint8_t path[MAX_PATH_SIZE],
   char* token = spec;
   while (token && *token) {
     char* comma = strchr(token, ',');
-    if (comma) *comma = 0;
+    if (comma) {
+      if (!comma[1]) { error = "Err - missing path hash after comma"; return false; }
+      *comma = 0;
+    }
     token = trimDataRoute(token);
     const size_t chars = strlen(token);
     const uint8_t token_width = uint8_t(chars / 2);
@@ -275,8 +278,11 @@ bool CommonCLI::resolveDataTxScope(TransportKey& scope, char* name,
 }
 
 bool CommonCLI::adoptLegacyDataTxPath(const uint8_t* path, uint8_t path_len) {
-  if (!_data_route || !_data_route->healthy || _data_route->persisted
-      || path_len == OUT_PATH_UNKNOWN || !mesh::Packet::isValidPathLen(path_len)
+  if (!_data_route || !_data_route->healthy) return false;
+  // A saved shared route is authoritative, including an explicit "none".
+  // This is successful migration, not a storage failure to fault on.
+  if (_data_route->persisted) return true;
+  if (path_len == OUT_PATH_UNKNOWN || !mesh::Packet::isValidPathLen(path_len)
       || ((path_len & 63) && !path)) return false;
   const uint8_t previous_len = _data_route->path_len;
   uint8_t previous[MAX_PATH_SIZE]; memcpy(previous, _data_route->path, sizeof(previous));
@@ -373,7 +379,10 @@ bool CommonCLI::handleManagementCommand(char* command, char* reply) {
   }
   if (!strncmp(command, "set mgmt.path ", 14)) {
     char alias[160];
-    snprintf(alias, sizeof(alias), "set data.tx path %s", command + 14);
+    const int length = snprintf(alias, sizeof(alias), "set data.tx path %s", command + 14);
+    if (length < 0 || size_t(length) >= sizeof(alias)) {
+      strcpy(reply, "Err - data.tx path too long"); return true;
+    }
     return handleDataTxCommand(alias, reply);
   }
   if (strcmp(command, "get mgmt") && strncmp(command, "get mgmt.", 9)
@@ -383,7 +392,13 @@ bool CommonCLI::handleManagementCommand(char* command, char* reply) {
       *_management_mesh, *_board, *_sensors, *_acl, *_prefs, *_callbacks, *this,
       _management_fs);
   }
-  if (!_management) { strcpy(reply, "ERR: management unavailable"); return true; }
+  if (!_management) {
+    // No reporter can consume/wipe the value when initialization or its
+    // nothrow allocation failed. Apply the same recognized-password hygiene.
+    if (!strncmp(command, "set mgmt.password ", 18))
+      mesh::management::erase(command + 18, strlen(command + 18));
+    strcpy(reply, "ERR: management unavailable"); return true;
+  }
   if (!_management->command(command, reply, 160)) strcpy(reply, "ERR: unknown management setting");
   return true;
 }
