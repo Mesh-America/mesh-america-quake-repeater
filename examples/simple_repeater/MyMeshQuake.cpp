@@ -20,7 +20,7 @@ const uint8_t QUAKE_PREFS_VERSION = 1;
 
 const uint16_t QUAKE_COOLDOWN_MIN_DEFAULT = 10;
 const uint16_t QUAKE_COOLDOWN_MIN_MAX = 1440;
-const uint32_t QUAKE_JITTER_MAX_MS = 15UL * 1000;
+const uint32_t QUAKE_JITTER_MAX_MS = 2UL * 1000;
 const uint32_t QUAKE_TEST_GAP_MS = 30UL * 1000;  // a typo should not be able to flood the channel
 
 const char* skipSpaces(const char* s) {

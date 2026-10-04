@@ -104,7 +104,7 @@ private:
   static bool reached(uint32_t now, uint32_t t) { return int32_t(now - t) >= 0; }
 
   uint32_t cooldownMs_ = 10UL * 60 * 1000;
-  uint32_t jitterMaxMs_ = 15UL * 1000;
+  uint32_t jitterMaxMs_ = 2UL * 1000;
   Phase phase_ = Phase::Idle;
   Block lastBlocked_ = Block::None;
   bool baselineSet_ = false;
