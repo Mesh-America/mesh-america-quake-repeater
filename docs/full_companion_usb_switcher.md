@@ -82,8 +82,9 @@ switched; they remain binary.
 1. Companion initializes the normal USB Binary Companion interface, then
    gives its primary stream to the ASCII terminal before normal loop service
    begins.
-2. While the prompt has no buffered input, the terminal peeks at the next byte.
-   It does not remove that byte.
+2. While the prompt has no buffered input, the terminal skips blank CR/LF
+   delimiters and peeks at the next byte without removing it. A queued binary
+   frame after a blank line is detected before any ASCII banner is emitted.
 3. If the byte is `<`, the terminal temporarily releases the stream and enables
    the existing `ArduinoSerialInterface` frame parser.
 4. The parser consumes the original `<`, the two-byte length, and the payload.
@@ -94,10 +95,20 @@ switched; they remain binary.
 6. If no complete frame arrives within one second, the parser state is reset
    and the ASCII terminal prints a new banner and prompt.
 
-The switcher checks framing, not client identity. Any syntactically complete
-Binary Companion frame confirms binary mode; it does not require the first
+The switcher checks framing, not client identity. A complete Binary Companion
+frame with 1-176 payload bytes confirms binary mode; it does not require the first
 command to be `CMD_APP_START` or `CMD_DEVICE_QUERY`. Normal command validation
 still occurs after the frame parser returns the payload.
+
+Oversized frames are consumed and discarded, never truncated into executable
+commands or counted as proof of a Binary client. ASCII, framed Binary, and mOTA
+input handlers process at most the initial queued-byte count, so a continuously
+sending host cannot keep the radio loop trapped in one input call.
+
+ASCII and mOTA reject an entire line containing an embedded NUL or exceeding its
+line buffer, discarding through the next CR/LF. A valid-looking suffix is not
+executed. Binary payloads may still contain NUL bytes. The immediate manual
+terminal-stop token remains an exception to ordinary line-oriented handling.
 
 The empty-prompt requirement prevents a literal `<` in the middle of a command
 from silently changing modes. A literal `<` typed as the first character does

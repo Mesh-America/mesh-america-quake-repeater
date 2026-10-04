@@ -9,6 +9,10 @@
 #include "CompanionBluetooth.h"
 #include "CompanionWireless.h"
 #include "CompanionWiFi.h"
+#if COMPANION_FEATURE_USB_MOTA_SOURCE || COMPANION_FEATURE_BLE_MOTA_SOURCE
+#include <helpers/ota/MotaSourceSerial.h>
+#include <helpers/ota/OtaContext.h>
+#endif
 #if defined(COMPANION_PAIRING_UI_HIL)
 void companionPairingUiHilProbe();
 #endif
@@ -321,9 +325,6 @@ void serviceWioE5HeadlessControls() {
 #endif
 
 #if COMPANION_FEATURE_BLE_MOTA_SOURCE
-#include <helpers/ota/MotaSourceSerial.h>
-#include <helpers/ota/OtaContext.h>
-
 class Nrf52BleMotaSourceControl : public mesh::companion::MotaSourceControl {
 public:
   Nrf52BleMotaSourceControl()
@@ -352,6 +353,7 @@ public:
     _packets_sent_at_start = context.manager.packetsSent();
     _last_packets_sent = 0;
     bluetooth_interface.setMotaStreamActive(true);
+    _source.resetSessionState();  // setActive(true) cleared the old ring generation.
     if (!context.attach_folder_source(
             &_source, mesh::ota::OtaContext::FOLDER_LINK_BLE, "ble",
             reply, reply_size)) {
@@ -636,12 +638,22 @@ static bool usb_logging_reply_state = false;
 #endif
 static mesh::UsbBinaryStartupProbe usb_binary_startup_probe;
 static mesh::UsbAsciiSessionDefault usb_ascii_session_default;
+static bool acceptUsbBinaryStartupFrame(uint32_t completed_at) {
+  // Radio/mesh work and the parser itself can cross the deadline after the
+  // main-loop precheck. Reject before command dispatch or Binary-client proof.
+  if (usb_binary_startup_probe.hasTimedOut(completed_at)) return false;
+  // This first valid frame establishes Binary ownership immediately, not at
+  // the later terminal-service poll. Later frames have no startup deadline.
+  usb_binary_startup_probe.cancel();
+  return true;
+}
 #if COMPANION_FEATURE_USB_MOTA_SOURCE
 static bool usb_mota_mode = false;
 static mesh::UsbMotaEntryOrigin usb_mota_entry_origin =
     mesh::UsbMotaEntryOrigin::BINARY;
 static char usb_mota_line[32];
 static size_t usb_mota_line_len = 0;
+static bool usb_mota_discard_line = false;
 static bool usb_mota_disconnect_armed = false;
 #endif
 
@@ -801,8 +813,12 @@ static void resetUsbMotaMode() {
   usb_mota_mode = false;
   usb_mota_line_len = 0;
   usb_mota_line[0] = 0;
+  usb_mota_discard_line = false;
   usb_mota_disconnect_armed = false;
-  usb_serial_interface.setPassthroughMode(false);
+  // A software owner change is not a transport reset. Retain any late binary
+  // reply and quarantine input until its known boundary is consumed.
+  usb_serial_interface.setPassthroughMode(
+      mesh::ota::OtaContext::serialFolderSource().hasPendingResponse());
 }
 
 static void leaveUsbMotaMode(bool acknowledge) {
@@ -826,13 +842,27 @@ static void leaveUsbMotaMode(bool acknowledge) {
 }
 
 static bool enterUsbMotaMode(mesh::UsbMotaEntryOrigin origin) {
+  // An explicit seeder command selects its own protocol owner, even if it
+  // arrived after a rejected startup frame. Neither a stale Binary deadline
+  // nor deferred default-ASCII restoration may reclaim a live mOTA stream.
+  usb_binary_startup_probe.cancel();
+  usb_ascii_session_default.cancel();
+  auto& source = mesh::ota::OtaContext::serialFolderSource();
+  if (source.hasPendingResponse()) {
+    queueUsbTerminalControlReply("\r\nERR waiting for previous mOTA response\r\n");
+    if (mesh::shouldRestoreAsciiAfterMotaFailure(origin)) enterUsbTerminalMode();
+    return false;
+  }
   cancelUsbSerialOperations();
   mesh::discardUsbTerminalOutput();
+  source.enableSharedTextControl();
+  source.resetSessionState();
   usb_serial_interface.setPassthroughMode(true);
   usb_mota_mode = true;
   usb_mota_entry_origin = origin;
   usb_mota_line_len = 0;
   usb_mota_line[0] = 0;
+  usb_mota_discard_line = false;
   usb_mota_disconnect_armed = isUsbTerminalDataConnected();
 #if defined(ESP32) && defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 1 \
     && defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
@@ -876,14 +906,20 @@ static void serviceUsbMota() {
   }
 #endif
 
-  // SerialMotaSource consumes framed responses synchronously while serving a
-  // block. Bytes left here are host control text, notably motatool's automatic
-  // `ota folder off` on a clean shutdown.
-  Stream& usb_input = mesh::usbCompanionPort();
-  while (usb_input.available()) {
-    int value = usb_input.read();
+  // A failed transaction can leave a late binary response, not just host text.
+  // Retain its known body boundary before recognizing clean shutdown controls.
+  // The static source accessor never allocates/acquires an OTA context here.
+  auto& source = mesh::ota::OtaContext::serialFolderSource();
+  int pending = source.availableControlBytes();
+  while (pending-- > 0) {
+    int value = source.readControlByte();
+    if (value == mesh::ota::SerialMotaSource::RESPONSE_BYTE) continue;
     if (value < 0) break;
     char c = (char)value;
+    if (usb_mota_discard_line) {
+      if (c == '\r' || c == '\n') usb_mota_discard_line = false;
+      continue;
+    }
     if (c == '\r' || c == '\n') {
       if (usb_mota_line_len == 0) continue;
       usb_mota_line[usb_mota_line_len] = 0;
@@ -896,14 +932,40 @@ static void serviceUsbMota() {
       }
       continue;
     }
-    if (usb_mota_line_len < sizeof(usb_mota_line) - 1) {
+    if (c != 0 && usb_mota_line_len < sizeof(usb_mota_line) - 1) {
       usb_mota_line[usb_mota_line_len++] = c;
       usb_mota_line[usb_mota_line_len] = 0;
     } else {
       usb_mota_line_len = 0;
       usb_mota_line[0] = 0;
+      usb_mota_discard_line = true;
     }
   }
+}
+
+static bool serviceUsbMotaResponseBoundary() {
+  if (usb_mota_mode) return false;
+  auto& source = mesh::ota::OtaContext::serialFolderSource();
+  if (!source.hasPendingResponse()) return false;
+  // Failed attach or software handoff must not turn late binary data into
+  // terminal commands or Companion frames. Input typed while waiting is
+  // discarded; only an actual response boundary or host reset ends the wait.
+  if (!usb_serial_interface.isPassthroughMode()) {
+    usb_serial_interface.setPassthroughMode(true);
+  }
+  int pending = source.availableControlBytes();
+  while (pending-- > 0) {
+    if (source.readControlByte() == -1) break;
+    if (!source.hasPendingResponse()) {
+      source.resetSessionState();
+      usb_serial_interface.setPassthroughMode(
+          the_mesh.isTerminalMode() || usb_logging_network_parked
+          || (!mesh::hasDedicatedUsbLoggingPort()
+              && mesh::isUsbLoggingEnabled()));
+      break;
+    }
+  }
+  return true;
 }
 #endif
 
@@ -923,6 +985,7 @@ static void resetUsbTerminalHostSession() {
   if (usb_mota_mode) {
     leaveUsbMotaMode(false);
   }
+  mesh::ota::OtaContext::serialFolderSource().resetSessionState();
 #endif
   if (the_mesh.isTerminalMode()) leaveUsbTerminalMode(false);
   mesh::discardUsbTerminalOutput();
@@ -1034,6 +1097,7 @@ static void serviceUsbTerminal() {
   serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());
   if (usb_logging_network_parked) return;
 #if COMPANION_FEATURE_USB_MOTA_SOURCE
+  if (serviceUsbMotaResponseBoundary()) return;
   if (usb_mota_mode) {
     serviceUsbMota();
     return;
@@ -1059,24 +1123,31 @@ static void serviceUsbTerminal() {
     return;
   }
 
-  // Companion boots as a useful ASCII terminal. MeshCLI's first framed
-  // command begins with '<'; hand that byte over untouched at an empty prompt.
-  // A malformed or accidental probe times out and restores the terminal.
-  if (!usb_logging_terminal_mode
-      && usb_binary_startup_probe.shouldStart(
-          usb_terminal_line_len == 0, usb_terminal_discard_line,
-          mesh::usbCompanionPort().peek())) {
-    const uint32_t frame_count = usb_serial_interface.getCompletedFrameCount();
-    leaveUsbTerminalMode(false);
-    usb_binary_startup_probe.start(millis(), frame_count);
-    return;
-  }
-
   Stream& usb_input = mesh::usbCompanionPort();
-  if (the_mesh.isTerminalWaitingForInput() && usb_input.available() > 0) {
-    enterUsbTerminalMode();
-  }
-  while (usb_input.available()) {
+  bool blank_input = false;
+  int pending = usb_input.available();
+  while (pending-- > 0) {
+    // A leftover CR/LF (for example after mOTA shutdown) must not hide a
+    // following frame or cause a banner to poison its first binary reply.
+    if (usb_terminal_line_len == 0 && !usb_terminal_discard_line) {
+      const int next_byte = usb_input.peek();
+      if (next_byte == '\r' || next_byte == '\n') {
+        usb_input.read();
+        blank_input = true;
+        continue;
+      }
+      // Re-check at each empty prompt, before consuming the '<' byte. A
+      // malformed or accidental probe still returns to ASCII after one second.
+      if (!usb_logging_terminal_mode
+          && usb_binary_startup_probe.shouldStart(true, false, next_byte)) {
+        const uint32_t frame_count = usb_serial_interface.getCompletedFrameCount();
+        leaveUsbTerminalMode(false);
+        usb_binary_startup_probe.start(millis(), frame_count);
+        return;
+      }
+    }
+    if (the_mesh.isTerminalWaitingForInput()) enterUsbTerminalMode();
+
     int value = usb_input.read();
     if (value < 0) break;
     char c = (char)value;
@@ -1086,6 +1157,15 @@ static void serviceUsbTerminal() {
         usb_terminal_discard_line = false;
         usbTerminalOutput().print("> ");
       }
+      continue;
+    }
+
+    if (c == 0) {
+      // The handlers consume C strings. Reject the whole malformed line, not
+      // an apparently valid mutating command before an embedded NUL.
+      clearUsbTerminalLine();
+      usb_terminal_discard_line = true;
+      usbTerminalOutput().print("\r\n  ERROR: invalid command\r\n");
       continue;
     }
 
@@ -1122,9 +1202,9 @@ static void serviceUsbTerminal() {
         return;
       }
 #endif
-      // On dual CDC hardware only CDC1 is the logging-reader endpoint.
-      if (!mesh::hasDedicatedUsbLoggingPort()
-          && strlen(usb_terminal_line) == usb_terminal_line_len)
+      // NUL-containing lines were discarded before reaching this point. On
+      // dual CDC hardware only CDC1 is the logging-reader endpoint.
+      if (!mesh::hasDedicatedUsbLoggingPort())
         mesh::noteUsbLoggingStatsCommand(usb_terminal_line);
       the_mesh.handleTerminalCommand(usb_terminal_line);
       clearUsbTerminalLine();
@@ -1166,6 +1246,9 @@ static void serviceUsbTerminal() {
       return;
     }
   }
+  // Enter alone should still reveal the otherwise silent ASCII session.
+  if (blank_input && usb_input.available() == 0
+      && the_mesh.isTerminalWaitingForInput()) enterUsbTerminalMode();
 }
 
 static void serviceUsbLoggingOwnership(bool logging_enabled) {
@@ -1197,11 +1280,21 @@ static void serviceUsbLoggingOwnership(bool logging_enabled) {
       && logging_action != mesh::UsbLoggingTerminalAction::PARK_USB_FOR_NETWORK) {
     // Bytes typed while USB was log-only belong to neither the new ASCII CLI
     // nor a new Binary client. Bound the discard to the existing RX snapshot.
+#if COMPANION_FEATURE_USB_MOTA_SOURCE
+    const bool response_pending =
+        mesh::ota::OtaContext::serialFolderSource().hasPendingResponse();
+#else
+    const bool response_pending = false;
+#endif
+    // A timed-out mOTA transaction still owns its exact response boundary.
+    // Raw reads would consume its tail without advancing that tracker, leaving
+    // the stream quarantined forever. Let its bounded consumer drain instead.
     Stream& input = mesh::usbCompanionPort();
-    int pending = input.available();
+    int pending = response_pending ? 0 : input.available();
     while (pending-- > 0) input.read();
     usb_logging_network_parked = false;
-    usb_serial_interface.setPassthroughMode(the_mesh.isTerminalMode());
+    usb_serial_interface.setPassthroughMode(
+        the_mesh.isTerminalMode() || response_pending);
   }
   switch (logging_action) {
     case mesh::UsbLoggingTerminalAction::PARK_USB_FOR_NETWORK:
@@ -3347,6 +3440,7 @@ void setup() {
 #endif
   // keep frames intact and pace the contact stream when the host is slow
   usb_serial_interface.enableFlowControl(true);
+  usb_serial_interface.setReceiveFrameCheck(acceptUsbBinaryStartupFrame);
 #if defined(ESP32) && defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 1 \
     && defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
   // The ESP32 USB-Serial-JTAG peripheral (HWCDC) has no DTR concept at all.
@@ -3485,6 +3579,9 @@ void loop() {
 #endif
 #if defined(ENABLE_USB_INTERFACE)
   expireUsbBinaryStartupProbeBeforeDispatch();
+#if COMPANION_FEATURE_USB_MOTA_SOURCE
+  serviceUsbMotaResponseBoundary();
+#endif
 #endif
   the_mesh.loop();
 #if defined(NRF52_PLATFORM) && defined(EXTRAFS) && !defined(QSPIFLASH)
