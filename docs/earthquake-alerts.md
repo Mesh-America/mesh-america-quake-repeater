@@ -28,7 +28,7 @@ Status: experimental, first released as an alpha. The alert logic is unit tested
 
 - **Trigger:** the D7S's own strong-shaking decision (the manufacturer's threshold, roughly JMA intensity 5 Upper, damaging-shaking territory). There is no lower-sensitivity setting yet; that is waiting for real-world recordings.
 - **One message per shake.** After sending, further reports are ignored for `earthquake.cooldown` minutes (default 10, range 1 to 1440).
-- **Final numbers.** The sensor takes about two minutes to finish measuring, so the message waits for the final values (up to four minutes, then sends without them), plus a random 0 to 30 second delay so neighbouring repeaters do not all transmit at once.
+- **As fast as the numbers allow.** The sensor takes about two minutes to finish measuring, and the message carries its final values, so it goes out the moment the sensor is done, plus a random delay of up to 2 seconds so neighbouring repeaters do not all transmit in the same instant. If the sensor has not finished after two and a half minutes, the alert is sent without numbers rather than later. `earthquake status` shows where an event is while it waits.
 - **Nothing queued for later.** If a requirement is missing at that moment (no channel, no location, a sensor fault) the alert is dropped and `earthquake status` counts it as held. Fixing the setting does not resend an old event.
 - **Scope.** The message is flooded with the repeater's own default region (the same one its adverts use), so whatever scoping you have already set up applies. There is no separate alert region.
 - Reports present at power-up are history and are ignored.

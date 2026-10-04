@@ -286,6 +286,20 @@ TEST(SeismicPolicy, NeverUsesARecordItDidNotSeeBeingWritten) {
   EXPECT_FALSE(r.sent.haveValues);  // sends without values rather than stale ones
 }
 
+TEST(SeismicPolicy, ReportsWhereAnEventIsAndHowLongIsLeft) {
+  Rig r;
+  r.step();
+  EXPECT_EQ(r.policy.waitRemainingMs(r.now), 0u);  // no event
+  r.shake();
+  r.processingStarts();
+  r.step();
+  EXPECT_EQ(r.policy.phase(), Policy::Phase::WaitingForRecord);
+  EXPECT_GT(r.policy.waitRemainingMs(r.now), Policy::RecordWaitMs - 2000);
+  EXPECT_LE(r.policy.waitRemainingMs(r.now), Policy::RecordWaitMs);
+  r.run(Policy::RecordWaitMs - 2000);
+  EXPECT_LE(r.policy.waitRemainingMs(r.now), 2000u);
+}
+
 TEST(SeismicPolicy, SendsWithoutValuesIfTheSensorNeverFinishes) {
   Rig r;
   r.step();
