@@ -16,6 +16,7 @@ public:
   static constexpr uint8_t HISTORY_SIZE = 8;
   static constexpr uint8_t NO_HISTORY = 255;
   static constexpr uint32_t DELIVERY_GRACE_MS = 10000;
+  static constexpr uint32_t HOST_EXTRA_TIMEOUT_MS = 5000;
   static constexpr uint32_t LOGIN_QUARANTINE_MS = 30000;
 
   struct Reply {
@@ -50,6 +51,7 @@ private:
   static bool due(uint32_t now, uint32_t deadline);
   static uint32_t retirementDeadline(uint32_t now, uint32_t radio_deadline,
                                      uint32_t floor);
+  static uint32_t radioBudget(const Reply& reply);
   static void reset(Reply& reply);
   static void arm(Reply& reply, uint32_t timeout, bool flood, uint32_t now);
   static bool store(Reply& reply, const uint8_t* frame, size_t len, uint32_t now);

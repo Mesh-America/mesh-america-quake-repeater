@@ -32,16 +32,31 @@ void CompanionDelayedReplies::reset(Reply& reply) {
   reply.sent_pending = false;
 }
 
+uint32_t CompanionDelayedReplies::radioBudget(const Reply& reply) {
+  // Leave room for retirement grace within the signed half of millis range.
+  const uint32_t maximum = 0x7FFFFFFFU - DELIVERY_GRACE_MS;
+  const uint32_t extra = reply.timeout / 5;
+  uint32_t budget = reply.timeout > maximum - extra
+      ? maximum : reply.timeout + extra;
+  if (!reply.terminal) {
+    // Official apps start an estimate + 5s timer when they receive SENT.
+    const uint32_t host_budget = reply.timeout > maximum - HOST_EXTRA_TIMEOUT_MS
+        ? maximum : reply.timeout + HOST_EXTRA_TIMEOUT_MS;
+    if (host_budget > budget) budget = host_budget;
+  }
+  return budget;
+}
+
 void CompanionDelayedReplies::arm(Reply& reply, uint32_t timeout,
                                   bool flood, uint32_t now) {
   reply.timeout = timeout;
-  // Wrap-safe deadlines must stay in the signed half of the millis range.
-  const uint32_t maximum = 0x7FFFFFFFU - DELIVERY_GRACE_MS;
-  uint32_t budget = timeout > maximum / 6 * 5 ? maximum : timeout + timeout / 5;
-  reply.radio_deadline = now + budget;
   reply.flood = flood;
   reply.sent_pending = !reply.terminal;
   reply.sent_deadline = now + DELIVERY_GRACE_MS;
+  // Before SENT admission only the bounded pre-SENT grace applies. Terminal
+  // output has no SENT frame and retains its printed arm-time radio budget.
+  reply.radio_deadline = reply.terminal
+      ? now + radioBudget(reply) : reply.sent_deadline;
   reply.frame_len = 0;
   reply.phase = AwaitRadio;
 }
@@ -80,6 +95,7 @@ bool CompanionDelayedReplies::service(Reply& reply,
       return false;
     }
     reply.sent_pending = false;
+    reply.radio_deadline = now + radioBudget(reply);
   }
   return reply.phase == AwaitAdmission
       && serial->writeFrameToRoute(reply.route, reply.frame, reply.frame_len)
