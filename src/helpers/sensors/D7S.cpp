@@ -36,6 +36,7 @@ bool Sensor::service(uint32_t now) {
     return false;
   }
   data.events |= events & 0x0f;  // Preserve both INT1 causes in a single register read.
+  if (events & SignificantShaking) ++data.shakingCount;
   if (events & (SignificantShaking | Tilt)) {
     // A shaking/tilt flag means a record may have been stored while we were not looking
     // (failure backoff, processing window shorter than the poll). Re-read it in standby.

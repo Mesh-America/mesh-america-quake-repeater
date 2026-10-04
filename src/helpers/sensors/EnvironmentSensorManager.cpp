@@ -1602,6 +1602,22 @@ bool EnvironmentSensorManager::setGpsSerialTransportBlocked(uint8_t uart,
 #endif
 }
 
+#if ENV_INCLUDE_D7S
+bool EnvironmentSensorManager::getSeismicReading(SeismicReading& out) {
+  static bool faulted = false;  // Sticky since boot, whoever clears the sensor's event bits.
+  const auto& s = d7s_sensor.snapshot();
+  if (s.events & (d7s::SelfTestError | d7s::BaselineError)) faulted = true;
+  out.sensorPresent = d7s_active && d7s_confirmed;
+  out.sensorFaulted = faulted;
+  out.processing = s.state != d7s::State::Standby;
+  out.recordValid = s.storedValid;
+  out.shakingCount = s.shakingCount;
+  out.siRaw = s.stored.siRaw;
+  out.pgaRaw = s.stored.pgaRaw;
+  return out.sensorPresent;
+}
+#endif
+
 #if ENV_INCLUDE_GPS || defined(ENV_INCLUDE_BME680_BSEC) || ENV_INCLUDE_D7S
 void EnvironmentSensorManager::loop() {
 

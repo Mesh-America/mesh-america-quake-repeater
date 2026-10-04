@@ -58,6 +58,9 @@ public:
   bool i2c_probe(TwoWire& wire, uint8_t addr) override;
   bool begin() override;
   bool querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) override;
+  #if ENV_INCLUDE_D7S
+  bool getSeismicReading(SeismicReading& out) override;
+  #endif
   uint8_t getVoltageSensorChannels(uint8_t channels[],
                                    uint8_t capacity) const override;
   uint8_t queryVoltageSensors(VoltageSensorReading readings[],

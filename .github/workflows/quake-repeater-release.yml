@@ -3,16 +3,21 @@ name: Quake Repeater Build and Release
 # Builds the Mesh America Quake Repeater image (the only firmware this repository ships), checks it,
 # and on a tag publishes a GitHub release for the web flasher to pick up.
 #
-#   pull request / push to main  ->  build and verify only (replaces the disabled PR Build Check)
-#   tag quake-vX.Y.Z.W           ->  build, verify, then create a pre-release with the package
+#   pull request / push to next  ->  build and verify only
+#   push to main                 ->  build and verify, then, if the version inside the image has no
+#                                    release yet, create the tag quake-vX.Y.Z.W and a pre-release
+#   tag quake-vX.Y.Z.W           ->  build, verify, then create a pre-release (manual tagging)
 #   manual run                   ->  build and verify, upload the result as a workflow artifact
 #
-# The tag must name the version inside the image (quake-v1.17.1.0 for firmware 1.17.1.0). A
-# mismatch fails the run before anything is published.
+# Work lands on `next`; a pull request from `next` to `main` is the release. The tag always names
+# the version inside the image (quake-v1.17.1.0 for firmware 1.17.1.0): a pushed tag that does not
+# match fails the run, and on main the tag is derived from the image, so it cannot mismatch. Bump
+# FIRMWARE_VERSION in variants/meshamerica_quake/platformio.ini to release; a push to main that
+# does not bump it publishes nothing.
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, next]
     paths:
       - 'src/**'
       - 'include/**'
@@ -29,7 +34,7 @@ on:
   # No path filter on push: GitHub does not reliably apply one to tag pushes, and a release that
   # silently fails to start is worse than one extra build of main.
   push:
-    branches: [main]
+    branches: [main, next]
     tags: ['quake-v*']
   workflow_dispatch:
 
@@ -97,9 +102,10 @@ jobs:
           if-no-files-found: error
 
   release:
-    # Only for a tag. Everything above has already passed, including the check that the tag names
-    # the version inside the image.
-    if: startsWith(github.ref, 'refs/tags/quake-v')
+    # For a quake tag, or a push to main (which tags the version in the image if it is new).
+    # Everything above has already passed, including the check that a tag names the version inside
+    # the image.
+    if: startsWith(github.ref, 'refs/tags/quake-v') || github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -111,10 +117,29 @@ jobs:
           name: quake-repeater-release
           path: dist
 
-      - name: Create release
+      - name: Work out the tag
+        id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="quake-v$(python3 -c 'import json; print(json.load(open("dist/manifest.json"))["version"])')"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" != refs/tags/* ]] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        if: steps.tag.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           python3 - <<'PY' > notes.md
           import json
@@ -128,9 +153,15 @@ jobs:
           print(f"- OTA target id: `{m['targetId']}`, hardware tag `{m['hardwareId']}`")
           print(f"- Built from commit `{m['commit']}`")
           PY
+          # A pushed tag already exists. On main, creating the release creates the tag at this commit.
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_FLAGS=(--verify-tag)
+          else
+            TAG_FLAGS=(--target "$GITHUB_SHA")
+          fi
           gh release create "$TAG" dist/*.zip dist/manifest.json \
             --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
+            "${TAG_FLAGS[@]}" \
             --prerelease \
             --title "Quake Repeater ${TAG#quake-v}" \
             --notes-file notes.md
