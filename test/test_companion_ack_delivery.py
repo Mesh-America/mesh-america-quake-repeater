@@ -75,6 +75,7 @@ class CompanionAckDeliveryTests(unittest.TestCase):
                         f"-I{ROOT / 'src'}", str(FIXTURE),
                         str(ROOT / "src/helpers/ArduinoSerialInterface.cpp"),
                         str(ROOT / "src/helpers/wifi/SerialWifiInterface.cpp"),
+                        str(ROOT / "src/helpers/CompanionDelayedReplies.cpp"),
                         "-o", str(binary),
                     ], capture_output=True, text=True, timeout=60)
                     self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)

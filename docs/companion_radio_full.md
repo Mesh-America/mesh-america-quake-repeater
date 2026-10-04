@@ -558,6 +558,35 @@ or UART backpressure pauses the contact stream; a frame may drain through a
 smaller hardware FIFO in ordered chunks, but its remainder is retained and no
 later frame can interleave with it or cause it to be discarded.
 
+Binary login, status, telemetry, path-discovery, binary-request, and trace
+results also have bounded producer retention when that transport queue is
+full. One request result and one trace result can wait independently, on their
+original captured interfaces. Their required `SENT` frames are retained and
+admitted before the final result. A first valid radio result gets up to ten
+seconds for whole-frame queue admission; a still-blocked `SENT` keeps its
+earlier ten-second deadline. Duplicate callbacks cannot replace the retained
+result or extend these deadlines. Disconnect, cancellation, or expiry drops
+an unadmitted result. Queue admission is not proof of physical host receipt.
+
+Reflected request tags are matched against the complete peer public key.
+Recent request and trace history has eight slots each, reserved before radio
+transmission; live entries are never evicted to accept a newer request. A full
+history or a quarantined identifier returns `ERR_BAD_STATE`, so clients must
+back off. Retired reflected tags and trace tag/auth tuples are suppressed for
+at least ten seconds and through the original radio deadline plus ten seconds
+when longer. Login retries to the same peer have at least a thirty-second
+quarantine. Positively matched newer status/telemetry/binary replies still work
+after login, but otherwise unsolicited responses from that login peer can be
+suppressed during the quarantine.
+
+These guards are finite and clear at reboot. Login replies carry a server
+timestamp, not an echoed request nonce; sufficiently late replies or a
+timestamp collision cannot always be distinguished without a protocol change.
+Trace tag/auth fields are correlation data, not cryptographic authentication.
+The guards do not authenticate a host process or retract frames already
+accepted by a transport. In particular, the same-IP TCP queue replay described
+above remains unchanged, including its lack of authentication.
+
 When a BLE client requests pairing, a display-equipped build wakes the screen,
 switches to the first home page, and keeps the active six-digit PIN visible
 until Bluetooth connects or the two-minute pairing window expires. USB, WiFi,

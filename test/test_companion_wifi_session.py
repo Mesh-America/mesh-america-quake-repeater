@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -21,6 +22,7 @@ HARNESS = r'''
 #include <deque>
 #include <vector>
 #include <helpers/MultiSerialInterface.h>
+#include <helpers/CompanionDelayedReplies.h>
 
 struct FakeInterface : BaseSerialInterface {
   bool enabled = false;
@@ -47,9 +49,8 @@ struct MyMesh {
   bool streaming = false;
   int stream_cancels = 0, pending_cancels = 0, radio_cancels = 0;
   int trace_cancels = 0, signing_cancels = 0, expirations = 0;
-  BaseSerialInterface* pending_serial_reply_route = nullptr;
+  mesh::CompanionDelayedReplies _delayed_replies;
   BaseSerialInterface* command_radio_reply_route = nullptr;
-  BaseSerialInterface* binary_trace_reply_route = nullptr;
   BaseSerialInterface* sign_data_reply_route = nullptr;
   BaseSerialInterface* private_key_backup_route = nullptr;
   unsigned long private_key_backup_deadline = 0;
@@ -61,9 +62,9 @@ struct MyMesh {
     ++stream_cancels;
     if (streaming) { streaming = false; interface_manager.unlockReplyRoute(); }
   }
-  void clearPendingReqs() { ++pending_cancels; pending_serial_reply_route = nullptr; }
+  void clearPendingReqs() { ++pending_cancels; _delayed_replies.retireRequest(millis()); }
   void cancelPendingRadioParamApply() { ++radio_cancels; command_radio_reply_route = nullptr; }
-  void clearBinaryTraceReply() { ++trace_cancels; binary_trace_reply_route = nullptr; }
+  void clearBinaryTraceReply() { ++trace_cancels; _delayed_replies.retireBinaryTrace(millis()); }
   void cancelSigningSession() { ++signing_cancels; sign_data_reply_route = nullptr; }
   void expireExpectedAcks() { ++expirations; }
   void cancelSerialOperationsForRoute(BaseSerialInterface*);
@@ -85,9 +86,13 @@ int main() {
     assert(interface_manager.checkRecvFrame(command) == 1);
     interface_manager.lockReplyRoute();
     the_mesh.streaming = true;
-    the_mesh.pending_serial_reply_route = owner;
+    const uint8_t peer[32] = {1};
+    assert(the_mesh._delayed_replies.reserveRequest(
+        mesh::CompanionDelayedReplies::Binary, peer, owner, false, millis()));
+    the_mesh._delayed_replies.armRequest(17, 1000, false, millis());
     the_mesh.command_radio_reply_route = owner;
-    the_mesh.binary_trace_reply_route = owner;
+    assert(the_mesh._delayed_replies.reserveBinaryTrace(17, 23, owner, millis()));
+    the_mesh._delayed_replies.armBinaryTrace(1000, millis());
     the_mesh.sign_data_reply_route = owner;
     the_mesh.private_key_backup_route = owner;
     the_mesh.private_key_backup_deadline = 1234;
@@ -108,9 +113,11 @@ int main() {
     assert(the_mesh.radio_cancels == int(cancelled));
     assert(the_mesh.trace_cancels == int(cancelled));
     assert(the_mesh.signing_cancels == int(cancelled));
-    assert(the_mesh.pending_serial_reply_route == (cancelled ? nullptr : owner));
+    assert(the_mesh._delayed_replies.request.route == (cancelled ? nullptr : owner));
+    assert(the_mesh._delayed_replies.hasRequest() == !cancelled);
     assert(the_mesh.command_radio_reply_route == (cancelled ? nullptr : owner));
-    assert(the_mesh.binary_trace_reply_route == (cancelled ? nullptr : owner));
+    assert(the_mesh._delayed_replies.trace.route == (cancelled ? nullptr : owner));
+    assert(the_mesh._delayed_replies.hasBinaryTrace() == !cancelled);
     assert(the_mesh.sign_data_reply_route == (cancelled ? nullptr : owner));
     assert(the_mesh.private_key_backup_route == (cancelled ? nullptr : owner));
     assert(the_mesh.private_key_backup_deadline == (cancelled ? 0UL : 1234UL));
@@ -208,8 +215,11 @@ class CompanionWiFiSessionTest(unittest.TestCase):
             executable = Path(directory) / ("wifi_session.exe" if os.name == "nt" else "wifi_session")
             result = subprocess.run(
                 [os.environ.get("CXX", "g++"), "-std=c++17", "-Werror",
+                 *(["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                    "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else []),
                  f"-I{ROOT / 'test/mocks'}", f"-I{ROOT / 'src'}",
-                 "-x", "c++", "-", "-o", str(executable)],
+                 "-x", "c++", "-", str(ROOT / "src/helpers/CompanionDelayedReplies.cpp"),
+                 "-o", str(executable)],
                 input=source, text=True, capture_output=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)

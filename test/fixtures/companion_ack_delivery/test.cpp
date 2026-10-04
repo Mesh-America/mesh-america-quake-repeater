@@ -1,5 +1,6 @@
 #include <helpers/ArduinoSerialInterface.h>
 #include <helpers/MultiSerialInterface.h>
+#include <helpers/CompanionDelayedReplies.h>
 #include <helpers/wifi/SerialWifiInterface.h>
 #include <algorithm>
 #include <cassert>
@@ -51,15 +52,14 @@ public:
   const uint8_t* last_connection_ack_input = nullptr;
   bool retry_active[256] = {};
   Terminal terminal;
-  BaseSerialInterface* pending_serial_reply_route = nullptr;
+  mesh::CompanionDelayedReplies _delayed_replies;
   BaseSerialInterface* command_radio_reply_route = nullptr;
-  BaseSerialInterface* binary_trace_reply_route = nullptr;
   BaseSerialInterface* sign_data_reply_route = nullptr;
   BaseSerialInterface* private_key_backup_route = nullptr;
   unsigned long private_key_backup_deadline = 0;
   char private_key_backup_nonce[17] = {};
   uint8_t private_key_backup_sender[6] = {};
-  bool command_radio_apply_pending = false, binary_trace_pending = false;
+  bool command_radio_apply_pending = false;
   // Radio dispatch, peer-store, and terminal I/O are hardware boundaries. All
   // ACK state decisions and transport admission execute production code.
   bool cancelActiveRetries(const uint8_t* key) {
@@ -81,9 +81,9 @@ public:
   }
   bool hasTerminalOutput() const { return true; }
   Terminal& terminalOutput() { return terminal; }
-  void clearPendingReqs() { pending_serial_reply_route = nullptr; }
+  void clearPendingReqs() { _delayed_replies.retireRequest(millis()); }
   void cancelPendingRadioParamApply() { command_radio_reply_route = nullptr; }
-  void clearBinaryTraceReply() { binary_trace_reply_route = nullptr; }
+  void clearBinaryTraceReply() { _delayed_replies.retireBinaryTrace(millis()); }
   void cancelSigningSession() { sign_data_reply_route = nullptr; }
   bool millisHasNowPassed(unsigned long) const;
   unsigned long futureMillis(int) const;

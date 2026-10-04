@@ -15,6 +15,7 @@ COMMON_HARNESS = r'''
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <helpers/CompanionDelayedReplies.h>
 struct Board {
  bool updating=false, testing=false;
  bool isOTAUpdateRunning() const{return updating;}
@@ -45,9 +46,9 @@ struct RoleMesh {
      _scheduled_reboot_at=0;
  bool outbound=false, temporary=false, ota_apply=false,
      saved_radio_apply_pending=false, temp_radio_handoff_pending=false,
-     command_radio_apply_pending=false, binary_trace_pending=false,
-     _iter_started=false, terminal=true;
- void* pending_serial_reply_route=nullptr;
+     command_radio_apply_pending=false,
+     _iter_started=false, _terminal_trace_pending=false, terminal=true;
+ mesh::CompanionDelayedReplies _delayed_replies;
  void* sign_data=nullptr;
  Store store;
  Store* _store=&store;
@@ -56,6 +57,7 @@ struct RoleMesh {
  bool hasOutbound() const{return outbound;}
  bool isAnyTempRadioActive() const{return temporary;}
  bool hasPendingOtaApply() const{return ota_apply;}
+ bool hasPendingReqs() const{return _delayed_replies.hasRequest();}
  bool isTerminalMode() const{return terminal;}
 #if MESH_USB_CONSOLE_COOPERATIVE
  bool functional_output=false;
@@ -184,18 +186,31 @@ class UsbLoggingWatchdogRoleTests(unittest.TestCase):
         callback = method((directory / 'main.cpp').read_text(),
                           'static bool usbLoggingRecoverySafe(void*)')
         role_checks = r'''
-   for(auto member : {&RoleMesh::command_radio_apply_pending,
-                      &RoleMesh::binary_trace_pending}){
-     the_mesh.*member=true;assert(!usbLoggingRecoverySafe(nullptr));
-     the_mesh.*member=false;
+   the_mesh.command_radio_apply_pending=true;assert(!usbLoggingRecoverySafe(nullptr));
+   the_mesh.command_radio_apply_pending=false;
+   for(auto slot : {&the_mesh._delayed_replies.request, &the_mesh._delayed_replies.trace}){
+     slot->phase=mesh::CompanionDelayedReplies::AwaitRadio;
+     assert(!usbLoggingRecoverySafe(nullptr));
+     slot->phase=mesh::CompanionDelayedReplies::AwaitAdmission;
+     assert(!usbLoggingRecoverySafe(nullptr));
+     slot->phase=mesh::CompanionDelayedReplies::Empty;
    }
+   // Terminal TRACE owns only a history reservation, not a binary reply slot.
+   // Its deadline still must be serviced before USB recovery can reset it.
+   the_mesh._terminal_trace_pending=true;
+#if COMPANION_FEATURE_TEXT_TERMINAL
+   assert(!the_mesh.canRecoverUsbLogging());
+   assert(!usbLoggingRecoverySafe(nullptr));
+#else
+   assert(the_mesh.canRecoverUsbLogging());
+   assert(usbLoggingRecoverySafe(nullptr));
+#endif
+   the_mesh._terminal_trace_pending=false;
    the_mesh.store.dirty=true;assert(!usbLoggingRecoverySafe(nullptr));
    the_mesh.store.dirty=false;
    the_mesh._scheduled_reboot_at=1;assert(!usbLoggingRecoverySafe(nullptr));
    the_mesh._scheduled_reboot_at=0;
    int route=1;
-   the_mesh.pending_serial_reply_route=&route;assert(!usbLoggingRecoverySafe(nullptr));
-   the_mesh.pending_serial_reply_route=nullptr;
    the_mesh.sign_data=&route;assert(!usbLoggingRecoverySafe(nullptr));
    the_mesh.sign_data=nullptr;
    the_mesh.serial.pending=true;assert(!usbLoggingRecoverySafe(nullptr));
@@ -244,9 +259,10 @@ class UsbLoggingWatchdogRoleTests(unittest.TestCase):
 '''
         harness = self._harness('bool canRecoverUsbLogging() const;', accessor,
                                 callback, role_checks, '', companion_checks)
-        for usb, mota in product((0, 1), repeat=2):
-            with self.subTest(usb=usb, mota=mota):
-                self._compile_and_run(harness, cooperative=usb, usb=usb, mota=mota)
+        for usb, mota, terminal in product((0, 1), repeat=3):
+            with self.subTest(usb=usb, mota=mota, terminal=terminal):
+                self._compile_and_run(harness, cooperative=usb, usb=usb, mota=mota,
+                                      terminal=terminal)
 
     def test_every_role_loads_durable_state_and_services_recovery_in_normal_loop(self):
         for role in ('companion_radio', 'simple_repeater', 'simple_room_server',
@@ -273,20 +289,24 @@ class UsbLoggingWatchdogRoleTests(unittest.TestCase):
                 .replace('@COMMAND_VETOES@', commands)
                 .replace('@COMPANION_VETOES@', companion))
 
-    def _compile_and_run(self, harness, cooperative, usb=0, mota=0):
+    def _compile_and_run(self, harness, cooperative, usb=0, mota=0, terminal=0):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             cpp = work / 'roles.cpp'
             cpp.write_text(harness)
             binary = work / 'roles'
             flags = ['-DMESH_USB_CONSOLE_COOPERATIVE=' + str(cooperative),
-                     '-DCOMPANION_FEATURE_USB_MOTA_SOURCE=' + str(mota)]
+                     '-DCOMPANION_FEATURE_USB_MOTA_SOURCE=' + str(mota),
+                     '-DCOMPANION_FEATURE_TEXT_TERMINAL=' + str(terminal)]
             if usb:
                 flags.append('-DENABLE_USB_INTERFACE=1')
             built = subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17',
                 '-Wall', '-Wextra', '-Werror', '-Wno-unused-variable',
                 '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
-                '-fno-pie', '-no-pie', *flags, str(cpp), '-o', str(binary)],
+                '-fno-pie', '-no-pie', *flags,
+                '-isystem', str(ROOT / "test/mocks"), f'-I{ROOT / "src"}',
+                str(cpp), str(ROOT / 'src/helpers/CompanionDelayedReplies.cpp'),
+                '-o', str(binary)],
                 capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True)
