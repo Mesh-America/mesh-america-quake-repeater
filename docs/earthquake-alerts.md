@@ -58,7 +58,9 @@ Settings are stored in `/quake_prefs`, separate from the shared preferences file
 
 ## The clock
 
-Alerts do not need the clock. A repeater with no battery-backed clock module or GPS starts at 1970 after every power loss and then sends alerts stamped with that date. Clients still show them (tested), just with the wrong time. Set the time with `time <epoch seconds>` (or `gps sync` with a GPS fitted) if you want proper timestamps.
+Alerts do not need the clock. A repeater with no battery-backed clock module or GPS falls back to its built-in date (1 March 2026) after a power loss or update, and its alerts carry that date. Clients still show them (tested), just with the wrong time. Set the time with `time <epoch seconds>` (or `gps sync` with a GPS fitted) for proper timestamps.
+
+A wrong clock can also stop the MeshCore app logging in, because peers reject timestamps lower than ones they already saw. Release 1.17.1.5 and later keep the clock from going backwards across a restart: see [clock-floor.md](clock-floor.md).
 
 ## Not in this version
 
