@@ -628,9 +628,7 @@ static void serviceCompanionPowerSaving(bool force = false) {
 
 #if defined(ETHERNET_ENABLED)
 static void cancelCompanionEthernetSession(void*) {
-  if (interface_manager.isReplyRouteFor(&ethernet_interface)) {
-    the_mesh.cancelSerialResponseStream();
-  }
+  the_mesh.cancelSerialResponseStream(&ethernet_interface);
   the_mesh.cancelSerialOperationsForRoute(&ethernet_interface);
   interface_manager.forgetReplyRouteForDisconnected(&ethernet_interface);
 }
@@ -777,12 +775,9 @@ static void cancelUsbSerialOperations() {
   // A cancelled reply must not enable diagnostics for the next USB host.
   usb_logging_reply_pending = false;
 #endif
-  // Contact enumeration uses the manager's pinned streaming route; delayed
-  // single replies capture their own route inside MyMesh. Cancel only USB's
-  // ownership so a simultaneous BLE/WiFi operation keeps running.
-  if (interface_manager.isReplyRouteFor(&usb_serial_interface)) {
-    the_mesh.cancelSerialResponseStream();
-  }
+  // Contact streams and delayed replies capture their own destinations.
+  // Cancel only USB's ownership so simultaneous BLE/WiFi work keeps running.
+  the_mesh.cancelSerialResponseStream(&usb_serial_interface);
   the_mesh.cancelSerialOperationsForRoute(&usb_serial_interface);
   interface_manager.forgetReplyRouteForDisconnected(&usb_serial_interface);
 }
@@ -2308,9 +2303,7 @@ void halt() {
   }
 
   static void cancelCompanionWiFiSession(void*) {
-    if (interface_manager.isReplyRouteFor(&wifi_interface)) {
-      the_mesh.cancelSerialResponseStream();
-    }
+    the_mesh.cancelSerialResponseStream(&wifi_interface);
     the_mesh.cancelSerialOperationsForRoute(&wifi_interface);
     interface_manager.forgetReplyRouteForDisconnected(&wifi_interface);
   }
@@ -2753,6 +2746,7 @@ static bool hasCompanionNonBluetoothClient() {
 
 static void disableCompanionBluetoothForCli() {
   companion_bluetooth_off_at = 0;
+  the_mesh.cancelSerialResponseStream(&bluetooth_interface);
   the_mesh.cancelSerialOperationsForRoute(&bluetooth_interface);
   interface_manager.disableBluetooth();
   interface_manager.forgetReplyRouteForDisconnected(&bluetooth_interface);
@@ -3422,9 +3416,7 @@ void setup() {
 // add usb interface
 #if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
   wifi_interface.setSessionChangedCallback([](void*) {
-    if (interface_manager.isReplyRouteFor(&wifi_interface)) {
-      the_mesh.cancelSerialResponseStream();
-    }
+    the_mesh.cancelSerialResponseStream(&wifi_interface);
     the_mesh.cancelSerialOperationsForRoute(&wifi_interface);
     interface_manager.forgetReplyRouteForDisconnected(&wifi_interface);
   }, nullptr);

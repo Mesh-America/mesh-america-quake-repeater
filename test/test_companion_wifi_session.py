@@ -58,7 +58,8 @@ struct MyMesh {
   uint8_t private_key_backup_sender[6] = {};
   struct Ack { BaseSerialInterface* reply_route; bool radio_retry; };
   Ack expected_ack_table[EXPECTED_ACK_TABLE_SIZE] = {};
-  void cancelSerialResponseStream() {
+  void cancelSerialResponseStream(BaseSerialInterface* route) {
+    if (!interface_manager.isReplyRouteFor(route)) return;
     ++stream_cancels;
     if (streaming) { streaming = false; interface_manager.unlockReplyRoute(); }
   }

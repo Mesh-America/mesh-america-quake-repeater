@@ -51,6 +51,7 @@ struct {
    bluetooth_preference=durable_bluetooth_preference=enabled;return true;
  }
  bool isAnyNetworkTerminalMode(){return network_terminal;}
+ void cancelSerialResponseStream(BaseSerialInterface*) {}
  void cancelSerialOperationsForRoute(BaseSerialInterface* route){
    assert(route==&bluetooth_interface);++cancelled;
  }

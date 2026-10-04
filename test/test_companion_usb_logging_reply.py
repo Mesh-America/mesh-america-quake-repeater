@@ -96,7 +96,9 @@ struct MyMesh {
   uint8_t cmd_frame[MAX_FRAME_SIZE+1]{}, out_frame[MAX_FRAME_SIZE+4]{};
   char reply_buf[166]{};
   bool isTerminalMode() const { return terminal; }
-  void cancelSerialResponseStream() { ++cancellations; }
+  void cancelSerialResponseStream(BaseSerialInterface* route) {
+    if (interface_manager.isReplyRouteFor(route)) ++cancellations;
+  }
   void cancelSerialOperationsForRoute(BaseSerialInterface*) {}
   void enterTerminalMode(bool show_banner) {
     terminal=true;

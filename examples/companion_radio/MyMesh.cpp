@@ -369,7 +369,8 @@ void MyMesh::writeDisabledFrame() {
   _serial->writeFrame(buf, 1);
 }
 
-bool MyMesh::writeContactRespFrame(uint8_t code, const ContactInfo &contact) {
+bool MyMesh::writeContactRespFrame(uint8_t code, const ContactInfo &contact,
+                                  BaseSerialInterface* route) {
   int i = 0;
   out_frame[i++] = code;
   memcpy(&out_frame[i], contact.id.pub_key, PUB_KEY_SIZE);
@@ -389,7 +390,8 @@ bool MyMesh::writeContactRespFrame(uint8_t code, const ContactInfo &contact) {
   i += 4;
   memcpy(&out_frame[i], &contact.lastmod, 4);
   i += 4;
-  return _serial->writeFrame(out_frame, i) == (size_t)i;
+  return (route != NULL ? _serial->writeFrameToRoute(route, out_frame, i)
+                        : _serial->writeFrame(out_frame, i)) == (size_t)i;
 }
 
 void MyMesh::stopContactsIterator() {
@@ -399,7 +401,7 @@ void MyMesh::stopContactsIterator() {
   _iter_start_pending = false;
   _iter_contact_pending = false;
   _iter_next_frame_at = 0;
-  if (_serial != NULL) _serial->unlockReplyRoute();
+  _iter_reply_route = NULL;
 }
 
 static constexpr int CONTACT_UPDATE_FRAME_MIN_LEN =
@@ -2271,6 +2273,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
       _serial(NULL), _mota_source_control(NULL),
       telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui), _iter(0) {
   _iter_started = false;
+  _iter_reply_route = NULL;
   _iter_start_pending = false;
   _iter_contact_pending = false;
   _iter_next_frame_at = 0;
@@ -5181,8 +5184,8 @@ void MyMesh::serviceSigningSession() {
   }
 }
 
-void MyMesh::cancelSerialResponseStream() {
-  stopContactsIterator();
+void MyMesh::cancelSerialResponseStream(BaseSerialInterface* route) {
+  if (route == NULL || _iter_reply_route == route) stopContactsIterator();
 }
 
 void MyMesh::cancelSerialOperationsForRoute(BaseSerialInterface* route) {
@@ -5268,7 +5271,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     MESH_DEBUG_PRINTLN("App %s connected", app_name);
 
     BaseSerialInterface* app_route = _serial->captureReplyRoute();
-    stopContactsIterator(); // stop any left-over ContactsIterator
+    cancelSerialResponseStream(app_route);
     cancelSerialOperationsForRoute(app_route);
     int i = 0;
     out_frame[i++] = RESP_CODE_SELF_INFO;
@@ -5535,9 +5538,10 @@ void MyMesh::handleCmdFrame(size_t len) {
         _iter_filter_since = 0;
       }
 
-      // CONTACTS_START, every CONTACT, and END_OF_CONTACTS are one response
-      // transaction. Keep them on the transport which requested the list.
-      _serial->lockReplyRoute();
+      // Retain this stream's destination independently of later commands.
+      // BLE's paced contact sync must not hold USB/WiFi command polling until
+      // the entire list finishes, or redirect their replies to the BLE app.
+      _iter_reply_route = _serial->captureReplyRoute();
       _iter = startContactsIterator();
       _iter_started = true;
       _iter_start_pending = true;
@@ -5550,7 +5554,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       uint8_t reply[5];
       reply[0] = RESP_CODE_CONTACTS_START;
       memcpy(&reply[1], &_iter_total_count, 4); // total, NOT filtered count
-      if (_serial->writeFrame(reply, 5) == 5) {
+      if (_serial->writeFrameToRoute(_iter_reply_route, reply, 5) == 5) {
         _iter_start_pending = false;
         _iter_next_frame_at = futureMillis(CONTACT_STREAM_FRAME_INTERVAL_MS);
       }
@@ -10123,6 +10127,9 @@ void MyMesh::checkCLIRescueCmd() {
 
 void MyMesh::checkSerialInterface() {
   size_t len = _serial->checkRecvFrame(cmd_frame);
+  if (_iter_started && !_serial->isReplyRouteAvailable(_iter_reply_route)) {
+    stopContactsIterator();
+  }
   if (!_serial->isConnected()) {
     stopContactsIterator();
     return;
@@ -10130,11 +10137,12 @@ void MyMesh::checkSerialInterface() {
 
   if (len > 0) {
     handleCmdFrame(len);
-  } else if (_iter_started              // check if our ContactsIterator is 'running'
+  }
+  if (_iter_started              // check if our ContactsIterator is 'running'
              && (_iter_next_frame_at == 0
                  || _iter_next_frame_at == _ms->getMillis()
                  || millisHasNowPassed(_iter_next_frame_at))
-             && !_serial->isWriteBusy() // don't spam the Serial Interface too quickly!
+             && !_serial->isReplyRouteWriteBusy(_iter_reply_route)
   ) {
     if (_iter_table_revision != getContactTableRevision()) {
       // The paced stream walks the live compacting table. If an advert, app
@@ -10154,7 +10162,8 @@ void MyMesh::checkSerialInterface() {
       uint8_t reply[5];
       reply[0] = RESP_CODE_CONTACTS_START;
       memcpy(&reply[1], &_iter_total_count, 4);
-      if (_serial->writeFrame(reply, sizeof(reply)) == sizeof(reply)) {
+      if (_serial->writeFrameToRoute(_iter_reply_route, reply, sizeof(reply))
+          == sizeof(reply)) {
         _iter_start_pending = false;
         _iter_next_frame_at = futureMillis(CONTACT_STREAM_FRAME_INTERVAL_MS);
       }
@@ -10171,7 +10180,7 @@ void MyMesh::checkSerialInterface() {
         out_frame[0] = RESP_CODE_END_OF_CONTACTS;
         memcpy(&out_frame[1], &_most_recent_lastmod,
                4); // include the most recent lastmod, so app can update their 'since'
-        if (_serial->writeFrame(out_frame, 5) == 5) {
+        if (_serial->writeFrameToRoute(_iter_reply_route, out_frame, 5) == 5) {
           stopContactsIterator();
         }
         return;
@@ -10181,7 +10190,8 @@ void MyMesh::checkSerialInterface() {
     // Do not advance past a contact until its complete frame has been accepted
     // by the selected transport. A transiently full/lost route must not turn a
     // successful CONTACTS_START/END transaction into a silently short list.
-    if (writeContactRespFrame(RESP_CODE_CONTACT, _iter_pending_contact)) {
+    if (writeContactRespFrame(RESP_CODE_CONTACT, _iter_pending_contact,
+                              _iter_reply_route)) {
       if (_iter_pending_contact.lastmod > _most_recent_lastmod) {
         _most_recent_lastmod = _iter_pending_contact.lastmod;
       }
@@ -10346,7 +10356,8 @@ bool MyMesh::canRecoverUsbLogging() const {
       && !_terminal_trace_pending
 #endif
       && !(_serial && _serial->hasPendingIO())
-      && !(_iter_started && _serial && _serial->isConnected());
+      && !(_iter_started && _serial
+           && _serial->isReplyRouteAvailable(_iter_reply_route));
 }
 
 bool MyMesh::hasPendingWork() const {
@@ -10370,7 +10381,8 @@ bool MyMesh::hasPendingWork() const {
   const bool contact_write_needs_polling = isContactWriteDue();
 #endif
   return (_serial != NULL && _serial->hasPendingIO())
-      || (_iter_started && _serial != NULL && _serial->isConnected())
+      || (_iter_started && _serial != NULL
+          && _serial->isReplyRouteAvailable(_iter_reply_route))
       || hasPendingOtaApply()
       || command_radio_apply_pending
       || _scheduled_reboot_at != 0
