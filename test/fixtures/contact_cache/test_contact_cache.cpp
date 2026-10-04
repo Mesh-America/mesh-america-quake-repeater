@@ -489,11 +489,11 @@ static void background_crc_verification_uses_bounded_batches() {
     total_crc_reads += read_count;
     max_reads = std::max(max_reads, read_count);
     max_backend_reads = std::max(max_backend_reads, backend_count);
-    assert(read_count <= 8 && backend_count <= 4);
+    assert(read_count <= 8 && backend_count <= 1);
   }
   assert(total_crc_reads == 825);
   assert(crc_read_passes == 104);
-  assert(max_reads == 8 && max_backend_reads == 4);
+  assert(max_reads == 8 && max_backend_reads == 1);
   assert(!SPIFFS.exists("/contacts3.tmp"));
   f.host.contacts.clear();
   f.store.loadContacts(&f.host);
@@ -818,9 +818,30 @@ static void contact_tx_policy_round_trips_without_growing_records() {
   }
 }
 
+
+#if defined(ESP32_PLATFORM)
+static void deferred_cleanup_publishes_actual_cached_handles() {
+  Fixture f(40);
+  const auto old = SPIFFS.files.at("/contacts3");
+  SPIFFS.files["/contacts3.bak"] = {9, 8, 7};
+  assert(f.host.contacts[0].setRawPath(route(2100).data()));
+  assert(f.store.markContactDirty(f.host.contacts[0]));
+  for (unsigned step = 0; step < 4; ++step)
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+  assert(SPIFFS.files.at("/contacts3.bak") == std::vector<uint8_t>({9, 8, 7}));
+  assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+  assert(!SPIFFS.exists("/contacts3.bak") && SPIFFS.files.at("/contacts3") == old);
+  drain_cooperative_save(f);
+  assert(!f.store.hasPendingContactWrites() && SPIFFS.files.at("/contacts3.bak") == old);
+  f.check(0, route(2100));
+  for (unsigned i = 1; i < 40; ++i) f.check(i, route(i));
+}
+#endif
+
 int main() {
   contact_tx_policy_round_trips_without_growing_records();
 #if defined(ESP32_PLATFORM)
+  deferred_cleanup_publishes_actual_cached_handles();
   cooperative_save_services_commands_and_preserves_snapshots();
   background_crc_verification_uses_bounded_batches();
   cooperative_mutations_never_publish_obsolete_indices();

@@ -33,11 +33,12 @@ private:
   // This bounded stdio buffer coalesces records without the SDK's 4 KiB burst;
   // one logical record can flush at most one full buffer per write pass.
   static constexpr size_t ESP_WRITE_BUFFER_SIZE = 251;
+  static constexpr size_t ESP_BACKGROUND_WRITE_BUFFER_SIZE = 502;
   static constexpr size_t ESP_VERIFY_BUFFER_SIZE = 128;
   static_assert(storage::CONTACT_RECORD_SIZE <= ESP_WRITE_BUFFER_SIZE,
                 "Contact records must fit one bounded writer buffer");
   enum class BeginStage : uint8_t {
-    Target, Backup, Recover, Temp, Remove, Open, Configure, Ready, Failed
+    Target, Backup, Recover, RetireBackup, Temp, Remove, Open, Configure, Ready, Failed
   };
   BeginStage _begin_stage = BeginStage::Target;
   bool _begin_target_exists = false;
@@ -106,7 +107,7 @@ public:
   operator bool() const { return _ok; }
 #if defined(ESP32_PLATFORM)
   enum class BeginProgress : uint8_t { Pending, Ready, Failed };
-  BeginProgress serviceBegin() {
+  BeginProgress serviceBegin(bool background_contact_write = false) {
     bool ok = true;
     switch (_begin_stage) {
       case BeginStage::Target:
@@ -118,8 +119,22 @@ public:
         if (ok) _begin_stage = BeginStage::Recover;
         break;
       case BeginStage::Recover:
-        if (!_begin_target_exists && _begin_backup_exists)
+        if (!_begin_target_exists && _begin_backup_exists) {
           ok = _fs->rename(_backup, _target);
+          if (ok) {
+            _begin_target_exists = true;
+            _begin_backup_exists = false;
+          }
+        }
+        if (ok) _begin_stage = background_contact_write
+            ? BeginStage::RetireBackup : BeginStage::Temp;
+        break;
+      case BeginStage::RetireBackup:
+        // A successful prior publication may retain its old backup. Retire it
+        // in a separate setup pass only when the original target was present.
+        // Recover already consumed the backup when the target was missing.
+        if (_begin_target_exists && _begin_backup_exists)
+          ok = _fs->remove(_backup);
         if (ok) _begin_stage = BeginStage::Temp;
         break;
       case BeginStage::Temp:
@@ -140,9 +155,11 @@ public:
         if (ok) _begin_stage = BeginStage::Configure;
         break;
       case BeginStage::Configure:
-        // Arduino otherwise batches small writes into a 4 KiB stdio buffer.
-        // Configure the newly opened stream before its first I/O.
-        ok = _file.setBufferSize(ESP_WRITE_BUFFER_SIZE);
+        // Select once at Configure, before the stream's first I/O. Default
+        // and synchronous callers retain one 251-byte SPIFFS payload page;
+        // background contacts coalesce two pages without a larger record.
+        ok = _file.setBufferSize(background_contact_write
+            ? ESP_BACKGROUND_WRITE_BUFFER_SIZE : ESP_WRITE_BUFFER_SIZE);
         if (ok) {
           _ok = true;
           _begin_stage = BeginStage::Ready;
@@ -176,7 +193,8 @@ public:
   // callers may request up to eight chunks while reusing the same scratch
   // buffer. Transports run between passes without exposing the rename gap;
   // synchronous commit() and other platforms retain the one-chunk default.
-  CommitProgress serviceCommit(bool valid = true, unsigned max_verify_chunks = 1) {
+  CommitProgress serviceCommit(bool valid = true, unsigned max_verify_chunks = 1,
+                                bool defer_backup_cleanup = false) {
 #if defined(ESP32_PLATFORM)
     // A premature commit must not publish, clean up, or implicitly aggregate
     // the deferred setup operations inside this call.
@@ -193,11 +211,13 @@ public:
       _verify = _fs->open(_temp, "r");
       ok = static_cast<bool>(_verify);
 #if defined(ESP32_PLATFORM)
-      // fread() otherwise reads ahead up to 4 KiB while the caller requests
-      // only one 64-byte CRC chunk. A bounded two-chunk read-ahead buffer
-      // halves backend reads without growing that scratch buffer. The caller's
-      // separate chunk budget bounds each pass. Configuration must succeed.
-      ok = ok && _verify.setBufferSize(ESP_VERIFY_BUFFER_SIZE);
+      // Select read-ahead at Open only. Default/synchronous callers retain
+      // 128 bytes; an eight-chunk background pass may coalesce its 512-byte
+      // budget in one backend refill. Later budget changes retain this choice,
+      // with at most 512 backend bytes per pass and the same 64-byte scratch.
+      // Configuration must succeed before verification or publication.
+      ok = ok && _verify.setBufferSize(
+          max_verify_chunks >= 8 ? 512 : ESP_VERIFY_BUFFER_SIZE);
 #endif
       ok = ok && _verify.size() == _size;
       if (ok) {
@@ -252,8 +272,16 @@ public:
     if (!ok && backed_up) _fs->rename(_backup, _target);
     // Cleanup remains best effort after the publish/rollback result, but an
     // absent file must not trigger the SDK's error log on the shared USB port.
-    if (ok) removeIfPresent(_fs, _backup, _presence);
-    else removeIfPresent(_fs, _temp, _presence);
+    if (ok) {
+#if defined(ESP32_PLATFORM)
+      // Background contacts publish the target and its path handles now.
+      // A later transaction retires this recoverable old backup separately.
+      if (!defer_backup_cleanup)
+#else
+      (void)defer_backup_cleanup; // Other platforms retain immediate cleanup.
+#endif
+        removeIfPresent(_fs, _backup, _presence);
+    } else removeIfPresent(_fs, _temp, _presence);
     _finished = true;
     return ok ? CommitProgress::Succeeded : CommitProgress::Failed;
   }

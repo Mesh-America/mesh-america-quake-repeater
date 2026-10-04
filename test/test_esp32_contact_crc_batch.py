@@ -9,7 +9,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SIGNATURE = "CommitProgress serviceCommit(bool valid = true, unsigned max_verify_chunks = 1) {"
+SIGNATURE = ("CommitProgress serviceCommit(bool valid = true, unsigned max_verify_chunks = 1,\n"
+             "                                bool defer_backup_cleanup = false) {")
 OPAQUE_FILE = """#pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -58,17 +59,29 @@ class ContactCRCBatchTest(unittest.TestCase):
             anchor = "ESP_VERIFY_BUFFER_SIZE = 128;"
             self.assertEqual(source.count(anchor), 1)
             source = source.replace(anchor, "ESP_VERIFY_BUFFER_SIZE = 4096;")
+        elif negative == "background_stdio":
+            anchor = "max_verify_chunks >= 8 ? 512 : ESP_VERIFY_BUFFER_SIZE"
+            self.assertEqual(source.count(anchor), 1)
+            source = source.replace(
+                anchor, "max_verify_chunks >= 8 ? 4096 : ESP_VERIFY_BUFFER_SIZE")
+        fixture = (ROOT / "test/fixtures/contact_crc_batch/test.cpp").read_text()
+        if negative == "background_stdio":
+            # Start with a large file so the negative executes a real >512B
+            # refill, rather than failing only the selected-size assertion.
+            self.assertEqual(fixture.count("  limitsAndTails();"), 1)
+            fixture = fixture.replace("  limitsAndTails();", "  verify(347 * 152, 8);")
         # Count actual commit() calls without replacing its body or algorithm.
         source = source.replace(SIGNATURE, SIGNATURE + "\n    ++fixture_commit_calls;")
         with tempfile.TemporaryDirectory(prefix="mesh-contact-crc-") as directory:
             temp = Path(directory)
             (temp / "transaction_under_test.h").write_text(source)
+            (temp / "fixture.cpp").write_text(fixture)
             binary = temp / "fixture"
             result = subprocess.run([
                 "c++", "-std=c++17", "-O1", "-g", "-Wall", "-Wextra",
                 "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                 "-D" + platform + "=1", "-I", str(temp), "-I", str(ROOT / "src"),
-                str(ROOT / "test/fixtures/contact_crc_batch/test.cpp"),
+                str(temp / "fixture.cpp"),
                 "-o", str(binary),
             ], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -76,7 +89,8 @@ class ContactCRCBatchTest(unittest.TestCase):
             if negative:
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 markers = {"clamp": "reads <= bound", "synchronous": "fixture_commit_calls == 829",
-                           "stdio": "largest_backend_read <= 128"}
+                           "stdio": "reader_buffer_size == selected",
+                           "background_stdio": "backend_bytes <= 512"}
                 self.assertIn(markers[negative], result.stderr)
                 return
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -85,8 +99,10 @@ class ContactCRCBatchTest(unittest.TestCase):
     def test_esp_bounds_tails_failures_crc_cancellation_and_crash(self):
         result = self.run_native()
         self.assertEqual(result, {"one_passes": 829, "eight_passes": 108,
-                                 "logical_reads": 825, "backend_reads": 413,
-                                 "max_pass_reads": 8, "max_pass_refills": 4})
+                                 "logical_reads": 825, "backend_reads": 104,
+                                 "max_pass_reads": 8, "max_pass_refills": 1,
+                                 "max_pass_backend_bytes": 512, "reader_buffer_size": 512,
+                                 "one_backend_reads": 413, "one_reader_buffer_size": 128})
 
     def test_other_platform_ignores_requested_batch(self):
         result = self.run_native("RP2040_PLATFORM")
@@ -102,6 +118,9 @@ class ContactCRCBatchTest(unittest.TestCase):
 
     def test_large_stdio_read_ahead_is_detected(self):
         self.run_native(negative="stdio")
+
+    def test_large_background_stdio_read_ahead_is_detected(self):
+        self.run_native(negative="background_stdio")
 
     def test_opaque_xtensa_fixture_frame_and_object_sizes(self):
         compiler = os.environ.get("CONTACT_CRC_XTENSA_CXX") or shutil.which("xtensa-esp32s3-elf-g++")
@@ -134,7 +153,7 @@ class ContactCRCBatchTest(unittest.TestCase):
             frames = [line.split("\t") for line in (temp / "frame.su").read_text().splitlines()
                       if "ContactFileTransaction::serviceCommit(" in line]
             self.assertEqual(len(frames), 1)
-            self.assertEqual(int(frames[0][1]), 112)
+            self.assertEqual(int(frames[0][1]), 128)
             nm = str(Path(compiler).with_name("xtensa-esp32s3-elf-nm"))
             symbols = subprocess.check_output([nm, "-S", str(temp / "frame.o")], text=True)
             size = next(int(line.split()[1], 16) for line in symbols.splitlines()

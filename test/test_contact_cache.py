@@ -91,10 +91,10 @@ class ContactCacheTest(unittest.TestCase):
                 functions.append("bool DataStore::loadContactPages(")
             implementation += "\n".join(method(store, signature) for signature in functions)
             if disable_crc_batch:
-                self.assertIn("_contact_write->serviceCommit(true, 8)", implementation)
+                self.assertIn("_contact_write->serviceCommit(true, 8, true)", implementation)
                 implementation = implementation.replace(
-                    "_contact_write->serviceCommit(true, 8)",
-                    "_contact_write->serviceCommit()")
+                    "_contact_write->serviceCommit(true, 8, true)",
+                    "_contact_write->serviceCommit(true, 1, true)")
             (temp / "store_under_test.h").write_text(implementation)
             packet = (ROOT / "src/Packet.cpp").read_text()
             (temp / "packet_under_test.h").write_text("namespace mesh {\n" + "\n".join(
