@@ -103,6 +103,13 @@ public:
   bool releaseContact(const ContactInfo&);
   bool hasPendingContactWrites() const;
   bool serviceContactWrites(DataStoreHost*, bool (*filter)(const ContactInfo&));
+  bool starting() const {
+    return _contact_write != nullptr && !static_cast<bool>(*_contact_write);
+  }
+  bool activeJob() const { return _contact_write != nullptr; }
+  bool readyToPublish() const {
+    return _contact_write && _contact_write->readyToPublish();
+  }
 #endif
 #if defined(NRF52_PLATFORM)
   bool loadContactPages(DataStoreHost*, uint16_t, uint32_t);
@@ -460,11 +467,13 @@ static void cooperative_save_services_commands_and_preserves_snapshots() {
 }
 
 static void cooperative_mutations_never_publish_obsolete_indices() {
-  for (unsigned mutation_step : {4u, 46u, 110u, 140u}) {
+  for (unsigned mutation_step : {4u, 46u, 110u, 0u}) {
     Fixture f(40);
     const auto old = SPIFFS.files.at("/contacts3");
     assert(f.store.markContactDirty(f.host.contacts[0]));
-    for (unsigned step = 0; step < mutation_step; ++step) {
+    unsigned step = 0;
+    while (mutation_step == 0 ? !f.store.readyToPublish() : step < mutation_step) {
+      assert(++step < 1000);
       assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
       assert(SPIFFS.files.at("/contacts3") == old);
     }
@@ -507,6 +516,7 @@ static void cooperative_failures_keep_the_old_file_and_pending_mutations() {
       failed = !f.store.serviceContactWrites(&f.host, cachedContactFilter);
     }
     assert(failed && f.store.hasPendingContactWrites());
+    assert(!f.store.activeJob());
     assert(SPIFFS.files.at("/contacts3") == old);
     assert(!SPIFFS.exists("/contacts3.tmp"));
     f.check(0, route(993));
@@ -553,6 +563,31 @@ static void interleaved_path_pressure_preserves_guarded_eviction() {
   drain_cooperative_save(f);
   for (unsigned i = 0; i < 40; ++i)
     f.check(i, route(i < 26 ? 1200 + i : i));
+}
+
+static void pending_startup_pressure_preserves_guarded_eviction() {
+  for (unsigned completed : {0u, 3u, 6u}) {
+    Fixture f(40);
+    for (unsigned i = 0; i < 16; ++i) {
+      assert(f.host.contacts[i].setRawPath(route(1600 + i).data()));
+      assert(f.store.markContactDirty(f.host.contacts[i]));
+    }
+    assert(f.host.cache_flushes == 0);
+    SPIFFS.files["/contacts3.tmp"] = {8, 9};
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter)); // allocate
+    for (unsigned pass = 0; pass < completed; ++pass)
+      assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+    assert(f.store.starting());
+    // The seventeenth resident update must cancel a pending begin, release
+    // _committing, then run the existing guarded synchronous eviction flush.
+    assert(f.host.contacts[16].setRawPath(route(1616).data()));
+    assert(f.host.cache_flushes == 1);
+    assert(!f.store.activeJob());
+    assert(f.store.markContactDirty(f.host.contacts[16]));
+    drain_cooperative_save(f);
+    for (unsigned i = 0; i < 40; ++i)
+      f.check(i, route(i < 17 ? 1600 + i : i));
+  }
 }
 
 static void lifecycle_cancels_jobs_and_closes_prior_filesystem_readers() {
@@ -755,6 +790,7 @@ int main() {
   cooperative_failures_keep_the_old_file_and_pending_mutations();
   synchronous_flush_cancels_pending_jobs_and_stays_durable();
   interleaved_path_pressure_preserves_guarded_eviction();
+  pending_startup_pressure_preserves_guarded_eviction();
   lifecycle_cancels_jobs_and_closes_prior_filesystem_readers();
   routes_survive_eviction_and_full_sync();
   snapshot_rollback_and_dirty_eviction();

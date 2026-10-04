@@ -22,6 +22,9 @@ class UncachedESPContactsTest(unittest.TestCase):
     def test_default_stdio_reader_readahead_is_detected(self):
         self.run_fixture(["-DBOARD_HAS_PSRAM=1"], disable="reader")
 
+    def test_synchronous_startup_batch_is_detected(self):
+        self.run_fixture(["-DBOARD_HAS_PSRAM=1"], disable="begin")
+
     def run_fixture(self, policy, disable=None):
         with tempfile.TemporaryDirectory(prefix="mesh-esp-inline-contacts-") as directory:
             temp = Path(directory)
@@ -47,6 +50,11 @@ class UncachedESPContactsTest(unittest.TestCase):
                 "inline void makeBlobPath(",
             )
             implementation = "\n".join(method(source, signature) for signature in signatures)
+            if disable == "begin":
+                self.assertIn('"/contacts3", companionPathPresence, true)', implementation)
+                implementation = implementation.replace(
+                    '"/contacts3", companionPathPresence, true)',
+                    '"/contacts3", companionPathPresence, false)')
             # Only the native SDK stat seam is substituted. The production
             # presence logic still distinguishes ENOENT from metadata failure.
             presence = method(source, "static bool companionPathPresence(")
@@ -64,10 +72,10 @@ class UncachedESPContactsTest(unittest.TestCase):
             (temp / "store_under_test.h").write_text(implementation)
             transaction = (ROOT / "src/helpers/ContactFileTransaction.h").read_text()
             if disable == "writer":
-                self.assertIn("_ok = _ok && _file.setBufferSize(storage::CONTACT_RECORD_SIZE);", transaction)
+                self.assertIn("ok = _file.setBufferSize(storage::CONTACT_RECORD_SIZE);", transaction)
                 transaction = transaction.replace(
-                    "_ok = _ok && _file.setBufferSize(storage::CONTACT_RECORD_SIZE);",
-                    "// Negative control: retain the SDK's default writer buffer.")
+                    "ok = _file.setBufferSize(storage::CONTACT_RECORD_SIZE);",
+                    "ok = true; // Negative control: retain default writer buffer.")
             elif disable == "reader":
                 self.assertIn("ok = ok && _verify.setBufferSize(64);", transaction)
                 transaction = transaction.replace("ok = ok && _verify.setBufferSize(64);",
@@ -105,8 +113,9 @@ class UncachedESPContactsTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             else:
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("largest_backend_" + ("write" if disable == "writer" else "read"),
-                              result.stderr)
+                marker = "startup_operations" if disable == "begin" else (
+                    "largest_backend_" + ("write" if disable == "writer" else "read"))
+                self.assertIn(marker, result.stderr)
 
 
 if __name__ == "__main__":

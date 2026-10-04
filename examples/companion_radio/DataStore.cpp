@@ -2508,10 +2508,8 @@ bool DataStore::serviceContactWrite(DataStoreHost* host,
     }
 #endif
     _contact_write = new (std::nothrow) mesh::ContactFileTransaction(
-        _getContactsChannelsFS(), "/contacts3", companionPathPresence);
-    if (_contact_write == nullptr || !static_cast<bool>(*_contact_write)) {
-      delete _contact_write;
-      _contact_write = nullptr;
+        _getContactsChannelsFS(), "/contacts3", companionPathPresence, true);
+    if (_contact_write == nullptr) {
 #if MESH_CONTACT_CACHE
       paths.endCommit(false);
 #endif
@@ -2522,6 +2520,17 @@ bool DataStore::serviceContactWrite(DataStoreHost* host,
     _contact_write_active_revision = _contact_write_revision;
     _contact_write_index = 0;
     _contact_write_verifying = false;
+    return true;
+  }
+  if (!static_cast<bool>(*_contact_write)) {
+    // The revision/session guard above also applies to every setup step.
+    // Keep initialization separate from serialization, including its final
+    // buffer configuration, so transports are serviced between operations.
+    const auto progress = _contact_write->serviceBegin();
+    if (progress == mesh::ContactFileTransaction::BeginProgress::Failed) {
+      cancelContactWrite();
+      return false;
+    }
     return true;
   }
   if (!_contact_write_verifying) {
