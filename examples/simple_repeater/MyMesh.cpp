@@ -19,6 +19,7 @@
 #include <helpers/NRF52VoltagePolicy.h>
 #endif
 #include <helpers/ClientACLCLI.h>
+#include <helpers/ClientACLResponse.h>
 #include <helpers/ClockSyncUtils.h>
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/ClientPathObservation.h>
@@ -729,7 +730,12 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
   return 0;
 }
 
-int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload, size_t payload_len) {
+int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload, size_t payload_len,
+                          size_t reply_capacity) {
+  if (sender == NULL || payload_len == 0 || reply_capacity < 4) return 0;
+  if (reply_capacity > mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY) {
+    reply_capacity = mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY;
+  }
   // uint32_t now = getRTCClock()->getCurrentTimeUnique();
   // memcpy(reply_data, &now, 4);   // response packets always prefixed with timestamp
   memcpy(reply_data, &sender_timestamp, 4); // reflect sender_timestamp back in response packet (kind of like a 'tag')
@@ -780,12 +786,15 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     memcpy(&reply_data[4], telemetry.getBuffer(), tlen);
     return 4 + tlen; // reply_len
   }
-  if (payload[0] == REQ_TYPE_GET_ACCESS_LIST && sender->isAdmin()) {
+  if (payload[0] == REQ_TYPE_GET_ACCESS_LIST) {
+    if (!sender->isAdmin() || payload_len < 3) return 0;
     uint8_t res1 = payload[1];   // reserved for future  (extra query params)
     uint8_t res2 = payload[2];
     if (res1 == 0 && res2 == 0) {
-      uint8_t ofs = 4;
-      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= sizeof(reply_data) - 4; i++) {
+      size_t ofs = 4;
+      // Legacy ACL replies contain no pagination or total-count field. Keep
+      // the same bounded prefix, but fit the actual encrypted reply route.
+      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= reply_capacity; i++) {
         auto c = acl.getClientByIdx(i);
         if (c->permissions == 0) continue;  // skip deleted entries
         memcpy(&reply_data[ofs], c->id.pub_key, 6); ofs += 6;  // just 6-byte pub_key prefix
@@ -965,15 +974,15 @@ static bool directPathsEqual(const uint8_t* a_path, uint8_t a_len, const uint8_t
   return byte_len == 0 || memcmp(a_path, b_path, byte_len) == 0;
 }
 
-void MyMesh::sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size) {
+bool MyMesh::sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size) {
   TransportKey fallback_scope;
   const TransportKey* fallback_scope_ptr = NULL;
   if (recv_pkt_region != NULL && !recv_pkt_region->isWildcard()
       && region_map.getTransportKeysFor(*recv_pkt_region, &fallback_scope, 1) > 0) {
     fallback_scope_ptr = &fallback_scope;
   }
-  sendClientReplyWithFallbackScope(client, packet, delay_millis, path_hash_size,
-                                   fallback_scope_ptr);
+  return sendClientReplyWithFallbackScope(client, packet, delay_millis, path_hash_size,
+                                          fallback_scope_ptr);
 }
 
 bool MyMesh::sendClientReplyWithFallbackScope(ClientInfo* client, mesh::Packet* packet,
@@ -2826,25 +2835,30 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
 #endif
 
   if (type == PAYLOAD_TYPE_REQ) { // request (from a Known admin client!)
+    if (len < 5) return; // timestamp plus request type must be present
     uint32_t timestamp;
     memcpy(&timestamp, data, 4);
 
     if (timestamp > client->last_timestamp) { // prevent replay attacks
-      int reply_len = handleRequest(client, timestamp, &data[4], len - 4);
+      const size_t reply_capacity =
+          mesh::clientACLReplyCapacity(packet->isRouteFlood(), packet->path_len);
+      int reply_len = handleRequest(client, timestamp, &data[4], len - 4, reply_capacity);
       if (reply_len == 0) return; // invalid command
 
-      client->last_timestamp = timestamp;
-      client->last_activity = getRTCClock()->getCurrentTime();
-
+      bool reply_queued = false;
       if (packet->isRouteFlood()) {
         // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
         mesh::Packet *path = createPathReturn(client->id, secret, packet->path, packet->path_len,
                                               PAYLOAD_TYPE_RESPONSE, reply_data, reply_len);
-        if (path) sendFloodReply(path, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+        if (path) reply_queued = sendFloodReply(path, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
       } else {
         mesh::Packet *reply =
             createDatagram(PAYLOAD_TYPE_RESPONSE, client->id, secret, reply_data, reply_len);
-        sendClientReply(client, reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+        reply_queued = sendClientReply(client, reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+      }
+      if (reply_queued) {
+        client->last_timestamp = timestamp;
+        client->last_activity = getRTCClock()->getCurrentTime();
       }
     } else {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");

@@ -217,6 +217,7 @@ jobs:
           python3 -B test/test_ota_device_deflate_role.py -v
           python3 -B test/test_client_acl_spiffs.py
           python3 -B test/test_client_acl_cli.py -v
+          python3 -B test/test_client_acl_response.py -v
 
       - name: Verify ESP32 USB reboot sleep grace and G3 button wake
         run: |
