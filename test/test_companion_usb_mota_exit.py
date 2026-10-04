@@ -27,11 +27,21 @@ HARNESS = r'''
 namespace mesh {
 enum class UsbMotaEntryOrigin { BINARY, ASCII };
 static void discardUsbTerminalOutput() {}
+namespace ota {
+struct Source {
+  bool hasPendingResponse() const { return false; }
+  void resetSessionState() {}
+};
+struct OtaContext {
+  static Source& serialFolderSource() { static Source source; return source; }
+};
+}
 }
 static bool usb_mota_mode = true, usb_mota_disconnect_armed = true;
 static mesh::UsbMotaEntryOrigin usb_mota_entry_origin = mesh::UsbMotaEntryOrigin::BINARY;
 static char usb_mota_line[32] = "old";
 static size_t usb_mota_line_len = 3;
+static bool usb_mota_discard_line = false;
 static bool ascii = false;
 static int drained = 0, folder_off = 0;
 static char control_reply[224];
@@ -61,6 +71,7 @@ static void prepare(mesh::UsbMotaEntryOrigin origin) {
   usb_mota_mode = usb_mota_disconnect_armed = true;
   usb_mota_entry_origin = origin;
   usb_mota_line_len = 3;
+  usb_mota_discard_line = true;
   strcpy(usb_mota_line, "old");
   usb_serial_interface.passthrough = true;
   ascii = false;
@@ -72,6 +83,7 @@ int main() {
   leaveUsbMotaMode(true);
   assert(ascii && usb_serial_interface.passthrough);
   assert(!usb_mota_mode && !usb_mota_disconnect_armed && usb_mota_line_len == 0);
+  assert(!usb_mota_discard_line);
   assert(folder_off == 1 && drained == 1);
   assert(strstr(control_reply, "OK - Terminal mode") != nullptr);
 

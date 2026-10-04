@@ -85,7 +85,12 @@ Log& usbLoggingPort() { static Log log; return log; }
 namespace ota {
 class SerialMotaSource : public ::Folder {
 public:
+  inline static unsigned session_resets = 0;
   SerialMotaSource(int, MotaStreamWritePolicy, uint32_t) {}
+  void resetSessionState() {
+    assert(::bluetooth_interface.active);
+    ++session_resets;
+  }
 };
 } }
 #include "ble_control_under_test.h"
@@ -225,10 +230,12 @@ int main() {
 #else
   Nrf52BleMotaSourceControl ble;
   assert(!ble.start(reply, sizeof reply)); // no subscription, no storage loan
+  assert(SerialMotaSource::session_resets == 0);
   assert(!ota_context_if_active() && q.buffer.capacity() == 256);
   for (int disconnect = 0; disconnect < 2; ++disconnect) {
     bluetooth_interface.ready = true;
     assert(ble.start(reply, sizeof reply));
+    assert(SerialMotaSource::session_resets == static_cast<unsigned>(disconnect + 1));
     assert(ble.status().attached && q.buffer.capacity() == 128);
     assert(ble.status().offered == 1 && ble.status().advertised == 1);
     if (disconnect) {
@@ -255,6 +262,7 @@ int main() {
                                         "USB", reply, sizeof reply));
   bluetooth_interface.ready = true;
   assert(!ble.start(reply, sizeof reply));
+  assert(SerialMotaSource::session_resets == 2);
   assert(ble.status().another_link_active);
   assert(ble.stop(reply, sizeof reply));
   ota_release_context_if_idle(false);

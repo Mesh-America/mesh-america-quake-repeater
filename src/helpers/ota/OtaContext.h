@@ -502,13 +502,16 @@ struct OtaContext {
   // Attach/detach an external folder of `.mota` served by a host daemon over the seeder UART (the node
   // then advertises + relays them alongside its own fw). Only built when OTA_FOLDER_SERIAL is configured.
 #if defined(OTA_FOLDER_SERIAL)
-  bool attach_folder(char* msg, size_t cap) {
+  static SerialMotaSource& serialFolderSource() {
     static SerialMotaSource src(OTA_FOLDER_SERIAL_STREAM,
                                 OTA_FOLDER_SERIAL_WRITE_POLICY, 600);
+    return src;
+  }
+  bool attach_folder(char* msg, size_t cap) {
 #ifdef OTA_FOLDER_SERIAL_BEGIN
     OTA_FOLDER_SERIAL_STREAM.begin(OTA_FOLDER_SERIAL_BAUD);     // dedicated UART; console is already up
 #endif
-    return attach_folder_source(&src, FOLDER_LINK_SERIAL, "serial", msg, cap);
+    return attach_folder_source(&serialFolderSource(), FOLDER_LINK_SERIAL, "serial", msg, cap);
   }
 #endif
   void detach_folder(bool preserve_capture = false) {

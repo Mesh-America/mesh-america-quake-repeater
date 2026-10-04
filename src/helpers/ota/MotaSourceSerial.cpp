@@ -1,23 +1,122 @@
 #include "MotaSourceSerial.h"
 #include "MotaSeederProto.h"
 #include "OtaByteIO.h"
+#include <limits.h>
 #include <string.h>
 
 namespace mesh {
 namespace ota {
 
-bool SerialMotaSource::readByteT(uint8_t& b) {
-  uint32_t t0 = millis();
-  while ((millis() - t0) < _to) {
-    int c = _io.read();
-    if (c >= 0) { b = (uint8_t)c; return true; }
+void SerialMotaSource::resetSessionState() {
+  _response_pending = false;
+  _response_stage = SYNC_FIRST;
+  _response_payload_len = _response_remaining = 0;
+  _control_offset = _control_len = 0;
+  _control_discard_line = false;
+}
+
+void SerialMotaSource::queueControlByte(uint8_t b) {
+  const bool newline = b == '\r' || b == '\n';
+  if (_control_discard_line) {
+    if (!newline) return;
+    _control_discard_line = false;
+  }
+  if (_control_len == sizeof(_control_queue)) {
+    // Invalidate any prefix already handed to the ASCII owner, then discard
+    // through the real line ending. Never expose an overlong line's suffix.
+    _control_offset = 0;
+    _control_len = 1;
+    _control_queue[0] = 0;
+    _control_discard_line = !newline;
+    if (!newline) return;
+  }
+  _control_queue[(_control_offset + _control_len) % sizeof(_control_queue)] = b;
+  ++_control_len;
+}
+
+int SerialMotaSource::takeControlByte() {
+  if (_control_len == 0) return -1;
+  const uint8_t value = _control_queue[_control_offset];
+  _control_offset = (_control_offset + 1) % sizeof(_control_queue);
+  --_control_len;
+  return value;
+}
+
+int SerialMotaSource::readTrackedByte() {
+  const int value = _io.read();
+  if (value < 0) return value;
+  if (!_shared_text_control) return value;
+  const uint8_t b = (uint8_t)value;
+  if (!_response_pending) {
+    queueControlByte(b);
+    return value;
+  }
+  switch (_response_stage) {
+    case SYNC_FIRST:
+      if (b == MOTA_SEEDER_RSP_MAGIC0) _response_stage = SYNC_SECOND;
+      else queueControlByte(b);
+      break;
+    case SYNC_SECOND:
+      if (b == MOTA_SEEDER_RSP_MAGIC1) {
+        _response_stage = RESPONSE_OP;
+      } else {
+        queueControlByte(MOTA_SEEDER_RSP_MAGIC0);
+        if (b != MOTA_SEEDER_RSP_MAGIC0) {
+          queueControlByte(b);
+          _response_stage = SYNC_FIRST;
+        }
+      }
+      break;
+    case RESPONSE_OP:
+      _response_stage = RESPONSE_STATUS;
+      break;
+    case RESPONSE_STATUS:
+      _response_remaining = b == MS_STATUS_OK ? _response_payload_len : 0;
+      _response_stage = _response_remaining ? RESPONSE_PAYLOAD : RESPONSE_CHECKSUM;
+      break;
+    case RESPONSE_PAYLOAD:
+      if (--_response_remaining == 0) _response_stage = RESPONSE_CHECKSUM;
+      break;
+    case RESPONSE_CHECKSUM:
+      // The request determines payload length, even when checksum/op fails.
+      // Only this full wire boundary, or an explicit owner reset, permits a
+      // new request; a late body tail can never become ASCII control text.
+      _response_pending = false;
+      _response_stage = SYNC_FIRST;
+      break;
+  }
+  return value;
+}
+
+int SerialMotaSource::availableControlBytes() {
+  const int available = _io.available();
+  if (available <= 0) return _control_len;
+  return available > INT_MAX - _control_len ? INT_MAX : available + _control_len;
+}
+
+int SerialMotaSource::readControlByte() {
+  if (!_shared_text_control) return _io.read();
+  if (_control_len != 0) return takeControlByte();
+  if (readTrackedByte() < 0) return -1;
+  return _control_len ? takeControlByte() : RESPONSE_BYTE;
+}
+
+bool SerialMotaSource::readByteT(uint8_t& b, uint32_t started) {
+  while ((uint32_t)(millis() - started) < _to) {
+    int c = readTrackedByte();
+    if (c >= 0) {
+      // A read or scheduler tick can cross the deadline after the precheck.
+      if ((uint32_t)(millis() - started) >= _to) return false;
+      b = (uint8_t)c;
+      return true;
+    }
     delay(1);  // let BLE/WiFi callbacks deliver the response
   }
   return false;
 }
 
-bool SerialMotaSource::readExact(uint8_t* b, uint32_t n) {
-  for (uint32_t i = 0; i < n; i++) if (!readByteT(b[i])) return false;
+bool SerialMotaSource::readExact(uint8_t* b, uint32_t n, uint32_t started) {
+  for (uint32_t i = 0; i < n; i++) if (!readByteT(b[i], started)) return false;
   return true;
 }
 
@@ -25,7 +124,13 @@ bool SerialMotaSource::readExact(uint8_t* b, uint32_t n) {
 // checksum, then scans for the response magic and validates op+status+checksum before delivering payload.
 bool SerialMotaSource::txn(uint8_t op, const uint8_t* args, uint8_t arglen,
                            uint8_t* payload, uint32_t payload_len) {
-  while (_io.read() >= 0) {}                       // drop any stale/partial bytes before a fresh request
+  // Drop the currently queued stale/partial input only. A continuously writing
+  // host cannot keep the primary mesh loop trapped before the request.
+  int pending = _io.available();
+  while (pending-- > 0) if (readTrackedByte() < 0) break;
+  // Shared text ownership must never overwrite an incomplete old response's
+  // body length. The wire has no request ID or response payload length.
+  if (_response_pending) return false;
   if (arglen > 7) return false;                    // largest source request is READ(idx,off,len)
   uint8_t xs = op;
   for (uint8_t i = 0; i < arglen; i++) xs ^= args[i];
@@ -37,13 +142,19 @@ bool SerialMotaSource::txn(uint8_t op, const uint8_t* args, uint8_t arglen,
   if (arglen) { memcpy(frame + frame_len, args, arglen); frame_len += arglen; }
   frame[frame_len++] = xs;
   if (_io.write(frame, frame_len) != frame_len) return false;
+  if (_shared_text_control) {
+    _response_pending = true;
+    _response_stage = SYNC_FIRST;
+    _response_payload_len = payload_len;
+    _response_remaining = 0;
+  }
   if (_write_policy == MotaStreamWritePolicy::FlushTransmit) _io.flush();
 
   // scan for response magic 'm' 's' (tolerate leading noise)
-  uint32_t t0 = millis(); bool got = false;
+  const uint32_t t0 = millis(); bool got = false;
   uint8_t prev = 0;
   while ((millis() - t0) < _to) {
-    int c = _io.read();
+    int c = readTrackedByte();
     if (c < 0) { delay(1); continue; }
     if (prev == MOTA_SEEDER_RSP_MAGIC0 && (uint8_t)c == MOTA_SEEDER_RSP_MAGIC1) { got = true; break; }
     prev = (uint8_t)c;
@@ -51,16 +162,16 @@ bool SerialMotaSource::txn(uint8_t op, const uint8_t* args, uint8_t arglen,
   if (!got) return false;
 
   uint8_t hdr[2];
-  if (!readExact(hdr, 2)) return false;            // op, status
+  if (!readExact(hdr, 2, t0)) return false;        // op, status
   if (hdr[0] != op) return false;
   uint8_t rxs = (uint8_t)(MOTA_SEEDER_RSP_MAGIC0 ^ MOTA_SEEDER_RSP_MAGIC1) ^ hdr[0] ^ hdr[1];
   bool ok = (hdr[1] == MS_STATUS_OK);
   if (ok && payload_len) {
-    if (!readExact(payload, payload_len)) return false;
+    if (!readExact(payload, payload_len, t0)) return false;
     for (uint32_t i = 0; i < payload_len; i++) rxs ^= payload[i];
   }
   uint8_t xsum;
-  if (!readByteT(xsum)) return false;
+  if (!readByteT(xsum, t0)) return false;
   if (xsum != rxs) return false;                   // corrupt frame -> caller retries
   return ok;
 }
