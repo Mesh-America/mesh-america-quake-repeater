@@ -14,6 +14,9 @@ class ContactPathBackend {
 public:
   virtual bool readStoredPath(uint16_t source, uint8_t path[64]) = 0;
   virtual bool flushCachedPaths() = 0;
+  // A lazy streaming transaction may be abandoned before the existing
+  // synchronous eviction flush. Synchronous/paged commits keep their veto.
+  virtual bool cancelCooperativeWrite() { return false; }
 };
 
 class ContactPathStorage {
@@ -123,6 +126,9 @@ class ContactPathPool : public ContactPathStorage {
   }
   int makeRoom() {
     int index = availableEntry();
+    if (index < 0 && _backend && _committing && !_flushing) {
+      _backend->cancelCooperativeWrite();
+    }
     if (index < 0 && _backend && !_committing && !_flushing) {
       _flushing = true;
       _backend->flushCachedPaths();

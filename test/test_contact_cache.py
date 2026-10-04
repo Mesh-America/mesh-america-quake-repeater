@@ -63,6 +63,24 @@ class ContactCacheTest(unittest.TestCase):
             helper_start = store.index("namespace {\nbool cachedContactFilter")
             helper_end = store.index("bool DataStore::readStoredPath(", helper_start)
             implementation = store[helper_start:helper_end]
+            header = (ROOT / "examples/companion_radio/DataStore.h").read_text()
+            state_start = header.index("  File _contact_path_reader;")
+            state_end = header.index("\n#endif", state_start)
+            (temp / "contact_write_state_under_test.h").write_text(
+                header[state_start:state_end])
+            functions.append("DataStore::~DataStore()")
+            if platform == "ESP32_PLATFORM":
+                functions.extend((
+                    "void DataStore::cancelContactWrite(",
+                    "bool DataStore::cancelCooperativeWrite(",
+                    "bool DataStore::serviceCachedContactWrite(",
+                    "bool DataStore::markContactDirty(",
+                    "bool DataStore::releaseContact(",
+                    "bool DataStore::serviceContactWrites(",
+                    "bool DataStore::hasPendingContactWrites() const",
+                    "void DataStore::begin()",
+                    "void DataStore::disableSecondaryFS(",
+                ))
             if platform == "NRF52_PLATFORM":
                 implementation += method(store, "static void makeContactPagePath(") + "\n"
                 implementation += method(store, "static void discardInvalidContactPage(") + "\n"
