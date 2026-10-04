@@ -28,36 +28,41 @@ def parse_acl(buf):
     return res
 
 
+def production_acl_methods():
+    source = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text()
+    handler = extract_braced(source, "int MyMesh::handleRequest(")
+    prefix = handler[:handler.index("  if (payload[0] == REQ_TYPE_GET_STATUS)")]
+    acl = extract_braced(handler, "if (payload[0] == REQ_TYPE_GET_ACCESS_LIST)")
+    generated = prefix + acl + "\nreturn 0;\n}\n"
+    receive = extract_braced(source, "if (type == PAYLOAD_TYPE_REQ) { // request")
+    generated += """
+    void MyMesh::receive(mesh::Packet* packet, uint8_t* data, size_t len) {
+      ClientInfo* client = &sender;
+      const uint8_t type = PAYLOAD_TYPE_REQ;
+      uint8_t secret[PUB_KEY_SIZE] = {};
+    """ + receive + "\n}\n"
+    mesh_source = (ROOT / "src/Mesh.cpp").read_text()
+    generated += "namespace mesh {\n"
+    generated += "#define MAX_COMBINED_PATH (MAX_PACKET_PAYLOAD - 2 - CIPHER_BLOCK_SIZE)\n"
+    for signature in (
+        "Packet* Mesh::createPathReturn(const Identity& dest,",
+        "Packet* Mesh::createPathReturn(const uint8_t* dest_hash,",
+        "Packet* Mesh::createDatagram(",
+    ):
+        generated += extract_braced(mesh_source, signature) + "\n"
+    packet_source = (ROOT / "src/Packet.cpp").read_text()
+    for signature in ("Packet::Packet()", "bool Packet::isValidPathLen("):
+        generated += extract_braced(packet_source, signature) + "\n"
+    generated += "}\n"
+    return generated
+
+
 class ClientAclResponseTest(unittest.TestCase):
     def test_production_acl_route_admission_and_replay(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
         if compiler is None:
             self.skipTest("a host C++17 compiler is required")
-        source = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text()
-        handler = extract_braced(source, "int MyMesh::handleRequest(")
-        prefix = handler[:handler.index("  if (payload[0] == REQ_TYPE_GET_STATUS)")]
-        acl = extract_braced(handler, "if (payload[0] == REQ_TYPE_GET_ACCESS_LIST)")
-        generated = prefix + acl + "\nreturn 0;\n}\n"
-        receive = extract_braced(source, "if (type == PAYLOAD_TYPE_REQ) { // request")
-        generated += """
-void MyMesh::receive(mesh::Packet* packet, uint8_t* data, size_t len) {
-  ClientInfo* client = &sender;
-  const uint8_t type = PAYLOAD_TYPE_REQ;
-  uint8_t secret[PUB_KEY_SIZE] = {};
-""" + receive + "\n}\n"
-        mesh_source = (ROOT / "src/Mesh.cpp").read_text()
-        generated += "namespace mesh {\n"
-        generated += "#define MAX_COMBINED_PATH (MAX_PACKET_PAYLOAD - 2 - CIPHER_BLOCK_SIZE)\n"
-        for signature in (
-            "Packet* Mesh::createPathReturn(const Identity& dest,",
-            "Packet* Mesh::createPathReturn(const uint8_t* dest_hash,",
-            "Packet* Mesh::createDatagram(",
-        ):
-            generated += extract_braced(mesh_source, signature) + "\n"
-        packet_source = (ROOT / "src/Packet.cpp").read_text()
-        for signature in ("Packet::Packet()", "bool Packet::isValidPathLen("):
-            generated += extract_braced(packet_source, signature) + "\n"
-        generated += "}\n"
+        generated = production_acl_methods()
         with tempfile.TemporaryDirectory(prefix=".tmp-acl-response-", dir=ROOT) as directory:
             work = Path(directory)
             (work / "production.inc").write_text(generated, encoding="ascii")

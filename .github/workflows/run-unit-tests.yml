@@ -219,6 +219,22 @@ jobs:
           python3 -B test/test_client_acl_cli.py -v
           python3 -B test/test_client_acl_response.py -v
 
+      - name: Setup Node for official app compatibility tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache pinned official app protocol source
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/meshcore-tests
+          key: official-app-84bc39a950735aaffa93d912556852a4c22e235d0cc4e4d04790113207f13a68
+
+      - name: Verify stock app radio and Access Control compatibility
+        run: |
+          node --version
+          python3 -B test/test_official_app_compatibility.py -v
+
       - name: Verify ESP32 USB reboot sleep grace and G3 button wake
         run: |
           python3 -B test/test_usb_host_sleep_policy.py
