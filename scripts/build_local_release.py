@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 from build_esp32_partition_migration import bundle_release, verify_archive
-from package_esp32_partition_migration import BOARDS
+from package_esp32_partition_migration import BOARDS, resolve_pio_build_dir
 from package_cascade_release import category, collect_artifacts, nrf52_sensor_profile
 
 
@@ -66,7 +66,12 @@ def migration_bridges() -> list[str]:
 
 
 def build_migration_artifacts(work: Path, version: str, short_source: str,
-                              jobs: int, environment: dict[str, str]) -> None:
+                              jobs: int, environment: dict[str, str],
+                              pio_build_dir: Path | None = None) -> None:
+    utility_build_dir = resolve_pio_build_dir(
+        pio_build_dir, environment=environment, project_dir=ROOT)
+    environment = environment.copy()
+    environment["PLATFORMIO_BUILD_DIR"] = str(utility_build_dir)
     for target in migration_targets():
         matches = list(work.glob(full_image_pattern(target, version, short_source)))
         if len(matches) == 1:
@@ -141,9 +146,12 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
 
 
 def stage_release(work: Path, migration_work: Path, destination: Path, version: str,
-                  source: str) -> None:
+                  source: str, pio_build_dir: Path | None = None) -> None:
     if destination.exists():
         raise FileExistsError(f"release already exists: {destination}")
+    utility_build_dir = resolve_pio_build_dir(pio_build_dir, project_dir=ROOT)
+    package_environment = os.environ.copy()
+    package_environment["PLATFORMIO_BUILD_DIR"] = str(utility_build_dir)
     destination.parent.mkdir(parents=True, exist_ok=True)
     short_source = source[:8]
     tooling_source = git("rev-parse", "HEAD")
@@ -180,11 +188,12 @@ def stage_release(work: Path, migration_work: Path, destination: Path, version: 
         with tempfile.TemporaryDirectory(prefix="migration-package-", dir=staging) as temp_packages:
             package_command = [sys.executable, "-B", "scripts/package_esp32_partition_migration.py",
                                "--build-dir", str(migration_work), "--output-dir", temp_packages,
+                               "--pio-build-dir", str(utility_build_dir),
                                "--version", version, "--source", short_source]
             package_log = work / "migration-packaging.log"
             with package_log.open("w", encoding="utf-8") as output:
                 result = subprocess.run(package_command, cwd=ROOT, stdout=output,
-                                        stderr=subprocess.STDOUT)
+                                        stderr=subprocess.STDOUT, env=package_environment)
             if result.returncode:
                 raise RuntimeError(f"migration packaging failed; see {package_log}")
             for board in BOARDS:
@@ -258,8 +267,13 @@ def main() -> None:
     print(f"Output: {destination}", flush=True)
     if args.dry_run:
         return
-    work.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
+    try:
+        utility_build_dir = resolve_pio_build_dir(environment=environment, project_dir=ROOT)
+    except ValueError as error:
+        parser.error(str(error))
+    environment["PLATFORMIO_BUILD_DIR"] = str(utility_build_dir)
+    work.mkdir(parents=True, exist_ok=True)
     environment["OUTPUT_DIR"] = str(work)
     run_logged([
         "bash", "build_legacy.sh", "build-firmwares-logging-matrix",
@@ -274,8 +288,9 @@ def main() -> None:
     migration_environment = environment.copy()
     migration_environment["OUTPUT_DIR"] = str(migration_work)
     build_migration_artifacts(migration_work, args.firmware_version, short_source,
-                              args.pio_jobs, migration_environment)
-    stage_release(work, migration_work, destination, args.firmware_version, source)
+                              args.pio_jobs, migration_environment, utility_build_dir)
+    stage_release(work, migration_work, destination, args.firmware_version, source,
+                  utility_build_dir)
 
 
 if __name__ == "__main__":
