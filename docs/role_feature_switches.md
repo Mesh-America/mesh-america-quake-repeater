@@ -333,7 +333,7 @@ source commands and the bounded temporary radio setup.
 
 | Role / hardware | Start self-update | Stop / requirement |
 | --- | --- | --- |
-| ESP32 Repeater, Room Server, Sensor with WiFi updater | `start ota` or `start ota ap`; open the returned URL (normally port 80, `/update`) | `stop ota`; close WebConfig first if it shares port 80 |
+| ESP32 Repeater, Room Server, Sensor with WiFi updater | `start ota` or `start ota ap`; WiFi starts as needed and WebConfig stops automatically; open the returned URL (normally port 80, `/update`) | `stop ota` |
 | ESP32 Full Companion with two application slots | `start ota` or `start ota ap`; returned URL uses port 8080, `/update` | `stop ota`; single-slot Full builds use USB |
 | nRF52 infrastructure with Bluetooth DFU | `start ota` enters the Bluetooth update flow | Matching application DFU ZIP and board bootloader required |
 | Qualified LoRa OTA receiver | Follow [LoRa OTA directions](ota_easy.md) | Exact destination package, storage profile, and overlapping temporary radio windows |

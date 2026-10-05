@@ -188,8 +188,9 @@ For ESP32 with two application slots, `start ota` returns the WiFi uploader
 URL, normally `http://DEVICE_IP:8080/update`. `start ota ap` explicitly opens
 `MeshCore-OTA`; join it and use the returned URL. Upload the exact board's
 application `.bin`. The device reboots when the upload succeeds. Use
-`stop ota` to close an unused uploader. Port 8080 keeps WebConfig on port 80
-available. Use a trusted local network or a temporary setup network.
+`stop ota` to close an unused uploader. Starting OTA enables WiFi as needed,
+stops WebConfig automatically, and reports the network and URL to use. Use a
+trusted local network or a temporary setup network.
 
 The 4 MB Full layouts and T-Beam 1W Full use a single application slot and
 require USB; the command reports that limitation. The artifact's

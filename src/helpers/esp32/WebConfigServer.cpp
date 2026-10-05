@@ -245,12 +245,11 @@ static_assert(WC_BOARD_CMD_COUNT <= 8, "board command mask must fit uint8_t");
 // POST so nothing in the sequence runs, rather than failing halfway with a
 // reply that does not explain itself. Returns the reason, or NULL if fine.
 static const char* wcCliUnavailable(const char* cmd, bool streamed = false) {
-  // ESP32Board::startOTAUpdate() does `new AsyncWebServer(80)` with no bind
-  // check and answers "Started" regardless. The portal already holds port 80,
-  // so from here it can only leak the allocation, inhibit sleep, and lie.
+  // OTA stops this portal, including the session carrying this command. It
+  // needs an independent reply route so the user receives the upload URL.
   if (strncmp(cmd, "start ota", 9) == 0) {
-    return "start ota needs port 80, which this portal is using. "
-           "Run it from the serial console, or use `ota update`.";
+    return "start ota stops WebConfig. Run it from USB/Bluetooth or LoRa "
+           "to receive the upload URL, or use `ota update`.";
   }
   // `clock sync` sets the clock from the CALLER's timestamp. Web requests carry
   // none (execCommand passes 0), so CommonCLI always rejects it as moving the
@@ -967,6 +966,31 @@ void WebConfigServer::requestStop() {
   _stop_warned = false;
 }
 
+bool WebConfigServer::stopForOTA(char reply[]) {
+  if (!isRunning() && !isStopping()) return true;
+  // Keep a STA interface alive while removing our setup AP. Switching the
+  // last interface off and immediately creating the OTA AP races ESP32 netif
+  // teardown. A connected station keeps its address throughout the handoff.
+  if (_was_setup_ap && !WiFi.enableSTA(true)) {
+    strcpy(reply, "ERR: could not prepare WiFi for OTA");
+    return false;
+  }
+  _keep_wifi_on_stop = true;
+  requestStop(); // Detaches routes and releases port 80 synchronously.
+  if (_was_setup_ap) {
+    WiFi.softAPdisconnect(true);
+    // Arduino 2.x can return false even when enableAP(false) succeeded.
+    // Check the resulting mode instead of that return value.
+    if (WiFi.getMode() & WIFI_AP) {
+      strcpy(reply, "ERR: WebConfig stopped; WiFi AP handoff failed");
+      return false;
+    }
+    _was_setup_ap = false;
+  }
+  strcpy(reply, "WebConfig stopped");
+  return true;
+}
+
 void WebConfigServer::finalizeTeardown() {
   closeTerminal();
   // Async requests keep a pointer to their server until disconnect. Retain the
@@ -976,7 +1000,7 @@ void WebConfigServer::finalizeTeardown() {
   delete _dns;
   _dns = NULL;
   const bool was_setup_ap = _was_setup_ap;
-  if (was_setup_ap) {
+  if (was_setup_ap && !_keep_wifi_on_stop) {
     WiFi.softAPdisconnect(true);
     // Nothing else owns WiFi when we raised the AP: either the node is
     // unconfigured, or `start webconfig ap` required the bridge stopped.
@@ -985,11 +1009,12 @@ void WebConfigServer::finalizeTeardown() {
     } else {
       WiFi.mode(WIFI_STA);
     }
-    _was_setup_ap = false;
   }
-  if (_owns_wifi && !was_setup_ap) {
+  if (_owns_wifi && !was_setup_ap && !_keep_wifi_on_stop) {
     stopOwnedWiFiRadio();
   }
+  _was_setup_ap = false;
+  _keep_wifi_on_stop = false;
   _initial_setup = false;
   _setup_started_at = 0;
   _stopping = false;

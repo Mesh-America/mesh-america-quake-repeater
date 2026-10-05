@@ -217,6 +217,9 @@ public:
   bool startAutoMode(char reply[]);    // use saved WiFi, or setup AP when absent
   bool reloadStandaloneWiFi();
   void requestStop();                  // stop listening and detach this session
+  // Release HTTP/DNS for the updater without delayed teardown taking its
+  // WiFi down. Existing HTTP request objects still drain through tick().
+  bool stopForOTA(char reply[]);
   void tick(uint32_t now);             // call every loop iteration
 
   Mode mode() const { return _mode; }
@@ -267,6 +270,7 @@ private:
   SemaphoreHandle_t _mux;
   Mode _mode = MODE_OFF;
   bool _stopping = false;
+  bool _keep_wifi_on_stop = false;
   bool _was_setup_ap = false;
   bool _initial_setup = false;
   uint32_t _setup_started_at = 0;

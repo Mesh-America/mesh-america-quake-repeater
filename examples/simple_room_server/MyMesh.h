@@ -864,6 +864,9 @@ public:
   bool isWebConfigStopping() const { return _webconfig && _webconfig->isStopping(); }
   bool hasWirelessNetworkClient() const { return _web_terminal != nullptr; }
   bool stopWebConfig(char* reply) override;
+  bool stopWebConfigForOTA(char* reply) override {
+    return !_webconfig || _webconfig->stopForOTA(reply);
+  }
   bool setWebUIEnabled(bool enabled, char* reply) override;
   bool getWebUIStatus(char* reply) const override;
   bool getWiFiSSID(char* reply) const override;

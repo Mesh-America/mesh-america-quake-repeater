@@ -72,6 +72,17 @@ public:
     blocked_.store(blocked_.load() & ~service);
     return true;
   }
+  // An explicit OTA start owns its WiFi startup, including after a user has
+  // disabled 2.4 GHz for this boot. Leave the other services disabled. Do not
+  // race a pending shutdown, which could otherwise turn OTA off afterwards.
+  bool allowWiFiForOTA() {
+    if (pending_) return false;
+    blocked_.store(blocked_.load() & ~WiFi);
+    master_off_ = false;
+    saved_valid_ = false;
+    error_ = nullptr;
+    return true;
+  }
   uint8_t enabled() const { return backend_ ? backend_->enabled() : 0; }
 
   bool handle(const char* text, char* reply, size_t size, uint32_t now, uint8_t requester) {

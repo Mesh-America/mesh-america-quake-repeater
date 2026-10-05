@@ -625,6 +625,10 @@ public:
     (void)reply;
     return false;
   };
+  virtual bool stopWebConfigForOTA(char* reply) {
+    (void)reply;
+    return false;
+  };
   virtual bool isWebConfigActive() const {
     return false;
   };

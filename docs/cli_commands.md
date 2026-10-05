@@ -223,13 +223,18 @@ See the [OTA guide](ota_user_guide.md#adjust-lora-ota-speed).
 On nRF52, `start ota` invokes Bluetooth DFU with the matching bootloader and
 application DFU ZIP. The WiFi/AP instructions below apply to ESP32.
 
-On ESP32, `start ota` serves the web upload page on the station IP when connected to WiFi;
-otherwise it raises the `MeshCore-OTA` access point. `start ota ap` always raises
-the access point, which is useful when the normal network uses client isolation.
+On ESP32, `start ota` enables WiFi as needed and serves the web upload page on
+the station IP when connected to WiFi; otherwise it raises the `MeshCore-OTA`
+access point. The reply gives the URL to open and tells you which network to
+use. `start ota ap` always selects the access point, including when OTA is
+already running on a LAN address. This is useful with client-isolated networks.
 
-On an ESP32 build with WebConfig, the manual OTA uploader and WebConfig both use HTTP
-port 80 and cannot run together. Stop WebConfig before `start ota`, or stop OTA
-before `start webconfig`.
+Starting OTA automatically stops WebConfig and reports `WebConfig stopped` in
+the reply. The existing LAN connection stays up; a setup hotspot is replaced
+by `MeshCore-OTA`. WebConfig's delayed HTTP cleanup cannot stop OTA's WiFi.
+Use the USB/Bluetooth or LoRa command line to start the uploader; WebConfig's
+own terminal cannot deliver the handoff reply after shutting itself down.
+Stop OTA before starting WebConfig again.
 
 FULL ESP32 builds also expose the `.mota` folder seeder on TCP port 5001
 whenever WiFi is usable. This listener is independent of port 80, so a host can
