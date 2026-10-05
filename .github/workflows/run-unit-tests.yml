@@ -262,6 +262,7 @@ jobs:
         run: |
           python3 -B test/test_gps_status.py
           python3 -B test/test_gps_upstream_adaptations.py -v
+          python3 -B test/test_esp32_gps_discovery.py -v
           python3 -B test/test_gps_sync_interval.py -v
           python3 -B test/test_gps_sync_preferences.py -v
           python3 -B test/test_t1000e_sensor_power.py -v
