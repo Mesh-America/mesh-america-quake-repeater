@@ -558,7 +558,7 @@ These settings apply across all MQTT slots:
 - `get wifi.pwd` - Get WiFi password
 - `get link.status` - Get the selected network medium, connection status, IP, signal when available, and uptime
 - `get link.diag` - Explain automatic Ethernet selection using controller initialization, link event, IP, WiFi fallback, route-lock, and reason state
-- `get link.dns` - Show the live DNS resolver list, the selected medium's gateway, and the DNS each medium's DHCP lease installed (`-` = empty slot, `none` = never leased)
+- `get link.dns` - Show the live DNS resolver list, the selected medium's gateway, and the DNS each medium's DHCP lease installed (trailing empty slots are omitted; `-` = empty slot or empty list, `none` = never leased)
 - `get wifi.status` - WiFi-only compatibility alias; reports n/a when another medium is selected
 - `get wifi.powersave` - Get WiFi power save mode (none/min/max)
 
