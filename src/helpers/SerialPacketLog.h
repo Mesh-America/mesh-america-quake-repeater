@@ -130,7 +130,14 @@ class SerialLogLine {
 inline void serialLogBegin() {
 #if defined(ESP32_PLATFORM) && defined(ARDUINO_USB_CDC_ON_BOOT) && \
     (ARDUINO_USB_CDC_ON_BOOT == 1)
+  #if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 1
+  // Arduino 2.0.17 HWCDC decrements an unsigned retry counter when its
+  // host stops reading. A zero timeout can underflow; retain the bounded
+  // timeout established by prepareUsbLoggingPort().
+  Serial.setTxTimeoutMs(5);
+  #else
   Serial.setTxTimeoutMs(0);
+  #endif
 #endif
 }
 
