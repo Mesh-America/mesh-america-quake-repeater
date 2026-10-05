@@ -348,6 +348,10 @@ static bool serialHasValidGpsSentence(Stream& serial, uint32_t timeout_ms) {
   const uint32_t started = millis();
   do {
     while (serial.available()) {
+      // Continuous non-NMEA input must not bypass the existing probe window.
+      // Sample inside the byte loop as well as after an empty FIFO; unsigned
+      // elapsed time preserves the deadline across millisecond rollover.
+      if (static_cast<uint32_t>(millis() - started) >= timeout_ms) return false;
       if (probe.ingest(static_cast<uint8_t>(serial.read()))) return true;
     }
     delay(5);
@@ -1113,11 +1117,11 @@ const char* EnvironmentSensorManager::getSettingValue(int i) const {
 bool EnvironmentSensorManager::setSettingValue(const char* name, const char* value) {
   #if ENV_INCLUDE_GPS
   bool gps_setting_available = gps_detected;
-#if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+#if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
   gps_setting_available = gps_setting_available || gps_discovery_pending;
 #endif
   if (gps_setting_available && strcmp(name, "gps") == 0) {
-#if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+#if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
     // Preferences load before a cold receiver finishes its bounded probe.
     // Retain intent so late discovery cannot replace a saved off/on choice.
     gps_discovery_preference_known = true;
@@ -1181,7 +1185,7 @@ void EnvironmentSensorManager::setPowerSavingEnabled(bool enabled) {
 }
 
 #if ENV_INCLUDE_GPS
-#if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+#if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
 void EnvironmentSensorManager::finishBasicGpsDiscovery(bool found) {
   gps_discovery_pending = false;
   gps_detected = found;
@@ -1238,7 +1242,7 @@ void EnvironmentSensorManager::initBasicGPS() {
   resetGpsTelemetryTransportState();
   gps_serial_transport = false;
   gps_serial_transport_blocked = false;
-#if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+#if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
   gps_detected = false;
   gps_active = false;
 #endif
@@ -1259,7 +1263,7 @@ void EnvironmentSensorManager::initBasicGPS() {
     MESH_DEBUG_PRINTLN("No GPS wake/reset pin found for this board. Continuing on...");
   #endif
 
-#if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+#if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
   // Reserve the configured UART immediately, including while presence is
   // still unknown. Continue discovery from loop() so an absent optional GPS
   // cannot consume the website's entire five-second USB bootstrap deadline.
@@ -1540,7 +1544,7 @@ void EnvironmentSensorManager::stop_gps() {
 
 bool EnvironmentSensorManager::gpsUsesSerialUart(uint8_t uart) const {
 #if ENV_INCLUDE_GPS
-#if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+#if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
   // The pending probe owns this UART before presence has been established.
   return uart == 1 && gps_serial_transport;
 #else
@@ -1603,14 +1607,14 @@ bool EnvironmentSensorManager::setGpsSerialTransportBlocked(uint8_t uart,
     // Cancel remote-query acquisition/hold state before releasing the UART.
     setGpsTelemetryTransportAvailable(false);
     gps_serial_transport_blocked = true;
-#if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+#if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
     if (gps_discovery_pending) _location->stop();
 #endif
     if (gps_active) stop_gps();
     Serial1.end();
   } else {
     gps_serial_transport_blocked = false;
-#if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+#if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
     if (gps_discovery_pending) {
       // The bridge's time cannot count as a GPS absence timeout. Reclaim only
       // after release and give the newly awakened receiver its full window.
@@ -1637,7 +1641,7 @@ void EnvironmentSensorManager::loop() {
   #if ENV_INCLUDE_GPS
   static unsigned long next_gps_update = 0;
   unsigned long now = millis();
-#if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+#if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
   serviceBasicGpsDiscovery();
 #endif
   loopGpsTelemetry(now);
