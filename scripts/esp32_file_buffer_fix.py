@@ -44,17 +44,55 @@ STRICT_METHOD = ORIGINAL_METHOD.replace(
         && static_cast<size_t>(_f->_bf._size) == size));''')
 
 
-def patched_vfs_source(source):
+LAYOUT_GUARD_ARDUINO3 = LAYOUT_GUARD.replace(
+    "Arduino 2.0.17/newlib 3.3.0", "Arduino 3.1.3/3.3.11/newlib 4.3.0"
+).replace("__NEWLIB__ != 3", "__NEWLIB__ != 4")
+ORIGINAL_METHOD_ARDUINO3 = '''bool VFSFileImpl::setBufferSize(size_t size) {
+  if (_isDirectory || !_f) {
+    return 0;
+  }
+  int res = setvbuf(_f, NULL, _IOFBF, size);
+  return res == 0;
+}'''
+STRICT_METHOD_ARDUINO3 = ORIGINAL_METHOD_ARDUINO3.replace(
+    "  return res == 0;",
+    '''  // Reject a successful newlib fallback to a different allocation size.
+  // size==0 retains the public choose-default behavior.
+  return res == 0 && (size == 0 || (_f->_bf._size > 0
+    && static_cast<size_t>(_f->_bf._size) == size));''')
+FRAMEWORK_PINS = {
+    (2, 0, 17): (PINNED_VFS_SHA256, PATCHED_VFS_SHA256),
+    (3, 1, 3): (
+        'b879998d67c5c6fc36845831af60b03338365031b4ca15d638d5ff6389a5c155',
+        '5facd9c1543aad0105008ce6c93db0b771396834bf18cec6c62cceadee08d109'),
+    (3, 3, 11): (
+        '3d345bcb3b764f08c6e923dbacc96f27da10edb12beb774de439228057d14a54',
+        '0cfa80cc29a38e854fa17401605dbe9adbd6157195ec5444f0a90d68c344cd0c'),
+}
+
+
+def patched_vfs_source(source, framework_version=(2, 0, 17)):
+    try:
+        pinned_digest, patched_digest = FRAMEWORK_PINS[framework_version]
+    except KeyError as error:
+        raise RuntimeError("ESP32 FS buffer fix: unreviewed framework version") from error
     source = source.replace("\r\n", "\n")
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    if digest == PATCHED_VFS_SHA256:
+    if digest == patched_digest:
         return source
-    if (digest != PINNED_VFS_SHA256 or source.count(INCLUDE) != 1
-            or source.count(ORIGINAL_METHOD) != 1):
-        raise RuntimeError("ESP32 FS buffer fix: changed pinned2.0.17 source; review SDK update")
-    patched = source.replace(INCLUDE, INCLUDE + LAYOUT_GUARD, 1).replace(
-        ORIGINAL_METHOD, STRICT_METHOD, 1)
-    if hashlib.sha256(patched.encode("utf-8")).hexdigest() != PATCHED_VFS_SHA256:
+    original, strict, layout = ((ORIGINAL_METHOD, STRICT_METHOD, LAYOUT_GUARD)
+                               if framework_version == (2, 0, 17) else
+                               (ORIGINAL_METHOD_ARDUINO3, STRICT_METHOD_ARDUINO3,
+                                LAYOUT_GUARD_ARDUINO3))
+    if (digest != pinned_digest or source.count(INCLUDE) != 1
+            or source.count(original) != 1):
+        raise RuntimeError("ESP32 FS buffer fix: changed pinned source; review SDK update")
+    patched = source.replace(INCLUDE, INCLUDE + layout, 1).replace(original, strict, 1)
+    # Only the reviewed 3.3.11 comments contain these characters. Keep generated
+    # project copies ASCII without changing the shared SDK or executable text.
+    for character, replacement in (("\u2192", "->"), ("\u2013", "-"), ("\u2014", "-")):
+        patched = patched.replace(character, replacement)
+    if hashlib.sha256(patched.encode("utf-8")).hexdigest() != patched_digest:
         raise RuntimeError("ESP32 FS buffer fix: unexpected transform result")
     return patched
 
@@ -79,8 +117,13 @@ def require_pinned_framework(source):
         raise RuntimeError("ESP32 FS buffer fix: missing framework version header") from error
     entries = re.findall(r"^#define ESP_ARDUINO_VERSION_(MAJOR|MINOR|PATCH)\s+(\d+)\s*$",
                          header, re.MULTILINE)
-    if (len(entries) != 3 or dict(entries) != {"MAJOR": "2", "MINOR": "0", "PATCH": "17"}):
+    values = dict(entries)
+    if len(entries) != 3 or set(values) != {"MAJOR", "MINOR", "PATCH"}:
         raise RuntimeError("ESP32 FS buffer fix: changed/malformed pinned framework version")
+    version = tuple(int(values[key]) for key in ("MAJOR", "MINOR", "PATCH"))
+    if version not in FRAMEWORK_PINS:
+        raise RuntimeError("ESP32 FS buffer fix: changed/malformed pinned framework version")
+    return version
 
 
 def replace_vfs_source(build_env, node):
@@ -89,8 +132,8 @@ def replace_vfs_source(build_env, node):
     source = Path(node.srcnode().get_abspath())
     if source.parts[-4:] != SOURCE_SUFFIX:
         return node
-    require_pinned_framework(source)
-    patched = patched_vfs_source(source.read_text(encoding="utf-8"))
+    version = require_pinned_framework(source)
+    patched = patched_vfs_source(source.read_text(encoding="utf-8"), version)
     destination = Path(build_env.subst("$BUILD_DIR")) / "patched-esp32-fs" / source.name
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists() or destination.read_text(encoding="utf-8") != patched:

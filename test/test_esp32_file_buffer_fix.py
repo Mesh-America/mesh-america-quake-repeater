@@ -2,6 +2,7 @@
 """Portable witnesses for the exact pinned Arduino/newlib buffer admission fix."""
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -14,6 +15,11 @@ FIX = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FIX)
 RAW = (FIXTURES / "vfs_api.cpp").read_text()
 PATCHED = FIX.patched_vfs_source(RAW)
+SDK_VARIANTS = [((2, 0, 17), RAW, PATCHED, FIXTURES)]
+for version in ((3, 1, 3), (3, 3, 11)):
+    fixture = FIXTURES / ".".join(map(str, version))
+    raw = json.loads((fixture / "vfs_api.json").read_text(encoding="ascii"))["source"]
+    SDK_VARIANTS.append((version, raw, FIX.patched_vfs_source(raw, version), fixture))
 
 
 def method(source, signature):
@@ -156,6 +162,23 @@ int main() {
 '''
 
 
+class Node:
+    def __init__(self, path): self.path = path
+    def srcnode(self): return self
+    def get_abspath(self): return str(self.path)
+class Env(dict):
+    def __init__(self, defines, build):
+        super().__init__(CPPDEFINES=defines)
+        self.build, self.paths, self.middleware = build, [], []
+    def subst(self, value):
+        assert value == "$BUILD_DIR"
+        return str(self.build)
+    def File(self, path): return path
+    def AppendUnique(self, **kwargs):
+        for path in kwargs["CPPPATH"]:
+            if path not in self.paths: self.paths.append(path)
+    def AddBuildMiddleware(self, callback, pattern): self.middleware.append((callback, pattern))
+
 class FileBufferFixTest(unittest.TestCase):
     def compile_run(self, source, *, success=True, compile_failure=False, headers=None):
         with tempfile.TemporaryDirectory(prefix="mesh-fs-buffer-") as directory:
@@ -183,25 +206,31 @@ class FileBufferFixTest(unittest.TestCase):
                 self.assertIn("file.setBufferSize(251)", result.stderr)
 
     def test_actual_method_honored_fallback_errors_zero_and_no_io(self):
-        self.compile_run(METHOD_PREFIX + method(PATCHED, "bool VFSFileImpl::setBufferSize(") + METHOD_MAIN)
+        for version, _, patched, _ in SDK_VARIANTS:
+            with self.subTest(version=version):
+                self.compile_run(METHOD_PREFIX + method(patched, "bool VFSFileImpl::setBufferSize(") + METHOD_MAIN)
 
     def test_upstream_success_only_negative_control_rejects_fallback(self):
-        self.compile_run(METHOD_PREFIX + method(RAW, "bool VFSFileImpl::setBufferSize(") + METHOD_MAIN,
-                         success=False)
+        for version, raw, _, _ in SDK_VARIANTS:
+            with self.subTest(version=version):
+                self.compile_run(METHOD_PREFIX + method(raw, "bool VFSFileImpl::setBufferSize(") + METHOD_MAIN,
+                                 success=False)
 
     def test_actual_transaction_rejects_writer_and_verifier_fallback_before_io(self):
         transaction = (ROOT / "src/helpers/ContactFileTransaction.h").read_text().replace(
             '#include "IdentityStore.h"', '#include "identity_seam.h"').replace(
             '#include "PersistentStoreFormat.h"', '#include <helpers/PersistentStoreFormat.h>').replace(
             '#pragma once\n', '', 1)
-        self.compile_run(METHOD_PREFIX + method(PATCHED, "bool VFSFileImpl::setBufferSize(")
-                         + TRANSACTION_MOCK + transaction + TRANSACTION_MAIN,
-                         headers={"identity_seam.h": "#pragma once\n"})
+        for version, _, patched, _ in SDK_VARIANTS:
+            with self.subTest(version=version):
+                self.compile_run(METHOD_PREFIX + method(patched, "bool VFSFileImpl::setBufferSize(")
+                                 + TRANSACTION_MOCK + transaction + TRANSACTION_MAIN,
+                                 headers={"identity_seam.h": "#pragma once\n"})
 
-    def layout_source(self):
+    def layout_source(self, fixture=FIXTURES, guard=FIX.LAYOUT_GUARD):
         # Execute the exact header's reviewed prefix with 32-bit pointer values
         # on a native 64-bit host. The target copy additionally asserts void*32.
-        reent = (FIXTURES / "newlib_sys_reent.h").read_text()
+        reent = (fixture / "newlib_sys_reent.h").read_text()
         sbuf = method(reent, "struct __sbuf {") + ";\n"
         start = reent.index("struct __sFILE {")
         end = reent.index("#ifdef _REENT_SMALL", start)
@@ -209,7 +238,7 @@ class FileBufferFixTest(unittest.TestCase):
         fields = (sbuf + prefix).replace("unsigned char *", "ModelPointer ")
         source = "#include <cstdint>\nusing ModelPointer = uint32_t;\n" + fields
         source += "using FILE = __sFILE;\n"
-        source += FIX.LAYOUT_GUARD.replace("sizeof(void*)", "sizeof(ModelPointer)")
+        source += guard.replace("sizeof(void*)", "sizeof(ModelPointer)")
         source += "int main() {}\n"
         return source
 
@@ -222,6 +251,57 @@ class FileBufferFixTest(unittest.TestCase):
             self.compile_run(broken, headers=headers, compile_failure=True)
         self.compile_run(self.layout_source(), headers={"newlib.h": version.replace(
             "#define __NEWLIB__ 3", "#define __NEWLIB__ 4")}, compile_failure=True)
+
+    def test_arduino3_actual_newlib_prefix_rejects_changed_layout_and_abi(self):
+        fixture = FIXTURES / "newlib4"
+        version = (fixture / "_newlib_version.h").read_text(encoding="ascii")
+        source = self.layout_source(fixture, FIX.LAYOUT_GUARD_ARDUINO3)
+        self.compile_run(source, headers={"newlib.h": version})
+        for broken in (source.replace("struct __sbuf _bf;", "int added; struct __sbuf _bf;"),
+                       source.replace("int\t_size;", "long long\t_size;")):
+            self.compile_run(broken, headers={"newlib.h": version}, compile_failure=True)
+        self.compile_run(source, headers={"newlib.h": version.replace(
+            "#define __NEWLIB_MINOR__ 3", "#define __NEWLIB_MINOR__ 4")}, compile_failure=True)
+        self.assertEqual(hashlib.sha256((fixture / "newlib_sys_reent.h").read_bytes()).hexdigest(),
+                         "c7ba657f911f7e27b7449bda36aa4efa80a025c726768dabb8d4a792f535ec9a")
+
+    def test_every_supported_sdk_uses_its_own_source_pin_and_keeps_shared_sdk_unchanged(self):
+        with tempfile.TemporaryDirectory(prefix="mesh-fs-multi-sdk-") as directory:
+            temp = Path(directory)
+            source = temp / "sdk/libraries/FS/src/vfs_api.cpp"
+            source.parent.mkdir(parents=True)
+            header = temp / "sdk/cores/esp32/esp_arduino_version.h"
+            header.parent.mkdir(parents=True)
+            node = Node(source)
+            for version, raw, patched, fixture in SDK_VARIANTS:
+                with self.subTest(version=version):
+                    original_header = (fixture / "esp_arduino_version.h").read_bytes()
+                    source.write_text(raw, encoding="utf-8")
+                    header.write_bytes(original_header)
+                    self.assertEqual(FIX.require_pinned_framework(source), version)
+                    self.assertTrue(patched.isascii())
+                    self.assertEqual(FIX.patched_vfs_source(patched, version), patched)
+                    self.assertEqual(FIX.patched_vfs_source(raw.replace("\n", "\r\n"), version), patched)
+                    for mode in (None, 0, 1):
+                        defines = ["ESP32_PLATFORM"]
+                        if mode is not None:
+                            defines += [("ARDUINO_USB_MODE", mode), ("ARDUINO_USB_CDC_ON_BOOT", 1)]
+                        env = Env(defines, temp / (str(version) + str(mode)))
+                        result = Path(FIX.replace_vfs_source(env, node))
+                        self.assertEqual(result.read_text(encoding="ascii"), patched)
+                        self.assertEqual(source.read_text(encoding="utf-8"), raw)
+                        self.assertEqual(header.read_bytes(), original_header)
+                        before = result.stat().st_mtime_ns
+                        self.assertEqual(Path(FIX.replace_vfs_source(env, node)).stat().st_mtime_ns, before)
+                    for changed in (raw + "\n", patched + "\n",
+                                    raw.replace("return res == 0;", "return true;", 1)):
+                        with self.assertRaises(RuntimeError): FIX.patched_vfs_source(changed, version)
+                    for other_version, _, _, _ in SDK_VARIANTS:
+                        if other_version != version:
+                            with self.assertRaises(RuntimeError): FIX.patched_vfs_source(raw, other_version)
+                    header.write_bytes(original_header + b"\n#define ESP_ARDUINO_VERSION_MAJOR 9\n")
+                    with self.assertRaises(RuntimeError): FIX.replace_vfs_source(env, node)
+            with self.assertRaises(RuntimeError): FIX.patched_vfs_source(RAW, (3, 3, 12))
 
     def test_exact_fingerprints_shape_normalization_and_idempotence(self):
         self.assertEqual(hashlib.sha256((FIXTURES / "vfs_api.cpp").read_bytes()).hexdigest(), FIX.PINNED_VFS_SHA256)
@@ -240,22 +320,6 @@ class FileBufferFixTest(unittest.TestCase):
             self.assertEqual(hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest(), digest)
 
     def test_build_local_copy_all_usb_modes_guards_and_shared_bytes(self):
-        class Node:
-            def __init__(self, path): self.path = path
-            def srcnode(self): return self
-            def get_abspath(self): return str(self.path)
-        class Env(dict):
-            def __init__(self, defines, build):
-                super().__init__(CPPDEFINES=defines)
-                self.build, self.paths, self.middleware = build, [], []
-            def subst(self, value):
-                assert value == "$BUILD_DIR"
-                return str(self.build)
-            def File(self, path): return path
-            def AppendUnique(self, **kwargs):
-                for path in kwargs["CPPPATH"]:
-                    if path not in self.paths: self.paths.append(path)
-            def AddBuildMiddleware(self, callback, pattern): self.middleware.append((callback, pattern))
         with tempfile.TemporaryDirectory(prefix="mesh-fs-copy-") as directory:
             temp = Path(directory)
             source = temp / "sdk/libraries/FS/src/vfs_api.cpp"

@@ -27,3 +27,24 @@ model 32-bit pointer widths rather than borrowing the host libc's FILE layout.
 
 Backend buffer admission is not a wall-clock guarantee: SPIFFS metadata,
 garbage collection, flush, close and publication still require hardware tests.
+
+Arduino-ESP32 3.1.3 and 3.3.11:
+The versioned directories contain exact upstream version headers and VFS source
+encoded in the JSON "source" field. JSON escaping preserves the upstream bytes
+while keeping repository fixture files ASCII. The build copy replaces only the
+reviewed Unicode comment punctuation; the shared SDK remains unmodified.
+https://github.com/espressif/arduino-esp32/blob/3.1.3/libraries/FS/src/vfs_api.cpp
+https://github.com/espressif/arduino-esp32/blob/3.3.11/libraries/FS/src/vfs_api.cpp
+Both source variants retain their complete upstream copyright/license notices.
+3.1.3 source SHA256 b879998d67c5c6fc36845831af60b03338365031b4ca15d638d5ff6389a5c155
+3.3.11 source SHA256 3d345bcb3b764f08c6e923dbacc96f27da10edb12beb774de439228057d14a54
+
+newlib4/ contains the exact shared FILE-layout and generated version headers
+from Xtensa 14.2.0+20260121 and RISC-V 13.2.0+20240530, newlib 4.3.0.
+Both installed reent.h files match these complete upstream files byte for byte:
+https://github.com/espressif/newlib-esp32/blob/esp-4.3.0_20260121/newlib/libc/include/sys/reent.h
+https://github.com/espressif/newlib-esp32/blob/esp-4.3.0_20240530/newlib/libc/include/sys/reent.h
+https://github.com/espressif/newlib-esp32/blob/esp-4.3.0_20260121/COPYING.NEWLIB
+reent SHA256 c7ba657f911f7e27b7449bda36aa4efa80a025c726768dabb8d4a792f535ec9a
+The reviewed FILE prefix has the same 32-bit _bf/_size offsets as newlib 3.3.0.
+Arduino 3 uses a separate newlib 4.3.0 version guard; other versions fail closed.
