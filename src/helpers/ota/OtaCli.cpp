@@ -223,7 +223,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
              c.folder_active ? c.folder_dest_info : "not connected",
              (unsigned)c.manager.servedCount(), dighx);
 #else
-    SelfFwInfo fi; bool s = ota_self_firmware(fi);
+    SelfFwInfo fi; bool s = ota_self_firmware_for_display(fi);
     char selfhx[9]; if (s && fi.valid) mesh::Utils::toHex(selfhx, fi.body_hash, 4); else strcpy(selfhx, "?");
     OtaManager::FetchState fs = c.manager.fetchState();
     char dl[80];
@@ -303,7 +303,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       const OtaManager::ServeEntry* e = c.manager.servedEntry(i);
       if (e && e->is_self) { self = e; break; }
     }
-    SelfFwInfo fi; bool sok = ota_self_firmware(fi);
+    SelfFwInfo fi; bool sok = ota_self_firmware_for_display(fi);
     char midhx[9], bodyhx[9], verbuf[20], dighx[9];
     if (self)            mesh::Utils::toHex(midhx, self->mid, 4);        else strcpy(midhx, "?");
     if (sok && fi.valid) mesh::Utils::toHex(bodyhx, fi.body_hash, 4);    else strcpy(bodyhx, "?");
