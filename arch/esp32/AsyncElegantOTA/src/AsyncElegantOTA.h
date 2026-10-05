@@ -33,6 +33,10 @@ class AsyncElegantOtaClass{
             loop(),
             restart();
 
+        // Stop admission atomically with upload ownership. Existing GET
+        // responses may drain while the containing listener is stopped.
+        bool setEnabled(bool enabled);
+
     private:
         AsyncWebServer *_server;
 

@@ -255,6 +255,9 @@ jobs:
       - name: Verify WiFi OTA startup and WebConfig handoff
         run: python3 -B test/test_wifi_ota_start.py -v
 
+      - name: Verify browser OTA completion and immediate HTTP listener restart
+        run: python3 -B test/test_async_web_lifecycle.py -v
+
       - name: Verify GPS status distinguishes user settings from receiver sleep
         run: |
           python3 -B test/test_gps_status.py

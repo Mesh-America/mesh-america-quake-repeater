@@ -1,4 +1,13 @@
 #include <AsyncElegantOTA.h>
+#include <atomic>
+static std::atomic<bool> ota_uploads_enabled{false};
+static std::atomic<bool> ota_upload_busy{false};
+#if defined(ESP32)
+static std::atomic<bool> ota_reboot_pending{false};
+#endif
+// All upload callbacks run on AsyncTCP's task. Update is a global singleton;
+// retain one request as its owner until that request disconnects.
+static AsyncWebServerRequest* ota_upload_owner = nullptr;
 
 AsyncElegantOtaClass AsyncElegantOTA;
 
@@ -8,6 +17,7 @@ void AsyncElegantOtaClass::setID(const char* id){
 
 void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, const char* password){
     _server = server;
+    setEnabled(true);
 
     if(strlen(username) > 0){
         _authRequired = true;
@@ -49,13 +59,13 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 return request->requestAuthentication();
             }
         }
-        // the request handler is triggered after the upload has finished... 
-        // create the response, add header, and send response
-        AsyncWebServerResponse *response = request->beginResponse((Update.hasError())?500:200, "text/plain", (Update.hasError())?"FAIL":"OK");
+        if (request->isSent()) return; // Preserve an earlier upload error.
+        const bool complete = request->_tempObject
+            && *static_cast<bool*>(request->_tempObject) && !Update.hasError();
+        AsyncWebServerResponse *response = request->beginResponse(complete?200:500, "text/plain", complete?"OK":"FAIL");
         response->addHeader("Connection", "close");
         response->addHeader("Access-Control-Allow-Origin", "*");
         request->send(response);
-        restart();
     }, [&](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         //Upload handler chunks in data
         if(_authRequired){
@@ -65,11 +75,30 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
         }
 
         if (!index) {
+            if (!ota_uploads_enabled.load()) {
+                return request->send(503, "text/plain", "OTA stopped");
+            }
+            bool expected = false;
+            if (request->_tempObject
+#if defined(ESP32)
+                || ota_reboot_pending.load()
+#endif
+                || !ota_upload_busy.compare_exchange_strong(expected, true)
+            ) {
+                return request->send(409, "text/plain", "OTA upload already active");
+            }
+            // A stop can race the first check before ownership was reserved.
+            if (!ota_uploads_enabled.load()) {
+                ota_upload_busy.store(false);
+                return request->send(503, "text/plain", "OTA stopped");
+            }
             if(!request->hasParam("MD5", true)) {
+                ota_upload_busy.store(false);
                 return request->send(400, "text/plain", "MD5 parameter missing");
             }
 
             if(!Update.setMD5(request->getParam("MD5", true)->value().c_str())) {
+                ota_upload_busy.store(false);
                 return request->send(400, "text/plain", "MD5 parameter invalid");
             }
 
@@ -84,9 +113,33 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 if (!Update.begin(UPDATE_SIZE_UNKNOWN, cmd)) { // Start with max available size
             #endif
                 Update.printError(Serial);
+                ota_upload_busy.store(false);
                 return request->send(400, "text/plain", "OTA could not begin");
             }
+            // AsyncWebServer frees this per-request allocation on disconnect.
+            // hasError() alone also reports success for a POST with no upload.
+            request->_tempObject = calloc(1, sizeof(bool));
+            if (!request->_tempObject) {
+                Update.abort();
+                ota_upload_busy.store(false);
+                return request->send(503, "text/plain", "OTA state allocation failed");
+            }
+            ota_upload_owner = request;
+            request->onDisconnect([this, request]() {
+                if (ota_upload_owner != request) return;
+                ota_upload_owner = nullptr;
+                if (*static_cast<bool*>(request->_tempObject)) {
+                    // Let the response drain and the network callback return
+                    // before rebooting from the separate restart task.
+                    restart();
+                } else {
+                    Update.abort(); // Release a disconnected, partial upload.
+                }
+                ota_upload_busy.store(false);
+            });
         }
+
+        if (request->isSent() || ota_upload_owner != request) return;
 
         // Write chunked data to the free sketch space
         if(len){
@@ -100,10 +153,28 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 Update.printError(Serial);
                 return request->send(400, "text/plain", "Could not end OTA");
             }
+            *static_cast<bool*>(request->_tempObject) = true;
         }else{
             return;
         }
     });
+}
+
+bool AsyncElegantOtaClass::setEnabled(bool enabled) {
+    if (enabled) {
+        ota_uploads_enabled.store(true);
+        return true;
+    }
+    const bool was_enabled = ota_uploads_enabled.exchange(false);
+    if (ota_upload_busy.load()
+#if defined(ESP32)
+        || ota_reboot_pending.load()
+#endif
+    ) {
+        ota_uploads_enabled.store(was_enabled);
+        return false;
+    }
+    return true;
 }
 
 // deprecated, keeping for backward compatibility
@@ -111,10 +182,24 @@ void AsyncElegantOtaClass::loop() {
 }
 
 void AsyncElegantOtaClass::restart() {
+#if defined(ESP32)
+    bool expected = false;
+    if (!ota_reboot_pending.compare_exchange_strong(expected, true)) return;
+    // Even disconnect handlers run on the shared AsyncTCP task. Return to it
+    // immediately, then reboot from a separate task after final TCP cleanup.
+    if (xTaskCreate([](void*) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            ESP.restart();
+            vTaskDelete(nullptr);
+        }, "ota-reboot", 3072, nullptr, 1, nullptr) != pdPASS) {
+        ota_reboot_pending.store(false);
+    }
+#else
     yield();
     delay(1000);
     yield();
     ESP.restart();
+#endif
 }
 
 String AsyncElegantOtaClass::getID(){

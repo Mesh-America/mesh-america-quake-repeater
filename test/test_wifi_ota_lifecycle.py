@@ -39,6 +39,7 @@ STUBS = r'''
 constexpr int WL_CONNECTED = 3, WL_DISCONNECTED = 6, HTTP_GET = 0;
 constexpr int WIFI_AP = 2;
 constexpr int ESP_OK = 0;
+constexpr int LISTEN = 10;
 
 struct IPAddress {
   uint32_t value = 0;
@@ -102,14 +103,19 @@ struct AsyncWebServerRequest {
   template<class... Args> void send(Args...) {}
 };
 struct AsyncWebServer {
+  bool listening = false;
   explicit AsyncWebServer(int port) { assert(port == 80); ++server_count; }
   template<class Handler> void on(const char*, int, Handler) {}
-  void begin() { ++server_begin_calls; }
+  void begin() { ++server_begin_calls; listening = true; }
+  void end() { listening = false; }
+  int state() const { return listening ? LISTEN : 0; }
 };
 struct MockElegantOTA {
   void setID(const char*) {}
   void begin(AsyncWebServer* server) { assert(server != nullptr); }
+  bool setEnabled(bool) { return true; }
 } AsyncElegantOTA;
+static AsyncWebServer* async_ota_host = nullptr;
 struct MockSPIFFS {} SPIFFS;
 
 class ESP32Board {
