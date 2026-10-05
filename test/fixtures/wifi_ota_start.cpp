@@ -11,6 +11,11 @@
 constexpr int WL_CONNECTED = 3;
 constexpr int HTTP_GET = 0;
 constexpr int WIFI_AP = 2;
+constexpr int ESP_OK = 0, WIFI_IF_AP = 1;
+constexpr uint8_t WIFI_PROTOCOL_11B = 1, WIFI_PROTOCOL_11G = 2;
+constexpr uint8_t WIFI_PROTOCOL_11N = 4, WIFI_PROTOCOL_LR = 8;
+using esp_err_t = int;
+bool allow_protocol_reset = true;
 struct IPAddress {
   std::string value;
   IPAddress() = default;
@@ -24,6 +29,7 @@ struct IPAddress {
 struct WiFiFake {
   bool connected = true, ap = false, allow_ap = true;
   unsigned starts = 0;
+  uint8_t ap_protocol = 15; // Valid driver state, but LR beacons hide the AP from ordinary clients.
   int status() const { return connected ? WL_CONNECTED : 0; }
   int getMode() const { return ap ? WIFI_AP : 0; }
   IPAddress localIP() const { return IPAddress(10, 20, 30, 40); }
@@ -39,6 +45,15 @@ struct WiFiFake {
   }
   void softAPdisconnect(bool) { ap = false; }
 } WiFi;
+esp_err_t esp_wifi_set_protocol(int interface_id, uint8_t protocols) {
+  assert(interface_id == WIFI_IF_AP);
+  if (!allow_protocol_reset) return -1;
+  WiFi.ap_protocol = protocols;
+  return ESP_OK;
+}
+namespace mesh { namespace wifi {
+@AP_PROTOCOL_POLICY@
+} }
 static unsigned server_starts = 0;
 struct AsyncWebServerRequest {
   void send(int, const char*, const char*) {}
@@ -101,6 +116,7 @@ int main() {
         + "/update";
     assert(strncmp(reply.text, url.c_str(), url.size()) == 0);
     assert(strstr(reply.text, instruction));
+    if (ap || !WiFi.connected) assert(WiFi.ap_protocol == 7);
     assert(strlen(reply.text) < 160 && reply.guard == 0x12345678);
   };
   // Normal start reports the actual LAN address and does not disconnect it.
@@ -119,6 +135,7 @@ int main() {
   start(true, "192.168.4.1", "Join WiFi MeshCore-OTA");
   assert(WiFi.ap && WiFi.connected && server_starts == 1);
   const auto ap_starts = WiFi.starts;
+  WiFi.ap_protocol = 15; // Repair an existing AP without dropping its clients.
   start(true, "192.168.4.1", "Join WiFi MeshCore-OTA");
   assert(WiFi.starts == ap_starts); // Healthy repeats retain associated clients.
   WiFi.ap = false; // An external driver stop invalidates cached AP ownership.
@@ -136,6 +153,11 @@ int main() {
   assert(!board.inhibit_sleep && !board.ota_server && !WiFi.ap && WiFi.connected);
 
   WiFi.connected = false;
+  allow_protocol_reset = false;
+  assert(!board.startOTAUpdate("test node", reply.text, false));
+  assert(strcmp(reply.text, "ERR: OTA WiFi failed") == 0);
+  assert(!board.inhibit_sleep && !board.ota_server && !WiFi.ap);
+  allow_protocol_reset = true;
   start(false, "192.168.4.1", "Join WiFi MeshCore-OTA");
   assert(WiFi.ap && !WiFi.connected);
   assert(board.stopOTAUpdate(reply.text));

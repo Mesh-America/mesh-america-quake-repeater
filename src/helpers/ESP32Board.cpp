@@ -59,6 +59,7 @@ bool ESP32Board::isUserGpioAvailable(uint8_t pin) const {
 #if defined(LIGHTWEIGHT_WIFI_OTA) && \
     (defined(ADMIN_PASSWORD) || defined(COMPANION_RADIO_FULL))
 #include <WiFi.h>
+#include <helpers/esp32/WiFiRadioPolicy.h>
 #include <helpers/esp32/StaticHtml.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
@@ -304,6 +305,12 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
       ota_started_ap = WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
           && WiFi.softAP("MeshCore-OTA", nullptr);
     }
+    // A valid IP does not imply a discoverable hotspot. An LR protocol bit
+    // left by ESP-NOW makes AP beacons incompatible with ordinary clients.
+    if (ota_started_ap && mesh::wifi::applyAccessPointProtocolMask() != ESP_OK) {
+      WiFi.softAPdisconnect(true);
+      ota_started_ap = false;
+    }
     if (!ota_started_ap) {
       inhibit_sleep = ota_server != nullptr;
       strcpy(reply, "ERR: OTA WiFi failed");
@@ -355,6 +362,7 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
 
 #elif defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA)   // Repeater or Room Server only
 #include <WiFi.h>
+#include <helpers/esp32/WiFiRadioPolicy.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncElegantOTA.h>
@@ -386,6 +394,10 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
       const IPAddress ap_mask(255, 255, 255, 0);
       ota_started_ap = WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
           && WiFi.softAP("MeshCore-OTA", NULL);
+    }
+    if (ota_started_ap && mesh::wifi::applyAccessPointProtocolMask() != ESP_OK) {
+      WiFi.softAPdisconnect(true);
+      ota_started_ap = false;
     }
     if (!ota_started_ap) {
       inhibit_sleep = ota_server != nullptr;
