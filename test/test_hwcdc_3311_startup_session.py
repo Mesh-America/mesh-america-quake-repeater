@@ -17,10 +17,10 @@ RAW = (CORE / "HWCDC.cpp").read_text()
 PATCHED = FIX.patched_hwcdc_startup_source(RAW)
 
 
-def harness(**controls):
+def harness(patched=PATCHED, **controls):
     state, functions, owner = startup.application_sources(**controls)
     # Reuse only the peripheral boundary. All driver methods below come from
-    # the original 3.3.11 implementation with its capture-only startup patch.
+    # the reviewed 3.x implementation with its capture-only startup patch.
     prefix = backport.HARNESS.split("@SUPPORT@", 1)[0]
     prefix = prefix.replace("static std::vector<unsigned> event_lengths;",
                             "static std::vector<unsigned> event_lengths;\n"
@@ -29,17 +29,24 @@ def harness(**controls):
         " if(event==ARDUINO_HW_CDC_TX_EVENT)event_lengths.push_back(data->tx.len);",
         " queued_events.push_back(event);\n"
         " if(event==ARDUINO_HW_CDC_TX_EVENT)event_lengths.push_back(data->tx.len);")
+    has_stash = "static volatile size_t tx_stash_len" in patched
     fields = "\n".join(re.search(r"^static [^\n]*\b" + name + r"[^\n]*;",
-                                  PATCHED, re.MULTILINE)[0]
-                       for name in ("tx_stash_buf", "tx_stash_len", "hw_cdc_tx_mux"))
-    driver = "\n".join(backport.body(PATCHED, signature) for signature in (
+                                  patched, re.MULTILINE)[0]
+                       for name in ("tx_stash_buf", "tx_stash_len", "hw_cdc_tx_mux")) if has_stash else ""
+    signatures = (
         "static inline void hw_cdc_enable_tx_intr(void)",
         "static inline void hw_cdc_enable_tx_intr_from_isr(void)",
         "static inline void hw_cdc_disable_tx_intr_from_isr(void)",
         "static inline void hw_cdc_clear_tx_stash(void)",
         "bool HWCDC::isCDC_Connected()",
         "static void hw_cdc_isr_handler(",
-    ))
+    )
+    if not has_stash:
+        # The 3.1.3 driver has no TX stash/mux helpers and directly updates
+        # interrupts. Do not invent the newer driver's locking guarantees.
+        signatures = signatures[-2:]
+        prefix = prefix.replace("assert(critical_depth);", "")
+    driver = "\n".join(backport.body(patched, signature) for signature in signatures)
     service = r'''
 static void pulse(unsigned limit=64) {
   fifo_limit=limit; intr_status=USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY;
@@ -47,29 +54,41 @@ static void pulse(unsigned limit=64) {
 }
 static void reset() {
   ring=Ring{}; staged.clear(); event_lengths.clear(); queued_events.clear();
-  tx_stash_len=0; irq_enabled=true; plugged=false; connected=false;
+  @RESET_STASH@ irq_enabled=true; plugged=false; connected=false;
   before_empty_return=nullptr; flushes=0;
 }
 '''
+    service = service.replace("@RESET_STASH@", "tx_stash_len=0;" if has_stash else "")
     extra = startup.EXTRA.replace("#define MESH_HWCDC_PINNED_TX_BACKPORT 1",
                                   "#define MESH_HWCDC_PINNED_TX_BACKPORT 0")
     extra = extra.replace("mesh_hwcdc_tx_stash_len", "tx_stash_len")
     extra = extra.replace(" && mesh_hwcdc_fifo_pending", "")
     extra = extra.replace(" && !mesh_hwcdc_fifo_pending", "")
     extra = extra.replace(" && mesh_hwcdc_tx_allowed", "")
+    if not has_stash:
+        # 3.1.3 does not retain partially accepted FIFO suffixes. Exercise its
+        # real boot TX event with a fully accepted packet, then enumeration.
+        extra = extra.replace(
+            "// Real ISR stages a partial boot diagnostic before the host enumerates.",
+            "// Real 3.1.3 ISR stages a boot diagnostic before the host enumerates.")
+        extra = extra.replace("pulse(4); assert(tx_stash_len != 0);",
+                              "pulse(); assert(staged.size() == 11 && ring.data.empty());")
+        extra = extra.replace("    assert(tx_stash_len == 0);\n", "")
     extra = extra.replace("@STARTUP_STATE@", state).replace(
         "@FUNCTIONS@", functions).replace("@OWNER_RESET_HOOK@", owner)
-    return prefix + FIX.HWCDC_3311_STARTUP_HOOK + fields + "\n" + driver + service + extra
+    return prefix + FIX.HWCDC_STARTUP_HOOK + fields + "\n" + driver + service + extra
 
 
 class Hwcdc3311StartupSessionTests(startup.HwcdcStartupSessionTests):
     # Run the exact same client/session assertions and negative controls with
     # the actual 3.3.11 ISR and non-backport application cleanup branches.
+    core, raw, patched, version = CORE, RAW, PATCHED, (3, 3, 11)
+
     def run_case(self, case, *, expect_success=True, **controls):
         with tempfile.TemporaryDirectory(prefix="hwcdc-3311-startup-") as directory:
             directory = Path(directory)
             cpp, binary = directory / "startup.cpp", directory / "startup"
-            cpp.write_text(harness(**controls), encoding="ascii")
+            cpp.write_text(harness(self.patched, **controls), encoding="ascii")
             compiled = subprocess.run([
                 "g++", "-std=c++17", "-pthread", "-Wall", "-Wextra",
                 "-Wno-unused-parameter", "-Wno-sign-compare",
@@ -85,20 +104,22 @@ class Hwcdc3311StartupSessionTests(startup.HwcdcStartupSessionTests):
                 self.assertNotEqual(result.returncode, 0, "Negative control did not fail")
 
     def test_only_reset_event_posting_and_hook_declaration_change(self):
-        self.assertEqual(hashlib.sha256(RAW.encode()).hexdigest(), FIX.PINNED_HWCDC_3311_SHA256)
-        self.assertEqual(hashlib.sha256(PATCHED.encode()).hexdigest(), FIX.PATCHED_HWCDC_3311_SHA256)
-        self.assertEqual(PATCHED.count(FIX.HWCDC_3311_STARTUP_HOOK), 1)
-        self.assertEqual(PATCHED.count(FIX.HWCDC_3311_RESET_CAPTURE), 1)
-        reverted = PATCHED.replace(FIX.HWCDC_3311_STARTUP_HOOK, "", 1).replace(
-            FIX.HWCDC_3311_RESET_CAPTURE, FIX.HWCDC_3311_RESET_POST, 1)
-        self.assertEqual(reverted, RAW, "Unrelated driver code changed")
-        self.assertEqual(FIX.patched_hwcdc_startup_source(PATCHED), PATCHED)
-        self.assertEqual(FIX.patched_hwcdc_startup_source(RAW.replace("\n", "\r\n")), PATCHED)
-        for changed in (RAW + "\n", PATCHED + "\n",
-                        RAW.replace("tx_stash_len = 0;", "tx_stash_len = 1;", 1)):
+        raw_pin, patched_pin = FIX.HWCDC_STARTUP_PINS[self.version]
+        self.assertEqual(hashlib.sha256(self.raw.encode()).hexdigest(), raw_pin)
+        self.assertEqual(hashlib.sha256(self.patched.encode()).hexdigest(), patched_pin)
+        self.assertEqual(self.patched.count(FIX.HWCDC_STARTUP_HOOK), 1)
+        self.assertEqual(self.patched.count(FIX.HWCDC_RESET_CAPTURE), 1)
+        reverted = self.patched.replace(FIX.HWCDC_STARTUP_HOOK, "", 1).replace(
+            FIX.HWCDC_RESET_CAPTURE, FIX.HWCDC_RESET_POST, 1)
+        self.assertEqual(reverted, self.raw, "Unrelated driver code changed")
+        patch = lambda source: FIX.patched_hwcdc_startup_source(source, version=self.version)
+        self.assertEqual(patch(self.patched), self.patched)
+        self.assertEqual(patch(self.raw.replace("\n", "\r\n")), self.patched)
+        for changed in (self.raw + "\n", self.patched + "\n",
+                        self.raw.replace("connected = false;", "connected = true;", 1)):
             with self.subTest(changed=hashlib.sha256(changed.encode()).hexdigest()):
                 with self.assertRaises(RuntimeError):
-                    FIX.patched_hwcdc_startup_source(changed)
+                    patch(changed)
 
     def test_build_local_patch_has_exact_version_and_mode_scope(self):
         class Node:
@@ -118,8 +139,8 @@ class Hwcdc3311StartupSessionTests(startup.HwcdcStartupSessionTests):
             directory = Path(directory)
             sdk = directory / "sdk"; sdk.mkdir()
             path, version = sdk / "HWCDC.cpp", sdk / "esp_arduino_version.h"
-            path.write_text(RAW, encoding="ascii")
-            version.write_text((CORE / "esp_arduino_version.h").read_text(), encoding="ascii")
+            path.write_text(self.raw, encoding="ascii")
+            version.write_text((self.core / "esp_arduino_version.h").read_text(), encoding="ascii")
             node = Node(path)
             for definitions in ([], [("ARDUINO_USB_CDC_ON_BOOT", 0), ("ARDUINO_USB_MODE", 1)],
                                 [("ARDUINO_USB_CDC_ON_BOOT", 1), ("ARDUINO_USB_MODE", 0)]):
@@ -129,13 +150,21 @@ class Hwcdc3311StartupSessionTests(startup.HwcdcStartupSessionTests):
             env = Environment([("ARDUINO_USB_CDC_ON_BOOT", 1), ("ARDUINO_USB_MODE", 1)],
                               directory / "build")
             result = Path(FIX.replace_hwcdc_source(env, node))
-            self.assertEqual(result.read_text(), PATCHED)
-            self.assertEqual(path.read_text(), RAW)
+            self.assertEqual(result.read_text(), self.patched)
+            self.assertEqual(path.read_text(), self.raw)
             self.assertEqual(env.paths, [str(sdk)])
             before = result.stat().st_mtime_ns
             FIX.replace_hwcdc_source(env, node)
             self.assertEqual(result.stat().st_mtime_ns, before)
-            path.write_text(RAW + "\n", encoding="ascii")
+            path.write_text(self.raw + "\n", encoding="ascii")
+            with self.assertRaises(RuntimeError):
+                FIX.replace_hwcdc_source(env, node)
+            # Reviewed versions cannot borrow another version's source pin.
+            path.write_text(self.raw, encoding="ascii")
+            other = (3, 1, 3) if self.version == (3, 3, 11) else (3, 3, 11)
+            version.write_text("\n".join("#define ESP_ARDUINO_VERSION_" + name + " " + str(value)
+                                          for name, value in zip(("MAJOR", "MINOR", "PATCH"), other)) + "\n",
+                               encoding="ascii")
             with self.assertRaises(RuntimeError):
                 FIX.replace_hwcdc_source(env, node)
             # An unreviewed framework version keeps its existing driver.
