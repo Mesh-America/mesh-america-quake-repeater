@@ -2,6 +2,7 @@
 """Exercise the actual browser OTA start/stop methods with fake WiFi and servers."""
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,11 @@ class WiFiOtaStartTest(unittest.TestCase):
         source = (ROOT / "src/helpers/ESP32Board.cpp").read_text()
         lightweight, other = source.split("#elif defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA)", 1)
         fixture = (ROOT / "test/fixtures/wifi_ota_start.cpp").read_text()
+        policy = (ROOT / "src/helpers/esp32/WiFiRadioPolicy.h").read_text()
+        mask = re.search(r"static constexpr uint8_t kAccessPointProtocolMask =.*?;",
+                         policy, re.DOTALL).group(0)
+        fixture = fixture.replace("@AP_PROTOCOL_POLICY@", mask + "\n" + extract_braced(
+            policy, "inline esp_err_t applyAccessPointProtocolMask()"))
         for name, implementation, flags in (
             ("lightweight infrastructure", lightweight, ["-DLIGHTWEIGHT_WIFI_OTA=1"]),
             ("lightweight companion", lightweight, ["-DLIGHTWEIGHT_WIFI_OTA=1", "-DCOMPANION_RADIO_FULL=1"]),

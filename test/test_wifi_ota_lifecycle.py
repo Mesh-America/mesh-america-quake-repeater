@@ -38,6 +38,7 @@ STUBS = r'''
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 constexpr int WL_CONNECTED = 3, WL_DISCONNECTED = 6, HTTP_GET = 0;
 constexpr int WIFI_AP = 2;
+constexpr int ESP_OK = 0;
 
 struct IPAddress {
   uint32_t value = 0;
@@ -61,6 +62,7 @@ struct MockWiFi {
   bool ap_config_ok = true, ap_start_ok = true;
   bool initialized_cache = false, started_cache = false;
   IPAddress station_ip, ap_ip, configured_ap_ip;
+  int ap_protocol = 15;
   int status() const { return station_status; }
   int getMode() const { return sdk_ap_active ? WIFI_AP : 0; }
   IPAddress localIP() const { return station_ip; }
@@ -78,7 +80,11 @@ struct MockWiFi {
     }
     return ap_start_ok;
   }
+  void softAPdisconnect(bool) { sdk_ap_active = false; ap_ip = IPAddress(); }
 } WiFi;
+namespace mesh { namespace wifi {
+int applyAccessPointProtocolMask() { WiFi.ap_protocol = 7; return ESP_OK; }
+} }
 
 int wifi_stop_calls = 0, wifi_deinit_calls = 0;
 int esp_wifi_stop() {
@@ -148,7 +154,7 @@ void seedStation() {
 bool endpointUsable() {
   return sdk_initialized && sdk_started
       && ((WiFi.station_status == WL_CONNECTED && WiFi.station_ip.value != 0)
-          || (sdk_ap_active && WiFi.ap_ip.value != 0));
+          || (sdk_ap_active && WiFi.ap_ip.value != 0 && WiFi.ap_protocol == 7));
 }
 int main(int argc, char** argv) {
   assert(argc == 2);
@@ -162,6 +168,7 @@ int main(int argc, char** argv) {
     the_mesh.web = true;
     const IPAddress ip(192, 168, 4, 1), mask(255, 255, 255, 0);
     assert(WiFi.softAPConfig(ip, ip, mask) && WiFi.softAP("setup", nullptr));
+    mesh::wifi::applyAccessPointProtocolMask();
     assert(endpointUsable());
   } else if (scenario == "owners_mqtt" || scenario == "cleanup_mqtt") {
     the_mesh.mqtt = true;
