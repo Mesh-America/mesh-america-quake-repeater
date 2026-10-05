@@ -96,6 +96,7 @@ nav:
   - Research: research/index.md
   - Releases:
       - Current release:
+          - 1.17.1.9 USA Cascade: releases/1.17.1.9.md
           - 1.17.1.8 USA Cascade: releases/1.17.1.8.md
           - Test Results: test-results/index.md
       - Old Releases: old-releases/index.md

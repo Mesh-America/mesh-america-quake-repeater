@@ -8,6 +8,8 @@ on:
   push:
     tags:
       - 'repeater-*'
+      # Cascade pages contain already-qualified local matrix artifacts.
+      - '!repeater-room-*'
 
 jobs:
   build-repeater-firmwares:

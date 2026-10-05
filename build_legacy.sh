@@ -3757,16 +3757,17 @@ apply_nrf52_size_profile() {
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -Os"
 
   # These color-display repeaters reserve a 64 KiB reset-retained OTA arena
-  # plus a 25 KiB framebuffer. Keep their board-declared 50 neighbours and
-  # the complete flood-rule engine with a smaller table so runtime startup
-  # allocations also fit; do not lower the heap qualification requirement.
+  # plus a 25 KiB framebuffer. With the 8 KiB loop stack, the complete sensor
+  # profile is 1.5-1.9 KiB short of the runtime heap requirement at 16 rules.
+  # Keep their 50 neighbours, sensors, display, OTA and stack; bound the
+  # optional flood-rule table instead of lowering the qualification margin.
   case "${env_name,,}" in
     heltec_t096_repeater_lora_ota_no_external_sensors|\
     heltec_t1_repeater_lora_ota_no_external_sensors)
       append_platformio_build_unflags "-DFLOOD_PACKET_FILTER_SLOTS=63"
-      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_PACKET_FILTER_SLOTS=16"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_PACKET_FILTER_SLOTS=4"
       record_build_reduction \
-        "mesh.flood_rules limited to 16 by measured internal RAM; complete rule engine, color display, GPS, and OTA retained"
+        "mesh.flood_rules limited to 4 by measured internal RAM; complete rule engine, 8 KiB loop stack, 50 neighbors, color display, GPS, sensors, and OTA retained"
       ;;
   esac
 }
