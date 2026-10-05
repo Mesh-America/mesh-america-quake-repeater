@@ -12,6 +12,10 @@ exit code when the tool has a documented false-success mode.
 
 ## ESP32 web console and browser OTA release gates
 
+The [2026-10-05 V4/XIAO checkpoint](hardware_validation_esp32_web_console_ota_2026-10-05.md)
+records reproduced browser OTA failures, fixes, physical results, and remaining
+USB qualification limits. It is not a release approval.
+
 Host tests cannot prove USB enumeration, WiFi discovery, or an HTTP upload on
 the physical board. Before qualifying an ESP32 release, record the following
 on each available hardware family. Mark unavailable hardware as untested; a
@@ -37,7 +41,9 @@ successful build or simulated peripheral is not a hardware pass.
    intervals. For builds that pause bridges during upload, require that pause
    to last until `stop ota`, then verify that the configured bridges resume.
 6. Upload a board-compatible, hash-verified application through the HTTP
-   uploader. Require the server's completion response, normal reboot, expected
+   uploader's unchanged browser page. A scripted HTTP POST alone does not
+   exercise the page's upload format or completion handling. Require the
+   server's completion response, normal reboot, expected
    application version, and working USB console without an extra reset or
    unplug. Use a distinct target version so a reboot without an update cannot
    pass. Select the upload protocol from the compiled implementation:
@@ -46,10 +52,17 @@ successful build or simulated peripheral is not a hardware pass.
    device settings and the test host's network connection.
 
 Keep the host regressions (`test_official_web_console.py`,
-`test_wifi_ota_start.py`, and `test_wifi_ota_lifecycle.py`) alongside these gates.
+`test_wifi_ota_start.py`, `test_wifi_ota_lifecycle.py`, and
+`test_async_web_lifecycle.py`) alongside these gates.
 They cover parsing, sleep policy, startup errors, network ownership, and
 deferred cleanup. A `Started` reply alone does not satisfy the physical OTA
 gate.
+
+Record USB line states and reset reasons during these checks. An opener that
+briefly asserts the hardware reset combination invalidates a no-reset test.
+Keep its failed sample, correct the opener, and repeat under a new run name.
+Report startup readiness, uninterrupted idle, and close/reopen as separate
+results; a later successful command must not erase an earlier timeout.
 
 ## Bluetooth stealth qualification - 2026-09-07
 
