@@ -1,5 +1,9 @@
 #include "MyMesh.h"
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/BootFileSystem.h>
+#endif
 #include <helpers/UsbLogging.h>
+#include <helpers/HilStartupTrace.h>
 #include <helpers/FileRead.h>
 #if MESH_ENABLE_TELEMETRY_HISTORY
 #include <helpers/FilePresence.h>
@@ -3706,14 +3710,20 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 // OTA mesh-integration (receive/begin/loop) is centralized in mesh::Mesh - no per-example wiring.
 
 void MyMesh::begin(FILESYSTEM *fs) {
+  mesh::hilStartupTrace("mesh_dispatcher_begin");
   mesh::Mesh::begin();   // also starts OTA (ota_ctx().begin) for all roles
+  mesh::hilStartupTrace("mesh_dispatcher_ready");
   _fs = fs;
   // load persisted prefs
+  mesh::hilStartupTrace("mesh_prefs_begin");
   _cli.loadPrefs(_fs);
+  mesh::hilStartupTrace("mesh_prefs_ready");
+  mesh::hilStartupTrace("mesh_management_begin");
   _cli.beginManagement(*this, _fs);
 #if MESH_ENABLE_TELEMETRY_HISTORY
   loadTelemetryHistoryTxPrefs();
 #endif
+  mesh::hilStartupTrace("mesh_management_ready");
 
 #if defined(SIM_WIFI_SSID) && defined(WITH_MQTT_BRIDGE)
   // Emulator builds (Wokwi) boot with fresh NVS every run. Seed WiFi so the
@@ -3734,9 +3744,12 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
 #endif
 
+  mesh::hilStartupTrace("mesh_acl_begin");
   acl.load(_fs, self_id);
+  mesh::hilStartupTrace("mesh_acl_ready");
   // TODO: key_store.begin();
   region_map.load(_fs);
+  mesh::hilStartupTrace("mesh_regions_ready");
 #if !defined(PORTABLE_MQTT_OBSERVER)
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
   bool flood_filters_loaded = loadFloodPacketFilters();
@@ -3755,6 +3768,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   loadClockSyncPrefs();
 #endif
 #endif
+  mesh::hilStartupTrace("mesh_filters_ready");
 
   // establish default-scope
   {
@@ -3776,6 +3790,11 @@ void MyMesh::begin(FILESYSTEM *fs) {
     }
   }
 
+#if defined(ESP32_PLATFORM)
+  // Bridge/WebConfig startup can create tasks that read or write this FS.
+  mesh::endEsp32BootFileInventory();
+#endif
+  mesh::hilStartupTrace("mesh_bridge_begin");
 #if defined(WITH_BRIDGE)
   if (_prefs.bridge_enabled) {
 #ifdef WITH_MQTT_BRIDGE
@@ -3849,6 +3868,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
   if (_prefs.espnow_bridge_enabled) setEspNowBridgeState(true);
 #endif
+  mesh::hilStartupTrace("mesh_bridge_ready");
 
   // Wire fault-alert reporter. begin() is safe regardless of bridge state.
   // Passing `this` as the callbacks lets the reporter resolve a TransportKey
@@ -3859,6 +3879,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _alerter.setBridge(mqtt_bridge);
 #endif
 
+  mesh::hilStartupTrace("mesh_webconfig_begin");
 #if defined(WITH_WEBCONFIG) && !defined(WEBCONFIG_NO_AUTO_AP)
   bool start_webui = WebConfigServer::loadEnabled(false);
 #ifdef WITH_MQTT_BRIDGE
@@ -3880,6 +3901,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
 #endif
 
+  mesh::hilStartupTrace("mesh_webconfig_ready");
+  mesh::hilStartupTrace("mesh_radio_begin");
   saved_radio_apply_pending = !applySavedRadioParams();
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
@@ -3890,6 +3913,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
   board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
   setRxPowerSaving(_prefs.rx_powersaving_enabled, _prefs.rx_ps_rx_us, _prefs.rx_ps_sleep_us);
+  mesh::hilStartupTrace("mesh_radio_ready");
 
   board.attachDynamicPrefs(_prefs.getCustom());
 
@@ -3898,6 +3922,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   next_recent_repeater_sweep = futureMillis(RECENT_REPEATER_SWEEP_INTERVAL_MILLIS);
 
 #if ENV_INCLUDE_GPS == 1
+  mesh::hilStartupTrace("mesh_gps_begin");
   applyGpsPrefs();
 #if MESH_ENABLE_TELEMETRY_HISTORY
   if (sensors.getLocationProvider() != NULL) {
@@ -3905,6 +3930,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
     MESH_DEBUG_PRINTLN("Telemetry GPS retention: %u days", (unsigned)gps_days);
   }
 #endif
+  mesh::hilStartupTrace("mesh_gps_ready");
 #endif
 
 #if MESH_ENABLE_TELEMETRY_HISTORY
@@ -3920,6 +3946,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
                        (unsigned)external_voltage_history.storageBytes());
   }
 #endif
+  mesh::hilStartupTrace("mesh_history_ready");
 }
 
 bool MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size) {

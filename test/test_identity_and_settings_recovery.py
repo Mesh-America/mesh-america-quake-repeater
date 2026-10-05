@@ -70,6 +70,10 @@ class IdentityAndSettingsRecovery(unittest.TestCase):
         presence = (ROOT / 'src/helpers/FilePresence.h').read_text()
         program = fixture_prefix() + '\n#include <helpers/IdentityStore.h>\n'
         if platform == 'ESP32_PLATFORM':
+            # Identity startup precedes the inventory. Include its real owner
+            # registry so the extracted metadata probe takes the normal path.
+            program += '#include <helpers/esp32/BootFilePresence.h>\n'
+        if platform == 'ESP32_PLATFORM':
             program += r'''
 struct MigrationNvs {
   bool pending = false;

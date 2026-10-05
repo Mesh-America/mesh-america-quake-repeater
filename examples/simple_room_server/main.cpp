@@ -13,6 +13,7 @@
 
 #if defined(ESP32_PLATFORM)
   #include <helpers/ESP32TrueRandom.h>
+  #include <helpers/esp32/BootFileSystem.h>
 #endif
 #if defined(NRF52_PLATFORM)
   #include <helpers/nrf52/InternalPrimaryFsBoot.h>
@@ -173,6 +174,13 @@ void setup() {
     return;
   }
 
+#if defined(ESP32_PLATFORM)
+  // Identity writes have finished; this FS view remains alive after setup.
+  static mesh::Esp32BootFileSystem boot_fs(*fs);
+  fs = &boot_fs;
+  boot_fs.beginInventory();
+#endif
+
   Stream& console = mesh::usbConsolePort();
   console.print("Room ID: ");
   mesh::Utils::printHex(console, the_mesh.self_id.pub_key, PUB_KEY_SIZE); console.println();
@@ -225,6 +233,9 @@ void setup() {
   the_mesh.sendSelfAdvertisement(16000, false);
 #endif
 
+#if defined(ESP32_PLATFORM)
+  mesh::endEsp32BootFileInventory();
+#endif
   board.onBootComplete();
 }
 

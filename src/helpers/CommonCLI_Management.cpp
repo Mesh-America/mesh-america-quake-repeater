@@ -2,6 +2,7 @@
 #include "ManagementReporter.h"
 #include "FileRead.h"
 #include "PersistentStoreFormat.h"
+#include "HilStartupTrace.h"
 #include <new>
 #include <stdlib.h>
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -245,17 +246,23 @@ void CommonCLI::beginManagement(mesh::Mesh& mesh, FILESYSTEM* fs) {
   _management_mesh = &mesh; _management_fs = fs;
   _management_last_ms = millis(); _management_uptime_ms = _management_last_ms;
   if (!_data_route) {
+    mesh::hilStartupTrace("management_route_begin");
     _data_route = new (std::nothrow) mesh::DataRouteState;
     if (_data_route) {
       _data_route->fs = fs; _data_route->regions = _region_map;
       _data_route->healthy = mesh::dataRouteLoad(*_data_route);
     }
+    mesh::hilStartupTrace("management_route_ready");
   }
   // No reporter/history allocation for the default unconfigured installation.
+  mesh::hilStartupTrace("management_probe_begin");
   if (fs->exists("/management") || fs->exists("/management.bak")) {
+    mesh::hilStartupTrace("management_reporter_begin");
     _management = new (std::nothrow) mesh::ManagementReporter(
       mesh, *_board, *_sensors, *_acl, *_prefs, *_callbacks, *this, fs);
+    mesh::hilStartupTrace("management_reporter_ready");
   }
+  mesh::hilStartupTrace("management_probe_ready");
 }
 
 void CommonCLI::loopManagement() {
