@@ -483,9 +483,16 @@ public:
 
   size_t write(const uint8_t* data, size_t size) override {
     if (data == nullptr || size == 0) return 0;
+    // The shared producer guard excludes other application writers here.
+    // The ISR can only free ring capacity, so one fresh capacity sample keeps
+    // HWCDC::write out of its wait-for-space remainder loop.
+    const int available = Serial.availableForWrite();
+    if (available <= 0) return 0;
+    const size_t attempt = size < static_cast<size_t>(available)
+        ? size : static_cast<size_t>(available);
     noteUsbLoggingTxAttempt();
     esp32_hwcdc_tx_kick_pending.store(true, std::memory_order_release);
-    return Serial.write(data, size);
+    return Serial.write(data, attempt);
   }
 
 private:
