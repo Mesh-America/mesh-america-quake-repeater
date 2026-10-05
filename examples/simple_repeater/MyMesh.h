@@ -506,6 +506,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   uint64_t recv_pkt_filter_match_mask;
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
   bool flood_policy_has_embedded_sections;
+  // A valid stored ruleset can exceed this image's runtime table. Preserve
+  // it until compatible firmware is installed; do not publish an empty set.
+  bool flood_policy_capacity_limited;
   // Zero-based forward-row slot owned by the flood.channel.data compatibility
   // facade. 0xFF means forwarding is enabled and no compatibility row exists.
   uint8_t flood_channel_data_rule_slot;

@@ -194,6 +194,27 @@ assert(!releaseSet.releases.some(function (item) {
   return item.tag_name.startsWith("nrf52-mota-");
 }));
 
+// Numbered pages are emitted when a category exceeds the asset limit.
+// Include them only for the exact family and known category names.
+const chunkTags = ["companion-2-", "lora-ota-2-", "full-profiles-10-"];
+const chunkedReleases = releases.concat(chunkTags.map(function (prefix, index) {
+  return release(prefix + family, "2026-08-23T12:00:00Z", [
+    asset("Extra" + index + "_repeater-" + family + ".uf2")
+  ]);
+}));
+for (const prefix of ["companion-1-", "lora-ota-0-", "lora-ota-02-", "unknown-2-"]) {
+  chunkedReleases.push(release(prefix + family, "2026-08-23T12:00:00Z", []));
+}
+chunkedReleases.push(release("lora-ota-2-" + family + "-other", "2026-08-23T12:00:00Z", []));
+chunkedReleases.push(release("lora-ota-3-" + family, "2026-08-23T12:00:00Z", [], { draft: true }));
+const chunkedSet = picker.selectReleaseSet(chunkedReleases);
+assert.strictEqual(chunkedSet.releases.length, releaseSet.releases.length + chunkTags.length);
+for (const prefix of chunkTags) assert(chunkedSet.releases.some(r => r.tag_name === prefix + family));
+const chunkedCatalog = picker.buildCatalog(chunkedReleases);
+for (let index = 0; index < chunkTags.length; ++index) {
+  assert(chunkedCatalog.profiles.some(p => p.target === "Extra" + index + "_repeater"));
+}
+
 const catalog = picker.buildCatalog(releases);
 assert.strictEqual(catalog.releaseSet.familyTag, family);
 assert.strictEqual(catalog.profiles.length, 12);
