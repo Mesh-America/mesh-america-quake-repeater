@@ -216,6 +216,33 @@ int main() {
 '''
         self.compile_and_run(fixture.replace("@COMMAND@", command), "-DWITH_WEBCONFIG=1")
 
+    def test_lightweight_stop_keeps_slow_client_state_until_task_exits(self):
+        source = (ROOT / "src/helpers/ESP32Board.cpp").read_text()
+        implementation = source[source.index("class LightweightOTAServer {"):]
+        method = extract_braced(implementation, "bool end()")
+        fixture = r'''
+#include <cassert>
+#include <cstdint>
+static unsigned delays = 0;
+static void delay(unsigned value) { assert(value == 10); ++delays; }
+struct Server { void stop() {} };
+struct Updater {
+  bool running = true;
+  Server server;
+  void* task = reinterpret_cast<void*>(1);
+  void* board = reinterpret_cast<void*>(2);
+  @END@
+};
+int main() {
+  Updater updater;
+  assert(!updater.end());
+  assert(!updater.running && updater.task && updater.board && delays == 100);
+  updater.task = nullptr; // Slow network write has now returned and task exited.
+  assert(updater.end() && !updater.board && delays == 100);
+}
+'''
+        self.compile_and_run(fixture.replace("@END@", method))
+
 
 if __name__ == "__main__":
     unittest.main()

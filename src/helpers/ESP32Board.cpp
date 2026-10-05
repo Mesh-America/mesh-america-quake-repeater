@@ -67,8 +67,6 @@ bool ESP32Board::isUserGpioAvailable(uint8_t pin) const {
 #include <freertos/task.h>
 #include <strings.h>
 
-static bool lightweight_ota_started_ap;
-
 // Full Companion retains its established uploader URL on port 8080.
 // Infrastructure uses port 80; CLI startup hands WebConfig's WiFi to OTA.
 #if defined(COMPANION_RADIO_FULL)
@@ -214,6 +212,7 @@ class LightweightOTAServer {
       }
     } while (line[0]);
 
+    if (!running) return;
     if (get_page) sendPage(client);
     else if (get_log) sendLog(client);
     else if (post_update) receiveUpdate(client, content_length);
@@ -256,11 +255,17 @@ public:
     return true;
   }
 
-  void end() {
+  bool isRunning() const { return running; }
+
+  bool end() {
     running = false;
     server.stop();
     for (unsigned i = 0; task != nullptr && i < 100; i++) delay(10);
+    // A slow client can still be returning from a socket write. Keep its
+    // board/session alive until the task exits; a retry can finish cleanup.
+    if (task != nullptr) return false;
     board = nullptr;
+    return true;
   }
 };
 
@@ -268,6 +273,10 @@ static LightweightOTAServer lightweight_ota_server;
 
 bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   (void)id;
+  if (ota_server != nullptr && !lightweight_ota_server.isRunning()) {
+    strcpy(reply, "ERR: OTA stopping; retry stop ota first");
+    return false;
+  }
 #if defined(COMPANION_RADIO_FULL)
   const esp_partition_t* running = esp_ota_get_running_partition();
   const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
@@ -283,17 +292,19 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   inhibit_sleep = true;
 
   IPAddress ip;
-  const bool use_ap = force_ap || WiFi.status() != WL_CONNECTED;
+  const bool use_ap = force_ap || WiFi.status() != WL_CONNECTED
+      || static_cast<uint32_t>(WiFi.localIP()) == 0;
   if (!use_ap) {
     ip = WiFi.localIP();
   } else {
-    if (!lightweight_ota_started_ap) {
+    if (!ota_started_ap || !(WiFi.getMode() & WIFI_AP)
+        || static_cast<uint32_t>(WiFi.softAPIP()) == 0) {
       const IPAddress ap_ip(192, 168, 4, 1);
       const IPAddress ap_mask(255, 255, 255, 0);
-      lightweight_ota_started_ap = WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
+      ota_started_ap = WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
           && WiFi.softAP("MeshCore-OTA", nullptr);
     }
-    if (!lightweight_ota_started_ap) {
+    if (!ota_started_ap) {
       inhibit_sleep = ota_server != nullptr;
       strcpy(reply, "ERR: OTA WiFi failed");
       return false;
@@ -303,8 +314,8 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
 
   if (ota_server == nullptr) {
     if (!lightweight_ota_server.begin(this)) {
-      if (lightweight_ota_started_ap) WiFi.softAPdisconnect(true);
-      lightweight_ota_started_ap = false;
+      if (ota_started_ap) WiFi.softAPdisconnect(true);
+      ota_started_ap = false;
       inhibit_sleep = false;
       strcpy(reply, "ERR: OTA server failed");
       return false;
@@ -329,10 +340,13 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
     return true;
   }
 
-  lightweight_ota_server.end();
+  if (!lightweight_ota_server.end()) {
+    strcpy(reply, "ERR: OTA stopping; retry stop ota");
+    return false;
+  }
   ota_server = nullptr;
-  if (lightweight_ota_started_ap) WiFi.softAPdisconnect(true);
-  lightweight_ota_started_ap = false;
+  if (ota_started_ap) WiFi.softAPdisconnect(true);
+  ota_started_ap = false;
   inhibit_sleep = false;
   strcpy(reply, "OK - OTA stopped");
   MESH_DEBUG_PRINTLN("stopOTAUpdate: %s", reply);
@@ -361,14 +375,19 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   // reachable even when the joined network applies client isolation and the
   // station IP can't be reached.
   IPAddress ip;
-  const bool use_ap = force_ap || WiFi.status() != WL_CONNECTED;
+  const bool use_ap = force_ap || WiFi.status() != WL_CONNECTED
+      || static_cast<uint32_t>(WiFi.localIP()) == 0;
   if (!use_ap) {
     ip = WiFi.localIP();
   } else {
-    const IPAddress ap_ip(192, 168, 4, 1);
-    const IPAddress ap_mask(255, 255, 255, 0);
-    if (!WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
-        || !WiFi.softAP("MeshCore-OTA", NULL)) {
+    if (!ota_started_ap || !(WiFi.getMode() & WIFI_AP)
+        || static_cast<uint32_t>(WiFi.softAPIP()) == 0) {
+      const IPAddress ap_ip(192, 168, 4, 1);
+      const IPAddress ap_mask(255, 255, 255, 0);
+      ota_started_ap = WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
+          && WiFi.softAP("MeshCore-OTA", NULL);
+    }
+    if (!ota_started_ap) {
       inhibit_sleep = ota_server != nullptr;
       strcpy(reply, "ERR: OTA WiFi failed");
       return false;
@@ -385,9 +404,9 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   if (ota_server != nullptr) return true;
 
   static char id_buf[60];
-  sprintf(id_buf, "%s (%s)", id, getManufacturerName());
+  snprintf(id_buf, sizeof(id_buf), "%s (%s)", id, getManufacturerName());
   static char home_buf[90];
-  sprintf(home_buf, "<H2>Hi! I am a MeshCore Repeater. ID: %s</H2>", id);
+  snprintf(home_buf, sizeof(home_buf), "<H2>Hi! I am a MeshCore Repeater. ID: %s</H2>", id);
 
   ota_server = new AsyncWebServer(80);
 
@@ -414,7 +433,8 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
   ota_server->end();
   delete ota_server;
   ota_server = nullptr;
-  WiFi.softAPdisconnect(true);
+  if (ota_started_ap) WiFi.softAPdisconnect(true);
+  ota_started_ap = false;
   inhibit_sleep = false;
 
   strcpy(reply, "OK - OTA stopped");

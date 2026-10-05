@@ -10,6 +10,7 @@
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 constexpr int WL_CONNECTED = 3;
 constexpr int HTTP_GET = 0;
+constexpr int WIFI_AP = 2;
 struct IPAddress {
   std::string value;
   IPAddress() = default;
@@ -18,11 +19,13 @@ struct IPAddress {
         + std::to_string(c) + "." + std::to_string(d);
   }
   std::string toString() const { return value; }
+  explicit operator uint32_t() const { return value.empty() || value == "0.0.0.0" ? 0 : 1; }
 };
 struct WiFiFake {
   bool connected = true, ap = false, allow_ap = true;
   unsigned starts = 0;
   int status() const { return connected ? WL_CONNECTED : 0; }
+  int getMode() const { return ap ? WIFI_AP : 0; }
   IPAddress localIP() const { return IPAddress(10, 20, 30, 40); }
   IPAddress softAPIP() const { return ap ? IPAddress(192, 168, 4, 1) : IPAddress(0, 0, 0, 0); }
   bool softAPConfig(IPAddress ip, IPAddress gateway, IPAddress mask) {
@@ -54,6 +57,7 @@ struct Elegant {
 static int SPIFFS;
 struct ESP32Board {
   bool inhibit_sleep = false;
+  bool ota_started_ap = false;
 #ifdef LIGHTWEIGHT_WIFI_OTA
   void* ota_server = nullptr;
 #else
@@ -64,11 +68,11 @@ struct ESP32Board {
   bool stopOTAUpdate(char*);
 };
 struct LightweightServer {
-  bool allow = true;
-  bool begin(ESP32Board*) { ++server_starts; return allow; }
-  void end() {}
+  bool allow = true, running = false, allow_stop = true;
+  bool begin(ESP32Board*) { ++server_starts; running = allow; return allow; }
+  bool isRunning() const { return running; }
+  bool end() { running = false; return allow_stop; }
 } lightweight_ota_server;
-static bool lightweight_ota_started_ap;
 #ifdef COMPANION_RADIO_FULL
 static constexpr uint16_t LIGHTWEIGHT_OTA_PORT = 8080;
 #else
@@ -114,6 +118,20 @@ int main() {
   // In particular, an already-running LAN server must honor a later `ap`.
   start(true, "192.168.4.1", "Join WiFi MeshCore-OTA");
   assert(WiFi.ap && WiFi.connected && server_starts == 1);
+  const auto ap_starts = WiFi.starts;
+  start(true, "192.168.4.1", "Join WiFi MeshCore-OTA");
+  assert(WiFi.starts == ap_starts); // Healthy repeats retain associated clients.
+  WiFi.ap = false; // An external driver stop invalidates cached AP ownership.
+  start(true, "192.168.4.1", "Join WiFi MeshCore-OTA");
+  assert(WiFi.starts == ap_starts + 1);
+#ifdef LIGHTWEIGHT_WIFI_OTA
+  lightweight_ota_server.allow_stop = false;
+  assert(!board.stopOTAUpdate(reply.text));
+  assert(strstr(reply.text, "OTA stopping") && board.inhibit_sleep && board.ota_server);
+  assert(!board.startOTAUpdate("test node", reply.text, true));
+  assert(strstr(reply.text, "retry stop ota first"));
+  lightweight_ota_server.allow_stop = true;
+#endif
   assert(board.stopOTAUpdate(reply.text));
   assert(!board.inhibit_sleep && !board.ota_server && !WiFi.ap && WiFi.connected);
 
