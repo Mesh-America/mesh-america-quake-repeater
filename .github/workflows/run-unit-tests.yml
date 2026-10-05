@@ -213,6 +213,7 @@ jobs:
           python3 -B test/test_ota_heap_context.py
           python3 -B test/test_ota_self_serve_policy.py -v
           python3 -B test/test_ota_self_metadata_cache.py -v
+          python3 -B test/test_ota_nrf52_display_cache.py -v
           python3 -B test/test_ota_device_deflate_encoder.py -v
           python3 -B test/test_ota_device_deflate_role.py -v
           python3 -B test/test_client_acl_spiffs.py

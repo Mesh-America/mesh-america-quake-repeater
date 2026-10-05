@@ -57,6 +57,7 @@ int esp_partition_read(const esp_partition_t* p, uint32_t off, void* dst, uint32
 
 namespace mesh { namespace ota {
 @ACCESSOR@
+@DISPLAY@
 } }
 using namespace mesh::ota;
 
@@ -223,6 +224,29 @@ int main(int argc, char** argv) {
       const unsigned complete = reads;
       assert(ota_self_firmware(out) && reads == complete);
     }
+  } else if (which == "display") {
+    image(4096, 1);
+    assert(ota_self_firmware_for_display(out));
+    expect_info(out, 4096, 1);
+    const unsigned first = reads;
+    for (unsigned i = 0; i < 50; ++i) {
+      assert(ota_self_firmware_for_display(out));
+      expect_info(out, 4096, 1);
+    }
+    assert(reads == first);
+    running.address = 0x410000;
+    image(8192, 2);
+    assert(ota_self_firmware_for_display(out));
+    expect_info(out, 8192, 2);
+    assert(reads > first);
+    present = false;
+    assert(!ota_self_firmware_for_display(out)); expect_empty(out);
+    present = true;
+    image(1024, 3);
+    fail_call = reads + 1;
+    assert(!ota_self_firmware_for_display(out)); expect_empty(out);
+    fail_call = 0;
+    assert(ota_self_firmware_for_display(out)); expect_info(out, 1024, 3);
   } else {
     assert(false && "unknown test case");
   }
@@ -236,10 +260,12 @@ class OtaSelfMetadataCacheTest(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory(prefix="meshcore-self-metadata-")
         cls.addClassCleanup(cls.temp.cleanup)
         cls.binary = Path(cls.temp.name) / ("self_metadata.exe" if os.name == "nt" else "self_metadata")
-        accessor = method((ROOT / "src/helpers/ota/OtaSelf.cpp").read_text(encoding="utf-8"),
-                          "bool ota_self_firmware(SelfFwInfo& out)")
-        source = HARNESS.replace("@ACCESSOR@", accessor)
+        self_source = (ROOT / "src/helpers/ota/OtaSelf.cpp").read_text(encoding="utf-8")
+        accessor = method(self_source, "bool ota_self_firmware(SelfFwInfo& out)")
+        display = method(self_source, "bool ota_self_firmware_for_display(SelfFwInfo& out)")
+        source = HARNESS.replace("@ACCESSOR@", accessor).replace("@DISPLAY@", display)
         built = subprocess.run(["c++", "-std=c++11", "-Wall", "-Wextra", "-Werror",
+                                "-DESP32_PLATFORM=1",
                                 "-I", str(ROOT / "src"), "-x", "c++", "-", "-o", str(cls.binary)],
                                input=source, text=True, capture_output=True)
         if built.returncode:
@@ -276,6 +302,9 @@ class OtaSelfMetadataCacheTest(unittest.TestCase):
 
     def test_chunk_overlap_and_partition_boundary(self):
         self.run_case("edges")
+
+    def test_display_accessor_delegates_esp32_cache_and_retry_semantics(self):
+        self.run_case("display")
 
 
 if __name__ == "__main__":

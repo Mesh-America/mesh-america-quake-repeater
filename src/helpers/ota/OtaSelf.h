@@ -15,6 +15,11 @@ namespace ota {
 // missing partitions, changed geometry and read failures are never cached. OTA writes inactive flash.
 bool ota_self_firmware(SelfFwInfo& out);
 
+// Display-only snapshot for status/stats polling. nRF52 caches successful, body-verified metadata
+// for this boot while the app base and staging ceiling match; invalid geometry or failed scans are
+// never cached. Use ota_self_firmware(), not this accessor, for explicit verification or OTA safety.
+bool ota_self_firmware_for_display(SelfFwInfo& out);
+
 // Read `len` bytes of the running firmware image at offset `off` (ESP32: running partition via
 // esp_partition_read; nRF52: memory-mapped app region). false on unsupported platforms.
 bool ota_self_read(uint32_t off, uint8_t* buf, uint32_t len);

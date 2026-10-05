@@ -106,6 +106,49 @@ bool ota_self_firmware(SelfFwInfo& out) {
 }
 #endif
 
+bool ota_self_firmware_for_display(SelfFwInfo& out) {
+#if defined(NRF52_PLATFORM)
+  struct DisplayCache {
+    bool valid = false;
+    uint32_t app_base = 0;
+    uint32_t stage_ceiling = 0;
+    SelfFwInfo info;
+  };
+  static DisplayCache cache;
+  out = SelfFwInfo();
+  const uint32_t app_base = mota_nrf52_app_base();
+  const uint32_t stage_ceiling =
+#if defined(OTA_SD_STORE)
+      MOTA_NRF52_APP_END;
+#else
+      mota_nrf52_layout_stage_ceiling();
+#endif
+  if (!mota_nrf52_layout_valid(app_base, stage_ceiling)) {
+    cache.valid = false;
+    return false;
+  }
+  if (cache.valid && cache.app_base == app_base && cache.stage_ceiling == stage_ceiling) {
+    out = cache.info;
+    return true;
+  }
+  // App updates reboot, so only diagnostic metadata needs a per-boot snapshot. Keep all explicit
+  // verification and apply/base/headroom checks on the fresh accessor: a display hit proves nothing
+  // about later flash mutations. Never cache failure or retain metadata from a different layout.
+  cache.valid = false;
+  if (!ota_self_firmware(out) || !out.valid) {
+    out = SelfFwInfo();
+    return false;
+  }
+  cache.app_base = app_base;
+  cache.stage_ceiling = stage_ceiling;
+  cache.info = out;
+  cache.valid = true;
+  return true;
+#else
+  return ota_self_firmware(out);
+#endif
+}
+
 #if defined(ESP32_PLATFORM)
 bool ota_self_read(uint32_t off, uint8_t* buf, uint32_t len) {
   const esp_partition_t* p = esp_ota_get_running_partition();
