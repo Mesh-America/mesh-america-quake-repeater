@@ -140,12 +140,22 @@ int main(int argc, char** argv) {
   const Bytes command = fromHex(argv[1]); assert(command.size() == 40);
   Fixture f; f.mesh.direct_timeout = 2000;
   memcpy(f.mesh.recipient.id.pub_key, command.data() + 1, 32);
+  // Access Control is opened after login. A synchronized repeater can return
+  // the timestamp the Companion would otherwise choose for this app query.
+  f.command(Tracker::Login);
+  const uint32_t server_tag = f.mesh.rtc.wall + 1;
+  reply(f, Tracker::Login, nullptr, server_tag); f.drain();
+  assert(count(f.wire(), PUSH_CODE_LOGIN_SUCCESS) == 1);
+  f.usb_stream.output.clear();
   memcpy(f.mesh.cmd_frame, command.data(), command.size());
   f.mesh.handleRequestFrame(command.size());
   const auto& payload = f.mesh.transmitted_payload;
   assert(payload.size() == 11 && !memcmp(payload.data() + 4, command.data() + 33, 7));
   uint32_t tag; memcpy(&tag, payload.data(), 4);
   assert(tag == slot(f, Tracker::Binary).tag && !slot(f, Tracker::Binary).sent_pending);
+  assert(tag > server_tag && f.mesh.rtc.wall == 1000);
+  reply(f, Tracker::Login, nullptr, server_tag);
+  assert(slot(f, Tracker::Binary).phase == Tracker::AwaitRadio);
   if (argc == 2) { printHex("REQUEST", payload); return 0; }
   Bytes radio = fromHex(argv[2]);
   if (atoi(argv[3]) == 0) {

@@ -25,7 +25,8 @@ def production_methods(source, base, packet, dispatcher):
         "void MyMesh::onContactResponse(", "bool MyMesh::onContactPathRecv(",
         "void MyMesh::onTraceRecv(", "void MyMesh::clearPendingReqs(",
         "bool MyMesh::hasPendingReqs(", "bool MyMesh::beginPendingRequest(",
-        "bool MyMesh::allowRequestTag(", "void MyMesh::armPendingRequest(",
+        "bool MyMesh::allowRequestTag(", "bool MyMesh::allocateRequestTag(",
+        "void MyMesh::armPendingRequest(",
         "void MyMesh::finishPendingRequest(",
         "void MyMesh::abandonPendingRequest(", "void MyMesh::servicePendingSerialReply(",
         "void MyMesh::servicePendingSerialReply(uint32_t now)",
@@ -47,6 +48,7 @@ def production_methods(source, base, packet, dispatcher):
     methods += "\n#if COMPANION_FEATURE_TEXT_TERMINAL\n" + terminal + "\n#endif\n"
     methods += "\n" + "\n".join(extract_braced(base, signature) for signature in (
         "bool BaseChatMesh::onContactPathRecv(", "int BaseChatMesh::sendLogin(",
+        "bool BaseChatMesh::allocateRequestTag(",
         "int BaseChatMesh::sendAnonReq(",
         "int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t*",
         "int  BaseChatMesh::sendRequest(const ContactInfo& recipient, uint8_t",

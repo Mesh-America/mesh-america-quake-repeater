@@ -814,12 +814,16 @@ int BaseChatMesh::sendLogin(const ContactInfo& recipient, const char* password, 
   return MSG_SEND_FAILED;
 }
 
+bool BaseChatMesh::allocateRequestTag(uint32_t& tag) {
+  tag = getRTCClock()->getCurrentTimeUnique();
+  return allowRequestTag(tag);
+}
+
 int BaseChatMesh::sendAnonReq(const ContactInfo& recipient, const uint8_t* data, uint8_t len, uint32_t& tag, uint32_t& est_timeout) {
   mesh::Packet* pkt;
   {
     uint8_t temp[MAX_PACKET_PAYLOAD];
-    tag = getRTCClock()->getCurrentTimeUnique();
-    if (!allowRequestTag(tag)) return MSG_SEND_FAILED;
+    if (!allocateRequestTag(tag)) return MSG_SEND_FAILED;
     memcpy(temp, &tag, 4);   // tag to match later (also extra blob to help make packet_hash unique)
     memcpy(&temp[4], data, len);
 
@@ -846,8 +850,7 @@ int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t* req_
   mesh::Packet* pkt;
   {
     uint8_t temp[MAX_PACKET_PAYLOAD];
-    tag = getRTCClock()->getCurrentTimeUnique();
-    if (!allowRequestTag(tag)) return MSG_SEND_FAILED;
+    if (!allocateRequestTag(tag)) return MSG_SEND_FAILED;
     memcpy(temp, &tag, 4);   // mostly an extra blob to help make packet_hash unique
     memcpy(&temp[4], req_data, data_len);
 
@@ -872,8 +875,7 @@ int  BaseChatMesh::sendRequest(const ContactInfo& recipient, uint8_t req_type, u
   mesh::Packet* pkt;
   {
     uint8_t temp[13];
-    tag = getRTCClock()->getCurrentTimeUnique();
-    if (!allowRequestTag(tag)) return MSG_SEND_FAILED;
+    if (!allocateRequestTag(tag)) return MSG_SEND_FAILED;
     memcpy(temp, &tag, 4);   // mostly an extra blob to help make packet_hash unique
     temp[4] = req_type;
     memset(&temp[5], 0, 4);  // reserved (possibly for 'since' param)

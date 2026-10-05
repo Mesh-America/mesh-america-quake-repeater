@@ -5130,6 +5130,20 @@ bool MyMesh::allowRequestTag(uint32_t tag) {
   return !_request_tag_rejected;
 }
 
+bool MyMesh::allocateRequestTag(uint32_t& tag) {
+  // Login replies use the server's clock, so their retired tag can equal
+  // the next locally generated request tag even with synchronized clocks.
+  // Skip held tags instead of reporting BAD_STATE to the app. One history
+  // slot belongs to this reservation, leaving at most HISTORY_SIZE - 1
+  // collisions. Keep the wall clock and all stale-response guards intact.
+  for (unsigned attempt = 0;
+       attempt < mesh::CompanionDelayedReplies::HISTORY_SIZE; ++attempt) {
+    tag = getRTCClock()->getCurrentTimeUnique();
+    if (allowRequestTag(tag)) return true;
+  }
+  return false;
+}
+
 void MyMesh::armPendingRequest(uint32_t tag, uint32_t timeout, bool flood) {
   const uint32_t now = _ms->getMillis();
   _delayed_replies.armRequest(tag, timeout, flood, now);

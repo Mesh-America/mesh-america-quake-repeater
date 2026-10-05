@@ -101,7 +101,7 @@ class ClientAclResponseTest(unittest.TestCase):
     def test_same_clock_generates_login_and_binary_request_tags(self):
         source = (ROOT / "src/helpers/BaseChatMesh.cpp").read_text()
         for signature in ("int BaseChatMesh::sendLogin(",
-                          "int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t*"):
+                          "bool BaseChatMesh::allocateRequestTag("):
             body = extract_braced(source, signature)
             self.assertEqual(body.count("getRTCClock()->getCurrentTimeUnique()"), 1)
 

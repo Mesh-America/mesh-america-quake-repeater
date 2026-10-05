@@ -416,6 +416,7 @@ protected:
   uint32_t calcDirectTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t path_len) const override;
   void onSendTimeout() override;
   bool allowRequestTag(uint32_t tag) override;
+  bool allocateRequestTag(uint32_t& tag) override;
 
   // DataStoreHost methods
   bool onContactLoaded(const ContactInfo& contact) override { return addContact(contact); }
