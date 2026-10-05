@@ -41,7 +41,9 @@ process.stdout.write(JSON.stringify(Object.fromEntries(
 
 
 def file_entry(path, platform, tag, repo):
-    if path.name.endswith("-merged.bin"):
+    if platform == "noflash":
+        kind, title = "download", path.suffix[1:].upper() + " download"
+    elif path.name.endswith("-merged.bin"):
         kind, title = "flash-wipe", "USB full install (bootloader + partitions + app)"
     elif path.suffix == ".bin" and platform == "esp32":
         kind, title = "flash-update", "App update (matching partition layout only)"
@@ -119,10 +121,13 @@ def generate(catalog, plan, family, records, profiles, repo):
         platform = PLATFORMS[row["platform"]]
         indexes = by_identity.get(target) or by_identity.get(row["target"])
         if not indexes:
-            indexes = by_hardware.get((platform, parsed["hardware"]), set())
+            indexes = set(by_hardware.get((platform, parsed["hardware"]), set()))
+            # A download-only card is an installer restriction, not a chip.
+            # Retain that restriction for new profiles of the same hardware.
+            indexes.update(by_hardware.get(("noflash", parsed["hardware"]), set()))
             if len(indexes) != 1:
                 raise ValueError(f"new profile needs an exact hardware card mapping: {target}")
-        if any(catalog["device"][i]["type"] != platform for i in indexes):
+        if any(catalog["device"][i]["type"] not in (platform, "noflash") for i in indexes):
             raise ValueError("firmware platform differs from its hardware card")
         role, title = {"repeater": ("repeater", "Repeater"),
                        "room": ("roomServer", "Room Server"),
@@ -168,12 +173,16 @@ def generate(catalog, plan, family, records, profiles, repo):
                   "CAPABILITIES - " + url + quote(cap), "MEMORY - " + url + quote(memory),
                   f"SOURCE - https://github.com/{repo}/tree/{row.get('source_commit', plan['source'])}",
                   f"RELEASE - https://github.com/{repo}/releases/tag/{tag}"]
-        entry = {"role": role, "title": title, "subTitle": target + " - " + profile,
-                 "version": {family: {"notes": "\n\n".join(notes),
-                     "files": [file_entry(path, platform, tag, repo) for path in sorted(files,
-                          key=lambda p: (not p.name.endswith('-merged.bin'), p.suffix != '.bin', p.name))]}}}
         for index in sorted(indexes):
-            result["device"][index]["firmware"].append(copy.deepcopy(entry))
+            install_platform = catalog["device"][index]["type"]
+            card_notes = list(notes)
+            if install_platform == "noflash":
+                card_notes.append("MESH AMERICA - Downloads only. In-app flashing is not qualified for this hardware card.")
+            entry = {"role": role, "title": title, "subTitle": target + " - " + profile,
+                     "version": {family: {"notes": "\n\n".join(card_notes),
+                         "files": [file_entry(path, install_platform, tag, repo) for path in sorted(files,
+                              key=lambda p: (not p.name.endswith('-merged.bin'), p.suffix != '.bin', p.name))]}}}
+            result["device"][index]["firmware"].append(entry)
     result["device"] = [device for device in result["device"] if device["firmware"]]
     for device in result["device"]:
         device["firmware"].sort(key=lambda entry: (entry["role"], entry["subTitle"]))
