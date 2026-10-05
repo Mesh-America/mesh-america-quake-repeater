@@ -39,6 +39,7 @@ class ESP32Board : public mesh::MainBoard {
 protected:
   uint8_t startup_reason;
   bool inhibit_sleep = false;
+  bool ota_started_ap = false;
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   mesh::UsbHostSleepPolicy usb_host_sleep_policy;
 #endif

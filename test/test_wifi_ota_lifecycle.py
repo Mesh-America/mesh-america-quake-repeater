@@ -1,9 +1,7 @@
 """Execute production WiFi ownership, ESP-NOW cleanup and ElegantOTA startup.
 
-Desired-behavior assertions are marked as known failures until firmware is fixed. Set
-MESHCORE_REQUIRE_WIFI_OTA_FIX=1 to make those regressions ordinary failures.
-Compilation, every fixture execution and observation parsing happen in
-setUpClass, outside expectedFailure, so infrastructure failures cannot pass.
+All lifecycle regressions are required to pass. Compilation, every fixture
+execution and observation parsing happen in setUpClass.
 OTA startup coverage deliberately selects ElegantOTA, not LightweightOTA.
 """
 from pathlib import Path
@@ -39,12 +37,14 @@ STUBS = r'''
 #define WITH_ESPNOW_BRIDGE 1
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 constexpr int WL_CONNECTED = 3, WL_DISCONNECTED = 6, HTTP_GET = 0;
+constexpr int WIFI_AP = 2;
 
 struct IPAddress {
   uint32_t value = 0;
   IPAddress() = default;
   IPAddress(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
       : value((uint32_t(a) << 24) | (uint32_t(b) << 16) | (uint32_t(c) << 8) | d) {}
+  explicit operator uint32_t() const { return value; }
   std::string toString() const {
     char text[16];
     std::snprintf(text, sizeof(text), "%u.%u.%u.%u", (value >> 24) & 255,
@@ -62,6 +62,7 @@ struct MockWiFi {
   bool initialized_cache = false, started_cache = false;
   IPAddress station_ip, ap_ip, configured_ap_ip;
   int status() const { return station_status; }
+  int getMode() const { return sdk_ap_active ? WIFI_AP : 0; }
   IPAddress localIP() const { return station_ip; }
   IPAddress softAPIP() const { return ap_ip; }
   bool softAPConfig(IPAddress ip, IPAddress, IPAddress) {
@@ -108,6 +109,7 @@ struct MockSPIFFS {} SPIFFS;
 class ESP32Board {
 public:
   bool inhibit_sleep = false;
+  bool ota_started_ap = false;
   AsyncWebServer* ota_server = nullptr;
   ~ESP32Board() { delete ota_server; }
   const char* getManufacturerName() const { return "test board"; }
@@ -289,9 +291,8 @@ class WifiOtaLifecycleTests(unittest.TestCase):
     def test_espnow_alone_is_not_infrastructure_wifi(self):
         self.assertEqual(self.observations["owners_espnow"]["enabled"], 4)
 
-    @unittest.expectedFailure
     def test_http_ota_alone_owns_wifi(self):
-        """Known bug: enabled() omits board HTTP OTA ownership in both AP and STA modes."""
+        """HTTP OTA owns WiFi in both AP and STA modes."""
         self.assertEqual(tuple(self.observations[scenario]["enabled"] & 1
                                for scenario in ("owners_httpota", "owners_httpota_sta")), (1, 1))
 
@@ -321,9 +322,8 @@ class WifiOtaLifecycleTests(unittest.TestCase):
     def test_espnow_without_infrastructure_allows_driver_cleanup(self):
         self.assert_cleanup("cleanup_espnow", 1)
 
-    @unittest.expectedFailure
     def test_http_ota_owner_protects_wifi_from_bridge_cleanup(self):
-        """Known bug: raw cleanup stops/deinits the AP or STA owned only by HTTP OTA."""
+        """Bridge cleanup retains the AP or STA owned only by HTTP OTA."""
         self.assertEqual(tuple((self.observations[scenario]["stop_calls"],
                                 self.observations[scenario]["deinit_calls"],
                                 self.observations[scenario]["endpoint_usable"],
@@ -334,7 +334,8 @@ class WifiOtaLifecycleTests(unittest.TestCase):
     def assert_healthy_ota(self, scenario, url, ap_starts):
         observation = self.observations[scenario]
         self.assertTrue(observation["first_started"] and observation["started"])
-        self.assertEqual(observation["reply"], f"Started: http://{url}/update")
+        network = "Join WiFi MeshCore-OTA" if url == "192.168.4.1" else "Use same WiFi/LAN"
+        self.assertEqual(observation["reply"], f"Started: http://{url}/update - WiFi on; {network}")
         self.assertEqual(observation["server_count"], 1)
         self.assertEqual(observation["server_begin_calls"], 1)
         self.assertEqual(observation["ap_start_calls"], ap_starts)
@@ -351,9 +352,8 @@ class WifiOtaLifecycleTests(unittest.TestCase):
     def test_healthy_station_repeat_start_is_idempotent(self):
         self.assert_healthy_ota("ota_sta_repeat", "10.0.0.7", 0)
 
-    @unittest.expectedFailure
     def test_stale_server_cannot_claim_success_at_zero_ap_ip(self):
-        """Known bug: non-null ElegantOTA server bypasses dead-AP validation/recovery."""
+        """A non-null ElegantOTA server still validates/recovers a dead AP."""
         observation = self.observations["ota_stale_ap"]
         if observation["started"]:
             self.assertTrue(observation["endpoint_usable"])
@@ -369,13 +369,6 @@ class WifiOtaLifecycleTests(unittest.TestCase):
         self.assertEqual(observation["reply"], "ERR: OTA WiFi failed")
         self.assertEqual(observation["server_count"], 0)
         self.assertFalse(observation["ota_running"] or observation["sleep_inhibited"])
-
-
-if os.environ.get("MESHCORE_REQUIRE_WIFI_OTA_FIX") == "1":
-    # A strict run must fail on current firmware, and passes only after fixes.
-    for test in vars(WifiOtaLifecycleTests).values():
-        if getattr(test, "__unittest_expecting_failure__", False):
-            test.__unittest_expecting_failure__ = False
 
 
 if __name__ == "__main__":
