@@ -257,7 +257,9 @@ jobs:
         run: python3 -B test/test_official_config_gui.py -v
 
       - name: Verify ESP32 boot filesystem inventory and recovery safety
-        run: python3 -B test/test_esp32_boot_file_inventory.py -v
+        run: |
+          python3 -B test/test_esp32_boot_file_inventory.py -v
+          python3 -B test/test_esp32_boot_file_lifecycle.py -v
 
       - name: Verify WiFi OTA startup and WebConfig handoff
         run: python3 -B test/test_wifi_ota_start.py -v
