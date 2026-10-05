@@ -35,6 +35,14 @@ def replace_async_source(build_env, node):
         return node
     destination = Path(build_env.subst("$BUILD_DIR")) / "patched-esp32-web" / source.name
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.name == "AsyncElegantOTA.cpp":
+        # Quoted includes resolve beside this private source, ahead of any
+        # stale library include path inherited by PlatformIO's build clone.
+        for name in ("AsyncElegantOTA.h", "Hash.h", "elegantWebpage.h"):
+            header = (include_dir / name).read_bytes()
+            target = destination.parent / name
+            if not target.exists() or target.read_bytes() != header:
+                target.write_bytes(header)
     if not destination.exists() or destination.read_text(encoding="ascii") != content:
         destination.write_text(content, encoding="ascii")
     build_env.PrependUnique(CPPPATH=[str(include_dir)])
@@ -42,8 +50,6 @@ def replace_async_source(build_env, node):
 
 
 def install(build_env):
-    build_env.PrependUnique(CPPPATH=[str(Path(build_env.subst("$PROJECT_DIR"))
-        / "arch/esp32/AsyncElegantOTA/src")])
     build_env.AddBuildMiddleware(replace_async_source, "*AsyncTCP*src*AsyncTCP.cpp")
     build_env.AddBuildMiddleware(replace_async_source, "*AsyncElegantOTA*src*AsyncElegantOTA.cpp")
 
