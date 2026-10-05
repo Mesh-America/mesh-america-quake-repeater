@@ -32,6 +32,7 @@ class TestFS : public MemoryFS {
 #include <helpers/AtomicFileWriter.h>
 #include <helpers/PrefsSaveRouting.h>
 #include <helpers/CommonPrefsRecovery.h>
+#include <helpers/HilStartupTrace.h>
 #include <helpers/MQTTPrefsAtomicStore.h>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/RepeaterRadioTiming.h>
