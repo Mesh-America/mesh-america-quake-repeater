@@ -112,6 +112,34 @@ class ReleasePublicationTest(unittest.TestCase):
                 catalogs.generate(self.template(), {"version": "1.17.1.9", "source": SOURCE, "groups": []},
                                   FAMILY, [(row, FAMILY, files)], catalogs.target_profiles(targets), "mikecarper/MeshCore")
 
+    def test_catalog_retains_download_only_cards_for_new_sensor_profiles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            self.stage(directory)
+            plan, family, records = catalogs.read_stage(directory)
+            template = self.template()
+            template["device"][1]["type"] = "noflash"
+            targets = {row["artifact_target"] for row, _, _ in records} | {
+                "Station_G2_companion_radio_full", "Station_G2_repeater", "RAK_4631_repeater"}
+            result = catalogs.generate(template, plan, family, records,
+                                       catalogs.target_profiles(targets), "mikecarper/MeshCore")
+            device = result["device"][1]
+            self.assertEqual(device["type"], "noflash")
+            self.assertEqual(len(device["firmware"]), 2)
+            for firmware in device["firmware"]:
+                version = firmware["version"][FAMILY]
+                self.assertIn("Downloads only", version["notes"])
+                self.assertTrue(all(file["type"] == "download" for file in version["files"]))
+            # Even a merged ESP32 image must not enable a download-only card.
+            for name in ("example-merged.bin", "example.bin", "example.zip", "example.uf2"):
+                self.assertEqual(catalogs.file_entry(Path(name), "noflash", FAMILY,
+                                                    "mikecarper/MeshCore")["type"], "download")
+            # Real flasher/chip mismatches still fail instead of being guessed.
+            template["device"][1]["type"] = "esp32"
+            with self.assertRaisesRegex(ValueError, "exact hardware card|platform differs"):
+                catalogs.generate(template, plan, family, records,
+                                  catalogs.target_profiles(targets), "mikecarper/MeshCore")
+
     def test_stable_publication_notes_and_assets_are_ascii(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
