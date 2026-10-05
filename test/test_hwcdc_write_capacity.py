@@ -2,6 +2,7 @@
 """Execute the HWCDC facade and pinned SDK write against a stalled host."""
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -26,12 +27,17 @@ class HwcdcWriteCapacityTest(unittest.TestCase):
         sdk_write = body(PATCHED, 'size_t HWCDC::write(const uint8_t *buffer, size_t size)')
         sdk_write = sdk_write.replace('HWCDC::write(', 'HWCDC::driverWrite(', 1)
         sdk_available = body(PATCHED, 'int HWCDC::availableForWrite(void)')
+        logging = re.search(r'static\s+(AtomicWholeRecordNonBlockingStream<640>)\s+'
+                            r'guarded_esp32_hwcdc_logging_port\(', source)
+        self.assertIsNotNone(logging, 'use the actual HWCDC logging view type')
         return (FIXTURE.read_text()
                 .replace('@SDK_WRITE@', sdk_write)
                 .replace('@SDK_AVAILABLE@', sdk_available)
-                .replace('@FACADE@', facade))
+                .replace('@FACADE@', facade)
+                .replace('@LOGGING_VIEW@', 'using LoggingView = ' + logging[1] + ';'))
 
-    def compile(self, directory, uncapped=False, zero_timeout=False):
+    def compile(self, directory, uncapped=False, zero_timeout=False,
+                partial_logging=False):
         compiler = os.environ.get('CXX') or shutil.which('g++') or shutil.which('clang++')
         if compiler is None:
             self.skipTest('a host C++17 compiler is required')
@@ -40,14 +46,26 @@ class HwcdcWriteCapacityTest(unittest.TestCase):
         flags = ['-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                  '-fno-pie', '-no-pie'] if os.name != 'nt' else []
         includes = ['-I' + str(ROOT / 'test/mocks'), '-I' + str(ROOT / 'src')]
-        if zero_timeout:
+        if zero_timeout or partial_logging:
             copied = Path(directory) / 'helpers'
             copied.mkdir()
             packet_log = (ROOT / 'src/helpers/SerialPacketLog.h').read_text()
-            self.assertIn('Serial.setTxTimeoutMs(5);', packet_log)
+            if zero_timeout:
+                self.assertIn('Serial.setTxTimeoutMs(5);', packet_log)
+                packet_log = packet_log.replace('Serial.setTxTimeoutMs(5);',
+                                                'Serial.setTxTimeoutMs(0);')
+            if partial_logging:
+                # Restore the actual old non-HWCDC chunked emitter, preserving
+                # the rest of this copied production header byte-for-byte.
+                function = body(packet_log, 'bool serialLogEmit(')
+                start = function.index('#if defined(ESP32_PLATFORM)')
+                old_branch = function.index('\n#else\n')
+                end = function.rindex('\n#endif')
+                restored = (function[:start]
+                            + function[old_branch + len('\n#else\n'):end] + '\n}')
+                packet_log = packet_log.replace(function, restored)
             (copied / 'SerialPacketLog.h').write_text(
-                packet_log.replace('Serial.setTxTimeoutMs(5);',
-                                   'Serial.setTxTimeoutMs(0);'), encoding='ascii')
+                packet_log, encoding='ascii')
             includes.insert(0, '-I' + str(directory))
         binary = Path(directory) / 'test.exe'
         built = subprocess.run([
@@ -62,7 +80,10 @@ class HwcdcWriteCapacityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='hwcdc-capacity-') as directory:
             binary = self.compile(directory)
             for case in ('full', 'oversize', 'stale', 'contention', 'mutex',
-                         'isr_drain', 'short', 'mota', 'timeout', 'sdk_fallback'):
+                         'isr_drain', 'short', 'mota', 'timeout', 'sdk_fallback',
+                         'logging_low', 'logging_full', 'logging_line', 'logging_stale',
+                         'logging_contention', 'logging_fallback_small',
+                         'logging_fallback_large'):
                 with self.subTest(case=case):
                     result = subprocess.run([str(binary), case], capture_output=True,
                                             text=True, timeout=10)
@@ -79,6 +100,13 @@ class HwcdcWriteCapacityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='hwcdc-no-timeout-') as directory:
             binary = self.compile(directory, zero_timeout=True)
             result = subprocess.run([str(binary), 'timeout'], capture_output=True,
+                                    text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_partial_logging_capacity_negative_control(self):
+        with tempfile.TemporaryDirectory(prefix='hwcdc-partial-log-') as directory:
+            binary = self.compile(directory, partial_logging=True)
+            result = subprocess.run([str(binary), 'logging_low'], capture_output=True,
                                     text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
 

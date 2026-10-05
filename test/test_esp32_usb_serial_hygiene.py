@@ -354,7 +354,16 @@ int main() {
         self.assertIn(
             "esp32_hwcdc_tx_kick_pending.store(true", guarded_write
         )
-        self.assertIn("return Serial.write(data, size);", guarded_write)
+        self.assertIn("return Serial.write(data, attempt);", guarded_write)
+        capacity = guarded_write.index("const int available = Serial.availableForWrite();")
+        full = guarded_write.index("if (available <= 0) return 0;")
+        clamp = guarded_write.index("const size_t attempt = size <")
+        kick_pending = guarded_write.index("esp32_hwcdc_tx_kick_pending.store(true")
+        native_write = guarded_write.index("return Serial.write(data, attempt);")
+        self.assertLess(capacity, full)
+        self.assertLess(full, clamp)
+        self.assertLess(clamp, kick_pending)
+        self.assertLess(kick_pending, native_write)
 
         # Extract complete functions: their pinned-SDK/fallback branches now
         # contain nested #endif directives inside the outer platform guard.

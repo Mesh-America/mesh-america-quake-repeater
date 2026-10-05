@@ -513,6 +513,11 @@ static SingleAttemptNonBlockingStream guarded_esp32_hwcdc_port(
 static AtomicWholeRecordNonBlockingStream<11>
     guarded_esp32_hwcdc_mota_port(guarded_esp32_hwcdc_port);
 
+// Admit each complete packet log line under the same guard as CLI replies.
+// Short records can still use a smaller ring if the preferred allocation fails.
+static AtomicWholeRecordNonBlockingStream<640> guarded_esp32_hwcdc_logging_port(
+    guarded_esp32_hwcdc_port);
+
 static void serviceEsp32HwcdcTxKickExclusive(void*) {
   if (!esp32_hwcdc_tx_kick_pending.load(std::memory_order_acquire)
       || !canAccessEsp32Hwcdc(nullptr)) {
@@ -1393,7 +1398,7 @@ Stream& usbLoggingPort() {
   #if MESH_ESP32_TINYUSB_NONBLOCKING
     return buffered_esp32_tinyusb_logging_port;
   #elif MESH_ESP32_HWCDC_SESSION_GUARD
-    return guarded_esp32_hwcdc_port;
+    return guarded_esp32_hwcdc_logging_port;
   #elif defined(NRF52_PLATFORM)
     return nonblocking_primary_usb_logging_port;
   #else
