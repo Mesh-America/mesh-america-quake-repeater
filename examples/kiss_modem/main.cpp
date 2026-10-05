@@ -3,6 +3,7 @@
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/IdentityGeneration.h>
 #include <helpers/IdentityStore.h>
+#include <helpers/UsbLogging.h>
 #include "KissModem.h"
 
 #if defined(ESP32_PLATFORM)
@@ -27,14 +28,21 @@
 
 #define NOISE_FLOOR_CALIB_INTERVAL_MS 2000
 #define AGC_RESET_INTERVAL_MS 30000
-#define USB_TX_TIMEOUT_MS 50
-#define USB_TX_BUFFER_SIZE 1024
+
+#if MESH_ESP32_HWCDC_SESSION_GUARD && !(defined(KISS_UART_RX) && defined(KISS_UART_TX))
+  #define KISS_HWCDC_TRANSPORT 1
+#else
+  #define KISS_HWCDC_TRANSPORT 0
+#endif
 
 StdRNG rng;
 mesh::LocalIdentity identity;
 KissModem* modem;
 static uint32_t next_noise_floor_calib_ms = 0;
 static uint32_t next_agc_reset_ms = 0;
+#if KISS_HWCDC_TRANSPORT
+static bool usb_host_reset_pending = false;
+#endif
 
 void halt() {
   while (1) ;
@@ -136,6 +144,11 @@ void onGetStats(uint32_t* rx, uint32_t* tx, uint32_t* errors) {
 }
 
 void setup() {
+#if KISS_HWCDC_TRANSPORT
+  // KISS owns the entire serial byte stream, including gaps between chunks.
+  mesh::setUsbLoggingEnabled(false);
+  mesh::setUsbDebugEnabled(false);
+#endif
   board.begin();
 
   int radioinit_attempts = 0;
@@ -176,15 +189,22 @@ void setup() {
 #endif
   modem = new KissModem(Serial1, identity, rng, radio_driver, board, sensors);
 #else
+#if KISS_HWCDC_TRANSPORT
+  // Allocate the USB queues before begin() enables the live driver ISR.
+  mesh::prepareUsbLoggingPort();
+#endif
   Serial.begin(115200);
+#if KISS_HWCDC_TRANSPORT
+  mesh::beginUsbLoggingPort();
+#endif
   uint32_t start = millis();
   while (!Serial && millis() - start < 3000) delay(10);
   delay(100);
-#if defined(ESP32) && ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
-  Serial.setTxTimeoutMs(USB_TX_TIMEOUT_MS);
-  Serial.setTxBufferSize(USB_TX_BUFFER_SIZE);
-#endif
+#if KISS_HWCDC_TRANSPORT
+  modem = new KissModem(mesh::usbCompanionPort(), identity, rng, radio_driver, board, sensors);
+#else
   modem = new KissModem(Serial, identity, rng, radio_driver, board, sensors);
+#endif
 #endif
 
   modem->setRadioCallback(onSetRadio);
@@ -197,6 +217,18 @@ void setup() {
 }
 
 void loop() {
+#if KISS_HWCDC_TRANSPORT
+  mesh::serviceUsbLoggingPort();
+  if (mesh::takeUsbTerminalSessionReset()) {
+    modem->resetHostSession();
+    usb_host_reset_pending = true;
+  }
+  if (usb_host_reset_pending && mesh::tryCompleteUsbTerminalSessionReset()) {
+    usb_host_reset_pending = false;
+  }
+  // The guarded stream blocks host I/O during cleanup. Continue the modem
+  // loop so an in-flight RF transmission can finish while USB is quarantined.
+#endif
 #if defined(NRF52_PLATFORM)
   board.feedWatchdog();
 #endif

@@ -106,7 +106,44 @@ def replace_source(build_env, node):
 # HWCDC fixes are deliberately limited to the installed Arduino2.0.17 C3/S3
 # native Serial/JTAG driver. Other versions retain their own framework driver.
 PINNED_HWCDC_SHA256 = "d0a8ca606c2729c8522a041113285dbf27033c22a5a6af8649a7305ffe84c449"
-PATCHED_HWCDC_SHA256 = "5107db35dc3c855326dff0a9b93b279ee9bda60b5cc1ebcdce77a9028e3577b4"
+PATCHED_HWCDC_SHA256 = "7429655b063022e42c677dc79ecf0aab78acf33bba21a8cdb822435400c39719"
+HWCDC_S3_PHY_GUARD = "#if CONFIG_IDF_TARGET_ESP32S3 && ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT\n"
+HWCDC_S3_PHY_HELPERS = HWCDC_S3_PHY_GUARD + r'''#include "soc/usb_wrap_struct.h"
+#include "soc/rtc_cntl_struct.h"
+
+// Exact ESP-IDF 4.4.7 usb_phy_ll.h bodies, renamed locally. The complete HAL
+// header has unrelated volatile struct copies that cannot compile as C++.
+static inline void mesh_hwcdc_int_jtag_enable(usb_serial_jtag_dev_t *hw)
+{
+    // USB_Serial_JTAG use internal PHY
+    hw->conf0.phy_sel = 0;
+    // Disable software control USB D+ D- pullup pulldown (Device FS: dp_pullup = 1)
+    hw->conf0.pad_pull_override = 0;
+    // Enable USB D+ pullup
+    hw->conf0.dp_pullup = 1;
+    // Enable USB pad function
+    hw->conf0.usb_pad_enable = 1;
+    // phy_sel is controlled by the following register value
+    RTCCNTL.usb_conf.sw_hw_usb_phy_sel = 1;
+    // phy_sel=sw_usb_phy_sel=0, USB_Serial_JTAG is connected with internal PHY
+    RTCCNTL.usb_conf.sw_usb_phy_sel = 0;
+}
+
+static inline void mesh_hwcdc_usb_wrap_pad_enable(usb_wrap_dev_t *hw, bool pad_en)
+{
+    hw->otg_conf.pad_enable = pad_en;
+}
+#endif
+'''
+HWCDC_S3_PHY_CONFIG = r"""    // TinyUSB's RTC PHY selection survives a software restart (IDF #9826).
+    // An OTA upgrade must release its old pullup before claiming the shared
+    // PHY, so the host discards the previous USB device's descriptors.
+    if (RTCCNTL.usb_conf.sw_hw_usb_phy_sel && RTCCNTL.usb_conf.sw_usb_phy_sel) {
+        mesh_hwcdc_usb_wrap_pad_enable(&USB_WRAP, false);
+        delay(20);
+    }
+    mesh_hwcdc_int_jtag_enable(&USB_SERIAL_JTAG);
+"""
 HWCDC_TX_SUPPORT = r"""
 // MeshCore pinned HWCDC TX suffix/interrupt backport (upstream #12606).
 static uint8_t mesh_hwcdc_tx_stash[64] = {0};
@@ -262,6 +299,13 @@ def patched_hwcdc_source(source):
     # Perform exact-shape transforms only after the complete input hash passes.
     source = source.replace('#include "esp_freertos_hooks.h"\n',
                             '#include "esp_freertos_hooks.h"\n#include <string.h>\n', 1)
+    source = source.replace('#include "hal/usb_serial_jtag_ll.h"\n',
+                            '#include "hal/usb_serial_jtag_ll.h"\n' + HWCDC_S3_PHY_HELPERS, 1)
+    begin = source.index('void HWCDC::begin(unsigned long baud)')
+    phy_begin = source.index('    // Configure PHY\n', begin)
+    phy_end = source.index('    usb_serial_jtag_ll_disable_intr_mask(USB_SERIAL_JTAG_LL_INTR_MASK);', phy_begin)
+    source = (source[:phy_begin] + HWCDC_S3_PHY_GUARD + HWCDC_S3_PHY_CONFIG
+              + '#else\n' + source[phy_begin:phy_end] + '#endif\n' + source[phy_end:])
     source = source.replace('usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);',
                             'mesh_hwcdc_enable_tx_intr();')
     begin = source.index('    if (usbjtag_intr_status & USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY) {')

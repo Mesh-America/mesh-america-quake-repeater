@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,7 +9,10 @@ import unittest
 ROOT=Path(__file__).resolve().parents[1]
 CORE=ROOT/'test/fixtures/hwcdc_tx_backport'
 spec=importlib.util.spec_from_file_location('usb_fix',ROOT/'scripts/esp32_usb_session_fix.py')
-module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+module=importlib.util.module_from_spec(spec)
+# Exercise the current transform after rapid edits without timestamp-based
+# bytecode caches retaining an earlier same-size fingerprint literal.
+exec(compile(Path(spec.origin).read_text(),spec.origin,'exec'),module.__dict__)
 RAW=(CORE/'HWCDC.cpp').read_text()
 PATCHED=module.patched_hwcdc_source(RAW)
 
@@ -201,6 +205,112 @@ class BackportTest(unittest.TestCase):
             body(source,'bool HWCDC::isCDC_Connected()')).replace('@ISR@',body(source,'static void hw_cdc_isr_handler('))
     def test_actual_isr_suffix_wakeup_pending_quarantine_and_reset(self):
         self.compile_run(self.harness())
+    def phy_harness(self, source=PATCHED, *, s3=1, mode=1, cdc=1):
+        hal=(CORE/'usb_phy_ll.h').read_text()
+        self.assertEqual(hashlib.sha256(hal.encode()).hexdigest(),
+                         '07f869755299e96fc73fb913bb0b9fed2ade580f12a22c058bbb07247f5c959c')
+        helper_names=[('mesh_hwcdc_int_jtag_enable','usb_phy_ll_int_jtag_enable'),
+                      ('mesh_hwcdc_usb_wrap_pad_enable','usb_phy_ll_usb_wrap_pad_enable')]
+        hal_functions=[]
+        for local,official in helper_names:
+            helper=body(source,'static inline void '+local+'(')
+            self.assertEqual(helper.replace(local,official,1),
+                             body(hal,'static inline void '+official+'('))
+            hal_functions.append(helper)
+        hal_functions='\n'.join(hal_functions)
+        self.assertNotIn('#include "hal/usb_phy_ll.h"',source)
+        harness=r'''
+#include <cassert>
+#include <cstdint>
+#include <cstddef>
+@CONFIG@
+#define USB_SERIAL_JTAG_LL_INTR_MASK 7
+#define USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY 1
+#define USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT 2
+#define USB_SERIAL_JTAG_INTR_BUS_RESET 4
+#define ETS_USB_SERIAL_JTAG_INTR_SOURCE 1
+#define ESP_OK 0
+#define log_e(...) ((void)0)
+#define isr_log_e(...) ((void)0)
+struct usb_serial_jtag_dev_t {
+ struct {unsigned phy_sel=1,pad_pull_override=1,dp_pullup=0,usb_pad_enable=0;} conf0;
+} USB_SERIAL_JTAG;
+struct usb_wrap_dev_t {struct {unsigned pad_enable=1;} otg_conf;} USB_WRAP;
+struct {struct {unsigned sw_hw_usb_phy_sel=1,sw_usb_phy_sel=1;} usb_conf;} RTCCNTL;
+static unsigned delays=0,interrupt_mask=0,allocations=0;
+static void delay(unsigned ms){
+ // The old TinyUSB owner must be detached before any PHY ownership change.
+ assert(ms==20&&!USB_WRAP.otg_conf.pad_enable);
+ assert(RTCCNTL.usb_conf.sw_hw_usb_phy_sel==1&&RTCCNTL.usb_conf.sw_usb_phy_sel==1);
+ ++delays;
+}
+#if CONFIG_IDF_TARGET_ESP32S3 && ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+@HAL@
+#endif
+static int handle_token;
+static void* tx_lock=&handle_token;
+static void* rx_queue=&handle_token;
+static void* tx_ring_buf=&handle_token;
+static void* intr_handle=nullptr;
+static void* xSemaphoreCreateMutex(){return &handle_token;}
+static void usb_serial_jtag_ll_disable_intr_mask(unsigned){interrupt_mask=0;}
+static void usb_serial_jtag_ll_ena_intr_mask(unsigned mask){interrupt_mask=mask;}
+static void hw_cdc_isr_handler(void*){}
+static int esp_intr_alloc(int,int,void(*)(void*),void*,void** out){
+ ++allocations;*out=&handle_token;return ESP_OK;
+}
+struct HWCDC {
+ bool setRxBufferSize(size_t){return true;}
+ bool setTxBufferSize(size_t){return true;}
+ void end(){}
+ void begin(unsigned long baud);
+};
+@BEGIN@
+int main(){
+ HWCDC serial;
+ // Simulate RTC USB registers retained across esp_restart from TinyUSB.
+ serial.begin(115200);
+#if CONFIG_IDF_TARGET_ESP32S3 && ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+ assert(RTCCNTL.usb_conf.sw_hw_usb_phy_sel==1&&RTCCNTL.usb_conf.sw_usb_phy_sel==0);
+ assert(delays==1&&!USB_WRAP.otg_conf.pad_enable);
+#else
+ // C3, UART-backed Serial and native TinyUSB do not change RTC ownership.
+ assert(RTCCNTL.usb_conf.sw_hw_usb_phy_sel==1&&RTCCNTL.usb_conf.sw_usb_phy_sel==1);
+ assert(delays==0&&USB_WRAP.otg_conf.pad_enable);
+#endif
+ assert(USB_SERIAL_JTAG.conf0.phy_sel==0&&!USB_SERIAL_JTAG.conf0.pad_pull_override);
+ assert(USB_SERIAL_JTAG.conf0.dp_pullup==1&&USB_SERIAL_JTAG.conf0.usb_pad_enable==1);
+ assert(interrupt_mask==7&&allocations==1);
+ unsigned prior_delays=delays;
+ serial.begin(115200);assert(delays==prior_delays&&allocations==1);
+ // Normal cold/continued HWCDC startup needs no forced disconnect delay.
+ RTCCNTL.usb_conf.sw_hw_usb_phy_sel=0;RTCCNTL.usb_conf.sw_usb_phy_sel=0;
+ serial.begin(115200);assert(delays==prior_delays);
+}
+'''
+        config='\n'.join('#define '+name+' '+str(value) for name,value in [
+            ('CONFIG_IDF_TARGET_ESP32S3',s3),('ARDUINO_USB_MODE',mode),('ARDUINO_USB_CDC_ON_BOOT',cdc)])
+        # Suppress unused functions only for branches whose complete HAL is
+        # intentionally unavailable; the real source's begin() still executes.
+        harness=harness.replace('static void delay(unsigned ms)',
+                                'static void __attribute__((unused)) delay(unsigned ms)')
+        return harness.replace('@CONFIG@',config).replace('@HAL@',hal_functions).replace(
+            '@BEGIN@',body(source,'void HWCDC::begin(unsigned long baud)'))
+    def test_s3_begin_reclaims_retained_tinyusb_phy_after_host_disconnect(self):
+        self.compile_run(self.phy_harness())
+    def test_s3_legacy_begin_retains_otg_ownership_negative_control(self):
+        # Keep verified production helpers while executing only legacy begin.
+        harness=self.phy_harness().replace(body(PATCHED,'void HWCDC::begin(unsigned long baud)'),
+                                          body(RAW,'void HWCDC::begin(unsigned long baud)'))
+        self.compile_run(harness,expect_success=False)
+    def test_s3_handoff_requires_disconnecting_the_old_controller_negative_control(self):
+        source=PATCHED.replace('        mesh_hwcdc_usb_wrap_pad_enable(&USB_WRAP, false);\n','',1)
+        self.assertNotEqual(source,PATCHED)
+        self.compile_run(self.phy_harness(source),expect_success=False)
+    def test_phy_handoff_is_excluded_from_c3_uart_and_tinyusb(self):
+        for s3,mode,cdc in [(0,1,1),(1,1,0),(1,0,1)]:
+            with self.subTest(s3=s3,mode=mode,cdc=cdc):
+                self.compile_run(self.phy_harness(s3=s3,mode=mode,cdc=cdc))
     def test_ignored_fifo_count_negative_control(self):
         source=PATCHED.replace('sent_size = usb_serial_jtag_ll_write_txfifo(queued_buff, queued_size);',
             'usb_serial_jtag_ll_write_txfifo(queued_buff, queued_size);sent_size = queued_size;',1)

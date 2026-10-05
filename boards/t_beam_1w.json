@@ -10,7 +10,7 @@
             "-DBOARD_HAS_PSRAM",
             "-DLILYGO_TBEAM_1W",
             "-DARDUINO_USB_CDC_ON_BOOT=1",
-            "-DARDUINO_USB_MODE=0",
+            "-DARDUINO_USB_MODE=1",
             "-DARDUINO_RUNNING_CORE=1",
             "-DARDUINO_EVENT_RUNNING_CORE=1"
         ],
@@ -40,6 +40,8 @@
     ],
     "name": "LilyGo TBeam-1W",
     "upload": {
+        "use_1200bps_touch": false,
+        "wait_for_upload_port": false,
         "flash_size": "16MB",
         "maximum_ram_size": 327680,
         "maximum_size": 16777216,
