@@ -360,7 +360,7 @@ int main(){
             self.assertEqual(env.paths,[str(src)])
             before=Path(result).stat().st_mtime_ns;module.replace_hwcdc_source(env,node)
             self.assertEqual(Path(result).stat().st_mtime_ns,before)
-            version.write_text('#define ESP_ARDUINO_VERSION_MAJOR 3\n#define ESP_ARDUINO_VERSION_MINOR 3\n#define ESP_ARDUINO_VERSION_PATCH 11\n')
+            version.write_text('#define ESP_ARDUINO_VERSION_MAJOR 3\n#define ESP_ARDUINO_VERSION_MINOR 3\n#define ESP_ARDUINO_VERSION_PATCH 12\n')
             self.assertIs(module.replace_hwcdc_source(env,node),node)
             version.write_text('#define ESP_ARDUINO_VERSION_MAJOR 2\n')
             with self.assertRaises(RuntimeError):module.replace_hwcdc_source(env,node)

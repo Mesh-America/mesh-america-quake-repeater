@@ -103,8 +103,9 @@ def replace_source(build_env, node):
 
 
 
-# HWCDC fixes are deliberately limited to the installed Arduino2.0.17 C3/S3
-# native Serial/JTAG driver. Other versions retain their own framework driver.
+# HWCDC TX/PHY fixes are limited to the installed Arduino2.0.17 C3/S3 driver.
+# The separately pinned3.3.11 transform below only classifies startup resets.
+# Other framework versions retain their own driver unchanged.
 PINNED_HWCDC_SHA256 = "d0a8ca606c2729c8522a041113285dbf27033c22a5a6af8649a7305ffe84c449"
 PATCHED_HWCDC_SHA256 = "0969a94ae32edcfeeedb3daab19e5697e6c7647dc31578cdb0c3a0cb29e7c6d6"
 HWCDC_S3_PHY_GUARD = "#if CONFIG_IDF_TARGET_ESP32S3 && ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT\n"
@@ -358,23 +359,61 @@ def hwcdc_primary_enabled(build_env):
             and defines.get("ARDUINO_USB_MODE") == "1")
 
 
-def pinned_hwcdc_framework(source):
+# Arduino3.3.11 already supplies its own TX suffix and interrupt fixes. Only
+# classify the startup BUS_RESET event at capture; leave that driver intact.
+PINNED_HWCDC_3311_SHA256 = "c5ed5fdd05aa0df9b74d390812643599223f96b459256718d0ad328aeaba6a8a"
+PATCHED_HWCDC_3311_SHA256 = "7b693bf5d72df97336360969ff429c67f3783d472123aeb79b3aabc8154b51ba"
+HWCDC_3311_INCLUDE = '#include "hal/usb_serial_jtag_ll.h"\n'
+HWCDC_3311_STARTUP_HOOK = 'extern "C" bool meshEsp32HwcdcShouldReportBusReset() __attribute__((weak));\n'
+HWCDC_3311_RESET_POST = (
+    '    arduino_hw_cdc_event_post(ARDUINO_HW_CDC_EVENTS, ARDUINO_HW_CDC_BUS_RESET_EVENT, '
+    '&event, sizeof(arduino_hw_cdc_event_data_t), &xTaskWoken);')
+HWCDC_3311_RESET_CAPTURE = (
+    '    // Snapshot startup before the framework event task can delay delivery.\n'
+    '    if (!meshEsp32HwcdcShouldReportBusReset || meshEsp32HwcdcShouldReportBusReset()) {\n'
+    + '  ' + HWCDC_3311_RESET_POST + '\n'
+    '    }')
+
+
+def patched_hwcdc_startup_source(source):
+    import hashlib
+    source = source.replace("\r\n", "\n")
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    if digest == PATCHED_HWCDC_3311_SHA256:
+        return source
+    if digest != PINNED_HWCDC_3311_SHA256:
+        raise RuntimeError("ESP32 HWCDC startup fix: changed pinned3.3.11 source; review SDK update")
+    return source.replace(HWCDC_3311_INCLUDE,
+                          HWCDC_3311_INCLUDE + HWCDC_3311_STARTUP_HOOK, 1).replace(
+                              HWCDC_3311_RESET_POST, HWCDC_3311_RESET_CAPTURE, 1)
+
+
+def hwcdc_framework_version(source):
     import re
     version = source.parent / "esp_arduino_version.h"
     values = dict(re.findall(r"^#define ESP_ARDUINO_VERSION_(MAJOR|MINOR|PATCH)\s+(\d+)\s*$",
                              version.read_text(encoding="utf-8"), re.MULTILINE))
     if set(values) != {"MAJOR", "MINOR", "PATCH"}:
         raise RuntimeError("ESP32 HWCDC TX fix: malformed framework version header")
-    return values == {"MAJOR": "2", "MINOR": "0", "PATCH": "17"}
+    return tuple(int(values[key]) for key in ("MAJOR", "MINOR", "PATCH"))
+
+
+def pinned_hwcdc_framework(source):
+    return hwcdc_framework_version(source) == (2, 0, 17)
 
 
 def replace_hwcdc_source(build_env, node):
     if not hwcdc_primary_enabled(build_env):
         return node
     source = Path(node.srcnode().get_abspath())
-    if not pinned_hwcdc_framework(source):
+    version = hwcdc_framework_version(source)
+    if version == (2, 0, 17):
+        patcher = patched_hwcdc_source
+    elif version == (3, 3, 11):
+        patcher = patched_hwcdc_startup_source
+    else:
         return node
-    patched = patched_hwcdc_source(source.read_text(encoding="utf-8"))
+    patched = patcher(source.read_text(encoding="utf-8"))
     destination = Path(build_env.subst("$BUILD_DIR")) / "patched-esp32-usb" / source.name
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists() or destination.read_text(encoding="utf-8") != patched:

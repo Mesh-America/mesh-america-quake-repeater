@@ -161,8 +161,8 @@ int main(int argc, char** argv) {
 '''
 
 
-def harness(*, remove_boot_gate=False, remove_owner_hook=False,
-            boot_traffic_arms=False, keep_startup_forever=False):
+def application_sources(*, remove_boot_gate=False, remove_owner_hook=False,
+                        boot_traffic_arms=False, keep_startup_forever=False):
     source = (ROOT / "src/helpers/UsbLogging.cpp").read_text()
     signatures = (
         "static bool canAccessEsp32Hwcdc(void*)",
@@ -182,7 +182,6 @@ def harness(*, remove_boot_gate=False, remove_owner_hook=False,
     state = re.search(r"^static std::atomic<bool> esp32_hwcdc_startup_pending.*;",
                       source, re.MULTILINE)
     assert state is not None
-    sdk = PATCHED
     if remove_boot_gate:
         functions = functions.replace(
             "    if (esp32_hwcdc_startup_pending.load(std::memory_order_acquire)) return;\n", "")
@@ -197,7 +196,12 @@ def harness(*, remove_boot_gate=False, remove_owner_hook=False,
     if keep_startup_forever:
         functions = functions.replace(
             "  esp32_hwcdc_startup_pending.store(false, std::memory_order_release);", "")
-    prefix = backport.BackportTest().harness(sdk).split("int main(){", 1)[0]
+    return state[0], functions, owner
+
+
+def harness(**controls):
+    state, functions, owner = application_sources(**controls)
+    prefix = backport.BackportTest().harness(PATCHED).split("int main(){", 1)[0]
     prefix = prefix.replace("static std::vector<unsigned> event_lengths;",
                             "static std::vector<unsigned> event_lengths;\n"
                             "static std::deque<int> queued_events;")
@@ -205,7 +209,7 @@ def harness(*, remove_boot_gate=False, remove_owner_hook=False,
         " if(event==ARDUINO_HW_CDC_TX_EVENT)event_lengths.push_back(data->tx.len);",
         " queued_events.push_back(event);\n"
         " if(event==ARDUINO_HW_CDC_TX_EVENT)event_lengths.push_back(data->tx.len);")
-    return prefix + EXTRA.replace("@STARTUP_STATE@", state[0]).replace(
+    return prefix + EXTRA.replace("@STARTUP_STATE@", state).replace(
         "@FUNCTIONS@", functions).replace("@OWNER_RESET_HOOK@", owner)
 
 

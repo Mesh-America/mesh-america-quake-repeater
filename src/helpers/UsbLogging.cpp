@@ -1799,7 +1799,7 @@ bool isUsbLoggingTransportRecoveryPending() {
 
 }  // namespace mesh
 
-#if MESH_ESP32_HWCDC_SESSION_GUARD && MESH_HWCDC_PINNED_TX_BACKPORT
+#if MESH_ESP32_HWCDC_SESSION_GUARD
 // Capture startup at the actual hardware reset, not when the finite framework
 // event queue eventually delivers it. A delayed initial enumeration event
 // must not be reclassified as an active-session reset after loop() has begun.
