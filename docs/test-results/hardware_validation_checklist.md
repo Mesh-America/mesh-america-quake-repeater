@@ -10,6 +10,47 @@ when its log identifies the physical device, firmware artifact, artifact hash,
 command result, and cold/warm boot outcome. Do not infer success from a tool's
 exit code when the tool has a documented false-success mode.
 
+## ESP32 web console and browser OTA release gates
+
+Host tests cannot prove USB enumeration, WiFi discovery, or an HTTP upload on
+the physical board. Before qualifying an ESP32 release, record the following
+on each available hardware family. Mark unavailable hardware as untested; a
+successful build or simulated peripheral is not a hardware pass.
+
+1. Run the pinned, unmodified official web console, recording its source
+   revision and hash. With power saving enabled, leave it idle for at least
+   ten minutes without transmitted commands or keepalives, then require a
+   complete CRLF-delimited command reply. Repeat with USB logging enabled and
+   disabled. Close and reopen the console and verify that uptime did not reset.
+2. Flash through the official website's reset/handoff sequence. Record the
+   delay until the first complete CLI reply and reconnect without unplugging
+   or issuing another reset. A boot banner is not a command reply.
+3. Exercise `start ota` from WiFi off, connected LAN, WebConfig LAN, and
+   WebConfig setup AP states. Require the reply to identify the reachable URL,
+   required network, and WebConfig shutdown when applicable. Also exercise
+   `start ota ap` while the LAN uploader is already running.
+4. Discover and connect to the actual board's hotspot. Measure its WiFi MAC;
+   do not infer it from the USB serial number. Pin that measured identity
+   before any firmware upload. Fetch the returned URL repeatedly across
+   delayed WebConfig cleanup and background bridge retry intervals.
+5. With ESP-NOW configured on, exercise OTA across background bridge retry
+   intervals. For builds that pause bridges during upload, require that pause
+   to last until `stop ota`, then verify that the configured bridges resume.
+6. Upload a board-compatible, hash-verified application through the HTTP
+   uploader. Require the server's completion response, normal reboot, expected
+   application version, and working USB console without an extra reset or
+   unplug. Use a distinct target version so a reboot without an update cannot
+   pass. Select the upload protocol from the compiled implementation:
+   AsyncElegantOTA uses multipart data and an MD5 field; LightweightOTA uses a
+   raw binary request. Confirm identity and settings were preserved, then restore temporary
+   device settings and the test host's network connection.
+
+Keep the host regressions (`test_official_web_console.py`,
+`test_wifi_ota_start.py`, and `test_wifi_ota_lifecycle.py`) alongside these gates.
+They cover parsing, sleep policy, startup errors, network ownership, and
+deferred cleanup. A `Started` reply alone does not satisfy the physical OTA
+gate.
+
 ## Bluetooth stealth qualification - 2026-09-07
 
 The [XIAO stealth report](hardware_validation_bluetooth_stealth_2026-09-07.md)
