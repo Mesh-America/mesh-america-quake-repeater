@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute cooperative ESP32 GPS discovery with real preference/UART policy.
+"""Execute cooperative ESP32/nRF52 GPS discovery with preference/UART policy.
 
 Only the UART, clock and GPS hardware are peripheral doubles. Discovery,
 completion, loop servicing, settings, power transitions and UART handoff come
@@ -7,7 +7,6 @@ from EnvironmentSensorManager.cpp; SensorManager.cpp and LocationProvider's
 power/timing policy compile unchanged. This does not qualify physical GPS/USB.
 """
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -73,8 +72,6 @@ struct EnvironmentSensorManager : SensorManager {
   bool userEnabled() const { return isGpsTelemetryUserEnabled(); }
   bool transportAvailable() const { return isGpsTelemetryTransportAvailable(); }
   void initBasicGPS();
-  void finishBasicGpsDiscovery(bool found);
-  void serviceBasicGpsDiscovery();
   void armGpsPowerSavingCycle();
   void start_gps();
   void stop_gps();
@@ -263,15 +260,14 @@ int main(int argc, char** argv) {
 def harness(*, negative=None):
     source = SOURCE.read_text(encoding="utf-8")
     header = HEADER.read_text(encoding="utf-8")
-    names = ("gps_detected", "gps_active", "gps_serial_transport",
-             "gps_serial_transport_blocked", "gps_discovery_pending",
-             "gps_discovery_preference_known", "gps_discovery_started_at")
-    fields = "\n".join(re.search(r"^\s*(?:bool|uint32_t)\s+" + name + r"\s*=[^;]*;",
-                                 header, re.MULTILINE)[0] for name in names)
+    # Preserve the actual header's platform/provider guards and declarations.
+    # Extracting each field without its guard could invent nRF52 state that
+    # the production header never made available to that platform.
+    fields = header[header.index("  bool     gps_detected"):
+                    header.index("  LocationProvider* _location")]
+    fields += "\n#endif // ENV_INCLUDE_GPS\n"
     signatures = (
         "void EnvironmentSensorManager::initBasicGPS()",
-        "void EnvironmentSensorManager::finishBasicGpsDiscovery(bool found)",
-        "void EnvironmentSensorManager::serviceBasicGpsDiscovery()",
         "void EnvironmentSensorManager::armGpsPowerSavingCycle()",
         "void EnvironmentSensorManager::start_gps()",
         "void EnvironmentSensorManager::stop_gps()",
@@ -283,7 +279,15 @@ def harness(*, negative=None):
         "bool EnvironmentSensorManager::setGpsSerialTransportBlocked(",
         "void EnvironmentSensorManager::loop()",
     )
-    methods = "\n".join(extract_braced(source, signature) for signature in signatures)
+    # These two methods live under the production platform/provider guard.
+    # Compile that guard unchanged as well, instead of calling an extracted
+    # unconditional definition that would mask a missing nRF52 implementation.
+    begin = source.rindex("#if ENV_INCLUDE_GPS\n", 0, source.index(
+        "void EnvironmentSensorManager::finishBasicGpsDiscovery(bool found)"))
+    end = source.index("void EnvironmentSensorManager::initBasicGPS()", begin)
+    guarded_discovery = source[begin:end] + "\n#endif // ENV_INCLUDE_GPS\n"
+    methods = guarded_discovery + "\n" + "\n".join(
+        extract_braced(source, signature) for signature in signatures)
     mutations = {
         "blocking": ("  gps_discovery_started_at = millis();",
                      "  gps_discovery_started_at = millis();\n  delay(5000);"),
@@ -301,14 +305,15 @@ def harness(*, negative=None):
     return HARNESS.replace("@FIELDS@", fields).replace("@METHODS@", methods)
 
 
-class Esp32GpsDiscoveryTests(unittest.TestCase):
+class CooperativeGpsDiscoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.compiler = shutil.which("g++") or shutil.which("clang++")
         if cls.compiler is None:
             raise unittest.SkipTest("a host C++17 compiler is required")
 
-    def compile_run(self, cases, *, defines=(), negative=None):
+    def compile_run(self, cases, *, defines=(), negative=None,
+                    platform="ESP32_PLATFORM"):
         with tempfile.TemporaryDirectory(prefix="meshcore-esp32-gps-") as directory:
             work = Path(directory)
             for name, text in {
@@ -319,7 +324,7 @@ class Esp32GpsDiscoveryTests(unittest.TestCase):
             cpp, binary = work / "discovery.cpp", work / "discovery"
             cpp.write_text(harness(negative=negative), encoding="utf-8")
             command = [self.compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                       "-Wno-unused-parameter", "-DENV_INCLUDE_GPS=1", "-DESP32_PLATFORM=1",
+                       "-Wno-unused-parameter", "-DENV_INCLUDE_GPS=1", "-D" + platform,
                        *["-D" + define for define in defines],
                        *(["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                           "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else []),
@@ -328,7 +333,8 @@ class Esp32GpsDiscoveryTests(unittest.TestCase):
             compiled = subprocess.run(command, capture_output=True, text=True, timeout=60)
             self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
             for case in cases:
-                with self.subTest(case=case, defines=defines, negative=negative):
+                with self.subTest(case=case, defines=defines, negative=negative,
+                                  platform=platform):
                     result = subprocess.run([str(binary), case], capture_output=True,
                                             text=True, timeout=10)
                     if negative:
@@ -362,6 +368,48 @@ class Esp32GpsDiscoveryTests(unittest.TestCase):
 
     def test_loaded_preference_must_be_retained_negative_control(self):
         self.compile_run(("latest",), defines=("PERSISTANT_GPS=1",), negative="preference_loss")
+
+    def test_nrf52_basic_gps_uses_production_guarded_state_and_methods(self):
+        for defines in (("GPS_BAUD_RATE=38400",), ("PERSISTANT_GPS=1",),
+                        ("RAK_BOARD=1", "RAK_WISMESH_TAG=1")):
+            self.compile_run(("absent", "late", "latest", "awake", "wrap", "blocked", "no_enable"),
+                             defines=defines, platform="NRF52_PLATFORM")
+        for defines in (("ENV_SKIP_GPS_DETECT=1",),
+                        ("ENV_SKIP_GPS_DETECT=1", "PERSISTANT_GPS=1")):
+            self.compile_run(("awake",), defines=defines, platform="NRF52_PLATFORM")
+
+    def test_nrf52_guards_preserve_distinct_wisblock_provider(self):
+        # Unlike WisMesh Tag, ordinary WisBlock must not acquire basic GPS
+        # discovery members. Preprocess the real header; the complete RAK
+        # provider has its own behavior and tests.
+        header = HEADER.read_text(encoding="ascii")
+        with tempfile.TemporaryDirectory(prefix="meshcore-nrf52-gps-header-") as directory:
+            work = Path(directory)
+            for relative in ("Mesh.h", "helpers/SensorManager.h",
+                             "helpers/sensors/LocationProvider.h"):
+                path = work / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("\n", encoding="ascii")
+            cpp = work / "header.cpp"
+            cpp.write_text(header, encoding="ascii")
+            for defines, expected in ((("NRF52_PLATFORM",), True),
+                                      (("NRF52_PLATFORM", "RAK_BOARD"), False),
+                                      (("NRF52_PLATFORM", "RAK_BOARD", "RAK_WISMESH_TAG"), True),
+                                      (("RP2040_PLATFORM",), False)):
+                with self.subTest(defines=defines):
+                    result = subprocess.run([self.compiler, "-E", "-P", "-x", "c++",
+                        "-DENV_INCLUDE_GPS=1", *["-D" + value for value in defines],
+                        "-I" + str(work), str(cpp)], text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual("gps_discovery_pending" in result.stdout, expected)
+
+    def test_nrf52_runtime_negative_controls(self):
+        for cases, negative, defines in ((("absent",), "blocking", ()),
+                                        (("blocked",), "blocked_poll", ()),
+                                        (("blocked",), "cancellation", ()),
+                                        (("latest",), "preference_loss", ("PERSISTANT_GPS=1",))):
+            self.compile_run(cases, negative=negative, defines=defines,
+                             platform="NRF52_PLATFORM")
 
 
 if __name__ == "__main__":

@@ -26,7 +26,9 @@ protected:
   bool     gps_serial_transport_blocked = false;
 
   #if ENV_INCLUDE_GPS
-  #if defined(ESP32_PLATFORM) && !defined(RAK_WISBLOCK_GPS)
+  #if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) \
+    && !defined(RAK_WISBLOCK_GPS) \
+    && !(defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG))
   bool gps_discovery_pending = false;
   bool gps_discovery_preference_known = false;
   uint32_t gps_discovery_started_at = 0;
