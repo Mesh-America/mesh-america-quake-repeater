@@ -160,6 +160,8 @@ uint32_t usbTerminalDroppedBytes();
 // CDC0 DTR-low on TinyUSB, or a hardware CDC bus reset on ESP32. This is
 // independent of polling current line/SOF state; ESP32 retains that poll as a
 // fallback because its bundled framework event queue is finite.
+// The first HWCDC call ends cold-start enumeration before protocol input is
+// processed. Enumeration during setup preserves the first host's queued RX.
 bool takeUsbTerminalSessionReset();
 // After the application has reset its protocol state, atomically purge any
 // CDC0 writer that raced the close callback and reopen the producer gate. A

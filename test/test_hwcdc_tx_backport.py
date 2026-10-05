@@ -395,6 +395,7 @@ static void noteUsbLoggingTxComplete(){}
 static std::atomic<uint32_t> esp32_hwcdc_access_generation{0},esp32_hwcdc_allowed_generation{0};
 static std::atomic<uint32_t> esp32_hwcdc_bus_reset_generation{0};
 static mesh::UsbSelfResetBurstGuard esp32_hwcdc_self_reset_guard;
+static std::atomic<bool> esp32_hwcdc_startup_pending{false}; // post-setup runtime fixture
 static std::atomic<bool> esp32_hwcdc_tx_kick_pending{false},esp32_hwcdc_tx_primed{false};
 static portMUX_TYPE esp32_hwcdc_session_mux;
 static std::atomic<size_t> esp32_hwcdc_tx_buffer_capacity{4096};

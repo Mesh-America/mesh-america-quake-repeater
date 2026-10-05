@@ -282,6 +282,7 @@ jobs:
           python3 -B test/test_esp32_tinyusb_nonblocking.py
           python3 -B test/test_esp32_usb_session_fix.py
           python3 -B test/test_hwcdc_tx_backport.py -v
+          python3 -B test/test_hwcdc_startup_session.py -v
           python3 -B test/test_esp32_hwcdc_recipes.py -v
           python3 -B test/test_hwcdc_role_transport.py -v
           python3 -B test/test_hwcdc_write_capacity.py -v
