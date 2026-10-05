@@ -1029,6 +1029,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     }
   } else if (strcmp(config, "link.diag") == 0) {
     activeNetworkLink().formatDiagnostics(reply, 160);
+  } else if (strcmp(config, "link.dns") == 0) {
+    activeNetworkLink().formatDns(reply, 160);
   } else if (memcmp(config, "link.status", 11) == 0 ||
              memcmp(config, "wifi.status", 11) == 0) {
     NetworkLink& network = activeNetworkLink();

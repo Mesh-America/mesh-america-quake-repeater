@@ -574,6 +574,7 @@ GETTERS = {
     "link.diag": lambda c: (
         "why:ethernet-not-enabled selected:wifi\n"
         "wifi:state:connected ip:192.168.1.42"),
+    "link.dns": lambda c: "dns:192.168.1.1,-,- gw:192.168.1.1 lease:192.168.1.1,-",
     "mqtt.status": lambda c: cli_mqtt_status(c),
     "mqtt.presets": lambda c: "\n".join(
         "%2d. %s%s" % (i + 1, n, "" if nd == "none" else "  (needs %s)" % nd)
