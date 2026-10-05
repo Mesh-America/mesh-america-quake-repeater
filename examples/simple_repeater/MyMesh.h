@@ -617,6 +617,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool startSharedEspNowBridgeIfReady() {
     if (espnow_bridge.isRunning()) return true;
     if (!_prefs.espnow_bridge_enabled) return false;
+    // Browser OTA pauses the bridges for the entire upload session. The
+    // periodic retry must not undo that pause on its next loop iteration.
+    if (_cli.getBoard()->isOTAUpdateRunning()) return false;
     if (mqtt_bridge && mqtt_bridge->isRunning() && !WiFi.isConnected()) return false;
     if (!millisHasNowPassed(shared_espnow_retry_at)) return false;
     shared_espnow_retry_at = millis() + 5000;

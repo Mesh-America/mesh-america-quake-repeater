@@ -580,6 +580,8 @@ public:
   bool startSharedEspNowBridgeIfReady() {
     if (espnow_bridge.isRunning()) return true;
     if (!_prefs.espnow_bridge_enabled) return false;
+    // Keep the browser uploader's bridge pause in effect until OTA stops.
+    if (_cli.getBoard()->isOTAUpdateRunning()) return false;
     if (bridge && bridge->isRunning() && !WiFi.isConnected()) return false;
     if (!millisHasNowPassed(shared_espnow_retry_at)) return false;
     shared_espnow_retry_at = millis() + 5000;
