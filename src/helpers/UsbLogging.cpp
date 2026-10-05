@@ -386,6 +386,13 @@ static std::atomic<uint32_t> esp32_hwcdc_access_generation{0};
 static std::atomic<uint32_t> esp32_hwcdc_allowed_generation{0};
 static std::atomic<uint32_t> esp32_hwcdc_bus_reset_generation{0};
 static UsbSelfResetBurstGuard esp32_hwcdc_self_reset_guard;
+// Cold-start queues contain only this boot's diagnostics, never a previous
+// application session. The host can enumerate and submit its first command
+// while setup() is still initializing the radio/filesystem. Do not turn that
+// initial enumeration into a second PHY detach which invalidates its new port.
+// TX/RX event delivery must not end startup: boot diagnostics and a queued
+// first command are normal before the protocol owner begins its service loop.
+static std::atomic<bool> esp32_hwcdc_startup_pending{true};
 // HWCDC::write() retains bytes in its software ring when the framework's raw
 // five-millisecond SOF detector happens to report false. In that path the core
 // does not leave SERIAL_IN_EMPTY enabled, so a valid Companion response can
@@ -415,6 +422,7 @@ static void handleEsp32HwcdcEvent(void*, esp_event_base_t, int32_t event_id,
                                   void*) {
   if (event_id == ARDUINO_HW_CDC_BUS_RESET_EVENT) {
     clearUsbLoggingClientActivity();
+    if (esp32_hwcdc_startup_pending.load(std::memory_order_acquire)) return;
     // A host may issue several reset requests while enumerating the clean
     // transport. Suppress the complete burst; post-clean traffic below ends
     // the exemption before any later active-session reset can be ignored.
@@ -1554,6 +1562,10 @@ bool takeUsbTerminalSessionReset() {
   primary_usb_terminal_taken_reset_generation = reset_generation;
   return true;
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
+  // Every HWCDC protocol owner checks for a boundary before processing input.
+  // After this first service pass, resets retain the ordinary stale-session
+  // quarantine even if no host has submitted a command yet.
+  esp32_hwcdc_startup_pending.store(false, std::memory_order_release);
   const uint32_t reset_generation =
       esp32_hwcdc_bus_reset_generation.load(std::memory_order_acquire);
   if (reset_generation == esp32_hwcdc_taken_bus_reset_generation) {
@@ -1607,6 +1619,7 @@ bool tryCompleteUsbTerminalSessionReset() {
       == primaryUsbSessionGeneration()
       && !nrf52_usb_reenumeration_pending.load(std::memory_order_acquire);
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
+  esp32_hwcdc_startup_pending.store(false, std::memory_order_release);
   if (!esp32_hwcdc_cleanup_pending
       && esp32_hwcdc_allowed_generation.load(std::memory_order_acquire)
           == esp32_hwcdc_access_generation.load(std::memory_order_acquire)) {
@@ -1785,6 +1798,15 @@ bool isUsbLoggingTransportRecoveryPending() {
 }
 
 }  // namespace mesh
+
+#if MESH_ESP32_HWCDC_SESSION_GUARD && MESH_HWCDC_PINNED_TX_BACKPORT
+// Capture startup at the actual hardware reset, not when the finite framework
+// event queue eventually delivers it. A delayed initial enumeration event
+// must not be reclassified as an active-session reset after loop() has begun.
+extern "C" bool meshEsp32HwcdcShouldReportBusReset() {
+  return !mesh::esp32_hwcdc_startup_pending.load(std::memory_order_acquire);
+}
+#endif
 
 #if defined(NRF52_PLATFORM) && defined(USE_TINYUSB)
 extern "C" void meshTinyUsbLoggingTxComplete(uint8_t instance) {

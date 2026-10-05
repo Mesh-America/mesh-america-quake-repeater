@@ -106,7 +106,7 @@ def replace_source(build_env, node):
 # HWCDC fixes are deliberately limited to the installed Arduino2.0.17 C3/S3
 # native Serial/JTAG driver. Other versions retain their own framework driver.
 PINNED_HWCDC_SHA256 = "d0a8ca606c2729c8522a041113285dbf27033c22a5a6af8649a7305ffe84c449"
-PATCHED_HWCDC_SHA256 = "7429655b063022e42c677dc79ecf0aab78acf33bba21a8cdb822435400c39719"
+PATCHED_HWCDC_SHA256 = "0969a94ae32edcfeeedb3daab19e5697e6c7647dc31578cdb0c3a0cb29e7c6d6"
 HWCDC_S3_PHY_GUARD = "#if CONFIG_IDF_TARGET_ESP32S3 && ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT\n"
 HWCDC_S3_PHY_HELPERS = HWCDC_S3_PHY_GUARD + r'''#include "soc/usb_wrap_struct.h"
 #include "soc/rtc_cntl_struct.h"
@@ -146,6 +146,7 @@ HWCDC_S3_PHY_CONFIG = r"""    // TinyUSB's RTC PHY selection survives a software
 """
 HWCDC_TX_SUPPORT = r"""
 // MeshCore pinned HWCDC TX suffix/interrupt backport (upstream #12606).
+extern "C" bool meshEsp32HwcdcShouldReportBusReset() __attribute__((weak));
 static uint8_t mesh_hwcdc_tx_stash[64] = {0};
 static size_t mesh_hwcdc_tx_stash_len = 0;
 static bool mesh_hwcdc_tx_allowed = true;
@@ -320,6 +321,13 @@ def patched_hwcdc_source(source):
                             '        portENTER_CRITICAL_ISR(&mesh_hwcdc_tx_mux);\n'
                             '        mesh_hwcdc_tx_stash_len = 0;\n        mesh_hwcdc_fifo_pending = false;\n'
                             '        portEXIT_CRITICAL_ISR(&mesh_hwcdc_tx_mux);\n        connected = false;\n    }\n\n//    if (usbjtag_intr_status', 1)
+    source = source.replace(
+        '        arduino_hw_cdc_event_post(ARDUINO_HW_CDC_EVENTS, ARDUINO_HW_CDC_BUS_RESET_EVENT, &event, sizeof(arduino_hw_cdc_event_data_t), &xTaskWoken);',
+        '        // Classify at capture: setup-time enumeration must not become an\n'
+        '        // active-session reset if the framework event task runs later.\n'
+        '        if (!meshEsp32HwcdcShouldReportBusReset || meshEsp32HwcdcShouldReportBusReset()) {\n'
+        '            arduino_hw_cdc_event_post(ARDUINO_HW_CDC_EVENTS, ARDUINO_HW_CDC_BUS_RESET_EVENT, &event, sizeof(arduino_hw_cdc_event_data_t), &xTaskWoken);\n'
+        '        }', 1)
     source = source.replace('    if(buffer == NULL) {\n',
                             '    if(buffer == NULL) {\n        mesh_hwcdc_clear_tx_stash();\n', 1)
     source = source.replace('size_t HWCDC::setTxBufferSize(size_t tx_queue_len){\n',
