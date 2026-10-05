@@ -171,6 +171,61 @@ int main() {
         fixture = (ROOT / "test/fixtures/webconfig_ota_handoff.cpp").read_text()
         self.compile_and_run(fixture.replace("@METHODS@", methods))
 
+    def test_background_bridge_retry_waits_until_ota_stops(self):
+        fixture = r'''
+#include <cassert>
+#include <cstdint>
+uint32_t now = 0;
+uint32_t millis() { return now; }
+bool millisHasNowPassed(uint32_t deadline) { return int32_t(now - deadline) >= 0; }
+struct Board {
+  bool ota = true;
+  bool isOTAUpdateRunning() const { return ota; }
+} board;
+struct Cli { Board* getBoard() { return &board; } };
+struct Bridge {
+  unsigned starts = 0;
+  bool running = false;
+  bool isRunning() const { return running; }
+  void begin() { ++starts; running = true; }
+};
+struct WiFiMock { bool isConnected() { return true; } } WiFi;
+struct Mesh {
+  Cli _cli;
+  struct { bool espnow_bridge_enabled = true; } _prefs;
+  Bridge espnow_bridge;
+  Bridge* @MQTT_MEMBER@ = nullptr;
+  uint32_t shared_espnow_retry_at = 0;
+  void configureBridgeFilter(Bridge*) {}
+  @RETRY@
+};
+int main() {
+  Mesh mesh;
+  // Simulate repeated servicePostMeshLoop calls, spanning several retry windows.
+  for (now = 0; now <= 30000; now += 100) {
+    assert(!mesh.startSharedEspNowBridgeIfReady());
+    assert(mesh.espnow_bridge.starts == 0);
+  }
+  board.ota = false;
+  assert(mesh.startSharedEspNowBridgeIfReady());
+  assert(mesh.espnow_bridge.starts == 1);
+  assert(mesh.startSharedEspNowBridgeIfReady());
+  assert(mesh.espnow_bridge.starts == 1);
+  mesh.espnow_bridge.running = false;
+  mesh._prefs.espnow_bridge_enabled = false;
+  now += 30000;
+  assert(!mesh.startSharedEspNowBridgeIfReady());
+  assert(mesh.espnow_bridge.starts == 1);
+}
+'''
+        for role, mqtt_member in (("simple_repeater", "mqtt_bridge"),
+                                  ("simple_room_server", "bridge")):
+            with self.subTest(role=role):
+                source = (ROOT / "examples" / role / "MyMesh.h").read_text()
+                retry = extract_braced(source, "bool startSharedEspNowBridgeIfReady()")
+                self.compile_and_run(fixture.replace("@RETRY@", retry)
+                                     .replace("@MQTT_MEMBER@", mqtt_member))
+
     def test_full_companion_cli_reports_webconfig_stop_and_hardware_errors(self):
         source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
         command = extract_braced(source, 'if (strcmp(command, "start ota") == 0')
