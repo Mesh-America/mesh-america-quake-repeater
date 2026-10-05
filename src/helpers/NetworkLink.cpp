@@ -33,18 +33,28 @@ extern void tcpipInit();
 
 namespace {
 
-static void appendDnsAddr(char* out, size_t out_size, const ip_addr_t& addr) {
-  const size_t len = strlen(out);
-  if (len >= out_size) return;
-  if (len > 0 && len + 1 < out_size) {
-    out[len] = ',';
-    out[len + 1] = '\0';
+// Trailing empty slots are dropped to keep remote replies short; "-" marks an
+// empty slot before a populated one, or a list with nothing in it.
+static void formatDnsList(char* out, size_t out_size, const ip_addr_t* servers, int count) {
+  int last = count - 1;
+  while (last >= 0 && ip_addr_isany_val(servers[last])) last--;
+  out[0] = '\0';
+  if (last < 0) {
+    snprintf(out, out_size, "-");
+    return;
   }
-  const size_t at = strlen(out);
-  if (ip_addr_isany_val(addr)) {
-    snprintf(out + at, out_size - at, "-");
-  } else {
-    ipaddr_ntoa_r(&addr, out + at, (int)(out_size - at));
+  for (int i = 0; i <= last; i++) {
+    size_t len = strlen(out);
+    if (i > 0 && len + 1 < out_size) {
+      out[len++] = ',';
+      out[len] = '\0';
+    }
+    if (len + 1 >= out_size) return;
+    if (ip_addr_isany_val(servers[i])) {
+      snprintf(out + len, out_size - len, "-");
+    } else {
+      ipaddr_ntoa_r(&servers[i], out + len, (int)(out_size - len));
+    }
   }
 }
 
@@ -61,8 +71,7 @@ static esp_err_t readDnsServersOnTcpipThread(void* ctx) {
 static void formatCurrentDnsServers(char* out, size_t out_size) {
   ip_addr_t servers[DNS_MAX_SERVERS] = {};
   esp_netif_tcpip_exec(readDnsServersOnTcpipThread, servers);
-  out[0] = '\0';
-  for (int i = 0; i < DNS_MAX_SERVERS; i++) appendDnsAddr(out, out_size, servers[i]);
+  formatDnsList(out, out_size, servers, DNS_MAX_SERVERS);
 }
 
 class NetworkLinkBase : public NetworkLink {
@@ -74,7 +83,7 @@ class NetworkLinkBase : public NetworkLink {
   bool _status_initialized = false;
   bool _last_connected = false;
   unsigned long _last_status_check = 0;
-  static constexpr int kDnsServers = 2;
+  static constexpr int kDnsServers = DNS_MAX_SERVERS;
   // Only ever touched on the lwIP thread (see snapshotDns()), so no atomics.
   ip_addr_t _dns_snapshot[kDnsServers] = {};
   bool _dns_captured = false;
@@ -189,17 +198,16 @@ class NetworkLinkBase : public NetworkLink {
       for (int i = 0; i < kDnsServers; i++) c->servers[i] = c->self->_dns_snapshot[i];
       return ESP_OK;
     }, &copy);
-    out[0] = '\0';
     if (!copy.captured) {
       snprintf(out, out_size, "none");
       return;
     }
-    for (int i = 0; i < kDnsServers; i++) appendDnsAddr(out, out_size, copy.servers[i]);
+    formatDnsList(out, out_size, copy.servers, kDnsServers);
   }
 
   void formatDnsFor(char* reply, size_t reply_size, IPAddress gateway) const {
     char current[64];
-    char lease[40];
+    char lease[64];
     formatCurrentDnsServers(current, sizeof(current));
     formatLeaseDns(lease, sizeof(lease));
     snprintf(reply, reply_size, "> dns:%s gw:%s lease:%s",
@@ -1009,8 +1017,8 @@ class AutomaticNetworkLink final : public NetworkLink {
   void formatDns(char* reply, size_t reply_size) const override {
     const NetworkMedium selected = _selected.load(std::memory_order_acquire);
     char current[64];
-    char eth_lease[40];
-    char wifi_lease[40];
+    char eth_lease[64];
+    char wifi_lease[64];
     formatCurrentDnsServers(current, sizeof(current));
     _ethernet.formatLeaseDns(eth_lease, sizeof(eth_lease));
     _wifi.formatLeaseDns(wifi_lease, sizeof(wifi_lease));
