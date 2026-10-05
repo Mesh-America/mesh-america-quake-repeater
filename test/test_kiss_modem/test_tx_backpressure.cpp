@@ -335,6 +335,90 @@ TEST_F(KissModemFixture, RadioTxCompletionAdvancesWhileHostOutputIsBackedUp) {
   EXPECT_FALSE(modem.isTxBusy());
 }
 
+TEST_F(KissModemFixture, HostSessionResetPreservesAnActiveRadioTransmission) {
+  radio.setSendComplete(false);
+  serial.pushRx(dataFrame({0x42}));
+  advanceToTxSending();
+  ASSERT_TRUE(modem.isActuallyTransmitting());
+  ASSERT_EQ(radio.startSendCount(), 1);
+  ASSERT_EQ(radio.sendFinishedCount(), 0);
+
+  serial.setBlockWrites(true);
+  serial.pushRx(hardwareFrame(HW_CMD_PING));
+  modem.loop();
+  ASSERT_TRUE(modem.isHostOutputBackedUp());
+
+  modem.resetHostSession();
+  EXPECT_TRUE(modem.isActuallyTransmitting());
+  EXPECT_TRUE(modem.isTxBusy());
+  EXPECT_FALSE(modem.isHostOutputBackedUp());
+  EXPECT_EQ(radio.startSendCount(), 1);
+  EXPECT_EQ(radio.sendFinishedCount(), 0);
+  serial.setBlockWrites(false);
+  modem.loop();
+  EXPECT_TRUE(modem.isActuallyTransmitting());
+  EXPECT_TRUE(serial.writesSnapshot().empty());
+
+  radio.setSendComplete(true);
+  modem.loop();
+  modem.loop();
+  EXPECT_EQ(radio.sendFinishedCount(), 1);
+  EXPECT_EQ(radio.startSendCount(), 1);
+  EXPECT_FALSE(modem.isTxBusy());
+  const std::vector<uint8_t> expected = {
+      KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP_TX_DONE, 0x01, KISS_FEND};
+  EXPECT_EQ(serial.writesSnapshot(), expected);
+}
+
+TEST_F(KissModemFixture, HostSessionResetReleasesAnAlreadyCompletedRadioResult) {
+  serial.pushRx(dataFrame({0x42}));
+  advanceToTxSending();
+  ASSERT_TRUE(modem.isActuallyTransmitting());
+  serial.setBlockWrites(true);
+  const uint8_t packet[] = {0x11};
+  // Occupy both output slots so the completed RF result waits outside them.
+  modem.onPacketReceived(TEST_SNR, TEST_RSSI, packet, sizeof(packet));
+  modem.loop();
+  modem.loop();
+  ASSERT_EQ(radio.sendFinishedCount(), 1);
+  ASSERT_TRUE(modem.isTxBusy());
+  ASSERT_TRUE(modem.isHostOutputBackedUp());
+
+  modem.resetHostSession();
+  serial.setBlockWrites(false);
+  modem.loop();
+  EXPECT_FALSE(modem.isTxBusy());
+  EXPECT_FALSE(modem.isHostOutputBackedUp());
+  EXPECT_TRUE(serial.writesSnapshot().empty());
+  EXPECT_EQ(radio.sendFinishedCount(), 1);
+  EXPECT_EQ(radio.startSendCount(), 1);
+
+  sendHardware(HW_CMD_PING);
+  const std::vector<uint8_t> expected = {
+      KISS_FEND, KISS_CMD_SETHARDWARE, HW_RESP(HW_CMD_PING), KISS_FEND};
+  EXPECT_EQ(serial.writesSnapshot(), expected);
+}
+
+TEST_F(KissModemFixture, HostSessionResetDropsPartialInputAndQueuedOutput) {
+  serial.setBlockWrites(true);
+  sendHardware(HW_CMD_PING);
+  serial.pushRx({KISS_FEND, KISS_CMD_TXDELAY});
+  modem.loop();
+  ASSERT_TRUE(modem.isHostOutputBackedUp());
+
+  modem.resetHostSession();
+  EXPECT_FALSE(modem.isHostOutputBackedUp());
+  serial.setBlockWrites(false);
+  // The tail of the abandoned setter must not replace the 50-unit TX delay.
+  serial.pushRx({100, KISS_FEND});
+  modem.loop();
+  EXPECT_TRUE(serial.writesSnapshot().empty());
+  serial.pushRx(dataFrame({0x42}));
+  advanceToTxSending();
+  EXPECT_EQ(radio.startSendCount(), 1);
+  EXPECT_TRUE(modem.isActuallyTransmitting());
+}
+
 TEST_F(KissModemFixture, QueueFullReportsBusyWithoutDroppingQueuedFrames) {
   static constexpr uint8_t TEST_PACKET_ONE[] = {0x11, 0x12};
   static constexpr uint8_t TEST_PACKET_TWO[] = {0x21, 0x22};

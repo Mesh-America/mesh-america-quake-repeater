@@ -77,6 +77,13 @@ void KissModem::begin() {
   resetOutputQueue();
 }
 
+void KissModem::resetHostSession() {
+  _rx_len = 0;
+  _rx_escaped = false;
+  _rx_active = false;
+  resetOutputQueue();
+}
+
 void KissModem::resetOutputQueue() {
   _tx_frame_head = 0;
   _tx_frame_tail = 0;
