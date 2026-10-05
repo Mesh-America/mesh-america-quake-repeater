@@ -15,6 +15,34 @@ def record(target: str, profile: str = "full", platform: str = "ESP32_PLATFORM")
 
 
 class ReleaseFullSelectionTest(unittest.TestCase):
+    def test_meshtower_sd_primary_filters_stale_internal_images_without_relabeling(self):
+        primary = "Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"
+        variants = []
+        for sensor in ("full", "reduced"):
+            item = record(primary, "auto", "NRF52_PLATFORM")
+            item["manifest"].update(artifact_target=primary + "-" + sensor + "-ota",
+                                    capabilities=["sensor.profile." + sensor])
+            variants.append(item)
+        companion = record("Heltec_tower_v2_companion_radio_full", platform="NRF52_PLATFORM")
+        room = record("Heltec_tower_v2_room_server_lora_ota_no_external_sensors",
+                      platform="NRF52_PLATFORM")
+        legacy = [record(target, "auto", "NRF52_PLATFORM") for target in (
+            "Heltec_tower_v2_repeater",
+            "Heltec_tower_v2_repeater_lora_ota_no_external_sensors",
+        )]
+        selected = select_ordinary_full_records(legacy + variants + [companion, room])
+        self.assertEqual(selected, variants + [companion, room])
+        for before, after in zip(variants, selected):
+            self.assertIs(before, after)
+            self.assertEqual(after["manifest"]["target"], primary)
+
+    def test_meshtower_internal_images_cannot_substitute_for_missing_primary(self):
+        for target in ("Heltec_tower_v2_repeater",
+                       "Heltec_tower_v2_repeater_lora_ota_no_external_sensors"):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(ValueError, "requires the SD primary"):
+                    select_ordinary_full_records([record(target, "auto", "NRF52_PLATFORM")])
+
     def test_nrf52_full_and_reduced_ota_pair_is_never_collapsed(self):
         for role in ('repeater', 'room_server', 'sensor'):
             target = 'RAK_3401_' + role

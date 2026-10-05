@@ -4,6 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source build.sh
 fail() { echo "test_nrf52_ota_profiles: $*" >&2; exit 1; }
+test_output=$(mktemp -d)
+trap 'rm -rf -- "$test_output"' EXIT
+tower_primary=Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors
+tower_legacy=Heltec_tower_v2_repeater_lora_ota_no_external_sensors
+tower_base=Heltec_tower_v2_repeater
 
 # This suite deliberately has no PlatformIO dependency. A mocked one-profile
 # worker exercises the actual single/bulk/matrix dispatch and fail-closed pair
@@ -12,7 +17,7 @@ SUPPORTED_PIO_ENVS=(
   nrf_repeater nrf_repeater_lora_ota_no_external_sensors
   nrf_room_server nrf_room_server_lora_ota_no_external_sensors
   nrf_sensor nrf_sensor_lora_ota_no_external_sensors
-  Xiao_nrf52_repeater Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors
+  Xiao_nrf52_repeater "$tower_primary" "$tower_base" "$tower_legacy"
   RAK_3401_repeater_unified_lora_ota RAK_3401_sensor
   RAK_3401_sensor_lora_ota_no_external_sensors nrf_kiss_modem
   nrf_companion_radio_usb nrf_companion_radio_full nrf_terminal_chat
@@ -31,6 +36,9 @@ done
 PIO_ENV_QSPI_OTA_BY_NAME[Xiao_nrf52_repeater]=1
 PIO_ENV_QSPI_OTA_BY_NAME[RAK_3401_repeater_unified_lora_ota]=1
 PIO_ENV_SD_OTA_BY_NAME[Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors]=1
+ALL_PIO_ENVS=("$tower_base" "$tower_primary")
+PIO_ENV_BUILD_BASE_BY_NAME[$tower_legacy]=$tower_base
+PIO_ENV_COMPLETE_OTA_BASE_BY_NAME[$tower_legacy]=$tower_base
 PIO_CONFIG_JSON='[]'
 
 for target in nrf_repeater nrf_room_server nrf_sensor Xiao_nrf52_repeater \
@@ -54,12 +62,87 @@ done
   Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors ] \
   || fail "SD target lost its exact storage identity"
 
+# The old base and generated internal-only build names now select the exact
+# SD primary. A direct alias must warn about its different installed OTA ID,
+# and all bulk/tagged lists must retain only one Full/Reduced target pair.
+for alias in "$tower_base" "$tower_legacy"; do
+  [ "$(get_nrf52_sensor_ota_pair_target "$alias")" = "$tower_primary" ] \
+    || fail "$alias did not resolve to the SD primary"
+  resolve_command_targets build-firmware "$alias" > /dev/null \
+    2> "$test_output/tower-alias-warning"
+  [ "${#RESOLVED_BUILD_TARGETS[@]}" -eq 1 ] \
+    && [ "${RESOLVED_BUILD_TARGETS[0]}" = "$tower_primary" ] \
+    || fail "$alias direct dispatch retained an internal-only identity"
+  warning=$(cat "$test_output/tower-alias-warning")
+  [[ "$warning" == *"require local USB/BLE DFU or SWD migration"* \
+     && "$warning" == *"not a same-target LoRa upgrade"* ]] \
+    || fail "$alias omitted its installed-identity migration warning"
+  is_redundant_bulk_build_target "$alias" \
+    || fail "$alias remained a second canonical artifact"
+done
+for resolver in resolve_all_firmwares resolve_repeater_firmwares; do
+  mapfile -t tower_targets < <("$resolver")
+  target_list=" ${tower_targets[*]} "
+  [[ "$target_list" == *" $tower_primary "* \
+     && "$target_list" != *" $tower_base "* \
+     && "$target_list" != *" $tower_legacy "* ]] \
+    || fail "$resolver did not publish only the Tower SD primary"
+done
+mapfile -t tower_targets < <(print_release_firmware_targets get-repeater-firmwares-to-build)
+target_list=" ${tower_targets[*]} "
+[[ "$target_list" == *" $tower_primary "* \
+   && "$target_list" != *" $tower_base "* \
+   && "$target_list" != *" $tower_legacy "* ]] \
+  || fail "tagged repeater list omitted the SD primary or retained a duplicate"
+for unchanged in Heltec_tower_v2_room_server Heltec_tower_v2_companion_radio_full; do
+  if get_unified_meshtower_repeater_replacement "$unchanged" >/dev/null; then
+    fail "$unchanged was redirected outside the repeater role"
+  fi
+done
+
 RESOLVED_BUILD_TARGETS=(nrf_repeater nrf_repeater_lora_ota_no_external_sensors \
   nrf_sensor nrf_sensor_lora_ota_no_external_sensors Xiao_nrf52_repeater \
-  Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors)
-normalize_nrf52_sensor_ota_pair_targets
+  "$tower_primary" "$tower_base" "$tower_legacy")
+normalize_nrf52_sensor_ota_pair_targets 2> "$test_output/tower-alias-warning"
 [ "${#RESOLVED_BUILD_TARGETS[@]}" -eq 4 ] \
   || fail "ordinary/reduced aliases did not deduplicate into exactly one pair"
+
+# Do not silently resurrect an incompatible internal recipe if the canonical
+# SD target is absent from a narrowed/misconfigured build inventory.
+unset 'PIO_ENV_PLATFORM_BY_NAME[Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors]'
+RESOLVED_BUILD_TARGETS=("$tower_legacy")
+if normalize_nrf52_sensor_ota_pair_targets > /dev/null 2>&1; then
+  fail "unavailable SD primary silently fell back to the old internal recipe"
+fi
+PIO_ENV_PLATFORM_BY_NAME[$tower_primary]=NRF52_PLATFORM
+
+# The build overlay must not undefine the exact primary's internal fallback.
+# Other SD targets retain their old SD-only contract even if metadata happens
+# to contain the Tower macro; no generic SD layout is made dual-storage.
+NRF52_OTA_SENSOR_PROFILE=full
+PIO_CONFIG_JSON='[["env:Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors", [["build_flags", ["-DOTA_SD_STORE=1", "-DOTA_FLASH_STORE=1", "-DOTA_TOWER_AUTO_STORE=1"]]]]]'
+PLATFORMIO_BUILD_FLAGS=""
+PLATFORMIO_BUILD_UNFLAGS=""
+apply_lora_ota_override "$tower_primary"
+[[ "$PLATFORMIO_BUILD_FLAGS" == *"-DOTA_FLASH_STORE=1"* \
+   && "$PLATFORMIO_BUILD_FLAGS" == *"-DOTA_SD_STORE=1"* \
+   && "$PLATFORMIO_BUILD_FLAGS" == *"-DOTA_TOWER_AUTO_STORE=1"* \
+   && "$PLATFORMIO_BUILD_FLAGS" != *"-UOTA_FLASH_STORE"* \
+   && "$PLATFORMIO_BUILD_UNFLAGS" != *"OTA_FLASH_STORE"* ]] \
+  || fail "SD primary overlay disabled its qualified internal fallback"
+other_sd_target=other_sd_repeater_lora_ota_no_external_sensors
+PIO_ENV_PLATFORM_BY_NAME[$other_sd_target]=NRF52_PLATFORM
+PIO_ENV_SD_OTA_BY_NAME[$other_sd_target]=1
+PIO_CONFIG_JSON='[["env:other_sd_repeater_lora_ota_no_external_sensors", [["build_flags", ["-DOTA_SD_STORE=1", "-DOTA_TOWER_AUTO_STORE=1"]]]]]'
+PLATFORMIO_BUILD_FLAGS=""
+PLATFORMIO_BUILD_UNFLAGS=""
+apply_lora_ota_override "$other_sd_target"
+[[ "$PLATFORMIO_BUILD_FLAGS" == *"-UOTA_FLASH_STORE"* \
+   && "$PLATFORMIO_BUILD_FLAGS" != *"-DOTA_TOWER_AUTO_STORE"* \
+   && "$PLATFORMIO_BUILD_UNFLAGS" == *"-D OTA_FLASH_STORE=1"* ]] \
+  || fail "unrelated SD target gained the Tower internal fallback"
+PIO_CONFIG_JSON='[]'
+NRF52_OTA_SENSOR_PROFILE=""
 
 for selected in auto standard full; do
   BUILD_PROFILE_OVERRIDE=$selected
@@ -93,13 +176,17 @@ FIRMWARE_FILENAME_INFIX=outer
 SKIP_DECLARED_REDUCTIONS=0
 NRF52_OTA_SENSOR_PROFILE=""
 for target in nrf_repeater nrf_room_server nrf_sensor Xiao_nrf52_repeater \
-  Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors; do
+  "$tower_primary" "$tower_base" "$tower_legacy"; do
   calls=()
   build_firmware "$target" >/dev/null
   [ "${#calls[@]}" -eq 2 ] || fail "$target did not build exactly two options"
   [[ "${calls[0]}" == *:full:full-ota:1:1:1 ]] || fail "$target full flags/OTA requirement are wrong"
   [[ "${calls[1]}" == *:reduced:reduced-ota:0:0:1 ]] || fail "$target reduced flags/OTA requirement are wrong"
   [ "${calls[0]%%:*}" = "${calls[1]%%:*}" ] || fail "$target profiles have different OTA IDs"
+  if [[ "$target" == Heltec_tower_v2* ]]; then
+    [ "${calls[0]%%:*}" = "$tower_primary" ] \
+      || fail "$target profile worker built the obsolete internal identity"
+  fi
 done
 [ "$ESP32_FULL_BUILD:$BUILD_PROFILE_EFFECTIVE:$REQUIRE_OTA_UPDATES:$FIRMWARE_FILENAME_INFIX:$NRF52_OTA_SENSOR_PROFILE" = \
   '1:standard:0:outer:' ] || fail "pair state leaked into other platform/Companion builds"
@@ -117,8 +204,6 @@ failed_profile=""
 calls=()
 run_resolved_build_targets nrf_repeater nrf_sensor Xiao_nrf52_repeater >/dev/null
 [ "${#calls[@]}" -eq 6 ] || fail "bulk builds did not publish every pair"
-test_output=$(mktemp -d)
-trap 'rm -rf -- "$test_output"' EXIT
 OUTPUT_DIR=$test_output
 FIRMWARE_FILENAME_INFIX=""
 calls=()

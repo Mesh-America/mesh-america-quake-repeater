@@ -197,6 +197,9 @@ jobs:
           python3 -B test/test_ota_store_resume.py -v
           python3 -B test/test_ota_catalog_lifetime.py -v
           python3 -B test/test_ota_store_flash_nrf52_hybrid.py -v
+          python3 -B test/test_tower_bootloader_caps.py -v
+          python3 -B test/test_tower_auto_storage.py -v
+          python3 -B test/test_tower_auto_integration.py -v
           python3 -B test/test_ota_dev_staging.py -v
           python3 -B test/test_ota_dev_reboot_guard.py -v
 
@@ -374,6 +377,7 @@ jobs:
           python3 -B test/test_full_build_flag_dedup.py
           python3 -B test/test_full_logging_compile.py
           python3 -B test/test_full_logging_resume.py
+          python3 -B test/test_xiao_canonical_logging.py -v
           python3 -B test/test_firmware_build_recipe.py -v
           python3 -B test/test_firmware_capabilities.py
           MESHCORE_TEST_REAL_PIO_PATHS=1 python3 -B test/test_esp32_partition_migration_build_dir.py -v

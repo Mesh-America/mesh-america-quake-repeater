@@ -39,6 +39,8 @@ class OtaSelfServePolicyTest(unittest.TestCase):
             (("NRF52_PLATFORM=1", "OTA_QSPI_STORE=1"), True, True),
             (("NRF52_PLATFORM=1", "OTA_SD_STORE=1"), True, True),
             (("NRF52_PLATFORM=1", "OTA_RAK_AUTO_STORE=1"), False, True),
+            (("NRF52_PLATFORM=1", "OTA_TOWER_AUTO_STORE=1", "OTA_SD_STORE=1",
+              "OTA_FLASH_STORE=1"), False, True),
             (("NRF52_PLATFORM=1", "OTA_RAK_AUTO_STORE=1",
               "OTA_QSPI_STORE=1"), False, True),
             (("NRF52_PLATFORM=1", "OTA_RAK_AUTO_STORE=1",
@@ -116,6 +118,7 @@ struct Context {
   uint8_t autoinstall = AUTOINSTALL_OFF;
   char hw_id[33] = {};
   struct Cache { void attach(Store&) {} } sd_cache;
+  Store& sdStagingStore() { return fetch_store; }
 #include "begin.h"
 };
 static bool send(void*, const uint8_t*, uint16_t, bool) { return true; }

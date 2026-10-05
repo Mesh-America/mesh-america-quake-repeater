@@ -158,6 +158,9 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
   OtaContext& c = ota_ctx();
   c.manager.set_clock(millis());
   c.manager.set_speed(speedFactor());
+#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+  c.prepareTowerStorage();
+#endif
   const char* rest = a;
 
   // ---- raw / internal primitives, tucked under `ota dev ...` ----
@@ -196,6 +199,11 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
       "folder | config | key");
 #endif
 #elif defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+#if defined(OTA_TOWER_AUTO_STORE)
+    strcpy(reply,
+      "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
+      "storage | folder | cache | config | key");
+#else
 #if defined(OTA_SD_BOOTLOADER_UPDATE)
     strcpy(reply,
       "OTA: status | stats | ls | get <id> flash | install | bootloader | cancel | announce | self | serve | "
@@ -204,6 +212,7 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     strcpy(reply,
       "OTA: status | stats | ls | get <id> flash | install | cancel | announce | self | serve | folder | "
       "cache | config | key");
+#endif
 #endif
 #else
     snprintf(reply, 160,
@@ -253,7 +262,11 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
     // nRF52 applies via the bootloader - show (cached) whether it can, so `ota get`/`install` won't surprise.
     // blrc = the bootloader's last apply code (diagnostic; 0xB8=success, see ota_delta.c).
     const OtaBlCaps& bl = c.bootloaderAppCaps();
-#if defined(OTA_RAK_AUTO_STORE)
+#if defined(OTA_TOWER_AUTO_STORE)
+    const char* bl_state = !bl.present ? "NONE" :
+        c.fetch_store.usesExternal() ? "SD" :
+        c.fetch_store.usesInternal() ? "internal" : "storage-ERR";
+#elif defined(OTA_RAK_AUTO_STORE)
     const char* bl_state = !bl.present ? "NONE" :
         c.fetch_store.usesExternal() ? "QSPI" :
         c.fetch_store.usesInternal() ? "internal" : "storage-ERR";
@@ -415,6 +428,9 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
                       ota_bootloader_self_update_caps_valid(list_bl_update);
 #if defined(OTA_SD_BOOTLOADER_UPDATE)
         installable = installable && list_sd_headroom;
+#if defined(OTA_TOWER_AUTO_STORE)
+        installable = installable && c.fetch_store.usesExternal();
+#endif
 #endif
 #endif
         fit = installable ? "yours" : "bootloader unsupported";
@@ -423,7 +439,11 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 #if defined(NRF52_PLATFORM)
         installable = installable && list_bl.present && list_bl.apply_abi >= MOTA_FORMAT_VER
                    && h->codec < 16 && (list_bl.codec_mask & (1u << h->codec));
-#if defined(OTA_SD_STORE)
+#if defined(OTA_TOWER_AUTO_STORE)
+        installable = installable && c.fetch_store.compatible();
+        if (h->codec == CODEC_FULL)
+          installable = installable && c.fetch_store.usesExternal();
+#elif defined(OTA_SD_STORE)
         installable = installable && (list_bl.storage_flags & OTA_BL_STORAGE_SD);
 #elif defined(OTA_RAK_AUTO_STORE)
         if (c.fetch_store.usesExternal())
@@ -567,6 +587,12 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
           return true;
         }
 #if defined(OTA_SD_BOOTLOADER_UPDATE)
+#if defined(OTA_TOWER_AUTO_STORE)
+        if (!c.fetch_store.usesExternal()) {
+          strcpy(reply, "ERR bootloader packages require a usable SD card");
+          return true;
+        }
+#endif
         SelfFwInfo sd_self;
         if (!ota_self_firmware(sd_self) ||
             !ota_bootloader_scratch_headroom_valid(
@@ -602,7 +628,12 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
                  need_abi, (unsigned)selcodec, bl.apply_abi, bl.codec_mask);
         return true;
       }
-#if defined(OTA_SD_STORE)
+#if defined(OTA_TOWER_AUTO_STORE)
+      if (!c.fetch_store.compatible()) {
+        snprintf(reply, 160, "ERR OTA storage unsafe: %s", c.fetch_store.selectionReason());
+        return true;
+      }
+#elif defined(OTA_SD_STORE)
       if (!(bl.storage_flags & OTA_BL_STORAGE_SD)) {
         strcpy(reply, "ERR bootloader cannot apply an update staged on SD; update it over USB first");
         return true;
@@ -709,6 +740,12 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 #endif
     const bool discarded = !was_folder && !was_sd_archive &&
                            c.fetch_store.discard();
+#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+    if (discarded || (!c.fetch_store.usesExternal() && !c.fetch_store.usesInternal())) {
+      c.fetch_store.resetSelection();
+      c.prepareTowerStorage();
+    }
+#endif
     // Fetch cancellation and serving are independent. In particular, a
     // manual serve view can point into serve_buf, so leave the manager
     // view and its caller-owned buffer intact until `ota dev clear` (which
@@ -769,7 +806,10 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 
   // ---- raw-QSPI staging diagnostics (read-only probe; preserves a latched fetch failure) ----
   } else if (is_cmd(a, "qspi|storage", &rest)) {
-#if defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
+#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+    snprintf(reply, 160, "OTA storage: %s; capacity=%luK; SD primary, internal application deltas only",
+             c.fetch_store.selectionReason(), (unsigned long)(c.fetch_store.capacity() / 1024));
+#elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
     if (c.fetch_store.usesExternal()) {
       const uint32_t qspi_capacity = c.fetch_store.qspiCapacity();
       snprintf(reply, 160, "QSPI %s jedec=%06lX size=%luK sr1=%02X stage=%s%s%s",
@@ -814,7 +854,11 @@ bool handle_ota_command(const char* command, char* reply, mesh::MainBoard& board
 #if defined(NRF52_PLATFORM)
     // nRF52 applies via the bootloader, so surface whether THIS device's bootloader can install this store.
     const OtaBlCaps& bl = c.bootloaderAppCaps();   // cached (flash scanned once)
-#if defined(OTA_RAK_AUTO_STORE)
+#if defined(OTA_TOWER_AUTO_STORE)
+    snprintf(reply + n, 160 - n, " | store:%s | bootloader:%s",
+             c.fetch_store.usesExternal() ? "SD" : c.fetch_store.usesInternal() ? "internal" : "unsafe",
+             c.fetch_store.compatible() ? "apply OK" : "unsupported");
+#elif defined(OTA_RAK_AUTO_STORE)
     if (c.fetch_store.usesExternal()) {
       const uint32_t qspi_capacity = c.fetch_store.qspiCapacity();
       snprintf(reply + n, 160 - n, " | QSPI store:%s%uK | bootloader: %s",
@@ -1323,6 +1367,12 @@ static bool handle_dev(const char* d, char* reply, OtaContext& c) {
       strcpy(reply, "OK cleared SD archive session; partial retained for resume");
     } else {
       const bool discarded = c.fetch_store.discard();
+#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+      if (discarded || (!c.fetch_store.usesExternal() && !c.fetch_store.usesInternal())) {
+        c.fetch_store.resetSelection();
+        c.prepareTowerStorage();
+      }
+#endif
       strcpy(reply, discarded ? "OK OTA receive slot confirmed clear"
                               : "ERR RAM state cleared; persistent OTA slot invalidation failed");
     }
