@@ -4191,6 +4191,9 @@ apply_companion_radio_full_profile() {
       record_build_reduction \
         "Wireless Paper Full: 350 contacts; 256 offline frames normally, 128 while mOTA borrows queue storage"
       ;;
+    # ESP-NOW Full also needs the C3 queue limit: 256 frames leave only
+    # 141376 internal heap bytes against the unchanged 142336-byte reserve.
+    generic_espnow_companion_radio_full|\
     heltec_ct62_companion_radio_full|\
     xiao_c3_companion_radio_full|\
     heltec_tracker_v2_companion_radio_full_*)
@@ -4199,7 +4202,6 @@ apply_companion_radio_full_profile() {
       record_build_reduction \
         "companion.capacity limited to 100 contacts for runtime RAM; 224 queued frames and all Full transports retained"
       ;;
-    generic_espnow_companion_radio_full|\
     heltec_v3_companion_radio_full)
       # The 1.17.1.8 matrix exceeds the runtime heap budget at 150 contacts
       # after adding alerts and held DMs. Preserve the 256-frame queue, Full

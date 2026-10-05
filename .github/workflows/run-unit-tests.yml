@@ -40,6 +40,12 @@ jobs:
       - name: Compile ordinary STM32 USB Companion with pinned core and RadioLib
         run: pio run -e RAK_3x72_companion_radio_usb
 
+      - name: Qualify Wio-E5 Mini Companion at release version length
+        run: >-
+          bash build.sh build-firmware wio-e5-mini_companion_radio_usb
+          --firmware-version v1.17.1.9-halo-keymind-cascade-dev
+          --radio-preset usa-cascade-fixed --profile cascade --require-ota
+
   bootloader-version:
     runs-on: ubuntu-latest
     steps:
