@@ -193,6 +193,7 @@ public:
   int sendLogin(const ContactInfo&, const char*, uint32_t&);
   int sendAnonReq(const ContactInfo&, const uint8_t*, uint8_t, uint32_t&, uint32_t&);
   virtual bool allowRequestTag(uint32_t) { return true; }
+  virtual bool allocateRequestTag(uint32_t&);
   int sendRequest(const ContactInfo&, const uint8_t*, uint8_t, uint32_t&, uint32_t&);
   int sendRequest(const ContactInfo&, uint8_t, uint32_t&, uint32_t&);
 };

@@ -182,6 +182,7 @@ protected:
   virtual void onContactResponse(const ContactInfo& contact, const uint8_t* data, uint8_t len) = 0;
   // Reject a recently retired reflected tag before allocating/transmitting.
   virtual bool allowRequestTag(uint32_t tag) { return true; }
+  virtual bool allocateRequestTag(uint32_t& tag);
   virtual void handleReturnPathRetry(const ContactInfo& contact, const uint8_t* path, uint8_t path_len);
 
   virtual bool sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis=0);

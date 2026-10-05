@@ -87,6 +87,7 @@ struct BaseChatMesh {
   RtcBoundary* getRTCClock() { return &rtc; }
   RngBoundary* getRNG() { return &rng; }
   virtual bool allowRequestTag(uint32_t) { return true; }
+  virtual bool allocateRequestTag(uint32_t&);
   virtual void onContactResponse(const ContactInfo&, const uint8_t*, uint8_t) = 0;
   bool canMutateContacts() const { return false; }
   void onContactPathUpdated(ContactInfo&) {}
@@ -159,6 +160,7 @@ struct MyMesh : BaseChatMesh {
   size_t writePendingSerialFrame(const uint8_t*, size_t, uint32_t);
   bool beginPendingRequest(Kind, const ContactInfo&, bool = false);
   bool allowRequestTag(uint32_t) override;
+  bool allocateRequestTag(uint32_t&) override;
   void armPendingRequest(uint32_t, uint32_t, bool);
   void finishPendingRequest(int, uint32_t, uint32_t);
   void abandonPendingRequest();
@@ -633,8 +635,29 @@ int main() {
     f.arm(Tracker::Status, 18); reply(f, Tracker::Status, nullptr, 18); f.drain();
     assert(count(f.wire(), PUSH_CODE_STATUS_RESPONSE) == 1); ++checks;
   }
-  // Real Base send methods and real command branches prove rejection happens
-  // before packet allocation and transmission, including RTC tag re-use.
+  // A real login response carries the server's clock, not the client's
+  // request timestamp. It can equal the client's next timestamp. The app's
+  // immediate status/ACL request must select another tag without accepting
+  // the old login response or changing the wall clock.
+  for (bool tcp : {false, true}) for (Kind kind : {
+      Tracker::Status, Tracker::Binary, Tracker::Telemetry, Tracker::Discovery}) {
+    Fixture f(tcp); f.command(Tracker::Login);
+    const uint32_t server_tag = f.mesh.rtc.wall + 1;
+    reply(f, Tracker::Login, nullptr, server_tag); f.drain();
+    const size_t request_start = f.wire().size();
+    if (kind == Tracker::Binary) f.aclCommand(); else f.command(kind);
+    assert(f.mesh.transmissions == 2 && f.mesh.allocations == 2);
+    const uint32_t tag = f.mesh._delayed_replies.request.tag;
+    assert(tag > server_tag && f.mesh.rtc.wall == 1000);
+    reply(f, Tracker::Login, nullptr, server_tag);
+    assert(f.mesh._delayed_replies.request.phase == Tracker::AwaitRadio);
+    reply(f, kind, nullptr, tag); f.drain();
+    assert(count(f.wire(), RESP_CODE_ERR) == 0);
+    assert(count(f.wire(), PUSH_CODE_LOGIN_SUCCESS) == 1);
+    assertSentBeforeFinal(Bytes(f.wire().begin() + request_start, f.wire().end()),
+                          kind, tag); ++checks;
+  }
+  // An active request still rejects overlap before packet allocation/TX.
   for (Kind kind : {Tracker::Login, Tracker::Status, Tracker::Telemetry, Tracker::Binary, Tracker::Discovery, Tracker::Trace}) {
     Fixture f; f.command(kind); assert(f.mesh.transmissions == 1 && f.mesh.allocations == 1);
     f.command(kind); assert(f.mesh.transmissions == 1 && f.mesh.allocations == 1); ++checks;
@@ -715,17 +738,45 @@ int main() {
       testReservedHistorySurvivesIdle(request_service, start, kind); ++checks;
     }
   }
-  {
-    Fixture f; f.command(Tracker::Binary, true); assert(f.mesh.transmissions == 1);
+  // RTC correction also skips recent tags. Old replies remain quarantined;
+  // the newly transmitted tag is the one reported to the host and matched.
+  for (bool anonymous : {false, true}) for (Kind kind : {
+      Tracker::Status, Tracker::Binary, Tracker::Telemetry, Tracker::Discovery}) {
+    Fixture f; f.command(kind, anonymous);
+    const uint32_t old_tag = f.mesh._delayed_replies.request.tag;
+    reply(f, kind, nullptr, old_tag); f.drain();
+    const size_t request_start = f.wire().size();
+    f.mesh.rtc.resetUniqueTime(old_tag); f.command(kind, anonymous);
+    assert(f.mesh.transmissions == 2 && f.mesh.allocations == 2);
     const uint32_t tag = f.mesh._delayed_replies.request.tag;
-    reply(f, Tracker::Binary, nullptr, tag); f.drain();
-    f.mesh.rtc.resetUniqueTime(tag); f.command(Tracker::Binary, true);
-    assert(f.mesh.transmissions == 1 && f.mesh.allocations == 1); ++checks;
+    assert(tag == old_tag + 1);
+    reply(f, kind, nullptr, old_tag);
+    assert(f.mesh._delayed_replies.request.phase == Tracker::AwaitRadio);
+    reply(f, kind, nullptr, tag); f.drain();
+    assertSentBeforeFinal(Bytes(f.wire().begin() + request_start, f.wire().end()),
+                          kind, tag); ++checks;
   }
-  for (Kind kind : {Tracker::Status, Tracker::Binary, Tracker::Telemetry}) {
-    Fixture f; f.command(kind); const uint32_t tag = f.mesh._delayed_replies.request.tag;
-    reply(f, kind, nullptr, tag); f.drain(); f.mesh.rtc.resetUniqueTime(tag); f.command(kind);
-    assert(f.mesh.transmissions == 1 && f.mesh.allocations == 1); ++checks;
+  {
+    Fixture f;
+    for (unsigned i = 0; i < Tracker::HISTORY_SIZE - 1; ++i) {
+      f.command(Tracker::Binary);
+      reply(f, Tracker::Binary, nullptr, f.mesh._delayed_replies.request.tag);
+      f.drain();
+    }
+    f.mesh.rtc.resetUniqueTime(1000); f.command(Tracker::Binary);
+    assert(f.mesh.transmissions == Tracker::HISTORY_SIZE);
+    assert(f.mesh._delayed_replies.request.tag == 1000 + Tracker::HISTORY_SIZE - 1);
+    assert(f.mesh.rtc.wall == 1000); ++checks;
+  }
+  {
+    struct RejectAllTags : MyMesh {
+      unsigned attempts = 0;
+      bool allowRequestTag(uint32_t) override { ++attempts; return false; }
+    } mesh;
+    uint32_t tag = 0;
+    assert(!mesh.allocateRequestTag(tag));
+    assert(mesh.attempts == Tracker::HISTORY_SIZE);
+    assert(mesh.allocations == 0 && mesh.transmissions == 0); ++checks;
   }
   {
     Fixture f;

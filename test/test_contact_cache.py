@@ -108,6 +108,7 @@ class ContactCacheTest(unittest.TestCase):
                 "namespace mesh {\n" + method(mesh, "bool Mesh::sendDirect(") + "\n}\n"
                 + "\n".join(method(chat, signature) for signature in (
                     "int BaseChatMesh::sendLogin(", "int BaseChatMesh::sendAnonReq(",
+                    "bool BaseChatMesh::allocateRequestTag(",
                     "int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t*",
                     "int  BaseChatMesh::sendRequest(const ContactInfo& recipient, uint8_t"))
             )
