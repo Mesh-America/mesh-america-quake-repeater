@@ -1,4 +1,7 @@
 #include "MyMesh.h"
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/BootFileSystem.h>
+#endif
 #include <helpers/UsbLogging.h>
 #if defined(ENABLE_OTA)
 #include <helpers/ota/OtaContext.h>
@@ -1417,6 +1420,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
 #if ENV_INCLUDE_GPS == 1
   applyGpsPrefs();
+#endif
+#if defined(ESP32_PLATFORM)
+  // MQTT/WebConfig startup below may create tasks that access persisted state.
+  mesh::endEsp32BootFileInventory();
 #endif
 #ifdef WITH_MQTT_BRIDGE
   if (_prefs.bridge_enabled) {

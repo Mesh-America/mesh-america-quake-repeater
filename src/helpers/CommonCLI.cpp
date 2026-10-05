@@ -2,6 +2,7 @@
 #include "CommonCLI.h"
 #include "PrefsSaveReplyGuard.h"
 #include "UsbLoggingWatchdog.h"
+#include "HilStartupTrace.h"
 #include <helpers/ui/DisplayPowerSettings.h>
 #include "CLICommandUtils.h"
 #include "GpsPowerPolicy.h"
@@ -745,15 +746,23 @@ static void formatSnrDbX4Short(char* dest, size_t dest_len, int16_t snr_x4) {
 }
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
+  mesh::hilStartupTrace("prefs_profiles_begin");
   _radio_profiles.begin(fs, _callbacks->getProfileRadio(), _rtc, true);
+  mesh::hilStartupTrace("prefs_profiles_ready");
   _prefs->primary_radio_preamble = _radio_profiles.primaryPreamble();
 #if !defined(WITH_MQTT_BRIDGE) && (defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM))
+  mesh::hilStartupTrace("prefs_recovery_begin");
   mesh::ContactFileTransaction::recover(fs, "/com_prefs");
+  mesh::hilStartupTrace("prefs_recovery_ready");
 #endif
 #if defined(ENABLE_OTA)
+  mesh::hilStartupTrace("prefs_ota_speed_begin");
   mesh::ota::beginSpeedConfig(fs);
+  mesh::hilStartupTrace("prefs_ota_speed_ready");
 #endif
+  mesh::hilStartupTrace("prefs_display_begin");
   const bool display_settings_loaded = mesh::ui::loadDisplayPowerSettings(fs, false);
+  mesh::hilStartupTrace("prefs_display_ready");
   (void)display_settings_loaded;
   bool is_fresh_install = false;
   bool is_upgrade = false;
@@ -777,11 +786,14 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 
 #ifdef WITH_MQTT_BRIDGE
   bool node_prefs_needs_migration = false;
+  mesh::hilStartupTrace("prefs_recovery_begin");
   if (!recoverCommonPrefsFiles(fs)) {
     MESH_DEBUG_PRINTLN("Prefs: common preference recovery is incomplete");
   }
+  mesh::hilStartupTrace("prefs_recovery_ready");
 #endif
 
+  mesh::hilStartupTrace("prefs_common_begin");
   if (fs->exists("/com_prefs")) {
     loadPrefsInt(fs, "/com_prefs"); loaded = true;   // new filename
   } else if (fs->exists("/node_prefs")) {
@@ -835,13 +847,16 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
     _prefs->powersaving_enabled = DEFAULT_POWERSAVING_ENABLED && !dual_radio_active ? 1 : 0;
     _prefs->bridge_pkt_src = 1;  // Default to RX (logRx) for new installs
   }
+  mesh::hilStartupTrace("prefs_common_ready");
 #ifdef WITH_MQTT_BRIDGE
   // Load observer preferences (MQTT/WiFi/timezone/SNMP/alert) from /mqtt_prefs.
   // Readers (MQTTBridge, AlertReporter, observer CLI) use _mqtt_prefs directly -
   // these fields no longer exist in NodePrefs, so there is nothing to sync.
   MQTTPrefsAtomicStore::LegacyUpgradeGate legacy_upgrade(
       _com_prefs_needs_upgrade || node_prefs_needs_migration);
+  mesh::hilStartupTrace("prefs_mqtt_begin");
   loadMQTTPrefs(fs, &legacy_upgrade);
+  mesh::hilStartupTrace("prefs_mqtt_ready");
   if (!display_settings_loaded && _mqtt_prefs.display_timeout_secs != DISPLAY_TIMEOUT_DEFAULT_SECS)
     mesh::ui::migrateLegacyDisplayTimeout(_mqtt_prefs.display_timeout_secs);
   if (_mqtt_prefs_hold) legacy_upgrade.holdMqttSource();
@@ -868,6 +883,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   // set by setMQTTPrefsDefaults(). No explicit migration needed.
 #endif
 
+  mesh::hilStartupTrace("prefs_migration_begin");
 #ifdef WITH_MQTT_BRIDGE
   if (node_prefs_needs_migration) {
     if (legacy_upgrade.mayRewriteComPrefs()) {
@@ -905,15 +921,18 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
     _com_prefs_needs_upgrade = false;
   }
 #endif
+  mesh::hilStartupTrace("prefs_migration_ready");
 #if defined(ENABLE_OTA)
   if (loaded) syncOtaConfigFromPrefs();   // persisted OTA policy/keys -> OtaContext (else keep safe defaults)
 #endif
+  mesh::hilStartupTrace("prefs_apply_begin");
 #if MESH_USB_LOGGING_AVAILABLE
   mesh::setUsbDebugEnabled(_prefs->usb_debug_enabled != 0);
   mesh::setUsbLoggingEnabled(_prefs->usb_logging_enabled != 0);
 #endif
   _radio_profiles.adoptPrimaryPreamble(_prefs->primary_radio_preamble);
   _radio_profiles.stagePrimary(_prefs->primary_radio_preamble, false);
+  mesh::hilStartupTrace("prefs_apply_ready");
 }
 
 #if defined(ENABLE_OTA)
@@ -939,6 +958,7 @@ void CommonCLI::syncOtaConfigFromPrefs() {
 #endif
 
 void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
+  mesh::hilStartupTrace("prefs_image_open_begin");
   // Older or truncated preference images must never inherit these opt-ins
   // from a previous load of a newer image.
   _prefs->usb_debug_enabled = 0;
@@ -950,6 +970,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 #else
   File file = fs->open(filename);
 #endif
+  mesh::hilStartupTrace("prefs_image_open_ready");
   if (file) {
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
     && !defined(RS232_BRIDGE_DEFAULT_ON)
@@ -967,6 +988,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     }
     uint8_t pad[8];
 
+    mesh::hilStartupTrace("prefs_image_core_begin");
     file.read((uint8_t *)&_prefs->airtime_factor, sizeof(_prefs->airtime_factor));    // 0
     file.read((uint8_t *)&_prefs->node_name, sizeof(_prefs->node_name));              // 4
     file.read(pad, 4);                                                                // 36
@@ -1010,6 +1032,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162
     file.read((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
     file.read((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
+    mesh::hilStartupTrace("prefs_image_core_ready");
     _prefs->node_name[sizeof(_prefs->node_name) - 1] = '\0';
     _prefs->password[sizeof(_prefs->password) - 1] = '\0';
     _prefs->guest_password[sizeof(_prefs->guest_password) - 1] = '\0';
