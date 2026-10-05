@@ -38,6 +38,20 @@ void tud_umount_cb(void){
 '''
 
 
+def installed_tested_tinyusb_cores(packages):
+    # This optional installed-source qualification covers the 2.0.17 layout
+    # used by the golden anchors. A C6 HWCDC build can replace the default
+    # package with 3.x; it must not silently change which TinyUSB SDK is tested.
+    result = []
+    for package in sorted(packages.glob("framework-arduinoespressif32*")):
+        core = package / "cores/esp32"
+        if not (core / "USBCDC.cpp").is_file() or not (core / "esp_arduino_version.h").is_file():
+            continue
+        if FIX.hwcdc_framework_version(core / "USBCDC.cpp") == (2, 0, 17):
+            result.append(core)
+    return result
+
+
 class Esp32UsbSessionFixTests(unittest.TestCase):
     def test_owner_hooks_precede_state_changes_and_rx_queue(self):
         patched = FIX.patched_cdc_source(CDC)
@@ -92,17 +106,44 @@ class Esp32UsbSessionFixTests(unittest.TestCase):
                                 [("ARDUINO_USB_CDC_ON_BOOT", 0), ("ARDUINO_USB_MODE", 0)]):
                 env["CPPDEFINES"] = definitions
                 self.assertIs(FIX.replace_source(env, node), node)
+            # Selecting a newer HWCDC SDK for optional qualification must
+            # never relax the actual mode0 build's changed-layout rejection.
+            env["CPPDEFINES"] = [("ARDUINO_USB_CDC_ON_BOOT", 1), ("ARDUINO_USB_MODE", 0)]
+            source.write_text(CDC.replace(FIX.RX, "void USBCDC::_onRX() {\n"), encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                FIX.replace_source(env, node)
+
+    def test_installed_sdk_selection_uses_exact_version_and_alternate_packages(self):
+        with tempfile.TemporaryDirectory(prefix="meshcore-tinyusb-sdk-selection-") as directory:
+            packages = Path(directory)
+            cores = {}
+            for name, version in (("framework-arduinoespressif32", (3, 1, 3)),
+                                  ("framework-arduinoespressif32@src-old", (2, 0, 17)),
+                                  ("framework-arduinoespressif32@src-new", (3, 3, 11))):
+                core = packages / name / "cores/esp32"
+                core.mkdir(parents=True)
+                (core / "USBCDC.cpp").write_text(CDC, encoding="ascii")
+                (core / "esp_arduino_version.h").write_text(
+                    "\n".join("#define ESP_ARDUINO_VERSION_" + key + " " + str(value)
+                              for key, value in zip(("MAJOR", "MINOR", "PATCH"), version)) + "\n",
+                    encoding="ascii")
+                cores[version] = core
+            self.assertEqual(installed_tested_tinyusb_cores(packages), [cores[(2, 0, 17)]])
+            (cores[(2, 0, 17)] / "USBCDC.cpp").unlink()
+            self.assertEqual(installed_tested_tinyusb_cores(packages), [])
 
     def test_installed_sdk_compatibility_when_available(self):
         # Package-free CI still exercises the golden anchors above. Check an
         # installed SDK on Windows and Unix, including a custom PIO core dir.
         core = Path(os.environ.get("PLATFORMIO_CORE_DIR", str(Path.home() / ".platformio")))
-        package = core / "packages/framework-arduinoespressif32/cores/esp32"
-        if not (package / "USBCDC.cpp").is_file():
-            self.skipTest("installed Arduino-ESP32 SDK unavailable")
-        for name, patcher in (("USBCDC.cpp", FIX.patched_cdc_source), ("USB.cpp", FIX.patched_usb_source)):
-            original = (package / name).read_text(encoding="utf-8")
-            self.assertIn("meshEsp32TinyUsb", patcher(original))
+        packages = installed_tested_tinyusb_cores(core / "packages")
+        if not packages:
+            self.skipTest("installed Arduino-ESP32 2.0.17 TinyUSB SDK unavailable")
+        for package in packages:
+            for name, patcher in (("USBCDC.cpp", FIX.patched_cdc_source), ("USB.cpp", FIX.patched_usb_source)):
+                with self.subTest(package=package, source=name):
+                    original = (package / name).read_text(encoding="utf-8")
+                    self.assertIn("meshEsp32TinyUsb", patcher(original))
 
     def test_all_esp32_profiles_inherit_hook(self):
         config = (ROOT / "platformio.ini").read_text()
