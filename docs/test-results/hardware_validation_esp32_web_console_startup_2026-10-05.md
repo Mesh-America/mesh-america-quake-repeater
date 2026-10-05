@@ -7,7 +7,7 @@ filesystem correction, the unchanged GUI's first fresh-flash connection passed
 on both the Heltec V4 and XIAO ESP32-S3. The final V4 600-second idle run also
 passed with power saving on, logging off, and no transmitted command during
 idle. Earlier terminal runs establish different boundaries and are recorded
-separately. The V4 core error counter increased during idle and is retained
+separately. The V4 core error flags changed during idle and are retained
 below; this is not a claim of error-free radio operation.
 
 A later user screenshot identifies the affected surface as the Repeater / Room
@@ -207,7 +207,7 @@ completed its radio, region/default, and ACL commands as well as initial time.
 | V4 cooperative GPS source `c8c5f87ab`, fresh flash | FAIL. Initial time timed out at 5024 ms. A separately recorded clean reopen completed time in 3336.2 ms and the full GUI read passed. Recovery does not change the first-attempt result. |
 | Local XIAO ESP32-S3 Repeater, fresh flash | FAIL. Initial time timed out at 5001 ms. Separate clean reopen completed time in 3983.4 ms and the full GUI read passed. Native local Chromium and the target's own verified partition/active slot were used. |
 | Same local XIAO, separate settled no-flash GUI control with 600 seconds idle | PASS. The initial GUI time completed in 9.9 ms and the full configuration read passed. With power saving on and logging off, no native writes occurred during the 600-second idle interval. Uptime advanced from 177 to 777 seconds, errors stayed at 0, and a visible GUI disconnect/reconnect reread passed. Original preferences were restored. This does not change the failed fresh-flash first attempt. |
-| V4 normal, untraced firmware `631f2ad97`, fresh flash and 600 seconds idle | PASS. Initial time completed in 420.7 ms and the full unchanged GUI read flow completed. With power saving on and logging off, zero native writes occurred during 600 seconds idle and uptime advanced from 18 to 618 seconds. Core errors increased from 0 to 8. Visible GUI Disconnect/Connect completed a full reread, original preferences were restored, and final awaited Disconnect left port/reader/writer absent. |
+| V4 normal, untraced firmware `631f2ad97`, fresh flash and 600 seconds idle | PASS. Initial time completed in 420.7 ms and the full unchanged GUI read flow completed. With power saving on and logging off, zero native writes occurred during 600 seconds idle and uptime advanced from 18 to 618 seconds. Core err_flags changed from 0 to 8, setting the radio-watchdog bit. Visible GUI Disconnect/Connect completed a full reread, original preferences were restored, and final awaited Disconnect left port/reader/writer absent. |
 | XIAO normal, untraced firmware `631f2ad97`, fresh flash | PASS. Initial time completed in 3110.6 ms and the full unchanged GUI read passed. Core statistics reported uptime 4 seconds, errors 0, and queue length 1. No diagnostic reopen, extra reset, unplug/replug or timeout change was used. Final visible Disconnect completed with port, reader and writer absent. |
 
 The native V4 failure is not just a pending write: both writes completed quickly.
@@ -319,7 +319,16 @@ negative lookups intentionally perform no later per-path metadata operation.
 The actual inventory negative controls and both normal-firmware unchanged-GUI
 first fresh-flash passes qualify the tested startup boundary.
 
-## Final XIAO role restoration
+## Final target state
+
+Final V4 readback reported uptime 718 seconds, active radio state `1(RX)`,
+zero received packets, one sent packet, physical RX errors 0, err_flags 8,
+and no outbound packet. This confirms active RX after the idle test without
+identifying the exact past watchdog trigger. Power saving was restored off,
+logging to USB, USB debug off, and MQTT and WebUI off/inactive. A manual
+`get bridge` probe was unsupported and is retained as such, not counted as a
+pass; the correct `get bridge.enabled` and `get bridge.running` readbacks
+both returned off.
 
 The local XIAO was restored to the latest tested Full Companion image at source
 `631f2ad97`, application SHA-256
@@ -343,8 +352,11 @@ unchanged.
 
 The final V4 fresh-flash 600-second idle test completed its uptime checks,
 configuration reread, preference restoration, and awaited final disconnect.
-The core errors counter increased by 8 while USB remained responsive; these
-results do not establish zero radio errors or diagnose that counter's origin.
+The JSON field `stats-core.errors` is the `err_flags` bitmask serialized by
+`StatsFormatHelper.h`, not an event counter. Its change from 0 to 8 sets
+`ERR_EVENT_RADIO_WATCHDOG` (bit 3 in `Dispatcher.h`). It does not mean eight
+errors. USB remained responsive, but this evidence alone does not identify
+which radio-watchdog trigger path set the flag.
 The XIAO Full Companion restoration is complete.
 
 The local XIAO unchanged-GUI 600-second no-transmit idle control completed
@@ -384,6 +396,8 @@ and their SHA-256 hashes are:
 | `pi-chromium-config-gui-bootfs-fixed-fresh-flash-idle-600-safe.json` | `8419f294aeeed087a43c1f062a109da2770f2dcfa79c52ac8aae72d82250cb05` |
 | `bootfs-xiao-companion-restoration/flash-safe.json` | `ae72ae2e3645735e44d46cb4d4a21920b7f669edb5571151e3a28ebafb89848c` |
 | `bootfs-xiao-companion-restoration/strict-USB-safe.json` | `a8c56c8b7030ca5b5d18eed55f012e7227c9d234427e9e7df7e261b9cabb4dfa` |
+| `v4-bootfs-final-readback-safe.jsonl` | `6186871dfed0f0a62bc35dc004c8eb971a5cd4ab3b81c0e11ab2aa9db00afc38` |
+| `v4-bootfs-final-bridge-readback-safe.jsonl` | `b26b9d104cd853208aff685f528659d2b1aa35cd2c802c1dd31c8288a04700ae` |
 
 The host reproductions are `browser-console-lifecycle-mock-safe.json` and
 `browser-flash-ui-early-completion-safe.json`. Their mocked peripheral and
