@@ -1,6 +1,7 @@
 #ifdef ESP_PLATFORM
 
 #include "ESP32Board.h"
+#include "WirelessControl.h"
 #include <target.h>
 #include "UsbLogging.h"
 #include "FileRead.h"
@@ -68,8 +69,8 @@ bool ESP32Board::isUserGpioAvailable(uint8_t pin) const {
 
 static bool lightweight_ota_started_ap;
 
-// Full Companion keeps WebConfig on port 80 while an explicitly started
-// updater uses 8080. Infrastructure retains its established /update URL.
+// Full Companion retains its established uploader URL on port 8080.
+// Infrastructure uses port 80; CLI startup hands WebConfig's WiFi to OTA.
 #if defined(COMPANION_RADIO_FULL)
 static constexpr uint16_t LIGHTWEIGHT_OTA_PORT = 8080;
 #else
@@ -275,10 +276,15 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
     return false;
   }
 #endif
+  if (!mesh::wireless::control().allowWiFiForOTA()) {
+    strcpy(reply, "ERR: wireless change pending; retry start ota");
+    return false;
+  }
   inhibit_sleep = true;
 
   IPAddress ip;
-  if (!force_ap && WiFi.status() == WL_CONNECTED) {
+  const bool use_ap = force_ap || WiFi.status() != WL_CONNECTED;
+  if (!use_ap) {
     ip = WiFi.localIP();
   } else {
     if (!lightweight_ota_started_ap) {
@@ -288,7 +294,7 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
           && WiFi.softAP("MeshCore-OTA", nullptr);
     }
     if (!lightweight_ota_started_ap) {
-      inhibit_sleep = false;
+      inhibit_sleep = ota_server != nullptr;
       strcpy(reply, "ERR: OTA WiFi failed");
       return false;
     }
@@ -306,11 +312,12 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
     ota_server = &lightweight_ota_server;
   }
 
+  const char* network = use_ap ? "Join WiFi MeshCore-OTA" : "Use same WiFi/LAN";
   if (LIGHTWEIGHT_OTA_PORT == 80) {
-    snprintf(reply, 160, "Started: http://%s/update", ip.toString().c_str());
+    snprintf(reply, 160, "Started: http://%s/update - WiFi on; %s", ip.toString().c_str(), network);
   } else {
-    snprintf(reply, 160, "Started: http://%s:%u/update", ip.toString().c_str(),
-             static_cast<unsigned>(LIGHTWEIGHT_OTA_PORT));
+    snprintf(reply, 160, "Started: http://%s:%u/update - WiFi on; %s", ip.toString().c_str(),
+             static_cast<unsigned>(LIGHTWEIGHT_OTA_PORT), network);
   }
   MESH_DEBUG_PRINTLN("startOTAUpdate: %s", reply);
   return true;
@@ -341,13 +348,11 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
 #include <SPIFFS.h>
 
 bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
-  inhibit_sleep = true;   // prevent sleep during OTA
-
-  if (ota_server != nullptr) {   // already running (idempotent restart)
-    IPAddress cur_ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP() : WiFi.softAPIP();
-    sprintf(reply, "Started: http://%s/update", cur_ip.toString().c_str());
-    return true;
+  if (!mesh::wireless::control().allowWiFiForOTA()) {
+    strcpy(reply, "ERR: wireless change pending; retry start ota");
+    return false;
   }
+  inhibit_sleep = true;   // prevent sleep during OTA
 
   // If the device is already on a WiFi network (e.g. an observer joined in STA
   // mode), serve ElegantOTA on the station IP so it's reachable from the LAN
@@ -356,22 +361,28 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   // reachable even when the joined network applies client isolation and the
   // station IP can't be reached.
   IPAddress ip;
-  if (!force_ap && WiFi.status() == WL_CONNECTED) {
+  const bool use_ap = force_ap || WiFi.status() != WL_CONNECTED;
+  if (!use_ap) {
     ip = WiFi.localIP();
   } else {
     const IPAddress ap_ip(192, 168, 4, 1);
     const IPAddress ap_mask(255, 255, 255, 0);
     if (!WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
         || !WiFi.softAP("MeshCore-OTA", NULL)) {
-      inhibit_sleep = false;
+      inhibit_sleep = ota_server != nullptr;
       strcpy(reply, "ERR: OTA WiFi failed");
       return false;
     }
     ip = WiFi.softAPIP();
   }
 
-  sprintf(reply, "Started: http://%s/update", ip.toString().c_str());
+  snprintf(reply, 160, "Started: http://%s/update - WiFi on; %s", ip.toString().c_str(),
+           use_ap ? "Join WiFi MeshCore-OTA" : "Use same WiFi/LAN");
   MESH_DEBUG_PRINTLN("startOTAUpdate: %s", reply);
+
+  // Select the requested network even when the HTTP listener already exists.
+  // In particular, `start ota ap` must work after an earlier LAN-mode start.
+  if (ota_server != nullptr) return true;
 
   static char id_buf[60];
   sprintf(id_buf, "%s (%s)", id, getManufacturerName());

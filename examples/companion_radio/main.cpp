@@ -2337,6 +2337,12 @@ void halt() {
   }
 
   static bool finishStoppingCompanionWiFi() {
+#ifdef COMPANION_RADIO_FULL
+    if (board.isOTAUpdateRunning()) {
+      char reply[160];
+      if (!board.stopOTAUpdate(reply)) return false;
+    }
+#endif
     cancelCompanionWiFiNtp(false);
     stopCompanionWiFiServices();
 #ifdef WITH_WEBCONFIG
@@ -2902,6 +2908,9 @@ public:
   uint8_t enabled() const override {
     uint8_t mask = 0;
 #if defined(ESP32) && defined(WIFI_SSID)
+#ifdef COMPANION_RADIO_FULL
+    if (board.isOTAUpdateRunning()) mask |= mesh::wireless::WiFi;
+#endif
     if (companion_wifi_requested || companion_wifi_active) mask |= mesh::wireless::WiFi;
 #ifdef WITH_WEBCONFIG
     if (the_mesh.isWebConfigActiveOrStopping()) mask |= mesh::wireless::WiFi;

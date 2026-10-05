@@ -3349,13 +3349,26 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     // Board implementations use the common 160-byte CLI reply contract.
     // Binary Companion callers may supply a shorter buffer.
     char ota_reply[160] = {0};
+    bool webconfig_stopped = false;
+#ifdef WITH_WEBCONFIG
+    if (isWebConfigActiveOrStopping()) {
+      if (!_webconfig->stopForOTA(ota_reply)) {
+        snprintf(reply, reply_size, "%s", ota_reply);
+        return true;
+      }
+      webconfig_stopped = true;
+      ota_reply[0] = 0;
+    }
+#endif
     if (!board.startOTAUpdate(_prefs.node_name, ota_reply,
                              strcmp(command, "start ota ap") == 0)) {
-      snprintf(reply, reply_size, "%s",
-               ota_reply[0] ? ota_reply : "ERR: WiFi OTA unavailable");
-    } else {
-      snprintf(reply, reply_size, "%s", ota_reply);
+      if (!ota_reply[0]) strcpy(ota_reply, "ERR: WiFi OTA unavailable");
     }
+    if (webconfig_stopped) {
+      const size_t used = strlen(ota_reply);
+      snprintf(ota_reply + used, sizeof(ota_reply) - used, "; WebConfig stopped");
+    }
+    snprintf(reply, reply_size, "%s", ota_reply);
     return true;
   }
   if (strcmp(command, "stop ota") == 0) {

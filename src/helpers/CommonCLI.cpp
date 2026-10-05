@@ -2749,14 +2749,21 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       const bool force_ap = command[9] == ' ' && strcmp(&command[10], "ap") == 0;
       if (command[9] == ' ' && !force_ap) {
         strcpy(reply, "ERR: usage start ota [ap]");
-      } else
+        return;
+      }
+      bool webconfig_stopped = false;
 #if defined(ESP_PLATFORM) && defined(ADMIN_PASSWORD) && !defined(WEBCONFIG_DISABLED)
       if (_callbacks->isWebConfigActive()) {
-        strcpy(reply, "ERR: stop webconfig first");
-      } else
+        if (!_callbacks->stopWebConfigForOTA(reply)) {
+          if (!reply[0]) strcpy(reply, "ERR: could not stop WebConfig for OTA");
+          return;
+        }
+        webconfig_stopped = true;
+      }
 #endif
+      reply[0] = 0;
       if (!_board->startOTAUpdate(_prefs->node_name, reply, force_ap)) {
-        strcpy(reply, "Error");
+        if (!reply[0]) strcpy(reply, "Error");
       }
 #if defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA)
       else {
@@ -2764,9 +2771,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         _callbacks->setBridgeState(false);
       }
 #endif
+      if (webconfig_stopped) {
+        const size_t used = strlen(reply);
+        snprintf(reply + used, 160 - used, "; WebConfig stopped");
+      }
     } else if (memcmp(command, "stop ota", 8) == 0 && (command[8] == 0 || command[8] == ' ')) {
       if (!_board->stopOTAUpdate(reply)) {
-        strcpy(reply, "Error");
+        if (!reply[0]) strcpy(reply, "Error");
       }
 #if defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA)
       else if (_prefs->bridge_enabled) {

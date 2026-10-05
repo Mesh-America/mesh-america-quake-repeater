@@ -319,7 +319,12 @@ int main(){
 #include <helpers/WirelessControl.h>
 #include <cassert>
 enum {WIFI_STA=1,WIFI_OFF=0,WIFI_IF_STA=0};
-struct {bool usb=false;bool isUsbDataConnected(){return usb;}} board;
+struct {
+ bool usb=false, ota=false;
+ bool isUsbDataConnected(){return usb;}
+ bool isOTAUpdateRunning(){return ota;}
+ bool stopOTAUpdate(char*){ota=false;return true;}
+} board;
 struct {
  int mode_value=WIFI_STA;bool autoreconnect=true;
  void setAutoReconnect(bool value){autoreconnect=value;}
@@ -360,6 +365,13 @@ int main(){
  assert(!c.pending()&&!radio_driver.active&&::WiFi.mode_value==WIFI_OFF);
  c.handle("set 2.4ghz on",reply,sizeof(reply),300,Independent);c.service(550);
  assert(the_mesh.bridge&&the_mesh.web&&radio_driver.active);
+ // OTA alone remains visible as an active WiFi owner after WebConfig drains.
+ the_mesh.web=the_mesh.bridge=false;board.ota=true;
+ assert(b.enabled()&mesh::wireless::WiFi);
+ InfrastructureWirelessBackend ota_backend;
+ assert(ota_backend.set(mesh::wireless::WiFi,false)==Result::Done);
+ assert(!board.ota);
+ the_mesh.web=the_mesh.bridge=true;
  // Individual WiFi off retains the ESP-NOW driver and stops both its own services.
  c.handle("set wifi off",reply,sizeof(reply),600,Independent);c.service(850);
  the_mesh.stopping=false;c.service(851);
