@@ -3769,6 +3769,16 @@ apply_nrf52_size_profile() {
       record_build_reduction \
         "mesh.flood_rules limited to 4 by measured internal RAM; complete rule engine, 8 KiB loop stack, 50 neighbors, color display, GPS, sensors, and OTA retained"
       ;;
+    rak_3401_repeater_unified_lora_ota)
+      # Internal staging keeps a reset-retained 64 KiB arena even when the
+      # unified image can also select QSPI. Its complete sensor profile is
+      # 1,508 bytes short at 63 rules. Reserve 3,200 fewer rule-table bytes;
+      # keep the 8 KiB stack, 50 neighbors, all sensors and both OTA stores.
+      append_platformio_build_unflags "-DFLOOD_PACKET_FILTER_SLOTS=63"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_PACKET_FILTER_SLOTS=47"
+      record_build_reduction \
+        "mesh.flood_rules limited to 47 by measured internal RAM; complete rule engine, 8 KiB loop stack, 50 neighbors, GPS, sensors, and unified internal/QSPI OTA retained"
+      ;;
   esac
 }
 

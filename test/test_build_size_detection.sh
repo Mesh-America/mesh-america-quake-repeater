@@ -113,7 +113,23 @@ for target in Heltec_t096_repeater_lora_ota_no_external_sensors Heltec_t1_repeat
   [[ "$PLATFORMIO_BUILD_FLAGS" == *'-DFLOOD_PACKET_FILTER_SLOTS=4'* ]] || fail "$target omitted RAM-safe rule table"
   [[ "$PLATFORMIO_BUILD_FLAGS" != *'MESH_MIN_RUNTIME_HEAP'* ]] || fail "runtime RAM guard was overridden"
 done
-for target in Heltec_t096_companion_radio_full_femon RAK_4631_repeater; do
+# Unified internal/external RAK3401 staging reserves the 64 KiB internal
+# arena even with QSPI available. Keep the stack, sensors and table engine.
+(
+  target=RAK_3401_repeater_unified_lora_ota
+  PIO_ENV_PLATFORM_BY_NAME[$target]=NRF52_PLATFORM
+  for sensor_profile in full reduced; do
+    NRF52_OTA_SENSOR_PROFILE=$sensor_profile
+    PLATFORMIO_BUILD_FLAGS='-DENABLE_OTA=1 -DOTA_FLASH_STORE=1 -DOTA_QSPI_STORE=1 -DMAX_NEIGHBOURS=50'
+    PLATFORMIO_BUILD_UNFLAGS=''
+    apply_nrf52_size_profile "$target"
+    [[ "$PLATFORMIO_BUILD_FLAGS" == *'-DFLOOD_PACKET_FILTER_SLOTS=47'* ]] || fail "$target omitted safe unified-storage rule capacity"
+    [[ "$PLATFORMIO_BUILD_FLAGS" == *'-DMAX_NEIGHBOURS=50'* ]] || fail "$target changed neighbors"
+    [[ "$PLATFORMIO_BUILD_FLAGS" != *'MESH_NRF52_LOOP_STACK_WORDS'* && "$PLATFORMIO_BUILD_FLAGS" != *'MESH_MIN_RUNTIME_HEAP'* ]] || fail "$target weakened the stack or runtime RAM guard"
+    [[ "$PLATFORMIO_BUILD_UNFLAGS" != *'ENV_INCLUDE_'* && "$PLATFORMIO_BUILD_UNFLAGS" != *'OTA_FLASH_STORE'* && "$PLATFORMIO_BUILD_UNFLAGS" != *'OTA_QSPI_STORE'* ]] || fail "$target removed sensors or storage"
+  done
+)
+for target in Heltec_t096_companion_radio_full_femon RAK_4631_repeater RAK_4631_repeater_unified_lora_ota RAK_3401_repeater_rak13302_w25q16_lora_ota; do
   PIO_ENV_PLATFORM_BY_NAME[$target]=NRF52_PLATFORM
   PLATFORMIO_BUILD_FLAGS=''
   PLATFORMIO_BUILD_UNFLAGS=''

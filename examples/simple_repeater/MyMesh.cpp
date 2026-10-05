@@ -3536,6 +3536,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #endif
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
   flood_policy_has_embedded_sections = false;
+  flood_policy_capacity_limited = false;
   flood_channel_data_rule_slot = 0xFF;
   flood_channel_data_rule_max_hops = FLOOD_CHANNEL_HOPS_ALL;
 #endif
@@ -6022,12 +6023,13 @@ static_assert(PUB_KEY_SIZE == FloodFilterPolicy::CHANNEL_KEY_256_LEN,
 
 bool MyMesh::loadFloodPacketFilters() {
   if (flood_packet_filter_slots == 0) return false;
+  flood_policy_capacity_limited = false;
   if (_fs == NULL) {
     seedDefaultFloodPacketFilters();
     return true;
   }
 
-  enum class FileState : uint8_t { Missing, Valid, Invalid, Unreadable };
+  enum class FileState : uint8_t { Missing, Valid, Invalid, Unreadable, CapacityExceeded };
   auto loadFile = [this](const char* filename) -> FileState {
     if (flood_packet_filters) memset(flood_packet_filters, 0, sizeof(FloodPacketFilterEntry) * flood_packet_filter_slots);
     flood_channel_data_rule_slot = 0xFF;
@@ -6051,11 +6053,22 @@ bool MyMesh::loadFloodPacketFilters() {
   bool version_6 = success && memcmp(magic, "FPF6", sizeof(magic)) == 0;
   bool version_7 = success && memcmp(magic, "FPF7", sizeof(magic)) == 0;
   success = (version_6 || version_7)
-      && file.read(&count, sizeof(count)) == sizeof(count)
-      && FloodFilterPolicy::forwardPersistenceCountSupported(
-          count, flood_packet_filter_slots);
+      && file.read(&count, sizeof(count)) == sizeof(count);
+  // A wider firmware image can write inactive trailing slots. Decode them
+  // through one bounded scratch entry so harmless padding remains compatible.
+  // Counts beyond the rule engine's mask may belong to newer firmware; retain
+  // that file instead of treating an unsupported capacity as corrupt bytes.
+  if (success && !FloodFilterPolicy::forwardPersistenceCountSupported(count, 64)) {
+    file.close();
+    flood_policy_capacity_limited = true;
+    return FileState::CapacityExceeded;
+  }
+  FloodPacketFilterEntry overflow_entry;
+  bool active_overflow = false;
 
   for (int i = 0; success && i < count; i++) {
+    auto& entry = i < flood_packet_filter_slots ? loaded[i] : overflow_entry;
+    if (i >= flood_packet_filter_slots) memset(&entry, 0, sizeof(entry));
     uint8_t active = 0;
     uint8_t suspend_on_temp_radio = 0;
     uint8_t match_blacklisted_path = 0;
@@ -6066,17 +6079,17 @@ bool MyMesh::loadFloodPacketFilters() {
     uint8_t stop_on_match = 0;
     uint8_t stored_rule_channel = 0;
     success = file.read(&active, sizeof(active)) == sizeof(active);
-    success = success && file.read(&loaded[i].payload_type, sizeof(loaded[i].payload_type)) == sizeof(loaded[i].payload_type);
-    success = success && file.read(&loaded[i].min_hops, sizeof(loaded[i].min_hops)) == sizeof(loaded[i].min_hops);
-    success = success && file.read(&loaded[i].max_hops, sizeof(loaded[i].max_hops)) == sizeof(loaded[i].max_hops);
+    success = success && file.read(&entry.payload_type, sizeof(entry.payload_type)) == sizeof(entry.payload_type);
+    success = success && file.read(&entry.min_hops, sizeof(entry.min_hops)) == sizeof(entry.min_hops);
+    success = success && file.read(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops);
     success = success && file.read(&suspend_on_temp_radio,
                                     sizeof(suspend_on_temp_radio))
         == sizeof(suspend_on_temp_radio);
-    success = success && file.read((uint8_t*)loaded[i].scope_name,
-                                    sizeof(loaded[i].scope_name))
-        == sizeof(loaded[i].scope_name);
+    success = success && file.read((uint8_t*)entry.scope_name,
+                                    sizeof(entry.scope_name))
+        == sizeof(entry.scope_name);
     success = success
-        && memchr(loaded[i].scope_name, 0, sizeof(loaded[i].scope_name)) != NULL;
+        && memchr(entry.scope_name, 0, sizeof(entry.scope_name)) != NULL;
     success = success && file.read(&match_blacklisted_path,
                                     sizeof(match_blacklisted_path))
         == sizeof(match_blacklisted_path);
@@ -6087,36 +6100,36 @@ bool MyMesh::loadFloodPacketFilters() {
                                     sizeof(scope_uses_slow_timing))
         == sizeof(scope_uses_slow_timing);
     if (success && version_7) {
-      success = file.read(&loaded[i].incoming_scope_kind,
-                          sizeof(loaded[i].incoming_scope_kind))
-          == sizeof(loaded[i].incoming_scope_kind);
+      success = file.read(&entry.incoming_scope_kind,
+                          sizeof(entry.incoming_scope_kind))
+          == sizeof(entry.incoming_scope_kind);
       success = success
-          && file.read((uint8_t*)loaded[i].incoming_scope_name,
-                       sizeof(loaded[i].incoming_scope_name))
-              == sizeof(loaded[i].incoming_scope_name);
+          && file.read((uint8_t*)entry.incoming_scope_name,
+                       sizeof(entry.incoming_scope_name))
+              == sizeof(entry.incoming_scope_name);
       success = success
           && file.read(&stored_rule_channel,
                        sizeof(stored_rule_channel))
               == sizeof(stored_rule_channel);
       success = success
-          && file.read(loaded[i].channel_secret,
-                       sizeof(loaded[i].channel_secret))
-              == sizeof(loaded[i].channel_secret);
+          && file.read(entry.channel_secret,
+                       sizeof(entry.channel_secret))
+              == sizeof(entry.channel_secret);
       success = success
-          && file.read((uint8_t*)loaded[i].channel_name,
-                       sizeof(loaded[i].channel_name))
-              == sizeof(loaded[i].channel_name);
+          && file.read((uint8_t*)entry.channel_name,
+                       sizeof(entry.channel_name))
+              == sizeof(entry.channel_name);
       success = success
-          && file.read(&loaded[i].path_hash_size,
-                       sizeof(loaded[i].path_hash_size))
-              == sizeof(loaded[i].path_hash_size);
+          && file.read(&entry.path_hash_size,
+                       sizeof(entry.path_hash_size))
+              == sizeof(entry.path_hash_size);
       success = success
-          && file.read(&loaded[i].path_hops,
-                       sizeof(loaded[i].path_hops))
-              == sizeof(loaded[i].path_hops);
+          && file.read(&entry.path_hops,
+                       sizeof(entry.path_hops))
+              == sizeof(entry.path_hops);
       success = success
-          && file.read(loaded[i].path, sizeof(loaded[i].path))
-              == sizeof(loaded[i].path);
+          && file.read(entry.path, sizeof(entry.path))
+              == sizeof(entry.path);
       success = success
           && file.read(&drop_on_match, sizeof(drop_on_match))
               == sizeof(drop_on_match);
@@ -6124,45 +6137,45 @@ bool MyMesh::loadFloodPacketFilters() {
           && file.read(&rate_limit_enabled, sizeof(rate_limit_enabled))
               == sizeof(rate_limit_enabled);
       success = success
-          && file.read((uint8_t*)&loaded[i].rate_per_minute,
-                       sizeof(loaded[i].rate_per_minute))
-              == sizeof(loaded[i].rate_per_minute);
+          && file.read((uint8_t*)&entry.rate_per_minute,
+                       sizeof(entry.rate_per_minute))
+              == sizeof(entry.rate_per_minute);
       success = success
-          && file.read((uint8_t*)loaded[i].target_region_name,
-                       sizeof(loaded[i].target_region_name))
-              == sizeof(loaded[i].target_region_name);
+          && file.read((uint8_t*)entry.target_region_name,
+                       sizeof(entry.target_region_name))
+              == sizeof(entry.target_region_name);
       success = success
-          && file.read(&loaded[i].priority, sizeof(loaded[i].priority))
-              == sizeof(loaded[i].priority);
+          && file.read(&entry.priority, sizeof(entry.priority))
+              == sizeof(entry.priority);
       success = success
           && file.read(&stop_on_match, sizeof(stop_on_match))
               == sizeof(stop_on_match);
     } else {
-      loaded[i].incoming_scope_kind = scope_requires_region_match
+      entry.incoming_scope_kind = scope_requires_region_match
           ? FloodFilterPolicy::RULE_IN_ALLOWED
           : FloodFilterPolicy::RULE_IN_ANY;
-      drop_on_match = loaded[i].scope_name[0] == 0 ? 1 : 0;
+      drop_on_match = entry.scope_name[0] == 0 ? 1 : 0;
     }
     if (success && version_7) {
       success = FloodFilterPolicy::decodeStoredRuleChannel(
-          stored_rule_channel, loaded[i].channel_key_len,
-          loaded[i].retry_on_match);
+          stored_rule_channel, entry.channel_key_len,
+          entry.retry_on_match);
     } else {
-      loaded[i].retry_on_match = false;
+      entry.retry_on_match = false;
     }
     if (version_7) {
       success = success && FloodFilterPolicy::decodeStoredRuleActive(
-          active, loaded[i].active, loaded[i].transport_modes);
+          active, entry.active, entry.transport_modes);
     } else {
-      loaded[i].active = active != 0;
+      entry.active = active != 0;
       success = success && active <= 1;
     }
-    loaded[i].suspend_on_temp_radio = suspend_on_temp_radio != 0;
-    loaded[i].match_blacklisted_path = match_blacklisted_path != 0;
-    loaded[i].scope_uses_slow_timing = scope_uses_slow_timing != 0;
-    loaded[i].drop_on_match = drop_on_match != 0;
-    loaded[i].rate_limit_enabled = rate_limit_enabled != 0;
-    loaded[i].stop_on_match = stop_on_match != 0;
+    entry.suspend_on_temp_radio = suspend_on_temp_radio != 0;
+    entry.match_blacklisted_path = match_blacklisted_path != 0;
+    entry.scope_uses_slow_timing = scope_uses_slow_timing != 0;
+    entry.drop_on_match = drop_on_match != 0;
+    entry.rate_limit_enabled = rate_limit_enabled != 0;
+    entry.stop_on_match = stop_on_match != 0;
     if (success && (suspend_on_temp_radio > 1
         || match_blacklisted_path > 1 || scope_requires_region_match > 1
         || scope_uses_slow_timing > 1 || drop_on_match > 1
@@ -6170,105 +6183,116 @@ bool MyMesh::loadFloodPacketFilters() {
       success = false;
     }
     success = success && FloodFilterPolicy::transportActionsSupported(
-        loaded[i].transport_modes, loaded[i].scope_name[0] != 0
-            || loaded[i].target_region_name[0] != 0,
-        loaded[i].retry_on_match, loaded[i].scope_uses_slow_timing);
+        entry.transport_modes, entry.scope_name[0] != 0
+            || entry.target_region_name[0] != 0,
+        entry.retry_on_match, entry.scope_uses_slow_timing);
     if (!success) break;
-    if (!loaded[i].active) {
-      memset(&loaded[i], 0, sizeof(loaded[i]));
+    if (!entry.active) {
+      memset(&entry, 0, sizeof(entry));
       continue;
     }
 
-    bool direct_target = loaded[i].scope_name[0] != 0;
+    bool direct_target = entry.scope_name[0] != 0;
     bool target_name_terminated = memchr(
-        loaded[i].target_region_name, 0,
-        sizeof(loaded[i].target_region_name)) != NULL;
+        entry.target_region_name, 0,
+        sizeof(entry.target_region_name)) != NULL;
     bool region_target = target_name_terminated
-        && loaded[i].target_region_name[0] != 0;
+        && entry.target_region_name[0] != 0;
     bool input_name_terminated = memchr(
-        loaded[i].incoming_scope_name, 0,
-        sizeof(loaded[i].incoming_scope_name)) != NULL;
+        entry.incoming_scope_name, 0,
+        sizeof(entry.incoming_scope_name)) != NULL;
     bool channel_name_terminated = memchr(
-        loaded[i].channel_name, 0, sizeof(loaded[i].channel_name)) != NULL;
-    bool incoming_valid = loaded[i].incoming_scope_kind
+        entry.channel_name, 0, sizeof(entry.channel_name)) != NULL;
+    bool incoming_valid = entry.incoming_scope_kind
         <= FloodFilterPolicy::RULE_IN_REGION;
     if (incoming_valid
-        && loaded[i].incoming_scope_kind == FloodFilterPolicy::RULE_IN_SCOPE) {
+        && entry.incoming_scope_kind == FloodFilterPolicy::RULE_IN_SCOPE) {
       incoming_valid = input_name_terminated
           && isValidStoredFloodFilterScopeName(
-              loaded[i].incoming_scope_name);
+              entry.incoming_scope_name);
     } else if (incoming_valid
-        && loaded[i].incoming_scope_kind == FloodFilterPolicy::RULE_IN_REGION) {
+        && entry.incoming_scope_kind == FloodFilterPolicy::RULE_IN_REGION) {
       incoming_valid = input_name_terminated
           && isValidStoredFloodRuleRegionName(
-              loaded[i].incoming_scope_name);
+              entry.incoming_scope_name);
     } else if (incoming_valid) {
       incoming_valid = input_name_terminated
-          && loaded[i].incoming_scope_name[0] == 0;
+          && entry.incoming_scope_name[0] == 0;
     }
 
     bool channel_valid = FloodFilterPolicy::channelKeyLengthSupported(
-        loaded[i].channel_key_len);
-    if (channel_valid && loaded[i].channel_key_len == 0) {
+        entry.channel_key_len);
+    if (channel_valid && entry.channel_key_len == 0) {
       channel_valid = channel_name_terminated
-          && loaded[i].channel_name[0] == 0;
+          && entry.channel_name[0] == 0;
     } else if (channel_valid
         && FloodFilterPolicy::channelHashOnly(
-            loaded[i].channel_key_len)) {
+            entry.channel_key_len)) {
       channel_valid = channel_name_terminated;
       if (channel_valid) {
-        loaded[i].channel_hash = loaded[i].channel_secret[0];
-        memset(&loaded[i].channel_secret[1], 0,
-               sizeof(loaded[i].channel_secret) - 1);
-        snprintf(loaded[i].channel_name,
-                 sizeof(loaded[i].channel_name), "hash:%02X",
-                 loaded[i].channel_hash);
+        entry.channel_hash = entry.channel_secret[0];
+        memset(&entry.channel_secret[1], 0,
+               sizeof(entry.channel_secret) - 1);
+        snprintf(entry.channel_name,
+                 sizeof(entry.channel_name), "hash:%02X",
+                 entry.channel_hash);
       }
     } else if (channel_valid) {
       channel_valid = channel_name_terminated
-          && loaded[i].channel_name[0] != 0;
+          && entry.channel_name[0] != 0;
       if (channel_valid) {
-        mesh::Utils::sha256(&loaded[i].channel_hash,
-                            sizeof(loaded[i].channel_hash),
-                            loaded[i].channel_secret,
-                            loaded[i].channel_key_len);
+        mesh::Utils::sha256(&entry.channel_hash,
+                            sizeof(entry.channel_hash),
+                            entry.channel_secret,
+                            entry.channel_key_len);
       }
     }
-    if (channel_valid && loaded[i].channel_key_len != 0) {
-      channel_valid = loaded[i].payload_type == FLOOD_PACKET_FILTER_ANY_TYPE
-          || loaded[i].payload_type == PAYLOAD_TYPE_GRP_TXT
-          || loaded[i].payload_type == PAYLOAD_TYPE_GRP_DATA;
+    if (channel_valid && entry.channel_key_len != 0) {
+      channel_valid = entry.payload_type == FLOOD_PACKET_FILTER_ANY_TYPE
+          || entry.payload_type == PAYLOAD_TYPE_GRP_TXT
+          || entry.payload_type == PAYLOAD_TYPE_GRP_DATA;
     }
 
     bool path_valid = FloodFilterPolicy::pathMatcherValid(
-        loaded[i].path_hash_size, loaded[i].path_hops,
-        loaded[i].match_blacklisted_path);
-    bool action_valid = loaded[i].drop_on_match || direct_target
-        || region_target || loaded[i].rate_limit_enabled
-        || loaded[i].stop_on_match || loaded[i].retry_on_match;
-    if (!((loaded[i].payload_type <= PH_TYPE_MASK
-              || loaded[i].payload_type == FLOOD_PACKET_FILTER_ANY_TYPE)
-          && loaded[i].min_hops <= loaded[i].max_hops
-          && loaded[i].max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS
+        entry.path_hash_size, entry.path_hops,
+        entry.match_blacklisted_path);
+    bool action_valid = entry.drop_on_match || direct_target
+        || region_target || entry.rate_limit_enabled
+        || entry.stop_on_match || entry.retry_on_match;
+    if (!((entry.payload_type <= PH_TYPE_MASK
+              || entry.payload_type == FLOOD_PACKET_FILTER_ANY_TYPE)
+          && entry.min_hops <= entry.max_hops
+          && entry.max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS
           && (!direct_target
-              || isValidStoredFloodFilterScopeName(loaded[i].scope_name))
+              || isValidStoredFloodFilterScopeName(entry.scope_name))
           && target_name_terminated
           && (!region_target
               || isValidStoredFloodRuleRegionName(
-                  loaded[i].target_region_name))
+                  entry.target_region_name))
           && !(direct_target && region_target)
-          && !(loaded[i].drop_on_match && (direct_target || region_target))
-          && !(loaded[i].drop_on_match && loaded[i].rate_limit_enabled)
-          && !(loaded[i].drop_on_match && loaded[i].retry_on_match)
-          && (!loaded[i].rate_limit_enabled
-              || loaded[i].rate_per_minute
+          && !(entry.drop_on_match && (direct_target || region_target))
+          && !(entry.drop_on_match && entry.rate_limit_enabled)
+          && !(entry.drop_on_match && entry.retry_on_match)
+          && (!entry.rate_limit_enabled
+              || entry.rate_per_minute
                   < FLOOD_GROUP_MODERATION_RATE_UNLIMITED)
-          && (!loaded[i].scope_uses_slow_timing
+          && (!entry.scope_uses_slow_timing
               || direct_target || region_target)
           && incoming_valid && channel_valid && path_valid
           && action_valid)) {
       success = false;
     }
+    if (success && i >= flood_packet_filter_slots) active_overflow = true;
+  }
+
+  if (success && active_overflow) {
+    // Do not activate only part of an operator's policy or discard the stored
+    // transaction. A larger-capacity image can read it without data loss.
+    memset(flood_packet_filters, 0,
+           sizeof(FloodPacketFilterEntry) * flood_packet_filter_slots);
+    file.close();
+    flood_policy_capacity_limited = true;
+    return FileState::CapacityExceeded;
   }
 
   // FPF7 keeps the forwarding rows byte-compatible with the room-server
@@ -6379,6 +6403,7 @@ bool MyMesh::loadFloodPacketFilters() {
     if (success && file.available() != 0) success = false;
     if (success && compatibility_slot != 0xFF) {
       success = compatibility_slot < count
+          && compatibility_slot < flood_packet_filter_slots
           && isFloodChannelDataRule(loaded[compatibility_slot])
           && loaded[compatibility_slot].min_hops
               == (compatibility_max_hops == FLOOD_CHANNEL_HOPS_ALL
@@ -6408,6 +6433,7 @@ bool MyMesh::loadFloodPacketFilters() {
   };
 
   FileState primary = loadFile(FLOOD_PACKET_FILTER_FILE);
+  if (primary == FileState::CapacityExceeded) return false;
   if (primary == FileState::Valid) {
     // A valid primary is already committed. Transaction remnants are stale.
     if (_fs->exists(FLOOD_PACKET_FILTER_TEMP_FILE))
@@ -6423,6 +6449,7 @@ bool MyMesh::loadFloodPacketFilters() {
   }
 
   FileState temp = loadFile(FLOOD_PACKET_FILTER_TEMP_FILE);
+  if (temp == FileState::CapacityExceeded) return false;
   if (temp == FileState::Valid) {
     // A complete temp is the newest transaction image. Never destroy an
     // unreadable primary, but still use the verified temp in RAM this boot.
@@ -6440,6 +6467,7 @@ bool MyMesh::loadFloodPacketFilters() {
   }
 
   FileState backup = loadFile(FLOOD_PACKET_FILTER_BACKUP_FILE);
+  if (backup == FileState::CapacityExceeded) return false;
   if (backup == FileState::Valid) {
     if (primary != FileState::Unreadable) {
       if (primary == FileState::Invalid)
@@ -6821,6 +6849,7 @@ bool MyMesh::migrateLegacyFloodChannelBlocks() {
 bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
                                     bool empty_forward_phase) {
   if (_fs == NULL) return false;
+  if (flood_policy_capacity_limited) return false;
   // Without a rule table there is nothing to persist. Writing the file anyway
   // would replace the operator's stored ruleset with an empty one.
   if (flood_packet_filter_slots == 0) return false;
@@ -7609,6 +7638,12 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
 }
 
 void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compact) const {
+  if (flood_policy_capacity_limited) {
+    snprintf(reply, 160,
+             "Err - saved rules exceed this image's %u slots; install an image with more rule slots",
+             (unsigned)flood_packet_filter_slots);
+    return;
+  }
   const char* selector = skipFloodFilterSpaces(args);
   if (*selector == '.') selector = skipFloodFilterSpaces(selector + 1);
   if (*selector != 0) {
