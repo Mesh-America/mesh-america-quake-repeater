@@ -19,7 +19,8 @@ import unittest
 import urllib.request
 
 from test_client_acl_response import production_acl_methods
-from test_companion_primary_radio_persistence import production_primary_radio_harness
+from test_companion_primary_radio_persistence import (
+    prepare_profile_metadata_boundary, production_primary_radio_harness)
 from test_companion_delayed_reply_delivery import production_delayed_reply_inputs
 from test_replay_reset_integration import extract_braced
 
@@ -244,6 +245,7 @@ public:
     transaction = (ROOT / "src/helpers/ContactFileTransaction.h").read_text()
     (work / "ContactFileTransaction.h").write_text(transaction.replace(
         '#include "IdentityStore.h"', '#include <helpers/IdentityStore.h>'), encoding="ascii")
+    prepare_profile_metadata_boundary(work)
     (work / "radio.cpp").write_text(harness, encoding="ascii")
     binary = work / "radio.exe"
     checked([compiler, "-std=c++17", "-Wall", "-Wextra", "-Wno-unused-function",

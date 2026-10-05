@@ -343,7 +343,11 @@ class CompanionUsbDefaultTest(unittest.TestCase):
         self.assertLess(loop.index("serviceUsbLoggingReplyBarrier();"), loop.index("the_mesh.loop();"))
         self.assertLess(loop.index("serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());"), loop.index("the_mesh.loop();"))
         self.assertLess(loop.index("expireUsbBinaryStartupProbeBeforeDispatch();"), loop.index("the_mesh.loop();"))
-        self.assertNotIn("COMPANION_RADIO_FULL", MAIN)
+        # USB defaults apply to ordinary and Full builds. Unrelated WiFi OTA
+        # ownership may legitimately use the Full profile elsewhere in main.
+        for name in ("beginUsbDefaultSession", "resetUsbTerminalHostSession",
+                     "serviceUsbTerminalHostSessionReset", "serviceUsbAsciiSessionDefault"):
+            self.assertNotIn("COMPANION_RADIO_FULL", function("static void " + name + "() {"))
         source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
         self.assertNotIn("mesh::setUsbLoggingEnabled(", source)
         logging_reply = source[source.index('if (strncmp(command, "set logging.output ", 19)'):
