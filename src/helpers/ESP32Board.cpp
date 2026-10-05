@@ -366,8 +366,13 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncElegantOTA.h>
+#include <new>
 
 #include <SPIFFS.h>
+
+// Requests retain raw pointers to the AsyncWebServer and its route handlers.
+// Keep this one host alive across stops; end() only closes its listener.
+static AsyncWebServer* async_ota_host = nullptr;
 
 bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   if (!mesh::wireless::control().allowWiFiForOTA()) {
@@ -413,25 +418,52 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
 
   // Select the requested network even when the HTTP listener already exists.
   // In particular, `start ota ap` must work after an earlier LAN-mode start.
-  if (ota_server != nullptr) return true;
+  if (ota_server != nullptr) {
+    if (ota_server->state() != LISTEN) ota_server->begin();
+    if (ota_server->state() != LISTEN) {
+      strcpy(reply, "ERR: OTA server failed; retry start ota");
+      return false;
+    }
+    return true;
+  }
 
   static char id_buf[60];
   snprintf(id_buf, sizeof(id_buf), "%s (%s)", id, getManufacturerName());
   static char home_buf[90];
   snprintf(home_buf, sizeof(home_buf), "<H2>Hi! I am a MeshCore Repeater. ID: %s</H2>", id);
 
-  ota_server = new AsyncWebServer(80);
-
-  ota_server->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", home_buf);
-  });
-  ota_server->on("/log", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(SPIFFS, "/packet_log", "text/plain");
-  });
-
+  if (async_ota_host == nullptr) {
+    async_ota_host = new (std::nothrow) AsyncWebServer(80);
+    if (async_ota_host == nullptr) {
+      if (ota_started_ap) WiFi.softAPdisconnect(true);
+      ota_started_ap = false;
+      inhibit_sleep = false;
+      strcpy(reply, "ERR: OTA server allocation failed");
+      return false;
+    }
+    async_ota_host->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->send(200, "text/html", home_buf);
+    });
+    async_ota_host->on("/log", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->send(SPIFFS, "/packet_log", "text/plain");
+    });
+    AsyncElegantOTA.begin(async_ota_host);
+  }
+  ota_server = async_ota_host;
   AsyncElegantOTA.setID(id_buf);
-  AsyncElegantOTA.begin(ota_server);    // Start ElegantOTA
+  AsyncElegantOTA.setEnabled(true);
   ota_server->begin();
+  if (ota_server->state() != LISTEN) {
+    // begin() returns void even when the port could not be bound.
+    AsyncElegantOTA.setEnabled(false);
+    ota_server->end();
+    ota_server = nullptr;
+    if (ota_started_ap) WiFi.softAPdisconnect(true);
+    ota_started_ap = false;
+    inhibit_sleep = false;
+    strcpy(reply, "ERR: OTA server failed; retry start ota");
+    return false;
+  }
 
   return true;
 }
@@ -442,8 +474,11 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
     return true;
   }
 
+  if (!AsyncElegantOTA.setEnabled(false)) {
+    strcpy(reply, "ERR: OTA upload active; retry stop ota after it finishes");
+    return false;
+  }
   ota_server->end();
-  delete ota_server;
   ota_server = nullptr;
   if (ota_started_ap) WiFi.softAPdisconnect(true);
   ota_started_ap = false;

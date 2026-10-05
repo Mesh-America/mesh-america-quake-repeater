@@ -12,6 +12,8 @@ constexpr int WL_CONNECTED = 3;
 constexpr int HTTP_GET = 0;
 constexpr int WIFI_AP = 2;
 constexpr int ESP_OK = 0, WIFI_IF_AP = 1;
+constexpr int LISTEN = 10;
+bool async_bind_allowed = true;
 constexpr uint8_t WIFI_PROTOCOL_11B = 1, WIFI_PROTOCOL_11G = 2;
 constexpr uint8_t WIFI_PROTOCOL_11N = 4, WIFI_PROTOCOL_LR = 8;
 using esp_err_t = int;
@@ -60,15 +62,20 @@ struct AsyncWebServerRequest {
   void send(int, const char*, const char*, const char*) {}
 };
 struct AsyncWebServer {
+  bool listening = false;
   explicit AsyncWebServer(int) {}
   template<class F> void on(const char*, int, F) {}
-  void begin() { ++server_starts; }
-  void end() {}
+  void begin() { ++server_starts; listening = async_bind_allowed; }
+  void end() { listening = false; }
+  int state() const { return listening ? LISTEN : 0; }
 };
 struct Elegant {
+  bool busy = false;
   void setID(const char*) {}
   void begin(AsyncWebServer*) {}
+  bool setEnabled(bool enabled) { return enabled || !busy; }
 } AsyncElegantOTA;
+static AsyncWebServer* async_ota_host = nullptr;
 static int SPIFFS;
 struct ESP32Board {
   bool inhibit_sleep = false;
@@ -141,6 +148,21 @@ int main() {
   WiFi.ap = false; // An external driver stop invalidates cached AP ownership.
   start(true, "192.168.4.1", "Join WiFi MeshCore-OTA");
   assert(WiFi.starts == ap_starts + 1);
+#ifndef LIGHTWEIGHT_WIFI_OTA
+  auto* existing_server = board.ota_server;
+  existing_server->listening = false;
+  async_bind_allowed = false;
+  assert(!board.startOTAUpdate("test node", reply.text, true));
+  assert(strstr(reply.text, "OTA server failed") && board.inhibit_sleep);
+  async_bind_allowed = true;
+  start(true, "192.168.4.1", "Join WiFi MeshCore-OTA");
+  assert(board.ota_server == existing_server && existing_server->listening);
+  AsyncElegantOTA.busy = true;
+  assert(!board.stopOTAUpdate(reply.text));
+  assert(strstr(reply.text, "OTA upload active") && board.inhibit_sleep);
+  assert(board.ota_server == existing_server && existing_server->listening);
+  AsyncElegantOTA.busy = false;
+#endif
 #ifdef LIGHTWEIGHT_WIFI_OTA
   lightweight_ota_server.allow_stop = false;
   assert(!board.stopOTAUpdate(reply.text));
@@ -165,6 +187,14 @@ int main() {
   assert(!board.startOTAUpdate("test node", reply.text, false));
   assert(strcmp(reply.text, "ERR: OTA WiFi failed") == 0);
   assert(!board.inhibit_sleep && !board.ota_server);
+#ifndef LIGHTWEIGHT_WIFI_OTA
+  WiFi.allow_ap = true;
+  async_bind_allowed = false;
+  assert(!board.startOTAUpdate("test node", reply.text, false));
+  assert(strstr(reply.text, "OTA server failed"));
+  assert(!board.inhibit_sleep && !board.ota_server && !WiFi.ap);
+  async_bind_allowed = true;
+#endif
   // A pending wireless shutdown must not race a newly started uploader.
   struct Backend : mesh::wireless::Backend {
     uint8_t active = mesh::wireless::All;
