@@ -97,14 +97,14 @@ int main() {
 #include <cstring>
 struct Callbacks {
   bool active = true, allow_stop = true;
-  int stops = 0, bridge_stops = 0;
+  int stops = 0, bridge_stops = 0, bridge_starts = 0;
   bool isWebConfigActive() const { return active; }
   bool stopWebConfigForOTA(char* reply) {
     ++stops;
     if (!allow_stop) { strcpy(reply, "ERR: handoff failed"); return false; }
     active = false; strcpy(reply, "WebConfig stopped"); return true;
   }
-  void setBridgeState(bool enabled) { if (!enabled) ++bridge_stops; }
+  void setBridgeState(bool enabled) { if (enabled) ++bridge_starts; else ++bridge_stops; }
 } callbacks;
 struct Board {
   bool allow_start = true;
@@ -117,7 +117,10 @@ struct Board {
   }
   bool stopOTAUpdate(char*) { return true; }
 } board;
-struct Prefs { const char* node_name = "test"; bool bridge_enabled = false; } prefs;
+struct Prefs {
+  const char* node_name = "test";
+  bool bridge_enabled = false, espnow_bridge_enabled = false;
+} prefs;
 struct CLI {
   Board* _board = &board;
   Prefs* _prefs = &prefs;
@@ -147,12 +150,18 @@ int main() {
   cli.run("start ota", reply.text);
   assert(strcmp(reply.text, "ERR: OTA WiFi failed; WebConfig stopped") == 0);
   assert(callbacks.stops == 3 && board.starts == 3 && callbacks.bridge_stops == 2);
+  cli.run("stop ota", reply.text);
+  assert(callbacks.bridge_starts == 0); // Do not enable disabled bridges.
+  prefs.espnow_bridge_enabled = true;
+  cli.run("stop ota", reply.text);
+  assert(callbacks.bridge_starts == 1); // Restore ESP-NOW even with MQTT off.
   assert(reply.guard == 123);
 }
 '''
         self.compile_and_run(fixture.replace("@CLI@", cli[start:end]),
                              "-DESP_PLATFORM=1", "-DADMIN_PASSWORD=1",
-                             "-DWITH_MQTT_BRIDGE=1", "-DLIGHTWEIGHT_WIFI_OTA=1")
+                             "-DWITH_MQTT_BRIDGE=1", "-DLIGHTWEIGHT_WIFI_OTA=1",
+                             "-DWITH_ESPNOW_BRIDGE=1")
 
     def test_webconfig_teardown_cannot_turn_ota_wifi_off(self):
         source = (ROOT / "src/helpers/esp32/WebConfigServer.cpp").read_text()

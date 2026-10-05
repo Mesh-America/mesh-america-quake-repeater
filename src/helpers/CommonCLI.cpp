@@ -2780,7 +2780,11 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         if (!reply[0]) strcpy(reply, "Error");
       }
 #if defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA)
-      else if (_prefs->bridge_enabled) {
+      else if (_prefs->bridge_enabled
+#ifdef WITH_ESPNOW_BRIDGE
+               || _prefs->espnow_bridge_enabled
+#endif
+      ) {
         _callbacks->setBridgeState(true);
       }
 #endif
