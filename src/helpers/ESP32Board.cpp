@@ -365,7 +365,7 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
 #include <helpers/esp32/WiFiRadioPolicy.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include <AsyncElegantOTA.h>
+#include "../../arch/esp32/AsyncElegantOTA/src/AsyncElegantOTA.h"
 #include <new>
 
 #include <SPIFFS.h>
