@@ -10,6 +10,19 @@
 #include "OtaBlInfo.h"
 #include "OtaByteIO.h"
 
+#if defined(OTA_TOWER_AUTO_STORE)
+  #if !defined(NRF52_PLATFORM) || !defined(HELTEC_TOWER_V2_SDCARD) || \
+      !defined(OTA_SD_STORE) || !defined(OTA_FLASH_STORE) || \
+      !defined(OTA_SD_BOOTLOADER_UPDATE)
+    #error "OTA_TOWER_AUTO_STORE requires the qualified nRF52 MeshTower SD-primary OTA profile"
+  #endif
+  #if defined(OTA_QSPI_STORE) || defined(QSPIFLASH) || \
+      defined(OTA_RAK_AUTO_STORE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
+      defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_HYBRID_RAM_STORE)
+    #error "MeshTower automatic storage retains the full-RAM SD profile and SD-only bootloader staging"
+  #endif
+#endif
+
 #if defined(OTA_QSPI_BOOTLOADER_UPDATE)
   #if !defined(NRF52_PLATFORM) || !defined(OTA_QSPI_STORE)
     #error "OTA_QSPI_BOOTLOADER_UPDATE requires nRF52 raw-QSPI staging"
@@ -39,7 +52,8 @@
   #if !defined(HELTEC_TOWER_V2_SDCARD)
     #error "OTA_SD_BOOTLOADER_UPDATE is restricted to the qualified MeshTower V2 SD target"
   #endif
-  #if defined(OTA_FLASH_STORE) || defined(OTA_QSPI_STORE) || defined(QSPIFLASH)
+  #if (defined(OTA_FLASH_STORE) && !defined(OTA_TOWER_AUTO_STORE)) || \
+      defined(OTA_QSPI_STORE) || defined(QSPIFLASH)
     #error "SD bootloader staging cannot share another OTA/filesystem store"
   #endif
 #endif
@@ -556,15 +570,25 @@ inline bool ota_bootloader_external_crc_ok(
 template <typename Store>
 inline bool ota_bootloader_external_image_metadata(
     Store& store, uint32_t payload_off, uint8_t exact_storage_flags,
-    OtaBootloaderIdentity& candidate, OtaBootloaderCapsMarker& caps) {
+    OtaBootloaderIdentity& candidate, OtaBootloaderCapsMarker& caps,
+    uint8_t required_optional_storage = 0) {
   candidate = OtaBootloaderIdentity();
   caps = OtaBootloaderCapsMarker();
   if (exact_storage_flags == 0u) return false;
+  if (required_optional_storage != 0u &&
+      !((exact_storage_flags == OTA_BL_PROFILE_SD_BOOT_UPDATE &&
+         required_optional_storage == OTA_BL_STORAGE_STAGE_CEILING) ||
+        (exact_storage_flags == OTA_BL_PROFILE_INTERNAL_BOOT_UPDATE &&
+         required_optional_storage == (OTA_BL_STORAGE_QSPI | OTA_BL_STORAGE_HEADER_W25))))
+    return false;
 
   static const uint32_t STEP = 512u;
   uint8_t buf[STEP + OTA_BOOT_ENVELOPE_SIZE - 1u];
   uint8_t valid_identities = 0;
   uint8_t valid_caps = 0;
+  uint8_t valid_ram = 0;
+  uint8_t storage_records = 0;
+  uint32_t optional_record_offset = 0;
   for (uint32_t base = 0; base < OTA_BOOT_IMAGE_SIZE; base += STEP) {
     uint32_t len = OTA_BOOT_IMAGE_SIZE - base;
     if (len > sizeof(buf)) len = sizeof(buf);
@@ -573,7 +597,22 @@ inline bool ota_bootloader_external_image_metadata(
         ? OTA_BOOT_IMAGE_SIZE - base : STEP;
     for (uint32_t local = 0; local < starts; ++local) {
       const uint32_t absolute = base + local;
+      if (required_optional_storage && (absolute & 3u) == 0u &&
+          local + 8u <= len && memcmp(buf + local, "MOTASTOR", 8u) == 0) {
+        // Scan each aligned start once, including chunk boundaries. A valid
+        // RAM record is encountered first and binds its immediately following
+        // STOR; no stray or duplicate declaration may hide beside that pair.
+        if (++storage_records != 1u || valid_ram != 1u ||
+            absolute != optional_record_offset) return false;
+      }
       if ((absolute & 3u) == 0u && local + 16u <= len) {
+        OtaRamCaps ram;
+        if (required_optional_storage && ota_ram_caps_marker_parse(buf + local, ram)) {
+          if (++valid_ram != 1u || local + 32u > len ||
+              ota_bl_optional_app_storage(buf + local, 32u) != required_optional_storage)
+            return false;
+          optional_record_offset = absolute + 16u;
+        }
         OtaBootloaderCapsMarker parsed;
         if (ota_bootloader_caps_marker_parse(buf + local, parsed) &&
             parsed.apply_abi >= MOTA_BOOT_FORMAT_VER &&
@@ -596,7 +635,8 @@ inline bool ota_bootloader_external_image_metadata(
       }
     }
   }
-  if (valid_identities != 1u || valid_caps != 1u || !caps.present ||
+  if ((required_optional_storage && (valid_ram != 1u || storage_records != 1u)) ||
+      valid_identities != 1u || valid_caps != 1u || !caps.present ||
       candidate.manifest_offset > OTA_BOOT_IMAGE_SIZE - OTA_BOOT_MANIFEST_SIZE)
     return false;
   const uint32_t available = OTA_BOOT_IMAGE_SIZE - candidate.manifest_offset;

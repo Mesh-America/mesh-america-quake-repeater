@@ -3294,6 +3294,17 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
     strcpy(reply, "Error: OTA apply is pending");
     return true;
   }
+#if defined(OTA_TOWER_AUTO_STORE)
+  // Card maintenance must never abandon a fallback update stored internally.
+  if (context.fetch_store.usesInternal() &&
+      (context.manager.fetchState() != mesh::ota::OtaManager::IDLE ||
+       context.fetch_store.staged_size() != 0)) {
+    strcpy(reply, "Error: internal OTA slot is occupied; use ota cancel first");
+    return true;
+  }
+#endif
+
+  mesh::ota::OtaStoreSdNrf52& card = context.sdStagingStore();
 
   // A card-wide destructive operation invalidates any staged fetch. First let
   // an archive capture checkpoint and close its shared card handles.
@@ -3305,9 +3316,9 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
   context.prev_fstate = mesh::ota::OtaManager::IDLE;
 
   if (is_format) {
-    if (!context.fetch_store.formatCard(*_board)) {
+    if (!card.formatCard(*_board)) {
       char error[80];
-      strncpy(error, context.fetch_store.last_error(), sizeof(error) - 1);
+      strncpy(error, card.last_error(), sizeof(error) - 1);
       error[sizeof(error) - 1] = 0;
       context.finishSdCardReset(millis());
       snprintf(reply, 160, "Error: SD card format failed: %s",
@@ -3321,9 +3332,9 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
     return true;
   }
 
-  if (!context.fetch_store.eraseCard(*_board)) {
+  if (!card.eraseCard(*_board)) {
     char error[80];
-    strncpy(error, context.fetch_store.last_error(), sizeof(error) - 1);
+    strncpy(error, card.last_error(), sizeof(error) - 1);
     error[sizeof(error) - 1] = 0;
     context.finishSdCardReset(millis());
     snprintf(reply, 160, "Error: SD card erase failed: %s",
@@ -3333,9 +3344,9 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
   _sdcard_erase_recorded = true;
   _sdcard_erase_at = millis();
 
-  if (!context.fetch_store.formatCard(*_board)) {
+  if (!card.formatCard(*_board)) {
     char error[80];
-    strncpy(error, context.fetch_store.last_error(), sizeof(error) - 1);
+    strncpy(error, card.last_error(), sizeof(error) - 1);
     error[sizeof(error) - 1] = 0;
     context.finishSdCardReset(millis());
     snprintf(reply, 160, "Error: SD card erased but format failed: %s",
@@ -3378,7 +3389,7 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
   } else if (strcmp(query, "free") == 0) {
     uint64_t used_bytes = 0;
     uint64_t free_bytes = 0;
-    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().fetch_store;
+    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().sdStagingStore();
     if (!store.getSpace(*_board, used_bytes, free_bytes)) {
       snprintf(reply, 160, "Error: SD card space query failed: %s",
                store.last_error());
@@ -3407,7 +3418,7 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
       }
       page = parsed;
     }
-    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().fetch_store;
+    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().sdStagingStore();
     if (!store.listFiles(*_board, (uint16_t)page, reply, 160)) {
       snprintf(reply, 160, "Error: SD card list failed: %s", store.last_error());
     }

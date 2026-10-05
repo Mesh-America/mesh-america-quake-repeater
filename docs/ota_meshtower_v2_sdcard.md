@@ -1,20 +1,42 @@
 # MeshTower V2 microSD LoRa OTA
 
-For **1.17.1.5**, use the exact board/storage profile from
-[OTAFIX 2.4.6](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/0.11.0-OTAFIX2.4.6)
-for nRF52 OTAFIX installations. New internal-flash hybrid receivers require
-its 64 KiB retained-RAM handoff; QSPI and microSD targets require their own
-matching bootloader profiles. Earlier preview versions mentioned below
-describe compatibility/migration history, not the current recommended download.
-Full Companion is a MOTA source and normally updates itself over USB.
+`Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors` is the one
+canonical MeshTower V2 repeater target. Its SD OTA target ID `0A9DBBF0`,
+hardware ID `Heltec_tower_v2`, application layout, and artifact names remain
+unchanged. The required Full and Reduced sensor choices use that same target.
+Existing SD users need no configuration change.
 
+The build aliases `Heltec_tower_v2_repeater` and
+`Heltec_tower_v2_repeater_lora_ota_no_external_sensors` resolve to this primary
+target. An installed internal-only image has a different OTA identity and
+bootloader/layout contract: migrate it once with the matching combined OTAFIX
+profile and application over local USB/BLE DFU or SWD. An alias does not make
+that migration a same-target LoRa update.
 
-The `Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors` target uses the MeshTower V2 onboard
-microSD socket as persistent storage for its own LoRa OTA downloads. It accepts
-full application images, in-place application deltas, and explicitly selected
-signed v3 bootloader packages. After verification, the matching SD-aware OTAFIX
-bootloader reads the staged file from the card and programs the selected
-nRF52840 application or bootloader region.
+## Automatic storage selection
+
+The onboard microSD socket remains primary. A mountable card accepts full
+application images, in-place application deltas, and explicitly selected
+signed v3 bootloader packages. After verification, the SD-aware OTAFIX
+bootloader reads the staged file and programs the application or bootloader.
+
+With a missing or unmountable card, the same application can select internal
+flash for signed application in-place deltas only. The signer must be trusted
+by the node, as on the SD application path. This fallback requires the
+published combined MeshTower SD/internal profile in
+[OTAFIX 2.4.11](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/releases/tag/v0.11.0-OTAFIX2.4.11):
+the privileged storage profile must remain exactly `09` (`SD|BOOT_UPDATE`),
+with a separate positive `MOTASTOR` optional-application storage record of
+`02` (`STAGE_CEILING`). A missing record or an internal-only bootloader does
+not authorize fallback. Full images, bootloader packages, SD archiving, and
+automatic own-image offering remain unavailable on internal storage.
+
+Selection is deferred until OTA use so card probing does not delay USB setup.
+The selected backend stays pinned through the transfer, including a paused or
+failed transfer. Removing a card produces a storage failure; it does not move
+the partial download into internal flash. Use `ota cancel` before selecting
+storage again after changing the card. The fallback uses internal flash only;
+it does not reserve or use the 64 KiB `APPHYBRID` retained-RAM arena.
 
 The pin assignment follows the
 [Heltec MeshTower V2 partial reference circuit](https://resource.heltec.cn/download/MeshTower-V2/schematic/MeshTower_V2_Partial_Reference_Circuit.pdf):
@@ -44,9 +66,9 @@ Preview.12 must first be upgraded over USB/BLE DFU or SWD.
 
 ## Capacity and update types
 
-The card removes the internal-flash staging limit. The `.mota` container may be
-much larger than the old internal staging gap, and either a full image or an
-in-place delta may be downloaded. The installed firmware itself must still fit
+When SD is selected, the card removes the internal-flash staging limit. The
+`.mota` container may be much larger than the old internal staging gap, and
+either a full image or an in-place delta may be downloaded. The installed firmware itself must still fit
 the nRF52840 application region below InternalFS (ending at `0xED000`); SD
 storage does not increase the MCU's executable flash.
 
@@ -74,7 +96,14 @@ motatool build \
 motatool verify ./motas/*.mota
 ```
 
-The download is resumable because the partial `.mota` stays on the card.
+The internal fallback has a smaller flash staging gap and in-place workspace.
+A delta generated for the larger SD workspace can be rejected even though it
+updates the same application and target. Keep a usable card inserted for that
+package, or generate an exact-base delta that fits the fallback's available
+workspace and staging capacity. The firmware refuses an oversized package;
+it does not switch backends during its download.
+
+An SD download is resumable because the partial `.mota` stays on the card.
 Once it reaches `ready`, `ota install` performs the final verification,
 publishes a one-reset authorization record, and reboots. SD application
 installation requires a valid signature from a key in the node's allowlist.
@@ -83,14 +112,16 @@ Keep the card inserted through the reboot and installation.
 The BLM2 retained-auth SD-aware bootloader is mandatory for application OTA.
 `ota install` refuses to reboot if its continuity metadata does not match the
 running S140 family/FWID/application layout or if its capability marker does
-not advertise SD staging and the selected codec. Existing
-`Heltec_tower_v2_repeater` firmware continues to use the internal-flash delta
-path and is unchanged.
+not advertise SD staging and the selected codec. Earlier internal-only
+MeshTower firmware retains its old identity until the deliberate local
+migration described above.
 
 ## Signed bootloader update
 
-Only this exact SD build exposes the privileged LoRa bootloader-update command.
-It requires an already installed exact-board ABI-3 OTAFIX bootloader whose one
+Only the canonical SD target with SD selected exposes a usable privileged
+LoRa bootloader-update path. Internal application fallback does not stage
+bootloader packages. It requires an already installed exact-board ABI-3
+OTAFIX bootloader whose one
 unambiguous capability marker is exactly `0x09` (`SD|BOOT_UPDATE`) and whose
 codec mask is `0x0005` (`FULL|INPLACE`). Requiring both application codecs
 prevents a bootloader self-update from disabling either normal SD application
@@ -196,7 +227,9 @@ get sdcard dir 3
 `format` creates a new FAT16, FAT32, or exFAT filesystem according to card
 size. `erase` first uses the card's raw media erase command and then formats it,
 so a successful erase finishes with a usable filesystem. Both operations
-destroy all data on the card and cancel any staged OTA download.
+destroy all data on the card and cancel a staged SD OTA download. If the
+internal fallback slot is occupied, card maintenance is refused until an
+explicit `ota cancel`; it does not abandon an internal download to format SD.
 
 The firmware records successful format and erase completion times in RAM.
 Repeating the same operation within five minutes is rejected unless `--force`
@@ -213,7 +246,7 @@ file size. The header reports the selected page, total pages, and total files.
 
 ## Persistent OTA archive and seeder
 
-On the SD-backed target, automatic OTA archiving is on by default. While the
+With SD selected, automatic OTA archiving is on by default. While the
 temporary OTA radio is active, the node requests full catalogs from seeders and
 saves every complete mOTA it discovers, including firmware for other hardware
 targets and codecs that this node cannot install. Archive downloads use the

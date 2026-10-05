@@ -497,7 +497,7 @@ static bool ota_nrf52_clear_reset_reasons() {
 
 void ota_reboot_to_apply() {                   // public: set the apply magic + reset (does not return)
   uint8_t stage_handoff = GPREGRET2_OTA_STAGE_LEGACY;
-#if defined(OTA_RAK_AUTO_STORE)
+#if defined(OTA_RAK_AUTO_STORE) || defined(OTA_TOWER_AUTO_STORE)
   if (g_nrf52_apply_store) {
     if (g_nrf52_apply_store->is_hybrid()) {
       if (!ota_nrf52_clear_reset_reasons() ||
@@ -511,7 +511,11 @@ void ota_reboot_to_apply() {                   // public: set the apply magic + 
       stage_handoff = mota_nrf52_flash_stage_handoff(ota_nrf52_effective_stage_ceiling());
     }
   } else {
+#if defined(OTA_TOWER_AUTO_STORE)
+    stage_handoff = GPREGRET2_OTA_STAGE_SD;
+#else
     stage_handoff = g_nrf52_qspi_handoff;
+#endif
   }
 #elif defined(OTA_SD_STORE)
   stage_handoff = GPREGRET2_OTA_STAGE_SD;
@@ -1114,10 +1118,21 @@ static bool ota_prepare_bootloader_update_external(Store& store,
   OtaBootloaderCapsMarker candidate_caps;
   if (!ota_bootloader_external_image_metadata(
           store, payload_off, ota_bootloader_update_storage_flags(),
-          candidate, candidate_caps) ||
+          candidate, candidate_caps,
+#if defined(OTA_TOWER_AUTO_STORE)
+          current_caps.optional_app_storage
+#else
+          0
+#endif
+          ) ||
       !ota_bootloader_identity_matches(installed, candidate)) {
     strcpy(msg, "candidate bootloader identity/capability/CRC mismatch"); return false;
   }
+#if defined(OTA_TOWER_AUTO_STORE)
+  if (current_caps.optional_app_storage && ota_boot_rd32(vectors) > MOTA_NRF52_HYBRID_RAM_START) {
+    strcpy(msg, "candidate must retain the combined bootloader RAM arena"); return false;
+  }
+#endif
   const OtaBootloaderContinuityGate continuity = ota_bootloader_continuity_gate(
       installed, candidate, m.fw_version, OTA_BOOT_CONTINUITY_FAMILY_S140,
       ota_runtime_softdevice_fwid(), mota_nrf52_app_base(),
@@ -1140,6 +1155,9 @@ static bool ota_prepare_bootloader_update_external(Store& store,
 #if defined(OTA_SD_STORE)
 bool ota_apply_mota_nrf52(OtaStoreSdNrf52& store, const SignerAllowlist& allow,
                           ApplyState& st, char* msg) {
+#if defined(OTA_TOWER_AUTO_STORE)
+  g_nrf52_apply_store = nullptr;
+#endif
 #if defined(OTA_SD_BOOTLOADER_UPDATE)
   OtaBootloaderIdentity installed;
   if (!ota_installed_bootloader_identity(installed) ||
@@ -1163,6 +1181,9 @@ bool ota_prepare_bootloader_update_nrf52(OtaStoreSdNrf52& store,
                                          const uint8_t operator_mid[4],
                                          const uint8_t operator_hash8[8],
                                          ApplyState& st, char* msg) {
+#if defined(OTA_TOWER_AUTO_STORE)
+  g_nrf52_apply_store = nullptr;
+#endif
   if (!ota_bootloader_sd_retained_auth_ready(
           installed, OTA_BOOT_CONTINUITY_FAMILY_S140,
           ota_runtime_softdevice_fwid(), mota_nrf52_app_base(),

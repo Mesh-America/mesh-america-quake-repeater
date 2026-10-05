@@ -109,12 +109,25 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
     their separately built migration packages or direct --full-exact builds.
     This also removes stale sibling artifacts when a matrix build is resumed.
     nRF52 Full/reduced sensor OTA records always pass through independently,
-    even when their logical target ID and storage layout are the same.
+    even when their logical target ID and storage layout are the same. The
+    MeshTower SD primary replaces stale internal-only artifacts on resume;
+    those files must never be relabeled with the primary's different OTA ID.
     """
+    tower_primary = "heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"
+    tower_legacy = {
+        "heltec_tower_v2_repeater",
+        "heltec_tower_v2_repeater_lora_ota_no_external_sensors",
+    }
+    targets = {record["manifest"]["target"].lower() for record in records}
+    if targets & tower_legacy and tower_primary not in targets:
+        raise ValueError("MeshTower V2 release requires the SD primary; old internal-only "
+                         "artifacts cannot substitute for its distinct OTA identity")
     chosen: dict[str, tuple[int, dict]] = {}
     passthrough: list[dict] = []
     for record in records:
         manifest = record["manifest"]
+        if manifest["target"].lower() in tower_legacy:
+            continue
         if manifest["platform"] != "ESP32_PLATFORM" or manifest["build_profile"] != "full":
             passthrough.append(record)
             continue

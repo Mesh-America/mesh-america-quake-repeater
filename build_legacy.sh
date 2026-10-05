@@ -215,7 +215,9 @@ Environment Variables:
                            offered directly as the editable default.
                            A single custom version suffix found in existing OUTPUT_DIR
                            artifacts is carried forward after the new numeric version.
-  DISABLE_DEBUG=1: Disables all debug logging flags (MESH_DEBUG, MESH_PACKET_LOGGING, etc.)
+  DISABLE_DEBUG=1: Disables build-time debug logging. Full Companion retains its
+                   runtime-gated diagnostics; canonical XIAO QSPI repeaters retain
+                   runtime-gated USB packet logging while MESH_DEBUG stays disabled.
                    If not set, debug flags from variant platformio.ini files are used.
   RESUME_BUILD_OUTPUT=1: Preserves out/ and skips targets whose expected output
                          artifacts already exist. Option 3 resumes by default.
@@ -1977,6 +1979,11 @@ print_release_firmware_targets() {
       ;;
     get-repeater-firmwares-to-build)
       get_pio_envs_ending_with_string "_repeater"
+      # MeshTower keeps its deployed SD target identity as the one canonical
+      # repeater recipe, including when SD staging falls back to internal staging.
+      if is_supported_build_env "Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"; then
+        printf '%s\n' "Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"
+      fi
       # These full-sensor targets are distinct hardware/bootloader contracts,
       # not generated lean OTA aliases, so tagged repeater releases must ship
       # them explicitly alongside the canonical standard repeaters.
@@ -2683,6 +2690,10 @@ disable_debug_flags() {
   # apparent order in PLATFORMIO_BUILD_FLAGS.
   if [ -n "$env_name" ] && is_companion_radio_full_target "$env_name"; then
     usb_logging_undefs=""
+  elif [ -n "$env_name" ] && is_xiao_qspi_canonical_repeater_build "$env_name"; then
+    # Its combined artifact promises runtime USB packet logging. Keep the
+    # logger linked without retaining optional MESH_DEBUG output.
+    usb_logging_undefs="-UMESH_DEBUG"
   fi
 
   if [ "${DISABLE_DEBUG:-0}" == "1" ]; then
@@ -2714,9 +2725,13 @@ apply_mqtt_bridge_override() {
 apply_debug_overrides() {
   local env_name=${1:-}
   local preserve_full_companion_logging=0
+  local preserve_runtime_packet_logging=0
 
   if [ -n "$env_name" ] && is_companion_radio_full_target "$env_name"; then
     preserve_full_companion_logging=1
+    preserve_runtime_packet_logging=1
+  elif [ -n "$env_name" ] && is_xiao_qspi_canonical_repeater_build "$env_name"; then
+    preserve_runtime_packet_logging=1
   fi
 
   case "${MESHDEBUG_OVERRIDE,,}" in
@@ -2735,7 +2750,7 @@ apply_debug_overrides() {
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMESH_PACKET_LOGGING=1"
       ;;
     off)
-      if [ "$preserve_full_companion_logging" -eq 0 ]; then
+      if [ "$preserve_runtime_packet_logging" -eq 0 ]; then
         export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UMESH_PACKET_LOGGING"
       fi
       ;;
@@ -2788,13 +2803,22 @@ apply_merged_standard_usb_logging_profile() {
 
   uses_merged_standard_usb_logging "$env_name" || return 0
 
+  # Canonical XIAO QSPI repeaters include packet logging in the immutable
+  # combined artifact. The saved usb.logging switch controls its live stream.
+  local preserve_runtime_packet_logging=0
+  if is_xiao_qspi_canonical_repeater_build "$env_name"; then
+    preserve_runtime_packet_logging=1
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMESH_PACKET_LOGGING=1 -DMESH_USB_LOGGING_MERGED=1"
+  fi
+
   # Explicit diagnostic overrides retain their documented meaning. Canonical
   # builds otherwise compile packet/debug output into the ordinary artifact;
   # get/set usb.logging controls the live Serial stream at runtime.
   if [ "${DISABLE_DEBUG:-0}" = "1" ]; then
     return 0
   fi
-  if [ "${PACKET_LOGGING_OVERRIDE,,}" != "off" ]; then
+  if [ "$preserve_runtime_packet_logging" -eq 0 ] \
+      && [ "${PACKET_LOGGING_OVERRIDE,,}" != "off" ]; then
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMESH_PACKET_LOGGING=1 -DMESH_USB_LOGGING_MERGED=1"
   fi
   if [ "${MESHDEBUG_OVERRIDE,,}" != "off" ] \
@@ -3054,6 +3078,11 @@ is_nrf52_sensor_ota_pair_target() {
 get_nrf52_sensor_ota_pair_target() {
   local target=$1
   local candidate
+  # The former internal-only MeshTower names are build aliases for the SD
+  # primary. Their old OTA IDs are not compatible aliases on deployed nodes.
+  if candidate=$(get_unified_meshtower_repeater_replacement "$target"); then
+    target=$candidate
+  fi
   is_nrf52_sensor_ota_pair_target "$target" || return 1
   # Preserve an explicit/deployed OTA identity and every external-storage
   # contract. Ordinary internal targets keep the historical auto-build ID of
@@ -3074,6 +3103,14 @@ normalize_nrf52_sensor_ota_pair_targets() {
   local -a normalized=()
   local -A seen=()
   for target in "${RESOLVED_BUILD_TARGETS[@]}"; do
+    if candidate=$(get_unified_meshtower_repeater_replacement "$target"); then
+      if ! is_supported_build_env "$candidate"; then
+        echo "MeshTower V2 primary build target is unavailable: ${candidate}" >&2
+        return 1
+      fi
+      echo "MeshTower V2 build alias ${target} resolves to ${candidate}. Old internal-only bootloader/OTA identities require local USB/BLE DFU or SWD migration; this is not a same-target LoRa upgrade." >&2
+      target=$candidate
+    fi
     candidate=$(get_nrf52_sensor_ota_pair_target "$target") || candidate=$target
     if [ -z "${seen[$candidate]+x}" ]; then
       normalized+=("$candidate")
@@ -3986,8 +4023,14 @@ apply_lora_ota_override() {
       append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1 -DOTA_FLASH_STORE=1 -DOTA_SD_STORE=1"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -UOTA_FLASH_STORE -UOTA_SD_STORE -DOTA_QSPI_STORE=1 -DOTA_FOLDER_SERIAL"
     elif [ "${PIO_ENV_SD_OTA_BY_NAME[$env_name]:-0}" = "1" ]; then
-      append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1 -DOTA_FLASH_STORE=1"
-      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -UOTA_FLASH_STORE -DOTA_SD_STORE=1 -DOTA_FOLDER_SERIAL"
+      if [ "$env_name" = Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors ] \
+          && pio_env_option_contains "$env_name" build_flags "OTA_TOWER_AUTO_STORE=1"; then
+        append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1"
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -DOTA_FLASH_STORE=1 -DOTA_SD_STORE=1 -DOTA_TOWER_AUTO_STORE=1 -DOTA_FOLDER_SERIAL"
+      else
+        append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1 -DOTA_FLASH_STORE=1"
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -UOTA_FLASH_STORE -DOTA_SD_STORE=1 -DOTA_FOLDER_SERIAL"
+      fi
     else
       append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -DOTA_FLASH_STORE=1 -DOTA_FOLDER_SERIAL"
@@ -5388,6 +5431,17 @@ get_combined_usb_ble_companion_replacement() {
   esac
 }
 
+get_unified_meshtower_repeater_replacement() {
+  case "${1,,}" in
+    heltec_tower_v2_repeater|heltec_tower_v2_repeater_lora_ota_no_external_sensors)
+      printf '%s\n' Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 get_merged_rs232_repeater_replacement() {
   case "${1,,}" in
     heltec_t096_repeater_bridge_rs232)
@@ -5447,7 +5501,8 @@ get_merged_rs232_repeater_replacement() {
 }
 
 is_firmware_role_replaced_by_canonical_artifact() {
-  get_full_companion_replacement "$1" >/dev/null 2>&1 \
+  get_unified_meshtower_repeater_replacement "$1" >/dev/null \
+    || get_full_companion_replacement "$1" >/dev/null 2>&1 \
     || get_terminal_chat_companion_replacement "$1" >/dev/null \
     || get_combined_usb_ble_companion_replacement "$1" >/dev/null \
     || get_merged_rs232_repeater_replacement "$1" >/dev/null
@@ -5534,7 +5589,12 @@ resolve_full_companion_firmwares() {
 }
 
 resolve_repeater_firmwares() {
-  get_pio_envs_for_variant_role repeater
+  local env_name
+  while IFS= read -r env_name; do
+    if ! get_unified_meshtower_repeater_replacement "$env_name" >/dev/null; then
+      printf '%s\n' "$env_name"
+    fi
+  done < <(get_pio_envs_for_variant_role repeater)
 }
 
 resolve_room_server_firmwares() {
@@ -5738,7 +5798,7 @@ resolve_command_targets() {
 
   # Base and reduced aliases resolve to one exact-identity pair; external
   # storage and deployed compatibility identities deliberately stay separate.
-  normalize_nrf52_sensor_ota_pair_targets
+  normalize_nrf52_sensor_ota_pair_targets || return $?
 
   # Keep one queue so parallel workers stay saturated. The scheduler may pull
   # a later target forward when a generated alias shares an active PlatformIO

@@ -497,6 +497,11 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
     _next_ota_tick = futureMillis(ota_loop_interval);
   }
   if (millisHasNowPassed(_next_ota_tick)) {
+#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+    // Establish storage policy before resume and codec selection. Startup
+    // deliberately performs no SD mount so the USB console is ready first.
+    ota::ota_ctx().prepareTowerStorage();
+#endif
     // one-shot on first tick: resume an interrupted fetch left staged in flash before a reboot. Only adopt
     // a PARTIAL container (continue fetching the holes); a COMPLETE one is left for manual/auto-install,
     // not re-adopted at boot. requestMissing() (inside resumeStaged) drives the rest via REQ/DATA.
@@ -518,6 +523,9 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
   }
   if (_ota_announce_timer.ready(_ms->getMillis())) {   // auto-advertise so peers discover us (tiny beacon)
     ota::OtaContext& oc = ota::ota_ctx();
+#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+    oc.prepareTowerStorage();
+#endif
     bool in_burst = _ota_announce_count < OTA_ANNOUNCE_BURST;
     uint32_t mins = oc.manager.advert_mins();     // periodic cadence in minutes; 0 = disabled (boot burst only)
     if (in_burst || mins != 0) {
