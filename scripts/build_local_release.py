@@ -21,7 +21,7 @@ from package_cascade_release import category, collect_artifacts, nrf52_sensor_pr
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_VERSION = "v1.17.1.8-halo-keymind-cascade-dev"
+DEFAULT_VERSION = "v1.17.1.9-halo-keymind-cascade-dev"
 RADIO = {"frequency_mhz": 910.525, "bandwidth_khz": 62.5,
          "spreading_factor": 7, "coding_rate": 5}
 
@@ -268,6 +268,7 @@ def main() -> None:
     if args.dry_run:
         return
     environment = os.environ.copy()
+    environment["OPTION3_PIO_JOBS"] = str(args.pio_jobs)
     try:
         utility_build_dir = resolve_pio_build_dir(environment=environment, project_dir=ROOT)
     except ValueError as error:

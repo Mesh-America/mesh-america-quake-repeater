@@ -110,7 +110,7 @@ for target in Heltec_t096_repeater_lora_ota_no_external_sensors Heltec_t1_repeat
   apply_repeater_neighbor_capacity "$target"
   apply_nrf52_size_profile "$target"
   [[ "$PLATFORMIO_BUILD_FLAGS" == *'-DMAX_NEIGHBOURS=50'* ]] || fail "$target omitted RAM-safe neighbours"
-  [[ "$PLATFORMIO_BUILD_FLAGS" == *'-DFLOOD_PACKET_FILTER_SLOTS=16'* ]] || fail "$target omitted RAM-safe rule table"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *'-DFLOOD_PACKET_FILTER_SLOTS=4'* ]] || fail "$target omitted RAM-safe rule table"
   [[ "$PLATFORMIO_BUILD_FLAGS" != *'MESH_MIN_RUNTIME_HEAP'* ]] || fail "runtime RAM guard was overridden"
 done
 for target in Heltec_t096_companion_radio_full_femon RAK_4631_repeater; do

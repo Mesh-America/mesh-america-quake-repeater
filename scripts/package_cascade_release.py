@@ -250,33 +250,123 @@ def portable_profile_exclusions(status):
             for name in names]
 
 
+def collect_local_release(directory, version, source):
+    """Recheck a completed local release without adding migration-only images."""
+    from build_esp32_partition_migration import verify_archive
+    from package_esp32_partition_migration import BOARDS
+
+    manifest = json.loads((directory / "manifest.json").read_text())
+    if (manifest.get("format") != "meshcore-local-release-v1"
+            or manifest.get("source_commit") != source
+            or manifest.get("firmware_version") != version
+            or manifest.get("profile") != "cascade"
+            or manifest.get("publication") != "local-only"):
+        raise ValueError("local release belongs to another source, version or profile")
+    expected_radio = {"frequency_mhz": 910.525, "bandwidth_khz": 62.5,
+                      "spreading_factor": 7, "coding_rate": 5}
+    if manifest.get("radio") != expected_radio:
+        raise ValueError("local release did not use USA Cascade radio defaults")
+    checked = set()
+    for line in (directory / "SHA256SUMS.txt").read_text(encoding="ascii").splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if not match:
+            raise ValueError("invalid local release checksum line")
+        name = match[2]
+        path = directory / name
+        if (name in checked or path.is_symlink() or not path.is_file()
+                or not path.resolve().is_relative_to(directory.resolve())
+                or sha256(path) != match[1]):
+            raise ValueError(f"local release checksum failed: {name}")
+        checked.add(name)
+    actual = {str(p.relative_to(directory)) for p in directory.rglob("*")
+              if p.is_file() and p != directory / "SHA256SUMS.txt"}
+    if checked != actual:
+        raise ValueError("local release checksum inventory is incomplete")
+    records = []
+    for group in sorted((directory / "firmware").iterdir()):
+        if not group.is_dir():
+            raise ValueError("unexpected file outside firmware groups")
+        group_records = collect_artifacts(group, f"{version}-{source[:8]}")
+        if any(category(record) != group.name for record in group_records):
+            raise ValueError("local release firmware group disagrees with qualification")
+        records.extend(group_records)
+    indexed = {record["manifest"]["artifact_target"]: record for record in records}
+    entries = manifest["firmware"]
+    if (len(indexed) != len(records) or len(entries) != len(records)
+            or len(records) != manifest["firmware_target_count"]
+            or len({entry["artifact_target"] for entry in entries}) != len(entries)):
+        raise ValueError("local release target inventory disagrees with qualification")
+    for entry in entries:
+        record = indexed.get(entry["artifact_target"])
+        if record is None:
+            raise ValueError("local release contains an unqualified target")
+        qualified = record["manifest"]
+        if (qualified["target"] != entry["target"]
+                or qualified.get("source_commit", source) != source
+                or qualified["platform"] != entry["platform"]
+                or qualified["build_profile"] != entry["profile"]
+                or set(entry["files"]) != {
+                    str(p.relative_to(directory)) for p in record["files"]}):
+            raise ValueError("local release manifest disagrees with qualified files")
+    extras = []
+    for board in BOARDS:
+        path = directory / "esp32-partition-migration" / f"{board}-{version}-{source[:8]}-migration.zip"
+        verify_archive(path, board, version, source[:8])
+        extras.append(path)
+    if manifest["migration_board_role_count"] != len(extras):
+        raise ValueError("local release migration inventory is incomplete")
+    bundles = list(directory.glob(f"esp32-partition-migration-{version}-{source[:8]}-release.zip"))
+    if len(bundles) != 1:
+        raise ValueError("local release needs exactly one migration bundle")
+    with zipfile.ZipFile(bundles[0]) as archive:
+        if set(archive.namelist()) != {p.name for p in extras} | {"release-manifest.json"}:
+            raise ValueError("migration bundle inventory is incomplete")
+        for path in extras:
+            if hashlib.sha256(archive.read(path.name)).hexdigest() != sha256(path):
+                raise ValueError("migration bundle differs from individual packages")
+    extras.extend(bundles)
+    return records, extras, {"frequency": "910.525", "bandwidth": "62.5", "sf": "7", "cr": "5"}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--build-status", required=True, type=Path)
+    provenance = parser.add_mutually_exclusive_group(required=True)
+    provenance.add_argument("--build-status", type=Path)
+    provenance.add_argument("--local-release", action="store_true",
+                            help="Package the verified output of build_local_release.py")
     parser.add_argument("--version", default="1.17.1.5")
     parser.add_argument("--commit", required=True)
     parser.add_argument("--repo", default="mikecarper/MeshCore")
+    parser.add_argument("--stable", action="store_true", help="Stage a stable release family")
     parser.add_argument("--allow-partial", action="store_true",
                         help="Publish qualified outputs from a finished matrix with failures, listing every failed attempt")
     args = parser.parse_args()
-    status = dict(line.split("=", 1) for line in args.build_status.read_text().splitlines() if "=" in line)
-    failures = completed_matrix_failures(status, args.allow_partial)
-    portable_exclusions = portable_profile_exclusions(status)
-    output_directory = Path(status["working_directory"]) / status["output_directory"]
-    if output_directory.resolve() != args.input.resolve():
-        raise ValueError("build status belongs to another output directory")
     firmware_label = f"v{args.version}-halo-keymind-cascade-dev"
-    if status.get("source_commit") != args.commit or status.get("firmware_version") != firmware_label:
-        raise ValueError("build status belongs to another source revision or version")
-    if status.get("firmware_profile") != "cascade":
-        raise ValueError("matrix did not use Cascade runtime defaults")
-    radio = {key: status["radio_" + key] for key in ("frequency", "bandwidth", "sf", "cr")}
+    version = f"{firmware_label}-{args.commit[:8]}"
+    extras = []
+    if args.local_release:
+        if args.allow_partial:
+            parser.error("a completed local release cannot be partially published")
+        records, extras, radio = collect_local_release(args.input, firmware_label, args.commit)
+        status = {"state": "completed", "exit_code": "0"}
+        failures, portable_exclusions = [], []
+    else:
+        status = dict(line.split("=", 1) for line in args.build_status.read_text().splitlines() if "=" in line)
+        failures = completed_matrix_failures(status, args.allow_partial)
+        portable_exclusions = portable_profile_exclusions(status)
+        output_directory = Path(status["working_directory"]) / status["output_directory"]
+        if output_directory.resolve() != args.input.resolve():
+            raise ValueError("build status belongs to another output directory")
+        if status.get("source_commit") != args.commit or status.get("firmware_version") != firmware_label:
+            raise ValueError("build status belongs to another source revision or version")
+        if status.get("firmware_profile") != "cascade":
+            raise ValueError("matrix did not use Cascade runtime defaults")
+        radio = {key: status["radio_" + key] for key in ("frequency", "bandwidth", "sf", "cr")}
+        records = collect_artifacts(args.input, version)
     if args.output.exists() and any(args.output.iterdir()):
         raise ValueError("staging directory must be empty; existing releases are never overwritten")
-    version = f"{firmware_label}-{args.commit[:8]}"
-    records = collect_artifacts(args.input, version)
     base_tag = version
     groups = []
     titles = {"companion": "Companion builds", "repeater-room": "Repeater and Room Server builds",
@@ -297,10 +387,14 @@ def main():
         for index, chunk in enumerate(chunks):
             key = name + (f"-{index + 1}" if index else "")
             tag = base_tag if key == "companion" else f"{key}-{base_tag}"
-            title = f"MeshCore {args.version} Dev - {titles[name]}"
+            title = f"MeshCore {args.version}{'' if args.stable else ' Dev'} - {titles[name]}"
             if index:
                 title += f" (part {index + 1})"
-            groups.append({"key": key, "tag": tag, "title": title, "prerelease": True, "records": chunk})
+            groups.append({"key": key, "tag": tag, "title": title, "prerelease": not args.stable, "records": chunk})
+    if extras and not any(g['key'] == 'utility' for g in groups):
+        groups.append({'key': 'utility', 'tag': 'utility-' + base_tag,
+                       'title': f'MeshCore {args.version} - Migration utilities',
+                       'prerelease': not args.stable, 'records': []})
     links = "\n".join(f"- [{g['key']}](https://github.com/{args.repo}/releases/tag/{g['tag']})" for g in groups)
     source_url = f"https://github.com/{args.repo}/blob/{args.commit}"
     rows = []
@@ -320,7 +414,12 @@ def main():
             methods = ", ".join(manifest.get("ota_update_methods", [])) or "USB"
             summaries.append({**manifest, "sensor_profile": nrf52_sensor_profile(manifest),
                               "files": [path.name for path in record["files"]]})
-            rows.append(f"<tr><td>{html.escape(manifest['artifact_target'])}</td><td>{html.escape(release_profile_label(manifest))}</td><td>{html.escape(methods)}</td><td>{' · '.join(file_links)}</td></tr>")
+            rows.append(f"<tr><td>{html.escape(manifest['artifact_target'])}</td><td>{html.escape(release_profile_label(manifest))}</td><td>{html.escape(methods)}</td><td>{' | '.join(file_links)}</td></tr>")
+        if group['key'] == 'utility':
+            for path in extras:
+                if (destination / path.name).exists():
+                    raise ValueError(f'duplicate utility asset: {path.name}')
+                shutil.copy2(path, destination / path.name)
         (destination / "TARGET-MANIFEST.json").write_text(json.dumps(summaries, indent=2) + "\n")
         columns = ("artifact_target", "target", "platform", "build_profile", "sensor_profile",
                    "ota_update_methods", "files")
@@ -366,11 +465,12 @@ def main():
             report_url = f"https://github.com/{args.repo}/releases/download/{group['tag']}/BUILD-FAILURES.md"
             partial_note = (f"**Partial matrix:** {len(failures)} build attempt(s) failed and await repair. "
                             f"Only individually qualified firmware is published. [Missing builds]({report_url}).\n\n")
-        body = (f"> **Development prerelease.** Firmware identifier: **{base_tag}**.\n\n"
-                f"# MeshCore {args.version} Dev — USA Cascade\n\n"
+        channel = 'Stable release' if args.stable else 'Development prerelease'
+        body = (f"> **{channel}.** Firmware identifier: **{base_tag}**.\n\n"
+                f"# MeshCore {args.version} - USA Cascade\n\n"
                 f"Source: `{args.commit}`. USA/Canada: **{radio['frequency']} MHz, BW{radio['bandwidth']}, SF{radio['sf']}, CR{radio['cr']}**; Cascade defaults.\n\n"
                 f"This page contains **{len(summaries)} qualified firmware profiles**. Full Companions send MOTA and normally update over USB. Infrastructure has a verified wireless update path; see each capability manifest.\n\n"
-                f"[Feature on/off and update directions]({source_url}/docs/full_companion_features.md) · "
+                f"[Feature on/off and update directions]({source_url}/docs/full_companion_features.md) | "
                 f"[Release details]({source_url}/docs/releases/{args.version}.md)\n\n"
                 "Match the exact board, radio, display, and storage variant. ESP32 WiFi updates use the application `.bin`; the merged image installs boot/partition data over USB. nRF52 `.zip` files are native application DFU packages. LoRa MOTA installation requires an exact destination package; nRF52 also requires its matching OTAFIX bootloader. Full Companions do not LoRa-install onto themselves.\n\n"
                 "Firmware and capability checks passed in the build matrix. Hardware update testing across every board was not performed.\n\n"
@@ -404,6 +504,7 @@ def main():
         group["asset_count"] = len(files) + 1
         group["target_count"] = len(group.pop("records"))
     (args.output / "release-plan.json").write_text(json.dumps({"source": args.commit, "version": args.version, "radio": radio, "groups": groups,
+        "provenance": "local-release" if args.local_release else "matrix-status",
         "matrix": {"state": status["state"], "exit_code": int(status["exit_code"]), "failures": failures,
                    "portable_profile_exclusions": portable_exclusions}}, indent=2) + "\n")
     print(json.dumps({"targets": len(records), "groups": groups}, indent=2))
