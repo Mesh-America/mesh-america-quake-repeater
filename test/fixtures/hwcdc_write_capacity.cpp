@@ -88,6 +88,8 @@ static size_t once(void*, const uint8_t* bytes, size_t size) {
 }
 static bool canAccess(void*) { return access_allowed; }
 static SingleAttemptNonBlockingStream guarded(session, once, nullptr, canAccess);
+@LOGGING_VIEW@
+static LoggingView logging(guarded);
 }
 static const uint8_t bytes[] = "abcdefghijklmnopqrstuvwx";
 
@@ -179,6 +181,91 @@ int main(int argc, char** argv) {
     ring_free = 5;
     assert(Serial.driverWrite(bytes, 24) == 5);
     assert(g_mock_millis == 5 && zero_sends == 5 && !connected);
+  } else if (name == "logging_low") {
+    const std::vector<uint8_t> line(640, 'L');
+    ring_free = 639;
+    assert(!mesh::serialLogEmit(mesh::logging,
+                               reinterpret_cast<const char*>(line.data()), line.size()));
+    assert(admitted.empty() && sdk_calls == 0 && ring_sends == 0);
+    assert(g_mock_millis == 0 && zero_sends == 0);
+  } else if (name == "logging_full") {
+    const std::vector<uint8_t> line(640, 'L');
+    ring_free = 640;
+    assert(mesh::logging.availableForWrite() == 640);
+    assert(mesh::serialLogEmit(mesh::logging,
+                              reinterpret_cast<const char*>(line.data()), line.size()));
+    assert(admitted == line && sdk_calls == 1 && ring_sends == 1);
+    assert(g_mock_millis == 0 && zero_sends == 0);
+  } else if (name == "logging_fallback_small") {
+    const std::vector<uint8_t> line(100, 'L');
+    ring_free = 256;
+    assert(mesh::logging.availableForWrite() == 256);
+    assert(mesh::serialLogEmit(mesh::logging,
+                              reinterpret_cast<const char*>(line.data()), line.size()));
+    assert(admitted == line && sdk_calls == 1 && ring_sends == 1);
+    assert(g_mock_millis == 0 && zero_sends == 0);
+  } else if (name == "logging_fallback_large") {
+    const std::vector<uint8_t> line(257, 'L');
+    ring_free = 256;
+    assert(!mesh::serialLogEmit(mesh::logging,
+                               reinterpret_cast<const char*>(line.data()), line.size()));
+    assert(admitted.empty() && sdk_calls == 0 && ring_sends == 0);
+    assert(g_mock_millis == 0 && zero_sends == 0);
+  } else if (name == "logging_stale") {
+    struct StaleView : Stream {
+      int availableForWrite() override { return mesh::logging.availableForWrite(); }
+      size_t write(const uint8_t* data, size_t size) override {
+        // A different facade uses capacity after serialLogEmit's outer sample.
+        assert(mesh::guarded.write(bytes, 24) == 24);
+        return mesh::logging.write(data, size);
+      }
+    } stale;
+    const std::vector<uint8_t> line(640, 'L');
+    ring_free = 640;
+    assert(!mesh::serialLogEmit(stale,
+                               reinterpret_cast<const char*>(line.data()), line.size()));
+    assert(admitted == std::vector<uint8_t>(bytes, bytes + 24));
+    assert(sdk_calls == 1 && ring_sends == 1 && g_mock_millis == 0);
+  } else if (name == "logging_line") {
+    ring_free = 640;
+    mesh::SerialLogLine<> line;
+    line.printf("STREAM_RX: ");
+    line.hex(bytes, 24);
+    assert(line.flush(mesh::logging, false));
+    const std::string expected =
+        "STREAM_RX: 6162636465666768696A6B6C6D6E6F707172737475767778\n";
+    assert(admitted == std::vector<uint8_t>(expected.begin(), expected.end()));
+    assert(sdk_calls == 1 && ring_sends == 1 && g_mock_millis == 0);
+  } else if (name == "logging_contention") {
+    ring_free = 640;
+    const std::vector<uint8_t> first(640, 'A'), second(640, 'B');
+    std::mutex mutex;
+    std::condition_variable event;
+    bool entered = false, proceed = false;
+    before_sdk_write = [&] {
+      std::unique_lock<std::mutex> lock(mutex);
+      entered = true;
+      event.notify_all();
+      assert(event.wait_for(lock, std::chrono::seconds(2), [&] { return proceed; }));
+    };
+    std::thread writer([&] {
+      assert(mesh::serialLogEmit(mesh::logging,
+                                reinterpret_cast<const char*>(first.data()), first.size()));
+    });
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      assert(event.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
+    }
+    assert(!mesh::serialLogEmit(mesh::logging,
+                               reinterpret_cast<const char*>(second.data()), second.size()));
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      proceed = true;
+    }
+    event.notify_all();
+    writer.join();
+    assert(admitted == first && sdk_calls == 1 && ring_sends == 1);
+    assert(g_mock_millis == 0 && zero_sends == 0);
   } else {
     assert(false && "unknown fixture case");
   }
