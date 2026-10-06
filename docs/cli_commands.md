@@ -435,9 +435,9 @@ remain available.
 
 ### Switch the OTA release channel (observer builds)
 
-- `ota branch` — shows the selected channel, the channel this build was made for, and the manifest base `ota check`/`ota update` will use.
-- `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`) — pull future `ota update`s from that channel. The selection is saved; run `ota update` to switch.
-- `ota branch default` — follow the channel this build was made for.
+- `ota branch` - shows the selected channel, the channel this build was made for, and the manifest base `ota check`/`ota update` will use.
+- `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`) - pull future `ota update`s from that channel. The selection is saved; run `ota update` to switch.
+- `ota branch default` - follow the channel this build was made for.
 
 The selector is saved only after the preferences transaction succeeds. A queued
 `ota update` keeps the channel it checked, even if `ota branch` is changed before
