@@ -8,6 +8,60 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Tests(unittest.TestCase):
+    def run_main(self, output, target, *options, old_resume_bug=False,
+                 inherited_resume=False):
+        # Exercise the real parser, target/profile resolution, main policy,
+        # and filesystem cleanup. Only discovery, locking/version prompts and
+        # final compilation are doubles; no PlatformIO process is permitted.
+        script = r'''
+source "$1/build_legacy.sh"
+OUTPUT_DIR=$2
+RESUME_BUILD_OUTPUT=$3
+OUTPUT_POLICY_EXPLICIT=0
+shift 3
+pio() { echo 'UNEXPECTED_PLATFORMIO' >&2; return 99; }
+acquire_build_script_lock() { return 0; }
+release_build_script_lock() { return 0; }
+refresh_firmware_version_tags() { return 0; }
+prompt_for_resolved_firmware_version() { return 0; }
+init_project_context() {
+  ALL_PIO_ENVS=(wio-e5-mini_companion_radio_usb Tbeam_SX1262_repeater heltec_mesh_solar_repeater)
+  SUPPORTED_PIO_ENVS=("${ALL_PIO_ENVS[@]}")
+  PIO_ENV_PLATFORM_BY_NAME[wio-e5-mini_companion_radio_usb]=STM32_PLATFORM
+  PIO_ENV_PLATFORM_BY_NAME[Tbeam_SX1262_repeater]=ESP32_PLATFORM
+  PIO_ENV_PLATFORM_BY_NAME[heltec_mesh_solar_repeater]=ESP32_PLATFORM
+  PIO_ENV_FULL_BUILD_BY_NAME[Tbeam_SX1262_repeater]=1
+  PIO_ENV_FULL_BUILD_BY_NAME[heltec_mesh_solar_repeater]=1
+}
+record_stub_build() {
+  local target
+  for target in "$@"; do
+    printf '%s\n' "$BUILD_PROFILE_EFFECTIVE" > "$OUTPUT_DIR/$target-$BUILD_PROFILE_EFFECTIVE.bin"
+  done
+}
+run_resolved_build_targets() { record_stub_build "$@"; }
+run_full_only_esp32_profile() { record_stub_build "$@"; }
+run_full_esp32_build_targets() { shift; record_stub_build "$@"; }
+run_auto_two_pass_build() { record_stub_build "$@"; }
+'''
+        if old_resume_bug:
+            source = (ROOT / 'build_legacy.sh').read_text(encoding='ascii')
+            main = source[source.index('main() {\n'):source.index('\nif [[ "${BASH_SOURCE[0]}" == "$0" ]]')]
+            begin = main.index('    # Single-target builds still clean by default,')
+            end = main.index('\n  fi\n', begin)
+            # Reintroduce the historical override in the complete real main;
+            # all other production functions retain their original source path.
+            script += main[:begin] + '    RESUME_BUILD_OUTPUT=0' + main[end:] + '\n'
+        script += 'main "$@"\n'
+        return subprocess.run(['bash', '-c', script, 'main-output-policy', str(ROOT),
+                               str(output), '1' if inherited_resume else '0',
+                               'build-firmware', target, '--radio-preset', 'target',
+                               *options], cwd=ROOT, capture_output=True, text=True, timeout=10)
+
+    def assert_main_passed(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('UNEXPECTED_PLATFORMIO', result.stderr)
+
     def prepare(self, output, *, cwd=ROOT, resume=False, stub=False, overrides=''):
         script = r'''
 source "$1/build_legacy.sh"
@@ -103,6 +157,66 @@ mkdir() { printf 'UNSAFE_MKDIR_CALL:%s\n' "$*"; }
             self.assert_rejected_without_mutation(str(link)+'/')
             self.assertTrue(link.is_symlink())
             self.assertEqual(artifact.read_bytes(), b'previous diagnostic build')
+
+    def test_main_explicit_resume_preserves_sequential_standard_and_full_outputs(self):
+        with tempfile.TemporaryDirectory(prefix='mesh-main-output-policy-') as temporary:
+            output = Path(temporary) / 'output'
+            output.mkdir()
+            previous = output / 'qualified-image.bin'
+            previous.write_bytes(b'already qualified build')
+            initial = previous.stat()
+            targets = (('wio-e5-mini_companion_radio_usb', (), 'auto'),
+                       ('Tbeam_SX1262_repeater', ('--full-exact',), 'full'),
+                       ('heltec_mesh_solar_repeater', ('--standard',), 'standard'))
+            for target, options, profile in targets:
+                result = self.run_main(output, target, *options, '--resume')
+                self.assert_main_passed(result)
+                self.assertEqual(previous.read_bytes(), b'already qualified build')
+                self.assertEqual((previous.stat().st_ino, previous.stat().st_mtime_ns),
+                                 (initial.st_ino, initial.st_mtime_ns))
+                self.assertEqual((output / f'{target}-{profile}.bin').read_text(), profile + '\n')
+            self.assertEqual(len(list(output.iterdir())), 4)
+
+    def test_main_ordinary_default_and_explicit_clean_still_remove_old_outputs(self):
+        for options, inherited in (((), False), ((), True), (('--clean',), False),
+                                   (('--resume', '--clean'), False)):
+            with self.subTest(options=options, inherited=inherited):
+                with tempfile.TemporaryDirectory(prefix='mesh-main-output-clean-') as temporary:
+                    output = Path(temporary) / 'output'
+                    output.mkdir()
+                    previous = output / 'previous.bin'
+                    previous.write_bytes(b'old isolated build')
+                    result = self.run_main(output, 'heltec_mesh_solar_repeater',
+                                           '--standard', *options, inherited_resume=inherited)
+                    self.assert_main_passed(result)
+                    self.assertFalse(previous.exists())
+                    self.assertEqual([item.name for item in output.iterdir()],
+                                     ['heltec_mesh_solar_repeater-standard.bin'])
+
+    def test_main_last_output_policy_wins_and_resume_keeps_safe_symlink(self):
+        with tempfile.TemporaryDirectory(prefix='mesh-main-output-link-') as temporary:
+            output = Path(temporary) / 'output'
+            output.mkdir()
+            previous = output / 'previous.bin'
+            previous.write_bytes(b'previous build')
+            link = Path(temporary) / 'output-link'
+            link.symlink_to(output, target_is_directory=True)
+            result = self.run_main(link, 'heltec_mesh_solar_repeater', '--standard',
+                                   '--clean', '--resume')
+            self.assert_main_passed(result)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(previous.read_bytes(), b'previous build')
+
+    def test_historical_main_resume_override_reproduces_artifact_loss(self):
+        with tempfile.TemporaryDirectory(prefix='mesh-main-output-negative-') as temporary:
+            output = Path(temporary) / 'output'
+            output.mkdir()
+            previous = output / 'qualified-image.bin'
+            previous.write_bytes(b'already qualified build')
+            result = self.run_main(output, 'heltec_mesh_solar_repeater', '--standard',
+                                   '--resume', old_resume_bug=True)
+            self.assert_main_passed(result)
+            self.assertFalse(previous.exists(), 'negative control must expose the historical deletion')
 
     def test_safe_parent_symlink_keeps_link_and_other_outputs(self):
         with tempfile.TemporaryDirectory(prefix='mesh-build-output-safety-') as temporary:
