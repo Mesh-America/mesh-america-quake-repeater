@@ -55,7 +55,11 @@ static void formatDnsList(char* out, size_t out_size, const ip_addr_t* servers, 
     if (ip_addr_isany_val(servers[i])) {
       snprintf(out + len, out_size - len, "-");
     } else {
-      ipaddr_ntoa_r(&servers[i], out + len, (int)(out_size - len));
+      if (ipaddr_ntoa_r(&servers[i], out + len, (int)(out_size - len)) == nullptr) {
+        // lwIP can leave a partial address without NUL when the buffer fills.
+        out[out_size - 1] = '\0';
+        return;
+      }
     }
   }
 }

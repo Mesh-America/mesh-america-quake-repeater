@@ -98,6 +98,22 @@ class NetworkDnsTest(unittest.TestCase):
     def test_zero_capacity_and_null_destination_do_not_write(self):
         self.run_scenario("zero")
 
+    def test_ipv6_partial_conversion_keeps_lists_and_diagnostics_terminated(self):
+        self.run_scenario("ipv6")
+        self.run_scenario("ipv6-termination")
+
+    def test_unchecked_ipv6_conversion_loses_terminator(self):
+        source = (ROOT / "src/helpers/NetworkLink.cpp").read_text(encoding="utf-8")
+        guarded = extract_braced(source, "if (ipaddr_ntoa_r(")
+        broken = self.source.replace(guarded,
+            "ipaddr_ntoa_r(&servers[i], out + len, (int)(out_size - len));")
+        self.assertNotEqual(broken, self.source)
+        binary = self.compile(broken, "unchecked-ipv6")
+        result = subprocess.run([str(binary), "ipv6-termination"], capture_output=True,
+                                text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("IPv6 DNS list lost terminator", result.stderr)
+
     def test_observer_getter_uses_real_interface_and_exact_command(self):
         self.run_scenario("getter")
         cli = (ROOT / "src/helpers/CommonCLI_Observer.cpp").read_text(encoding="utf-8")
