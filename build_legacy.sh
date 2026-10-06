@@ -3631,6 +3631,14 @@ apply_esp32_lora_ota_size_profile() {
     fi
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_WIFI_OTA -DLIGHTWEIGHT_WIFI_OTA=1 -DMAX_NEIGHBOURS=${max_neighbours} -fno-exceptions"
     record_build_capability "web.lightweight_browser_ota"
+    if is_lora_ota_no_external_sensors_target "$env_name"; then
+      # Preserve both update paths and the complete CLI inside the portable
+      # slot. These existing compact implementations retain every OTA target
+      # name and the exact Ed25519 key/signature format; fixed-base signing
+      # trades more CPU time and stack for the 30 KiB precomputed flash table.
+      # Full and ordinary standard images retain their normal implementations.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DED25519_COMPACT_BASE=1 -DED25519_COMPACT_SHA512=1 -DOTA_TARGET_NAME_FRONT_CODED=1"
+    fi
   else
     append_platformio_build_unflags "-DLIGHTWEIGHT_WIFI_OTA=1"
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -ULIGHTWEIGHT_WIFI_OTA -DDISABLE_WIFI_OTA=1"

@@ -15,6 +15,7 @@ static_assert(sizeof(WEBCONFIG_AP_PREFIX) <= 28,
 #include <helpers/ui/DisplayBuildFlags.h>
 #include <Preferences.h>
 #include <esp_wifi.h>
+#include <esp_arduino_version.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 
@@ -783,6 +784,65 @@ bool WebConfigServer::getSetupInfo(char* ssid, size_t ssid_len, char* ip, size_t
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+static bool setupAccessPointStarted() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  return WiFi.AP.started();
+#else
+  return (WiFi.getStatusBits() & AP_STARTED_BIT) != 0;
+#endif
+}
+
+static bool setupAccessPointReady(const char* ssid, int channel) {
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  wifi_config_t config = {};
+  uint8_t protocol = 0;
+  const size_t ssid_len = strlen(ssid);
+#ifdef WEBCONFIG_AP_PASSWORD
+  const wifi_auth_mode_t auth = WEBCONFIG_AP_PASSWORD[0]
+      ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+#else
+  const wifi_auth_mode_t auth = WIFI_AUTH_OPEN;
+#endif
+  return setupAccessPointStarted()
+      && esp_wifi_get_mode(&mode) == ESP_OK && (mode & WIFI_MODE_AP)
+      && esp_wifi_get_config(WIFI_IF_AP, &config) == ESP_OK
+      && config.ap.ssid_len == ssid_len
+      && memcmp(config.ap.ssid, ssid, ssid_len) == 0
+      && config.ap.ssid_hidden == 0 && config.ap.authmode == auth
+      && config.ap.channel == channel
+      && esp_wifi_get_protocol(WIFI_IF_AP, &protocol) == ESP_OK
+      && protocol == mesh::wifi::kAccessPointProtocolMask
+      && static_cast<uint32_t>(WiFi.softAPIP()) != 0
+      && WiFi.status() != WL_CONNECTED;
+}
+
+static bool scanSetupNetworks() {
+  // Populate the picker before the AP starts, while off-channel scanning
+  // cannot interrupt discovery or a client's first connection.
+  WiFi.scanDelete();
+  const uint8_t channel = mesh::wifi::stationScanChannel();
+  const int16_t scan_result = WiFi.scanNetworks(true, false, false, 200, channel);
+  const uint32_t scan_started = millis();
+  while (WiFi.scanComplete() == WIFI_SCAN_RUNNING
+         && millis() - scan_started < 3600) delay(20);
+  mesh::usbDebugPort().printf(
+      "WebConfig pre-AP scan: channel=%u start=%d result=%d elapsed=%u\n",
+      (unsigned)channel, (int)scan_result, (int)WiFi.scanComplete(),
+      (unsigned)(millis() - scan_started));
+  // Arduino's scanComplete() can clear its running flag on a facade timeout
+  // before the SDK scanner stops. Also cancel FAILED scans before enabling AP.
+  if (WiFi.scanComplete() < 0) {
+    if (esp_wifi_scan_stop() != ESP_OK) return false;
+    const uint32_t stop_started = millis();
+    while (WiFi.scanComplete() == WIFI_SCAN_RUNNING
+           && millis() - stop_started < 100) delay(20);
+    WiFi.scanDelete();
+  }
+  // A failed scan still allows manual SSID entry and a browser rescan. An
+  // active scanner must stop before we enable the AP interface.
+  return WiFi.scanComplete() != WIFI_SCAN_RUNNING;
+}
+
 bool WebConfigServer::startSetupMode(char reply[]) {
   if (mesh::wireless::control().blocked(mesh::wireless::WiFi)) {
     strcpy(reply, "Error: WiFi disabled; use set wifi on or set 2.4ghz on");
@@ -797,10 +857,10 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   _setup_reconnect_in_progress = false;
   _setup_reconnect_deadline = 0;
   _setup_started_at = 0;
-  // AP_STA (not pure AP) so the WiFi scan for the SSID picker works while
-  // the AP is up. STA stays unconnected - the bridge won't touch WiFi
-  // while wifi_ssid is empty, and `start webconfig ap` requires it stopped.
-  bool mode_ok = WiFi.mode(WIFI_AP_STA);
+  // Remove any previous setup/OTA AP before replacing its configuration.
+  // Keep STA and the driver alive so an ESP-NOW owner is not torn down.
+  // softAPConfig() adds AP to this STA interface for the SSID picker below.
+  bool mode_ok = WiFi.mode(WIFI_STA);
   // Setup mode has no login. Drop any STA association so the open setup API is
   // reachable only from the setup AP, not from the operator's LAN.
   WiFi.setAutoReconnect(false);
@@ -808,14 +868,32 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   delay(100);
   snprintf(_ap_ssid, sizeof(_ap_ssid), "%s-%02X%02X",
            WEBCONFIG_AP_PREFIX, _pub_key[0], _pub_key[1]);
+  const int ap_channel = mesh::wifi::accessPointChannel();
+  const IPAddress ap_ip(192, 168, 4, 1);
+  const IPAddress ap_mask(255, 255, 255, 0);
   bool ap_ok = false;
-  for (uint8_t attempt = 1; attempt <= 6 && !ap_ok; ++attempt) {
+  bool scan_prepared = false;
+  const uint32_t startup_started = millis();
+  // Keep failed startup below the console's five-second reply deadline even
+  // when both AP_STOP and AP_START are slow on every retry.
+  for (uint8_t attempt = 1; attempt <= 6 && !ap_ok
+       && millis() - startup_started < 3000; ++attempt) {
+    // AP_STOP is delivered asynchronously. Consume the previous start state
+    // before accepting the new AP_START, including on retries.
+    const uint32_t stop_started = millis();
+    while (setupAccessPointStarted() && millis() - stop_started < 300) delay(20);
+    const bool station_ok = mode_ok && !setupAccessPointStarted()
+        && mesh::wifi::applyProtocolMask(WIFI_IF_STA) == ESP_OK;
+    if (!scan_prepared && station_ok) {
+      scan_prepared = scanSetupNetworks();
+      if (!scan_prepared) break;
+    }
+    const bool configured = scan_prepared && station_ok
+        && WiFi.softAPConfig(ap_ip, ap_ip, ap_mask);
 #ifdef WEBCONFIG_AP_PASSWORD
-    ap_ok = WiFi.softAP(_ap_ssid, WEBCONFIG_AP_PASSWORD,
-                        mesh::wifi::accessPointChannel());
+    ap_ok = configured && WiFi.softAP(_ap_ssid, WEBCONFIG_AP_PASSWORD, ap_channel);
 #else
-    ap_ok = WiFi.softAP(_ap_ssid, nullptr,
-                        mesh::wifi::accessPointChannel());
+    ap_ok = configured && WiFi.softAP(_ap_ssid, nullptr, ap_channel);
 #endif
     if (ap_ok) {
       // ESP-NOW can leave the persistent AP protocol mask with the proprietary
@@ -824,13 +902,15 @@ bool WebConfigServer::startSetupMode(char reply[]) {
       // advertise using the interoperable 2.4 GHz protocol set.
       const esp_err_t ap_protocol_result =
           mesh::wifi::applyAccessPointProtocolMask();
-      const esp_err_t sta_protocol_result = esp_wifi_set_protocol(
-          WIFI_IF_STA, mesh::wifi::kProtocolMask);
-      if (ap_protocol_result == ESP_OK && sta_protocol_result == ESP_OK) break;
-      mesh::usbDebugPort().printf(
-          "WebConfig protocol reset failed: AP=%d STA=%d\n",
-          (int)ap_protocol_result, (int)sta_protocol_result);
       ap_ok = false;
+      if (ap_protocol_result == ESP_OK) {
+        const uint32_t start_started = millis();
+        do {
+          ap_ok = setupAccessPointReady(_ap_ssid, ap_channel);
+          if (!ap_ok) delay(20);
+        } while (!ap_ok && millis() - start_started < 300);
+      }
+      if (ap_ok) break;
     }
 
     mesh::usbDebugPort().printf(
@@ -840,7 +920,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     WiFi.softAPdisconnect(true);
     delay(250);
-    mode_ok = WiFi.mode(WIFI_AP_STA);
+    mode_ok = WiFi.mode(WIFI_STA);
   }
   if (!ap_ok) {
     if (!promote_lan) stopOwnedWiFiRadio();
@@ -861,10 +941,8 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   _initial_setup = _wifi_ssid[0] == 0 && node.admin_password[0] != 0;
   _setup_started_at = millis();
   _last_activity = _setup_started_at;
-  // A primary ESP-NOW radio cannot leave its selected channel while scanning.
-  // Ordinary WiFi targets retain the zero-channel all-band scan.
-  WiFi.scanNetworks(true, false, false, 300,
-                    mesh::wifi::stationScanChannel());
+  // Keep the pre-AP scan results for the picker. Only an explicit browser
+  // rescan needs to leave the AP's home channel after clients have joined.
 
   sprintf(reply, "WebConfig AP started: join '%s' then open http://%s/", _ap_ssid, ip.toString().c_str());
   return true;
@@ -2731,6 +2809,13 @@ void WebConfigServer::handleScan(AsyncWebServerRequest* req) {
   if (req->hasParam("rescan") && n >= 0) {
     WiFi.scanDelete();
     n = WIFI_SCAN_FAILED;
+  }
+  if (_mode == MODE_SETUP && n == WIFI_SCAN_FAILED && !req->hasParam("rescan")) {
+    // A failed pre-AP scan still permits manual SSID entry. Leave the AP on
+    // its home channel until the operator explicitly requests another scan.
+    req->send(200, "application/json",
+              "{\"state\":\"done\",\"networks\":[],\"scan_failed\":true}");
+    return;
   }
   if (n == WIFI_SCAN_FAILED) {
     WiFi.scanNetworks(true, false, false, 300,
