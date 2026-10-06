@@ -118,6 +118,21 @@ int main() {
       assert(!charge::setPersistent(io, store, model, target));
       assert(io.writes == 0 && store.writes == 0);
     }
+    for (unsigned fail = 1; fail <= 3; ++fail) {
+      IO io = initialized(model);
+      assert(charge::write(io, model, 4100));
+      io.reads = io.writes = 0;
+      io.failRead = fail;
+      Store store;
+      store.present = true;
+      store.value = target;
+      assert(!charge::configureBoot(io, store, model, true));
+      assert(store.present && store.value == target && store.writes == 0 && store.erases == 0);
+      uint16_t actual = 0;
+      assert(charge::read(io, model, actual));
+      assert(actual == (fail < 3 ? 4100 : target));
+      assert(actual != 4200); // A failed boot restore cannot use the default.
+    }
     for (bool existed : {false, true}) {
       for (bool failedCommit : {false, true}) {
         IO io = initialized(model);
