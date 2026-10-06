@@ -2,15 +2,19 @@
 
 #include <Arduino.h>
 #include "TBeamBoard.h"
+#include "TBeamChargeTarget.h"
+#include <nvs.h>
 //#include <RadioLib.h>
 
 uint32_t deviceOnline = 0x00;
 
+#if !defined(PORTABLE_MQTT_OBSERVER) || defined(TBEAM_SUPREME_SX1262)
 bool pmuInterrupt;
 static void setPmuFlag()
 {
   pmuInterrupt = true;
 }
+#endif
 
 void TBeamBoard::begin() {
     
@@ -26,7 +30,9 @@ void TBeamBoard::begin() {
     Wire.begin(PIN_BOARD_SDA, PIN_BOARD_SCL);
 #endif
 
-    power_init();
+    charge_pmu_ready = power_init();
+    charge_target_restore_failed = !charge_pmu_ready;
+    if (charge_pmu_ready) restoreBatteryChargeTarget();
 
     //Configure user button
     pinMode(PIN_USER_BTN, INPUT);
@@ -39,8 +45,8 @@ void TBeamBoard::begin() {
 
     esp_reset_reason_t reason = esp_reset_reason();
     if (reason == ESP_RST_DEEPSLEEP) {
-      long wakeup_source = esp_sleep_get_ext1_wakeup_status();
-      if (wakeup_source & (1 << P_LORA_DIO_1)) {  // received a LoRa packet (while in deep sleep)
+      uint64_t wakeup_source = esp_sleep_get_ext1_wakeup_status();
+      if (wakeup_source & (1ULL << P_LORA_DIO_1)) {  // received a LoRa packet (while in deep sleep)
         startup_reason = BD_STARTUP_RX_PACKET;
       }
 
@@ -139,13 +145,14 @@ void TBeamBoard::printPMU()
 }
 #endif
 
-#if defined(PORTABLE_MQTT_OBSERVER) && !defined(TBEAM_SUPREME_SX1262)
 static bool pmuRead(uint8_t reg, uint8_t& value) {
   PMU_WIRE_PORT.beginTransmission(I2C_PMU_ADD);
   PMU_WIRE_PORT.write(reg);
   if (PMU_WIRE_PORT.endTransmission(false) != 0 ||
       PMU_WIRE_PORT.requestFrom(I2C_PMU_ADD, 1) != 1) return false;
-  value = PMU_WIRE_PORT.read();
+  const int received = PMU_WIRE_PORT.read();
+  if (received < 0) return false;
+  value = static_cast<uint8_t>(received);
   return true;
 }
 
@@ -156,6 +163,111 @@ static bool pmuWrite(uint8_t reg, uint8_t value) {
   return PMU_WIRE_PORT.endTransmission() == 0;
 }
 
+namespace {
+struct ChargePmuIO {
+  bool read(uint8_t reg, uint8_t& value) { return pmuRead(reg, value); }
+  bool write(uint8_t reg, uint8_t value) { return pmuWrite(reg, value); }
+};
+
+class ChargeTargetStore {
+  nvs_handle_t handle = 0;
+  bool opened = false;
+  bool absent_namespace = false;
+  static constexpr const char* key = "target_mv";
+public:
+  ChargeTargetStore(const char* name, bool read_only) {
+    if (!name) return;
+    const esp_err_t result = nvs_open(name, read_only ? NVS_READONLY : NVS_READWRITE,
+                                    &handle);
+    opened = result == ESP_OK;
+    absent_namespace = read_only && result == ESP_ERR_NVS_NOT_FOUND;
+  }
+  ~ChargeTargetStore() { if (opened) nvs_close(handle); }
+  bool read(uint16_t& value, bool& present) {
+    if (absent_namespace) {
+      value = 0;
+      present = false;
+      return true;
+    }
+    if (!opened) return false;
+    const esp_err_t result = nvs_get_u16(handle, key, &value);
+    if (result == ESP_ERR_NVS_NOT_FOUND) {
+      value = 0;
+      present = false;
+      return true;
+    }
+    if (result != ESP_OK) return false;
+    present = true;
+    return true;
+  }
+  bool write(uint16_t value) {
+    if (!opened || nvs_set_u16(handle, key, value) != ESP_OK ||
+        nvs_commit(handle) != ESP_OK) return false;
+    uint16_t actual = 0;
+    bool present = false;
+    return read(actual, present) && present && actual == value;
+  }
+  bool erase() {
+    if (!opened) return false;
+    const esp_err_t result = nvs_erase_key(handle, key);
+    if (result != ESP_OK && result != ESP_ERR_NVS_NOT_FOUND) return false;
+    if (result == ESP_OK && nvs_commit(handle) != ESP_OK) return false;
+    uint16_t actual = 0;
+    bool present = false;
+    return read(actual, present) && !present;
+  }
+};
+} // namespace
+
+uint8_t TBeamBoard::getChargeTargetModel() const {
+  if (!charge_pmu_ready) return 0;
+#if defined(PORTABLE_MQTT_OBSERVER) && !defined(TBEAM_SUPREME_SX1262)
+  return pmu_model;
+#else
+  if (!PMU) return 0;
+  if (PMU->getChipModel() == XPOWERS_AXP192) return mesh::tbeam_charge::AXP192;
+  if (PMU->getChipModel() == XPOWERS_AXP2101) return mesh::tbeam_charge::AXP2101;
+  return 0;
+#endif
+}
+
+bool TBeamBoard::getBatteryChargeTarget(uint16_t& millivolts) {
+  ChargePmuIO io;
+  return mesh::tbeam_charge::read(io, getChargeTargetModel(), millivolts);
+}
+
+bool TBeamBoard::supportsBatteryChargeTarget(uint16_t millivolts) {
+  return mesh::tbeam_charge::supports(getChargeTargetModel(), millivolts);
+}
+
+const char* TBeamBoard::getBatteryChargeTargetOptions() const {
+  return mesh::tbeam_charge::options(getChargeTargetModel());
+}
+
+bool TBeamBoard::setBatteryChargeTarget(uint16_t millivolts) {
+  const uint8_t model = getChargeTargetModel();
+  if (!mesh::tbeam_charge::supports(model, millivolts)) return false;
+  ChargePmuIO io;
+  ChargeTargetStore store(mesh::tbeam_charge::storeNamespace(model), false);
+  const bool success = mesh::tbeam_charge::setPersistent(io, store, model, millivolts);
+  if (success) charge_target_restore_failed = false;
+  return success;
+}
+
+void TBeamBoard::restoreBatteryChargeTarget() {
+  const uint8_t model = getChargeTargetModel();
+  ChargePmuIO io;
+  ChargeTargetStore store(mesh::tbeam_charge::storeNamespace(model), true);
+#if defined(PORTABLE_MQTT_OBSERVER) && !defined(TBEAM_SUPREME_SX1262)
+  const bool apply_fresh_default = false;
+#else
+  const bool apply_fresh_default = true;
+#endif
+  charge_target_restore_failed =
+      !mesh::tbeam_charge::configureBoot(io, store, model, apply_fresh_default);
+}
+
+#if defined(PORTABLE_MQTT_OBSERVER) && !defined(TBEAM_SUPREME_SX1262)
 static bool pmuUpdate(uint8_t reg, uint8_t clear_mask, uint8_t set_mask) {
   uint8_t value;
   return pmuRead(reg, value) && pmuWrite(reg, (value & ~clear_mask) | set_mask);
@@ -163,7 +275,10 @@ static bool pmuUpdate(uint8_t reg, uint8_t clear_mask, uint8_t set_mask) {
 
 bool TBeamBoard::power_init() {
   PMU_WIRE_PORT.begin(PIN_BOARD_SDA, PIN_BOARD_SCL);
+  pmu_model = 0;
   if (!pmuRead(0x03, pmu_model)) return false;
+  if (pmu_model != mesh::tbeam_charge::AXP192 &&
+      pmu_model != mesh::tbeam_charge::AXP2101) return false;
 
   if (pmu_model == 0x4A) {
     // AXP2101: ALDO2 and ALDO3 at 3.3 V, plus battery voltage ADC.
@@ -234,7 +349,6 @@ bool TBeamBoard::power_init()
     PMU->disableIRQ(XPOWERS_AXP192_ALL_IRQ);          //Disable PMU IRQ
 
     PMU->setChargerConstantCurr(XPOWERS_AXP192_CHG_CUR_450MA);  //Set battery charging current
-    PMU->setChargeTargetVoltage(XPOWERS_AXP192_CHG_VOL_4V2);    //Set battery charge-stop voltage
   }
   else if(PMU->getChipModel() == XPOWERS_AXP2101){
     #ifdef TBEAM_SUPREME_SX1262
@@ -315,7 +429,6 @@ bool TBeamBoard::power_init()
     PMU->disableIRQ(XPOWERS_AXP2101_ALL_IRQ);      //Disable all PMU interrupts
 
     PMU->setChargerConstantCurr(XPOWERS_AXP2101_CHG_CUR_500MA);   //Set battery charging current to 500mA
-    PMU->setChargeTargetVoltage(XPOWERS_AXP2101_CHG_VOL_4V2);     //Set battery charging cutoff voltage to 4.2V
 
   }
 

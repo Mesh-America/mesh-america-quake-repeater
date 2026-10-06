@@ -5111,6 +5111,22 @@ manufacturer images and the boards still requiring untouched factory dumps.
 
 ---
 
+#### Configure battery charge voltage
+
+T-Beam SX1262/SX1276 and T-Beam S3 Supreme support persistent charger-voltage
+selection through the fitted AXP192 or AXP2101 PMU:
+
+```text
+get charge.voltage.options
+get charge.voltage
+set charge.voltage 4.1
+```
+
+Values are exact supported targets in volts. Neither T-Beam PMU supports 3.65 V.
+Heltec Mesh Solar's CN3795 charge voltage is set by its Li-ion or LiFePO4 hardware
+version, so these commands report that limitation without changing BMS settings.
+See [charge-voltage behavior and supported targets](charge_voltage.md).
+
 #### Configure nRF52 battery protection
 **Usage:** `get pwrmgt.bootlock`, `set pwrmgt.bootlock <2500-4200>`
 

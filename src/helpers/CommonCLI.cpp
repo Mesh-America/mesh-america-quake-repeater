@@ -4,6 +4,7 @@
 #include "UsbLoggingWatchdog.h"
 #include "HilStartupTrace.h"
 #include <helpers/ui/DisplayPowerSettings.h>
+#include <helpers/BatteryChargeCLI.h>
 #include "CLICommandUtils.h"
 #include "GpsPowerPolicy.h"
 #include "FloodAdvertCLI.h"
@@ -2840,6 +2841,7 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     PrefsSaveReplyGuard save_reply(_prefs_save_failures, reply);
     mesh::cli::normalizeCommandVerb(command);
+    if (mesh::power::handleBatteryChargeCommand(*_board, command, reply, 160)) return;
     if (mesh::handleUsbLoggingWatchdogCommand(command, reply, 160)) return;
     if (handleManagementCommand(command, reply)) return;
     if (mesh::wireless::control().handle(command, reply, 160, millis(),
