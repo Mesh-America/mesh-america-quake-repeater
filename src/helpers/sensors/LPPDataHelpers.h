@@ -1,6 +1,8 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
+#include <math.h>
 
 #define LPP_DIGITAL_INPUT 0         // 1 byte
 #define LPP_DIGITAL_OUTPUT 1        // 1 byte
@@ -13,8 +15,8 @@
 #define LPP_RELATIVE_HUMIDITY 104   // 1 byte, 0.5% unsigned
 #define LPP_ACCELEROMETER 113       // 2 bytes per axis, 0.001G
 #define LPP_BAROMETRIC_PRESSURE 115 // 2 bytes 0.1hPa unsigned
-#define LPP_VOLTAGE 116             // 2 bytes 0.01V unsigned
-#define LPP_CURRENT 117             // 2 bytes 0.001A unsigned
+#define LPP_VOLTAGE 116             // 2 bytes 0.01V signed
+#define LPP_CURRENT 117             // 2 bytes 0.001A signed
 #define LPP_FREQUENCY 118           // 4 bytes 1Hz unsigned
 #define LPP_PERCENTAGE 120          // 1 byte 1-100% unsigned
 #define LPP_ALTITUDE 121            // 2 byte 1m signed
@@ -65,6 +67,53 @@
 
 class LPPData {
 public:
+  // Delta subscriptions and history records encode one scalar, not vectors.
+  static bool isScalarType(uint8_t type) {
+    switch (type) {
+      case LPP_DIGITAL_INPUT:
+      case LPP_DIGITAL_OUTPUT:
+      case LPP_ANALOG_INPUT:
+      case LPP_ANALOG_OUTPUT:
+      case LPP_GENERIC_SENSOR:
+      case LPP_LUMINOSITY:
+      case LPP_PRESENCE:
+      case LPP_TEMPERATURE:
+      case LPP_RELATIVE_HUMIDITY:
+      case LPP_BAROMETRIC_PRESSURE:
+      case LPP_VOLTAGE:
+      case LPP_CURRENT:
+      case LPP_FREQUENCY:
+      case LPP_PERCENTAGE:
+      case LPP_ALTITUDE:
+      case LPP_CONCENTRATION:
+      case LPP_POWER:
+      case LPP_DISTANCE:
+      case LPP_ENERGY:
+      case LPP_DIRECTION:
+      case LPP_UNIXTIME:
+      case LPP_SWITCH:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  // Keep complete known LPP entries within the supplied payload budget.
+  static size_t boundedPrefix(const uint8_t* buf, size_t size, size_t capacity) {
+    if (buf == NULL) return 0;
+    size_t pos = 0;
+    while (pos + 2 <= size) {
+      if (buf[pos] == 0) break;  // channel zero is end-of-data
+      const uint8_t type = buf[pos + 1];
+      if (!LPPData::isScalarType(type) && type != LPP_GPS
+          && type != LPP_ACCELEROMETER && type != LPP_GYROMETER && type != LPP_COLOUR) break;
+      const size_t item_len = 2 + LPPData::getDataSize(type);
+      if (item_len > size - pos || item_len > capacity - pos) break;
+      pos += item_len;
+    }
+    return pos;
+  }
+
   static uint8_t getDataSize(uint8_t type) {
     switch (type) {
       case LPP_GPS:
@@ -88,7 +137,6 @@ public:
       case LPP_TEMPERATURE:
       case LPP_CONCENTRATION:
       case LPP_BAROMETRIC_PRESSURE:
-      case LPP_RELATIVE_HUMIDITY:
       case LPP_ALTITUDE:
       case LPP_VOLTAGE:
       case LPP_CURRENT:
@@ -109,20 +157,23 @@ public:
       case LPP_ANALOG_INPUT:
       case LPP_ANALOG_OUTPUT:
         return 100;
+      case LPP_RELATIVE_HUMIDITY:
+        return 2;
       case LPP_TEMPERATURE:
       case LPP_BAROMETRIC_PRESSURE:
-      case LPP_RELATIVE_HUMIDITY:
         return 10;
     }
     return 1;
   }
 
   static bool isSigned(uint8_t type) {
-    return type == LPP_ALTITUDE || type == LPP_TEMPERATURE || type == LPP_GYROMETER ||
-        type == LPP_ANALOG_INPUT || type == LPP_ANALOG_OUTPUT || type == LPP_GPS || type == LPP_ACCELEROMETER;
+    return type == LPP_VOLTAGE || type == LPP_CURRENT || type == LPP_ALTITUDE ||
+        type == LPP_TEMPERATURE || type == LPP_GYROMETER || type == LPP_ANALOG_INPUT ||
+        type == LPP_ANALOG_OUTPUT || type == LPP_GPS || type == LPP_ACCELEROMETER;
   }
 
   static float getFloat(const uint8_t * buffer, uint8_t size, uint32_t multiplier, bool is_signed) {
+    if (size == 0 || size > sizeof(uint32_t) || multiplier == 0) return 0.0f;
     uint32_t value = 0;
     for (uint8_t i = 0; i < size; i++) {
       value = (value << 8) + buffer[i];
@@ -130,7 +181,7 @@ public:
 
     int sign = 1;
     if (is_signed) {
-      uint32_t bit = 1ul << ((size * 8) - 1);
+      uint32_t bit = uint32_t(1) << ((size * 8) - 1);
       if ((value & bit) == bit) {
         value = (bit << 1) - value;
         sign = -1;
@@ -140,18 +191,24 @@ public:
   }
 
   static uint8_t putFloat(uint8_t * dest, float value, uint8_t size, uint32_t multiplier, bool is_signed) {
-    // check sign
-    bool sign = value < 0;
-    if (sign) value = -value;
+    if (size == 0 || size > sizeof(uint32_t) || multiplier == 0
+        || !isfinite(value)) return 0;
 
-    // get value to store
-    uint32_t v = value * multiplier;
-
-    // format an uint32_t as if it was an int32_t
-    if (is_signed & sign) {
-      uint32_t mask = (1 << (size * 8)) - 1;
-      v = v & mask;
-      if (sign) v = mask - v + 1;
+    const uint32_t mask = size == sizeof(uint32_t)
+        ? UINT32_MAX : (uint32_t(1) << (size * 8)) - 1;
+    // Preserve the existing float scaling before checking integer limits.
+    const double scaled = (double)(value * multiplier);
+    uint32_t v;
+    if (is_signed) {
+      const bool negative = scaled < 0;
+      const uint32_t sign_bit = uint32_t(1) << ((size * 8) - 1);
+      const uint32_t limit = negative ? sign_bit : sign_bit - 1;
+      const double magnitude = negative ? -scaled : scaled;
+      v = magnitude >= (double)limit ? limit : (uint32_t)magnitude;
+      if (negative) v = (uint32_t(0) - v) & mask;
+    } else {
+      // float(UINT32_MAX) rounds to 2^32; clamp before the integer cast.
+      v = scaled <= 0.0 ? 0 : scaled >= (double)mask ? mask : (uint32_t)scaled;
     }
 
     // add bytes (MSB first)
@@ -193,7 +250,7 @@ public:
     return _pos <= _len;
   }
   bool readVoltage(float& voltage) {
-    voltage = LPPData::getFloat(&_buf[_pos], 2, 100, false); _pos += 2;
+    voltage = LPPData::getFloat(&_buf[_pos], 2, 100, true); _pos += 2;
     return _pos <= _len;
   }
   bool readCurrent(float& amps) {
@@ -243,24 +300,18 @@ public:
     uint8_t sz = LPPData::getDataSize(type);
     bool s = LPPData::isSigned(type);
     uint32_t mul = LPPData::getMultiplier(type);
-    if (_len + 2 + sz <= _max_len) {
-      _buf[_len++] = channel;
-      _buf[_len++] = type;
-      _len += LPPData::putFloat(&_buf[_len], v, sz, mul, s);
+    if (LPPData::isScalarType(type) && _len + 2 + sz <= _max_len) {
+      if (LPPData::putFloat(&_buf[_len + 2], v, sz, mul, s) != sz) return false;
+      _buf[_len] = channel;
+      _buf[_len + 1] = type;
+      _len += 2 + sz;
       return true;
     }
     return false;
   }
 
   bool writeVoltage(uint8_t channel, float voltage) {
-    if (_len + 4 <= _max_len) {
-      _buf[_len++] = channel;
-      _buf[_len++] = LPP_VOLTAGE;
-      uint16_t value = voltage * 100;
-      write(value);
-      return true;
-    }
-    return false;
+    return writeData(channel, LPP_VOLTAGE, voltage);
   }
 
   bool writeGPS(uint8_t channel, float lat, float lon, float alt) {

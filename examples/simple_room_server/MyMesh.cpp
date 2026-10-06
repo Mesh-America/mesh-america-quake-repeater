@@ -11,6 +11,7 @@
 #include <helpers/CLICommandUtils.h>
 #include <helpers/ClientACLCLI.h>
 #include <helpers/ClientACLResponse.h>
+#include <helpers/sensors/LPPDataHelpers.h>
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/ClientPathPersistence.h>
 #include <helpers/LazyPersistence.h>
@@ -268,8 +269,9 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
       telemetry.addTemperature(TELEM_CHANNEL_SELF, temperature); // Built-in MCU Temperature
     }
 
-    uint8_t tlen = telemetry.getSize();
-    memcpy(&reply_data[4], telemetry.getBuffer(), tlen);
+    const uint8_t* tbuf = telemetry.getBuffer();
+    const size_t tlen = LPPData::boundedPrefix(tbuf, telemetry.getSize(), reply_capacity - 4);
+    memcpy(&reply_data[4], tbuf, tlen);
     return 4 + tlen; // reply_len
   }
   if (payload[0] == REQ_TYPE_GET_ACCESS_LIST && sender->isAdmin()) {

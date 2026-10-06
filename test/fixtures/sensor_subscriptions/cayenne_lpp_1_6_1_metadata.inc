@@ -1,0 +1,370 @@
+// Unmodified scalar metadata methods from Electronic Cats CayenneLPP1.6.1.
+// https://github.com/ElectronicCats/CayenneLPP
+// Source package pinned by platformio.ini to electroniccats/CayenneLPP@1.6.1.
+// Upstream src/CayenneLPP.cpp SHA256: 3dab5bca79280efaa0f286741c08e8e1bd3cd6de01a870154b17131e5322f002
+// MIT license is preserved in CAYENNE_LICENSE.txt.
+#define LPP_DIGITAL_INPUT_SIZE 1
+#define LPP_DIGITAL_OUTPUT_SIZE 1
+#define LPP_ANALOG_INPUT_SIZE 2
+#define LPP_ANALOG_OUTPUT_SIZE 2
+#define LPP_GENERIC_SENSOR_SIZE 4
+#define LPP_LUMINOSITY_SIZE 2
+#define LPP_PRESENCE_SIZE 1
+#define LPP_TEMPERATURE_SIZE 2
+#define LPP_RELATIVE_HUMIDITY_SIZE 1
+#define LPP_ACCELEROMETER_SIZE 6
+#define LPP_BAROMETRIC_PRESSURE_SIZE 2
+#define LPP_VOLTAGE_SIZE 2
+#define LPP_CURRENT_SIZE 2
+#define LPP_FREQUENCY_SIZE 4
+#define LPP_PERCENTAGE_SIZE 1
+#define LPP_ALTITUDE_SIZE 2
+#define LPP_POWER_SIZE 2
+#define LPP_DISTANCE_SIZE 4
+#define LPP_ENERGY_SIZE 4
+#define LPP_DIRECTION_SIZE 2
+#define LPP_UNIXTIME_SIZE 4
+#define LPP_GYROMETER_SIZE 6
+#define LPP_GPS_SIZE 9
+#define LPP_SWITCH_SIZE 1
+#define LPP_CONCENTRATION_SIZE 2
+#define LPP_COLOUR_SIZE 3
+#define LPP_MIN_POLYLINE_SIZE 8
+#define LPP_DIGITAL_INPUT_MULT 1
+#define LPP_DIGITAL_OUTPUT_MULT 1
+#define LPP_ANALOG_INPUT_MULT 100
+#define LPP_ANALOG_OUTPUT_MULT 100
+#define LPP_GENERIC_SENSOR_MULT 1
+#define LPP_LUMINOSITY_MULT 1
+#define LPP_PRESENCE_MULT 1
+#define LPP_TEMPERATURE_MULT 10
+#define LPP_RELATIVE_HUMIDITY_MULT 2
+#define LPP_ACCELEROMETER_MULT 1000
+#define LPP_BAROMETRIC_PRESSURE_MULT 10
+#define LPP_VOLTAGE_MULT 100
+#define LPP_CURRENT_MULT 1000
+#define LPP_FREQUENCY_MULT 1
+#define LPP_PERCENTAGE_MULT 1
+#define LPP_ALTITUDE_MULT 1
+#define LPP_POWER_MULT 1
+#define LPP_DISTANCE_MULT 1000
+#define LPP_ENERGY_MULT 1000
+#define LPP_DIRECTION_MULT 1
+#define LPP_UNIXTIME_MULT 1
+#define LPP_GYROMETER_MULT 100
+#define LPP_GPS_LAT_LON_MULT 10000
+#define LPP_GPS_ALT_MULT 100
+#define LPP_SWITCH_MULT 1
+#define LPP_CONCENTRATION_MULT 1
+#define LPP_COLOUR_MULT 1
+class CayenneLPP {
+public:
+  static uint8_t getTypeSize(uint8_t);
+  static uint32_t getTypeMultiplier(uint8_t);
+  static bool getTypeSigned(uint8_t);
+};
+uint8_t CayenneLPP::getTypeSize(uint8_t type) {
+
+  switch (type) {
+
+#ifndef CAYENNE_DISABLE_DIGITAL_INPUT
+    case LPP_DIGITAL_INPUT:
+      return LPP_DIGITAL_INPUT_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_DIGITAL_OUTPUT
+    case LPP_DIGITAL_OUTPUT:
+      return LPP_DIGITAL_OUTPUT_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_ANALOG_INPUT
+    case LPP_ANALOG_INPUT:
+      return LPP_ANALOG_INPUT_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_ANALOG_OUTPUT
+    case LPP_ANALOG_OUTPUT:
+      return LPP_ANALOG_OUTPUT_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_GENERIC_SENSOR
+    case LPP_GENERIC_SENSOR:
+      return LPP_GENERIC_SENSOR_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_LUMINOSITY
+    case LPP_LUMINOSITY:
+      return LPP_LUMINOSITY_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_PRESENCE
+    case LPP_PRESENCE:
+      return LPP_PRESENCE_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_TEMPERATURE
+    case LPP_TEMPERATURE:
+      return LPP_TEMPERATURE_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_RELATIVE_HUMIDITY
+    case LPP_RELATIVE_HUMIDITY:
+      return LPP_RELATIVE_HUMIDITY_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_ACCELEROMETER
+    case LPP_ACCELEROMETER:
+      return LPP_ACCELEROMETER_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_BAROMETRIC_PRESSUE
+    case LPP_BAROMETRIC_PRESSURE:
+      return LPP_BAROMETRIC_PRESSURE_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_VOLTAGE
+    case LPP_VOLTAGE:
+      return LPP_VOLTAGE_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_CURRENT
+    case LPP_CURRENT:
+      return LPP_CURRENT_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_FREQUENCY
+    case LPP_FREQUENCY:
+      return LPP_FREQUENCY_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_PERCENTAGE
+    case LPP_PERCENTAGE:
+      return LPP_PERCENTAGE_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_ALTITUDE
+    case LPP_ALTITUDE:
+      return LPP_ALTITUDE_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_POWER
+    case LPP_POWER:
+      return LPP_POWER_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_DISTANCE
+    case LPP_DISTANCE:
+      return LPP_DISTANCE_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_ENERGY
+    case LPP_ENERGY:
+      return LPP_ENERGY_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_DIRECTION
+    case LPP_DIRECTION:
+      return LPP_DIRECTION_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_UNIX_TIME
+    case LPP_UNIXTIME:
+      return LPP_UNIXTIME_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_GYROMETER
+    case LPP_GYROMETER:
+      return LPP_GYROMETER_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_GPS
+    case LPP_GPS:
+      return LPP_GPS_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_SWITCH
+    case LPP_SWITCH:
+      return LPP_SWITCH_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_CONCENTRATION
+    case LPP_CONCENTRATION:
+      return LPP_CONCENTRATION_SIZE;
+#endif
+
+#ifndef CAYENNE_DISABLE_COLOUR
+    case LPP_COLOUR:
+      return LPP_COLOUR_SIZE;
+#endif
+
+    default:
+      return 0;
+  }
+}
+uint32_t CayenneLPP::getTypeMultiplier(uint8_t type) {
+
+  switch (type) {
+
+#ifndef CAYENNE_DISABLE_DIGITAL_INPUT
+    case LPP_DIGITAL_INPUT:
+      return LPP_DIGITAL_INPUT_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_DIGITAL_OUTPUT
+    case LPP_DIGITAL_OUTPUT:
+      return LPP_DIGITAL_OUTPUT_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_ANALOG_INPUT
+    case LPP_ANALOG_INPUT:
+      return LPP_ANALOG_INPUT_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_ANALOG_OUTPUT
+    case LPP_ANALOG_OUTPUT:
+      return LPP_ANALOG_OUTPUT_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_GENERIC_SENSOR
+    case LPP_GENERIC_SENSOR:
+      return LPP_GENERIC_SENSOR_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_LUMINOSITY
+    case LPP_LUMINOSITY:
+      return LPP_LUMINOSITY_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_PRESENCE
+    case LPP_PRESENCE:
+      return LPP_PRESENCE_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_TEMPERATURE
+    case LPP_TEMPERATURE:
+      return LPP_TEMPERATURE_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_RELATIVE_HUMIDITY
+    case LPP_RELATIVE_HUMIDITY:
+      return LPP_RELATIVE_HUMIDITY_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_ACCELEROMETER
+    case LPP_ACCELEROMETER:
+      return LPP_ACCELEROMETER_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_BAROMETRIC_PRESSUE
+    case LPP_BAROMETRIC_PRESSURE:
+      return LPP_BAROMETRIC_PRESSURE_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_VOLTAGE
+    case LPP_VOLTAGE:
+      return LPP_VOLTAGE_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_CURRENT
+    case LPP_CURRENT:
+      return LPP_CURRENT_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_FREQUENCY
+    case LPP_FREQUENCY:
+      return LPP_FREQUENCY_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_PERCENTAGE
+    case LPP_PERCENTAGE:
+      return LPP_PERCENTAGE_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_ALTITUDE
+    case LPP_ALTITUDE:
+      return LPP_ALTITUDE_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_POWER
+    case LPP_POWER:
+      return LPP_POWER_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_DISTANCE
+    case LPP_DISTANCE:
+      return LPP_DISTANCE_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_ENERGY
+    case LPP_ENERGY:
+      return LPP_ENERGY_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_DIRECTION
+    case LPP_DIRECTION:
+      return LPP_DIRECTION_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_UNIX_TIME
+    case LPP_UNIXTIME:
+      return LPP_UNIXTIME_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_GYROMETER
+    case LPP_GYROMETER:
+      return LPP_GYROMETER_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_SWITCH
+    case LPP_SWITCH:
+      return LPP_SWITCH_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_CONCENTRATION
+    case LPP_CONCENTRATION:
+      return LPP_CONCENTRATION_MULT;
+#endif
+
+#ifndef CAYENNE_DISABLE_COLOUR
+    case LPP_COLOUR:
+      return LPP_COLOUR_MULT;
+#endif
+
+    default:
+      return 0;
+  }
+}
+bool CayenneLPP::getTypeSigned(uint8_t type) {
+
+  switch (type) {
+#ifndef CAYENNE_DISABLE_VOLTAGE
+    case LPP_VOLTAGE:
+#endif
+#ifndef CAYENNE_DISABLE_CURRENT
+    case LPP_CURRENT:
+#endif
+#ifndef CAYENNE_DISABLE_ANALOG_INPUT
+    case LPP_ANALOG_INPUT:
+#endif
+#ifndef CAYENNE_DISABLE_ANALOG_OUTPUT
+    case LPP_ANALOG_OUTPUT:
+#endif
+#ifndef CAYENNE_DISABLE_TEMPERATURE
+    case LPP_TEMPERATURE:
+#endif
+#ifndef CAYENNE_DISABLE_ACCELEROMETER
+    case LPP_ACCELEROMETER:
+#endif
+#ifndef CAYENNE_DISABLE_ALTITUDE
+    case LPP_ALTITUDE:
+#endif
+#ifndef CAYENNE_DISABLE_GYROMETER
+    case LPP_GYROMETER:
+#endif
+#ifndef CAYENNE_DISABLE_GPS
+    case LPP_GPS:
+#endif
+      return true;
+  }
+  return false;
+}
