@@ -25,13 +25,12 @@ release_build_script_lock() { return 0; }
 refresh_firmware_version_tags() { return 0; }
 prompt_for_resolved_firmware_version() { return 0; }
 init_project_context() {
-  ALL_PIO_ENVS=(wio-e5-mini_companion_radio_usb Tbeam_SX1262_repeater heltec_mesh_solar_repeater)
+  ALL_PIO_ENVS=(wio-e5-mini_companion_radio_usb Tbeam_SX1262_repeater Heltec_mesh_solar_companion_radio_usb)
   SUPPORTED_PIO_ENVS=("${ALL_PIO_ENVS[@]}")
   PIO_ENV_PLATFORM_BY_NAME[wio-e5-mini_companion_radio_usb]=STM32_PLATFORM
   PIO_ENV_PLATFORM_BY_NAME[Tbeam_SX1262_repeater]=ESP32_PLATFORM
-  PIO_ENV_PLATFORM_BY_NAME[heltec_mesh_solar_repeater]=ESP32_PLATFORM
+  PIO_ENV_PLATFORM_BY_NAME[Heltec_mesh_solar_companion_radio_usb]=NRF52_PLATFORM
   PIO_ENV_FULL_BUILD_BY_NAME[Tbeam_SX1262_repeater]=1
-  PIO_ENV_FULL_BUILD_BY_NAME[heltec_mesh_solar_repeater]=1
 }
 record_stub_build() {
   local target
@@ -167,7 +166,7 @@ mkdir() { printf 'UNSAFE_MKDIR_CALL:%s\n' "$*"; }
             initial = previous.stat()
             targets = (('wio-e5-mini_companion_radio_usb', (), 'auto'),
                        ('Tbeam_SX1262_repeater', ('--full-exact',), 'full'),
-                       ('heltec_mesh_solar_repeater', ('--standard',), 'standard'))
+                       ('Heltec_mesh_solar_companion_radio_usb', ('--standard',), 'standard'))
             for target, options, profile in targets:
                 result = self.run_main(output, target, *options, '--resume')
                 self.assert_main_passed(result)
@@ -186,12 +185,12 @@ mkdir() { printf 'UNSAFE_MKDIR_CALL:%s\n' "$*"; }
                     output.mkdir()
                     previous = output / 'previous.bin'
                     previous.write_bytes(b'old isolated build')
-                    result = self.run_main(output, 'heltec_mesh_solar_repeater',
+                    result = self.run_main(output, 'Heltec_mesh_solar_companion_radio_usb',
                                            '--standard', *options, inherited_resume=inherited)
                     self.assert_main_passed(result)
                     self.assertFalse(previous.exists())
                     self.assertEqual([item.name for item in output.iterdir()],
-                                     ['heltec_mesh_solar_repeater-standard.bin'])
+                                     ['Heltec_mesh_solar_companion_radio_usb-standard.bin'])
 
     def test_main_last_output_policy_wins_and_resume_keeps_safe_symlink(self):
         with tempfile.TemporaryDirectory(prefix='mesh-main-output-link-') as temporary:
@@ -201,7 +200,7 @@ mkdir() { printf 'UNSAFE_MKDIR_CALL:%s\n' "$*"; }
             previous.write_bytes(b'previous build')
             link = Path(temporary) / 'output-link'
             link.symlink_to(output, target_is_directory=True)
-            result = self.run_main(link, 'heltec_mesh_solar_repeater', '--standard',
+            result = self.run_main(link, 'Heltec_mesh_solar_companion_radio_usb', '--standard',
                                    '--clean', '--resume')
             self.assert_main_passed(result)
             self.assertTrue(link.is_symlink())
@@ -213,7 +212,7 @@ mkdir() { printf 'UNSAFE_MKDIR_CALL:%s\n' "$*"; }
             output.mkdir()
             previous = output / 'qualified-image.bin'
             previous.write_bytes(b'already qualified build')
-            result = self.run_main(output, 'heltec_mesh_solar_repeater', '--standard',
+            result = self.run_main(output, 'Heltec_mesh_solar_companion_radio_usb', '--standard',
                                    '--resume', old_resume_bug=True)
             self.assert_main_passed(result)
             self.assertFalse(previous.exists(), 'negative control must expose the historical deletion')
