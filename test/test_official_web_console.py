@@ -48,17 +48,17 @@ def firmware_harness(*, lose_sleep_guard=False, lose_crlf=False,
     # Retain the existing host peripheral boundary; use the production methods
     # and a virtual clock to exercise minutes/hours without slowing CI.
     source = HARNESS.split("int main()", 1)[0]
+    sleep_held = board_method("bool isUsbSleepHeld()")
+    if lose_sleep_guard:
+        # Remove the actual native USB veto while retaining host observation.
+        # The stock client must lose its reply after the real sleep branch runs.
+        guard = ("return host_connected || usb_host_sleep_policy.shouldKeepAwake(\n"
+                 "        millis(), MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS);")
+        assert guard in sleep_held, "Missing native USB negative-control boundary"
+        sleep_held = sleep_held.replace(guard, "return false;")
     methods = "\n".join(board_method(signature) for signature in (
         "void sleep(uint32_t secs) override", "bool isUsbDataConnected() override",
-        "bool isUsbHostConnected() override"))
-    if lose_sleep_guard:
-        # A negative control must fail at the client-visible reply boundary,
-        # rather than only inspecting whether an implementation string exists.
-        methods = methods.replace("const bool usb_host_connected = isUsbHostConnected();",
-                                  "const bool usb_host_connected = false;")
-        methods = methods.replace("usb_host_sleep_policy.shouldKeepAwake(\n"
-                                  "        millis(), MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS)",
-                                  "false")
+        "bool isUsbHostConnected() override")) + "\n" + sleep_held
     if lose_raw_uart_guard:
         expression = "keep_awake = keep_awake || static_cast<bool>(Serial);"
         assert expression in methods, "Missing raw UART negative-control boundary"
