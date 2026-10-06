@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <math.h>
 #include "helpers/UsbLogging.h"
+#include "helpers/BatteryChargeSupport.h"
 
 #define MAX_HASH_SIZE        8
 #define PUB_KEY_SIZE        32
@@ -239,6 +240,7 @@ public:
   // True while a board can identify an active battery-charging source.
   virtual bool isChargerActive() { return false; }
 
+#if MESH_BATTERY_CHARGE_CONTROL
   // Actual charger voltage, in millivolts. Battery reporting and protection
   // thresholds are separate capabilities. A successful setter must verify
   // hardware readback and persist the setting for the next boot.
@@ -250,6 +252,7 @@ public:
   virtual const char* getBatteryChargeTargetUnsupportedReason() const {
     return "charge.voltage is not supported on this board";
   }
+#endif
 
   // Optional, source-specific power detection. Boards that can distinguish a USB
   // supply from a solar charger override these; defaults keep every other board

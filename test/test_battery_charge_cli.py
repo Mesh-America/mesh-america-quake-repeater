@@ -13,6 +13,38 @@ SANITIZER_FLAGS = [] if os.name == "nt" else [
 
 
 class BatteryChargeCliTest(unittest.TestCase):
+    def test_charger_api_is_scoped_to_supported_boards(self):
+        # Unused virtual hooks still consume flash in small Companion images.
+        # Compile the actual MainBoard interface for every supported macro and
+        # representative unrelated platforms, not only the capability macro.
+        source = r'''
+#include <MeshCore.h>
+#include <type_traits>
+template<class Board> class HasChargeControl {
+  template<class B> static std::true_type probe(decltype(&B::getBatteryChargeTarget));
+  template<class> static std::false_type probe(...);
+public:
+  static constexpr bool value = decltype(probe<Board>(nullptr))::value;
+};
+static_assert(MESH_BATTERY_CHARGE_CONTROL == EXPECT_CHARGE_CONTROL, "capability scope");
+static_assert(HasChargeControl<mesh::MainBoard>::value == bool(EXPECT_CHARGE_CONTROL),
+              "charger virtual hooks must not consume unrelated board flash");
+'''
+        supported = ("TBEAM_SX1262", "TBEAM_SX1276", "TBEAM_SUPREME_SX1262",
+                     "HELTEC_MESH_SOLAR")
+        unrelated = (None, "STM32", "NRF52", "ESP32", "HELTEC_V4")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "test.cpp"
+            path.write_text(source, encoding="ascii")
+            for macro in supported + unrelated:
+                with self.subTest(board=macro):
+                    expected = int(macro in supported)
+                    flags = [f"-D{macro}"] if macro else []
+                    subprocess.run(["c++", "-std=c++11", "-fsyntax-only",
+                                    f"-DEXPECT_CHARGE_CONTROL={expected}", *flags,
+                                    "-I", str(ROOT / "src"), str(path)],
+                                   check=True, capture_output=True)
+
     def test_commands_failures_precision_and_bounded_replies(self):
         source = r'''
 #include <MeshCore.h>
@@ -121,7 +153,7 @@ int main() {
             path = Path(temp)
             (path / "test.cpp").write_text(source, encoding="ascii")
             binary = path / "test"
-            subprocess.run(["c++", "-std=c++11", "-Wall", "-Wextra",
+            subprocess.run(["c++", "-std=c++11", "-Wall", "-Wextra", "-DTBEAM_SX1262",
                             *SANITIZER_FLAGS,
                             "-I", str(ROOT / "src"), str(path / "test.cpp"),
                             "-o", str(binary)], check=True, capture_output=True)
@@ -159,6 +191,7 @@ int main() {
             (path / "Arduino.h").write_text(
                 "#pragma once\n#include <stdint.h>\ninline uint16_t meshSolarGetBattVoltage() {return 7400;}\n",
                 encoding="ascii")
+            (path / "meshSolarApp.h").write_text('#include "Arduino.h"\n', encoding="ascii")
             (path / "helpers/NRF52Board.h").write_text(r'''
 #pragma once
 #include <MeshCore.h>
@@ -172,7 +205,7 @@ using NRF52BoardDCDC = NRF52Board;
 ''', encoding="ascii")
             (path / "test.cpp").write_text(source, encoding="ascii")
             binary = path / "test"
-            subprocess.run(["c++", "-std=c++11", "-I", temp, "-I", str(ROOT / "src"),
+            subprocess.run(["c++", "-std=c++11", "-DHELTEC_MESH_SOLAR", "-I", temp, "-I", str(ROOT / "src"),
                             "-I", str(ROOT / "variants/heltec_mesh_solar"),
                             str(path / "test.cpp"), "-o", str(binary)],
                            check=True, capture_output=True)

@@ -9855,8 +9855,10 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     return true;
   }
 
+#if MESH_BATTERY_CHARGE_CONTROL
   if (mesh::power::handleBatteryChargeCommand(board, command, reply,
                                              reply_capacity)) return true;
+#endif
 
   // Hook for future variant-specific commands not covered by the shared,
   // runtime-aware FEM handlers above.
