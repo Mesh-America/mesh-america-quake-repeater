@@ -27,6 +27,8 @@ class WebConfigStationOwnershipTest(unittest.TestCase):
                 refresh = source[refresh_start:refresh_end]
                 self.assertIn("_webconfig->updateWiFiOwnership(", refresh)
                 body = fixture.replace("@WORKER@", worker).replace("@START@", start)
+                body = body.replace("@SUSPEND@", extract_braced(source,
+                    "void MyMesh::suspendUnconfiguredSetupBridges()"))
                 body = body.replace("@REFRESH@", refresh)
                 self.compile_and_run(body, "-DWITH_MQTT_BRIDGE=1")
                 # A stopped/unconfigured MQTT implementation used to keep

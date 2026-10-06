@@ -263,6 +263,8 @@ jobs:
         run: |
           python3 -B test/test_usb_host_sleep_policy.py
           python3 -B test/test_esp32_usb_sleep.py
+          python3 -B test/test_esp32_full_sleep.py
+          python3 -B test/test_esp32_full_power_lifecycle.py
 
       - name: Verify official web console framing and power-saving idle sessions
         run: python3 -B test/test_official_web_console.py -v

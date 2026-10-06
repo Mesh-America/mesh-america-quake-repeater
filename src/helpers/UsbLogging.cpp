@@ -72,10 +72,12 @@
 
 namespace mesh {
 
-#if defined(ENABLE_USB_INTERFACE)
+#if defined(ENABLE_USB_INTERFACE) \
+    || (defined(ESP32_PLATFORM) && defined(MESHCORE_EXPANDED_PARTITION_PROFILE))
 // A USB Companion owns its primary stream for framed traffic until saved
 // preferences are loaded. Starting disabled prevents early boot diagnostics
 // from corrupting that stream before single-TTY builds can enter terminal mode.
+// Full infrastructure likewise waits for its saved runtime logging preference.
 static std::atomic<bool> usb_logging_enabled{false};
 #else
 static std::atomic<bool> usb_logging_enabled{true};

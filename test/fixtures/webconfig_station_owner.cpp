@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cstring>
 #include <new>
+#include <helpers/WirelessControl.h>
 struct Worker {
   bool running = false, stopping = false;
   bool isRunning() const { return running; }
@@ -22,23 +23,28 @@ struct WebConfigServer {
   bool isRunning() const { return false; }
   bool isStopping() const { return false; }
   void updateWiFiOwnership(bool owner) { owns = owner; }
-  void startAutoMode(char* reply) { strcpy(reply, "starting"); }
-  void startSetupMode(char* reply) { strcpy(reply, "setup"); }
+  bool startAutoMode(char* reply) { strcpy(reply, "starting"); return true; }
+  bool startSetupMode(char* reply) { strcpy(reply, "setup"); return true; }
 };
 struct MyMesh {
   Worker* @WORKER@ = nullptr;
   CLI _cli;
   WebConfigServer* _webconfig = nullptr;
+  bool _unconfigured_setup_espnow_suspended = false;
+  bool isMqttBridgeRunning() const { return @WORKER@ && @WORKER@->isRunning(); }
+  bool isMqttBridgeStopping() const { return @WORKER@ && @WORKER@->isStopping(); }
   struct { unsigned char pub_key[32] = {}; } self_id;
   const char* getFirmwareVer() const { return "test"; }
   const char* getBuildDate() const { return "test"; }
   const char* getRole() const { return "test"; }
   bool startWebConfig(bool force_ap, char* reply);
+  void suspendUnconfiguredSetupBridges();
   void refresh() {
 @REFRESH@
   }
 };
 @START@
+@SUSPEND@
 int main() {
   MyMesh mesh;
   Worker worker;

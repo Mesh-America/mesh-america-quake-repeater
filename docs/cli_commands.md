@@ -296,6 +296,13 @@ again without rebooting. Once an SSID is saved, the cutoff no longer applies
 and the selected WiFi/MQTT mode keeps reconnecting. Other setup sessions retain
 their profile's idle timeout.
 
+Full Repeater and Room Server suspend unconfigured network bridges during
+this setup session. Automatic ESP-NOW retries remain suspended after the AP
+closes, so they cannot keep an unused WiFi driver running. Saved bridge choices
+remain intact; explicitly enabling the bridge resumes it for this boot.
+Stopping a browser OTA session restores only bridges that session actually
+paused, rather than starting services from saved intent alone.
+
 Every ESP32 build with WebConfig supports the browser command terminal,
 including WiFi Companion and Full Companion. Companions use their complete
 USB/TCP terminal on the trusted LAN, including contact import, chat, recipient
@@ -2361,6 +2368,12 @@ for verification steps and the distinction between the fix and the published
 binaries.
 
 Companion firmware defaults this setting to `on`. Full Companion accepts the command from its local USB terminal and exposes the same setting in WebConfig. On ESP32, it lowers the CPU clock to 80 MHz, enables idle yielding, and enables the configured GPS duty cycle. USB and each active wireless transport remain available; SenseCAP Indicator Full keeps only its selected BLE or infrastructure-WiFi secondary transport active. `set powersaving off` restores the board's normal CPU clock and disables the GPS duty cycle. This device setting is separate from LoRa RXPS (`radio.rxps`) and WiFi modem power save (`wifi.powersave`). Infrastructure uses the same commands; its hardware and active-service sleep guards determine when the node can sleep.
+
+Native USB ESP32 Full Companions can also use short light-sleep intervals when
+the BLE/WiFi drivers, ESP-NOW, GPS UART, logging, and USB host sessions are
+inactive and no work is pending. Compiling those transports into Full does not
+itself prevent sleep. Turning off BLE advertising alone leaves its controller
+running and therefore retains idle behavior rather than manual light sleep.
 
 ---
 

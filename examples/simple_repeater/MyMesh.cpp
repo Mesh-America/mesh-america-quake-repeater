@@ -1,6 +1,11 @@
 #include "MyMesh.h"
 #if defined(ESP32_PLATFORM)
 #include <helpers/esp32/BootFileSystem.h>
+#if defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+    || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))
+#include <WiFi.h>
+#include <esp_wifi.h>
+#endif
 #endif
 #include <helpers/UsbLogging.h>
 #include <helpers/HilStartupTrace.h>
@@ -10920,6 +10925,29 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   }
 }
 
+void MyMesh::suspendUnconfiguredSetupBridges() {
+#if defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
+#ifdef WITH_MQTT_BRIDGE
+  if (_cli.getObserverPrefs()->wifi_ssid[0]) return;
+#else
+  char ssid[33] = {};
+  WebConfigServer::loadStandaloneWiFi(ssid, sizeof(ssid), nullptr, 0);
+  if (ssid[0]) return;
+#endif
+  _unconfigured_setup_espnow_suspended = true;
+#ifdef WITH_ESPNOW_BRIDGE
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+  if (espnow_bridge.isRunning()) espnow_bridge.end();
+#else
+  if (bridge.isRunning()) bridge.end();
+#endif
+#endif
+#ifdef WITH_MQTT_BRIDGE
+  if (mqtt_bridge && mqtt_bridge->isRunning()) mqtt_bridge->end();
+#endif
+#endif
+}
+
 bool MyMesh::startWebConfig(bool force_ap, char* reply) {
   if (_cli.getBoard()->isOTAUpdateRunning()) {
     strcpy(reply, "Err: OTA server is running - 'stop ota' first");
@@ -10930,6 +10958,23 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
                                            : "Err: webconfig already running");
     return true;
   }
+  if (mesh::wireless::control().blocked(mesh::wireless::WiFi)) {
+    strcpy(reply, "Error: WiFi disabled; use set wifi on or set 2.4ghz on");
+    return true;
+  }
+#ifdef WITH_MQTT_BRIDGE
+  // A live MQTT worker cannot be rolled back immediately if its stop times
+  // out. Require an explicit stop before a portal that would take its radio.
+  if ((isMqttBridgeRunning() || isMqttBridgeStopping()) && (force_ap
+#if defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
+      || _cli.getObserverPrefs()->wifi_ssid[0] == 0
+#endif
+     )) {
+    strcpy(reply, isMqttBridgeStopping() ? "Err: MQTT bridge is stopping - retry shortly"
+        : "Err: MQTT bridge is running - 'set bridge off' first");
+    return true;
+  }
+#endif
   if (!_webconfig) {
     void* mqtt_prefs = nullptr;
     bool owns_wifi = true;
@@ -10947,21 +10992,38 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
     }
   }
 
+  const bool setup_was_suspended = _unconfigured_setup_espnow_suspended;
+#ifdef WITH_ESPNOW_BRIDGE
+  const bool espnow_was_running = isEspNowBridgeRunning();
+#endif
+  suspendUnconfiguredSetupBridges();
+
 #ifdef WITH_MQTT_BRIDGE
   _webconfig->updateWiFiOwnership(!mqtt_bridge
       || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping()));
 #endif
 
+  bool started;
   if (force_ap) {
-#ifdef WITH_MQTT_BRIDGE
-    if (mqtt_bridge && mqtt_bridge->isRunning()) {
-      strcpy(reply, "Err: MQTT bridge is running - 'set bridge off' first");
-      return true;
+    started = _webconfig->startSetupMode(reply);
+  } else {
+    started = _webconfig->startAutoMode(reply);
+  }
+  if (!started) {
+    // A failed portal must not consume a live operator-started transport.
+    // Restore actual pre-start state, never the saved first-boot defaults.
+    _unconfigured_setup_espnow_suspended = setup_was_suspended;
+    bool restored = true;
+#ifdef WITH_ESPNOW_BRIDGE
+    if (espnow_was_running && !isEspNowBridgeRunning()) {
+      restored = setEspNowBridgeState(true) && restored;
     }
 #endif
-    _webconfig->startSetupMode(reply);
-  } else {
-    _webconfig->startAutoMode(reply);
+    _unconfigured_setup_espnow_suspended = setup_was_suspended;
+    if (!restored) {
+      const size_t used = strlen(reply);
+      snprintf(reply + used, 160 - used, "; bridge resume failed");
+    }
   }
   return true;
 }
@@ -12918,6 +12980,16 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
     // the loop until reboot - otherwise a packet still queued here (busy /
     // duty-limited channel) is lost when the flash spins the loop and reboots.
     drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
+    const bool mqtt_was_running = mqtt_bridge && mqtt_bridge->isRunning();
+#ifdef WITH_ESPNOW_BRIDGE
+    const bool espnow_was_running = espnow_bridge.isRunning();
+#endif
+    auto resume_paused_bridges = [&]() {
+      if (mqtt_was_running) setMqttBridgeState(true);
+#ifdef WITH_ESPNOW_BRIDGE
+      if (espnow_was_running) setEspNowBridgeState(true);
+#endif
+    };
     setBridgeState(false);
     // TODO: Replace this timed settle with a task-exit/join barrier once MQTT
     // teardown can prove that the idle task has reclaimed the worker resources.
@@ -12930,13 +13002,13 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
     if (mqtt_bridge && !mqtt_bridge->canFlashAfterStop()) {
       mesh::usbConsolePort().printf("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge\r\n");
       otaAlert("OTA aborted: MQTT stop unclean, bridge resumed");
-      setBridgeState(true);
+      resume_paused_bridges();
     } else if (!_cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, ota_reply)) {
       mesh::usbConsolePort().printf("OTA: aborted, resuming bridge - %s\r\n", ota_reply);
       char ota_alert_msg[160];
       snprintf(ota_alert_msg, sizeof(ota_alert_msg), "OTA aborted: %s", ota_reply);
       otaAlert(ota_alert_msg);
-      setBridgeState(true);
+      resume_paused_bridges();
     }
     // Success path: otaFromManifest() flashes and reboots into the new image
     // (never returns), so there is no in-boot "success" alert - the START alert
@@ -12964,6 +13036,9 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
 #endif
 
   // is pending dirty contacts write needed?
+#if defined(ESP32_PLATFORM)
+  serviceIdleWiFi();
+#endif
   if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
     const bool saved = acl.save(_fs);
     if (saved) {
@@ -13546,9 +13621,59 @@ bool MyMesh::startNeighborDiscover(char* reply) {
 #endif // WITH_MQTT_NEIGHBORS
 
 // To check if there is pending work
+#if defined(ESP32_PLATFORM)
+void MyMesh::serviceIdleWiFi() {
+#if (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+    || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
+    && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
+    && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
+  if (_cli.getBoard()->isOTAUpdateRunning()) return;
+#ifdef WITH_WEBCONFIG
+  if (isWebConfigActive()) return;
+#endif
+#ifdef WITH_MQTT_BRIDGE
+  if (_ota_update_at) return;
+  if (mqtt_bridge && (mqtt_bridge->isRunning() || mqtt_bridge->isStopping())) return;
+#endif
+#ifdef WITH_ESPNOW_BRIDGE
+  if (isEspNowBridgeRunning()) return;
+#endif
+  // MQTT shutdown and WebConfig-to-OTA handoff retain STA intentionally.
+  // Reclaim it only after the last live owner is gone, using Arduino first
+  // so its private initialized/started cache agrees with the SDK driver.
+  if (WiFi.getMode() == WIFI_OFF && WiFi.channel() > 0
+      && !WiFi.mode(WIFI_STA)) return;
+  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+  if (WiFi.getMode() == WIFI_OFF && esp_wifi_get_mode(&sdk_mode) != ESP_OK) return;
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(false, false);
+  if (!WiFi.mode(WIFI_OFF)) return;
+  // A pure IDF ESP-NOW owner never created an Arduino facade, making OFF a
+  // no-op there. The ownership checks above also protect that startup path.
+  if (esp_wifi_get_mode(&sdk_mode) == ESP_OK) {
+    esp_wifi_stop();
+    esp_wifi_deinit();
+  }
+#endif
+}
+#endif
+
 bool MyMesh::hasPendingWork() const {
   if (isDualRadioActive()) return true;
   if (hasPendingOtaApply()) return true;
+#ifdef WITH_WEBCONFIG
+  if (isWebConfigActive()) return true;
+#endif
+#if defined(ESP32_PLATFORM) \
+    && (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+        || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
+    && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
+    && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
+  // Cleanup may fail while the Arduino facade already reports OFF. Require
+  // the live SDK driver to be gone before permitting manual light sleep.
+  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&sdk_mode) != ESP_ERR_WIFI_NOT_INIT) return true;
+#endif
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
   if (_local_cli_output.busy()) return true;
 #endif
@@ -13556,6 +13681,9 @@ bool MyMesh::hasPendingWork() const {
 #if defined(WITH_BRIDGE)
   const AbstractBridge* active_bridge = activeBridge();
   if (active_bridge && active_bridge->isRunning()) return true;
+#ifdef WITH_MQTT_BRIDGE
+  if (mqtt_bridge && mqtt_bridge->isStopping()) return true;
+#endif
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
   if (isRs232BridgeRunning()) return true;
 #endif

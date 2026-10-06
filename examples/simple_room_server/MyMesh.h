@@ -320,9 +320,14 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
 #endif
 #ifdef WITH_WEBCONFIG
   WebConfigServer* _webconfig = nullptr;
+  bool _unconfigured_setup_espnow_suspended = false;
+  void suspendUnconfiguredSetupBridges();
   bool _wc_batch_active = false;
   bool _wc_restart_pending = false;
   uint8_t _wc_slot_restart_mask = 0;
+#endif
+#if defined(ESP32_PLATFORM)
+  void serviceIdleWiFi();
 #endif
 
   void addPost(ClientInfo* client, const char* postData);
@@ -579,6 +584,9 @@ public:
   // MQTT's WiFi task associates asynchronously. ESP-NOW must wait for that
   // station interface so it can share the AP-selected channel safely.
   bool startSharedEspNowBridgeIfReady() {
+#ifdef WITH_WEBCONFIG
+    if (_unconfigured_setup_espnow_suspended) return false;
+#endif
     if (espnow_bridge.isRunning()) return true;
     if (!_prefs.espnow_bridge_enabled) return false;
     // Keep the browser uploader's bridge pause in effect until OTA stops.
@@ -661,6 +669,10 @@ public:
       return !espnow_bridge.isRunning();
     }
     if (espnow_bridge.isRunning()) return true;
+    if (_cli.getBoard()->isOTAUpdateRunning()) return false;
+#ifdef WITH_WEBCONFIG
+    _unconfigured_setup_espnow_suspended = false;
+#endif
     shared_espnow_retry_at = 0;
     if (bridge && bridge->isRunning()) {
       startSharedEspNowBridgeIfReady();

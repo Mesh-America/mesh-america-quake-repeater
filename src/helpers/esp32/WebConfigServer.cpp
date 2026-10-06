@@ -41,6 +41,7 @@ static_assert(sizeof(WEBCONFIG_AP_PREFIX) <= 28,
 #include "helpers/WebConfigKeys.h"
 #include "helpers/WiFiPowerSave.h"
 #include "helpers/esp32/WiFiRadioPolicy.h"
+#include "helpers/esp32/WiFiAccessPointPolicy.h"
 #include "helpers/esp32/WiFiStationPolicy.h"
 
 // ESPAsyncWebServer closes every ordinary response, so splitting the UI into
@@ -819,28 +820,14 @@ static bool setupAccessPointReady(const char* ssid, int channel) {
 static bool scanSetupNetworks() {
   // Populate the picker before the AP starts, while off-channel scanning
   // cannot interrupt discovery or a client's first connection.
-  WiFi.scanDelete();
   const uint8_t channel = mesh::wifi::stationScanChannel();
-  const int16_t scan_result = WiFi.scanNetworks(true, false, false, 200, channel);
   const uint32_t scan_started = millis();
-  while (WiFi.scanComplete() == WIFI_SCAN_RUNNING
-         && millis() - scan_started < 3600) delay(20);
+  const bool prepared = mesh::wifi::scanBeforeAccessPoint();
   mesh::usbDebugPort().printf(
-      "WebConfig pre-AP scan: channel=%u start=%d result=%d elapsed=%u\n",
-      (unsigned)channel, (int)scan_result, (int)WiFi.scanComplete(),
+      "WebConfig pre-AP scan: channel=%u result=%d elapsed=%u\n",
+      (unsigned)channel, (int)WiFi.scanComplete(),
       (unsigned)(millis() - scan_started));
-  // Arduino's scanComplete() can clear its running flag on a facade timeout
-  // before the SDK scanner stops. Also cancel FAILED scans before enabling AP.
-  if (WiFi.scanComplete() < 0) {
-    if (esp_wifi_scan_stop() != ESP_OK) return false;
-    const uint32_t stop_started = millis();
-    while (WiFi.scanComplete() == WIFI_SCAN_RUNNING
-           && millis() - stop_started < 100) delay(20);
-    WiFi.scanDelete();
-  }
-  // A failed scan still allows manual SSID entry and a browser rescan. An
-  // active scanner must stop before we enable the AP interface.
-  return WiFi.scanComplete() != WIFI_SCAN_RUNNING;
+  return prepared;
 }
 
 bool WebConfigServer::startSetupMode(char reply[]) {

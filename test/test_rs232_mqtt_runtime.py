@@ -12,6 +12,12 @@ from test_replay_reset_integration import extract_braced
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def ota_resume_fields():
+    header = (ROOT / "src/helpers/CommonCLI.h").read_text(encoding="ascii")
+    start = header.index("  bool _wifi_ota_resume_mqtt = false;")
+    return header[start:header.index("#endif", start)]
+
+
 class RS232MQTTRuntimeTests(unittest.TestCase):
     def test_independent_transports_route_retry_restart_and_survive_browser_ota(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
@@ -93,6 +99,7 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
             "ROUTE_TX": routing["logTx"], "SERVICE": implementation[service_start:service_end],
             "PENDING": implementation[pending_start:pending_end], "SET_BRANCHES": sets,
             "GET_BRANCHES": gets, "OTA": cli[ota_start:ota_end],
+            "OTA_STATE": ota_resume_fields(),
             "PARSERS": "\n".join(extract_braced(cli, signature) for signature in (
                 "static bool parseOnOffStrict(", "static bool configKeyEquals(")),
         }.items():
@@ -171,6 +178,7 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
             "PARSERS": "\n".join(extract_braced(cli, signature) for signature in (
                 "static bool parseOnOffStrict(", "static bool configKeyEquals(")),
             "OTA": cli[ota_start:cli.index('    } else if (memcmp(command, "clock", 5)', ota_start)],
+            "OTA_STATE": ota_resume_fields(),
         }
         for key, value in substitutions.items():
             code = code.replace("@" + key + "@", value)

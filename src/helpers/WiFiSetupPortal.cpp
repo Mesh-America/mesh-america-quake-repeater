@@ -13,13 +13,13 @@
 #include <helpers/CLICommandUtils.h>
 #include <helpers/UsbLogging.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
+#include <helpers/esp32/WiFiAccessPointPolicy.h>
 #include <helpers/WirelessControl.h>
 #include <helpers/esp32/WiFiStationPolicy.h>
 
 namespace {
 
 static const IPAddress SETUP_IP(192, 168, 4, 1);
-static const IPAddress SETUP_MASK(255, 255, 255, 0);
 static const uint32_t CONNECT_TIMEOUT_MS = 20000;
 // The rendered success page remains in the browser after the setup SSID
 // disappears; allow one second for the HTTP response to flush first.
@@ -29,6 +29,7 @@ struct PortalImpl {
   WiFiServer server{80};
   DNSServer dns;
   TaskHandle_t task = nullptr;
+  bool started_radio = false;
   WiFiSetupPortal::SaveCallback save_callback = nullptr;
   void* callback_context = nullptr;
   volatile bool* active = nullptr;
@@ -302,6 +303,8 @@ static void portalTask(void* arg) {
   impl->dns.stop();
   impl->server.stop();
   WiFi.softAPdisconnect(true);
+  mesh::wifi::stopTemporaryAccessPointRadio(impl->started_radio);
+  impl->started_radio = false;
   if (impl->active) *impl->active = false;
   impl->task = nullptr;
   vTaskDelete(nullptr);
@@ -333,20 +336,17 @@ bool WiFiSetupPortal::begin(const char* ap_name, SaveCallback save_callback, voi
           sizeof(impl->ap_name) - 1);
   impl->ap_name[sizeof(impl->ap_name) - 1] = 0;
 
-  WiFi.mode(WIFI_AP_STA);
-  if (!WiFi.softAPConfig(SETUP_IP, SETUP_IP, SETUP_MASK)
-      || !WiFi.softAP(impl->ap_name, nullptr,
-                      mesh::wifi::accessPointChannel())
-      || mesh::wifi::applyAccessPointProtocolMask() != ESP_OK
-      || esp_wifi_set_protocol(
-             WIFI_IF_STA,
-             mesh::wifi::kProtocolMask)
-             != ESP_OK) {
+  impl->started_radio = WiFi.getMode() == WIFI_OFF;
+  if (!mesh::wifi::startOpenAccessPoint(impl->ap_name, false)) {
     WiFi.softAPdisconnect(true);
+    mesh::wifi::stopTemporaryAccessPointRadio(impl->started_radio);
+    impl->started_radio = false;
     return false;
   }
   if (!impl->dns.start(53, "*", SETUP_IP)) {
     WiFi.softAPdisconnect(true);
+    mesh::wifi::stopTemporaryAccessPointRadio(impl->started_radio);
+    impl->started_radio = false;
     return false;
   }
   impl->server.begin();
@@ -358,6 +358,8 @@ bool WiFiSetupPortal::begin(const char* ap_name, SaveCallback save_callback, voi
     impl->dns.stop();
     impl->server.stop();
     WiFi.softAPdisconnect(true);
+    mesh::wifi::stopTemporaryAccessPointRadio(impl->started_radio);
+    impl->started_radio = false;
     impl->task = nullptr;
     return false;
   }

@@ -478,7 +478,7 @@ class Esp32UsbSleepTest(unittest.TestCase):
         methods = "\n".join(board_method(signature) for signature in (
             "void sleep(uint32_t secs) override",
             "bool isUsbDataConnected() override",
-            "bool isUsbHostConnected() override"))
+            "bool isUsbHostConnected() override", "bool isUsbSleepHeld()"))
         compiler = os.environ.get("CXX", "c++")
         self.assertIsNotNone(shutil.which(compiler), "a C++17 compiler is required")
         with tempfile.TemporaryDirectory(prefix="meshcore-v4-button-wake-") as directory:
@@ -552,7 +552,7 @@ class Esp32UsbSleepTest(unittest.TestCase):
     def test_raw_uart_driver_preserves_fresh_console_indefinitely_until_end(self):
         methods = "\n".join(board_method(signature) for signature in (
             "void sleep(uint32_t secs) override", "bool isUsbDataConnected() override",
-            "bool isUsbHostConnected() override"))
+            "bool isUsbHostConnected() override", "bool isUsbSleepHeld()"))
         harness = HARNESS.split("int main()", 1)[0] + r'''
 int main() {
   try {
@@ -600,6 +600,7 @@ int main() {
             "void sleep(uint32_t secs) override",
             "bool isUsbDataConnected() override",
             "bool isUsbHostConnected() override",
+            "bool isUsbSleepHeld()",
         ))
         with tempfile.TemporaryDirectory(prefix="meshcore-usb-sleep-") as temp:
             cpp = Path(temp) / "test.cpp"
@@ -629,6 +630,7 @@ int main() {
             "void sleep(uint32_t secs) override",
             "bool isUsbDataConnected() override",
             "bool isUsbHostConnected() override",
+            "bool isUsbSleepHeld()",
         ))
         harness = HARNESS.split("int main()", 1)[0] + r'''
 int main() {
