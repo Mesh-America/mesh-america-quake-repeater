@@ -39,7 +39,7 @@ Status: experimental, first released as an alpha. The alert logic is unit tested
 Shaking detected near 47.61,-122.33. Strength 43.3 cm/s, peak acceleration 148 gal. This does not necessarily indicate an earthquake.
 ```
 
-Coordinates are rounded to two decimals (about 1 km). Strength is the sensor's spectrum intensity (SI) and peak acceleration its PGA. The text is built to fit after the repeater's name; if the name is very long, detail is shortened (`peak 148 gal`, then values dropped) but the closing sentence is never cut. It is a vibration reading from one sensor, not an earthquake report.
+Coordinates are rounded to two decimals (about 1 km). Strength is the sensor's spectrum intensity (SI) and peak acceleration its PGA. The text is built to fit after the repeater's name; if the name is very long, detail is shortened (`peak 148 gal`, then values dropped) but the closing sentence is never cut. It is a vibration reading from one sensor, not an earthquake report. What the numbers mean, and what they do not, is explained in [reading-the-sensor.md](reading-the-sensor.md).
 
 ## Telling which firmware a repeater runs
 
