@@ -171,7 +171,7 @@ jobs:
           import glob, json
           BOARDS = {
               "MeshAmerica_Quake_Repeater_RAK3401": "RAK3401 (RAK12027 earthquake sensor in sensor slot A)",
-              "MeshAmerica_Quake_Repeater_RAK4631": "RAK4631 on a RAK19003 base (RAK12027 in sensor slot C or D, as in the RAK10703 earthquake sensor kit). ALPHA: not yet run on this hardware",
+              "MeshAmerica_Quake_Repeater_RAK4631": "RAK4631 on a RAK19003 base (RAK12027 in sensor slot D, as in the RAK10703 earthquake sensor kit). ALPHA: not yet run on this hardware",
           }
           manifests = [json.load(open(p)) for p in sorted(glob.glob("dist/manifest*.json"))]
           manifests.sort(key=lambda m: m["env"])

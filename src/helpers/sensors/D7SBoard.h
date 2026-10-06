@@ -11,8 +11,8 @@
 // code base. While INT2 is asserted (power-up offset acquisition, earthquake processing) the
 // enable can be pulled low; see docs/d7s-integration.md for what is and is not verified.
 //
-// A RAK4631 on a RAK19003 (the RAK10703 kit) does not need this: the sensor goes in slot C or D
-// there, its INT2 is on IO4 or IO6, and IO2 stays driven high to keep the sensor powered.
+// A RAK4631 on a RAK19003 (the RAK10703 kit) does not need this: the sensor goes in slot D
+// there, its INT2 is on IO6, and IO2 stays driven high to keep the sensor powered.
 inline void d7sBoardOnConfirmed() {
 #if defined(RAK_3401) && defined(PIN_3V3_EN)
   pinMode(PIN_3V3_EN, INPUT_PULLUP);
