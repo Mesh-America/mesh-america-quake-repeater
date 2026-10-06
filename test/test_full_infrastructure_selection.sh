@@ -119,11 +119,12 @@ for target in "${!PIO_ENV_PLATFORM_BY_NAME[@]}"; do
     full_only_count=$((full_only_count + 1))
   fi
 done
-[ "$full_only_count" -eq 147 ] || fail "expected 147 same-partition FULL-only targets, found $full_only_count"
+[ "$full_only_count" -eq 149 ] || fail "expected 149 same-partition FULL-only targets, found $full_only_count"
 
 for target in heltec_rc32_repeater Station_G2_repeater_observer_mqtt \
     Heltec_v3_repeater heltec_v4_r8_repeater \
-    heltec_v4_tft_repeater RAK_3112_repeater; do
+    heltec_v4_tft_repeater RAK_3112_repeater \
+    Station_G3_ESP32_sensor Station_G3_ESP32_r2_sensor; do
   is_esp32_full_only_bulk_target "$target" || fail "missed same-partition FULL-only target $target"
 done
 for target in LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ \

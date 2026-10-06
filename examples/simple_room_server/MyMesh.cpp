@@ -10,6 +10,7 @@
 #include <helpers/radiolib/RxBoostedGainDefaults.h>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/ClientACLCLI.h>
+#include <helpers/ClientACLResponse.h>
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/ClientPathPersistence.h>
 #include <helpers/LazyPersistence.h>
@@ -147,7 +148,7 @@ void MyMesh::pushPostToClient(ClientInfo *client, PostInfo &post) {
   bool sent = false;
   if (reply) {
     reply->radio_reply = true;  // asynchronous response to the room subscription
-    if (client->out_path_len == OUT_PATH_UNKNOWN) {
+    if (!mesh::Packet::isValidPathLen(client->out_path_len)) {
       unsigned long delay_millis = 0;
       sent = sendFloodScoped(default_scope, reply, delay_millis,
                              _prefs.path_hash_mode + 1); // REVISIT
@@ -216,7 +217,11 @@ File MyMesh::openAppend(const char *fname) {
 }
 
 int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload,
-                          size_t payload_len) {
+                          size_t payload_len, size_t reply_capacity) {
+  if (sender == NULL || payload == NULL || payload_len == 0 || reply_capacity < 4) return 0;
+  if (reply_capacity > mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY) {
+    reply_capacity = mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY;
+  }
   // uint32_t now = getRTCClock()->getCurrentTimeUnique();
   // memcpy(reply_data, &now, 4);   // response packets always prefixed with timestamp
   memcpy(reply_data, &sender_timestamp, 4); // reflect sender_timestamp back in response packet (kind of like a 'tag')
@@ -246,6 +251,7 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     return 4 + sizeof(stats);
   }
   if (payload[0] == REQ_TYPE_GET_TELEMETRY_DATA) {
+    if (payload_len < 2) return 0;
     uint8_t perm_mask = ~(payload[1]); // NEW: first reserved byte (of 4), is now inverse mask to apply to permissions
 
     telemetry.reset();
@@ -267,11 +273,13 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     return 4 + tlen; // reply_len
   }
   if (payload[0] == REQ_TYPE_GET_ACCESS_LIST && sender->isAdmin()) {
+    if (payload_len < 3) return 0;
     uint8_t res1 = payload[1];   // reserved for future  (extra query params)
     uint8_t res2 = payload[2];
     if (res1 == 0 && res2 == 0) {
-      uint8_t ofs = 4;
-      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= sizeof(reply_data) - 4; i++) {
+      size_t ofs = 4;
+      // Preserve the legacy seven-byte entries within the encrypted route budget.
+      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= reply_capacity; i++) {
         auto c = acl.getClientByIdx(i);
         if (!c->isAdmin()) continue;  // skip non-Admin entries
         memcpy(&reply_data[ofs], c->id.pub_key, 6); ofs += 6;  // just 6-byte pub_key prefix
@@ -789,7 +797,7 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
     } else {
       mesh::Packet *reply = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, client->shared_secret, reply_data, 13);
       if (reply) {
-        if (client->out_path_len != OUT_PATH_UNKNOWN) { // we have an out_path, so send DIRECT
+        if (mesh::Packet::isValidPathLen(client->out_path_len)) { // we have an out_path, so send DIRECT
           sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
         } else {
           sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
@@ -986,7 +994,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       mesh::Utils::sha256((uint8_t*)&ack_hash, 4, data, 5 + text_len,
                           client->id.pub_key, PUB_KEY_SIZE);
 
-      if (client->out_path_len == OUT_PATH_UNKNOWN) {
+      if (!mesh::Packet::isValidPathLen(client->out_path_len)) {
         mesh::Packet *ack = createAck(ack_hash);
         if (ack) sendFloodReply(ack, TXT_ACK_DELAY, packet->getPathHashSize());
         delay_millis = TXT_ACK_DELAY + REPLY_DELAY_MILLIS;
@@ -1021,7 +1029,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id, secret,
                                   temp, 5 + reply_text_len);
       if (reply) {
-        if (client->out_path_len == OUT_PATH_UNKNOWN) {
+        if (!mesh::Packet::isValidPathLen(client->out_path_len)) {
           sendFloodReply(reply, delay_millis + SERVER_RESPONSE_DELAY,
                          packet->getPathHashSize());
         } else {
@@ -1059,7 +1067,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
         // if client sends too quickly, evict()
 
         // RULE: only send keep_alive response DIRECT!
-        if (client->out_path_len != OUT_PATH_UNKNOWN) {
+        if (mesh::Packet::isValidPathLen(client->out_path_len)) {
           uint32_t ack_hash; // calc ACK to prove to sender that we got request
           mesh::Utils::sha256((uint8_t *)&ack_hash, 4, data, 9, client->id.pub_key, PUB_KEY_SIZE);
 
@@ -1070,7 +1078,9 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           }
         }
       } else {
-        int reply_len = handleRequest(client, sender_timestamp, &data[4], len - 4);
+        const size_t reply_capacity =
+            mesh::clientACLReplyCapacity(packet->isRouteFlood(), packet->path_len);
+        int reply_len = handleRequest(client, sender_timestamp, &data[4], len - 4, reply_capacity);
         if (reply_len > 0) { // valid command
           if (packet->isRouteFlood()) {
             // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
@@ -1080,7 +1090,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           } else {
             mesh::Packet *reply = createDatagram(PAYLOAD_TYPE_RESPONSE, client->id, secret, reply_data, reply_len);
             if (reply) {
-              if (client->out_path_len != OUT_PATH_UNKNOWN) { // we have an out_path, so send DIRECT
+              if (mesh::Packet::isValidPathLen(client->out_path_len)) { // we have an out_path, so send DIRECT
                 sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
               } else {
                 sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
@@ -2290,7 +2300,7 @@ void MyMesh::onUserGpioTimerCompleted(uint8_t pin, uint8_t state,
                                         5 + (size_t)text_len);
   if (!packet) return;
   packet->radio_reply = true;  // delayed GPIO command completion
-  if (client->out_path_len == OUT_PATH_UNKNOWN) {
+  if (!mesh::Packet::isValidPathLen(client->out_path_len)) {
     sendFlood(packet, SERVER_RESPONSE_DELAY, path_hash_size);
   } else {
     sendDirect(packet, client->out_path, client->out_path_len,
