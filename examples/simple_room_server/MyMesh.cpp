@@ -1951,16 +1951,21 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
     bool owns_wifi = true;
 #ifdef WITH_MQTT_BRIDGE
     mqtt_prefs = _cli.getObserverPrefs();
-    owns_wifi = false;
+    owns_wifi = !bridge || (!bridge->isRunning() && !bridge->isStopping());
 #endif
     _webconfig = new WebConfigServer(this, mqtt_prefs, owns_wifi,
                                      self_id.pub_key, getFirmwareVer(), getBuildDate(), getRole(),
-                                     _cli.getBoard()->getManufacturerName());
+                                     _cli.getBoard()->getManufacturerName(), true);
     if (!_webconfig) {
       strcpy(reply, "Err: not enough memory for webconfig");
       return true;
     }
   }
+
+#ifdef WITH_MQTT_BRIDGE
+  _webconfig->updateWiFiOwnership(!bridge
+      || (!bridge->isRunning() && !bridge->isStopping()));
+#endif
 
   if (force_ap) {
 #ifdef WITH_MQTT_BRIDGE
@@ -2742,6 +2747,10 @@ void MyMesh::loop() {
 
 #ifdef WITH_WEBCONFIG
   if (_webconfig) {
+#ifdef WITH_MQTT_BRIDGE
+    _webconfig->updateWiFiOwnership(!bridge
+        || (!bridge->isRunning() && !bridge->isStopping()));
+#endif
     _webconfig->tick(millis());
     if (!_webconfig->isRunning() && !_webconfig->isStopping()) {
       delete _webconfig;

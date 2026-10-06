@@ -331,15 +331,17 @@ static portMUX_TYPE s_wc_route_mux = portMUX_INITIALIZER_UNLOCKED;
 WebConfigServer::WebConfigServer(Callbacks* callbacks, void* mqtt_prefs, bool owns_wifi,
                                  const uint8_t* pub_key, const char* fw_ver,
                                  const char* build_date,
-                                 const char* role, const char* board_name)
-    : _cb(callbacks), _mqtt_prefs(mqtt_prefs), _owns_wifi(owns_wifi), _pub_key(pub_key),
+                                 const char* role, const char* board_name,
+                                 bool standalone_wifi)
+    : _cb(callbacks), _mqtt_prefs(mqtt_prefs), _owns_wifi(owns_wifi),
+      _standalone_wifi(standalone_wifi || mqtt_prefs == nullptr || !owns_wifi), _pub_key(pub_key),
       _fw_ver(fw_ver), _build_date(build_date), _role(role), _board_name(board_name) {
   _mux = xSemaphoreCreateMutex();
   _cli_enabled = loadCliEnabled(true);
 
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs* obs = static_cast<MQTTPrefs*>(_mqtt_prefs);
-  if (obs && _owns_wifi) {
+  if (obs && !_standalone_wifi) {
     strncpy(_wifi_ssid, obs->wifi_ssid, sizeof(_wifi_ssid) - 1);
     strncpy(_wifi_password, obs->wifi_password, sizeof(_wifi_password) - 1);
     _wifi_power_save = obs->wifi_power_save <= mesh::wifi::kPowerSaveMax
@@ -897,6 +899,29 @@ bool WebConfigServer::startLanMode(char reply[]) {
   return true;
 }
 
+bool WebConfigServer::beginSavedStation(uint32_t now) {
+  WiFi.mode(WIFI_STA);
+  if (mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) {
+    return false;
+  }
+  mesh::wifi::setStationAutoReconnect(true);
+  _retry_saved_wifi_in_setup = false;
+  _setup_reconnect_in_progress = false;
+  _setup_reconnect_deadline = 0;
+  _setup_started_at = 0;
+  _wifi_reconnect_tracker.noteDisconnected(now);
+  mesh::wifi::beginStation(_wifi_ssid, _wifi_password);
+  _wifi_power_save = effectiveWiFiPowerSave(_wifi_power_save);
+  wifi_ps_type_t ps_mode =
+      _wifi_power_save == mesh::wifi::kPowerSaveNone ? WIFI_PS_NONE
+      : _wifi_power_save == mesh::wifi::kPowerSaveMax ? WIFI_PS_MAX_MODEM
+                                                       : WIFI_PS_MIN_MODEM;
+  esp_wifi_set_ps(ps_mode);
+  _connect_deadline = now + 15000;
+  if (_connect_deadline == 0) _connect_deadline = 1;
+  return true;
+}
+
 bool WebConfigServer::startAutoMode(char reply[]) {
   if (mesh::wireless::control().blocked(mesh::wireless::WiFi)) {
     strcpy(reply, "Error: WiFi disabled; use set wifi on or set 2.4ghz on");
@@ -908,28 +933,17 @@ bool WebConfigServer::startAutoMode(char reply[]) {
     strcpy(reply, "Err: webconfig busy");
     return false;
   }
-
-  WiFi.mode(WIFI_STA);
-  if (mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) {
+  _connect_deadline = 0;
+  const bool manages_station = _owns_wifi || !_runtime_wifi_ownership_managed;
+  if (manages_station && !beginSavedStation(millis())) {
     strcpy(reply, "Err: failed to reset WiFi station protocol");
     return false;
   }
-  mesh::wifi::setStationAutoReconnect(true);
-  _retry_saved_wifi_in_setup = false;
-  _setup_reconnect_in_progress = false;
-  _setup_reconnect_deadline = 0;
-  _setup_started_at = 0;
-  _wifi_reconnect_tracker.noteDisconnected(millis());
-  mesh::wifi::beginStation(_wifi_ssid, _wifi_password);
-  _wifi_power_save = effectiveWiFiPowerSave(_wifi_power_save);
-  wifi_ps_type_t ps_mode =
-      _wifi_power_save == mesh::wifi::kPowerSaveNone ? WIFI_PS_NONE
-      : _wifi_power_save == mesh::wifi::kPowerSaveMax ? WIFI_PS_MAX_MODEM
-                                                       : WIFI_PS_MIN_MODEM;
-  esp_wifi_set_ps(ps_mode);
   _mode = MODE_CONNECTING;
-  _connect_deadline = millis() + 15000;
-  if (_connect_deadline == 0) _connect_deadline = 1;
+  if (!manages_station) {
+    strcpy(reply, "WebConfig waiting for WiFi owner; use 'get webui' for its IP");
+    return true;
+  }
   snprintf(reply, 160, "WebConfig connecting to '%s'; use 'get webui' for its IP", _wifi_ssid);
   return true;
 }
@@ -1086,6 +1100,14 @@ void WebConfigServer::tick(uint32_t now) {
   }
 
   if (_mode == MODE_CONNECTING) {
+    // A previously active MQTT worker may have stopped while the portal was
+    // waiting for its link. Acquire the station with a fresh bounded attempt.
+    if (_owns_wifi && !_connect_deadline && WiFi.status() != WL_CONNECTED) {
+      if (!beginSavedStation(now)) {
+        _connect_deadline = now + 15000;
+        if (_connect_deadline == 0) _connect_deadline = 1;
+      }
+    }
     if (WiFi.status() == WL_CONNECTED) {
       _wifi_reconnect_tracker.noteConnected();
       _mode = MODE_LAN;
@@ -1095,7 +1117,8 @@ void WebConfigServer::tick(uint32_t now) {
       mesh::usbDebugPort().printf(
           "WebConfig ready: http://%s/\n",
           WiFi.localIP().toString().c_str());
-    } else if (_connect_deadline && (int32_t)(now - _connect_deadline) >= 0) {
+    } else if ((_owns_wifi || !_runtime_wifi_ownership_managed) && _connect_deadline
+               && (int32_t)(now - _connect_deadline) >= 0) {
       mesh::usbDebugPort().printf(
           "WebConfig: WiFi '%s' unavailable; opening setup AP\n", _wifi_ssid);
       const bool retry_saved_wifi = _wifi_ssid[0] != 0;
@@ -1365,7 +1388,7 @@ void WebConfigServer::drainBatch(uint32_t now) {
       const bool admin_pwd = wcIsAdminPasswordKey(e.key);
       const char* value = admin_pwd ? e.cmd + strlen("password ")
                                     : e.cmd + strlen("set ") + strlen(e.key) + 1;
-      if ((_mqtt_prefs == NULL || !_owns_wifi) && strcmp(e.key, "wifi.ssid") == 0) {
+      if (_standalone_wifi && strcmp(e.key, "wifi.ssid") == 0) {
       if (!value[0] || strlen(value) >= sizeof(_wifi_ssid)) {
         strcpy(e.reply, "Error: WiFi SSID must be 1-31 characters");
       } else {
@@ -1374,7 +1397,7 @@ void WebConfigServer::drainBatch(uint32_t now) {
         _standalone_wifi_dirty = true;
         strcpy(e.reply, "OK");
       }
-    } else if ((_mqtt_prefs == NULL || !_owns_wifi) && strcmp(e.key, "wifi.pwd") == 0) {
+    } else if (_standalone_wifi && strcmp(e.key, "wifi.pwd") == 0) {
       if (!mesh::cli::standaloneWiFiPasswordValid(value)) {
         strcpy(e.reply,
                "Error: WiFi password must be 0-63 characters or 64 hex characters");
@@ -1384,7 +1407,7 @@ void WebConfigServer::drainBatch(uint32_t now) {
         _standalone_wifi_dirty = true;
         strcpy(e.reply, "OK");
       }
-    } else if ((_mqtt_prefs == NULL || !_owns_wifi) && strcmp(e.key, "wifi.powersave") == 0) {
+    } else if (_standalone_wifi && strcmp(e.key, "wifi.powersave") == 0) {
       if (strcmp(value, "min") == 0) _wifi_power_save = 0;
       else if (strcmp(value, "none") == 0
                && bluetoothWiFiCoexistenceRequired()) {
@@ -1780,7 +1803,7 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
 #endif
   // The fixed-layout MQTTPrefs path remains limited to 63 characters.
   // Standalone mesh-wifi NVS can also hold a standards-defined 64-hex PSK.
-  doc["wifi_psk64"] = (_mqtt_prefs == NULL || !_owns_wifi);
+  doc["wifi_psk64"] = _standalone_wifi;
   doc["cli"] = _cli_enabled && _mode == MODE_LAN
       && WiFi.status() == WL_CONNECTED && _cb->supportsCliTerminal();
   doc["terminal_stream"] = _cb->supportsStreamTerminal();
