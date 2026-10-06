@@ -19,6 +19,7 @@ class WebConfigStationOwnershipTest(unittest.TestCase):
             with self.subTest(role=role):
                 source = (ROOT / "examples" / role / "MyMesh.cpp").read_text()
                 start = extract_braced(source, "bool MyMesh::startWebConfig(")
+                start += "\n" + extract_braced(source, "bool MyMesh::startWebConfigImpl(")
                 tick = source.index("_webconfig->tick(millis());")
                 refresh_start = source.rfind("#ifdef WITH_MQTT_BRIDGE", 0, tick)
                 refresh_end = source.index("#endif", refresh_start) + len("#endif")
