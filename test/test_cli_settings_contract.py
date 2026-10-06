@@ -63,6 +63,7 @@ COMMON_QUERY_EXCEPTIONS = {
     'wifi.pwd': 'Setter is in the observer or standalone-WiFi delegate',
 }
 OBSERVER_QUERY_EXCEPTIONS = {
+    'link.dns': 'Live resolver list, gateway, and retained per-medium lease diagnostics',
     'mqtt.config.valid': 'Configuration validation result',
     'mqtt.enabled': 'Stored in common NodePrefs; set mqtt.enabled is handled by CommonCLI',
     'mqtt.ntp.diag': 'NTP diagnostics',
