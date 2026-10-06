@@ -2,11 +2,14 @@
 """Run the production charger CLI with hardware/storage failure fixtures."""
 
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+SANITIZER_FLAGS = [] if os.name == "nt" else [
+    "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie"]
 
 
 class BatteryChargeCliTest(unittest.TestCase):
@@ -119,7 +122,7 @@ int main() {
             (path / "test.cpp").write_text(source, encoding="ascii")
             binary = path / "test"
             subprocess.run(["c++", "-std=c++11", "-Wall", "-Wextra",
-                            "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+                            *SANITIZER_FLAGS,
                             "-I", str(ROOT / "src"), str(path / "test.cpp"),
                             "-o", str(binary)], check=True, capture_output=True)
             subprocess.run([str(binary)], check=True)

@@ -37,6 +37,8 @@ is failing, but it avoids silently resetting a saved lower target to 4.2 V.
 | LilyGo T-Beam SX1262 or SX1276 | AXP2101 | 4.00, 4.10, 4.20, 4.35, 4.40 |
 | LilyGo T-Beam S3 Supreme SX1262 | AXP2101 | 4.00, 4.10, 4.20, 4.35, 4.40 |
 
+Targets above 4.2 V require batteries rated for the selected charge voltage.
+
 The classic T-Beam driver detects the fitted AXP192 or AXP2101. Radio type does
 not determine which PMU is present. T-Beam 1W uses a different power design and
 does not support this setting.
