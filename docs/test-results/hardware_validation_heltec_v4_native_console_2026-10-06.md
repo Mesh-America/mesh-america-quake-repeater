@@ -10,6 +10,11 @@ original settings and closed their streams. Final operator readback and owned
 browser/host-service cleanup also passed. Release 1.17.1.9 remains held and
 unpublished.
 
+The subsequent button-profile correction at `ebf2f082` passed host/build checks
+and another native fresh-flash GUI connection with 180-second open/closed
+console intervals. That updated-source checkpoint is recorded separately below;
+it does not extend the older source's 600-second measurements to the new image.
+
 These results extend the [earlier startup investigation](hardware_validation_esp32_web_console_startup_2026-10-05.md)
 to the current normal Full image and native hardware CDC. They are physical
 console stability checks, not a measurement of sleep current, radio traffic
@@ -22,7 +27,7 @@ The requested target was `heltec_v4_repeater`, Full profile. Its resolved
 update identity. Runtime readback had to match the complete version
 `v1.17.1.9-halo-keymind-cascade-dev-c88885a3 (Build: 06-Oct-2026)`.
 The source includes the OTA upload correction in `d2983762` and WiFi ownership
-correction in `95913c53`. The GitHub unit workflow for the current source passed;
+correction in `95913c53`. The GitHub unit workflow for `c88885a3` passed;
 this does not replace the physical checks below or the final release matrix.
 
 | Artifact | Bytes | SHA-256 |
@@ -139,10 +144,9 @@ The USB cable remained attached throughout these trials. The native-host sleep
 guard keeps CPU command service available while the USB host is connected,
 including when its serial port is closed. Power saving on is therefore not
 proof of CPU light-sleep entry, measured current, or physical button wake.
-At this source, V4 lacks the momentary-button wake profile flag. The later
-profile correction is outside this image and needs separate software/build
-and console validation. No physical button access is available in this setup,
-so physical button wake remains unqualified.
+At this source, V4 lacks the momentary-button wake profile flag. Its subsequent
+software/build and console validation is recorded below. No physical button
+access is available in this setup, so physical button wake remains unqualified.
 
 These checks qualify this historical `c88885a3` Full application, native Pi Chromium setup,
 protected active-slot application flash, and measured intervals. They do not
@@ -151,3 +155,55 @@ heavy logging volume, measured power consumption, or RF traffic load. GPIO/reset
 behavior outside the unchanged stock flasher's reset sequence was not separately
 qualified. The release remains unpublished; the final same-source all-board
 build and release packaging are separate gates.
+
+## Updated button-profile checkpoint: `ebf2f082`
+
+Source `ebf2f0823ef8413987d31ccb2d044a2090e88469` enables the existing
+momentary-button wake flag in the shared V4 and V4-R8 profiles. Seven ESP32
+USB/sleep tests and two display-power tests passed. Configuration assertions
+cover 71 firmware profiles, excluding four deliberately standalone partition
+migrators. Six host cases execute actual board sleep/USB methods, real family
+button constructors and implementation, role polling guards, UITask button
+fragments and DisplayPowerPolicy. Three controls must fail if the profile flag,
+gesture polling guard or display wake is removed. These are synthetic GPIO/sleep
+results, not a physical button press.
+
+| Updated artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| Full application | 2,097,560 | `aebfd06f5e35ad636f52f329bd051deb9dfeb633361dc77396c0ee9d4456e7c1` |
+| Merged image | 2,163,096 | `08750bd38f9f71ea37b8739a8b3c26befa91829df6d5754ad9cffbf61a796a90` |
+| Matching ELF | - | `c2ec6d54c32c4b3cb331f9216607480e851933cf4865cc399be9409fdf587467` |
+
+The normal Full target, table, two slots, capabilities and RAM gates passed,
+with the same 20,880-byte required-heap margin. Linked instructions now contain
+the GPIO0 pending-press check, active-low wake and button cleanup, plus the
+gesture polling guard, while retaining radio IRQ14 wake. The HWCDC PHY handoff
+and startup hook remain linked; no TinyUSB USBCDC class is linked. This confirms
+the profile flag reached the application rather than only its source recipe.
+
+The same pinned stock native GUI/flasher and unchanged 5,000 ms deadline were
+used. Before this flash, host-only TTY preparation again changed VMIN/VTIME from
+0/0 to 1/0 with zero explicit modem-signal calls. The app-only ROM preflight
+again selected the protected active slot. Exact runtime readback was
+`v1.17.1.9-halo-keymind-cascade-dev-ebf2f082 (Build: 06-Oct-2026)`.
+
+| Updated-source check | Result |
+| --- | --- |
+| First stock DOM GUI Connect after fresh flash | PASS. Plain time clock-set acknowledgement in 2,036.4 ms; full GUI bootstrap, exact version and original reference checks passed. No extra reset, replug, settle or retry. |
+| Power saving on, USB logging, console open | PASS. 180.061 seconds with zero native writes or keepalives; uptime 17 -> 198 seconds. First post-idle core reply took 39.7 ms; full DOM reconnect time acknowledgement took 45.0 ms. |
+| Power saving on, USB logging, console closed | PASS. 180.100 seconds with streams closed and zero writes; uptime 205 -> 391 seconds. First DOM reconnect time response took 26.7 ms and was the recognized clock-cannot-go-backwards rejection, not an acknowledgement. Full GUI bootstrap passed. |
+| Cleanup and operator readback | PASS. Original power saving off, USB logging, all 15 checked preferences, public identity and ACL response were restored. Streams closed; independent operator readback again matched the exact updated version and original digests at uptime 448 seconds. |
+
+There were no native command errors or GUI modem-signal calls. Radio remained
+in active RX with zero physical RX errors; flags changed 0 -> 8, received
+packets stayed zero and one packet was sent. This remains a receive-silence
+watchdog warning, not a CPU crash or loaded-radio qualification. The owned
+browser and tunnel were closed, the serial port had no owner, original host
+service states were restored, and no Pi network configuration changed.
+
+The compact safe audit records this as `updated_source_checkpoint`, separate
+from the older 600-second trials. The updated source qualifies these
+180-second console intervals; physical button wake, CPU sleep and current draw
+remain untested with USB attached. GitHub unit run `37426156162` for this new
+source is still in progress at this checkpoint. Release 1.17.1.9 remains held
+and unpublished.
