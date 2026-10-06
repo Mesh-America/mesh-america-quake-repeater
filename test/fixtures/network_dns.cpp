@@ -36,8 +36,13 @@ static const ip_addr_t empty_address;
 #define IP_ADDR_ANY (&empty_address)
 static bool ip_addr_isany_val(const ip_addr_t& value) { return !value.text[0]; }
 static char* ipaddr_ntoa_r(const ip_addr_t* value, char* out, int size) {
-  if (size <= 0 || strlen(value->text.data()) >= size_t(size)) return nullptr;
-  strcpy(out, value->text.data());
+  if (size <= 0) return nullptr;
+  const size_t length = strlen(value->text.data());
+  // Match lwIP's partial-write behavior: a short buffer can receive address
+  // bytes without a terminating NUL before conversion reports failure.
+  const size_t written = length < size_t(size) ? length + 1 : size_t(size);
+  memcpy(out, value->text.data(), written);
+  if (length >= size_t(size)) return nullptr;
   return out;
 }
 using esp_err_t = int;
@@ -241,6 +246,44 @@ static void format_scenario() {
   require(dns_writes.size() == writes_before, "read-only DNS diagnostics changed resolver state");
 }
 
+static void ipv6_scenario() {
+  const char* longest = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff";
+  global_dns = {{address(longest, 6), address(longest, 6), address(longest, 6)}};
+  const std::string full = std::string(longest) + "," + longest + "," + longest;
+  for (size_t size = 1; size <= 128; ++size) {
+    std::array<unsigned char, 160> bounded;
+    bounded.fill(0xA5);
+    char* out = reinterpret_cast<char*>(bounded.data() + 8);
+    formatDnsList(out, size, global_dns.data(), 3);
+    for (size_t i = 0; i < 8; ++i) require(bounded[i] == 0xA5, "IPv6 DNS list wrote before destination");
+    for (size_t i = 8 + size; i < bounded.size(); ++i) require(bounded[i] == 0xA5, "IPv6 DNS list exceeded capacity");
+    require(memchr(out, '\0', size) != nullptr, "IPv6 DNS list lost terminator");
+    require(std::string(out) == full.substr(0, size - 1), "IPv6 DNS list changed truncated prefix");
+  }
+  automatic._wifi.snapshotDns();
+  automatic._ethernet.snapshotDns();
+  automatic._selected = NetworkMedium::Ethernet;
+  for (const NetworkLink* link : {static_cast<NetworkLink*>(&automatic._wifi),
+                                 static_cast<NetworkLink*>(&automatic._ethernet),
+                                 static_cast<NetworkLink*>(&automatic)}) {
+    struct Reply { unsigned char before[8]; char text[160]; unsigned char after[8]; } reply;
+    memset(&reply, 0xA5, sizeof(reply));
+    link->formatDns(reply.text, sizeof(reply.text));
+    require(memchr(reply.text, '\0', sizeof(reply.text)) != nullptr, "IPv6 DNS diagnostic lost terminator");
+    require(strncmp(reply.text, "> dns:", 6) == 0, "IPv6 DNS diagnostic lost live resolver prefix");
+    for (unsigned char c : reply.before) require(c == 0xA5, "IPv6 DNS diagnostic underflowed reply");
+    for (unsigned char c : reply.after) require(c == 0xA5, "IPv6 DNS diagnostic overflowed reply");
+  }
+}
+
+static void ipv6_termination_scenario() {
+  const ip_addr_t server = address("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 6);
+  char out[8];
+  memset(out, 0xA5, sizeof(out));
+  formatDnsList(out, sizeof(out), &server, 1);
+  require(memchr(out, '\0', sizeof(out)) != nullptr, "IPv6 DNS list lost terminator");
+}
+
 static void zero_scenario() {
   char canary = 'Z';
   formatDnsList(&canary, 0, global_dns.data(), 3);
@@ -272,6 +315,8 @@ int main(int argc, char** argv) {
     else if (scenario == "never-leased") never_leased_scenario();
     else if (scenario == "renewal") renewal_scenario();
     else if (scenario == "format") format_scenario();
+    else if (scenario == "ipv6") ipv6_scenario();
+    else if (scenario == "ipv6-termination") ipv6_termination_scenario();
     else if (scenario == "zero") zero_scenario();
     else if (scenario == "getter") getter_scenario();
     else throw std::runtime_error("unknown DNS scenario");
