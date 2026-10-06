@@ -51,6 +51,145 @@ def run_logged(command: list[str], log: Path, environment: dict[str, str]) -> No
             raise RuntimeError(f"build failed; see {log}")
 
 
+def capacity_rejected_attempt(manifest_path: Path, version: str, source: str) -> dict:
+    """Recognize only the successful qualification followed by portable-size rejection."""
+    work = manifest_path.parent
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("manifest is not a regular non-symlink file")
+    raw = manifest_path.read_bytes()
+    manifest = json.loads(raw)
+    target = manifest.get("target")
+    if not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", target):
+        raise ValueError("invalid target identity")
+    artifact_version = f"{version}-{source[:8]}"
+    stems = (f"{target}-{artifact_version}", f"{target}-ota-{artifact_version}")
+    if manifest_path.name not in {stem + ".capabilities.json" for stem in stems}:
+        raise ValueError("manifest filename does not match target/version/source")
+    stem = manifest_path.name.removesuffix(".capabilities.json")
+    # Even an unfamiliar sidecar can contain firmware or other failed-build
+    # evidence. Never consume such a package merely because its bin is absent.
+    siblings = list(work.glob(stem + "*"))
+    if siblings != [manifest_path] or list(work.rglob(stem + "*")) != [manifest_path]:
+        raise ValueError("manifest is not the sole same-stem output")
+    recipe = manifest.get("build_recipe")
+    checks = manifest.get("verification")
+    if (type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 2
+            or manifest.get("platform") != "ESP32_PLATFORM"
+            or manifest.get("build_profile") != "standard"
+            or manifest.get("artifact_target") != target
+            or manifest.get("verified") is not True
+            or manifest.get("ota_update_verified") is not True
+            or manifest.get("ota_update_evidence") !=
+               "firmware fits both OTA application slots; otadata present"
+            or not isinstance(checks, list) or not checks
+            or any(not isinstance(check, dict) or check.get("present") is not True
+                   for check in checks)
+            or not isinstance(recipe, dict) or set(recipe) != {"schema_version", "sha256"}
+            or type(recipe.get("schema_version")) is not int or recipe["schema_version"] != 1
+            or not isinstance(recipe.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", recipe["sha256"])):
+        raise ValueError("qualification or original recipe binding is incomplete")
+    log = work / "build-logs" / f"{target}-standard.log"
+    if log.parent.is_symlink() or log.is_symlink() or not log.is_file():
+        raise ValueError("original standard log is missing or unsafe")
+    log_raw = log.read_bytes()
+    lines = log_raw.decode("utf-8").splitlines()
+    overflow = re.fullmatch(
+        r"ESP32 app image is (\d+) bytes, exceeding portable LoRa-OTA "
+        r"slot 0x10000\.\.0x150000 \((\d+) bytes\) by (\d+) bytes",
+        lines[-2] if len(lines) >= 2 else "")
+    marker = (f"DEFERRED: {target} (standard) exceeds the portable OTA slot; "
+              "the expanded FULL pass is required.")
+    version_line = f'    -DFIRMWARE_VERSION="{artifact_version}"'
+    qualification = re.compile(
+        r"Verified \d+ capability marker\(s\); manifest: " + re.escape(str(manifest_path)))
+    if (not overflow or lines[-1] != marker or version_line not in lines
+            or not any(qualification.fullmatch(line) for line in lines[:-2])):
+        raise ValueError("original log does not prove this exact portable-size rejection")
+    size, limit, excess = map(int, overflow.groups())
+    if limit != 0x140000 or size <= limit or excess != size - limit:
+        raise ValueError("portable overflow measurements are inconsistent")
+    return {"target": target, "manifest": manifest_path.name,
+            "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+            "original_log": str(log.relative_to(work)),
+            "original_log_sha256": hashlib.sha256(log_raw).hexdigest(),
+            "build_recipe": recipe, "image_bytes": size,
+            "portable_limit_bytes": limit, "excess_bytes": excess,
+            "reason": "portable_slot_overflow"}
+
+
+def archive_capacity_rejected_attempts(work: Path, version: str, source: str,
+                                      *, project_root: Path = ROOT,
+                                      archive_parent: Path | None = None) -> dict:
+    """Preserve proven manifest-only rejections outside recursive package discovery."""
+    if not re.fullmatch(r"[0-9a-f]{40}", source):
+        raise ValueError("invalid release source commit")
+    if not re.fullmatch(r"v[0-9]+(?:\.[0-9]+){3}-halo-keymind-cascade-dev", version):
+        raise ValueError("invalid release firmware version")
+    work = Path(os.path.abspath(work))
+    parent = Path(os.path.abspath(archive_parent or work.parent))
+    if (work.resolve() != work or not work.is_dir() or parent.resolve() != parent
+            or parent == work or work in parent.parents):
+        raise ValueError("unsafe work/archive location")
+    lock_path = project_root / ".pio" / "build-sh.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.parent.resolve() != lock_path.parent or lock_path.is_symlink():
+        raise ValueError("unsafe build lock location")
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("active build owns the checkout; no attempts were archived") from error
+        candidates = []
+        preserved = []
+        for manifest in sorted(work.glob("*.capabilities.json")):
+            try:
+                candidates.append(capacity_rejected_attempt(manifest, version, source))
+            except (ValueError, OSError, TypeError, AttributeError) as error:
+                preserved.append({"manifest": manifest.name, "reason": str(error)})
+        if not candidates:
+            return {"archived": [], "preserved": preserved, "archive": None}
+        # Complete the scan and recheck every candidate before any file moves.
+        for record in candidates:
+            if capacity_rejected_attempt(work / record["manifest"], version, source) != record:
+                raise ValueError("capacity attempt changed during archival scan")
+        archive = Path(tempfile.mkdtemp(
+            prefix=f".capacity-rejected-{version}-{source[:8]}-", dir=parent))
+        (archive / "manifests").mkdir()
+        (archive / "logs").mkdir()
+        for record in candidates:
+            original = work / record["original_log"]
+            copy = archive / "logs" / original.name
+            shutil.copy2(original, copy)
+            if digest(copy) != record["original_log_sha256"]:
+                raise ValueError("original log changed while preserving rejection evidence")
+        index = {"format": "meshcore-capacity-rejected-attempts-v1",
+                 "source_commit": source, "firmware_version": version,
+                 "work_directory": str(work), "state": "prepared",
+                 "attempts": candidates, "moved_manifests": []}
+        def save_index() -> None:
+            temporary = archive / ".index.json.tmp"
+            temporary.write_text(json.dumps(index, indent=2, sort_keys=True,
+                                             ensure_ascii=True) + "\n", encoding="ascii")
+            temporary.replace(archive / "index.json")
+        save_index()
+        try:
+            for record in candidates:
+                manifest = work / record["manifest"]
+                if capacity_rejected_attempt(manifest, version, source) != record:
+                    raise ValueError("capacity attempt changed before archival move")
+                manifest.rename(archive / "manifests" / manifest.name)
+                index["moved_manifests"].append(manifest.name)
+                save_index()
+        except (ValueError, OSError):
+            index["state"] = "interrupted"
+            save_index()
+            raise
+        index["state"] = "archived"
+        save_index()
+        return {"archived": candidates, "preserved": preserved, "archive": str(archive)}
+
+
 def full_image_pattern(target: str, version: str, short_source: str) -> str:
     return f"{target}-full-*-{version}-{short_source}.bin"
 
@@ -400,6 +539,15 @@ def main() -> None:
     environment["PLATFORMIO_BUILD_DIR"] = str(utility_build_dir)
     work.mkdir(parents=True, exist_ok=True)
     environment["OUTPUT_DIR"] = str(work)
+    if args.resume:
+        archived = archive_capacity_rejected_attempts(work, args.firmware_version, source)
+        if archived["archived"]:
+            print(f'Archived {len(archived["archived"])} proven portable-capacity rejections: '
+                  f'{archived["archive"]}', flush=True)
+        print(f'Preserved {len(archived["preserved"])} other package manifests; '
+              'ordinary resume qualification still applies.', flush=True)
+        # All other packages retain the existing recipe/qualification checks
+        # in build_legacy.sh; this helper never makes them resumable.
     run_logged([
         "bash", "build_legacy.sh", "build-firmwares-logging-matrix",
         "--firmware-version", args.firmware_version,

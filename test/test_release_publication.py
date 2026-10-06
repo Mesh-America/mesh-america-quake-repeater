@@ -21,17 +21,19 @@ FAMILY = VERSION + "-" + SOURCE[:8]
 
 
 class ReleasePublicationTest(unittest.TestCase):
-    def record(self, directory, target, platform="ESP32_PLATFORM", sensor=""):
+    def record(self, directory, target, platform="ESP32_PLATFORM", sensor="", *,
+               publication_target=None, build_profile="auto"):
         directory.mkdir(parents=True, exist_ok=True)
-        stem = target + "-" + FAMILY
+        stem = (publication_target or target) + "-" + FAMILY
         names = [stem + suffix for suffix in (
             [".uf2", ".zip"] if platform == "NRF52_PLATFORM" else [".bin", "-merged.bin"])]
         names += [stem + ".capabilities.json", stem + ".memory.json"]
         for name in names:
             (directory / name).write_bytes((name + "\n").encode("ascii"))
         row = {"artifact_target": target, "target": target.removesuffix("-" + sensor + "-ota") if sensor else target,
-               "platform": platform, "build_profile": "auto", "verified": True,
-               "sensor_profile": sensor, "files": names, "reductions": []}
+               "platform": platform, "build_profile": build_profile, "verified": True,
+               "sensor_profile": sensor, "files": names, "reductions": [],
+               "source_commit": SOURCE, "ota_update_methods": ["lora"]}
         return row, [directory / name for name in names]
 
     def stage(self, directory):
@@ -140,10 +142,114 @@ class ReleasePublicationTest(unittest.TestCase):
                 catalogs.generate(template, plan, family, records,
                                   catalogs.target_profiles(targets), "mikecarper/MeshCore")
 
+    def test_catalog_accepts_standard_and_full_with_the_same_logical_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            plan = self.stage(directory)
+            target = "Station_G2_repeater"
+            published = target + "-full-usb-wifi-ota"
+            row, _ = self.record(directory / "full-profiles", target,
+                                 publication_target=published, build_profile="full")
+            folder = directory / "full-profiles"
+            (folder / "TARGET-MANIFEST.json").write_text(json.dumps([row]))
+            (folder / "SHA256SUMS.txt").write_text("".join(
+                hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.name + "\n"
+                for p in sorted(folder.iterdir())))
+            plan["groups"].append({"key": "full-profiles", "tag": "full-profiles-" + FAMILY,
+                                   "target_count": 1})
+            (directory / "release-plan.json").write_text(json.dumps(plan))
+            plan, family, records = catalogs.read_stage(directory)
+            self.assertEqual([row["artifact_target"] for row, _, _ in records].count(target), 2)
+            targets = {row["publication_target"] for row, _, _ in records} | {
+                "Station_G2_companion_radio_full", target, "RAK_4631_repeater"}
+            result = catalogs.generate(self.template(), plan, family, records,
+                                       catalogs.target_profiles(targets), "mikecarper/MeshCore")
+            entries = result["device"][0]["firmware"]
+            self.assertEqual(len(entries), 3)
+            full = next(entry for entry in entries if entry["subTitle"].startswith(published))
+            self.assertIn("Full profile", full["subTitle"])
+            self.assertTrue(all("/full-profiles-" + FAMILY + "/" in file["url"]
+                                for file in full["version"][FAMILY]["files"]))
+            # Matching filenames do not authorize a profile for another board
+            # or a fabricated Full infix on a standard qualified build.
+            for change in ({"artifact_target": "Other_repeater"}, {"build_profile": "auto"},
+                           {"source_commit": "b" * 40}):
+                (folder / "TARGET-MANIFEST.json").write_text(json.dumps([{**row, **change}]))
+                (folder / "SHA256SUMS.txt").write_text("".join(
+                    hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.name + "\n"
+                    for p in sorted(folder.iterdir()) if p.name != "SHA256SUMS.txt"))
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    catalogs.read_stage(directory)
+            # A second source suffix cannot hide inside an otherwise familiar
+            # family filename while keeping the original cap/memory stems.
+            wrong = {**row, "files": list(row["files"])}
+            for index, name in enumerate(wrong["files"]):
+                if name.endswith(".bin"):
+                    extra = name.replace(FAMILY, FAMILY + "-bbbbbbbb")
+                    (folder / name).rename(folder / extra)
+                    wrong["files"][index] = extra
+            (folder / "TARGET-MANIFEST.json").write_text(json.dumps([wrong]))
+            (folder / "SHA256SUMS.txt").write_text("".join(
+                hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.name + "\n"
+                for p in sorted(folder.iterdir()) if p.name != "SHA256SUMS.txt"))
+            with self.assertRaisesRegex(ValueError, "exact release source/version"):
+                catalogs.read_stage(directory)
+
+    def test_local_release_distinguishes_standard_and_full_by_exact_qualified_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            target = "Station_G2_companion_radio_usb"
+            folder = directory / "firmware/companion"
+            standard, standard_files = self.record(folder, target)
+            full, full_files = self.record(folder, target,
+                publication_target=target + "-full-usb-wifi-ota", build_profile="full")
+            records = [{"manifest": row, "files": files} for row, files in
+                       ((standard, standard_files), (full, full_files))]
+            manifest = {"format": "meshcore-local-release-v1", "source_commit": SOURCE,
+                        "firmware_version": VERSION, "profile": "cascade", "publication": "local-only",
+                        "radio": {"frequency_mhz": 910.525, "bandwidth_khz": 62.5,
+                                  "spreading_factor": 7, "coding_rate": 5},
+                        "firmware_target_count": 2, "migration_board_role_count": 1,
+                        "firmware": [{"target": row["target"], "artifact_target": row["artifact_target"],
+                            "profile": row["build_profile"], "platform": row["platform"],
+                            "files": [str(p.relative_to(directory)) for p in files]}
+                            for row, files in ((standard, standard_files), (full, full_files))]}
+            migrations = directory / "esp32-partition-migration"
+            migrations.mkdir()
+            archive = migrations / ("example-" + FAMILY + "-migration.zip")
+            archive.write_bytes(b"qualified migration fixture")
+            bundle = directory / ("esp32-partition-migration-" + FAMILY + "-release.zip")
+            with zipfile.ZipFile(bundle, "w") as z:
+                z.writestr("release-manifest.json", "{}")
+                z.writestr(archive.name, archive.read_bytes())
+            def write_inventory():
+                (directory / "manifest.json").write_text(json.dumps(manifest))
+                (directory / "SHA256SUMS.txt").write_text("".join(
+                    hashlib.sha256(p.read_bytes()).hexdigest() + "  " + str(p.relative_to(directory)) + "\n"
+                    for p in sorted(directory.rglob("*")) if p.is_file() and p.name != "SHA256SUMS.txt"))
+            with patch.object(package, "collect_artifacts", return_value=records), \
+                 patch("package_esp32_partition_migration.BOARDS", {"example": {}}), \
+                 patch("build_esp32_partition_migration.verify_archive"):
+                write_inventory()
+                self.assertEqual(len(package.collect_local_release(directory, VERSION, SOURCE)[0]), 2)
+                for field, value in (("artifact_target", "Other_companion_radio_usb"),
+                                     ("profile", "auto")):
+                    original = manifest["firmware"][1][field]
+                    manifest["firmware"][1][field] = value
+                    write_inventory()
+                    with self.subTest(field=field), self.assertRaisesRegex(ValueError, "manifest disagrees"):
+                        package.collect_local_release(directory, VERSION, SOURCE)
+                    manifest["firmware"][1][field] = original
+                manifest["firmware"][1]["files"] = manifest["firmware"][0]["files"]
+                write_inventory()
+                with self.assertRaisesRegex(ValueError, "inventory disagrees"):
+                    package.collect_local_release(directory, VERSION, SOURCE)
+
     def test_stable_publication_notes_and_assets_are_ascii(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             row, files = self.record(base / "input", "Station_G2_companion_radio_usb")
+            row.pop("source_commit")  # Actual older cap manifests inherit validated release provenance.
             output = base / "stage"
             argv = ["package", "--input", str(base / "input"), "--output", str(output),
                     "--local-release", "--stable", "--version", "1.17.1.9", "--commit", SOURCE]
@@ -153,12 +259,23 @@ class ReleasePublicationTest(unittest.TestCase):
                 package.main()
             plan = json.loads((output / "release-plan.json").read_text())
             self.assertFalse(plan["groups"][0]["prerelease"])
+            staged_rows = json.loads((output / "companion/TARGET-MANIFEST.json").read_text())
+            self.assertEqual(staged_rows[0]["source_commit"], SOURCE)
+            self.assertNotIn("source_commit", row, "raw capability record was relabeled")
             notes = (output / "companion-notes.md").read_text(encoding="ascii")
             self.assertIn("Stable release", notes)
             self.assertNotIn("Development prerelease", notes)
             for path in output.rglob("*"):
                 if path.is_file():
                     path.read_text(encoding="ascii")
+            bad = {**row, "source_commit": "b" * 40}
+            bad_argv = list(argv)
+            bad_argv[bad_argv.index(str(output))] = str(base / "wrong-source-stage")
+            with patch.object(sys, "argv", bad_argv), patch.object(package, "collect_local_release",
+                    return_value=([{"manifest": bad, "files": files}], [],
+                                  {"frequency": "910.525", "bandwidth": "62.5", "sf": "7", "cr": "5"})), \
+                    self.assertRaisesRegex(ValueError, "another source"):
+                package.main()
 
     def test_local_release_preserves_selected_profiles_and_verifies_complete_inventory(self):
         with tempfile.TemporaryDirectory() as temp:

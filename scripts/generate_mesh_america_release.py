@@ -81,10 +81,9 @@ def read_stage(stage):
         if len(manifests) != group["target_count"]:
             raise ValueError("release target count differs from manifest")
         for row in manifests:
-            key = row["artifact_target"]
-            if key in seen or row.get("verified") is not True:
-                raise ValueError("duplicate or unqualified release profile")
-            seen.add(key)
+            logical_target = row["artifact_target"]
+            if row.get("verified") is not True or row.get("source_commit", source) != source:
+                raise ValueError("unqualified or wrong-source release profile")
             files = []
             for name in row["files"]:
                 if Path(name).name != name or name not in checksums:
@@ -93,12 +92,35 @@ def read_stage(stage):
                 if hashlib.sha256(path.read_bytes()).hexdigest() != checksums[name]:
                     raise ValueError(f"release asset checksum failed: {name}")
                 if path.suffix in SUFFIXES:
-                    if identity(name) != key or family not in name:
-                        raise ValueError("firmware filename differs from qualified profile")
+                    if family not in name:
+                        raise ValueError("firmware filename belongs to a different family")
                     files.append(path)
             if not files:
                 raise ValueError("qualified profile contains no firmware")
-            records.append((row, group["tag"], files))
+            identities = {identity(path.name) for path in files}
+            if len(identities) != 1:
+                raise ValueError("firmware filenames disagree on publication profile")
+            published_target = identities.pop()
+            # Full images keep their OTA identity while the filename adds its
+            # qualified build profile. Do not relabel the logical target.
+            infix = published_target.removeprefix(logical_target)
+            valid_infix = (published_target == logical_target
+                or (published_target.startswith(logical_target + "-") and (
+                    (infix == "-ota" and "lora" in row.get("ota_update_methods", []))
+                    or (row["build_profile"] == "full" and
+                        re.fullmatch(r"-full(?:-usb-wifi|-logging)?(?:-ota)?", infix))
+                    or (row["build_profile"] == "logging" and
+                        re.fullmatch(r"-logging(?:-ota)?", infix)))))
+            qualified_stem = published_target + "-" + family
+            if any(path.stem.removesuffix("-merged") != qualified_stem for path in files):
+                raise ValueError("firmware filename differs from exact release source/version")
+            if (not valid_infix or any(qualified_stem + suffix not in row["files"]
+                                      for suffix in (".capabilities.json", ".memory.json"))):
+                raise ValueError("firmware filename differs from qualified profile")
+            if published_target in seen:
+                raise ValueError("duplicate release publication profile")
+            seen.add(published_target)
+            records.append(({**row, "publication_target": published_target}, group["tag"], files))
     return plan, family, records
 
 
@@ -116,7 +138,7 @@ def generate(catalog, plan, family, records, profiles, repo):
                     by_hardware.setdefault((device["type"], hardware), set()).add(index)
         result["device"][index]["firmware"] = []
     for row, tag, files in records:
-        target = row["artifact_target"]
+        target = row.get("publication_target", row["artifact_target"])
         parsed = profiles[target]
         platform = PLATFORMS[row["platform"]]
         indexes = by_identity.get(target) or by_identity.get(row["target"])
@@ -201,7 +223,7 @@ def main():
     args = parser.parse_args()
     catalog = json.loads(args.catalog.read_text())
     plan, family, records = read_stage(args.stage)
-    targets = {row["artifact_target"] for row, _, _ in records}
+    targets = {row.get("publication_target", row["artifact_target"]) for row, _, _ in records}
     targets.update(identity(file["name"]) for device in catalog["device"]
                    for firmware in device["firmware"] for version in firmware["version"].values()
                    for file in version["files"])

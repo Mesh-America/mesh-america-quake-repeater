@@ -290,18 +290,24 @@ def collect_local_release(directory, version, source):
         if any(category(record) != group.name for record in group_records):
             raise ValueError("local release firmware group disagrees with qualification")
         records.extend(group_records)
-    indexed = {record["manifest"]["artifact_target"]: record for record in records}
+    # Standard and expanded Full images may retain the same OTA identity.
+    # Match each independently qualified package by its exact file inventory;
+    # the logical target alone cannot distinguish those publication profiles.
+    indexed = {frozenset(str(p.relative_to(directory)) for p in record["files"]): record
+               for record in records}
     entries = manifest["firmware"]
     if (len(indexed) != len(records) or len(entries) != len(records)
             or len(records) != manifest["firmware_target_count"]
-            or len({entry["artifact_target"] for entry in entries}) != len(entries)):
+            or any(len(entry["files"]) != len(set(entry["files"])) for entry in entries)
+            or len({frozenset(entry["files"]) for entry in entries}) != len(entries)):
         raise ValueError("local release target inventory disagrees with qualification")
     for entry in entries:
-        record = indexed.get(entry["artifact_target"])
+        record = indexed.get(frozenset(entry["files"]))
         if record is None:
             raise ValueError("local release contains an unqualified target")
         qualified = record["manifest"]
         if (qualified["target"] != entry["target"]
+                or qualified["artifact_target"] != entry["artifact_target"]
                 or qualified.get("source_commit", source) != source
                 or qualified["platform"] != entry["platform"]
                 or qualified["build_profile"] != entry["profile"]
@@ -404,6 +410,8 @@ def main():
         summaries = []
         for record in group["records"]:
             manifest = record["manifest"]
+            if manifest.get("source_commit", args.commit) != args.commit:
+                raise ValueError("qualified firmware belongs to another source")
             file_links = []
             for path in record["files"]:
                 shutil.copy2(path, destination / path.name)
@@ -412,7 +420,10 @@ def main():
                     label = "merged.bin (USB)" if path.name.endswith("-merged.bin") else path.suffix[1:]
                     file_links.append(f'<a href="{html.escape(url)}">{html.escape(label)}</a>')
             methods = ", ".join(manifest.get("ota_update_methods", [])) or "USB"
-            summaries.append({**manifest, "sensor_profile": nrf52_sensor_profile(manifest),
+            # Older capability manifests inherit source provenance from the
+            # validated completed release inventory. Preserve their raw bytes.
+            summaries.append({**manifest, "source_commit": args.commit,
+                              "sensor_profile": nrf52_sensor_profile(manifest),
                               "files": [path.name for path in record["files"]]})
             rows.append(f"<tr><td>{html.escape(manifest['artifact_target'])}</td><td>{html.escape(release_profile_label(manifest))}</td><td>{html.escape(methods)}</td><td>{' | '.join(file_links)}</td></tr>")
         if group['key'] == 'utility':
