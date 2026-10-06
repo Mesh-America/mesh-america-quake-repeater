@@ -155,9 +155,17 @@ int main() {
   reconnect_result=ESP_OK;
   assert(b.reconnectSlotClient(0)==ESP_OK && b._slot_attempt_pending[0]);
   const int stopped_starts = start_calls, stopped_reconnects = reconnect_calls;
+  const auto stopped_failures = b._slots[0].start_failures;
   b._stop_requested = true;
-  assert(b.reconnectSlotClient(0)==ESP_ERR_INVALID_STATE);
-  assert(start_calls==stopped_starts && reconnect_calls==stopped_reconnects);
+  assert(b.reconnectSlotClient(-1)==ESP_ERR_INVALID_ARG);
+  for (bool started : {false, true}) {
+    c._started = started;
+    b._slot_attempt_pending[0] = started;
+    assert(b.reconnectSlotClient(0)==ESP_ERR_INVALID_STATE);
+    assert(start_calls==stopped_starts && reconnect_calls==stopped_reconnects);
+    assert(b._slot_attempt_pending[0]==started && b._slots[0].start_failures==stopped_failures);
+  }
+  b._stop_requested = false;
   return 0;
 }
 '''

@@ -121,7 +121,17 @@ class EspNowLifecycleTests(unittest.TestCase):
         self.assertIn('uint8_t espnow_bridge_enabled = 1;', prefs)
         self.assertIn('setEspNowBridgeState(enable)', common)
         self.assertIn('_prefs->espnow_bridge_enabled', common)
-        self.assertIn('setMqttBridgeState(enable)', common)
+        mqtt_switch = method(common, 'if (strncmp(config, "mqtt.enabled ", 13) == 0)')
+        self.assertIn('enable ? _callbacks->setMqttBridgeState(true)', mqtt_switch)
+        self.assertIn(': _callbacks->requestMqttBridgeStop()', mqtt_switch)
+        # Reject an unsafe restart before changing saved intent. An accepted
+        # OFF command saves successfully before signalling cooperative stop.
+        self.assertLess(mqtt_switch.index('isMqttBridgeStopping()'),
+                        mqtt_switch.index('_prefs->bridge_enabled ='))
+        self.assertLess(mqtt_switch.index('if (!trySavePrefs())'),
+                        mqtt_switch.index('setMqttBridgeState(true)'))
+        self.assertLess(mqtt_switch.index('if (!trySavePrefs())'),
+                        mqtt_switch.index('requestMqttBridgeStop()'))
         self.assertIn('isMqttBridgeRunning()', observer)
         for role in ('simple_repeater', 'simple_room_server'):
             header = (ROOT/f'examples/{role}/MyMesh.h').read_text()
@@ -129,8 +139,12 @@ class EspNowLifecycleTests(unittest.TestCase):
             self.assertIn('setMqttBridgeState(true)', combined)
             self.assertIn('setEspNowBridgeState(true)', combined)
             mqtt = method(header, 'bool setMqttBridgeState(bool enable) override')
+            stop = method(header, 'bool requestMqttBridgeStop() override')
             espnow = method(header, 'bool setEspNowBridgeState(bool enable) override')
             self.assertIn('if (espnow_bridge.isRunning()) espnow_bridge.end();', mqtt)
+            self.assertLess(mqtt.index('isStopping()'), mqtt.index('espnow_bridge.end()'))
+            self.assertIn('->requestStop()', stop)
+            self.assertNotIn('->end()', stop)
             self.assertIn('if (mqtt_bridge' if role == 'simple_repeater' else 'if (bridge', espnow)
 
     def test_sdk_failures_stop_and_restart(self):
