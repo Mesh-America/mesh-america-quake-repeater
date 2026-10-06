@@ -1,0 +1,168 @@
+/* Mesh America theme for VitePress.
+   The design system's tokens (./design/) carry the palette: navy #29487b with a signal-red accent
+   on steel-grey neutrals, Mulish type. Light uses the tokens as they are. Dark re-points the
+   semantic tokens the same way the Quake Repeater flasher and the device configurator do
+   (quake-repeater/src/design/semantic.dark.css in mesh-america-public-apps), because the design
+   system has no dark theme yet. VitePress's own variables are then mapped onto the tokens. */
+
+:root {
+  --font-sans: 'Mulish Variable', 'Mulish', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --vp-font-family-base: var(--font-sans);
+  --vp-font-family-mono: var(--font-mono);
+
+  --vp-c-brand-1: var(--ma-navy-600);
+  --vp-c-brand-2: var(--ma-navy-700);
+  --vp-c-brand-3: var(--ma-navy-600);
+  --vp-c-brand-soft: var(--color-primary-subtle);
+
+  --vp-c-bg: var(--surface-page);
+  --vp-c-bg-alt: var(--surface-subtle);
+  --vp-c-bg-soft: var(--surface-subtle);
+  --vp-c-bg-elv: var(--surface-card);
+  --vp-c-text-1: var(--text-primary);
+  --vp-c-text-2: var(--text-secondary);
+  --vp-c-text-3: var(--text-muted);
+  --vp-c-divider: var(--border-default);
+  --vp-c-gutter: var(--border-subtle);
+  --vp-c-border: var(--border-strong);
+
+  --vp-button-brand-bg: var(--color-primary);
+  --vp-button-brand-hover-bg: var(--color-primary-hover);
+  --vp-button-brand-active-bg: var(--color-primary-active);
+  --vp-button-brand-text: var(--text-on-primary);
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, var(--ma-navy-600) 20%, var(--ma-red-600) 100%);
+  --vp-home-hero-image-background-image: linear-gradient(-45deg, rgba(41, 72, 123, 0.35) 40%, rgba(211, 26, 24, 0.25) 60%);
+  --vp-home-hero-image-filter: blur(48px);
+}
+
+.dark {
+  color-scheme: dark;
+  --surface-page: #0a1220;
+  --surface-card: #0f1c31;
+  --surface-subtle: #0c1728;
+  --surface-sunken: #0a1524;
+  --surface-header: #0e1b30;
+  --text-primary: #eaf0f9;
+  --text-secondary: #b3c2da;
+  --text-muted: #8497b5;
+  --text-subtle: #64789a;
+  --text-link: #8ab8f2;
+  --text-link-hover: #a9ccf8;
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --color-primary: #2f7fd1;
+  --color-primary-hover: #4c95e0;
+  --color-primary-active: #2a72bd;
+  --color-primary-subtle: rgba(47, 127, 209, 0.16);
+  --color-accent: #ef5350;
+
+  --vp-c-brand-1: #8ab8f2;
+  --vp-c-brand-2: #a9ccf8;
+  --vp-c-brand-3: #2f7fd1;
+  --vp-home-hero-name-background: linear-gradient(120deg, #8ab8f2 20%, #ef5350 100%);
+  --vp-home-hero-image-background-image: linear-gradient(-45deg, rgba(47, 127, 209, 0.45) 40%, rgba(239, 83, 80, 0.3) 60%);
+}
+
+/* Headings carry the brand's heavy Mulish. */
+.vp-doc h1,
+.vp-doc h2,
+.VPHero .name,
+.VPHero .text {
+  font-weight: var(--fw-black, 900);
+  letter-spacing: -0.02em;
+}
+.vp-doc h2 {
+  border-top: 0;
+  padding-top: 8px;
+}
+.VPNavBarTitle .title {
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+.VPNavBarTitle .logo {
+  height: 28px;
+}
+
+/* Hero */
+.VPHero .tagline {
+  color: var(--text-secondary);
+}
+.VPHero .text {
+  color: var(--color-accent);
+  font-size: clamp(1.25rem, 3vw, 1.75rem);
+  line-height: 1.25;
+}
+.VPHero .image-src {
+  max-height: 320px;
+  max-width: 320px;
+}
+
+/* Feature cards: tinted icon tile, lift on hover. */
+.VPFeature {
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
+  border-radius: var(--radius-lg, 12px);
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+.VPFeature:hover {
+  transform: translateY(-2px);
+  border-color: var(--color-primary);
+}
+.VPFeature .icon {
+  color: var(--vp-c-brand-1);
+  background-color: var(--color-primary-subtle);
+}
+.VPFeature .icon svg {
+  width: 24px;
+  height: 24px;
+}
+.VPFeature .title {
+  font-weight: 800;
+}
+
+/* Callouts and the sample alert. */
+.custom-block.warning {
+  border-color: var(--color-accent);
+}
+.alert-sample {
+  margin: 1.5rem 0;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--border-default);
+  border-left: 4px solid var(--color-accent);
+  border-radius: var(--radius-lg, 12px);
+  background: var(--surface-card);
+}
+.alert-sample__meta {
+  margin: 0 0 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+.alert-sample p {
+  margin: 0;
+}
+
+/* Screenshots. */
+.vp-doc figure {
+  margin: 1.5rem 0;
+}
+.vp-doc figure img {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg, 12px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+.vp-doc figcaption {
+  margin-top: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+/* The footer message holds a link. */
+.VPFooter .message a {
+  text-decoration: underline;
+}

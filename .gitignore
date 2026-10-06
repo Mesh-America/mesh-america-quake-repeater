@@ -73,5 +73,7 @@ scripts/__pycache__/*
 .mbedtls-4k/
 
 # Quake Repeater documentation site (scripts/build_quake_site.py)
-.quake-site/
-site-quake/
+quake-site/src/
+quake-site/node_modules/
+quake-site/.vitepress/dist/
+quake-site/.vitepress/cache/

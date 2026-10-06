@@ -1,0 +1,72 @@
+/* ===========================================================================
+   Mesh America — Semantic aliases
+   ---------------------------------------------------------------------------
+   Role-based tokens that map the raw palette to meaning. Components and pages
+   reference THESE, never the raw --ma-* scales — so a future theme (e.g. the
+   app's dark mode) can re-point everything in one place.
+   =========================================================================== */
+
+:root {
+  /* ---- Brand: primary (navy) ------------------------------------------ */
+  --color-primary: var(--ma-navy-600);
+  --color-primary-hover: var(--ma-navy-700);
+  --color-primary-active: var(--ma-navy-800);
+  --color-primary-subtle: var(--ma-navy-50);  /* tonal fills, hovered ghost */
+
+  /* ---- Brand: accent (red) -------------------------------------------- */
+  --color-accent: var(--ma-red-600);
+  --color-accent-hover: var(--ma-red-700);
+  --color-accent-active: var(--ma-red-800);
+  --color-accent-subtle: var(--ma-red-50);
+
+  /* ---- Status / feedback ---------------------------------------------- */
+  --color-success: var(--ma-green-600);
+  --color-success-bg: var(--ma-green-100);
+  --color-warning: var(--ma-amber-600);
+  --color-warning-bg: var(--ma-amber-100);
+  --color-danger: var(--ma-red-600);
+  --color-danger-bg: var(--ma-red-100);
+  --color-info: var(--ma-blue-600);
+  --color-info-bg: var(--ma-blue-100);
+  --color-idle: var(--ma-grey-500);
+  --color-idle-bg: var(--ma-grey-100);
+
+  /* ---- Text ----------------------------------------------------------- */
+  --text-primary: var(--ma-grey-900);
+  --text-secondary: var(--ma-grey-700);
+  --text-muted: var(--ma-grey-600);
+  --text-subtle: var(--ma-grey-500);
+  --text-on-primary: var(--ma-white);
+  --text-on-accent: var(--ma-white);
+  --text-on-dark: var(--ma-white);
+  --text-on-dark-muted: rgba(255, 255, 255, 0.72);
+  --text-link: var(--ma-navy-600);
+  --text-link-hover: var(--ma-navy-700);
+
+  /* ---- Surfaces ------------------------------------------------------- */
+  --surface-page: var(--ma-white);
+  --surface-card: var(--ma-white);
+  --surface-subtle: var(--ma-grey-50);
+  --surface-sunken: var(--ma-grey-100);
+  --surface-header: var(--ma-navy-50);   /* app header tint */
+  --surface-inverse: var(--ma-navy-800); /* dark panels, nav drawer */
+  --surface-inverse-deep: var(--ma-navy-900);
+  --surface-overlay: rgba(18, 37, 68, 0.55);
+
+  /* ---- Borders -------------------------------------------------------- */
+  --border-subtle: var(--ma-grey-100);
+  --border-default: var(--ma-grey-200);
+  --border-strong: var(--ma-grey-300);
+  --border-inverse: rgba(255, 255, 255, 0.16);
+  --border-focus: var(--ma-navy-600);
+
+  /* ---- Focus ring (mirrored by --shadow-focus in elevation.css) ------- */
+  --focus-ring: 0 0 0 3px rgba(41, 72, 123, 0.35);
+  --focus-ring-danger: 0 0 0 3px rgba(211, 26, 24, 0.28);
+
+  /* ---- Gradients (brand washes) --------------------------------------- */
+  --gradient-navy: linear-gradient(135deg, var(--ma-navy-600) 0%, var(--ma-navy-800) 100%);
+  --gradient-accent: linear-gradient(135deg, var(--ma-red-600) 0%, var(--ma-red-800) 100%);
+  --gradient-hero-overlay: linear-gradient(180deg, rgba(18, 37, 68, 0.55) 0%, rgba(18, 37, 68, 0.88) 100%); /* @kind color */
+  --gradient-signal: linear-gradient(120deg, var(--ma-navy-600) 0%, var(--ma-red-600) 100%);
+}

@@ -1,0 +1,58 @@
+/* ===========================================================================
+   Mesh America — Color tokens (raw palette)
+   ---------------------------------------------------------------------------
+   Two brand poles: a deep federal NAVY (#29487b) and a signal RED (#d31a18),
+   resolved against cool STEEL-grey neutrals. Navy = structure & trust; red is
+   the sparing "live signal" accent. Greens/ambers/blues are reserved for
+   operational status in the Location Manager app.
+
+   These are the RAW scale values. Components should reference the semantic
+   aliases in semantic.css (--color-primary, --text-primary, …), not these.
+   =========================================================================== */
+
+:root {
+  /* ---- Navy — primary, structural ------------------------------------- */
+  --ma-navy-50:  #f0f4ff; /* app header / tinted surfaces */
+  --ma-navy-100: #e4e9f2;
+  --ma-navy-200: #c2cdde;
+  --ma-navy-300: #8a9bb8;
+  --ma-navy-400: #5a749f;
+  --ma-navy-500: #34568c;
+  --ma-navy-600: #29487b; /* PRIMARY — brand navy */
+  --ma-navy-700: #1f3f6e;
+  --ma-navy-800: #1a3560; /* hero gradient end, deep panels */
+  --ma-navy-900: #122544;
+
+  /* ---- Red — signal accent -------------------------------------------- */
+  --ma-red-50:  #fef3f2;
+  --ma-red-100: #fde7e6;
+  --ma-red-200: #f9cbca;
+  --ma-red-300: #f4a09e;
+  --ma-red-400: #ed6664;
+  --ma-red-500: #e23b39;
+  --ma-red-600: #d31a18; /* ACCENT — brand red */
+  --ma-red-700: #a61412;
+  --ma-red-800: #8f1311;
+  --ma-red-900: #6e0d0c;
+
+  /* ---- Steel — cool neutrals ------------------------------------------ */
+  --ma-white:    #ffffff;
+  --ma-grey-50:  #f8f9fb;
+  --ma-grey-100: #eff1f5;
+  --ma-grey-200: #e5e7eb; /* hairline border */
+  --ma-grey-300: #d7dbe2;
+  --ma-grey-400: #c2c7d0;
+  --ma-grey-500: #a5adbc; /* brand muted */
+  --ma-grey-600: #667085;
+  --ma-grey-700: #475467;
+  --ma-grey-900: #1a1a1a; /* primary text / ink */
+
+  /* ---- Operational status (app) --------------------------------------- */
+  --ma-green-600: #07630b; /* brand "active" green */
+  --ma-green-100: #e2f1e3;
+  --ma-amber-600: #ac6202; /* brand warning */
+  --ma-amber-100: #f8ebd6;
+  --ma-blue-600:  #1d729a; /* brand info (toolbar) */
+  --ma-blue-100:  #dcebf2;
+  --ma-orange-500: #ff8900; /* signal-flare alert accent */
+}
