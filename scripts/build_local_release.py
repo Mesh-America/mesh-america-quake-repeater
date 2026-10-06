@@ -113,6 +113,38 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
     MeshTower SD primary replaces stale internal-only artifacts on resume;
     those files must never be relabeled with the primary's different OTA ID.
     """
+    # Resumed directories can contain portable or transport-specific images
+    # from older release policies. They are recovery inputs, not ordinary
+    # ESP32 choices. Full qualification failures must fail the release rather
+    # than silently substitute one of those smaller images. KISS is a distinct
+    # host-modem role and the ordinary release command skips it separately.
+    def ordinary_record(record: dict) -> bool:
+        manifest = record["manifest"]
+        if manifest["platform"] != "ESP32_PLATFORM":
+            return True
+        target = manifest["target"].lower()
+        if "kiss" in target:
+            return True
+        if ("_lora_ota_no_external_sensors" in target
+                or "terminal_chat" in target
+                or "partition_migrator" in target
+                or "partition_expander" in target
+                or "partition_legacy_seed" in target
+                or target.endswith(("_legacy_partition_test", "_sim"))
+                or target.startswith(("profile_switch_", "profile_fixed_"))
+                or target == "profile_four_tx_v4_rx"):
+            return False
+        if (("companion" in target or "comp_radio" in target)
+                and "companion_radio_full" not in target):
+            return False
+        if (re.search(r"companion_radio_.*_ps(?:_|$)", target)
+                or ("companion_radio_" in target and target.endswith("_femoff"))
+                or target.startswith(("station_g2_logging_", "station_g3_esp32_logging_"))):
+            return False
+        return manifest["build_profile"] == "full"
+
+    records = [record for record in records if ordinary_record(record)]
+
     tower_primary = "heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"
     tower_legacy = {
         "heltec_tower_v2_repeater",
@@ -266,6 +298,10 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
         if requires_uart_full(manifest["target"]) and not proven_rs232(manifest):
             raise ValueError(manifest["target"] + ": Full release requires the verified "
                              "RS232 bridge from its normal repeater")
+    for record in selected:
+        if not qualified_full(record["manifest"]):
+            raise ValueError(record["manifest"]["target"]
+                             + ": ordinary ESP32 release requires a verified Full image")
     return passthrough + selected
 
 
