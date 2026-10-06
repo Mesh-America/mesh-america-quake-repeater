@@ -89,6 +89,9 @@ jobs:
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
 
+      - name: Install signed-package verification dependency
+        run: python3 -m pip install cryptography
+
       - name: Verify ArduinoJson pin
         run: |
           python3 -B scripts/check_arduinojson_pin.py --self-test
