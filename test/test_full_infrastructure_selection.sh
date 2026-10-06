@@ -331,23 +331,24 @@ done
     || fail "matrix emitted duplicate RC32 Full identities"
 )
 
-# A three-identity group keeps the audited plain target; a group without an
-# audited plain Full uses the feature-complete observer. Different hardware
-# variants must remain separate.
+# Canonical board/role identities share one exact Full pass. A group without
+# an audited plain Full keeps its feature-complete observer identity; legacy
+# observer/ESP-NOW aliases must not create duplicate builds or lose a role.
 (
   calls=()
   run_logged_build_targets() {
-    [ "$ESP32_FULL_BUILD" = 1 ] && calls+=("$*")
+    [ "$PACKET_LOGGING_OVERRIDE" = on ] || fail "multi-role Full lost packet logging"
+    [ "$MQTT_BRIDGE_OVERRIDE" = off ] || fail "multi-role Full changed its exact-identity recipe"
+    [ "$MESHDEBUG_OVERRIDE" = off ] || fail "multi-role Full enabled verbose debug"
+    calls+=("$BUILD_PROFILE_EFFECTIVE:$ESP32_FULL_BUILD:$FIRMWARE_FILENAME_INFIX:$*")
   }
   run_logging_matrix_build_targets Heltec_v3_repeater \
     Heltec_v3_repeater_observer_mqtt Heltec_v3_repeater_bridge_espnow \
     Tbeam_SX1262_repeater_bridge_espnow Tbeam_SX1262_repeater_observer_mqtt \
     Heltec_v3_room_server >/dev/null
-  [ "${#calls[@]}" -eq 2 ] || fail "multi-role matrix emitted too many Full passes"
-  [ "${calls[0]}" = 'Heltec_v3_repeater Heltec_v3_room_server' ] \
-    || fail "plain V3 Full identity or separate room role was lost"
-  [ "${calls[1]}" = Tbeam_SX1262_repeater_observer_mqtt ] \
-    || fail "T-Beam observer Full identity was lost"
+  [ "${#calls[@]}" -eq 1 ] || fail "multi-role matrix did not emit one exact Full pass"
+  [ "${calls[0]}" = 'full:1:full-logging:Heltec_v3_repeater Tbeam_SX1262_repeater_observer_mqtt Heltec_v3_room_server' ] \
+    || fail "multi-role Full changed canonical identities, roles, order, or profile"
 )
 
 (
@@ -364,16 +365,19 @@ done
 
 (
   calls=()
-  run_logged_build_targets() { calls+=("$*"); }
+  run_logged_build_targets() {
+    [ "$PACKET_LOGGING_OVERRIDE" = on ] || fail "Full-only bulk lost packet logging"
+    [ "$MQTT_BRIDGE_OVERRIDE" = off ] || fail "Full-only bulk changed its exact-identity recipe"
+    [ "$MESHDEBUG_OVERRIDE" = off ] || fail "Full-only bulk enabled verbose debug"
+    calls+=("$BUILD_PROFILE_EFFECTIVE:$ESP32_FULL_BUILD:$FIRMWARE_FILENAME_INFIX:$*")
+  }
   run_full_esp32_build_targets all heltec_v4_r8_repeater \
     heltec_v4_r8_repeater_observer_mqtt \
     Tbeam_SX1262_repeater_bridge_espnow \
     Tbeam_SX1262_repeater_observer_mqtt >/dev/null
-  [ "${#calls[@]}" -eq 2 ] || fail "Full-only bulk command emitted duplicate roles"
-  [ "${calls[0]}" = heltec_v4_r8_repeater ] \
-    || fail "Full-only bulk command lost the audited plain identity"
-  [ "${calls[1]}" = Tbeam_SX1262_repeater_observer_mqtt ] \
-    || fail "Full-only bulk command lost the T-Beam observer identity"
+  [ "${#calls[@]}" -eq 1 ] || fail "Full-only bulk did not emit one exact Full pass"
+  [ "${calls[0]}" = 'full:1:full-logging:heltec_v4_r8_repeater Tbeam_SX1262_repeater_observer_mqtt' ] \
+    || fail "Full-only bulk changed canonical identities, order, or profile"
 )
 
 (
