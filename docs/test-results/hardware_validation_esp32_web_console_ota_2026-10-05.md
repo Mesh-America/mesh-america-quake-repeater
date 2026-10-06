@@ -92,8 +92,11 @@ its recovery ACLs, and its running MQTT services were not changed by this run.
 
 ## Remaining limits
 
-The user's permanent/intermittent web-console hang has not been reproduced or
-proven fixed. Current tests do not qualify every host OS, physical USB adapter,
-cold power cycle, ESP32 board, or firmware profile. The final V4 build has not
-been flashed through Chromium's remote physical Web Serial interface. Keep
-those limits separate from the successful browser OTA and console idle checks.
+The subsequent [current Full V4 native browser qualification](hardware_validation_heltec_v4_native_console_2026-10-06.md)
+adds actual Pi Chromium Web Serial, the unchanged setup GUI's five-second
+deadline, and measured fresh-flash and power-saving console idle results. The
+older source and boundaries above remain historical evidence. Neither report
+qualifies every host OS, physical USB adapter, cold power cycle, ESP32 board,
+firmware profile, or radio traffic load. USB-attached console checks do not
+establish CPU sleep, measured current or button wake; the subsequent V4
+button-wake correction needs separate qualification.
