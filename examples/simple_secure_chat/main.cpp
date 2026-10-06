@@ -1,4 +1,5 @@
 #include <helpers/RadioProfileCLI.h>
+#include <helpers/BatteryChargeCLI.h>
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #if MESH_PACKET_LOGGING
@@ -468,6 +469,12 @@ public:
   }
 
   void handleCommand(const char* command) {
+    char charge_reply[160];
+    if (mesh::power::handleBatteryChargeCommand(board, command, charge_reply,
+                                               sizeof(charge_reply))) {
+      Serial.println(charge_reply);
+      return;
+    }
 #if defined(NRF52_POWER_MANAGEMENT)
     char voltage_reply[160];
     if (mesh::power::handleVoltagePolicyCommand(command, voltage_reply,

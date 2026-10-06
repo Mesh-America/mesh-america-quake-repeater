@@ -227,6 +227,8 @@ jobs:
       - name: Verify ESP32 static DRAM budget
         run: |
           python3 -B test/test_esp32_dram.py
+          python3 -B test/test_battery_charge_cli.py -v
+          python3 -B test/test_tbeam_charge_target.py -v
           python3 -B test/test_elrs_power.py
           python3 -B test/test_ota_heap_context.py
           python3 -B test/test_ota_self_serve_policy.py -v

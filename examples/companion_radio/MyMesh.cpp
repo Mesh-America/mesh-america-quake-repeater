@@ -1,4 +1,5 @@
 #include <helpers/ui/DisplayPowerSettings.h>
+#include <helpers/BatteryChargeCLI.h>
 #include <helpers/ui/StartupScreen.h>
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
@@ -9853,6 +9854,9 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
                                                _radio_profiles.primaryPreamble());
     return true;
   }
+
+  if (mesh::power::handleBatteryChargeCommand(board, command, reply,
+                                             reply_capacity)) return true;
 
   // Hook for future variant-specific commands not covered by the shared,
   // runtime-aware FEM handlers above.

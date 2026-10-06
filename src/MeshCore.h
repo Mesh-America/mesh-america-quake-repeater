@@ -239,6 +239,18 @@ public:
   // True while a board can identify an active battery-charging source.
   virtual bool isChargerActive() { return false; }
 
+  // Actual charger voltage, in millivolts. Battery reporting and protection
+  // thresholds are separate capabilities. A successful setter must verify
+  // hardware readback and persist the setting for the next boot.
+  virtual bool getBatteryChargeTarget(uint16_t& millivolts) { return false; }
+  virtual bool supportsBatteryChargeTarget(uint16_t millivolts) { return false; }
+  virtual bool setBatteryChargeTarget(uint16_t millivolts) { return false; }
+  virtual const char* getBatteryChargeTargetOptions() const { return nullptr; }
+  virtual bool batteryChargeTargetRestoreFailed() const { return false; }
+  virtual const char* getBatteryChargeTargetUnsupportedReason() const {
+    return "charge.voltage is not supported on this board";
+  }
+
   // Optional, source-specific power detection. Boards that can distinguish a USB
   // supply from a solar charger override these; defaults keep every other board
   // unaffected (the generic CLI prints "n/a" when a capability is absent).
