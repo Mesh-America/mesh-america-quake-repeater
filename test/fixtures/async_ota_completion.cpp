@@ -32,7 +32,12 @@ int xTaskCreate(Task task, const char*, unsigned, void*, unsigned, void*) {
   assert(!pending_task); pending_task=task; return pdPASS;
 }
 @REBOOT_STATE@
-struct Parameter { String text="valid"; String value() { return text; } };
+// Independent MD5 vectors: eight zero bytes, and that payload with byte zero
+// changed to one. The fake models Update's lifecycle rather than its digest
+// algorithm; both vectors are fixed independently of the uploader callbacks.
+const char fixture_md5[]="7dea362b3fac8e00956a4952a3d4f474";
+const char fixture_corrupt_md5[]="33cdeccccebe80329f1fdbee7f5874cb";
+struct Parameter { String text=fixture_md5; String value() { return text; } };
 struct Response {
   int code;
   String body;
@@ -94,14 +99,50 @@ struct AsyncWebServer {
   }
 };
 struct UpdateFake {
-  bool error=false, fail_begin=false, fail_end=false, fail_write=false;
-  int aborts=0, writes=0;
+  bool error=false, running=false, fail_begin=false, fail_end=false, fail_write=false;
+  int aborts=0, writes=0, begins=0, md5_checks=0;
+  String target_md5;
+  std::vector<uint8_t> received;
   bool hasError() const { return error; }
-  bool setMD5(const char* md5) { return String(md5)=="valid"; }
-  bool begin(unsigned, int) { error=fail_begin; return !error; }
-  size_t write(uint8_t*, size_t size) { ++writes; error=fail_write; return fail_write ? size-1 : size; }
-  bool end(bool) { error=fail_end; return !error; }
-  void abort() { error=true; ++aborts; }
+  bool setMD5(const char* md5) {
+    // Arduino-ESP32 2.0.17 checks length here, and checks content at end().
+    if (std::strlen(md5)!=32) return false;
+    target_md5=md5;
+    return true;
+  }
+  bool begin(unsigned, int) {
+    ++begins;
+    if (running) return false;
+    // Pinned UpdateClass::begin() clears a digest set before initialization.
+    target_md5.clear(); received.clear();
+    error=fail_begin; running=!error;
+    return running;
+  }
+  size_t write(uint8_t* data, size_t size) {
+    ++writes;
+    if (error || !running) return 0;
+    if (fail_write) { error=true; running=false; return size-1; }
+    received.insert(received.end(),data,data+size);
+    return size;
+  }
+  bool end(bool) {
+    if (error || !running) return false;
+    if (fail_end) { error=true; running=false; return false; }
+    assert(received.size()==8);
+    const std::vector<uint8_t> normal(8,0);
+    auto corrupted=normal; corrupted[0]=1;
+    assert(received==normal || received==corrupted);
+    const String actual_md5=received==normal ? fixture_md5 : fixture_corrupt_md5;
+    // Match Arduino: an empty target skips validation. Success assertions below
+    // require a real comparison, catching the original pre-begin ordering.
+    if (!target_md5.empty()) {
+      ++md5_checks;
+      if (target_md5!=actual_md5) { error=true; running=false; return false; }
+    }
+    running=false;
+    return true;
+  }
+  void abort() { error=true; running=false; ++aborts; }
   // A connected USB host which does not drain TX can block raw Serial. Every
   // upload error path must complete without attempting that raw print.
   void printError(int) { assert(false && "Raw USB printing can block OTA callbacks"); }
@@ -181,8 +222,10 @@ int main() {
       && !ota_upload_owner && !ota_upload_busy.load());
   Request bad_md5;
   bad_md5.md5.text="invalid";
+  const int aborts_before_bad_md5=Update.aborts;
   upload(bad_md5); complete(bad_md5);
   assert(bad_md5.code==400 && !ota_upload_owner && !ota_upload_busy.load()
+      && Update.aborts==aborts_before_bad_md5+1 && !Update.running
       && bad_md5.connection.timeout_changes==std::vector<unsigned>({3,0}));
   ota.begin(&server,"admin","password");
   Request unauthorized;
@@ -198,7 +241,8 @@ int main() {
   receive(successful,sizeof(chunk),true);
   complete(successful);
   assert(successful.code==200 && successful.body=="OK"
-      && successful.connection._rx_timeout==0 && !pending_task);
+      && successful.connection._rx_timeout==0 && !pending_task
+      && Update.md5_checks==1 && !Update.running);
   in_network_callback=true; successful.disconnected(); in_network_callback=false;
   assert(pending_task && !ota_upload_owner);
   auto task=pending_task; pending_task=nullptr; task(nullptr);
@@ -221,12 +265,52 @@ int main() {
       && !ota_upload_owner && !ota_upload_busy.load() && Update.aborts==0
       && !pending_task && ESP.restarts==0);
   Update.fail_begin=false;
+  // An invalid MD5 must release initialization without creating an owner,
+  // writing bytes, extending the receive timeout, or scheduling a reboot.
+  Request bad_md5;
+  bad_md5.md5.text="invalid";
+  const int writes_before_bad_md5=Update.writes;
+  const int begins_before_bad_md5=Update.begins;
+  upload(bad_md5); complete(bad_md5);
+  assert(bad_md5.code==400 && bad_md5.body=="MD5 parameter invalid"
+      && !bad_md5._tempObject && !bad_md5.disconnected && !ota_upload_owner
+      && !ota_upload_busy.load() && !Update.running && Update.aborts==1
+      && Update.writes==writes_before_bad_md5 && Update.begins==begins_before_bad_md5+1
+      && bad_md5.connection.timeout_changes==std::vector<unsigned>({3,0})
+      && !pending_task && ESP.restarts==0);
+  // A correctly sized but incorrect digest is admitted, then rejected only
+  // after all file bytes arrive. Its owner stays reserved until disconnect.
+  Request mismatched_md5;
+  mismatched_md5.md5.text=fixture_corrupt_md5;
+  upload(mismatched_md5); complete(mismatched_md5);
+  assert(mismatched_md5.code==400 && mismatched_md5.body=="Could not end OTA"
+      && ota_upload_owner==&mismatched_md5 && ota_upload_busy.load()
+      && !*static_cast<bool*>(mismatched_md5._tempObject)
+      && Update.md5_checks==1 && !pending_task && ESP.restarts==0);
+  in_network_callback=true; mismatched_md5.disconnected(); in_network_callback=false;
+  assert(Update.aborts==2 && !ota_upload_owner && !ota_upload_busy.load()
+      && !Update.running && !pending_task && ESP.restarts==0);
+  // Corrupt the actual bytes with the original digest still supplied. This
+  // independently rejects corruption instead of relying on a forced end error.
+  Request corrupt_bytes;
+  uint8_t corrupted_data[8]={1};
+  in_network_callback=true;
+  server.upload(&corrupt_bytes,"firmware",0,corrupted_data,sizeof(corrupted_data),true);
+  in_network_callback=false;
+  complete(corrupt_bytes);
+  assert(corrupt_bytes.code==400 && corrupt_bytes.body=="Could not end OTA"
+      && ota_upload_owner==&corrupt_bytes && ota_upload_busy.load()
+      && !*static_cast<bool*>(corrupt_bytes._tempObject)
+      && Update.md5_checks==2 && !pending_task && ESP.restarts==0);
+  in_network_callback=true; corrupt_bytes.disconnected(); in_network_callback=false;
+  assert(Update.aborts==3 && !ota_upload_owner && !ota_upload_busy.load()
+      && !Update.running && !pending_task && ESP.restarts==0);
   Request corrupt;
   Update.fail_end=true;
   upload(corrupt); complete(corrupt);
   assert(corrupt.code==400 && !pending_task && ESP.restarts==0);
   in_network_callback=true; corrupt.disconnected(); in_network_callback=false;
-  assert(Update.aborts==1 && ota_upload_owner==nullptr);
+  assert(Update.aborts==4 && ota_upload_owner==nullptr);
   Update.fail_end=false;
   Request partial;
   uint8_t chunk[4]={};
@@ -236,7 +320,7 @@ int main() {
   upload(concurrent); complete(concurrent);
   assert(concurrent.code==409 && ota_upload_owner==&partial);
   in_network_callback=true; partial.disconnected(); in_network_callback=false;
-  assert(Update.aborts==2 && ota_upload_owner==nullptr && ESP.restarts==0);
+  assert(Update.aborts==5 && ota_upload_owner==nullptr && ESP.restarts==0);
   assert(ota.setEnabled(false));
   Request stopped;
   upload(stopped); complete(stopped);
@@ -257,11 +341,12 @@ int main() {
   assert(write_failed.code==400 && write_failed.body=="OTA flash write failed"
       && !pending_task);
   in_network_callback=true; write_failed.disconnected(); in_network_callback=false;
-  assert(Update.aborts==3 && !ota_upload_owner && !ota_upload_busy.load());
+  assert(Update.aborts==6 && !ota_upload_owner && !ota_upload_busy.load());
   Update.fail_write=false;
   Request valid;
   upload(valid); complete(valid);
-  assert(valid.code==200 && valid.disconnected && !pending_task && ESP.restarts==0);
+  assert(valid.code==200 && valid.disconnected && !pending_task && ESP.restarts==0
+      && Update.md5_checks==3 && !Update.running);
   // The response drains before disconnect; its callback only schedules work.
   in_network_callback=true; valid.disconnected(); in_network_callback=false;
   assert(pending_task && ESP.restarts==0);

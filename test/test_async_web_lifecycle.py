@@ -67,6 +67,22 @@ static std::atomic<bool> ota_upload_busy{false};"""
         with self.assertRaises(AssertionError):
             self.compile_and_run(old,"-DESP32=1","-DTEST_OTA_BODY_TIMEOUT=1")
 
+    def test_md5_survives_begin_and_rejected_digest_releases_update(self):
+        fixture=self.uploader_fixture()
+        self.compile_and_run(fixture,"-DESP32=1")
+        guard=extract_braced(fixture,"if(!Update.setMD5(")
+        marker="            #if defined(ESP8266)\n                int cmd"
+        before_begin=fixture.replace(guard,"",1).replace(marker,guard+"\n"+marker,1)
+        self.assertNotEqual(fixture,before_begin,"The negative control must set MD5 before begin")
+        with self.assertRaises(AssertionError):
+            self.compile_and_run(before_begin,"-DESP32=1")
+        for cleanup in ("Update.abort();", "ota_upload_busy.store(false);"):
+            with self.subTest(rejected_digest_cleanup=cleanup):
+                missing=fixture.replace(guard,guard.replace(cleanup,"",1),1)
+                self.assertNotEqual(fixture,missing,"The negative control must remove rejection cleanup")
+                with self.assertRaises(AssertionError):
+                    self.compile_and_run(missing,"-DESP32=1")
+
     def test_tcp_listener_can_rebind_with_completed_connections(self):
         cached=ROOT/".pio/libdeps/heltec_v4_repeater_observer_mqtt/AsyncTCP/src/AsyncTCP.cpp"
         source=(cached.read_text() if cached.exists() else urllib.request.urlopen(
