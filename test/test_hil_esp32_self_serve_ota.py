@@ -25,7 +25,9 @@ def load_module(name, path):
     return module
 
 
-SOAK = load_module("self_serve_test_soak", HIL_DIR / "s3_memory_soak.py")
+SESSION = load_module("self_serve_test_serial_session", HIL_DIR / "serial_session.py")
+with mock.patch.dict(sys.modules, {"serial_session": SESSION}):
+    SOAK = load_module("self_serve_test_soak", HIL_DIR / "s3_memory_soak.py")
 with mock.patch.dict(sys.modules, {"s3_memory_soak": SOAK}):
     HIL = load_module("self_serve_test_harness", HIL_DIR / "esp32_self_serve_ota.py")
 

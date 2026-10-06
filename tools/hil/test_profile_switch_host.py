@@ -1,10 +1,44 @@
 """Regression tests for the serial HIL result reader."""
 import unittest
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from types import SimpleNamespace
-from profile_switch import read_response, exchange_ready, configure_session, exchange
+from profile_switch import read_response, exchange_ready, configure_session, exchange, open_session
+
+if os.name == "posix":
+    import serial.serialposix
+
+    class PosixModemSerial(serial.serialposix.Serial):
+        """Actual pySerial on a PTY, with only modem ioctls simulated.
+
+        The CP2102 kernel-open state observed in HIL asserts both lines. The
+        board's reset circuit is driven when DTR is cleared before RTS.
+        """
+        def __init__(self, *args, **kwargs):
+            self.modem_lines = {"dtr": True, "rts": True}
+            self.modem_edges = []
+            self.flow_at_reconfigure = []
+            super().__init__(*args, **kwargs)
+
+        def _reconfigure_port(self, force_update=False):
+            self.flow_at_reconfigure.append(self.dsrdtr)
+            super()._reconfigure_port(force_update)
+
+        def _set_modem_line(self, name, value):
+            self.modem_lines[name] = value
+            self.modem_edges.append((name, value, self.modem_lines.copy()))
+
+        def _update_dtr_state(self):
+            self._set_modem_line("dtr", self._dtr_state)
+
+        def _update_rts_state(self):
+            self._set_modem_line("rts", self._rts_state)
+
+        def has_reset_transition(self):
+            return any(not lines["dtr"] and lines["rts"]
+                       for _, _, lines in self.modem_edges)
 
 
 class Port:
@@ -27,14 +61,106 @@ class SessionPort:
         self.is_open = False
         self.dtr = True
         self.rts = True
+        self.dsrdtr = False
         self.opened_control_lines = None
+        self.close_count = 0
 
     def open(self):
         self.opened_control_lines = (self.dtr, self.rts)
         self.is_open = True
 
+    def close(self):
+        self.close_count += 1
+        self.is_open = False
+
+
+class FailingSessionPort(SessionPort):
+    def __init__(self, phase):
+        super().__init__("test")
+        self.failure_phase = phase
+
+    def __setattr__(self, name, value):
+        if getattr(self, "is_open", False):
+            phase = getattr(self, "failure_phase", None)
+            if name == phase or (phase == "restore" and name == "dsrdtr" and not value):
+                raise RuntimeError(phase + " failed")
+        object.__setattr__(self, name, value)
+
+    def open(self):
+        if self.failure_phase == "open":
+            raise RuntimeError("open failed")
+        super().open()
+
 
 class ResultReaderTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "Requires the POSIX pySerial backend")
+    def test_actual_posix_open_avoids_reset_and_preserves_native_dtr(self):
+        master, slave = os.openpty()
+        try:
+            device = os.ttyname(slave)
+            for vid, expected in ((0x10C4, False), (0x1A86, False),
+                                  (0x303A, True), (0x2886, True), (0x239A, True)):
+                with self.subTest(vid=vid):
+                    port = PosixModemSerial()
+                    port.port = device
+                    try:
+                        with patch("profile_switch.list_ports.comports", return_value=[
+                                SimpleNamespace(device=device, vid=vid)]):
+                            open_session(port)
+                        self.assertFalse(port.has_reset_transition(), port.modem_edges)
+                        self.assertEqual(port.modem_lines, {"dtr": expected, "rts": False})
+                        self.assertFalse(port.dsrdtr)
+                        if expected:
+                            self.assertNotIn(True, port.flow_at_reconfigure,
+                                             "Native USB entered the bridge handoff")
+                    finally:
+                        port.close()
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    @unittest.skipUnless(os.name == "posix", "Requires the POSIX pySerial backend")
+    def test_actual_posix_old_open_order_is_a_reset_negative_control(self):
+        master, slave = os.openpty()
+        port = PosixModemSerial()
+        port.port = os.ttyname(slave)
+        try:
+            with patch("profile_switch.list_ports.comports", return_value=[]):
+                configure_session(port)
+            port.open()  # Former caller sequence, using actual pySerial open.
+            self.assertTrue(port.has_reset_transition(), port.modem_edges)
+        finally:
+            port.close()
+            os.close(master)
+            os.close(slave)
+
+    def test_other_backend_does_not_use_dsr_handshaking(self):
+        class OtherBackendPort(SessionPort):
+            def __setattr__(self, name, value):
+                if name == "dsrdtr" and value:
+                    raise AssertionError("Other backend entered DSR handshaking")
+                super().__setattr__(name, value)
+
+        port = OtherBackendPort("test")
+        with patch("profile_switch.os.name", "nt"), patch(
+                "profile_switch.list_ports.comports", return_value=[]):
+            open_session(port)
+        self.assertTrue(port.is_open)
+        self.assertEqual(port.opened_control_lines, (False, False))
+        self.assertFalse(port.dsrdtr)
+
+    def test_failed_open_or_line_release_closes_and_restores_flow(self):
+        for phase in ("open", "rts", "dtr", "restore"):
+            with self.subTest(phase=phase):
+                port = FailingSessionPort(phase)
+                with patch("profile_switch.os.name", "posix"), patch(
+                        "profile_switch.list_ports.comports", return_value=[]):
+                    with self.assertRaisesRegex(RuntimeError, phase + " failed"):
+                        open_session(port)
+                self.assertFalse(port.is_open)
+                self.assertFalse(port.dsrdtr)
+                self.assertEqual(port.close_count, 1)
+
     def test_timing_runs_get_correlated_cached_replies(self):
         port = Port([])
         with patch("profile_switch._run_sequences", iter([99])), patch(

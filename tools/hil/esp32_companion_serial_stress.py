@@ -30,6 +30,7 @@ import struct
 import sys
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from serial_session import open_configured_session
 
 
 HOST_FRAME_MARKER = ord("<")
@@ -466,9 +467,9 @@ def _make_pyserial_factory() -> Callable[[StressConfig], Any]:
         ) from exc
 
     def factory(config: StressConfig) -> Any:
-        # Native USB/JTAG devices may require DTR for the CDC session. Set both
-        # control lines while closed and keep RTS deasserted, including when
-        # opting into DTR, to avoid deliberately driving the ESP reset line.
+        # Native USB/JTAG devices may require DTR for the CDC session. POSIX
+        # pySerial opens bridges by applying DTR before RTS; defer DTR there
+        # so a kernel's initial asserted lines cannot pulse the ESP reset line.
         port = serial.Serial()
         port.port = config.port
         port.baudrate = config.baudrate
@@ -476,7 +477,7 @@ def _make_pyserial_factory() -> Callable[[StressConfig], Any]:
         port.write_timeout = config.write_timeout
         port.dtr = config.dtr
         port.rts = False
-        port.open()
+        open_configured_session(port)
         return port
 
     return factory

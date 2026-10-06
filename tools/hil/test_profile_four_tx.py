@@ -1,6 +1,7 @@
 import ast
 import copy
 import json
+import importlib.util
 from pathlib import Path
 import re
 import subprocess
@@ -15,6 +16,44 @@ from profile_four_tx import check_scan,check_sent,parse_args
 from profile_four_tx_fixture import TXS,RX,resolve
 
 class FourTransmitterTests(unittest.TestCase):
+    def test_current_collector_opens_with_legacy_and_current_native_dependencies(self):
+        from test_profile_switch_host import SessionPort
+
+        class NativePort(SessionPort):
+            def __init__(self):
+                super().__init__('test')
+
+            def reset_input_buffer(self):
+                pass
+
+        def legacy_configure(port):
+            port.dtr=True
+            port.rts=False
+
+        # The repeat harness injects today's collector into an immutable old
+        # bundle. That native-only snapshot exports configure_session but not
+        # open_session. Exercise actual module import and its opening function.
+        legacy=SimpleNamespace(configure_session=legacy_configure,exchange=lambda *args:None,
+                               exchange_ready=lambda *args:None,read_packet_response=lambda *args:None)
+        current=sys.modules['profile_switch']
+        path=Path(__file__).with_name('profile_four_tx.py')
+        for dependency in (legacy,current):
+            with self.subTest(snapshot='legacy' if dependency is legacy else 'current'):
+                port=NativePort()
+                with patch.dict(sys.modules,{'profile_switch':dependency}), patch.object(
+                        dependency,'exchange',return_value={'bench':'production-profile-switch-v8','ready':True}), patch(
+                        'serial.Serial',return_value=port), patch('serial.tools.list_ports.comports',return_value=[
+                            SimpleNamespace(device='/dev/native_fixture',vid=0x303A)]):
+                    spec=importlib.util.spec_from_file_location('four_tx_repeat_import_test',path)
+                    collector=importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(collector)
+                    with patch.object(collector,'resolve',return_value='/dev/native_fixture'):
+                        opened,info=collector.open_radio(RX)
+                self.assertIs(opened,port)
+                self.assertTrue(info['ready'])
+                self.assertEqual(port.opened_control_lines,(True,False))
+                port.close()
+
     def test_dwell_override_changes_only_requested_visit_time(self):
         default=parse_args([])
         self.assertEqual((default.dwell_symbols,default.dwell_us),(5.1,41780))

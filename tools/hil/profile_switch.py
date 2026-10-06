@@ -10,6 +10,7 @@ import time
 
 import serial
 from serial.tools import list_ports
+from serial_session import open_configured_session
 
 _run_sequences = itertools.count(secrets.randbelow(0x3fffffff) + 1)
 
@@ -22,6 +23,12 @@ def configure_session(port):
     port.dtr = any(info.vid in (0x303A, 0x2886, 0x239A)
                    and os.path.realpath(str(info.device)).casefold() == device
                    for info in list_ports.comports())
+
+
+def open_session(port):
+    """Open a configured native session or a bridge without pulsing reset."""
+    configure_session(port)
+    open_configured_session(port)
 
 
 def read_response(port, key, timeout, expected=None):
@@ -113,9 +120,8 @@ def main():
     port.baudrate = 115200
     port.timeout = 0.25
     port.write_timeout = 2
-    configure_session(port)
     try:
-        port.open()
+        open_session(port)
         port.reset_input_buffer()
         info = exchange(port, "info", "bench", 5)
         if info.get("bench") != "production-profile-switch-v8" or not info.get("ready"):

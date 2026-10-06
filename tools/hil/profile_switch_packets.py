@@ -6,7 +6,7 @@ import secrets
 from pathlib import Path
 
 import serial
-from profile_switch import exchange, exchange_ready, read_packet_response, configure_session
+from profile_switch import exchange, exchange_ready, read_packet_response, open_session
 from profile_switch_sweep import CASES, BULK_CASES, PRODUCTION_CASES
 
 
@@ -14,8 +14,7 @@ def open_port(name):
     port = serial.Serial()
     port.port, port.baudrate, port.timeout = name, 115200, 0.25
     port.write_timeout = 2
-    configure_session(port)
-    port.open()
+    open_session(port)
     port.reset_input_buffer()
     info = exchange(port, "info", "bench", 5)
     if info.get("bench") != "production-profile-switch-v8" or not info.get("ready"):

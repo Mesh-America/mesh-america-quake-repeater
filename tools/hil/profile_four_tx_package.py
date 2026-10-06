@@ -41,7 +41,7 @@ for name in ('firmware.bin','partitions.bin','bootloader.bin'):
     add('rx-'+name,(ROOT/'.pio/build'/RX['env']/name).read_bytes())
 add('rx-boot_app0.bin',(Path.home()/'.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin').read_bytes())
 for name in ('profile_four_tx_fixture.py','profile_four_tx_deploy.py','profile_four_tx.py',
-             'profile_switch.py','profile_switch_channels.py','profile_switch_packets.py',
+             'profile_switch.py','serial_session.py','profile_switch_channels.py','profile_switch_packets.py',
              'profile_switch_sweep.py'):
     add(name,(ROOT/'tools/hil'/name).read_bytes())
 for name in ('profile_fixed_tx.cpp','profile_fixed_tx.ini','profile_switch.cpp','profile_switch_channels.h',
