@@ -39,6 +39,18 @@ The sensor's supply rail is unresolved. WisMap and the module pin table show VDD
 
 On a RAK3401 the stock firmware drives IO2 high. That would fight INT2, so once a D7S is confirmed (first valid state read, never on the scan ACK alone) `d7sBoardOnConfirmed()` in `src/helpers/sensors/D7SBoard.h` releases IO2 to an input with the internal pull-up; other builds, and images with no D7S attached, keep IO2 driven high. This applies to a D7S in any slot. It is a deliberate exception to the rule used elsewhere in this code base that IO2 (the shared 3V3_S rail enable) is never released. Low-voltage shutdown still drives IO2 low. Nothing in this repository shows what happens while INT2 is asserted (power-up offset acquisition, earthquake processing): the enable can be pulled low, which may cut the sensor's own supply if it is on 3V3_S, and may affect the RAK13302 booster. Whether IO2 gates the booster is also unresolved: the variant comment inherited from the base target says it does, WisMap shows the RAK13302 using no IO2 or 3V3_S, and RAK's RAK13302 datasheet lists pin 6 as 3V3_S without stating its function. An earlier diagnostic build ran with IO2 as a plain input and INT2 active and the sensor communicated, which is indirect evidence only. Measure TX power with the sensor fitted at idle and while INT2 is asserted, and the sensor's supply voltage during offset acquisition, before treating either as verified.
 
+## Hardware notes (RAK19003 + RAK4631 + RAK12027: the RAK10703 kit)
+
+Status: **alpha, not yet run on this hardware.** The RAK10703 earthquake sensor kit is a RAK19003 mini base board, a RAK4631 core and a RAK12027 (D7S) in an IP65 Unify enclosure with a solar panel and an integrated antenna (the RAK10703-K kit has no battery; the RAK10703 solution is assembled and has one). The `MeshAmerica_Quake_Repeater_RAK4631` environment builds this combination, and also any RAK4631 on another WisBlock base with the sensor fitted. The kit ships with RAK's own firmware; this one replaces it. Facts below come from RAK's product page and datasheets, read on 2026-10-05.
+
+- **Slot.** The RAK19003 has two sensor slots, **C and D**, not A. RAK's RAK12027 datasheet lists slots C to F as the places the module mounts, so it fits both. The firmware does not detect the slot.
+- **Interrupts.** In slot C the module's INT1 is IO3 and INT2 is IO4; in slot D, INT1 is IO5 and INT2 is IO6. The firmware does not use the interrupts (it polls), so the slot makes no difference to it.
+- **I2C.** The sensor is on the base's I2C1 (SDA P0.13, SCL P0.14 on a RAK4631, as in the variant), at address 0x55.
+- **Power and IO2.** The RAK19003 datasheet says IO2 is the enable for the 3V3_S rail, and that rail powers the RAK12027. Unlike the RAK3401 build above, **IO2 is not the sensor's INT2 here**, so there is nothing for it to fight. `d7sBoardOnConfirmed()` therefore does nothing on a RAK4631 and IO2 stays driven high, which keeps the sensor powered.
+- **Radio.** The RAK4631's SX1262 transmits at up to 22 dBm. There is no external amplifier as on the RAK3401 with a RAK13302, so range is lower.
+
+Not verified: that a RAK19003 with a RAK12027 behaves as the RAK19007 build did (no hardware to test), whether the D7S answers during its power-up calibration, and the live PGA scale (see the measurement contract). Do the same [hardware check](#hardware-check) as for the RAK3401 and report what you see.
+
 ## Limits
 
 - `Wire` on the nRF52 core has no timeout (unbounded waits, and the D7S has clock stretching enabled), so a device holding the I2C bus can stall the main loop, as with every other sensor on that bus. A bounded `Wire` in the core fork would fix this for all sensors and should be proposed separately.
