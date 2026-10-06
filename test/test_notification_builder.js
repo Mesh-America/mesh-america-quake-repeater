@@ -16,6 +16,10 @@ for (const config of Object.values(builder.EXAMPLES)) {
   const complete = {...config, id: config.kind === "contact" ? "01".repeat(32) : config.id};
   const commands = builder.commands(complete);
   assert.ok(commands.every(cmd => cmd.length + 4 <= 175));
+  if (config.quietOthers === "on") {
+    assert.throws(() => builder.notificationText(complete), /CLI|USB/);
+    continue;
+  }
   const dm = builder.notificationText(complete);
   assert.ok(dm.startsWith("!notify "));assert.ok(!dm.includes("gpio="));assert.ok(dm.length <= 159);
 }
@@ -28,6 +32,38 @@ assert.equal(builder.notificationText(longPost).length, 151);
 assert.throws(() => builder.notificationText({...longPost, kind: "room"}), /150 characters for a room post/);
 assert.throws(() => builder.commands({...builder.EXAMPLES.food, remote: "on"}));
 assert.throws(() => builder.commands({...vip, id: "1234"}));
+// The channel-only example installs a quiet default before its exception.
+const quietPrefix = [
+  "set notify.enabled on",
+  "set notify.vibration all off", "set notify.sound all off",
+  "set notify.led all off", "set notify.screen all off", "set notify.gpio all off",
+  "set notify.repeat all 1", "set notify.gap all 500", "set notify.stop all button"
+];
+const channel9 = builder.EXAMPLES.channel9;
+assert.equal(channel9.kind, "channel");assert.equal(channel9.id, "9");
+assert.equal(channel9.when, "any");assert.equal(channel9.quietOthers, "on");
+assert.equal(channel9.sound, "ch9:d=8,o=5,b=180:c,e,g");
+assert.equal(channel9.repeat, "1");assert.equal(channel9.gap, "500");assert.equal(channel9.stop, "button");
+for (const name of ["vibration", "led", "screen", "gpio"]) assert.equal(channel9[name], "off");
+const exceptionOnly = builder.commands({...channel9, quietOthers: "off"});
+const onlyChannel9 = builder.commands(channel9);
+assert.deepEqual(onlyChannel9, [...quietPrefix, ...exceptionOnly]);
+assert.deepEqual(exceptionOnly, builder.commands({...channel9, quietOthers: undefined}));
+assert.deepEqual(exceptionOnly, [
+  "set notify.vibration channel:9 off", "set notify.sound on",
+  "set notify.sound channel:9 ch9:d=8,o=5,b=180:c,e,g",
+  "set notify.led channel:9 off", "set notify.screen channel:9 off",
+  "set notify.gpio channel:9 off", "set notify.repeat channel:9 1",
+  "set notify.gap channel:9 500", "set notify.stop channel:9 button"
+]);
+assert.deepEqual(builder.commands({...channel9, id: "8"}), [
+  ...quietPrefix, ...exceptionOnly.map(command => command.replace("channel:9", "channel:8"))
+]);
+for (const kind of ["all", "contact", "room"]) {
+  assert.throws(() => builder.commands({...channel9, kind, id: "01".repeat(32)}), /channel/i);
+}
+assert.throws(() => builder.notificationText(channel9), /CLI|USB/);
+assert.ok(builder.notificationText({...channel9, quietOthers: "off"}).startsWith("!notify "));
 // Local examples must play before choosing a recipient. Saved rules still need a key.
 assert.equal(builder.parseOutputs(builder.EXAMPLES.vip).notes.length, 4);
 assert.throws(() => builder.commands(builder.EXAMPLES.vip), /full 64-digit/);
