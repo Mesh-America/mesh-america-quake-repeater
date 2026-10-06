@@ -37,7 +37,7 @@ fail() {
 [ "$OPTION3_BUILD_WORKERS" -eq 1 ] \
   || fail "logging matrix permits concurrent PlatformIO target builds"
 
-for utility in profile_switch_t096_sx1262 xiao_s3_partition_migrator \
+for utility in profile_switch_t096_sx1262 profile_four_tx_v4_rx xiao_s3_partition_migrator \
     heltec_v4_partition_migrator_test_hold xiao_s3_partition_legacy_seed \
     esp32_4mb_partition_migrator_lora \
     heltec_v4_partition_migrator_lora_repeater \
@@ -437,6 +437,155 @@ require(rak_usb, "build_flags", "FORCE_GPS_ALIVE")
 # aliases remain directly buildable, but canonical release resolution must
 # replace each with that exact board's Full target.
 init_project_context >/dev/null
+
+# Expanded partitions make Full the ordinary ESP32 node release. Legacy lean
+# names still address installed firmware and must remain directly buildable,
+# but cannot reappear in either the all-role or a role-specific release list.
+for resolver in resolve_all_firmwares resolve_repeater_firmwares \
+    resolve_room_server_firmwares resolve_sensor_firmwares; do
+  while IFS= read -r release_env; do
+    [ "${PIO_ENV_PLATFORM_BY_NAME[$release_env]:-}" = ESP32_PLATFORM ] || continue
+    if is_lora_ota_no_external_sensors_target "$release_env"; then
+      fail "$resolver republishes reduced ESP32 alias $release_env"
+    fi
+    is_redundant_bulk_build_target "$release_env" \
+      && fail "$resolver republishes utility or legacy alias $release_env"
+    if is_kiss_modem_target "$release_env"; then
+      if is_esp32_full_release_build_target "$release_env"; then
+        fail "$release_env host modem was promoted into the node Full profile"
+      fi
+    else
+      is_esp32_full_release_build_target "$release_env" \
+        || fail "$resolver selected ESP32 node without a Full release: $release_env"
+    fi
+  done < <("$resolver")
+done
+
+# Cover the former allowlist gaps as well as migration hardware and a named
+# Full Companion. Their ordinary release profile is Full; the older helper
+# continues to describe the narrower same-partition OTA identity contract.
+for release_env in Station_G3_ESP32_r2_repeater WHY2025_badge_repeater_ \
+    GEPRC_Linkflow_900_repeater Generic_ESPNOW_repeatr \
+    LilyGo_Tlora_C6_room_server_ Meshadventurer_sx1262_repeater \
+    Ebyte_EoRa-S3_Repeater Heltec_ct62_sensor Station_G2_companion_radio_full; do
+  is_esp32_full_release_build_target "$release_env" \
+    || fail "$release_env retained a standard ordinary ESP32 release slot"
+done
+if is_esp32_full_only_bulk_target Ebyte_EoRa-S3_Repeater; then
+  fail "release consolidation incorrectly advertised same-partition EoRa migration"
+fi
+if is_esp32_full_release_build_target RAK_3401_repeater; then
+  fail "nRF52 role acquired ESP32 Full-only release policy"
+fi
+
+for direct_env in Heltec_v3_repeater_lora_ota_no_external_sensors \
+    Ebyte_EoRa-S3_Repeater_lora_ota_no_external_sensors \
+    Heltec_v3_companion_radio_usb heltec_v4_partition_migrator \
+    heltec_v4_partition_migrator_lora_repeater; do
+  is_supported_build_env "$direct_env" \
+    || fail "ordinary consolidation removed direct compatibility target $direct_env"
+  [ -n "$(get_pio_build_env "$direct_env")" ] \
+    || fail "$direct_env no longer resolves a direct PlatformIO recipe"
+done
+(
+  BATCH_BUILD_MODE=0
+  SINGLE_TARGET_FULL_BUILD=0
+  EXACT_IDENTITY_FULL_BUILD=0
+  BUILD_PROFILE_OVERRIDE=standard
+  BUILD_PROFILE_EXPLICIT=1
+  RESOLVED_BUILD_TARGETS=(Ebyte_EoRa-S3_Repeater)
+  configure_effective_build_profile build-firmware >/dev/null
+  [ "$BUILD_PROFILE_EFFECTIVE" = standard ] \
+    || fail "explicit standard recovery profile was promoted to Full"
+  [ "${RESOLVED_BUILD_TARGETS[*]}" = Ebyte_EoRa-S3_Repeater ] \
+    || fail "explicit recovery profile changed its deployed target identity"
+  BUILD_PROFILE_OVERRIDE=auto
+  BUILD_PROFILE_EXPLICIT=0
+  RESOLVED_BUILD_TARGETS=(Heltec_v3_repeater_lora_ota_no_external_sensors)
+  configure_effective_build_profile build-firmware >/dev/null
+  [ "$BUILD_PROFILE_EFFECTIVE" = standard ] \
+    || fail "direct reduced compatibility request was promoted to Full"
+  [ "${RESOLVED_BUILD_TARGETS[*]}" = Heltec_v3_repeater_lora_ota_no_external_sensors ] \
+    || fail "direct reduced request changed its deployed target identity"
+)
+
+# Named Full Companion already selects its own combined profile. In a bulk
+# pass it must compile the real source recipe, including generated Full names,
+# without entering the infrastructure promotion path. Stop at recipe capture,
+# before any dependency install, PlatformIO invocation, or artifact collection.
+(
+  BATCH_BUILD_MODE=1
+  BUILD_PROFILE_EXPLICIT=0
+  BUILD_PROFILE_EFFECTIVE=standard
+  ESP32_FULL_BUILD=0
+  FIRMWARE_VERSION=vtest-full-companion-routing
+  RESUME_BUILD_OUTPUT=0
+  companion_probe_marker=$(mktemp)
+  trap 'rm -f "$companion_probe_marker"' EXIT
+  compute_build_recipe_digest() {
+    printf '%s|%s|%s\n' "$1" "$3" "$ESP32_FULL_BUILD" > "$companion_probe_marker"
+    return 77
+  }
+  for full_companion in Heltec_v3_companion_radio_full Heltec_ct62_companion_radio_full; do
+    source_recipe=$(get_pio_build_env "$full_companion")
+    [ "$(get_exact_identity_full_pio_env "$full_companion")" = "$source_recipe" ] \
+      || fail "$full_companion tried to compile a logical Full name as its source recipe"
+    : > "$companion_probe_marker"
+    if build_firmware_one_profile "$full_companion" >/dev/null; then
+      fail "$full_companion bypassed the pre-PlatformIO recipe probe"
+    fi
+    [ "$(cat "$companion_probe_marker")" = "$full_companion|$source_recipe|0" ] \
+      || fail "$full_companion entered infrastructure promotion or lost its real source recipe"
+  done
+)
+
+# Exercise actual matrix scheduling while replacing only its final build
+# dispatch. This verifies the portable pass cannot return through an old
+# allowlist gap, migration target, or later duplicate profile pass.
+(
+  REQUIRE_OTA_UPDATES=0
+  BATCH_BUILD_MODE=1
+  BUILD_PROFILE_EXPLICIT=0
+  BUILD_PROFILE_EFFECTIVE=standard
+  ESP32_FULL_BUILD=0
+  matrix_builds=()
+  run_logged_build_targets() {
+    local target
+    for target in "$@"; do
+      matrix_builds+=("$target:$ESP32_FULL_BUILD")
+      if [ "${PIO_ENV_PLATFORM_BY_NAME[$target]:-}" = ESP32_PLATFORM ] \
+          && ! is_kiss_modem_target "$target" \
+          && ! is_companion_radio_full_target "$target"; then
+        [ "$ESP32_FULL_BUILD" = 1 ] \
+          || fail "ordinary matrix scheduled a portable ESP32 node: $target"
+      fi
+    done
+    return 0
+  }
+  run_logging_matrix_build_targets \
+    Station_G3_ESP32_r2_repeater Ebyte_EoRa-S3_Repeater \
+    Generic_ESPNOW_repeatr heltec_v4_room_server heltec_v4_sensor \
+    Station_G2_companion_radio_full heltec_v4_kiss_modem \
+    RAK_3401_repeater_lora_ota_no_external_sensors >/dev/null
+  for target in Station_G3_ESP32_r2_repeater Ebyte_EoRa-S3_Repeater \
+      Generic_ESPNOW_repeatr heltec_v4_room_server heltec_v4_sensor; do
+    matches=0
+    for call in "${matrix_builds[@]}"; do
+      if [ "$call" = "$target:1" ]; then matches=$((matches + 1)); fi
+    done
+    [ "$matches" -eq 1 ] \
+      || fail "ordinary matrix built $target $matches times instead of one Full image"
+  done
+  for expected in Station_G2_companion_radio_full:0 heltec_v4_kiss_modem:0 \
+      RAK_3401_repeater_lora_ota_no_external_sensors:0; do
+    found=0
+    for call in "${matrix_builds[@]}"; do
+      if [ "$call" = "$expected" ]; then found=$((found + 1)); fi
+    done
+    [ "$found" -eq 1 ] \
+      || fail "matrix changed the distinct Companion/KISS/nRF52 recipe: $expected"
+  done
+)
 
 # ESP32 room servers and sensors use their expanded Full image for LoRa OTA.
 for full_role_env in Heltec_v3_room_server Heltec_v3_sensor; do

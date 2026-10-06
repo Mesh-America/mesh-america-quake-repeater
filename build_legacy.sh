@@ -121,7 +121,7 @@ Commands:
   list|-l: List firmwares available to build.
   build-firmware <target>: Build the firmware for the given build target.
   build-firmwares: Build canonical firmwares for all targets. Runtime-setting aliases and Terminal Chat targets replaced by Full Companion remain available as explicit builds.
-  build-firmwares-logging-matrix: Build canonical standard artifacts with merged runtime USB logging plus unified FULL ESP32 USB+WiFi and FULL fallback profiles, logging each target under out/build-logs/ and continuing after failures. MQTT observers and ESP-NOW bridges always use FULL. KISS, BLE-only Companion, and constrained LoRa-OTA repeater/room-server contracts do not gain plaintext USB logging.
+  build-firmwares-logging-matrix: Build canonical Full ESP32 images plus other platforms' qualified profiles with runtime USB logging, logging each target under out/build-logs/ and continuing after failures. MQTT observers and ESP-NOW bridges always use FULL. KISS and other platforms' constrained transport contracts do not gain plaintext USB logging. ESP32 expansion/recovery tools are separate from ordinary firmware.
   build-companion-firmwares-logging-matrix: Build canonical Companion targets with merged runtime USB logging where the transport is safe, plus applicable MQTT and expanded FULL profiles. Full Companion replaces separate USB, BLE, WiFi, Terminal Chat, and USB-logging artifacts where an exact combined recipe exists.
   build-full-esp32-firmwares: Build feature-complete ESP32 profiles with up to 254 neighbors, USB packet logging, WiFi MQTT plus ESP-NOW where a matching MQTT recipe exists, LoRa OTA, and expanded dual-OTA partitions.
   build-full-esp32-logging-firmwares: Build only the FULL USB-logging fallback for targets without a matching WiFi MQTT environment.
@@ -140,7 +140,7 @@ Options:
   --firmware-version <version>: Firmware version to embed.
   --radio-preset <name|number>: Override the USA Cascadia radio default. Stable names are usa-cascadia and target; legacy menu numbers remain accepted.
   --profile <default|cascade>: Override runtime settings embedded in the firmware (not its feature set).
-  --build-profile <auto|standard|full>: Select feature/partition policy. Every non-Companion nRF52 repeater, room server and sensor builds both Full sensors + LoRa OTA and Reduced sensors + LoRa OTA, in its exact existing storage/layout contract. Both must pass qualification; an oversized full image is an error, not a successful reduced-only fallback. Other platforms retain their existing auto/standard/full policy.
+  --build-profile <auto|standard|full>: Select feature/partition policy. Every non-Companion nRF52 repeater, room server and sensor builds both Full sensors + LoRa OTA and Reduced sensors + LoRa OTA, in its exact existing storage/layout contract. Both must pass qualification; an oversized full image is an error, not a successful reduced-only fallback. ESP32 bulk releases use Full only; explicit direct standard builds remain recovery tools. Other platforms retain their existing auto/standard/full policy.
   --auto|--standard|--full: Short forms of --build-profile.
   --full-exact: Build one expanded ESP32 release image under the requested target's own LoRa OTA identity.
   --skip-kiss|--include-kiss: Exclude (default) or include KISS modem targets in bulk builds.
@@ -2494,6 +2494,13 @@ get_exact_identity_full_pio_env() {
   local env_name=$1
   local candidate=""
 
+  # Many Full Companions are generated logical targets whose combined recipe
+  # compiles an exact USB/BLE/WiFi environment. Preserve that registered base.
+  if is_companion_radio_full_target "$env_name"; then
+    get_pio_build_env "$env_name"
+    return 0
+  fi
+
   is_esp32_canonical_full_release_target "$env_name" || {
     printf '%s\n' "$env_name"
     return 0
@@ -3253,6 +3260,16 @@ supports_esp32_full_build() {
     && ! is_lora_ota_only_target "$env_name"
 }
 
+# Ordinary ESP32 releases use the complete profile regardless of the old app
+# layout. Expansion/recovery utilities are packaged separately; an explicit
+# direct standard build remains available for those workflows. Keep the
+# older same-partition allowlist below separate: it also guards wire-compatible
+# observer-to-normal OTA identity transitions.
+is_esp32_full_release_build_target() {
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$1]:-}" = "ESP32_PLATFORM" ] || return 1
+  is_companion_radio_full_target "$1" || supports_esp32_full_build "$1"
+}
+
 # These ESP32 targets keep their exact partition table when the FULL overlay is
 # applied. In bulk release builds the portable artifact is therefore redundant:
 # publish FULL under the same mOTA identity. This inventory is derived from the
@@ -3302,13 +3319,11 @@ is_esp32_full_only_bulk_target() {
   return 1
 }
 
-# These normal role identities still ship a portable legacy image for installed
-# nodes, but also need a canonical FULL artifact for the one-time layout
-# migration. They are deliberately separate from the FULL-only list above:
-# some deployed 0x140000 slots differ from the expanded table, so LoRa mOTA
-# must not try to cross this boundary. An exact-target Wi-Fi bridge and Full
-# application are packaged separately; after migration, later normal-target
-# FULL packages use the same logical mOTA identity.
+# These identities have historical installed layouts that require expansion
+# before their Full app can be installed. Retain this metadata separately from
+# same-partition identity transitions: mOTA must not cross a layout boundary.
+# Exact migration tools and Full applications are packaged separately from
+# ordinary releases; future Full updates retain the normal target identity.
 is_esp32_partition_migration_full_target() {
   local env_name=${1,,}
 
@@ -3334,7 +3349,7 @@ is_esp32_partition_migration_full_target() {
 }
 
 is_esp32_canonical_full_release_target() {
-  is_esp32_full_only_bulk_target "$1" \
+  is_esp32_full_release_build_target "$1" \
     || is_esp32_partition_migration_full_target "$1"
 }
 
@@ -4916,15 +4931,16 @@ build_firmware_one_profile() {
     echo "Sensor OTA profile uses feature-rich base environment ${pio_env_name} with stable target identity ${env_name}."
   fi
 
-  # Canonical bulk releases omit the redundant portable image for targets
-  # whose exact environment identity has been approved for FULL-only output.
-  # Keep an explicit standard request untouched so maintainers retain a
-  # portable recovery build when diagnosing field devices.
+  # Every ordinary ESP32 bulk image uses Full. Changing an installed app
+  # layout still requires its reviewed expander/merged image first; it never
+  # authorizes app-only OTA across partition boundaries. Explicit direct
+  # standard requests remain installation/recovery developer tools.
   if [ "$ESP32_FULL_BUILD" != "1" ] \
       && [ "$BUILD_PROFILE_FOR_TARGET" = "standard" ] \
       && [ "${BATCH_BUILD_MODE:-0}" = "1" ] \
       && [ "${BUILD_PROFILE_EXPLICIT:-0}" != "1" ] \
-      && is_esp32_full_only_bulk_target "$env_name"; then
+      && ! is_companion_radio_full_target "$env_name" \
+      && is_esp32_full_release_build_target "$env_name"; then
     ESP32_FULL_BUILD=1
     if ! is_companion_radio_full_target "$env_name"; then
       MESHDEBUG_OVERRIDE="off"
@@ -5632,11 +5648,19 @@ is_redundant_bulk_build_target() {
   # Bench fixtures and migration utilities use their dedicated PlatformIO
   # recipes; they are not node firmware for the release/OTA packaging matrix.
   case "${1,,}" in
-    profile_switch_*|*partition_migrator*|*partition_expander*|*_partition_legacy_seed|\
+    profile_switch_*|profile_fixed_*|profile_four_tx_v4_rx|*partition_migrator*|*partition_expander*|*_partition_legacy_seed|\
     *_legacy_partition_test|*_sim)
       return 0
       ;;
   esac
+  # Expanded Full is the everyday ESP32 image. Keep compact OTA identities
+  # directly buildable for installation/recovery, but never publish them as a
+  # second ordinary firmware choice. Other platforms retain their capacity
+  # and deployed-target compatibility policies.
+  if [ "${PIO_ENV_PLATFORM_BY_NAME[$1]:-}" = "ESP32_PLATFORM" ] \
+      && is_lora_ota_no_external_sensors_target "$1"; then
+    return 0
+  fi
   # Keep every legacy name available to `build-firmware` and
   # `build-matching-firmwares`, but do not republish binaries that differ only
   # by a saved/default setting, or roles already supplied by Full Companion.
@@ -5703,11 +5727,21 @@ resolve_repeater_firmwares() {
 }
 
 resolve_room_server_firmwares() {
-  get_pio_envs_for_variant_role room_server
+  local env_name
+  while IFS= read -r env_name; do
+    if ! is_redundant_bulk_build_target "$env_name"; then
+      printf '%s\n' "$env_name"
+    fi
+  done < <(get_pio_envs_for_variant_role room_server)
 }
 
 resolve_sensor_firmwares() {
-  get_pio_envs_for_variant_role sensor
+  local env_name
+  while IFS= read -r env_name; do
+    if ! is_redundant_bulk_build_target "$env_name"; then
+      printf '%s\n' "$env_name"
+    fi
+  done < <(get_pio_envs_for_variant_role sensor)
 }
 
 resolve_kiss_radio_firmwares() {
@@ -6555,7 +6589,7 @@ run_full_esp32_profile() {
     if { [ "${PARTITION_MIGRATION_FULL_PROFILE_ACTIVE:-0}" = 1 ] \
         && is_ordinary_partition_migration_full_target "$full_profile_target"; } \
         || { [ "${FULL_ONLY_EXACT_PROFILE_ACTIVE:-0}" = 1 ] \
-        && is_esp32_full_only_bulk_target "$full_profile_target"; }; then
+        && is_esp32_full_release_build_target "$full_profile_target"; }; then
       continue
     fi
     # Use the same exact-board choice as single-target auto builds, including
@@ -6698,7 +6732,7 @@ run_partition_migration_full_esp32_profile() {
   fi
 
   echo "Partition-migration FULL pass: building ${#migration_targets[@]} canonical ESP32 target(s)."
-  echo "Each normal-target FULL artifact keeps its mOTA identity after its matching merged image is flashed once; legacy 1.25 MiB artifacts remain published during the transition."
+    echo "Each normal-target FULL artifact keeps its mOTA identity; install its reviewed expansion package or merged image before updating an older partition layout."
   MESHDEBUG_OVERRIDE=off
   PACKET_LOGGING_OVERRIDE=on
   MQTT_BRIDGE_OVERRIDE=off
@@ -6756,15 +6790,11 @@ run_full_esp32_build_targets() {
   else
     if [ "${SINGLE_TARGET_FULL_BUILD:-0}" != 1 ]; then
       for target in "${ordinary_full_targets[@]}"; do
-        if is_esp32_full_only_bulk_target "$target"; then
+        if is_esp32_full_release_build_target "$target"; then
           full_only_targets+=("$target")
         fi
       done
       run_full_only_esp32_profile "${full_only_targets[@]}"
-      pass_status=$?
-      if [ "$pass_status" -eq 130 ]; then return 130; fi
-      if [ "$pass_status" -ne 0 ]; then build_status=1; fi
-      run_partition_migration_full_esp32_profile "${ordinary_full_targets[@]}"
       pass_status=$?
       if [ "$pass_status" -eq 130 ]; then return 130; fi
       if [ "$pass_status" -ne 0 ]; then build_status=1; fi
@@ -6832,7 +6862,7 @@ run_logging_matrix_build_targets() {
   echo "Option 3 PlatformIO policy: one target build at a time, ${OPTION3_PIO_JOBS} compiler job(s) inside that process."
 
   for target in "${targets[@]}"; do
-    if is_esp32_full_only_bulk_target "$target"; then
+    if is_esp32_full_release_build_target "$target"; then
       # Full companion environments already select their complete profile in
       # build_firmware, so keep them in the ordinary pass to preserve their
       # established companion-specific recipe.
@@ -6858,7 +6888,7 @@ run_logging_matrix_build_targets() {
   done
 
   for target in "${ordinary_full_targets[@]}"; do
-    if is_esp32_full_only_bulk_target "$target" \
+    if is_esp32_full_release_build_target "$target" \
         && ! is_companion_radio_full_target "$target"; then
       full_only_targets+=("$target")
       full_only_exact_count=$((full_only_exact_count + 1))
@@ -6873,16 +6903,9 @@ run_logging_matrix_build_targets() {
     echo "Deferring ${full_only_standard_skip_count} ESP32 ESP-NOW target(s) to their FULL logging fallback; its persistent USB gate also provides normal output-off operation."
   fi
   if [ "$full_only_exact_count" -gt 0 ]; then
-    echo "Publishing ${full_only_exact_count} audited ESP32 target(s) as their exact-identity FULL release only; explicit --standard remains available for recovery."
+    echo "Publishing ${full_only_exact_count} ESP32 target(s) as their exact-identity FULL release only; explicit --standard remains available for recovery."
   fi
-  for target in "${ordinary_full_targets[@]}"; do
-    if is_ordinary_partition_migration_full_target "$target"; then
-      partition_migration_full_count=$((partition_migration_full_count + 1))
-    fi
-  done
-  if [ "$partition_migration_full_count" -gt 0 ]; then
-    echo "Publishing ${partition_migration_full_count} canonical ESP32 FULL migration target(s) alongside their legacy portable artifacts; flash each matching merged image once before mOTA can use FULL."
-  fi
+  echo "ESP32 ordinary releases contain only Full node images; expansion/recovery tools are packaged separately."
   ESP32_FULL_BUILD=0
   MESHDEBUG_OVERRIDE=""
   PACKET_LOGGING_OVERRIDE=""
@@ -6902,10 +6925,6 @@ run_logging_matrix_build_targets() {
   if [ "$pass_status" -eq 130 ]; then return 130; fi
   if [ "$pass_status" -ne 0 ]; then build_status=1; fi
 
-  run_partition_migration_full_esp32_profile "${ordinary_full_targets[@]}"
-  pass_status=$?
-  if [ "$pass_status" -eq 130 ]; then return 130; fi
-  if [ "$pass_status" -ne 0 ]; then build_status=1; fi
   PARTITION_MIGRATION_FULL_PROFILE_ACTIVE=1
 
   FULL_ONLY_EXACT_PROFILE_ACTIVE=1
