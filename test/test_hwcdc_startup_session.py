@@ -24,6 +24,7 @@ EXTRA = r'''
 #include <iostream>
 #include <string>
 #define MESH_ESP32_HWCDC_SESSION_GUARD 1
+#define MESH_ESP32_USB_CONSOLE_COOPERATIVE 1
 #define MESH_HWCDC_PINNED_TX_BACKPORT 1
 #define portENTER_CRITICAL(m) portENTER_CRITICAL_SAFE(m)
 #define portEXIT_CRITICAL(m) portEXIT_CRITICAL_SAFE(m)
@@ -154,6 +155,19 @@ int main(int argc, char** argv) {
     assert(tryCompleteUsbTerminalSessionReset());
     assert(phy_detaches == 1 && host_rx.empty() && ring.data.empty());
     assert(canAccessEsp32Hwcdc(nullptr) && mesh_hwcdc_tx_allowed);
+  } else if (name == "logging_only") {
+    // A BLE-only Companion has no USB parser to close the startup exemption.
+    // Its real logging-only service must do so before the next host reset.
+    enumerate(); deliverEvents(); serviceUsbLoggingOnlySession();
+    assert(meshEsp32HwcdcShouldReportBusReset());
+    assert(phy_detaches == 0 && canAccessEsp32Hwcdc(nullptr));
+    ring.data.push_back({'o', 'l', 'd', '\r', '\n'});
+    host_rx = {'o', 'l', 'd', '\r'};
+    enumerate(); deliverEvents();
+    assert(!canAccessEsp32Hwcdc(nullptr));
+    serviceUsbLoggingOnlySession();
+    assert(phy_detaches == 1 && host_rx.empty() && ring.data.empty());
+    assert(canAccessEsp32Hwcdc(nullptr));
   } else { assert(false && "Unknown startup case"); }
   std::cout << "PASS " << name << " phy_detaches=" << phy_detaches
             << " retained_rx=" << host_rx.size() << '\n';
@@ -162,7 +176,8 @@ int main(int argc, char** argv) {
 
 
 def application_sources(*, remove_boot_gate=False, remove_owner_hook=False,
-                        boot_traffic_arms=False, keep_startup_forever=False):
+                        boot_traffic_arms=False, keep_startup_forever=False,
+                        remove_logging_only_service=False):
     source = (ROOT / "src/helpers/UsbLogging.cpp").read_text()
     signatures = (
         "static bool canAccessEsp32Hwcdc(void*)",
@@ -175,6 +190,15 @@ def application_sources(*, remove_boot_gate=False, remove_owner_hook=False,
         "bool tryCompleteUsbTerminalSessionReset()",
     )
     functions = "\n".join(body(source, signature) for signature in signatures)
+    main = (ROOT / "examples/companion_radio/main.cpp").read_text()
+    logging_service = body(main, "static void serviceUsbLoggingOnlySession()")
+    # The production session methods are extracted into this flat host shell.
+    logging_service = logging_service.replace("mesh::", "")
+    if remove_logging_only_service:
+        logging_service = logging_service.replace(
+            "  (void)takeUsbTerminalSessionReset();\n", "").replace(
+                "  (void)tryCompleteUsbTerminalSessionReset();\n", "")
+    functions += "\n" + logging_service
     owner = body(source, 'extern "C" bool meshEsp32HwcdcShouldReportBusReset()')
     # The extracted application methods live in a flat test shell. Only their
     # namespace qualification changes; state and the actual owner hook remain.
@@ -237,6 +261,67 @@ class HwcdcStartupSessionTests(unittest.TestCase):
         for case in ("early", "delayed", "boot_tx", "boot_rx", "active"):
             with self.subTest(case=case):
                 self.run_case(case)
+
+    def test_logging_only_companion_ends_startup_and_cleans_active_reset(self):
+        self.run_case("logging_only")
+
+    def test_missing_logging_only_service_keeps_startup_pending_negative_control(self):
+        self.run_case("logging_only", expect_success=False, remove_logging_only_service=True)
+
+    def test_logging_only_companion_scope_uses_actual_transport_macros(self):
+        main = (ROOT / "examples/companion_radio/main.cpp").read_text()
+        helper = body(main, "static void serviceUsbLoggingOnlySession()")
+        loop = body(main[main.rindex("\nvoid loop()"):], "void loop()")
+        self.assertLess(loop.index("serviceUsbLoggingOnlySession();"),
+                        loop.index("the_mesh.loop();"))
+        self.assertLess(loop.index("serviceUsbLoggingOnlySession();"),
+                        loop.index("mesh::serviceUsbLoggingPort();"))
+        harness = r'''
+#include <helpers/UsbLogging.h>
+#include <cassert>
+namespace mesh {
+static unsigned calls = 0;
+bool takeUsbTerminalSessionReset() { ++calls; return true; }
+bool tryCompleteUsbTerminalSessionReset() { ++calls; return true; }
+}
+@HELPER@
+int main() {
+  serviceUsbLoggingOnlySession();
+  assert(mesh::calls == EXPECT_SERVICE * 2);
+}
+'''.replace("@HELPER@", helper)
+        profiles = {
+            "hwcdc": ["ESP32=1", "ARDUINO_USB_MODE=1", "ARDUINO_USB_CDC_ON_BOOT=1"],
+            "tinyusb": ["ESP32=1", "ARDUINO_USB_MODE=0", "ARDUINO_USB_CDC_ON_BOOT=1"],
+            "new_uart": ["ESP32=1", "ARDUINO_USB_MODE=1", "ARDUINO_USB_CDC_ON_BOOT=0"],
+            "classic_uart": ["ESP32=1"],
+            "nrf52": ["NRF52_PLATFORM=1", "USE_TINYUSB=1"],
+            "rp2040": ["RP2040_PLATFORM=1"],
+        }
+        with tempfile.TemporaryDirectory(prefix="companion-logging-session-") as directory:
+            directory = Path(directory)
+            cpp = directory / "scope.cpp"
+            cpp.write_text(harness, encoding="ascii")
+            for profile, flags in profiles.items():
+                for usb_protocol in (False, True):
+                    with self.subTest(profile=profile, usb_protocol=usb_protocol):
+                        binary = directory / (profile + str(usb_protocol))
+                        defines = ["-DARDUINO", *("-D" + flag for flag in flags),
+                                   "-DEXPECT_SERVICE=" + str(int(
+                                       profile in ("hwcdc", "tinyusb") and not usb_protocol))]
+                        if usb_protocol:
+                            defines.append("-DENABLE_USB_INTERFACE=1")
+                        compiled = subprocess.run([
+                            "g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-isystem", str(ROOT / "test/mocks"), "-I" + str(ROOT / "src"),
+                            *defines, str(cpp), "-o", str(binary)],
+                            capture_output=True, text=True, timeout=60)
+                        self.assertEqual(compiled.returncode, 0,
+                                         compiled.stdout + compiled.stderr)
+                        executed = subprocess.run([str(binary)], capture_output=True,
+                                                  text=True, timeout=10)
+                        self.assertEqual(executed.returncode, 0,
+                                         executed.stdout + executed.stderr)
 
     def test_original_boot_gate_failure_negative_control(self):
         self.run_case("early", expect_success=False, remove_boot_gate=True)

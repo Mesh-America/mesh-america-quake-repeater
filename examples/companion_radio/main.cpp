@@ -3546,6 +3546,15 @@ void setup() {
 #endif
 }
 
+static void serviceUsbLoggingOnlySession() {
+#if MESH_ESP32_USB_CONSOLE_COOPERATIVE && !defined(ENABLE_USB_INTERFACE)
+  // BLE/WiFi-only Companions still own native USB diagnostics. Mark setup
+  // complete and finish bus-reset cleanup even without a USB protocol owner.
+  (void)mesh::takeUsbTerminalSessionReset();
+  (void)mesh::tryCompleteUsbTerminalSessionReset();
+#endif
+}
+
 static bool usbLoggingRecoverySafe(void*) {
   if (board.isOTAUpdateRunning() || board.isRadioTestActive()
       || radio_driver.isWatchdogObserving() || radio_driver.isCalibratingNoiseFloor()
@@ -3581,6 +3590,7 @@ void loop() {
 #if defined(NRF52_PLATFORM)
   board.feedWatchdog();
 #endif
+  serviceUsbLoggingOnlySession();
 #if defined(ENABLE_USB_INTERFACE)
   serviceUsbTerminalHostSessionReset();
   serviceUsbAsciiSessionDefault();

@@ -52,14 +52,13 @@ LEGACY_DIAGNOSTIC_CDC_OVERRIDES = {
     "xiao_s3_partition_migrator_test_usb_diagnostic",
 }
 
-# Pin the unaffected family/transport counts rather than copying a machine's
+# Pin reviewed family/transport counts rather than copying a machine's
 # environment inventory. Mixed families have explicit role rules below.
 UNCHANGED_COUNTS = {
     ("ESP32-S3-WROOM-1-N4", "uart"): 21,
     ("ebyte_eora-s3", "hwcdc"): 8,
     ("esp32-c3-devkitm-1", "uart"): 19,
-    ("esp32-c6-devkitm-1", "hwcdc"): 12,
-    ("esp32-c6-devkitm-1", "uart"): 4,
+    ("esp32-c6-devkitm-1", "hwcdc"): 16,
     ("esp32-s3-devkitc-1", "hwcdc"): 22,
     ("esp32-s3-devkitc-1", "uart"): 55,
     ("esp32-s3-zero", "hwcdc"): 17,
@@ -149,16 +148,12 @@ def bool_option(value):
     return str(value).lower() in ("true", "1", "yes")
 
 
-def expected_unchanged_transport(board, name):
+def expected_other_transport(board, name):
     choices = {kind for family, kind in UNCHANGED_COUNTS if family == board}
     if len(choices) == 1:
         return next(iter(choices))
     if board == "esp32-s3-devkitc-1":
         return "hwcdc" if name.startswith(("Heltec_Wireless_Tracker_", "RAK_3112_")) else "uart"
-    if board == "esp32-c6-devkitm-1":
-        if name.startswith("M5Stack_Unit_C6L_"):
-            return "hwcdc" if name == "M5Stack_Unit_C6L_companion_radio_usb" else "uart"
-        return "hwcdc"
     if board in ("heltec_v4_migrator", "seeed_xiao_esp32s3_migrator"):
         return "hwcdc" if name.endswith("_test_usb_diagnostic") else "uart"
     raise AssertionError(f"unreviewed ESP32 board: {board}")
@@ -266,15 +261,49 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 self.assertEqual(self.sdk["hwcdc_primary_enabled"](row["env"]),
                                  row["kind"] == "hwcdc")
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
-        self.assertEqual(counts, {"hwcdc": 319, "uart": 122, "classic_uart": 61})
+        self.assertEqual(counts, {"hwcdc": 323, "uart": 118, "classic_uart": 61})
 
-    def test_uart_existing_hwcdc_and_newer_mcu_recipes_keep_their_transports(self):
+    def test_all_m5stack_native_usb_roles_select_hwcdc_and_its_startup_patch(self):
+        # M5's documented USB-C wiring exposes C6 Serial/JTAG, including when
+        # the Companion uses BLE. Resolve real SDK/compiler flags so a UART
+        # console regression cannot hide in the unchanged-transport counts.
+        names = {name for name in self.rows if name.startswith("M5Stack_Unit_C6L_")}
+        self.assertEqual(names, {
+            "M5Stack_Unit_C6L_repeater", "M5Stack_Unit_C6L_room_server",
+            "M5Stack_Unit_C6L_companion_radio_ble",
+            "M5Stack_Unit_C6L_companion_radio_usb", "M5Stack_Unit_C6L_kiss_modem",
+        })
+        for name in names:
+            with self.subTest(environment=name):
+                row = self.rows[name]
+                self.assertEqual(row["mcu"], "esp32c6")
+                self.assertEqual(row["kind"], "hwcdc")
+                self.assertEqual(row["values"], {USB_MODE: "1", USB_CDC: "1"})
+                self.assertTrue(self.sdk["hwcdc_primary_enabled"](row["env"]))
+                self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
+                self.assertEqual(self.config.get(f"env:{name}", "extra_scripts", []).count(
+                    "pre:scripts/esp32_usb_session_fix.py"), 1)
+                self.assertEqual(self.config.get(f"env:{name}", "platform"),
+                                 "https://github.com/pioarduino/platform-espressif32/releases/"
+                                 "download/53.03.13-1/platform-espressif32.zip")
+
+    def test_m5stack_selector_removal_reproduces_the_old_uart_backend(self):
+        for name in ("M5Stack_Unit_C6L_repeater", "M5Stack_Unit_C6L_room_server",
+                     "M5Stack_Unit_C6L_companion_radio_ble", "M5Stack_Unit_C6L_kiss_modem"):
+            with self.subTest(environment=name):
+                env = flag_environment(build_flags=self.config.get(f"env:{name}", "build_flags"),
+                                       build_unflags=["-DARDUINO_USB_MODE=1",
+                                                      "-DARDUINO_USB_CDC_ON_BOOT=1"])
+                self.assertEqual(usb_values(env), {USB_MODE: "0", USB_CDC: "0"})
+                self.assertFalse(self.sdk["hwcdc_primary_enabled"](env))
+
+    def test_uart_existing_hwcdc_and_newer_mcu_recipes_match_reviewed_transports(self):
         counts = Counter()
         for name, row in self.rows.items():
             if not row["esp32"] or row["board"] in MIGRATED_BOARD_COUNTS:
                 continue
             with self.subTest(environment=name):
-                expected = expected_unchanged_transport(row["board"], name)
+                expected = expected_other_transport(row["board"], name)
                 self.assertEqual(row["kind"], expected)
                 counts[row["board"], row["kind"]] += 1
         self.assertEqual(counts, UNCHANGED_COUNTS)
