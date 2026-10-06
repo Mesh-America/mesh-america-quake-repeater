@@ -67,6 +67,17 @@ def production_capacities(sensor_transform=None, room_transform=None):
     return "\n".join(definitions) + "\n"
 
 
+def production_telemetry_access():
+    source = (ROOT / "src/helpers/CommonCLI.h").read_text()
+    definitions = []
+    for mode in ("ALL", "ACL"):
+        matches = re.findall(r"^#define TELEMETRY_ACCESS_" + mode + r"\s+[0-9]+\s*$", source, re.M)
+        if len(matches) != 1:
+            raise AssertionError("one production telemetry access mode required: " + mode)
+        definitions.append(matches[0].strip())
+    return "\n".join(definitions) + "\n"
+
+
 class SensorReplyBoundsTest(unittest.TestCase):
     def execute(self, case, transform=None, room_transform=None):
         compiler = shutil.which("g++") or shutil.which("clang++")
@@ -74,6 +85,7 @@ class SensorReplyBoundsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="sensor-reply-bounds-") as directory:
             work = Path(directory)
             (work / "telemetry_capacity.inc").write_text(production_capacities(transform, room_transform), encoding="ascii")
+            (work / "telemetry_access.inc").write_text(production_telemetry_access(), encoding="ascii")
             (work / "production.inc").write_text(production_methods(transform, room_transform), encoding="ascii")
             history_types = (ROOT / "examples/simple_sensor/TimeSeriesData.h").read_text()
             history_types = "\n".join(line for line in history_types.splitlines() if not line.startswith("#"))
@@ -116,6 +128,9 @@ class SensorReplyBoundsTest(unittest.TestCase):
 
     def test_empty_history_query_has_no_synthetic_zero_values(self):
         self.check_case("empty")
+
+    def test_telemetry_permission_modes_match_current_prefs(self):
+        self.check_case("permissions")
 
     def test_old_telemetry_copy_exceeds_route_admission(self):
         def old(source):

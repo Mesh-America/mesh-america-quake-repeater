@@ -9,12 +9,12 @@
 #include <helpers/sensors/LPPDataHelpers.h>
 
 #include "telemetry_capacity.inc"
+#include "telemetry_access.inc"
 #define REQ_TYPE_GET_TELEMETRY_DATA SENSOR_REQ_TYPE_GET_TELEMETRY_DATA
 #define PERM_ACL_GUEST 0
 #define REQ_TYPE_GET_AVG_MIN_MAX 0x04
 #define PERM_ACL_ROLE_MASK 7
 #define PERM_ACL_READ_ONLY 1
-#define TELEMETRY_ACCESS_ALL 2
 #define TELEM_PERM_BASE 1
 #define TELEM_PERM_LOCATION 2
 #define TELEM_PERM_ENVIRONMENT 4
@@ -83,8 +83,10 @@ struct Telemetry {
 };
 struct Sensors {
   std::vector<uint8_t> body;
+  uint8_t last_permissions = 0;
   void requestGpsTelemetryTimeSync(uint32_t) {}
-  void querySensors(uint8_t, Telemetry& telemetry) {
+  void querySensors(uint8_t permissions, Telemetry& telemetry) {
+    last_permissions = permissions;
     if (telemetry.data.size() + body.size() <= telemetry.max_len)
       telemetry.data.insert(telemetry.data.end(), body.begin(), body.end());
   }
@@ -319,6 +321,24 @@ int main(int argc, char** argv) {
     uint8_t query[10] = {};
     target.empty_real_series = true;
     assert(target.handleRequest(&client, 51, REQ_TYPE_GET_AVG_MIN_MAX, query, sizeof(query)) == 8);
+  }
+  else if (!strcmp(argv[1], "permissions")) {
+    for (uint8_t mode : {uint8_t(TELEMETRY_ACCESS_ALL), uint8_t(TELEMETRY_ACCESS_ACL)}) {
+      for (uint8_t role : {uint8_t(PERM_ACL_GUEST), uint8_t(PERM_ACL_READ_ONLY), uint8_t(3)}) {
+        SensorMesh target;
+        ClientInfo client;
+        client.permissions = role;
+        target._prefs.telemetry_access = mode;
+        const bool allowed = mode == TELEMETRY_ACCESS_ALL || role >= PERM_ACL_READ_ONLY;
+        uint8_t mask = 0;
+        const unsigned length = target.handleRequest(&client, 51, REQ_TYPE_GET_TELEMETRY_DATA, &mask, 1);
+        assert(length == (allowed ? 8u : 4u));
+        assert(target.sensors.last_permissions == (allowed ? 7 : 0));
+        uint8_t query[10] = {};
+        const unsigned history_length = target.handleRequest(&client, 51, REQ_TYPE_GET_AVG_MIN_MAX, query, sizeof(query));
+        assert((history_length != 0) == (role >= PERM_ACL_READ_ONLY));
+      }
+    }
   }
   else if (!strcmp(argv[1], "packet")) {
     SensorMesh target;
