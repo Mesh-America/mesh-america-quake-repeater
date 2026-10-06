@@ -16,6 +16,7 @@ PREAMBLE = r'''
 #include <cstring>
 #include <cstdint>
 #include <initializer_list>
+#define TBEAM_SX1262 1
 #include <helpers/CLICommandUtils.h>
 #include <helpers/RadioProfileCommandUtils.h>
 #include <helpers/BatteryChargeCLI.h>

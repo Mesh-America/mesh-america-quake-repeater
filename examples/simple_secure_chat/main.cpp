@@ -469,12 +469,14 @@ public:
   }
 
   void handleCommand(const char* command) {
+#if MESH_BATTERY_CHARGE_CONTROL
     char charge_reply[160];
     if (mesh::power::handleBatteryChargeCommand(board, command, charge_reply,
                                                sizeof(charge_reply))) {
       Serial.println(charge_reply);
       return;
     }
+#endif
 #if defined(NRF52_POWER_MANAGEMENT)
     char voltage_reply[160];
     if (mesh::power::handleVoltagePolicyCommand(command, voltage_reply,
