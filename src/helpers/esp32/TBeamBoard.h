@@ -118,6 +118,10 @@ enum {
 };
 
 bool power_init();
+bool charge_pmu_ready = false;
+bool charge_target_restore_failed = false;
+uint8_t getChargeTargetModel() const;
+void restoreBatteryChargeTarget();
 //void radiotype_detect();
 
 public:
@@ -127,6 +131,13 @@ public:
   void scanDevices(TwoWire *w);
 #endif
   void begin();
+  bool getBatteryChargeTarget(uint16_t& millivolts) override;
+  bool supportsBatteryChargeTarget(uint16_t millivolts) override;
+  bool setBatteryChargeTarget(uint16_t millivolts) override;
+  const char* getBatteryChargeTargetOptions() const override;
+  bool batteryChargeTargetRestoreFailed() const override {
+    return charge_target_restore_failed;
+  }
 
   #ifndef TBEAM_SUPREME_SX1262
   void onBeforeTransmit() override{
@@ -138,9 +149,9 @@ public:
   #endif
 
   uint16_t getBattMilliVolts(){
+    if (!charge_pmu_ready) return 0;
 #if defined(PORTABLE_MQTT_OBSERVER) && !defined(TBEAM_SUPREME_SX1262)
     uint8_t high_reg = pmu_model == 0x4A ? 0x34 : 0x78;
-    uint8_t low_reg = high_reg + 1;
     PMU_WIRE_PORT.beginTransmission(I2C_PMU_ADD);
     PMU_WIRE_PORT.write(high_reg);
     if (PMU_WIRE_PORT.endTransmission(false) != 0 ||
@@ -150,7 +161,7 @@ public:
     if (pmu_model == 0x4A) return ((high & 0x1F) << 8) | low;
     return (uint16_t)((((high << 4) | (low & 0x0F)) * 11) / 10);
 #else
-    return PMU->getBattVoltage();
+    return PMU ? PMU->getBattVoltage() : 0;
 #endif
   }
 
