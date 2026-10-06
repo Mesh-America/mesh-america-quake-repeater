@@ -71,4 +71,4 @@ More in [Earthquake channel alerts](earthquake-alerts.md).
 | `earthquake.channel is not set` | Run `set earthquake.channel #your-channel`. |
 | `location is not set (set lat and lon)` | Run `set lat` and `set lon`. A location of exactly 0,0 counts as not set. |
 
-If the sensor shows "fault" or "not found", check that the RAK12027 sits in sensor slot A, then restart the repeater.
+If the sensor shows "fault" or "not found", check that the RAK12027 sits in the right slot, then restart the repeater: sensor slot A on a RAK3401, slot D on a RAK19003 (see [Supported hardware](hardware.md)).

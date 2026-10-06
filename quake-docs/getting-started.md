@@ -4,7 +4,7 @@ You need a [supported repeater](hardware.md) (a RAK3401, or a RAK4631 on a RAK19
 
 ## 1. Flash the firmware
 
-Open the [Quake Repeater flasher](https://apps.meshamerica.com/quake-repeater/) and follow it. It flashes the latest release over USB, then has a **Configure** step for the settings below. Releases are also listed on [GitHub](https://github.com/Mesh-America/mesh-america-quake-repeater/releases).
+Open the [Quake Repeater flasher](https://apps.meshamerica.com/quake-repeater/), choose your board (the RAK3401, or the RAK4631 on a RAK19003 from the RAK10703 kit) and follow it. It flashes the latest release over USB, then has a **Configure** step for the settings below. Releases are also listed on [GitHub](https://github.com/Mesh-America/mesh-america-quake-repeater/releases).
 
 <figure>
   <img src="/img/flasher-welcome.png" alt="The Quake Repeater flasher's welcome page, with Start flashing and Configure your repeater buttons" />
