@@ -721,7 +721,7 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
     memcpy(&reply_data[4], &now, 4);     // include our clock (for easy clock sync, and packet hash uniqueness)
     reply_data[8] = 0;  // features
 #ifdef WITH_RS232_BRIDGE
-    if (isBridgeRunning()) reply_data[8] |= 0x01;  // is bridge, type UART
+    if (isRs232BridgeRunning()) reply_data[8] |= 0x01;  // is bridge, type UART
 #ifdef WITH_ESPNOW_BRIDGE
     if (isEspNowBridgeRunning()) reply_data[8] |= 0x03;  // ESP-NOW may run alongside UART
 #endif
@@ -1198,6 +1198,12 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
     active_bridge->sendPacket(pkt);
   }
 #endif
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+  // UART output remains independent of MQTT's RX/TX and enabled settings.
+  if (_prefs.bridge_pkt_src == 1 && isRs232BridgeRunning()) {
+    bridge->sendPacket(pkt);
+  }
+#endif
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   // ESP-NOW follows bridge.source independently of the other transport's state.
@@ -1248,6 +1254,11 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
   if (_prefs.bridge_pkt_src == 0 && active_bridge
       && active_bridge->isRunning()) {
     active_bridge->sendPacket(pkt);
+  }
+#endif
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+  if (_prefs.bridge_pkt_src == 0 && isRs232BridgeRunning()) {
+    bridge->sendPacket(pkt);
   }
 #endif
 #if defined(WITH_ESPNOW_BRIDGE) \
@@ -3464,13 +3475,14 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
       , espnow_bridge(&_prefs, _mgr, &rtc)
       , shared_espnow_retry_at(0)
   #endif
-#elif defined(WITH_RS232_BRIDGE)
+#endif
+#if defined(WITH_RS232_BRIDGE)
       , bridge(nullptr)
-  #if defined(WITH_ESPNOW_BRIDGE)
+  #if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
       , espnow_bridge(&_prefs, _mgr, &rtc)
       , shared_espnow_retry_at(0)
   #endif
-#elif defined(WITH_ESPNOW_BRIDGE)
+#elif defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
       , bridge(&_prefs, _mgr, &rtc)
       , shared_espnow_retry_at(0)
 #endif
@@ -3655,10 +3667,16 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   // bridge defaults
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
-    && !defined(RS232_BRIDGE_DEFAULT_ON)
+    && !defined(RS232_BRIDGE_DEFAULT_ON) && !defined(WITH_MQTT_BRIDGE)
   _prefs.bridge_enabled = 0;    // normal repeater until explicitly enabled
 #else
   _prefs.bridge_enabled = 1;    // enabled
+#endif
+#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
+    && !defined(RS232_BRIDGE_DEFAULT_ON)
+  _prefs.rs232_bridge_enabled = 0;
+#elif defined(WITH_RS232_BRIDGE)
+  _prefs.rs232_bridge_enabled = 1;
 #endif
 #if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
   _prefs.espnow_bridge_enabled = 0;  // merged normal repeater until explicitly enabled
@@ -3828,7 +3846,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
     mqtt_bridge = new MQTTBridge(node_info, _cli.getObserverPrefs(),
                                  getRTCClock(), &self_id);
 #endif
-#ifdef WITH_RS232_BRIDGE
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
     if (!bridge) {
       bridge = createRS232Bridge();
     }
@@ -3837,7 +3855,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
       // partial object/GPS ownership. Advertisements and bridge.running report
       // the actual stopped state rather than the saved preference.
       MESH_DEBUG_PRINTLN("RS232 bridge configured on but failed to start");
-      if (!setBridgeState(false)) {
+      if (!setRs232BridgeState(false)) {
         MESH_DEBUG_PRINTLN(
             "RS232 bridge cleanup failed; UART/GPS ownership remains tracked");
       }
@@ -3883,6 +3901,14 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
 #endif
 
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+  if (rs232BridgeEnabled() && !setRs232BridgeState(true)) {
+    MESH_DEBUG_PRINTLN("RS232 bridge configured on but failed to start");
+    if (!setRs232BridgeState(false)) {
+      MESH_DEBUG_PRINTLN("RS232 bridge cleanup failed; UART/GPS ownership remains tracked");
+    }
+  }
+#endif
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   if (_prefs.espnow_bridge_enabled) setEspNowBridgeState(true);
@@ -12845,9 +12871,10 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   else startSharedEspNowBridgeIfReady();
   #endif
 #endif
-#if defined(WITH_RS232_BRIDGE) \
-    || (defined(WITH_BRIDGE) && !defined(WITH_MQTT_BRIDGE) \
-        && !defined(WITH_ESPNOW_BRIDGE))
+#if defined(WITH_RS232_BRIDGE)
+  if (isRs232BridgeRunning()) bridge->loop();
+#elif defined(WITH_BRIDGE) && !defined(WITH_MQTT_BRIDGE) \
+        && !defined(WITH_ESPNOW_BRIDGE)
   AbstractBridge* active_bridge = activeBridge();
   if (active_bridge && active_bridge->isRunning()) active_bridge->loop();
 #endif
@@ -13515,6 +13542,9 @@ bool MyMesh::hasPendingWork() const {
 #if defined(WITH_BRIDGE)
   const AbstractBridge* active_bridge = activeBridge();
   if (active_bridge && active_bridge->isRunning()) return true;
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+  if (isRs232BridgeRunning()) return true;
+#endif
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   if (espnow_bridge.isRunning()) return true;

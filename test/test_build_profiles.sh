@@ -341,6 +341,23 @@ require("RAK_4631_repeater", "build_flags", "WITH_RS232_BRIDGE_ALT=Serial1")
 require("RAK_4631_repeater", "build_flags", "WITH_RS232_BRIDGE_UART=2")
 reject("wio-e5_repeater", "build_flags", "WITH_RS232_BRIDGE=")
 
+# Full source substitution must preserve the normal repeater UART rather
+# than retiring its legacy bridge while compiling an MQTT-only recipe.
+for env_name, rx, tx in (
+    ("Heltec_v3_repeater_observer_mqtt", 5, 6),
+    ("Heltec_WSL3_repeater_observer_mqtt", 5, 6),
+    ("RAK_3112_repeater_observer_mqtt", 5, 6),
+    ("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_", 34, 25),
+):
+    require(env_name, "build_flags", "WITH_MQTT_BRIDGE=1")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE=Serial2")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE_UART=2")
+    require(env_name, "build_flags", f"WITH_RS232_BRIDGE_RX={rx}")
+    require(env_name, "build_flags", f"WITH_RS232_BRIDGE_TX={tx}")
+    require(env_name, "build_flags", "RS232_BRIDGE_MERGED=1")
+    require(env_name, "build_src_filter", "helpers/bridges/RS232Bridge.cpp")
+    reject(env_name, "build_flags", "RS232_BRIDGE_DEFAULT_ON")
+
 # MKE keeps its ordinary role and UART wiring while exposing the existing
 # persistent bridge controls. The merged marker selects the disabled default;
 # the explicit legacy bridge remains enabled for deliberate direct builds.
@@ -1605,6 +1622,19 @@ done
 if is_redundant_bulk_build_target wio-e5-repeater_bridge_rs232; then
   fail "capacity-constrained Wio-E5 RS232 bridge was incorrectly merged"
 fi
+
+(
+  BUILD_PROFILE_FOR_TARGET=full
+  for uart_target in Heltec_v3_repeater Heltec_WSL3_repeater RAK_3112_repeater \
+      LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_; do
+    BUILD_EXPECTATIONS=()
+    declare_build_capability_contract "$uart_target" ESP32_PLATFORM
+    [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.rs232=_ZN11RS232Bridge5beginEv"* ]] \
+      || fail "$uart_target Full contract omitted the linked UART driver"
+    [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.espnow=_ZN12ESPNowBridge5beginEv"* ]] \
+      || fail "$uart_target Full contract omitted the linked ESP-NOW driver"
+  done
+)
 
 # A WiFi base's final -UENABLE_OTA must not win over the Full Companion's
 # source-only OTA overlay. That mismatch compiles out both the TCP terminal and

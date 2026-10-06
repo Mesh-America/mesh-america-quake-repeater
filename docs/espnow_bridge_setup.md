@@ -84,6 +84,7 @@ Stopping it first lets you finish configuring both sides before connecting them.
 | Option | Choices and purpose |
 | --- | --- |
 | `espnow.enabled` | `on` starts ESP-NOW; `off` stops it and keeps its saved settings. Independent of MQTT or RS-232. |
+| `rs232.enabled` | On combined UART images, starts or stops RS-232 independently of MQTT and ESP-NOW. Use `get rs232.running` to check the live UART. |
 | `bridge.channel` | The 2.4 GHz channel, 1-13. Match it on both boards. This is separate from the LoRa frequency in `set radio`. |
 | `bridge.format` | `wrapped` is the default for this two-repeater setup and uses the shared secret. `raw` connects to primary-ESP-NOW nodes such as `Generic_ESPNOW` or `SenseCapIndicator-ESPNow`; it ignores the secret. Both peers must use compatible formats. |
 | `bridge.secret` | A matching, case-sensitive value of 1-15 characters for `wrapped` mode. It separates bridge groups; it is not strong encryption. MeshCore's own message encryption remains in place. |

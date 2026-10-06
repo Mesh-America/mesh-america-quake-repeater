@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <new>
 #include <Mesh.h>
 #if defined(ENABLE_OTA)
   #include <helpers/ota/OtaContext.h>
@@ -583,14 +584,15 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   ESPNowBridge espnow_bridge;
   uint32_t shared_espnow_retry_at = 0;
   #endif
-#elif defined(WITH_RS232_BRIDGE)
+#endif
+#if defined(WITH_RS232_BRIDGE)
   RS232Bridge* bridge;
   uint8_t active_rs232_bridge_uart = 0;
-  #if defined(WITH_ESPNOW_BRIDGE)
+  #if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
   ESPNowBridge espnow_bridge;
   uint32_t shared_espnow_retry_at = 0;
   #endif
-#elif defined(WITH_ESPNOW_BRIDGE)
+#elif defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
   ESPNowBridge bridge;
   uint32_t shared_espnow_retry_at = 0;
 #endif
@@ -1207,12 +1209,12 @@ public:
   RS232Bridge* createRS232Bridge() {
 #ifdef WITH_RS232_BRIDGE_ALT
     if (_prefs.bridge_uart == WITH_RS232_BRIDGE_ALT_UART) {
-      return new RS232Bridge(&_prefs, WITH_RS232_BRIDGE_ALT,
+      return new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE_ALT,
                              WITH_RS232_BRIDGE_ALT_RX,
                              WITH_RS232_BRIDGE_ALT_TX, _mgr, getRTCClock());
     }
 #endif
-    return new RS232Bridge(&_prefs, WITH_RS232_BRIDGE,
+    return new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE,
                            WITH_RS232_BRIDGE_RX, WITH_RS232_BRIDGE_TX,
                            _mgr, getRTCClock());
   }
@@ -1278,11 +1280,55 @@ public:
     if (stopped && gps_released) active_rs232_bridge_uart = 0;
     return stopped && gps_released;
   }
+
+  bool rs232BridgeEnabled() const {
+#ifdef WITH_MQTT_BRIDGE
+    return _prefs.rs232_bridge_enabled != 0;
+#else
+    return _prefs.bridge_enabled != 0;
+#endif
+  }
+
+  bool isRs232BridgeRunning() const override {
+    return bridge && bridge->isRunning();
+  }
+
+  bool setRs232BridgeState(bool enable) override {
+    if (!enable) {
+      const bool stopped = endRS232Bridge();
+      if (stopped) {
+        delete bridge;
+        bridge = nullptr;
+      }
+      return stopped;
+    }
+    if (isRs232BridgeRunning()) return true;
+    // Retry any tracked GPS release before constructing a new UART owner.
+    if (active_rs232_bridge_uart != 0 && !endRS232Bridge()) return false;
+    if (!bridge) bridge = createRS232Bridge();
+    return bridge && beginRS232Bridge();
+  }
+
+  bool restartRs232Bridge() override {
+    // Apply UART changes synchronously so a failed CLI change can restore
+    // the previous pins/baud without disturbing MQTT or ESP-NOW.
+    if (!endRS232Bridge()) return false;
+    delete bridge;
+    bridge = nullptr;
+    return !rs232BridgeEnabled() || setRs232BridgeState(true);
+  }
 #endif
 
   bool isBridgeRunning() const override {
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
-    return (mqtt_bridge && mqtt_bridge->isRunning()) || espnow_bridge.isRunning();
+#if defined(WITH_MQTT_BRIDGE)
+    return (mqtt_bridge && mqtt_bridge->isRunning())
+#ifdef WITH_ESPNOW_BRIDGE
+        || espnow_bridge.isRunning()
+#endif
+#ifdef WITH_RS232_BRIDGE
+        || isRs232BridgeRunning()
+#endif
+        ;
 #else
     const AbstractBridge* active_bridge = activeBridge();
     return active_bridge != nullptr && active_bridge->isRunning();
@@ -1385,7 +1431,11 @@ public:
 
   bool setBridgeState(bool enable) override {
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
-    if (!enable) return setEspNowBridgeState(false) && setMqttBridgeState(false);
+    if (!enable) {
+      const bool espnow_stopped = setEspNowBridgeState(false);
+      const bool mqtt_stopped = setMqttBridgeState(false);
+      return espnow_stopped && mqtt_stopped;
+    }
     const bool mqtt_ok = _prefs.bridge_enabled
         ? setMqttBridgeState(true) : setMqttBridgeState(false);
     const bool espnow_ok = _prefs.espnow_bridge_enabled
@@ -1417,7 +1467,7 @@ public:
       if (!mqtt_bridge) return false;
     }
 #endif
-#ifdef WITH_RS232_BRIDGE
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
     if (enable && !bridge) {
       bridge = createRS232Bridge();
       if (!bridge) return false;
@@ -1449,7 +1499,7 @@ public:
       mqtt_bridge->setBuildDate(getBuildDate());
       mqtt_bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
 #endif
-#ifdef WITH_RS232_BRIDGE
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
       const bool started = beginRS232Bridge();
 #else
       configureBridgeFilter(active_bridge);
@@ -1463,7 +1513,7 @@ public:
     }
     else
     {
-#ifdef WITH_RS232_BRIDGE
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
       const bool stopped = endRS232Bridge();
       delete bridge;
       bridge = nullptr;
@@ -1487,13 +1537,15 @@ public:
       return true;
     }
 #endif
-    return restartEspNowBridge() && restartMqttBridge();
+    const bool mqtt_ok = restartMqttBridge();
+    const bool espnow_ok = restartEspNowBridge();
+    return mqtt_ok && espnow_ok;
 #else
 #if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_RS232_BRIDGE)
     if (_cli.getBoard()->isOTAUpdateRunning()) return false;
     shared_espnow_retry_at = 0;
 #endif
-#ifdef WITH_RS232_BRIDGE
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
     // RS-232 changes must be applied synchronously so the CLI can commit or
     // roll back the selected pins/baud. This branch also reconstructs a bridge
     // after a prior allocation/start failure and is not WebConfig-coalesced.

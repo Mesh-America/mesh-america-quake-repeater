@@ -21,7 +21,7 @@ int main() {
   cli.savePrefs(&cli.fs, PrefsSaveRouting::Scope::Common);
   assert(cli._common_save_succeeded);
   const auto baseline = cli.fs.files["/com_prefs"];
-  assert(baseline.size() == 874);
+  assert(baseline.size() == 877);
   const size_t trace_offset = 872, debug_offset = 871, gps_offset = 869;
   assert(baseline[trace_offset] == 0 && baseline[debug_offset] == 1);
   assert(baseline[866] == 48 && baseline[867] == 0 && baseline[868] == 1);

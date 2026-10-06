@@ -29,7 +29,7 @@ template<typename T> T constrain(T value, int low, int high) {
 }
 
 struct NodePrefs {
-  uint8_t bridge_enabled = 0, espnow_bridge_enabled = 0;
+  uint8_t bridge_enabled = 0, espnow_bridge_enabled = 0, rs232_bridge_enabled = 0;
   uint16_t bridge_delay = 0;
   uint8_t bridge_pkt_src = 0, bridge_uart = 0, bridge_channel = 0, bridge_format = 0;
   uint32_t bridge_baud = 0;
@@ -117,6 +117,9 @@ struct Callbacks {
   virtual bool isBridgeRunning() const = 0;
   virtual bool setBridgeState(bool) = 0;
   virtual bool restartBridge() = 0;
+  virtual bool isRs232BridgeRunning() const = 0;
+  virtual bool setRs232BridgeState(bool) = 0;
+  virtual bool restartRs232Bridge() = 0;
 #ifdef WITH_ESPNOW_BRIDGE
   virtual bool isEspNowBridgeRunning() = 0;
   virtual bool setEspNowBridgeState(bool) = 0;
@@ -186,6 +189,7 @@ public:
   explicit CommonCLI(MyMesh& mesh)
       : _prefs(&mesh._prefs), _callbacks(&mesh), _sensors(&mesh.sensors) {}
   void savePrefs() { ++saves; stored = *_prefs; }
+  bool trySavePrefs() { savePrefs(); return true; }
   void load(FakeFile file) {
     @INITIAL_UART@
     @LOAD_UART@
@@ -212,7 +216,7 @@ static void check_upgrade(bool has_tail, uint8_t saved_uart, uint8_t enabled) {
   CommonCLI cli(mesh);
   cli.load(FakeFile{has_tail, saved_uart});
 #if defined(RS232_BRIDGE_MERGED) && !defined(RS232_BRIDGE_DEFAULT_ON)
-  const bool normal_upgrade = !has_tail || saved_uart == 0;
+  const bool normal_upgrade = !has_tail || saved_uart != 2;
 #else
   const bool normal_upgrade = false;
 #endif
@@ -241,7 +245,7 @@ int main() {
     assert(Serial2.begins == begins + (mesh._prefs.bridge_enabled ? 1 : 0));
   }
   // Missing old tails and current normal-repeater zero sentinels fail safe.
-  // Legacy dedicated UART1 is intent, and normalizes to the board's UART2.
+  // Only a supported legacy UART proves intent; unsupported ports fail closed.
   for (uint8_t enabled : {uint8_t{0}, uint8_t{1}}) {
     check_upgrade(false, 0, enabled);
     check_upgrade(true, 0, enabled);

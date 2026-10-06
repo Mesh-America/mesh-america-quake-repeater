@@ -3398,15 +3398,18 @@ declare_build_capability_contract() {
 
   declare_full_logging_application_contract "$env_name"
   record_build_capability "profile.${BUILD_PROFILE_FOR_TARGET}"
-  if [ "$env_name_lc" = mke_s3_repeater ]; then
-    # Do not remove the dedicated bridge images unless both real transports
-    # survived linking in the canonical runtime-selectable repeater.
-    record_build_expectation "bridge.rs232" "_ZN11RS232Bridge5beginEv"
-  fi
   pio_env_name=$(get_pio_build_env "$env_name")
   if [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
       && is_esp32_canonical_full_release_target "$env_name"; then
     pio_env_name=$(get_exact_identity_full_pio_env "$env_name")
+  fi
+  if is_repeater_role_target "$env_name" \
+      && { pio_env_option_contains "$env_name" build_flags "WITH_RS232_BRIDGE=" \
+           || pio_env_option_contains "$pio_env_name" build_flags "WITH_RS232_BRIDGE="; }; then
+    # A Full observer recipe must retain the UART from its normal repeater.
+    # Check both the logical and compiled recipes so substituting sources
+    # cannot silently remove RS-232 while its legacy image is retired.
+    record_build_expectation "bridge.rs232" "_ZN11RS232Bridge5beginEv"
   fi
   if [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
       && supports_esp32_full_shared_espnow "$pio_env_name"; then

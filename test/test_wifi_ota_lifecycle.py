@@ -37,7 +37,10 @@ STUBS = r'''
 #define WITH_ESPNOW_BRIDGE 1
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 constexpr int WL_CONNECTED = 3, WL_DISCONNECTED = 6, HTTP_GET = 0;
-constexpr int WIFI_AP = 2;
+enum wifi_mode_t { WIFI_OFF = 0, WIFI_STA = 1, WIFI_AP = 2 };
+constexpr wifi_mode_t WIFI_MODE_NULL = WIFI_OFF;
+int esp_wifi_stop();
+int esp_wifi_deinit();
 constexpr int ESP_OK = 0;
 constexpr int LISTEN = 10;
 
@@ -65,7 +68,20 @@ struct MockWiFi {
   IPAddress station_ip, ap_ip, configured_ap_ip;
   int ap_protocol = 15;
   int status() const { return station_status; }
-  int getMode() const { return sdk_ap_active ? WIFI_AP : 0; }
+  wifi_mode_t getMode() const {
+    return started_cache && sdk_started ? (sdk_ap_active ? WIFI_AP : WIFI_STA) : WIFI_OFF;
+  }
+  int channel() const { return initialized_cache && sdk_initialized ? 1 : 0; }
+  bool mode(wifi_mode_t requested) {
+    if (requested == getMode()) return true;
+    if (requested == WIFI_OFF) {
+      esp_wifi_stop(); esp_wifi_deinit();
+      initialized_cache = started_cache = false;
+    } else {
+      sdk_initialized = sdk_started = initialized_cache = started_cache = true;
+    }
+    return true;
+  }
   IPAddress localIP() const { return station_ip; }
   IPAddress softAPIP() const { return ap_ip; }
   bool softAPConfig(IPAddress ip, IPAddress, IPAddress) {
@@ -99,6 +115,11 @@ int esp_wifi_stop() {
   return 0;
 }
 int esp_wifi_deinit() { ++wifi_deinit_calls; sdk_initialized = false; return 0; }
+int esp_wifi_get_mode(wifi_mode_t* mode) {
+  if (!sdk_initialized) return -1;
+  *mode = sdk_ap_active ? WIFI_AP : WIFI_STA;
+  return ESP_OK;
+}
 
 int server_count = 0, server_begin_calls = 0;
 struct AsyncWebServerRequest {
@@ -268,10 +289,12 @@ class WifiOtaLifecycleTests(unittest.TestCase):
         source = folder / "lifecycle.cpp"
         binary = folder / ("lifecycle.exe" if os.name == "nt" else "lifecycle")
         source.write_text(production_harness())
-        subprocess.run([
+        built = subprocess.run([
             os.environ.get("CXX", "g++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
             "-I", str(ROOT / "src"), str(source), "-o", str(binary),
-        ], check=True, capture_output=True, text=True, timeout=60)
+        ], capture_output=True, text=True, timeout=60)
+        if built.returncode:
+            raise RuntimeError(built.stdout + built.stderr)
         cls.observations = {}
         for scenario in SCENARIOS:
             result = subprocess.run([str(binary), scenario], check=True,
@@ -317,7 +340,8 @@ class WifiOtaLifecycleTests(unittest.TestCase):
         self.assertEqual(observation["deinit_calls"], count)
         self.assertEqual(observation["sdk_initialized"], 1 - count)
         self.assertEqual(observation["sdk_started"], 1 - count)
-        self.assertTrue(observation["initialized_cache"] and observation["started_cache"])
+        self.assertEqual(observation["initialized_cache"], 1 - count)
+        self.assertEqual(observation["started_cache"], 1 - count)
         self.assertEqual(observation["endpoint_usable"], 1 - count)
         if count == 0:
             if scenario == "cleanup_web":

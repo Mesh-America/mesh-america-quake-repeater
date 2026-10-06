@@ -6,7 +6,7 @@
 #include <helpers/ConfigSerializer.h>
 
 struct NodePrefs : ConfigSerializer {
-  uint8_t bridge_enabled = 0, bridge_uart = 2, espnow_bridge_enabled = 0;
+  uint8_t bridge_enabled = 0, bridge_uart = 2, espnow_bridge_enabled = 0, rs232_bridge_enabled = 0;
   uint16_t bridge_delay = 500;
   uint8_t bridge_pkt_src = 1, bridge_channel = 1, bridge_format = 0;
   uint32_t bridge_baud = 115200;
@@ -47,8 +47,14 @@ struct CLI {
   }
   bool import(FakeFS* fs) {
     bool loaded = false, is_upgrade = false;
+#ifdef WITH_MQTT_BRIDGE
+    bool node_prefs_needs_migration = false;
+#endif
     @IMPORT@
     assert(loaded == is_upgrade);
+#ifdef WITH_MQTT_BRIDGE
+    assert(node_prefs_needs_migration == loaded);
+#endif
     return loaded;
   }
 };
@@ -60,17 +66,27 @@ int main() {
       "{name:\"imported node\",bridge:{en:1,uart:1}}",
       "{name:\"imported node\",bridge:{en:1,uart:2}}",
       "{name:\"imported node\",bridge:{en:0,uart:2}}",
+      "{name:\"imported node\",bridge:{en:1,uart:2,rs232:1}}",
   }) {
     CLI cli;
     cli.prefs.espnow_bridge_enabled = 1; // An old unused flag cannot prove intent.
+    cli.prefs.rs232_bridge_enabled = 1; // Reused objects cannot donate UART intent.
     FakeFS fs{json};
-    assert(cli.import(&fs) && cli.saves == 1);
+    assert(cli.import(&fs));
+#ifdef WITH_MQTT_BRIDGE
+    assert(cli.saves == 0);
+#else
+    assert(cli.saves == 1);
+#endif
     assert(strcmp(cli.prefs.node_name, "imported node") == 0);
 #if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON) \
     && !defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
     assert(cli.prefs.bridge_enabled == 0);
+#elif defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+    assert(cli.prefs.bridge_enabled == (strstr(json, "en:1") != nullptr));
+    assert(cli.prefs.rs232_bridge_enabled == 0 && cli.prefs.bridge_uart == 2);
 #elif defined(RS232_BRIDGE_MERGED) && !defined(RS232_BRIDGE_DEFAULT_ON)
-    const bool explicit_uart = strstr(json, "uart:1") || strstr(json, "uart:2");
+    const bool explicit_uart = strstr(json, "uart:2");
     const bool enabled = explicit_uart && strstr(json, "en:1");
     assert(cli.prefs.bridge_enabled == enabled && cli.prefs.bridge_uart == 2);
 #else
@@ -85,8 +101,10 @@ int main() {
 #else
     assert(cli.prefs.espnow_bridge_enabled == 1);
 #endif
+#ifndef WITH_MQTT_BRIDGE
     assert(cli.saved_uart == cli.prefs.bridge_uart && cli.saved_enabled == cli.prefs.bridge_enabled);
     assert(cli.saved_secondary == cli.prefs.espnow_bridge_enabled);
+#endif
   }
   // Malformed JSON may partially apply scalar fields before the parser rejects it.
   CLI broken;

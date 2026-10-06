@@ -20,6 +20,38 @@ def record(target: str, profile: str = "full", platform: str = "ESP32_PLATFORM",
 
 
 class ReleaseFullSelectionTest(unittest.TestCase):
+    def test_full_uart_source_substitution_requires_linked_driver_proof(self):
+        for base in ("Heltec_v3_repeater", "Heltec_WSL3_repeater", "RAK_3112_repeater",
+                     "LilyGo_TLora_V2_1_1_6_repeater"):
+            for suffix in ("", "_observer_mqtt", "_observer_mqtt_"):
+                for fault in ("missing_capability", "missing_proof", "false_proof", "unverified"):
+                    image = record(base + suffix, capabilities=("bridge.rs232", "bridge.espnow"))
+                    manifest = image["manifest"]
+                    if fault == "missing_capability":
+                        manifest["capabilities"].remove("bridge.rs232")
+                    elif fault == "missing_proof":
+                        manifest["verification"] = []
+                    elif fault == "false_proof":
+                        manifest["verification"][0]["present"] = False
+                    else:
+                        manifest["verified"] = False
+                    with self.subTest(base=base, suffix=suffix, fault=fault):
+                        with self.assertRaisesRegex(ValueError, "verified RS232 bridge"):
+                            select_ordinary_full_records([image])
+
+    def test_new_combined_full_displaces_stale_plain_and_both_dedicated_bridges(self):
+        for base in ("Heltec_v3_repeater", "Heltec_WSL3_repeater", "RAK_3112_repeater",
+                     "LilyGo_TLora_V2_1_1_6_repeater"):
+            stale = record(base, capabilities=("bridge.espnow",))
+            primary = record(base + "_observer_mqtt_",
+                             capabilities=("bridge.rs232", "bridge.espnow"))
+            for profile in ("standard", "full"):
+                old = [record(base + "_bridge_" + bridge, profile)
+                       for bridge in ("rs232", "espnow")]
+                for inputs in ([stale, primary] + old, old + [primary, stale]):
+                    with self.subTest(base=base, profile=profile):
+                        self.assertEqual(select_ordinary_full_records(inputs), [primary])
+
     def test_meshtower_sd_primary_filters_stale_internal_images_without_relabeling(self):
         primary = "Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"
         variants = []
@@ -63,7 +95,7 @@ class ReleaseFullSelectionTest(unittest.TestCase):
         inputs = [
             record("Heltec_v3_repeater_observer_mqtt"),
             record("Heltec_v3_repeater_bridge_espnow"),
-            record("Heltec_v3_repeater", capabilities=("bridge.espnow",)),
+            record("Heltec_v3_repeater", capabilities=("bridge.espnow", "bridge.rs232")),
             record("Heltec_v3_repeater", "standard"),
             record("Heltec_v3_room_server"),
             record("Station_G2_repeater"),
@@ -71,7 +103,7 @@ class ReleaseFullSelectionTest(unittest.TestCase):
             record("Tbeam_SX1262_repeater_bridge_espnow"),
             record("Tbeam_SX1262_repeater_observer_mqtt", capabilities=("bridge.espnow",)),
             record("LilyGo_TLora_V2_1_1_6_repeater"),
-            record("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_"),
+            record("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_", capabilities=("bridge.rs232",)),
             record("Meshadventurer_sx1262_repeater"),
             record("Meshadventurer_sx1262_repeater_bridge_espnow"),
             record("RAK_4631_repeater", platform="NRF52_PLATFORM"),
@@ -158,7 +190,7 @@ class ReleaseFullSelectionTest(unittest.TestCase):
             self.assertEqual(select_ordinary_full_records(ordered), ordered)
 
     def test_qualified_combined_plain_image_replaces_only_its_matching_espnow_image(self):
-        primary = record("Heltec_v3_repeater", capabilities=("bridge.espnow",))
+        primary = record("Heltec_v3_repeater", capabilities=("bridge.espnow", "bridge.rs232"))
         other_board = record("heltec_v4_tft_repeater_bridge_espnow", capabilities=("bridge.espnow",))
         for profile in ("full", "standard"):
             legacy = record("Heltec_v3_repeater_bridge_espnow", profile, capabilities=("bridge.espnow",))
@@ -221,7 +253,7 @@ class ReleaseFullSelectionTest(unittest.TestCase):
 
     def test_combined_observer_with_trailing_underscore_replaces_matching_espnow(self):
         observer = record("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_",
-                          capabilities=("bridge.espnow",))
+                          capabilities=("bridge.espnow", "bridge.rs232"))
         legacy = record("LilyGo_TLora_V2_1_1_6_repeater_bridge_espnow",
                         capabilities=("bridge.espnow",))
         for inputs in ([observer, legacy], [legacy, observer]):

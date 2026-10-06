@@ -1284,6 +1284,40 @@ assert(!picker.runtimeDirections(staleBridgeMetadata.profiles.find(profile =>
   profile.target === bridgeTargets[0]), {mode: 'espnow'}).some(section => section.title === 'ESP-NOW bridge'));
 console.log('combined UART/ESP-NOW picker modes, independent commands and historical compatibility passed');
 
+// MQTT, ESP-NOW and UART coexist in the same qualified Full artifact. UART
+// instructions must never use MQTT's historical ESP-NOW bridge alias.
+const tripleTargets = ['Heltec_v3_repeater', 'Heltec_WSL3_repeater',
+  'RAK_3112_repeater', 'LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_']
+  .map(target => target + '-full-usb-wifi');
+const tripleCatalog = picker.buildCatalog([
+  release(bridgeFamily, '2026-10-05T00:00:00Z', tripleTargets.map(target =>
+    asset(target + '-ota-' + bridgeFamily + '.bin'))),
+], {
+  familyTag: bridgeFamily,
+  profiles: Object.fromEntries(tripleTargets.map(target => [target, {
+    platform: 'ESP32_PLATFORM', rs232: true, mqtt: true, espnowBridge: true,
+    updateMethods: ['wifi', 'lora'],
+  }])),
+});
+for (const profile of tripleCatalog.profiles) {
+  assert.deepStrictEqual(picker.profileFieldValues(profile, 'mode'),
+    ['standard', 'rs232', 'espnow']);
+  const directions = picker.runtimeDirections(profile, {mode: 'rs232'});
+  const uart = directions.find(section => /^RS232 bridge/.test(section.title));
+  const wireless = directions.find(section => section.title === 'ESP-NOW bridge');
+  const mqtt = directions.find(section => section.title === 'MQTT broker connections');
+  assert(uart && wireless && mqtt);
+  assert.deepStrictEqual(uart.actions.map(action => action.commands), [
+    ['set rs232.enabled on', 'get rs232.running'], ['set rs232.enabled off'],
+    ['set rs232.enabled off', 'set bridge.baud 115200', 'set rs232.enabled on'],
+  ]);
+  assert(commands([wireless]).includes('set espnow.enabled on'));
+  assert(commands([mqtt]).includes('set mqtt.enabled on'));
+  assert(!commands([uart, wireless, mqtt]).some(command => command.includes('bridge.enabled')));
+}
+assert.strictEqual(tripleCatalog.profiles.length, tripleTargets.length);
+console.log('three-transport Full picker uses independent UART, MQTT and ESP-NOW controls');
+
 // Partition expansion uses the packager's lookup and published utility assets,
 // not hardware labels or guessed slugs (several historical names differ).
 const migrationFamily = currentControls.familyTag;

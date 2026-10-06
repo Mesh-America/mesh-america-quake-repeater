@@ -4745,6 +4745,15 @@ bridge actually started in this boot; they can differ after a hardware conflict,
 missing credentials, or a transient initialization failure. Normal merged
 repeater images default to `off`; dedicated bridge images may default to `on`.
 
+Full MQTT repeaters with RS-232 expose three independent transports. Use
+`set rs232.enabled on|off` and `get rs232.enabled` for saved UART intent;
+`get rs232.running` reports the actual UART state. `mqtt.enabled` and
+`espnow.enabled` select the other two transports. In MQTT images the historical
+`bridge.enabled` alias controls ESP-NOW; in non-MQTT UART images it controls
+RS-232. `bridge.baud` and `bridge.uart` change only UART configuration, without
+restarting MQTT or ESP-NOW. The new UART mode starts off when upgrading old
+MQTT preferences and retains explicit settings across reboots.
+
 ---
 
 #### Add a delay to packets routed through this bridge
@@ -4908,7 +4917,9 @@ Requires WiFi connected and the MQTT bridge running.
 **Parameters:**
 - `rate`: Integer baud rate from `9600` through the board's compiled
   `BRIDGE_MAX_BAUD` (commonly `500000`); for example `115200`. Stop the bridge
-  with `set bridge.enabled off` before changing it, then enable it again.
+  with `set rs232.enabled off` in a combined MQTT image, or
+  `set bridge.enabled off` in a non-MQTT UART image, before changing it.
+  Enable the UART again with the matching switch.
 
 **Default:** `115200`
 
@@ -4928,7 +4939,8 @@ Requires WiFi connected and the MQTT bridge running.
 
 The setting is persistent and restarts an enabled bridge immediately. Normal
 repeater artifacts start with `bridge.enabled off`; configure the UART and baud
-rate before running `set bridge.enabled on`. On the canonical RAK4631 runtime
+rate before running `set bridge.enabled on`. Combined MQTT images use
+`rs232.enabled` for that independent UART setting. On the canonical RAK4631 runtime
 image, UART 1 is reserved even if the bounded boot probe hears no RAK12501.
 Silence cannot prove that a cold L76K is physically absent, and that module
 remains powered by the shared WB_IO2/3V3_S rail. Use UART 2. UART 1 requires an

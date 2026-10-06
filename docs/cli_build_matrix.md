@@ -204,6 +204,18 @@ available from a canonical image:
   target remains directly buildable with its bridge-on default but is omitted
   from bulk releases. Browser OTA pauses ESP-NOW while leaving RS-232 running;
   `stop ota` restores ESP-NOW when its saved setting is on.
+- Full Heltec V3, Wireless Stick Lite V3, RAK3112 and LilyGo T-LoRa V2.1-1.6
+  MQTT repeaters retain RS-232 alongside MQTT and ESP-NOW. The first three
+  use UART2 with RX on GPIO5 and TX on GPIO6; T-LoRa uses UART2 with RX on
+  GPIO34 and TX on GPIO25. Use `set rs232.enabled on|off` and
+  `get rs232.running` independently of `mqtt.enabled` and `espnow.enabled`.
+  `bridge.baud` and `bridge.uart` configure the UART. Old MQTT preferences
+  do not enable this newly added UART; its saved intent needs a validated
+  UART profile marker. Historical `bridge.enabled` keeps its ESP-NOW meaning
+  in MQTT images and its UART meaning in non-MQTT images. Full qualification
+  verifies the linked UART driver even when compiling observer sources for a
+  normal repeater, and resumed release selection rejects Full images without
+  that proof.
 - MeshTower V2 repeaters use
   `Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors` as the one
   canonical target. Its SD OTA target `0A9DBBF0`, hardware ID
