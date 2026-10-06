@@ -18,6 +18,7 @@ PREAMBLE = r'''
 #include <initializer_list>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/RadioProfileCommandUtils.h>
+#include <helpers/BatteryChargeCLI.h>
 #define ESP32 1
 #define WIFI_SSID "test"
 #define WITH_MQTT_BRIDGE 1
@@ -84,6 +85,14 @@ struct Prefs {
 };
 struct Board {
   int power_offs=0;
+  uint16_t charge_target=4200;
+  unsigned charge_writes=0;
+  const char* getBatteryChargeTargetOptions() const {return "4.10,4.20";}
+  bool batteryChargeTargetRestoreFailed() const {return false;}
+  const char* getBatteryChargeTargetUnsupportedReason() const {return "unsupported";}
+  bool getBatteryChargeTarget(uint16_t& mv){mv=charge_target;return true;}
+  bool supportsBatteryChargeTarget(uint16_t mv){return mv==4100 || mv==4200;}
+  bool setBatteryChargeTarget(uint16_t mv){++charge_writes;charge_target=mv;return true;}
   bool rebootToUf2Bootloader(){return false;}
   bool handleCommand(const char*,uint32_t,char*){return false;}
   void powerOff(){++power_offs;}
@@ -153,6 +162,17 @@ SCENARIOS = r'''
 int main() {
   MyMesh node;
   char reply[160] = {};
+  assert(node.handleCommand("set charge.voltage 4.1",0,reply));
+  assert(board.charge_target==4100 && strstr(reply,"saved"));
+  for(uint32_t stamp:{0u,100u}) {
+    node.onCLICommandRecv(ContactInfo{},nullptr,stamp,"A7|set charge.voltage 4.2",reply);
+    assert(board.charge_target==4200 && !strcmp(reply,"A7|OK - charge.voltage 4.200 V (saved)"));
+    const unsigned writes=board.charge_writes;
+    node.onCLICommandRecv(ContactInfo{},nullptr,stamp,"A7|set charge.voltage 3.65",reply);
+    assert(board.charge_writes==writes && !strncmp(reply,"A7|Error: unsupported target",27));
+    node.onCLICommandRecv(ContactInfo{false},nullptr,stamp,"set charge.voltage 4.1",reply);
+    assert(board.charge_writes==writes && board.charge_target==4200);
+  }
   const char* local[] = {"get password", "get prv.key", "get wifi.pwd", "get mqtt1.password",
       "get mqtt1.token", "stats-core", "stats-radio", "stats-radio-diag", "stats-packets"};
   for(const char* command:local) {
