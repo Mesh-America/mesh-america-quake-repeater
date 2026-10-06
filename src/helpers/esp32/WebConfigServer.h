@@ -166,8 +166,22 @@ public:
   WebConfigServer(Callbacks* callbacks, void* mqtt_prefs, bool owns_wifi,
                   const uint8_t* pub_key, const char* fw_ver,
                   const char* build_date,
-                  const char* role, const char* board_name);
+                  const char* role, const char* board_name,
+                  bool standalone_wifi = false);
   ~WebConfigServer();
+
+  // Infrastructure roles refresh this from the actual MQTT worker state.
+  // A compiled-in but stopped/unconfigured bridge cannot reconnect WiFi.
+  // Companion runtimes retain their own station ownership. Loop task only.
+  void updateWiFiOwnership(bool owns_wifi) {
+    _runtime_wifi_ownership_managed = true;
+    if (_owns_wifi == owns_wifi) return;
+    _owns_wifi = owns_wifi;
+    // Discard only our attempt state. Never disconnect another owner's STA.
+    _connect_deadline = 0;
+    _setup_reconnect_in_progress = false;
+    _setup_reconnect_deadline = 0;
+  }
 
   // For the device display: true while a setup-mode portal is active.
   // Fills the AP SSID and portal IP; either buffer may be NULL to just poll.
@@ -259,6 +273,12 @@ private:
   Callbacks* _cb;
   void* _mqtt_prefs;
   bool _owns_wifi;
+  // Legacy Companion/manual portals preserve their original start behavior;
+  // infrastructure opts into worker ownership through updateWiFiOwnership.
+  bool _runtime_wifi_ownership_managed = false;
+  // Credential storage is fixed at construction, independently of which
+  // runtime currently owns the station. Async UI handlers read this flag.
+  const bool _standalone_wifi;
   const uint8_t* _pub_key;
   const char* _fw_ver;
   const char* _build_date;
@@ -341,6 +361,7 @@ private:
   bool _board_cmds_probed = false;
 
   void createServer();
+  bool beginSavedStation(uint32_t now);
   void registerRoutes();
   typedef void (WebConfigServer::*RequestHandler)(AsyncWebServerRequest*);
   static void dispatchRequest(AsyncWebServerRequest* req, RequestHandler handler);
