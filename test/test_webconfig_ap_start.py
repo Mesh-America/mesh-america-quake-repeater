@@ -35,6 +35,11 @@ class WebConfigApStartTest(unittest.TestCase):
         mask = policy[policy.index("static constexpr uint8_t kAccessPointProtocolMask ="):]
         mask = mask[:mask.index(";") + 1]
         fixture = FIXTURE.read_text(encoding="utf-8").replace("@AP_MASK@", mask)
+        ap_policy = (ROOT / "src/helpers/esp32/WiFiAccessPointPolicy.h").read_text(encoding="utf-8")
+        scanner = "namespace mesh { namespace wifi {\n" + "\n".join(
+            extract_braced(ap_policy, signature) for signature in (
+                "inline bool finishAccessPointScan(", "inline bool scanBeforeAccessPoint(")) + "\n} }\n"
+        helper = scanner + helper
         fixture = fixture.replace("@METHODS@", helper + "\n" + method + "\n" + scan_handler)
         with tempfile.TemporaryDirectory(prefix="webconfig-ap-start-") as directory:
             work = Path(directory)

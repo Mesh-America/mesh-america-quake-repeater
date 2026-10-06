@@ -773,7 +773,14 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   // contain its appended byte, so they safely inherit the enabled default.
   _prefs->system_watchdog_enabled = 1;
   memset(_prefs->extra_sf, 0, sizeof(_prefs->extra_sf));
+#if defined(ESP32_PLATFORM) && defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
+  // Full carries diagnostics as an optional runtime service. Merely adding
+  // that capability must not hold an otherwise idle battery node awake.
+  // A saved logging preference below still takes precedence.
+  _prefs->usb_logging_enabled = 0;
+#else
   _prefs->usb_logging_enabled = 1;
+#endif
   _prefs->usb_debug_enabled = 0;
   _prefs->trace_when_repeat_off = 0;
   _prefs->ota_channel = 0;
@@ -2941,6 +2948,11 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         strcpy(reply, "ERR: usage start ota [ap]");
         return;
       }
+#if defined(WITH_ESPNOW_BRIDGE)
+      const bool ota_was_running = _board->isOTAUpdateRunning();
+      // Keep an outstanding pause if an earlier resume failed. Only a
+      // successful resume or an explicitly disabled saved intent clears it.
+#endif
       bool webconfig_stopped = false;
 #if defined(ESP_PLATFORM) && defined(ADMIN_PASSWORD) && !defined(WEBCONFIG_DISABLED)
       if (_callbacks->isWebConfigActive()) {
@@ -2951,7 +2963,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         webconfig_stopped = true;
       }
 #endif
-#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE)
       // Browser OTA owns the shared WiFi driver. An independent UART bridge
       // can keep running throughout the upload.
       const bool espnow_paused = _callbacks->isEspNowBridgeRunning();
@@ -2959,21 +2971,28 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         strcpy(reply, "ERR: could not pause ESP-NOW for OTA");
         return;
       }
+      _wifi_ota_resume_espnow = _wifi_ota_resume_espnow || espnow_paused;
 #endif
       reply[0] = 0;
       if (!_board->startOTAUpdate(_prefs->node_name, reply, force_ap)) {
         if (!reply[0]) strcpy(reply, "Error");
-#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
-        if (espnow_paused && !_callbacks->setEspNowBridgeState(true)) {
-          const size_t used = strlen(reply);
-          snprintf(reply + used, 160 - used, "; ESP-NOW resume failed");
+#if defined(WITH_ESPNOW_BRIDGE)
+        if (espnow_paused && !ota_was_running) {
+          if (_callbacks->setEspNowBridgeState(true)) {
+            _wifi_ota_resume_espnow = false;
+          } else {
+            const size_t used = strlen(reply);
+            snprintf(reply + used, 160 - used, "; ESP-NOW resume failed");
+          }
         }
 #endif
       }
 #if defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA)
       else {
         // Keep WiFi up, but release MQTT/TLS heap while the browser uploader runs.
-        _callbacks->setBridgeState(false);
+        const bool mqtt_paused = _callbacks->isMqttBridgeRunning();
+        _wifi_ota_resume_mqtt = _wifi_ota_resume_mqtt || mqtt_paused;
+        if (mqtt_paused) _callbacks->setMqttBridgeState(false);
       }
 #endif
 #if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
@@ -2987,30 +3006,40 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         snprintf(reply + used, 160 - used, "; WebConfig stopped");
       }
     } else if (memcmp(command, "stop ota", 8) == 0 && (command[8] == 0 || command[8] == ' ')) {
-      if (!_board->stopOTAUpdate(reply)) {
+      const bool ota_stopped = _board->stopOTAUpdate(reply);
+      if (!ota_stopped) {
         if (!reply[0]) strcpy(reply, "Error");
       }
 #if defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA)
-      else if (_prefs->bridge_enabled
-#ifdef WITH_ESPNOW_BRIDGE
-               || _prefs->espnow_bridge_enabled
-#endif
-      ) {
-        _callbacks->setBridgeState(true);
+      else {
+        if (_wifi_ota_resume_mqtt) {
+          if (!_prefs->bridge_enabled || _callbacks->setMqttBridgeState(true)) {
+            _wifi_ota_resume_mqtt = false;
+          } else {
+            const size_t used = strlen(reply);
+            snprintf(reply + used, 160 - used, "; MQTT resume failed");
+          }
+        }
       }
 #endif
-#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
-      else if (
-#if defined(WITH_RS232_BRIDGE) || defined(ESPNOW_BRIDGE_MERGED)
+#if defined(WITH_ESPNOW_BRIDGE)
+      if (ota_stopped && !_board->isOTAUpdateRunning() && _wifi_ota_resume_espnow) {
+        const bool still_enabled =
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(ESPNOW_BRIDGE_MERGED)
           _prefs->espnow_bridge_enabled
 #else
           _prefs->bridge_enabled
 #endif
-      ) {
-        const bool resumed = _callbacks->setEspNowBridgeState(true);
-        const size_t used = strlen(reply);
-        snprintf(reply + used, 160 - used, resumed
-            ? "; ESP-NOW resumed" : "; ESP-NOW resume failed");
+          != 0;
+        if (!still_enabled) {
+          _wifi_ota_resume_espnow = false;
+        } else {
+          const bool resumed = _callbacks->setEspNowBridgeState(true);
+          if (resumed) _wifi_ota_resume_espnow = false;
+          const size_t used = strlen(reply);
+          snprintf(reply + used, 160 - used, resumed
+              ? "; ESP-NOW resumed" : "; ESP-NOW resume failed");
+        }
       }
 #endif
     } else if (memcmp(command, "clock", 5) == 0) {

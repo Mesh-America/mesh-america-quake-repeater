@@ -39,6 +39,19 @@ STUBS = r'''
 constexpr int WL_CONNECTED = 3, WL_DISCONNECTED = 6, HTTP_GET = 0;
 enum wifi_mode_t { WIFI_OFF = 0, WIFI_STA = 1, WIFI_AP = 2 };
 constexpr wifi_mode_t WIFI_MODE_NULL = WIFI_OFF;
+constexpr wifi_mode_t WIFI_MODE_AP = WIFI_AP;
+constexpr int WIFI_IF_STA = 0, WIFI_IF_AP = 1, WIFI_AUTH_OPEN = 0;
+constexpr int WIFI_SCAN_RUNNING = -1, AP_STARTED_BIT = 1;
+struct wifi_config_t {
+  struct {
+    uint8_t ssid[32] = {};
+    uint8_t ssid_len = 0, ssid_hidden = 0, channel = 1;
+    int authmode = WIFI_AUTH_OPEN;
+  } ap;
+};
+static unsigned clock_ms = 100;
+unsigned millis() { return clock_ms; }
+void delay(unsigned amount) { clock_ms += amount; }
 int esp_wifi_stop();
 int esp_wifi_deinit();
 constexpr int ESP_OK = 0;
@@ -67,6 +80,8 @@ struct MockWiFi {
   bool initialized_cache = false, started_cache = false;
   IPAddress station_ip, ap_ip, configured_ap_ip;
   int ap_protocol = 15;
+  wifi_config_t ap_config;
+  int getStatusBits() const { return sdk_ap_active ? AP_STARTED_BIT : 0; }
   int status() const { return station_status; }
   wifi_mode_t getMode() const {
     return started_cache && sdk_started ? (sdk_ap_active ? WIFI_AP : WIFI_STA) : WIFI_OFF;
@@ -79,6 +94,7 @@ struct MockWiFi {
       initialized_cache = started_cache = false;
     } else {
       sdk_initialized = sdk_started = initialized_cache = started_cache = true;
+      if (!(requested & WIFI_AP)) sdk_ap_active = false;
     }
     return true;
   }
@@ -88,22 +104,37 @@ struct MockWiFi {
     configured_ap_ip = ip;
     return ap_config_ok;
   }
-  bool softAP(const char*, const char*, int channel = 1) {
+  bool softAP(const char* ssid, const char*, int channel = 1) {
     assert(channel == 1);
     ++ap_start_calls;
     if (ap_start_ok) {
       sdk_initialized = sdk_started = sdk_ap_active = true;
       initialized_cache = started_cache = true;
       ap_ip = configured_ap_ip;
+      ap_config.ap.ssid_len = strlen(ssid);
+      memcpy(ap_config.ap.ssid, ssid, strlen(ssid));
+      ap_config.ap.channel = channel;
     }
     return ap_start_ok;
   }
   void softAPdisconnect(bool) { sdk_ap_active = false; ap_ip = IPAddress(); }
+  int scanNetworks(bool, bool, bool, int, uint8_t) { return 0; }
+  int scanComplete() const { return 0; }
+  void scanDelete() {}
 } WiFi;
 namespace mesh { namespace wifi {
+constexpr uint8_t kAccessPointProtocolMask = 7;
 int applyAccessPointProtocolMask() { WiFi.ap_protocol = 7; return ESP_OK; }
+int applyProtocolMask(int) { return ESP_OK; }
 int accessPointChannel() { return 1; }
+uint8_t stationScanChannel() { return 0; }
+bool espNowChannelConstrained() { return false; }
 } }
+int esp_wifi_get_mode(wifi_mode_t*);
+int esp_wifi_scan_stop() { return ESP_OK; }
+int esp_wifi_get_config(int, wifi_config_t* config) { *config = WiFi.ap_config; return ESP_OK; }
+int esp_wifi_get_protocol(int, uint8_t* value) { *value = WiFi.ap_protocol; return ESP_OK; }
+@AP_LIFECYCLE_POLICY@
 
 int wifi_stop_calls = 0, wifi_deinit_calls = 0;
 int esp_wifi_stop() {
@@ -145,6 +176,7 @@ class ESP32Board {
 public:
   bool inhibit_sleep = false;
   bool ota_started_ap = false;
+  bool ota_started_radio = false;
   AsyncWebServer* ota_server = nullptr;
   ~ESP32Board() { delete ota_server; }
   const char* getManufacturerName() const { return "test board"; }
@@ -275,8 +307,10 @@ def production_harness():
     enabled = method(infrastructure, "uint8_t enabled() const override")
     cleanup = method(bridge, "static void stopBridgeWiFiIfUnused(")
     ota_running = method(board_header, "bool isOTAUpdateRunning() const override")
+    ap_policy = (ROOT / "src/helpers/esp32/WiFiAccessPointPolicy.h").read_text()
     return (STUBS.replace("@ENABLED@", enabled).replace("@CLEANUP@", cleanup)
             .replace("@START_OTA@", start_ota)
+            .replace("@AP_LIFECYCLE_POLICY@", ap_policy[ap_policy.index("namespace mesh {"):])
             .replace("@OTA_RUNNING@", ota_running.replace(" override", "")) + CHECKS)
 
 

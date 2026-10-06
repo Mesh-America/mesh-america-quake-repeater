@@ -25,6 +25,9 @@ void companionPairingUiHilProbe();
 #include "esp_pm.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
+#if defined(CONFIG_BLUEDROID_ENABLED) && !defined(MESH_USE_NIMBLE_ARDUINO)
+#include <esp_bt_main.h>
+#endif
 #if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
 #define COMPANION_IDF_PM_AVAILABLE 1
 #else
@@ -3001,6 +3004,37 @@ public:
 };
 static CompanionWirelessBackend companion_wireless;
 
+#if defined(ESP32_PLATFORM) && defined(ENABLE_USB_INTERFACE) \
+    && defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT \
+    && !defined(ETHERNET_ENABLED) && !defined(SERIAL_RX)
+static bool companionNativeUsbLightSleepReady() {
+  // Full compiles every transport, but a compiled driver is not an active
+  // receiver. Preserve live services and pending replies while permitting
+  // the same short sleep slice when those services have been turned off.
+  if (companion_wireless.enabled() != 0 || interface_manager.hasPendingIO()
+      || board.isOTAUpdateRunning() || board.isRadioTestActive()
+      || sensors.gpsUsesSerialUart(1)) return false;
+#if defined(BLE_PIN_CODE) && !CONFIG_IDF_TARGET_ESP32C6
+  // Stopped advertising is not a stopped controller. Manual light sleep
+  // requires the RF driver to be disabled, including during BLE teardown.
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED)
+    return false;
+#if defined(CONFIG_BLUEDROID_ENABLED) && !defined(MESH_USE_NIMBLE_ARDUINO)
+  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED) return false;
+#endif
+#endif
+#if defined(ESP32) && defined(WIFI_SSID)
+  // Catch an unfinished teardown even if the logical WiFi owner is off.
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  const esp_err_t result = esp_wifi_get_mode(&mode);
+  if (result == ESP_OK) return mode == WIFI_MODE_NULL;
+  return result == ESP_ERR_WIFI_NOT_INIT || result == ESP_ERR_WIFI_NOT_STARTED;
+#else
+  return true;
+#endif
+}
+#endif
+
 bool handleCompanionWirelessCommand(const char* command, char* reply, size_t size,
                                    CompanionWirelessSource source) {
 #if defined(BLE_PIN_CODE)
@@ -3698,8 +3732,10 @@ void loop() {
   // The native-USB-only light-sleep path below bypasses ESP32Board::sleep.
   can_sleep = can_sleep && !mesh::isUsbLoggingEnabled();
 #endif
-#if defined(NRF52_PLATFORM) \
-    || (defined(ESP32_PLATFORM) && defined(ENABLE_USB_INTERFACE))
+#if defined(ESP32_PLATFORM) && defined(ENABLE_USB_INTERFACE)
+  const bool usb_sleep_held = board.isUsbSleepHeld();
+  can_sleep = can_sleep && !usb_sleep_held;
+#elif defined(NRF52_PLATFORM)
   can_sleep = can_sleep && !board.isUsbHostConnected();
 #endif
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
@@ -3714,22 +3750,22 @@ void loop() {
 #if defined(NRF52_PLATFORM)
     board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
 #elif defined(ESP32_PLATFORM)
-#if COMPANION_IDF_PM_AVAILABLE
-    // Yield long enough for ESP-IDF automatic light sleep to enter when no
-    // driver holds a power-management lock.
-    vTaskDelay(pdMS_TO_TICKS(10));
-#elif defined(ENABLE_USB_INTERFACE) \
+#if defined(ENABLE_USB_INTERFACE) \
     && defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT \
-    && !defined(BLE_PIN_CODE) && !defined(WIFI_SSID) \
     && !defined(ETHERNET_ENABLED) && !defined(SERIAL_RX)
-    // The stock Arduino core has no automatic light sleep. A short timer
-    // slice gives native-USB-only battery builds real light sleep without
+    // Automatic light sleep is disabled for native USB, even in a PM-enabled
+    // core. A short timer slice gives idle battery builds real light sleep without
     // delaying radio, GPS, button, or newly attached USB work by more than the
     // normal 10 ms loop cadence. can_sleep already proved no USB host is up.
-    if (esp_sleep_enable_timer_wakeup(10000ULL) != ESP_OK
+    if (!companionNativeUsbLightSleepReady()
+        || esp_sleep_enable_timer_wakeup(10000ULL) != ESP_OK
         || esp_light_sleep_start() != ESP_OK) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
+#elif COMPANION_IDF_PM_AVAILABLE
+    // Yield long enough for ESP-IDF automatic light sleep to enter when no
+    // driver holds a power-management lock.
+    vTaskDelay(pdMS_TO_TICKS(10));
 #else
     // Connected transports need their own modem sleep and must retain the
     // normal FreeRTOS idle behavior.

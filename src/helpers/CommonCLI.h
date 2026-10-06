@@ -793,6 +793,13 @@ class CommonCLI {
   NodePrefs* _prefs;
   CommonCLICallbacks* _callbacks;
   mesh::MainBoard* _board;
+#if defined(WITH_ESPNOW_BRIDGE) \
+    || (defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA))
+  // Browser OTA restores only transports it actually paused, not saved
+  // defaults suspended by an unconfigured first-boot setup session.
+  bool _wifi_ota_resume_mqtt = false;
+  bool _wifi_ota_resume_espnow = false;
+#endif
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)
   UserGpio _user_gpio;
 #endif

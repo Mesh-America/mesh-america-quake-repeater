@@ -212,6 +212,11 @@ nRF52 Full Companion. `log start/stop` records to storage independently of live
 USB logging. Use
 `log erase` to delete that capture.
 
+Fresh ESP32 Full infrastructure installs default to USB logging off. Upgrades
+retain the saved choice. With device power saving enabled, an idle node can
+sleep after the setup AP closes and all radio services stop; live USB logging,
+an attached native USB host, and active MQTT/ESP-NOW still hold it awake.
+
 For quiet packet capture in current firmware, use `set usb.debug off` and
 `set usb.logging on`. Verbose diagnostics default off for fresh and upgraded
 preferences without the new field. The debug choice is saved separately;

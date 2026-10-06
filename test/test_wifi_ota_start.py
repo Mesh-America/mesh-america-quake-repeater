@@ -31,9 +31,7 @@ class WiFiOtaStartTest(unittest.TestCase):
                                     text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_network_instructions_and_switching_on_all_esp32_uploaders(self):
-        source = (ROOT / "src/helpers/ESP32Board.cpp").read_text()
-        lightweight, other = source.split("#elif defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA)", 1)
+    def ap_fixture(self):
         fixture = (ROOT / "test/fixtures/wifi_ota_start.cpp").read_text()
         policy = (ROOT / "src/helpers/esp32/WiFiRadioPolicy.h").read_text()
         mask = re.search(r"static constexpr uint8_t kAccessPointProtocolMask =.*?;",
@@ -41,6 +39,14 @@ class WiFiOtaStartTest(unittest.TestCase):
         fixture = fixture.replace("@AP_PROTOCOL_POLICY@", mask + "\n" + extract_braced(
             policy, "inline esp_err_t applyAccessPointProtocolMask()") + "\n"
             + extract_braced(policy, "inline int accessPointChannel()"))
+        lifecycle = (ROOT / "src/helpers/esp32/WiFiAccessPointPolicy.h").read_text()
+        fixture = fixture.replace("@AP_LIFECYCLE_POLICY@", lifecycle[lifecycle.index("namespace mesh {"):])
+        return fixture
+
+    def test_network_instructions_and_switching_on_all_esp32_uploaders(self):
+        source = (ROOT / "src/helpers/ESP32Board.cpp").read_text()
+        lightweight, other = source.split("#elif defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA)", 1)
+        fixture = self.ap_fixture()
         for name, implementation, flags in (
             ("lightweight infrastructure", lightweight, ["-DLIGHTWEIGHT_WIFI_OTA=1"]),
             ("lightweight companion", lightweight, ["-DLIGHTWEIGHT_WIFI_OTA=1", "-DCOMPANION_RADIO_FULL=1"]),
@@ -49,7 +55,137 @@ class WiFiOtaStartTest(unittest.TestCase):
             with self.subTest(uploader=name):
                 methods = "\n".join(extract_braced(implementation, signature) for signature in (
                     "bool ESP32Board::startOTAUpdate(", "bool ESP32Board::stopOTAUpdate("))
-                self.compile_and_run(fixture.replace("@METHODS@", methods), *flags)
+                for major in (2, 3):
+                    with self.subTest(arduino_major=major):
+                        self.compile_and_run(fixture.replace("@METHODS@", methods),
+                                             *flags, f"-DESP_ARDUINO_VERSION_MAJOR={major}")
+
+    def test_companion_setup_portal_uses_the_same_live_ap_contract(self):
+        source = (ROOT / "src/helpers/WiFiSetupPortal.cpp").read_text()
+        start = extract_braced(source, "bool WiFiSetupPortal::begin(")
+        task = extract_braced(source, "static void portalTask(")
+        cleanup = task[task.rindex("\n  impl->dns.stop();"):task.rindex("\n}")]
+        endpoints = r'''
+static const IPAddress SETUP_IP(192, 168, 4, 1);
+using TaskHandle_t = void*;
+constexpr int pdPASS = 1;
+bool allow_dns = true, allow_task = true;
+unsigned task_starts = 0;
+struct WiFiServer {
+  bool listening = false;
+  explicit WiFiServer(int) {}
+  void begin() { assert(WiFi.ap_started); listening = true; }
+  void stop() { listening = false; }
+  void setNoDelay(bool) {}
+};
+struct DNSServer {
+  bool running = false;
+  bool start(int, const char*, IPAddress) {
+    assert(WiFi.ap_started); running = allow_dns; return running;
+  }
+  void stop() { running = false; }
+};
+class WiFiSetupPortal {
+public:
+  using SaveCallback = bool (*)(void*, const char*, const char*);
+  volatile bool _active = false;
+  void* _impl = nullptr;
+  bool begin(const char*, SaveCallback, void*);
+};
+struct PortalImpl {
+  WiFiServer server{80};
+  DNSServer dns;
+  TaskHandle_t task = nullptr;
+  bool started_radio = false;
+  WiFiSetupPortal::SaveCallback save_callback = nullptr;
+  void* callback_context = nullptr;
+  volatile bool* active = nullptr;
+  uint32_t close_ap_at = 0, recovery_interval_ms = 0;
+  char recovery_ssid[32] = {}, ap_name[33] = {};
+  bool recovery_connecting = false;
+};
+void vTaskDelete(void*) {}
+void portalTask(void* context) {
+  auto* impl = static_cast<PortalImpl*>(context);
+@CLEANUP@
+}
+int xTaskCreatePinnedToCore(void (*)(void*), const char*, int, void*, int,
+                            TaskHandle_t* task, int) {
+  ++task_starts;
+  if (!allow_task) return 0;
+  *task = reinterpret_cast<void*>(1); return pdPASS;
+}
+namespace mesh {
+struct Log { template<class... Args> void printf(const char*, Args...) {} };
+Log& usbLoggingPort() { static Log log; return log; }
+}
+@START@
+int main() {
+  constrain_espnow_channel = false;
+  WiFi.connected = WiFi.radio = false;
+  WiFiSetupPortal portal;
+  assert(portal.begin("MeshCore-Setup", nullptr, nullptr));
+  auto* impl = static_cast<PortalImpl*>(portal._impl);
+  assert(portal._active && impl->started_radio && impl->dns.running && impl->server.listening);
+  assert(WiFi.ap_started && WiFi.scans == 1);
+  const unsigned starts = WiFi.starts;
+  assert(portal.begin("MeshCore-Setup", nullptr, nullptr) && WiFi.starts == starts);
+  portalTask(impl);
+  assert(!portal._active && !impl->task && !impl->started_radio && !WiFi.radio);
+  for (Fault fault : {Fault::Ssid, Fault::StartEvent, Fault::ModeRead}) {
+    WiFi.fault = fault;
+    assert(!portal.begin("MeshCore-Setup", nullptr, nullptr));
+    assert(!portal._active && !impl->task && !WiFi.radio && !WiFi.ap);
+  }
+  WiFi.fault = Fault::None;
+  allow_dns = false;
+  assert(!portal.begin("MeshCore-Setup", nullptr, nullptr) && !WiFi.radio);
+  allow_dns = true;
+  allow_task = false;
+  assert(!portal.begin("MeshCore-Setup", nullptr, nullptr));
+  assert(!portal._active && !impl->task && !impl->dns.running && !impl->server.listening && !WiFi.radio);
+  allow_task = true;
+  WiFi.connected = WiFi.radio = true;
+  const unsigned scans = WiFi.scans;
+  assert(portal.begin("MeshCore-Setup", nullptr, nullptr));
+  assert(!impl->started_radio && WiFi.scans == scans && WiFi.connected);
+  portalTask(impl);
+  assert(WiFi.radio && WiFi.connected);
+  WiFi.connected = false;
+  constrain_espnow_channel = true;
+  assert(portal.begin("MeshCore-Setup", nullptr, nullptr));
+  assert(WiFi.ap_channel == 6);
+  portalTask(impl);
+  assert(WiFi.radio && !WiFi.ap);
+  delete impl;
+}
+'''
+        fixture = self.ap_fixture().split("static unsigned server_starts", 1)[0]
+        fixture += endpoints.replace("@CLEANUP@", cleanup).replace("@START@", start)
+        for major in (2, 3):
+            with self.subTest(arduino_major=major):
+                self.compile_and_run(fixture, f"-DESP_ARDUINO_VERSION_MAJOR={major}")
+
+    def test_minimal_ota_never_reports_a_stale_sdk_hotspot_as_started(self):
+        implementation = (ROOT / "src/helpers/ESP32Board.cpp").read_text().split(
+            "#elif defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA)", 1)[0]
+        methods = "\n".join(extract_braced(implementation, signature) for signature in (
+            "bool ESP32Board::startOTAUpdate(", "bool ESP32Board::stopOTAUpdate("))
+        fixture = self.ap_fixture().split("int main() {", 1)[0]
+        fixture = fixture.replace("@METHODS@", methods) + r'''
+int main() {
+  ESP32Board board;
+  char reply[160] = {};
+  WiFi.connected = WiFi.radio = false;
+  constrain_espnow_channel = false;
+  WiFi.fault = Fault::Ssid; // Setters succeed with an old SSID in the actual SDK.
+  assert(!board.startOTAUpdate("test", reply, true));
+  assert(strcmp(reply, "ERR: OTA WiFi failed") == 0);
+  assert(!board.ota_server && !board.inhibit_sleep && !WiFi.radio);
+}
+'''
+        self.compile_and_run(fixture, "-DLIGHTWEIGHT_WIFI_OTA=1",
+                             "-DESP_ARDUINO_VERSION_MAJOR=2")
 
     def test_common_cli_preserves_actionable_ota_errors(self):
         cli = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
@@ -103,26 +239,38 @@ int main() {
 #include <cstdio>
 #include <cstring>
 struct Callbacks {
-  bool active = true, allow_stop = true;
+  bool active = true, allow_stop = true, mqtt = true, espnow = true;
   int stops = 0, bridge_stops = 0, bridge_starts = 0;
+  int espnow_stops = 0, espnow_starts = 0;
   bool isWebConfigActive() const { return active; }
   bool stopWebConfigForOTA(char* reply) {
     ++stops;
     if (!allow_stop) { strcpy(reply, "ERR: handoff failed"); return false; }
     active = false; strcpy(reply, "WebConfig stopped"); return true;
   }
-  void setBridgeState(bool enabled) { if (enabled) ++bridge_starts; else ++bridge_stops; }
+  bool isMqttBridgeRunning() const { return mqtt; }
+  bool isEspNowBridgeRunning() const { return espnow; }
+  bool setMqttBridgeState(bool enabled) {
+    if (enabled) ++bridge_starts; else ++bridge_stops;
+    mqtt = enabled; return true;
+  }
+  bool setEspNowBridgeState(bool enabled) {
+    if (enabled) ++espnow_starts; else ++espnow_stops;
+    espnow = enabled; return true;
+  }
 } callbacks;
 struct Board {
-  bool allow_start = true;
+  bool allow_start = true, running = false;
   int starts = 0;
+  bool isOTAUpdateRunning() const { return running; }
   bool startOTAUpdate(const char*, char* reply, bool) {
-    assert(!callbacks.active); ++starts;
+    assert(!callbacks.active && !callbacks.espnow); ++starts;
+    if (allow_start) running = true;
     strcpy(reply, allow_start ? "Started: http://10.20.30.40/update - Use same WiFi/LAN"
                              : "ERR: OTA WiFi failed");
     return allow_start;
   }
-  bool stopOTAUpdate(char*) { return true; }
+  bool stopOTAUpdate(char*) { running = false; return true; }
 } board;
 struct Prefs {
   const char* node_name = "test";
@@ -132,6 +280,7 @@ struct CLI {
   Board* _board = &board;
   Prefs* _prefs = &prefs;
   Callbacks* _callbacks = &callbacks;
+  bool _wifi_ota_resume_mqtt = false, _wifi_ota_resume_espnow = false;
   void run(const char* command, char* reply) {
     if (false) {
 @CLI@
@@ -150,18 +299,36 @@ int main() {
   cli.run("start ota", reply.text);
   assert(strstr(reply.text, "http://10.20.30.40/update") && strstr(reply.text, "; WebConfig stopped"));
   assert(callbacks.stops == 2 && board.starts == 1 && callbacks.bridge_stops == 1);
+  assert(callbacks.espnow_stops == 1 && !callbacks.mqtt && !callbacks.espnow);
   cli.run("start ota ap", reply.text);
   assert(!strstr(reply.text, "WebConfig stopped") && callbacks.stops == 2 && board.starts == 2);
   callbacks.active = true;
   board.allow_start = false;
   cli.run("start ota", reply.text);
   assert(strcmp(reply.text, "ERR: OTA WiFi failed; WebConfig stopped") == 0);
-  assert(callbacks.stops == 3 && board.starts == 3 && callbacks.bridge_stops == 2);
+  assert(callbacks.stops == 3 && board.starts == 3 && callbacks.bridge_stops == 1);
   cli.run("stop ota", reply.text);
-  assert(callbacks.bridge_starts == 0); // Do not enable disabled bridges.
+  assert(callbacks.bridge_starts == 0 && callbacks.espnow_starts == 0);
+  // Saving intent after an inactive attempt must not manufacture a resume.
+  prefs.bridge_enabled = true;
   prefs.espnow_bridge_enabled = true;
   cli.run("stop ota", reply.text);
-  assert(callbacks.bridge_starts == 1); // Restore ESP-NOW even with MQTT off.
+  assert(callbacks.bridge_starts == 0 && callbacks.espnow_starts == 0);
+  callbacks.espnow = true; // Only ESP-NOW was actually running on entry.
+  board.allow_start = true;
+  cli.run("start ota ap", reply.text);
+  cli.run("start ota ap", reply.text); // Repeat start preserves the first snapshot.
+  prefs.bridge_enabled = false;
+  cli.run("stop ota", reply.text);
+  assert(callbacks.bridge_starts == 0 && callbacks.espnow_starts == 1);
+  assert(callbacks.espnow && !callbacks.mqtt);
+  // A stopped setup session with both saved defaults enabled stays stopped.
+  callbacks.espnow = false;
+  prefs.bridge_enabled = true;
+  callbacks.active = true;
+  cli.run("start ota ap", reply.text);
+  cli.run("stop ota", reply.text);
+  assert(callbacks.bridge_starts == 0 && callbacks.espnow_starts == 1);
   assert(reply.guard == 123);
 }
 '''
@@ -209,6 +376,7 @@ struct Callbacks {
 struct Board {
   bool allow_start = true, allow_stop = true;
   int starts = 0;
+  bool isOTAUpdateRunning() const { return ota; }
   bool startOTAUpdate(const char*, char* reply, bool) {
     assert(!callbacks.espnow && !callbacks.web); ++starts;
     ota = allow_start;
@@ -230,6 +398,7 @@ struct CLI {
   Board* _board = &board;
   Prefs* _prefs = &prefs;
   Callbacks* _callbacks = &callbacks;
+  bool _wifi_ota_resume_mqtt = false, _wifi_ota_resume_espnow = false;
   void run(const char* command, char* reply) {
     if (false) {
 @CLI@
@@ -269,6 +438,14 @@ int main() {
   assert(!callbacks.espnow && callbacks.uart);
   cli.run("stop ota", reply.text);
   assert(strstr(reply.text, "; ESP-NOW resume failed"));
+  // A fresh successful OTA must preserve an outstanding failed resume.
+  board.allow_start = true;
+  cli.run("start ota", reply.text);
+  assert(ota && !callbacks.espnow);
+  callbacks.allow_resume = true;
+  cli.run("stop ota", reply.text);
+  assert(!ota && callbacks.espnow && strstr(reply.text, "; ESP-NOW resumed"));
+  callbacks.espnow = false;
   // A disabled secondary must stay disabled after the upload stops.
   prefs.espnow_bridge_enabled = false;
 #if !defined(WITH_RS232_BRIDGE)

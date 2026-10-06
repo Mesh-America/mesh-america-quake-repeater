@@ -543,6 +543,9 @@ class TBeamChargeTargetTest(unittest.TestCase):
         harness.write_text(source, encoding="ascii")
         binary = directory / "harness"
         command = [self.compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror",
+                   # Production retains editor folding pragmas that GCC does
+                   # not implement. Keep real compiler warnings fatal.
+                   "-Wno-unknown-pragmas",
                    "-I", str(directory), "-I", str(ROOT / "src"), str(harness),
                    *extra, "-o", str(binary)]
         built = subprocess.run(command, capture_output=True, text=True)

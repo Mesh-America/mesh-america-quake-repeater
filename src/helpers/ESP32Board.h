@@ -40,6 +40,7 @@ protected:
   uint8_t startup_reason;
   bool inhibit_sleep = false;
   bool ota_started_ap = false;
+  bool ota_started_radio = false;
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   mesh::UsbHostSleepPolicy usb_host_sleep_policy;
 #endif
@@ -117,21 +118,14 @@ public:
     // after a Pi closes its serial port). Guard every caller here.
     // Sample even when another blocker is active, so an open console/OTA does
     // not leave the last positive native USB host signal stale.
-    const bool usb_host_connected = isUsbHostConnected();
-    bool keep_awake = inhibit_sleep || usb_host_connected || isRadioTestActive();
+    const bool usb_sleep_held = isUsbSleepHeld();
+    bool keep_awake = inhibit_sleep || usb_sleep_held || isRadioTestActive();
 #if !defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT
     // External USB-to-UART chips cannot report host attachment here. Light
     // sleep loses their first input bytes; UART wake loses the wake character
     // too. HardwareSerial's bool reports an installed driver, not a USB host.
     // Keep an enabled console available even before its first command.
     keep_awake = keep_awake || static_cast<bool>(Serial);
-#endif
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
-    // HWCDC loses its SOF host signal after about 5 ms. A warm Pi reboot,
-    // especially on a USB 1.1 bus, must not put us in a 30-second light sleep
-    // while the host is returning and trying to enumerate this same radio.
-    keep_awake = keep_awake || usb_host_sleep_policy.shouldKeepAwake(
-        millis(), MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS);
 #endif
 #if MESH_USB_LOGGING_AVAILABLE
     // A live logging stream must also remain available before a host opens
@@ -293,6 +287,18 @@ public:
 
   void setInhibitSleep(bool inhibit) {
     inhibit_sleep = inhibit;
+  }
+
+  bool isUsbSleepHeld() {
+    // Share the native host-loss grace with short Companion sleep slices.
+    // Sample even when another inhibitor is active, preserving reconnects.
+    const bool host_connected = isUsbHostConnected();
+#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+    return host_connected || usb_host_sleep_policy.shouldKeepAwake(
+        millis(), MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS);
+#else
+    return host_connected;
+#endif
   }
 
   uint32_t getResetReason() const override {

@@ -293,6 +293,13 @@ next reboot or power cycle. An explicit administrator `start webconfig` remains
 available as an override. A saved SSID switches to the normal indefinite
 reconnect behavior instead.
 
+Fresh ESP32 Full infrastructure defaults to USB logging off. Existing saved
+logging and device power-saving settings survive an update. The unconfigured
+setup session also pauses automatic network-bridge retries until an explicit
+bridge start, allowing its radio to turn off when the AP closes. Compact OTA
+images scan before raising a new AP and verify live driver readiness before
+reporting the update URL.
+
 Full Companion profiles use one binary for USB, BLE, ordinary Wi-Fi on ESP32,
 source-only LoRa OTA, Terminal Chat, optional USB packet logging, and any
 board-qualified serial or Ethernet Companion transport. Bulk builds therefore

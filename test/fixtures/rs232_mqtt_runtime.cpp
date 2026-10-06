@@ -233,6 +233,7 @@ public:
   MyMesh* _callbacks;
   FakeSensors* _sensors;
   FakeBoard* _board;
+  @OTA_STATE@
   NodePrefs stored;
   unsigned saves = 0;
   bool fail_save = false;

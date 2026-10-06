@@ -621,6 +621,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   // Retry ESP-NOW without taking over an active OTA session. MQTT creates its
   // WiFi task asynchronously, so it must first associate on the shared channel.
   bool startSharedEspNowBridgeIfReady() {
+#ifdef WITH_WEBCONFIG
+    if (_unconfigured_setup_espnow_suspended) return false;
+#endif
   #if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
     ESPNowBridge& transport = espnow_bridge;
     if (!_prefs.espnow_bridge_enabled) return false;
@@ -650,9 +653,16 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
 #ifdef WITH_WEBCONFIG
   WebConfigServer* _webconfig = nullptr;
+  // A first-boot setup session may pause saved bridge intent for this boot.
+  // Its retry loop must not revive ESP-NOW after the AP window ends.
+  bool _unconfigured_setup_espnow_suspended = false;
+  void suspendUnconfiguredSetupBridges();
   bool _wc_batch_active = false;
   bool _wc_restart_pending = false;
   uint8_t _wc_slot_restart_mask = 0;
+#endif
+#if defined(ESP32_PLATFORM)
+  void serviceIdleWiFi();
 #endif
 
 #if defined(WITH_MQTT_NEIGHBORS)
@@ -1393,6 +1403,9 @@ public:
     }
     if (espnow_bridge.isRunning()) return true;
     if (_cli.getBoard()->isOTAUpdateRunning()) return false;
+#ifdef WITH_WEBCONFIG
+    _unconfigured_setup_espnow_suspended = false;
+#endif
     shared_espnow_retry_at = 0;
 #ifdef WITH_MQTT_BRIDGE
     if (mqtt_bridge && mqtt_bridge->isRunning()) {
@@ -1450,6 +1463,9 @@ public:
     // A standalone bridge shares its WiFi driver with the browser uploader.
     // Preserve saved intent, but do not restart it until OTA has stopped.
     if (enable && _cli.getBoard()->isOTAUpdateRunning()) return false;
+#ifdef WITH_WEBCONFIG
+    if (enable) _unconfigured_setup_espnow_suspended = false;
+#endif
     shared_espnow_retry_at = 0;
 #endif
     // Disabling an already-absent heap-backed bridge is successful and must
@@ -1547,6 +1563,9 @@ public:
 #else
 #if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_RS232_BRIDGE)
     if (_cli.getBoard()->isOTAUpdateRunning()) return false;
+#ifdef WITH_WEBCONFIG
+    _unconfigured_setup_espnow_suspended = false;
+#endif
     shared_espnow_retry_at = 0;
 #endif
 #if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)

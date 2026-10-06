@@ -60,6 +60,7 @@ bool ESP32Board::isUserGpioAvailable(uint8_t pin) const {
     (defined(ADMIN_PASSWORD) || defined(COMPANION_RADIO_FULL))
 #include <WiFi.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
+#include <helpers/esp32/WiFiAccessPointPolicy.h>
 #include <helpers/esp32/StaticHtml.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
@@ -298,22 +299,14 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   if (!use_ap) {
     ip = WiFi.localIP();
   } else {
-    if (!ota_started_ap || !(WiFi.getMode() & WIFI_AP)
-        || static_cast<uint32_t>(WiFi.softAPIP()) == 0) {
-      const IPAddress ap_ip(192, 168, 4, 1);
-      const IPAddress ap_mask(255, 255, 255, 0);
-      ota_started_ap = WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
-          && WiFi.softAP("MeshCore-OTA", nullptr,
-                         mesh::wifi::accessPointChannel());
-    }
-    // A valid IP does not imply a discoverable hotspot. An LR protocol bit
-    // left by ESP-NOW makes AP beacons incompatible with ordinary clients.
-    if (ota_started_ap && mesh::wifi::applyAccessPointProtocolMask() != ESP_OK) {
-      WiFi.softAPdisconnect(true);
-      ota_started_ap = false;
-    }
+    ota_started_radio = ota_started_radio || WiFi.getMode() == WIFI_OFF;
+    ota_started_ap = mesh::wifi::startOpenAccessPoint("MeshCore-OTA", ota_started_ap);
     if (!ota_started_ap) {
       inhibit_sleep = ota_server != nullptr;
+      if (!inhibit_sleep) {
+        mesh::wifi::stopTemporaryAccessPointRadio(ota_started_radio);
+        ota_started_radio = false;
+      }
       strcpy(reply, "ERR: OTA WiFi failed");
       return false;
     }
@@ -324,6 +317,8 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
     if (!lightweight_ota_server.begin(this)) {
       if (ota_started_ap) WiFi.softAPdisconnect(true);
       ota_started_ap = false;
+      mesh::wifi::stopTemporaryAccessPointRadio(ota_started_radio);
+      ota_started_radio = false;
       inhibit_sleep = false;
       strcpy(reply, "ERR: OTA server failed");
       return false;
@@ -344,6 +339,11 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
 
 bool ESP32Board::stopOTAUpdate(char reply[]) {
   if (ota_server == nullptr) {
+    if (ota_started_ap) WiFi.softAPdisconnect(true);
+    ota_started_ap = false;
+    mesh::wifi::stopTemporaryAccessPointRadio(ota_started_radio);
+    ota_started_radio = false;
+    inhibit_sleep = false;
     strcpy(reply, "OK - OTA not running");
     return true;
   }
@@ -355,6 +355,8 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
   ota_server = nullptr;
   if (ota_started_ap) WiFi.softAPdisconnect(true);
   ota_started_ap = false;
+  mesh::wifi::stopTemporaryAccessPointRadio(ota_started_radio);
+  ota_started_radio = false;
   inhibit_sleep = false;
   strcpy(reply, "OK - OTA stopped");
   MESH_DEBUG_PRINTLN("stopOTAUpdate: %s", reply);
@@ -364,6 +366,7 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
 #elif defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA)   // Repeater or Room Server only
 #include <WiFi.h>
 #include <helpers/esp32/WiFiRadioPolicy.h>
+#include <helpers/esp32/WiFiAccessPointPolicy.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include "../../arch/esp32/AsyncElegantOTA/src/AsyncElegantOTA.h"
@@ -394,20 +397,14 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   if (!use_ap) {
     ip = WiFi.localIP();
   } else {
-    if (!ota_started_ap || !(WiFi.getMode() & WIFI_AP)
-        || static_cast<uint32_t>(WiFi.softAPIP()) == 0) {
-      const IPAddress ap_ip(192, 168, 4, 1);
-      const IPAddress ap_mask(255, 255, 255, 0);
-      ota_started_ap = WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
-          && WiFi.softAP("MeshCore-OTA", NULL,
-                         mesh::wifi::accessPointChannel());
-    }
-    if (ota_started_ap && mesh::wifi::applyAccessPointProtocolMask() != ESP_OK) {
-      WiFi.softAPdisconnect(true);
-      ota_started_ap = false;
-    }
+    ota_started_radio = ota_started_radio || WiFi.getMode() == WIFI_OFF;
+    ota_started_ap = mesh::wifi::startOpenAccessPoint("MeshCore-OTA", ota_started_ap);
     if (!ota_started_ap) {
       inhibit_sleep = ota_server != nullptr;
+      if (!inhibit_sleep) {
+        mesh::wifi::stopTemporaryAccessPointRadio(ota_started_radio);
+        ota_started_radio = false;
+      }
       strcpy(reply, "ERR: OTA WiFi failed");
       return false;
     }
@@ -439,6 +436,8 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
     if (async_ota_host == nullptr) {
       if (ota_started_ap) WiFi.softAPdisconnect(true);
       ota_started_ap = false;
+      mesh::wifi::stopTemporaryAccessPointRadio(ota_started_radio);
+      ota_started_radio = false;
       inhibit_sleep = false;
       strcpy(reply, "ERR: OTA server allocation failed");
       return false;
@@ -462,6 +461,8 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
     ota_server = nullptr;
     if (ota_started_ap) WiFi.softAPdisconnect(true);
     ota_started_ap = false;
+    mesh::wifi::stopTemporaryAccessPointRadio(ota_started_radio);
+    ota_started_radio = false;
     inhibit_sleep = false;
     strcpy(reply, "ERR: OTA server failed; retry start ota");
     return false;
@@ -472,6 +473,11 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
 
 bool ESP32Board::stopOTAUpdate(char reply[]) {
   if (ota_server == nullptr) {
+    if (ota_started_ap) WiFi.softAPdisconnect(true);
+    ota_started_ap = false;
+    mesh::wifi::stopTemporaryAccessPointRadio(ota_started_radio);
+    ota_started_radio = false;
+    inhibit_sleep = false;
     strcpy(reply, "OK - OTA not running");
     return true;
   }
@@ -484,6 +490,8 @@ bool ESP32Board::stopOTAUpdate(char reply[]) {
   ota_server = nullptr;
   if (ota_started_ap) WiFi.softAPdisconnect(true);
   ota_started_ap = false;
+  mesh::wifi::stopTemporaryAccessPointRadio(ota_started_radio);
+  ota_started_radio = false;
   inhibit_sleep = false;
 
   strcpy(reply, "OK - OTA stopped");
