@@ -1,9 +1,9 @@
 name: Quake Repeater docs site
 
-# Builds the Mesh America Quake Repeater documentation (mkdocs-quake.yml, assembled by
+# Builds the Mesh America Quake Repeater documentation (a VitePress site in quake-site/, assembled by
 # scripts/build_quake_site.py) and publishes it to GitHub Pages from main. Pull requests build it
-# (in strict mode, so a broken link fails) but do not publish. Separate from github-pages.yml, which
-# builds Keymind's inherited site.
+# (VitePress fails the build on a dead link) but do not publish. Separate from github-pages.yml, which
+# builds Keymind's inherited MkDocs site.
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
       - 'docs/d7s-integration.md'
       - 'docs/d7s-measurement-contract.md'
       - 'quake-docs/**'
-      - 'mkdocs-quake.yml'
+      - 'quake-site/**'
       - 'scripts/build_quake_site.py'
       - '.github/workflows/quake-docs-pages.yml'
   pull_request:
@@ -27,7 +27,7 @@ on:
       - 'docs/d7s-integration.md'
       - 'docs/d7s-measurement-contract.md'
       - 'quake-docs/**'
-      - 'mkdocs-quake.yml'
+      - 'quake-site/**'
       - 'scripts/build_quake_site.py'
       - '.github/workflows/quake-docs-pages.yml'
 
@@ -50,16 +50,25 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: quake-site/package-lock.json
+
+      - name: Install the site's dependencies
+        working-directory: quake-site
+        run: npm ci --ignore-scripts
+
       - name: Build the site
-        run: |
-          pip install mkdocs-material
-          python scripts/build_quake_site.py
+        run: python scripts/build_quake_site.py
 
       - name: Upload the site
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v4
         with:
-          path: site-quake
+          path: quake-site/.vitepress/dist
 
   deploy:
     if: github.event_name != 'pull_request'

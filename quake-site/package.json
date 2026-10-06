@@ -1,0 +1,15 @@
+{
+  "name": "quake-repeater-docs-site",
+  "private": true,
+  "type": "module",
+  "description": "VitePress site for the Mesh America Quake Repeater documentation. Built by ../scripts/build_quake_site.py.",
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "@fontsource-variable/mulish": "^5.2.0",
+    "vitepress": "^1.6.4"
+  }
+}
