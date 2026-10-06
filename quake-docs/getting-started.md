@@ -6,7 +6,12 @@ You need a RAK3401 repeater, ideally with a RAK12027 (Omron D7S) sensor fitted, 
 
 Open the [Quake Repeater flasher](https://apps.meshamerica.com/quake-repeater/) and follow it. It flashes the latest release over USB, then has a **Configure** step for the settings below. Releases are also listed on [GitHub](https://github.com/Mesh-America/mesh-america-quake-repeater/releases).
 
-Updates can also be sent over the air (Bluetooth or LoRa) once a repeater is running the firmware; the flasher's guide covers them.
+<figure>
+  <img src="/img/flasher-welcome.png" alt="The Quake Repeater flasher's welcome page, with Start flashing and Configure your repeater buttons" />
+  <figcaption>The flasher: choose Start flashing, or Configure your repeater if the firmware is already installed.</figcaption>
+</figure>
+
+Updates can also be sent over the air (Bluetooth or LoRa) once a repeater is running the firmware: see [Update over the air](ota-updates.md).
 
 A freshly flashed repeater is named `Quake Repeater` until you rename it. `ver` shows the firmware, for example `Quake Repeater v1.17.1.6`.
 
@@ -34,8 +39,10 @@ earthquake test
 
 posts a message beginning `TEST:` (at most one every 30 seconds). `earthquake status` shows whether the repeater is ready and, if not, what is missing.
 
-Setup in full, including the commands and what happens during an event, is in [Earthquake channel alerts](earthquake-alerts.md).
+Setup in full, including the commands and what happens during an event, is in [Earthquake channel alerts](earthquake-alerts.md). Every command an owner needs is in [How to admin your repeater](admin-guide.md).
 
 ## 5. Know what an alert tells you
 
-Before you share the channel with others, read [What the sensor readings mean](reading-the-sensor.md), so people understand that one alert is a local shaking report and not an earthquake announcement.
+::: warning Before you share the channel
+Read [What the sensor readings mean](reading-the-sensor.md) first, so people understand that one alert is a local shaking report and not an earthquake announcement.
+:::

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="110 110 1034 1034" fill="none">
+    <defs>
+      <clipPath id="quake-emblem-mountain">
+        <ellipse cx="627" cy="619" rx="462" ry="453" />
+      </clipPath>
+    </defs>
+    <g fill="#8ab8f2">
+      <path
+        clip-path="url(#quake-emblem-mountain)"
+        fill-rule="evenodd"
+        d="M 185 835 L 416 660 L 474 689 L 627 554 L 787 706 L 835 678 L 1060 848 L 1120 1140 L 130 1140 Z
+      M 254 844 L 428 711 L 480 731 L 628 611 L 773 751 L 828 726 L 975 880 L 811 773 L 777 791 L 624 655 L 462 837 L 437 770 L 269 869 Z"
+      />
+      <path d="M610 444 H644 V591 H610 Z" />
+      <path d="M552 339 C504 380 503 451 550 495 L574 472 C542 442 542 390 576 362 Z" />
+      <path d="M701 339 C749 380 750 451 703 495 L679 472 C711 442 711 390 677 362 Z" />
+      <path d="M507 295 C424 357 424 466 501 539 L526 516 C463 458 465 369 531 318 Z" />
+      <path d="M746 295 C829 357 829 466 752 539 L727 516 C790 458 788 369 722 318 Z" />
+    </g>
+    <ellipse fill="none" stroke="#8ab8f2" cx="627" cy="619" rx="462" ry="453" stroke-width="44" />
+    <circle fill="#ef5350" cx="627" cy="419" r="44" />
+  </svg>
