@@ -58,6 +58,8 @@ One sensor, in one place, felt strong shaking. It does not say how big an earthq
 ## Where to go next
 
 - **[Get started](getting-started.md)**: flash a repeater, set its location and alert channel, and test it.
+- **[How to admin your repeater](admin-guide.md)**: every command an owner needs, in plain language: the clock, region, alerts and status.
+- **[Update over the air](ota-updates.md)**: update a repeater on a roof or ridge without a cable.
 - **[Earthquake channel alerts](earthquake-alerts.md)**: how alerts behave, the message format and the commands.
 - **[What the sensor readings mean](reading-the-sensor.md)**: read this before you share the channel with others.
 - **Reference**: [the repeater's clock](clock-floor.md), [D7S sensor integration](d7s-integration.md) and the [measurement contract](d7s-measurement-contract.md).

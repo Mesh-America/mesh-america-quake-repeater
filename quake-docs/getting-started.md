@@ -11,7 +11,7 @@ Open the [Quake Repeater flasher](https://apps.meshamerica.com/quake-repeater/) 
   <figcaption>The flasher: choose Start flashing, or Configure your repeater if the firmware is already installed.</figcaption>
 </figure>
 
-Updates can also be sent over the air (Bluetooth or LoRa) once a repeater is running the firmware; the flasher's guide covers them.
+Updates can also be sent over the air (Bluetooth or LoRa) once a repeater is running the firmware: see [Update over the air](ota-updates.md).
 
 A freshly flashed repeater is named `Quake Repeater` until you rename it. `ver` shows the firmware, for example `Quake Repeater v1.17.1.6`.
 
@@ -39,7 +39,7 @@ earthquake test
 
 posts a message beginning `TEST:` (at most one every 30 seconds). `earthquake status` shows whether the repeater is ready and, if not, what is missing.
 
-Setup in full, including the commands and what happens during an event, is in [Earthquake channel alerts](earthquake-alerts.md).
+Setup in full, including the commands and what happens during an event, is in [Earthquake channel alerts](earthquake-alerts.md). Every command an owner needs is in [How to admin your repeater](admin-guide.md).
 
 ## 5. Know what an alert tells you
 
