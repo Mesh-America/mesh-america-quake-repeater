@@ -4,7 +4,8 @@
     quake_release_manifest.py --zip firmware.zip --env MeshAmerica_Quake_Repeater_RAK3401 \
         --commit <sha> --tag quake-v1.17.1.0 --out dist/
 
-Writes dist/manifest.json and copies the package to dist/<env>-<version>.zip. Refuses to produce
+Writes dist/manifest.json (or the name given with --manifest-name, for the second and later images
+of one release) and copies the package to dist/<env>-<version>.zip. Refuses to produce
 anything unless the package is a plain application update, its image carries a consistent MeshCore
 identity block (the 56-byte "EndF" trailer: docs/ota_protocol.md section 2), the OTA target id is
 the one the environment name implies, and the tag (when given) names the version in the image.
@@ -175,7 +176,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--tag", help="release tag; checked against the version inside the image")
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--manifest-name", default="manifest.json",
+                        help="file name for the manifest (default manifest.json); a release with several images "
+                             "keeps the first board's as manifest.json and names the others manifest-<env>.json")
     args = parser.parse_args(argv)
+    if "/" in args.manifest_name or "\\" in args.manifest_name or not args.manifest_name.endswith(".json"):
+        parser.error("--manifest-name must be a plain .json file name")
     try:
         built_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         manifest = build_manifest(args.zip, args.env, args.commit, args.tag, built_at, args.hex)
@@ -186,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     shutil.copyfile(args.zip, args.out / manifest["package"]["file"])
     if args.hex is not None:
         shutil.copyfile(args.hex, args.out / manifest["hex"]["file"])
-    (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    (args.out / args.manifest_name).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(manifest, indent=2))
     return 0
 
