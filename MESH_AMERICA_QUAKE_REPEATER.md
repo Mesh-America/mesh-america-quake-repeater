@@ -7,6 +7,7 @@ Firmware for LoRa mesh repeaters that carry an Omron D7S earthquake sensor (RAK1
 - Runtime-detected D7S sensor support (driver, Wire adapter, telemetry channels, board hook): see [docs/d7s-integration.md](docs/d7s-integration.md) and [docs/d7s-measurement-contract.md](docs/d7s-measurement-contract.md).
 - Earthquake channel alerts: one short canned message to a user-chosen hashtag channel when the sensor reports strong shaking, only once a channel and the repeater's location are set. See [docs/earthquake-alerts.md](docs/earthquake-alerts.md).
 - A product environment, `MeshAmerica_Quake_Repeater_RAK3401`, in [variants/meshamerica_quake/platformio.ini](variants/meshamerica_quake/platformio.ini). It is a lean, LoRa-OTA-capable RAK3401 repeater. Its environment name gives it its own OTA target id, so it cannot be mistaken for a Keymind image.
+- A second environment, `MeshAmerica_Quake_Repeater_RAK4631`, for a RAK4631 on a RAK19003 base with a RAK12027 (the RAK10703 earthquake sensor kit, or the same parts). **Alpha: not yet run on this hardware.** See the hardware notes in [docs/d7s-integration.md](docs/d7s-integration.md). One release carries both images.
 - Everything else is Keymind Cascade, unmodified except for the small edits listed in the integration doc.
 
 ## Building and testing
