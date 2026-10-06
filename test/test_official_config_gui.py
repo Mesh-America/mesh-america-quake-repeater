@@ -176,9 +176,11 @@ def nrf52_headers(work):
     return fixture
 
 
-def cli_source(*, lf_reply=False, reject_cr=False, platform="ESP32_PLATFORM"):
+def cli_source(*, lf_reply=False, reject_cr=False, platform="ESP32_PLATFORM",
+               lose_raw_uart_guard=False):
     source = (nrf52_cli_source() if platform == "NRF52_PLATFORM"
-              else console.firmware_harness(lose_crlf=lf_reply))
+              else console.firmware_harness(lose_crlf=lf_reply,
+                                            lose_raw_uart_guard=lose_raw_uart_guard))
     if platform == "NRF52_PLATFORM" and lf_reply:
         source = source.replace('console.printf("  -> %s\\r\\n", reply);',
                                 'console.printf("  -> %s\\n", reply);')
@@ -218,7 +220,8 @@ class OfficialConfigGuiTests(unittest.TestCase):
         cls.sources = official_sources()
 
     def run_contract(self, *, blocking=False, lf_reply=False, reject_cr=False,
-                     extra_boot_ms=0, platform="ESP32_PLATFORM"):
+                     extra_boot_ms=0, platform="ESP32_PLATFORM", raw_uart=False,
+                     preconnect_idle_ms=0, lose_raw_uart_guard=False):
         with tempfile.TemporaryDirectory(prefix="official-config-gui-") as directory:
             work = Path(directory)
             gui = self.sources["src/gui.js"].read_text()
@@ -246,8 +249,13 @@ class OfficialConfigGuiTests(unittest.TestCase):
             self.assertGreaterEqual(extra_boot_ms, 0)
             boot_ms = int(measured.stdout.strip()) + extra_boot_ms
             cli_cpp, cli = work / "cli.cpp", work / "cli"
-            cli_cpp.write_text(cli_source(lf_reply=lf_reply, reject_cr=reject_cr,
-                                         platform=platform), encoding="ascii")
+            cli_text = cli_source(lf_reply=lf_reply, reject_cr=reject_cr, platform=platform,
+                                  lose_raw_uart_guard=lose_raw_uart_guard)
+            if raw_uart:
+                self.assertEqual(platform, "ESP32_PLATFORM")
+                self.assertIn("  attachHost(true);", cli_text)
+                cli_text = cli_text.replace("  attachHost(true);", "  prefs.powersaving_enabled = 1;\n  attachHost(true);")
+            cli_cpp.write_text(cli_text, encoding="ascii")
             if platform == "NRF52_PLATFORM":
                 peripheral = nrf52_headers(work)
                 cli_flags = ["-DARDUINO", "-DNRF52_PLATFORM", "-DUSE_TINYUSB",
@@ -255,9 +263,10 @@ class OfficialConfigGuiTests(unittest.TestCase):
                 cli_sources = [str(ROOT / "src/helpers" / relative) for relative in (
                     "UsbLogging.cpp", "UsbLoggingClientActivity.cpp", "UsbLoggingLineStateOverride.cpp")]
             else:
-                cli_flags = ["-DARDUINO_USB_MODE=1", "-DARDUINO_USB_CDC_ON_BOOT=1",
-                             "-DESP32_PLATFORM=1", "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=1",
-                             "-DMESH_USB_CONSOLE_COOPERATIVE=1", "-DMESH_USB_LOGGING_AVAILABLE=1",
+                cdc = int(not raw_uart)
+                cli_flags = ["-DARDUINO_USB_MODE=1", f"-DARDUINO_USB_CDC_ON_BOOT={cdc}",
+                             "-DESP32_PLATFORM=1", f"-DMESH_ESP32_USB_CONSOLE_COOPERATIVE={cdc}",
+                             f"-DMESH_USB_CONSOLE_COOPERATIVE={cdc}", "-DMESH_USB_LOGGING_AVAILABLE=1",
                              "-DCONFIG_TINYUSB_ENABLED=0"]
                 cli_sources = []
             command = [self.compiler, "-std=c++17", "-Wall", "-Wextra",
@@ -267,8 +276,21 @@ class OfficialConfigGuiTests(unittest.TestCase):
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             result = subprocess.run([self.node, str(FIXTURE / "contract.mjs"),
                                      str(self.sources["lib/serial-cli.js"]), str(work / "bootstrap.js"),
-                                     str(cli), str(boot_ms)], text=True, capture_output=True, timeout=20)
+                                     str(cli), str(boot_ms), str(preconnect_idle_ms)],
+                                    text=True, capture_output=True, timeout=20)
             return result
+
+    def test_raw_uart_first_stock_gui_command_survives_preconnect_idle(self):
+        for idle_ms in (180001, 10800000, 0xFFFFFFFE):
+            with self.subTest(idle_ms=idle_ms):
+                result = self.run_contract(raw_uart=True, preconnect_idle_ms=idle_ms)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_missing_raw_uart_sleep_guard_breaks_first_stock_gui_command(self):
+        result = self.run_contract(raw_uart=True, preconnect_idle_ms=180001,
+                                   lose_raw_uart_guard=True)
+        self.assertNotEqual(result.returncode, 0, "Negative control did not fail")
+        self.assertIn("initial time missed the stock 5000 ms deadline", result.stderr)
 
     def test_stock_gui_time_handshake_with_cooperative_gps_and_cr_only(self):
         result = self.run_contract()

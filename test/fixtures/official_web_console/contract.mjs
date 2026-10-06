@@ -9,6 +9,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 const {SerialConsole} = await import('data:text/javascript;base64,' +
   readFileSync(process.argv[2]).toString('base64'));
 const firmware = spawn(process.argv[3], [], {stdio:['pipe','pipe','inherit']});
+const rawUart = process.argv[4] === '1';
 let stream, pending, state;
 let writes = 0;
 createInterface({input:firmware.stdout}).on('line', line => {
@@ -53,7 +54,7 @@ try {
   await connect();
   await query('set powersaving on','  -> OK - powersaving on\n','power-saving setter');
   await query('get powersaving','  -> > on\n','power-saving getter');
-  for(const elapsed of [121000,180000,360000,1800000,10800000,0xfffffffe]) {
+  for(const elapsed of [121000,180001,360000,1800000,10800000,0xfffffffe,0,180001]) {
     const before=writes;
     await command('TIME '+elapsed);
     assert.equal(writes,before,'An idle web console gained an artificial keepalive');
@@ -63,12 +64,18 @@ try {
   await client.disconnect();await connect();
   await query('get powersaving','  -> > on\n','reopen query');
   await query('set powersaving off','  -> OK - powersaving off\n','disable power saving');
-  await command('HOST_OFF');await command('TIME 121000');
+  await command('HOST_OFF');await command('TIME 180002');
   assert.equal(state[1],0,'Disabled power saving slept');
   await query('set powersaving on','  -> OK - powersaving on\n','enable battery power saving');
-  await command('TIME 242000');
+  // Closing Web Serial or disconnecting the USB-to-UART bridge cannot prove
+  // that a raw UART driver is no longer needed. Only driver disposal releases
+  // its sleep veto; native CDC continues using actual host availability.
+  if(rawUart) await command('DRIVER_END');
+  // Expire native CDC's existing 120-second host-loss grace, measured from
+  // the last positive host observation at 180001 after the clock wrapped.
+  await command('TIME 300001');
   assert.equal(state[1],1,'USB protection permanently disabled battery power saving');
-  console.log('Official console: CRLF, no-DTR idle, power saving, reopen and battery sleep passed');
+  console.log('Official console: CRLF, no-DTR idle, power saving, reopen and released-driver sleep passed');
 } finally {
   if(client?.connected) await client.disconnect();
   firmware.stdin.end();

@@ -30,8 +30,16 @@ static void require(bool ok, const char* message) {
 struct SerialPort {
   bool terminal_open = false;
   bool host_attached = false;
-  explicit operator bool() const { return terminal_open; }
+  bool driver_initialized = true;
+  explicit operator bool() const {
+#if ARDUINO_USB_CDC_ON_BOOT
+    return terminal_open;
+#else
+    return driver_initialized;
+#endif
+  }
   bool isPlugged() const { return host_attached; }
+  void end() { driver_initialized = false; }
 } Serial;
 struct UsbDevice {
   bool mounted = false;
@@ -137,10 +145,14 @@ int main() {
     require(sleep_calls == 0, "timer-only sleep lost USB");
     board.irq = 48;
 #else
-    // A UART build has no native host detection. Keep its existing behavior.
+    // A UART driver has no native host detection. Its initialized console
+    // must preserve the first incoming command even before any host traffic.
     attachHost(true);
     Serial.terminal_open = true;
     require(!board.isUsbHostConnected(), "UART build invented a USB host");
+    board.sleep(30);
+    require(sleep_calls == 0, "initialized UART console allowed light sleep");
+    Serial.end();
 #endif
 
     // After the bounded host-reboot grace, disconnected USB power must still
@@ -237,6 +249,50 @@ def board_method(signature: str) -> str:
 
 
 class Esp32UsbSleepTest(unittest.TestCase):
+    def test_raw_uart_driver_preserves_fresh_console_indefinitely_until_end(self):
+        methods = "\n".join(board_method(signature) for signature in (
+            "void sleep(uint32_t secs) override", "bool isUsbDataConnected() override",
+            "bool isUsbHostConnected() override"))
+        harness = HARNESS.split("int main()", 1)[0] + r'''
+int main() {
+  try {
+    ESP32Board board;
+    attachHost(false);
+    Serial.terminal_open = false;
+    mesh::logging_enabled = false;
+    for (uint32_t now : {180001U, 10800000U, UINT32_MAX, 0U, 180001U}) {
+      mock_millis = now;
+      require(!board.isUsbDataConnected() && !board.isUsbHostConnected(),
+              "UART driver was falsely reported as a USB host");
+      board.sleep(30);
+      require(sleep_calls == 0, "fresh initialized UART console slept after idle");
+      require(timer_us == 0 && critical_depth == 0,
+              "UART-inhibited sleep configured timer or interrupted IRQs");
+    }
+    require(yield_ms > 0, "UART-inhibited sleep did not yield");
+    Serial.end();
+    board.sleep(30);
+    require(sleep_calls == 1 && timer_us == 30000000ULL,
+            "ending the raw UART driver did not restore sleep eligibility");
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n'; return 1;
+  }
+}
+'''
+        compiler = os.environ.get("CXX", "c++")
+        self.assertIsNotNone(shutil.which(compiler), "a C++17 compiler is required")
+        with tempfile.TemporaryDirectory(prefix="meshcore-raw-uart-sleep-") as directory:
+            source = Path(directory) / "uart.cpp"
+            binary = Path(directory) / "uart"
+            source.write_text(harness.replace("@METHODS@", methods), encoding="ascii")
+            result = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra",
+                "-DARDUINO_USB_CDC_ON_BOOT=0", "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=0",
+                "-DMESH_USB_LOGGING_AVAILABLE=0", "-I", str(ROOT / "src"),
+                str(source), "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_native_host_survives_terminal_close_and_reconnect(self):
         compiler = os.environ.get("CXX", "c++")
         self.assertIsNotNone(shutil.which(compiler), "a C++17 compiler is required")
@@ -277,6 +333,9 @@ class Esp32UsbSleepTest(unittest.TestCase):
         harness = HARNESS.split("int main()", 1)[0] + r'''
 int main() {
   try {
+#if !ARDUINO_USB_CDC_ON_BOOT
+    Serial.end(); // This case exercises a UART board without a console driver.
+#endif
     // Charger-only/battery startup must not create a host-reboot grace.
     ESP32Board cold;
     attachHost(false);
