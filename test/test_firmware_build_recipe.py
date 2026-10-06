@@ -375,6 +375,81 @@ exit "$build_result"
         self.assertNotIn("Skipping", result.stdout)
         self.assertIn("fresh OUTPUT_DIR", result.stderr)
         self.assertEqual(before, self.snapshot())
+        return result
+
+    def test_resume_recipe_rejection_does_not_execute_artifact_gate(self):
+        self.qualified_fixture()
+        result = self.assert_conflict(settings=r'''RADIO_FREQ_OVERRIDE=910.525
+build_artifacts_exist() { printf 'FORBIDDEN_ARTIFACT_GATE\n' >&2; return 73; }
+''')
+        self.assertIn("Resume qualification gates: recipe_exit=1; artifact_capability_ram_exit=not-run.",
+                      result.stderr)
+        self.assertNotIn("FORBIDDEN_ARTIFACT_GATE", result.stdout + result.stderr)
+        self.assertIn("existing package has a missing/different recipe or failed qualification.",
+                      result.stderr)
+
+    def test_resume_recipe_error_status_is_private_and_still_fails_closed(self):
+        self.qualified_fixture()
+        result = self.assert_conflict(settings=r'''
+python3() {
+  if [ "$1" = scripts/firmware_build_recipe.py ] && [ "$2" = matches ]; then
+    printf '%s\n' PRIVATE_FIXTURE_SECRET
+    printf '%s\n' PRIVATE_FIXTURE_SECRET >&2
+    return 73
+  fi
+  command python3 "$@"
+}
+build_artifacts_exist() { printf 'FORBIDDEN_ARTIFACT_GATE\n' >&2; return 74; }
+'''.replace("PRIVATE_FIXTURE_SECRET", SECRET))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("recipe_exit=73; artifact_capability_ram_exit=not-run.", result.stderr)
+        self.assertNotIn("FORBIDDEN_ARTIFACT_GATE", result.stdout + result.stderr)
+
+    def test_resume_corrupt_artifact_and_failed_ram_report_identify_qualification_gate(self):
+        self.qualified_fixture()
+        application = Path(str(self.stem) + ".bin")
+        original_application = application.read_bytes()
+        original_memory = self.memory.read_bytes()
+        for failure in ("application", "ram"):
+            with self.subTest(failure=failure):
+                application.write_bytes(original_application)
+                self.memory.write_bytes(original_memory)
+                if failure == "application":
+                    application.write_bytes(b"tampered packaged application")
+                else:
+                    manifest = json.loads(original_memory)
+                    manifest["passed"] = False
+                    self.memory.write_text(json.dumps(manifest))
+                result = self.assert_conflict()
+                self.assertIn("recipe_exit=0; artifact_capability_ram_exit=1.", result.stderr)
+
+    def test_resume_missing_packaged_marker_identifies_artifact_gate_without_exposing_marker(self):
+        self.qualified_fixture()
+        # Add a current requirement after the real contract is declared. The
+        # cached package remains sealed and its recipe still matches, but its
+        # actual packaged-application evidence cannot satisfy this requirement.
+        result = self.assert_conflict(settings=r'''
+contract=$(declare -f declare_build_capability_contract)
+eval "${contract/declare_build_capability_contract /fixture_original_contract }"
+declare_build_capability_contract() {
+  fixture_original_contract "$@"
+  BUILD_APPLICATION_EXPECTATIONS+=("fixture.private=''' + SECRET + r'''")
+}
+''')
+        self.assertIn("recipe_exit=0; artifact_capability_ram_exit=1.", result.stderr)
+        self.validate_fixture()
+
+    def test_resume_artifact_error_status_suppresses_private_gate_output(self):
+        self.qualified_fixture()
+        result = self.assert_conflict(settings=r'''
+build_artifacts_exist() {
+  printf '%s\n' PRIVATE_FIXTURE_SECRET
+  printf '%s\n' PRIVATE_FIXTURE_SECRET >&2
+  return 74
+}
+'''.replace("PRIVATE_FIXTURE_SECRET", SECRET))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("recipe_exit=0; artifact_capability_ram_exit=74.", result.stderr)
 
     def test_fresh_build_attaches_recipe_and_exact_qualified_match_skips(self):
         self.qualified_fixture()
@@ -382,6 +457,7 @@ exit "$build_result"
         result = self.build()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("matching recipe and qualified artifacts", result.stdout)
+        self.assertNotIn("Resume qualification gates:", result.stdout + result.stderr)
         self.assertNotIn("STUB_BUILD_REQUIRED", result.stdout)
         self.assertEqual(before, self.snapshot())
 
@@ -422,6 +498,7 @@ exit "$build_result"
         self.assertEqual(len(attempts), 1)
         attempt = attempts[0]
         self.assertIn("Cannot resume", attempt.read_text())
+        self.assertIn("recipe_exit=1; artifact_capability_ram_exit=not-run.", attempt.read_text())
         self.assertNotIn("STUB_BUILD_REQUIRED", result.stdout + attempt.read_text())
         self.assertNotIn(SECRET, attempt.read_text())
         self.assertIn("status 1; log: " + str(attempt), result.stdout)
