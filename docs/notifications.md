@@ -13,6 +13,7 @@ stop policy. USB testing uses Binary Companion mode at 115200 baud.
     <button type="button" data-example="find">Find my node</button>
     <button type="button" data-example="food">Food order ready</button>
     <button type="button" data-example="vip">VIP chat</button>
+    <button type="button" data-example="channel9">Only channel 9</button>
   </div>
   <form data-role="form" onsubmit="return false">
     <section class="notification-card">
@@ -22,6 +23,12 @@ stop policy. USB testing uses Binary Companion mode at 115200 baud.
         <label>Contact/room key or channel slot<input name="id" autocomplete="off" placeholder="Full contact/room public key, or channel slot such as 3"></label>
         <label>Companion client status<select name="when"><option value="any">Connected or disconnected</option><option value="connected">Connected</option><option value="disconnected">Disconnected</option></select></label>
       </div>
+      <label class="notification-checkbox"><input type="checkbox" name="quietOthers" value="on">Silence other message alerts (channel exception)</label>
+      <p data-role="quiet-warning" hidden>This saves a silent default plus the selected channel's rule.
+      It also silences ordinary DMs and room-message alerts. Existing specific/state rules
+      and authorized <code>!notify</code> strings can still alert; review the
+      <a href="#only-channel-9-alerts-all-other-channels-silent">channel 9 example and caveats</a>.
+      Copy commands and USB Save include both rules; preview only plays the exception.</p>
       <p>Connected means an active phone/app, USB, WiFi, Ethernet or serial
       companion client. It selects a message rule; connecting or disconnecting
       alone does not create an alert. Contact matching uses the full public key.
@@ -106,7 +113,9 @@ stop policy. USB testing uses Binary Companion mode at 115200 baud.
     <p>Save writes the generated commands in order and stops at the first device
     error; earlier successful settings remain saved. A test with a connection
     suffix selects that profile even over USB. Stop-on-connect still watches
-    real subsequent connections. USB testing requires Chrome or Edge.</p>
+    real subsequent connections. The silence-other-alerts option saves both
+    the silent default and the selected channel rule. Deleting the selected
+    rule does not delete that default. USB testing requires Chrome or Edge.</p>
     <pre data-role="device-log" class="notification-log" aria-live="polite"></pre>
   </section>
 </div>
@@ -247,6 +256,10 @@ This example makes message alerts silent by default, then plays one short
 melody for channel 9. It works both with and without a connected companion
 client and requires a device with a buzzer. Messages still arrive normally;
 this changes the node's alerts, not the phone app's notification settings.
+Use the **Only channel 9** button above to load this setup into the builder.
+You can change the channel slot or alert pattern before copying or saving.
+Uncheck **Silence other message alerts** to generate only the selected rule;
+this does not remove a silent default already saved on the node.
 
 `channel:9` means the firmware's **zero-based slot 9** (the tenth slot), not
 a channel named `ch9`. Configure that slot before running these commands.
