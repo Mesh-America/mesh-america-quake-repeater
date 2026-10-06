@@ -197,12 +197,16 @@ port while leaving USB connected is not proof of a new firmware session; a
 partial command may survive that close. Bus reset/unplug cleanup and protocol
 client leases must be tested separately. Hosts should rediscover the port after
 the backend change: the USB product and `/dev/serial/by-id` path can change.
+Espressif confirms that hardware CDC descriptors are fixed in silicon, so
+firmware cannot preserve a custom TinyUSB product name.
+[Arduino-ESP32 maintainer comment](https://github.com/espressif/arduino-esp32/issues/11394#issuecomment-3778833461),
+[ESP-IDF maintainer comment](https://github.com/espressif/esp-idf/issues/18516#issuecomment-4316973953).
 
 Upstream reports checked for this transition:
 
 | Report | Documented behavior | Relevance and mitigation |
 | --- | --- | --- |
-| [ESP-IDF #9826](https://github.com/espressif/esp-idf/issues/9826) | S3 retains TinyUSB PHY ownership across software/watchdog restart, preventing USB Serial/JTAG operation. | Pinned HWCDC initialization now explicitly restores the official S3 hardware PHY route and detaches the former OTG connection first. Executed initialization tests seed the retained RTC state; real OTA transition remains a separate hardware check. |
+| [ESP-IDF #9826](https://github.com/espressif/esp-idf/issues/9826) | S3 retains TinyUSB PHY ownership across software/watchdog restart, preventing USB Serial/JTAG operation. | Pinned HWCDC initialization restores the official S3 hardware PHY route and detaches the former OTG connection first. Initialization fixtures seed retained RTC state; the controlled physical G2 OTA transition below also passed. |
 | [Meshtastic #10955](https://github.com/meshtastic/firmware/issues/10955) | Tracker V2 watchdog reboot after a serial reader closes; raw log writes block while the USB bus remains alive. Reproduced on Arduino 2.x and 3.x. | Applies to the same hardware/backend combination. Our bounded writer and diagnostic admission prevent waiting for a host to drain output; synthetic negative controls exercise unsafe raw writes. |
 | [Meshtastic #10975](https://github.com/meshtastic/firmware/issues/10975) | Tracker V2 binary synchronization corrupted by interleaved diagnostics and abandoned short-write suffixes. | Companion/KISS tests retain suffixes across short writes; KISS disables diagnostics before board initialization. |
 | [Arduino-ESP32 #12782](https://github.com/espressif/arduino-esp32/issues/12782) | Open report of HWCDC failing to reconnect after about two minutes idle on C3/C6/C61/S3, latest master / IDF 5.5.4. | Reported SDK differs from our pinned Arduino 2.0.17 / IDF 4.4. Synthetic tests cover idle lease expiry and reply admission, not physical enumeration on that SDK. |
@@ -239,3 +243,143 @@ radio service rather than real peripheral recovery.
 Native KISS tests also exercise the full modem's radio lifecycle during reset.
 These tests do not establish physical USB timing or host compatibility for
 boards that were not connected to the lab.
+
+## Physical G2 HTTP OTA and USB transition (2026-10-05)
+
+The latest OTA qualification used commit `95913c5301318fb738fb8f50e314a57a2dd9eb07`,
+including the uploader fix from `d2983762` and the station ownership fix.
+A current-source build explicitly selected TinyUSB; the target selected the
+normal HWCDC backend. Both ran on the physical Station G2 with the same existing
+partition table and two `0x640000` application slots. The independent audit
+checked packaged application hashes against metadata and matching preserved
+ELFs, the USB SDK transforms, and linked RAM requirements. Both ELFs contain
+the production 30-second admitted-upload timeout, queued-response guards and
+specific write-failure text; neither links the removed raw `Update.printError`
+calls. This is a controlled same-source transition, not released stock 1.17.1
+migration evidence.
+
+| Artifact | App bytes | SHA-256 |
+| --- | ---: | --- |
+| TinyUSB observer, `95913c53` | 1,978,200 | `cf72b3ce872fb0887273022255fe5826070b5b40f5aa8057f50e90e7c92d4b72` |
+| Normal HWCDC observer, `95913c53` | 1,950,824 | `aeeadb1f165164c5b01d5855918e20bb0dc37bedcb9f0a8b88f52faa4c435486` |
+
+The AP upload used the actual multipart `/update` handler and an app-only
+image. Its HTTP identity endpoint was matched to the node read over USB before
+the POST. USB topology was sampled every 20 ms without serial reads or writes
+across the upload/restart boundary. After 65,536 wire body bytes, Linux's
+`SIOCOUTQ` on that same HTTP socket fell from 59,987 outstanding bytes to zero
+in 0.554 seconds. Only then did the host pause body sends for 4.510 seconds;
+there were no serial operations during that pause. TCP acknowledgement was
+observed; the firmware's application receive timestamp was not directly
+instrumented.
+
+| Measured gate | Result |
+| --- | --- |
+| App-only multipart upload with the intentional body pause | HTTP 200, 22.559 seconds |
+| Firmware-owned software restart and USB backend change | TinyUSB device 120 disappeared; a transient TinyUSB device 121 preceded hardware CDC device 122 on the same physical topology |
+| First plain website `time <epoch>` after HWCDC discovery | Clock-set acknowledgement in 2,997.319 ms; strict deadline 5,000 ms |
+| Extra post-restart settling, serial commands during upload, external recovery | None |
+| Identity and saved runtime settings | Preserved against the original preflight |
+| Admin access | Exactly the original and recovery Admin ACL entries remained |
+| Core diagnostics after the upgrade | Error flags 0, uptime 4 seconds |
+| Pi WiFi rollback | Original connection restored and temporary AP profile deleted; runner completed in 35.598 seconds |
+
+The final `95913c53` hardware CDC application passed two quiet 180-second trials
+with power saving enabled. There were no serial reads, writes or keepalives
+during either interval. With the handle open, the first core reply took
+18.551 ms and uptime advanced from 43 to 223 seconds. With the handle closed,
+the first plain website clock request after reopening was acknowledged in
+14.728 ms and uptime advanced from 224 to 404 seconds. No CPU restart occurred.
+The preexisting radio CAD warning `0x02` remained unchanged throughout these
+trials; this was not a zero-error radio test. Original power saving off, other
+saved settings and both Admin ACL entries were restored and verified.
+
+After those trials, a single plain `start ota` command used the connected
+station's advertised LAN address. The actual `/update` page returned HTTP 200
+in 1.365 seconds and `/update/identity` returned HTTP 200 in 0.084 seconds with
+the exact G2 identity. The command reported WiFi on and WebConfig stopped.
+Stopping OTA and restoring the original WebConfig were verified; no firmware
+was uploaded in this endpoint probe. Uptime continued from 533 to 535 seconds,
+the station remained connected at -80 dBm, and identity, original settings,
+both Admins and power saving off were retained. These HTTP measurements use a
+separate diagnostic bound; the first USB website request still uses 5 seconds.
+
+Final restoration also verified the Pi's original WiFi connection, no temporary
+OTA profiles or return timers, and active `mctomqtt`, `ModemManager` and
+`mesh-logger` services. Each service reported exit status 0 and no restarts.
+This verifies service health; MQTT packet delivery was not measured in this run.
+
+Baseline preparation also used app-only HTTP OTA: hardware CDC `d2983762`
+installed TinyUSB `95913c53` in 19.083 seconds, and its first plain clock
+acknowledgement took 3,163.722 ms. Original identity, settings and both Admins
+were verified before and after this reverse transition; no rescue action was
+used. Its Pi WiFi rollback completed in 31.958 seconds.
+
+The first query used the stock website's plain clock command immediately after
+opening the discovered hardware CDC port. Later queries were tagged to keep
+unrelated diagnostics from satisfying a response. Neither a longer command
+deadline nor an arbitrary startup delay was added.
+
+The uploader fix addresses a separate bounded-gap problem: the pinned HTTP
+listener gives ordinary clients a 3-second receive timeout, which remained in
+effect while an admitted multipart upload was receiving its body. OTA now
+extends only that admitted request to 30 seconds after MD5 validation. Normal,
+unauthorized, malformed-MD5 and concurrent requests retain ordinary admission
+behavior. `send()` queues a response before it reaches the wire, so both the
+upload and completion callbacks preserve an already queued error. Begin/end
+errors and short writes return HTTP errors without calling raw USB prints
+from the shared AsyncTCP task.
+
+Three ASan/UBSan uploader tests passed, together with eight OTA startup tests
+and fifteen WiFi lifecycle tests. The uploader fixture executes production
+callbacks and the pinned AsyncTCP inactivity condition. A 4-second body pause
+survives, an abandoned owner remains open at 29.999 seconds and aborts at
+30 seconds, ownership is released without reboot, and a later upload completes.
+Negative controls fail when the timeout extension or queued-response guards
+are removed, or when raw USB error prints are restored.
+
+Historical results remain distinct:
+
+- The earlier same-source `d2983762` forward transition also passed its
+  4.510-second upload pause: HTTP 200 in 23.211 seconds and the first website
+  clock acknowledgement in 2,976.119 ms.
+- Earlier legacy-firmware WebConfig/WiFi handoff attempts failed before upload
+  and required USB restoration; they did not establish an OTA transition.
+- An earlier controlled `e971beab` LAN attempt reset its upload socket after
+  1,277,952 of 1,950,796 wire bytes, with weak LAN signal. USB stayed on TinyUSB,
+  uptime continued, and an AP retry later passed. The cause of that LAN failure
+  is unproven; neither a socket reset nor radio CAD error flag `0x02` establishes
+  a CPU crash.
+- Same-backend setup attempt 1 installed the fixed TinyUSB application over
+  HTTP, but the first product-matching USB rediscovery preceded the firmware's
+  delayed restart. Its version gate correctly failed while the old application
+  still answered. A later read-only version check confirmed `d2983762` without
+  rescue, and the measured forward transition verified that source version
+  before uploading. This setup report remains failed and is not counted as
+  migration or startup-latency evidence.
+
+The earlier `d2983762` hardware CDC application passed two quiet 180-second trials
+with power saving enabled. There were no serial reads, writes or keepalives
+during either interval. With the handle open, the first core reply took
+17.353 ms and uptime advanced 180 seconds. With the handle closed, the first
+plain website clock request after reopening was acknowledged in 8.905 ms and
+uptime advanced 181 seconds. Original power saving off, other saved settings
+and both Admin ACL entries were restored and verified.
+
+A normal `start ota` probe while the station was disconnected correctly
+reported its fallback AP address; a Pi still on its original LAN could not
+reach that separate AP. This does not qualify the LAN endpoint. Source review
+then identified a missing WebConfig retry owner when MQTT is compiled in but
+has no running worker. The infrastructure fix refreshes ownership from actual
+MQTT worker state on the mesh loop. Constructor credential loading, browser
+credential writes and the 64-hex password capability use a separate immutable
+storage choice, so taking over reconnects cannot truncate or reroute saved
+credentials. An active external worker retains its connection; a stopped
+worker releases it for a fresh portal attempt. Six ASan/UBSan tests exercise
+production role startup, connection fallback, retry, worker handoff and
+credential paths, including the existing manual Companion startup behavior.
+The `95913c53` OTA transition, quiet power-saving trials and normal LAN endpoint
+checks passed as reported above. The current GitHub unit workflow has not yet
+completed. Release 1.17.1.9 remains held and unpublished. These results qualify
+this G2, Linux host and pinned framework; they do not establish physical
+compatibility for every affected board or host operating system.
