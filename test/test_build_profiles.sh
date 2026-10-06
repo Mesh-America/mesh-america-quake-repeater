@@ -1278,17 +1278,24 @@ uses_merged_standard_usb_logging esp_repeater \
 # were dead ends.
 verify_esp32_field_browser_ota() {
   local env_name=$1
+  local minimal_lora_ota=${2:-0}
   local PLATFORMIO_BUILD_FLAGS=""
   local PLATFORMIO_BUILD_UNFLAGS=""
   local BUILD_PROFILE_FOR_TARGET=standard
   local ESP32_FULL_BUILD=0
+  local MESHDEBUG_OVERRIDE=off
+  local PACKET_LOGGING_OVERRIDE=off
+  local MQTT_BRIDGE_OVERRIDE=off
+  local FIRMWARE_FILENAME_INFIX=""
+  local PIO_CONFIG_JSON='[]'
   local -a BUILD_CAPABILITIES=()
   local -a BUILD_REDUCTIONS=()
   local -a BUILD_EXPECTATIONS=()
-  local capabilities reductions expectations
+  local capabilities reductions expectations compact_flag
 
   PIO_ENV_PLATFORM_BY_NAME[$env_name]=ESP32_PLATFORM
-  PIO_ENV_OTA_BY_NAME[$env_name]=0
+  PIO_ENV_OTA_BY_NAME[$env_name]=$minimal_lora_ota
+  apply_lora_ota_override "$env_name"
   apply_esp32_lora_ota_size_profile "$env_name"
 
   [[ "$PLATFORMIO_BUILD_FLAGS" == *-DLIGHTWEIGHT_WIFI_OTA=1* ]] \
@@ -1308,11 +1315,46 @@ verify_esp32_field_browser_ota() {
   expectations=" ${BUILD_EXPECTATIONS[*]} "
   [[ "$expectations" == *"web.lightweight_browser_ota=MeshCore firmware update"* ]] \
     || fail "$env_name does not verify browser OTA in the linked image"
+  for compact_flag in ED25519_COMPACT_BASE ED25519_COMPACT_SHA512 OTA_TARGET_NAME_FRONT_CODED; do
+    if [ "$minimal_lora_ota" = 1 ]; then
+      [[ "$PLATFORMIO_BUILD_FLAGS" == *"-D${compact_flag}=1"* ]] \
+        || fail "$env_name did not enable its feature-preserving flash trim"
+    else
+      [[ "$PLATFORMIO_BUILD_FLAGS" != *"${compact_flag}"* ]] \
+        || fail "$env_name changed the ordinary standard implementation"
+    fi
+  done
+  if [ "$minimal_lora_ota" = 1 ]; then
+    [[ "$PLATFORMIO_BUILD_FLAGS" == *-DENABLE_OTA=1* \
+       && "$PLATFORMIO_BUILD_FLAGS" == *-DOTA_FLASH_STORE=1* \
+       && "$PLATFORMIO_BUILD_FLAGS" == *-DOTA_FOLDER_SERIAL* ]] \
+      || fail "$env_name removed a LoRa OTA or USB seeding feature to fit"
+    [[ "$expectations" == *"ota.update.lora=image_hash MISMATCH after decode"* \
+       && "$expectations" == *"ota.cli=OTA: status"* ]] \
+      || fail "$env_name stopped verifying its LoRa OTA implementation"
+  fi
 }
 
 verify_esp32_field_browser_ota heltec_v4_repeater
 verify_esp32_field_browser_ota heltec_v4_room_server
 verify_esp32_field_browser_ota heltec_v4_sensor
+verify_esp32_field_browser_ota heltec_v4_repeater_lora_ota_no_external_sensors 1
+verify_esp32_field_browser_ota heltec_v4_room_server_lora_ota_no_external_sensors 1
+
+# The new storage representation is confined to portable ESP32 minimal OTA
+# artifacts. Full images and other platforms retain their existing policies.
+(
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_UNFLAGS=""
+  BUILD_PROFILE_FOR_TARGET=full
+  ESP32_FULL_BUILD=1
+  apply_esp32_lora_ota_size_profile heltec_v4_repeater_lora_ota_no_external_sensors
+  [ -z "$PLATFORMIO_BUILD_FLAGS" ] || fail "Full image received portable flash trims"
+  BUILD_PROFILE_FOR_TARGET=standard
+  ESP32_FULL_BUILD=0
+  apply_esp32_lora_ota_size_profile nrf_repeater_lora_ota_no_external_sensors
+  [ -z "$PLATFORMIO_BUILD_FLAGS" ] || fail "nRF52 image received ESP32 portable flash trims"
+)
 
 # Personal/attached roles can retain their established transport policy; the
 # fail-safe is deliberately scoped to remotely installed field/server images.
