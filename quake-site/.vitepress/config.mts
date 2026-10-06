@@ -31,6 +31,7 @@ export default defineConfig({
     nav: [
       { text: 'Home', link: '/' },
       { text: 'Get started', link: '/getting-started' },
+      { text: 'Hardware', link: '/hardware' },
       { text: 'Admin guide', link: '/admin-guide' },
       { text: 'Docs', link: '/earthquake-alerts' },
       { text: 'Flasher', link: 'https://apps.meshamerica.com/quake-repeater/' },
@@ -43,6 +44,7 @@ export default defineConfig({
       {
         text: 'Get started',
         items: [
+          { text: 'Supported hardware', link: '/hardware' },
           { text: 'Flash and set up', link: '/getting-started' },
           { text: 'How to admin your repeater', link: '/admin-guide' },
           { text: 'Update over the air (OTA)', link: '/ota-updates' },

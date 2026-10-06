@@ -1,6 +1,6 @@
 # Get started
 
-You need a RAK3401 repeater, ideally with a RAK12027 (Omron D7S) sensor fitted, and a computer with a USB cable and a Chromium-based browser (Chrome, Edge or similar).
+You need a [supported repeater](hardware.md) (a RAK3401, or a RAK4631 on a RAK19003 as in the RAK10703 kit, which is an alpha), ideally with a RAK12027 (Omron D7S) sensor fitted, and a computer with a USB cable and a Chromium-based browser (Chrome, Edge or similar).
 
 ## 1. Flash the firmware
 
