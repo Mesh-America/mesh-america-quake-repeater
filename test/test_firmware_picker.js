@@ -1223,8 +1223,66 @@ const combinedDirections = picker.runtimeDirections(combinedObserver, {logging: 
 assert(combinedDirections.some(section => section.title === 'MQTT broker connections'));
 assert(combinedDirections.some(section => section.title === 'ESP-NOW bridge'));
 assert.strictEqual(commands(combinedDirections).filter(command => command === 'set mqtt.enabled on').length, 1);
-assert.strictEqual(commands(combinedDirections).filter(command => command === 'set bridge.enabled on').length, 1);
+assert.strictEqual(commands(combinedDirections).filter(command => command === 'set espnow.enabled on').length, 1);
+assert.strictEqual(commands(combinedDirections).filter(command => command === 'set bridge.enabled on').length, 0);
 console.log('current release metadata and capacity directions tests passed');
+
+// The normal Full repeater can carry both independent bridges. Neither its
+// mode choices nor its ESP-NOW instructions may overwrite the UART transport.
+const bridgeFamily = 'v1.17.1.9-halo-keymind-cascade-dev-5f10e7d6';
+const bridgeTargets = ['MKE_s3_repeater-full-logging', 'heltec_v4_tft_repeater-full-logging',
+  'Heltec_v2_repeater_bridge_espnow'];
+const bridgeProfiles = {
+  [bridgeTargets[0]]: {platform: 'ESP32_PLATFORM', rs232: true, espnowBridge: true,
+    mqtt: false, updateMethods: ['wifi', 'lora']},
+  [bridgeTargets[1]]: {platform: 'ESP32_PLATFORM', rs232: false, espnowBridge: true,
+    mqtt: false, updateMethods: ['wifi', 'lora']},
+  [bridgeTargets[2]]: {platform: 'ESP32_PLATFORM', rs232: false, espnowBridge: true,
+    mqtt: false, updateMethods: []},
+};
+const bridgeRelease = release(bridgeFamily, '2026-10-05T00:00:00Z',
+  bridgeTargets.map(target => asset(target + '-ota-' + bridgeFamily + '.bin')));
+const bridgeCatalog = picker.buildCatalog([bridgeRelease], {
+  familyTag: bridgeFamily, profiles: bridgeProfiles, partitionMigrations: {},
+});
+const findBridge = target => bridgeCatalog.profiles.find(profile => profile.target === target);
+const mkeBridge = findBridge(bridgeTargets[0]);
+assert.deepStrictEqual(picker.profileFieldValues(mkeBridge, 'mode'), ['standard', 'rs232', 'espnow']);
+for (const mode of ['standard', 'rs232', 'espnow']) {
+  assert(picker.profileMatches(mkeBridge, {mode}, ['mode']));
+  const directions = picker.runtimeDirections(mkeBridge, {mode});
+  const uart = directions.find(section => /^RS232 bridge/.test(section.title));
+  const wireless = directions.find(section => section.title === 'ESP-NOW bridge');
+  assert(uart && wireless);
+  assert(commands([uart]).includes('set bridge.enabled on'));
+  assert(!commands([uart]).some(command => command.includes('espnow.enabled')));
+  assert.deepStrictEqual(wireless.actions.map(action => action.commands), [
+    ['set espnow.enabled on'], ['set espnow.enabled off'], ['get espnow.running'],
+  ]);
+  assert(!commands([wireless]).some(command => command.includes('bridge.enabled')));
+  assert(wireless.note.includes('Independent of RS-232'));
+}
+const plainBridge = findBridge(bridgeTargets[1]);
+assert.deepStrictEqual(picker.profileFieldValues(plainBridge, 'mode'), ['standard', 'espnow']);
+assert(picker.profileMatches(plainBridge, {mode: 'espnow'}, ['mode']));
+const plainDirections = picker.runtimeDirections(plainBridge, {mode: 'espnow'});
+assert(!plainDirections.some(section => /^RS232 bridge/.test(section.title)));
+assert(commands(plainDirections.filter(section => section.title === 'ESP-NOW bridge'))
+  .includes('set bridge.enabled on'));
+// Historical dedicated images did not expose espnow.enabled. Keep their
+// directions compatible without guessing support from the release version.
+const legacyDirections = picker.runtimeDirections(findBridge(bridgeTargets[2]), {mode: 'espnow'});
+assert.deepStrictEqual(legacyDirections.find(section => section.title === 'ESP-NOW bridge')
+  .actions.map(action => action.commands), [
+    ['set bridge.enabled on'], ['set bridge.enabled off'], ['get bridge.running'],
+  ]);
+const staleBridgeMetadata = picker.buildCatalog([bridgeRelease], {
+  familyTag: 'v1.17.1.8', profiles: bridgeProfiles,
+});
+assert(staleBridgeMetadata.profiles.every(profile => !profile.controls));
+assert(!picker.runtimeDirections(staleBridgeMetadata.profiles.find(profile =>
+  profile.target === bridgeTargets[0]), {mode: 'espnow'}).some(section => section.title === 'ESP-NOW bridge'));
+console.log('combined UART/ESP-NOW picker modes, independent commands and historical compatibility passed');
 
 // Partition expansion uses the packager's lookup and published utility assets,
 // not hardware labels or guessed slugs (several historical names differ).
