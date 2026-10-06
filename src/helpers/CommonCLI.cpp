@@ -3786,6 +3786,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: usage set logging.output off|usb|wifi|both");
       return;
     }
+    if (wifi_enabled && _callbacks->isMqttBridgeStopping()) {
+      strcpy(reply, "Error: MQTT is stopping; retry when mqtt.stopping is off");
+      return;
+    }
     const uint8_t previous_usb = _prefs->usb_logging_enabled;
     const uint8_t previous_bridge = _prefs->bridge_enabled;
     _prefs->usb_logging_enabled = usb_enabled ? 1 : 0;
@@ -3797,7 +3801,9 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       return;
     }
     mesh::setUsbLoggingEnabled(usb_enabled);
-    if (!_callbacks->setMqttBridgeState(wifi_enabled)) {
+    const bool applied = wifi_enabled ? _callbacks->setMqttBridgeState(true)
+                                      : _callbacks->requestMqttBridgeStop();
+    if (!applied) {
       strcpy(reply, "Error: logging output saved, but MQTT runtime change failed");
       return;
     }
@@ -3856,9 +3862,21 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: use set mqtt.enabled on|off");
     } else {
       const bool enable = strcmp(value, "on") == 0;
+      if (enable && _callbacks->isMqttBridgeStopping()) {
+        strcpy(reply, "Error: MQTT is stopping; retry when mqtt.stopping is off");
+        return;
+      }
+      const uint8_t previous = _prefs->bridge_enabled;
       _prefs->bridge_enabled = enable ? 1 : 0;
-      const bool applied = _callbacks->setMqttBridgeState(enable);
-      savePrefs();
+      // A cooperative stop cannot be cancelled safely once signalled. Save
+      // intent first so a failed write leaves the running service unchanged.
+      if (!trySavePrefs()) {
+        _prefs->bridge_enabled = previous;
+        strcpy(reply, "Error: MQTT setting not saved; unchanged");
+        return;
+      }
+      const bool applied = enable ? _callbacks->setMqttBridgeState(true)
+                                  : _callbacks->requestMqttBridgeStop();
       strcpy(reply, applied ? "OK"
                             : "Error: MQTT runtime change failed; setting saved");
     }

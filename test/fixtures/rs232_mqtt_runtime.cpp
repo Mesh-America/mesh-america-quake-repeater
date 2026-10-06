@@ -112,6 +112,7 @@ struct MQTTNodeInfo {
 };
 class MQTTBridge : public AbstractBridge {
   bool running = false;
+  bool stopping = false;
 public:
   inline static unsigned live = 0, fail_starts = 0;
   unsigned begins = 0, ends = 0, loops = 0, sent = 0, received = 0;
@@ -127,9 +128,11 @@ public:
     if (fail_starts) { --fail_starts; return; }
     running = true;
   }
-  void end() override { ++ends; running = false; }
+  void end() override { ++ends; running = stopping = false; }
+  void requestStop() { stopping = running; }
+  bool isStopping() const { return stopping; }
   bool isRunning() const override { return running; }
-  void loop() override { ++loops; }
+  void loop() override { ++loops; if (stopping) { ++ends; running = stopping = false; } }
   void sendPacket(mesh::Packet* p) override { if (allow(p)) ++sent; }
   void onPacketReceived(mesh::Packet* p) { if (allow(p)) ++received; }
 };
@@ -171,6 +174,8 @@ struct Callbacks {
   virtual bool restartEspNowBridge() = 0;
   virtual bool isMqttBridgeRunning() = 0;
   virtual bool setMqttBridgeState(bool) = 0;
+  virtual bool requestMqttBridgeStop() = 0;
+  virtual bool isMqttBridgeStopping() = 0;
   virtual bool restartMqttBridge() = 0;
 };
 class MyMesh : public Callbacks {
@@ -277,7 +282,7 @@ int main() {
   assert(mesh.bridge->sent == 1 && mesh.bridge->loops == 1);
   assert(mesh.espnow_bridge.sent == 1 && mesh.espnow_bridge.loops == 1);
   assert(mesh.mqtt_bridge->received == 1 && mesh.mqtt_bridge->sent == 1);
-  assert(mesh.mqtt_bridge->loops == 0); // Its actual task services MQTT independently.
+  assert(mesh.mqtt_bridge->loops == 1); // Core 1 services stop acknowledgement only.
   assert(mesh.filter_checks == 4);
   packet.allowed = false;
   mesh.routeRx(&packet); mesh.routeTx(&packet);
@@ -342,12 +347,34 @@ int main() {
   cli.set("bridge.enabled off", reply);
   assert(strcmp(reply, "OK") == 0 && !mesh.isEspNowBridgeRunning());
   assert(mesh.isMqttBridgeRunning() && mesh.isRs232BridgeRunning());
+  // A failed intent save must not signal an uncancellable worker stop.
+  cli.fail_save = true;
   cli.set("mqtt.enabled off", reply);
-  assert(strcmp(reply, "OK") == 0 && !mesh.isMqttBridgeRunning());
+  assert(strstr(reply, "not saved; unchanged") && mesh._prefs.bridge_enabled);
+  assert(mesh.isMqttBridgeRunning() && !mesh.isMqttBridgeStopping());
+  cli.fail_save = false;
+  cli.set("mqtt.enabled off", reply);
+  assert(strcmp(reply, "OK") == 0 && mesh.isMqttBridgeRunning());
+  assert(mesh.isMqttBridgeStopping() && !mesh._prefs.bridge_enabled);
+  expect_get(cli, "mqtt.running", "> on");
+  expect_get(cli, "mqtt.stopping", "> on");
+  const unsigned stopping_saves = cli.saves;
+  cli.set("mqtt.enabled on", reply);
+  assert(strstr(reply, "MQTT is stopping") && !mesh._prefs.bridge_enabled);
+  assert(cli.saves == stopping_saves && !mesh.setMqttBridgeState(true));
+  cli.set("mqtt.enabled off", reply); // a repeated request is accepted
+  assert(strcmp(reply, "OK") == 0 && mesh.isMqttBridgeStopping());
   assert(mesh.isRs232BridgeRunning() && mesh.bridgesPreventSleep());
   const unsigned uart_tx_before = mesh.bridge->sent;
   mesh.routeRx(&packet); mesh.serviceBridges();
   assert(mesh.bridge->sent == uart_tx_before + 1);
+  assert(!mesh.isMqttBridgeRunning() && !mesh.isMqttBridgeStopping());
+  expect_get(cli, "mqtt.stopping", "> off");
+  cli.fail_save = true;
+  cli.set("mqtt.enabled on", reply);
+  assert(strstr(reply, "not saved; unchanged") && !mesh._prefs.bridge_enabled);
+  assert(!mesh.isMqttBridgeRunning());
+  cli.fail_save = false;
   cli.set("espnow.enabled on", reply); assert(strcmp(reply, "OK") == 0);
   cli.set("mqtt.enabled on", reply); assert(strcmp(reply, "OK") == 0);
   mesh.serviceBridges(); assert(mesh.isEspNowBridgeRunning());
@@ -379,6 +406,8 @@ int main() {
     assert(mesh.isRs232BridgeRunning() && RS232Bridge::live == 1);
   }
   cli.set("rs232.enabled off", reply); cli.set("espnow.enabled off", reply); cli.set("mqtt.enabled off", reply);
+  assert(mesh.isMqttBridgeStopping() && mesh.bridgesPreventSleep());
+  mesh.serviceBridges();
   assert(!mesh.bridgesPreventSleep() && RS232Bridge::live == 0);
   cli.run("start ota", reply); cli.run("stop ota", reply); mesh.serviceBridges();
   assert(!mesh.isRs232BridgeRunning() && !mesh.isMqttBridgeRunning() && !mesh.isEspNowBridgeRunning());

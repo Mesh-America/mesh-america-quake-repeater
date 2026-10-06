@@ -1348,6 +1348,7 @@ public:
       _alerter.setBridge(nullptr);
       return !mqtt_bridge || !mqtt_bridge->isRunning();
     }
+    if (mqtt_bridge && mqtt_bridge->isStopping()) return false;
     // Give the WiFi station to MQTT while it associates. ESP-NOW is restarted
     // after the AP channel is known, which avoids a raw ESP-NOW-only session
     // pinning the station to a different channel.
@@ -1430,6 +1431,9 @@ public:
 #endif
 
   bool setBridgeState(bool enable) override {
+#ifdef WITH_MQTT_BRIDGE
+    if (enable && mqtt_bridge && mqtt_bridge->isStopping()) return false;
+#endif
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
     if (!enable) {
       const bool espnow_stopped = setEspNowBridgeState(false);
@@ -1660,6 +1664,24 @@ public:
   bool isMqttBridgeRunning() override {
 #ifdef WITH_MQTT_BRIDGE
     return mqtt_bridge && mqtt_bridge->isRunning();
+#else
+    return false;
+#endif
+  }
+
+  bool requestMqttBridgeStop() override {
+#ifdef WITH_MQTT_BRIDGE
+    _alerter.setBridge(nullptr);
+    if (mqtt_bridge) mqtt_bridge->requestStop();
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  bool isMqttBridgeStopping() override {
+#ifdef WITH_MQTT_BRIDGE
+    return mqtt_bridge && mqtt_bridge->isStopping();
 #else
     return false;
 #endif

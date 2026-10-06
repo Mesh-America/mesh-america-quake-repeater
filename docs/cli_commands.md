@@ -4794,6 +4794,7 @@ MQTT preferences and retains explicit settings across reboots.
 - `set mqtt.enabled on`
 - `set mqtt.enabled off`
 - `get mqtt.running`
+- `get mqtt.stopping`
 - `get mqtt.status`
 
 These commands are the same on MQTT-capable Companion, Repeater, Room Server,
@@ -4802,6 +4803,14 @@ MQTT while keeping broker presets and credentials. Turning it on allows those
 brokers to reconnect. `get mqtt.running` checks the service's runtime state;
 `get mqtt.status` reports individual broker connections. Enabling MQTT does
 not imply that a broker is connected.
+
+On ESP32 Repeater and Room Server images, `set mqtt.enabled off` acknowledges
+the stop request while the MQTT task disconnects and destroys its clients.
+`get mqtt.stopping` stays `on` until that cleanup completes; `mqtt.running`
+also stays `on` while those resources are still owned. Wait for
+`mqtt.stopping` to become `off` before enabling MQTT again. UART, ESP-NOW,
+and the radio continue running during this cleanup. OTA still waits for a
+completed MQTT shutdown before it can write firmware.
 
 USB logging remains independent. On images with both outputs,
 `set logging.output off|usb|wifi|both` selects USB and MQTT together.

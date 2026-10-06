@@ -26,6 +26,7 @@ def method(path, signature):
 
 
 PREAMBLE = r'''
+#include <atomic>
 #include <cstdlib>
 #include <cstdint>
 #include <cassert>
@@ -90,6 +91,7 @@ struct MQTTBridge {
   };
   MQTTSlot _slots[RUNTIME_MQTT_SLOTS];
   volatile bool _slot_attempt_pending[RUNTIME_MQTT_SLOTS] = {};
+  std::atomic<bool> _stop_requested{false};
   esp_err_t reconnectSlotClient(int index);
 };
 '''
@@ -152,12 +154,391 @@ int main() {
   sdk_callback=nullptr;
   reconnect_result=ESP_OK;
   assert(b.reconnectSlotClient(0)==ESP_OK && b._slot_attempt_pending[0]);
+  const int stopped_starts = start_calls, stopped_reconnects = reconnect_calls;
+  b._stop_requested = true;
+  assert(b.reconnectSlotClient(0)==ESP_ERR_INVALID_STATE);
+  assert(start_calls==stopped_starts && reconnect_calls==stopped_reconnects);
   return 0;
 }
 '''
 
 
+TASK_PREAMBLE = r'''
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <climits>
+#include <cstdint>
+#include <cstdlib>
+#include <string>
+#include <vector>
+#define PORTABLE_MQTT_OBSERVER 1
+#define MQTT_DEBUG_PRINTLN(...) ((void)0)
+using TickType_t = uint32_t;
+constexpr int RUNTIME_MQTT_SLOTS = 3, WL_CONNECTED = 1;
+constexpr uint32_t STATUS_RETRY_INTERVAL = 30000;
+static uint32_t tick_ms = 1, first_tick = 0, first_millis = 0;
+static uint64_t elapsed_ms = 0, stop_at_ms = UINT64_MAX;
+static int scenario = 0;
+static std::vector<uint32_t> task_sleeps;
+struct MQTTBridge;
+static MQTTBridge* active_bridge = nullptr;
+#define pdMS_TO_TICKS(ms) static_cast<TickType_t>((ms) / tick_ms)
+TickType_t xTaskGetTickCount() {
+  return first_tick + static_cast<TickType_t>(elapsed_ms / tick_ms);
+}
+uint32_t millis() { return first_millis + static_cast<uint32_t>(elapsed_ms); }
+void vTaskDelay(TickType_t ticks);
+struct { int status() { return WL_CONNECTED; } } WiFi;
+bool mqttNtpRefreshDue(unsigned long, unsigned long, unsigned long) { return false; }
+struct MQTTPrefs {
+  char mqtt_slot_preset[RUNTIME_MQTT_SLOTS][16] = {};
+  bool mqtt_status_enabled = true;
+};
+struct MQTTBridge {
+  struct Slot {
+    bool enabled = true, initial_connect_done = false, connected = false;
+    unsigned long last_reconnect_attempt = 0;
+  } _slots[RUNTIME_MQTT_SLOTS];
+  struct Latch {
+    void noteGotIp() {}
+    bool consumeIfConnected(bool) { return false; }
+  } _ntp_reconnect_latch;
+  MQTTPrefs prefs;
+  MQTTPrefs* _obs = &prefs;
+  std::atomic<bool> _ntp_synced{true};
+  bool _ntp_sync_pending = false, _slots_setup_done = false;
+  bool _ntp_force_requested = false, _ntp_force_result = false, _ntp_force_done = false;
+  bool _ntp_refresh_pending = false, _cached_has_connected_slots = true;
+  std::atomic<bool> _stop_requested{false}, _stop_acked{false};
+  bool _slot_reconfigure_pending[RUNTIME_MQTT_SLOTS] = {true, true, true};
+  bool _status_publish_pending[RUNTIME_MQTT_SLOTS] = {true, true, true};
+  unsigned long _last_ntp_sync = 0, _ntp_refresh_retry_at = 0;
+  unsigned long _last_status_retry = 0, _last_status_publish = 0, _status_interval = 300000;
+  int _max_active_slots = RUNTIME_MQTT_SLOTS, _queue_count = 0;
+  int late_work = 0, reconfigures = 0, publishes = 0, queue_calls = 0;
+  std::vector<int> setups;
+  std::vector<uint64_t> setup_times;
+  std::vector<std::string> teardown;
+  void work() {
+    if (_stop_requested) ++late_work;
+    assert(!_stop_acked);
+  }
+  void initializeWiFiInTask() {}
+  bool handleWiFiConnection(unsigned long) { work(); return false; }
+  bool syncTimeWithNTP(bool = false, bool = false) {
+    work();
+    if (scenario == 6 || scenario == 7) {
+      _ntp_synced = true;
+      _stop_requested = true;
+    }
+    return true;
+  }
+  bool canActivateSlot(int) { work(); return true; }
+  bool isSlotReady(int, char*, size_t) { work(); return true; }
+  bool setupSlot(int index) {
+    work(); setups.push_back(index); setup_times.push_back(elapsed_ms);
+    if (scenario == 5) _stop_requested = true;
+    return true;
+  }
+  void applySlotPreset(int, const char*) {
+    work(); ++reconfigures;
+    if (scenario == 8) _stop_requested = true;
+  }
+  void publishStatusToSlot(int) {
+    work(); ++publishes;
+    if (scenario == 9) _stop_requested = true;
+  }
+  void maintainSlotConnections() {
+    work();
+    if (scenario == 10) _stop_requested = true;
+  }
+  void processPacketQueue() {
+    work(); ++queue_calls;
+    if (scenario == 11) _stop_requested = true;
+  }
+  void checkConfigurationMismatch() { work(); }
+  void pollNtpRefresh(unsigned long) { work(); }
+  void refreshNTP() { work(); }
+  bool publishStatus() { work(); ++publishes; return true; }
+  void updateCachedConnectionStatus() { work(); }
+  void cancelNtpRefresh() {
+    assert(_stop_requested && !_stop_acked);
+    teardown.push_back("ntp");
+  }
+  void teardownSlot(int index) {
+    assert(_stop_requested && !_stop_acked);
+    teardown.push_back("slot" + std::to_string(index));
+  }
+  void destroySlotClients() {
+    assert(!_stop_acked);
+    assert(teardown == std::vector<std::string>({"ntp", "slot0", "slot1", "slot2"}));
+    teardown.push_back("destroy");
+  }
+  bool waitUnlessStopping(uint32_t delay_ms);
+  void mqttTaskLoop();
+};
+void vTaskDelay(TickType_t ticks) {
+  assert(ticks > 0);
+  const uint32_t duration = ticks * tick_ms;
+  task_sleeps.push_back(duration);
+  elapsed_ms += duration;
+  if (elapsed_ms >= stop_at_ms) active_bridge->_stop_requested = true;
+  // The no-stop scenario exits after one complete worker iteration. Stop is
+  // raised during its ordinary idle delay, after all setup and publications.
+  if (scenario == 3 && active_bridge->setups.size() == RUNTIME_MQTT_SLOTS)
+    active_bridge->_stop_requested = true;
+  assert(elapsed_ms < 30000); // bound a missing cooperative exit deterministically
+}
+'''
+
+TASK_MAIN = r'''
+int main(int argc, char** argv) {
+  assert(argc == 4);
+  scenario = std::atoi(argv[1]);
+  tick_ms = static_cast<uint32_t>(std::atoi(argv[2]));
+  if (std::atoi(argv[3])) {
+    first_tick = UINT32_MAX - 511;
+    first_millis = UINT32_MAX - 511;
+  }
+  MQTTBridge bridge;
+  active_bridge = &bridge;
+  switch (scenario) {
+    case 0: stop_at_ms = 187; break;          // stop while WiFi settles
+    case 1: stop_at_ms = 1173; break;         // stop during first TLS stagger
+    case 2: stop_at_ms = 6191; break;         // stop during second TLS stagger
+    case 3: break;                           // preserve every normal delay
+    case 4: bridge._stop_requested = true; break;
+    case 5: break;                           // setup callback requests stop
+    case 6: bridge._ntp_force_requested = true; break;
+    case 7: bridge._ntp_sync_pending = true; bridge._ntp_synced = false; break;
+    case 8: case 9: case 10: case 11: break;  // stop raised during worker callbacks
+    default: assert(false);
+  }
+  bridge.mqttTaskLoop();
+  assert(bridge._stop_acked && bridge.late_work == 0);
+  assert(bridge.teardown == std::vector<std::string>({
+    "ntp", "slot0", "slot1", "slot2", "destroy"}));
+  if (scenario == 3) {
+    assert(bridge.setups == std::vector<int>({0, 1, 2}));
+    assert(bridge.setup_times == std::vector<uint64_t>({1000, 6000, 11000}));
+    assert(bridge.reconfigures == RUNTIME_MQTT_SLOTS);
+    assert(bridge.publishes >= RUNTIME_MQTT_SLOTS && bridge.queue_calls == 1);
+  } else {
+    const size_t wanted = scenario >= 8 ? RUNTIME_MQTT_SLOTS
+                          : scenario == 0 || scenario == 4 || scenario >= 6 ? 0
+                          : scenario == 2 ? 2 : 1;
+    assert(bridge.setups.size() == wanted);
+    if (scenario >= 8) {
+      assert(bridge.reconfigures == (scenario == 8 ? 1 : RUNTIME_MQTT_SLOTS));
+      assert(bridge.publishes == (scenario == 8 ? 0 : scenario == 9 ? 1 : RUNTIME_MQTT_SLOTS));
+      assert(bridge.queue_calls == (scenario == 11 ? 1 : 0));
+    } else {
+      assert(bridge.reconfigures == 0 && bridge.publishes == 0 && bridge.queue_calls == 0);
+    }
+    const uint32_t poll_bound = std::max(uint32_t{20}, tick_ms);
+    assert(std::all_of(task_sleeps.begin(), task_sleeps.end(),
+                       [poll_bound](uint32_t duration) { return duration <= poll_bound; }));
+    if (scenario == 4) assert(elapsed_ms == 0 && task_sleeps.empty());
+    else if (scenario >= 8) assert(elapsed_ms == 11000);
+    else if (scenario >= 5) assert(elapsed_ms == 1000);
+    else assert(elapsed_ms >= stop_at_ms && elapsed_ms - stop_at_ms < poll_bound);
+  }
+  // A completed zero-duration wait preserves its caller's stop decision.
+  const auto sleeps_before = task_sleeps.size();
+  bridge._stop_requested = false;
+  assert(bridge.waitUnlessStopping(0));
+  bridge._stop_requested = true;
+  assert(!bridge.waitUnlessStopping(0));
+  assert(task_sleeps.size() == sleeps_before);
+}
+'''
+
+ASYNC_STOP_PREAMBLE = r'''
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <limits>
+#include "helpers/MQTTLifecycle.h"
+#define ESP_PLATFORM 1
+#define MQTT_DEBUG_PRINTLN(...) ((void)0)
+#define pdMS_TO_TICKS(ms) (ms)
+constexpr int RUNTIME_MQTT_SLOTS = 3;
+static constexpr uint32_t MQTT_STOP_TIMEOUT_BASE_MS = 5000;
+static constexpr uint32_t MQTT_STOP_TIMEOUT_PER_SLOT_MS = 8000;
+static uint32_t clock_ms = 0, sleeps = 0;
+static uint64_t elapsed_ms = 0, ack_after_ms = UINT64_MAX;
+uint32_t millis() { return clock_ms; }
+struct MQTTBridge;
+static MQTTBridge* s_mqtt_bridge_instance = nullptr;
+static MQTTBridge* bridge_waiting = nullptr;
+void vTaskDelay(uint32_t duration);
+struct MQTTBridge {
+  struct Slot { bool enabled = true; } _slots[RUNTIME_MQTT_SLOTS];
+  struct LifecycleOps : MQTTLifecycle::Ops {
+    MQTTBridge* _b;
+    explicit LifecycleOps(MQTTBridge* bridge) : _b(bridge) {}
+    uint32_t nowMs() override;
+    void startTask() override;
+    void deliverStop() override;
+    void releaseResources() override;
+    void onStopComplete(bool clean) override;
+  };
+  struct RecordingOps : LifecycleOps {
+    int signals = 0;
+    explicit RecordingOps(MQTTBridge* bridge) : LifecycleOps(bridge) {}
+    void deliverStop() override { ++signals; LifecycleOps::deliverStop(); }
+  } ops{this};
+  MQTTLifecycle::Coordinator _lifecycle{ops, 1};
+  std::atomic<bool> _stop_requested{false}, _stop_acked{false};
+  bool _initialized = true, resources_owned = true;
+  bool _slots_setup_done = true, _staged_raw_valid = true;
+  bool _ntp_estimate_requested = true, _ntp_estimate_done = true, _ntp_estimate_ok = true;
+  uint32_t _ntp_estimate_epoch = 123;
+  int releases = 0, cancels = 0, completions = 0;
+  bool clean_completion = false;
+  MQTTBridge() {
+    assert(_lifecycle.requestStart());
+    assert(_lifecycle.onTaskStarted());
+    s_mqtt_bridge_instance = this;
+  }
+  void cancelNtpRefresh() { ++cancels; }
+  void requestStop();
+  void end();
+  void finishStopped();
+  void loop();
+};
+void MQTTBridge::LifecycleOps::releaseResources() {
+  assert(_b->_stop_acked.load() || _b->_lifecycle.stopTimedOut());
+  assert(_b->resources_owned && _b->_initialized);
+  _b->resources_owned = false;
+  ++_b->releases;
+}
+void MQTTBridge::LifecycleOps::onStopComplete(bool clean) {
+  ++_b->completions;
+  _b->clean_completion = clean;
+}
+void vTaskDelay(uint32_t duration) {
+  assert(duration > 0);
+  ++sleeps;
+  clock_ms += duration;
+  elapsed_ms += duration;
+  if (elapsed_ms >= ack_after_ms)
+    bridge_waiting->_stop_acked.store(true, std::memory_order_release);
+  assert(elapsed_ms < 60000);
+}
+static void assert_finished(MQTTBridge& bridge, bool clean) {
+  assert(!bridge._initialized && !bridge.resources_owned);
+  assert(bridge.releases == 1 && bridge.completions == 1);
+  assert(bridge.clean_completion == clean);
+  assert(!bridge._lifecycle.isStopInProgress() && bridge._lifecycle.mayRestart());
+  assert(bridge._lifecycle.mayBeginFlash() == clean);
+  assert(!bridge._slots_setup_done && !bridge._staged_raw_valid);
+  assert(!bridge._ntp_estimate_requested && !bridge._ntp_estimate_done);
+  assert(!bridge._ntp_estimate_ok && bridge._ntp_estimate_epoch == 0);
+  assert(bridge.cancels == 1);
+}
+'''
+
+ASYNC_STOP_MAIN = r'''
+int main() {
+  {
+    MQTTBridge bridge;
+    bridge._stop_acked = true; // stale prior-epoch ACK must be cleared exactly once
+    bridge.requestStop();
+    assert(sleeps == 0 && elapsed_ms == 0 && bridge.ops.signals == 1);
+    assert(bridge._stop_requested && !bridge._stop_acked);
+    assert(bridge._initialized && bridge.resources_owned && bridge.releases == 0);
+    assert(s_mqtt_bridge_instance == nullptr);
+    const auto timeout = bridge._lifecycle.stopTimeoutMs();
+    assert(timeout > 5000);
+    for (int pass = 0; pass < 10; ++pass) {
+      clock_ms += timeout; // ordinary loop must never force-free a slow worker
+      bridge.requestStop();
+      bridge.loop();
+      assert(bridge.ops.signals == 1 && sleeps == 0);
+      assert(bridge._initialized && bridge.resources_owned && bridge.releases == 0);
+      assert(bridge._lifecycle.isStopInProgress() && !bridge._lifecycle.stopTimedOut());
+    }
+    bridge._stop_acked.store(true, std::memory_order_release);
+    bridge.requestStop();
+    assert(bridge._stop_acked && bridge.ops.signals == 1); // duplicate cannot revoke ACK
+    bridge.loop();
+    assert_finished(bridge, true);
+    bridge.loop();
+    bridge.requestStop();
+    bridge.end();
+    assert(bridge.releases == 1 && bridge.ops.signals == 1 && bridge.cancels == 1);
+  }
+  for (int at_deadline = 0; at_deadline < 2; ++at_deadline) {
+    MQTTBridge bridge;
+    clock_ms = UINT32_MAX - 500; elapsed_ms = 0; sleeps = 0;
+    bridge_waiting = &bridge;
+    bridge.requestStop();
+    ack_after_ms = at_deadline ? bridge._lifecycle.stopTimeoutMs() : 8000;
+    bridge.end(); // synchronous OTA barrier joins the existing request
+    assert(elapsed_ms == ack_after_ms && sleeps > 0 && bridge.ops.signals == 1);
+    assert(!bridge._lifecycle.stopTimedOut());
+    assert_finished(bridge, true);
+  }
+  {
+    MQTTBridge bridge;
+    clock_ms = 0; elapsed_ms = 0; sleeps = 0;
+    bridge_waiting = &bridge; ack_after_ms = UINT64_MAX;
+    bridge.end(); // reviewed timeout remains confined to the explicit barrier
+    assert(bridge.ops.signals == 1 && bridge._lifecycle.stopTimedOut());
+    assert(elapsed_ms == bridge._lifecycle.stopTimeoutMs());
+    assert_finished(bridge, false);
+  }
+}
+'''
+
+
 class MqttTransportResultsTests(unittest.TestCase):
+    def test_actual_async_stop_preserves_resources_until_ack_and_ota_joins(self):
+        compiler = shutil.which("g++") or shutil.which("c++")
+        self.assertIsNotNone(compiler, "a host C++ compiler is required")
+        bridge = "src/helpers/bridges/MQTTBridge.cpp"
+        source = ASYNC_STOP_PREAMBLE + "\n".join(method(bridge, signature) for signature in (
+            "static inline uint32_t mqttStopTimeoutForSlots(int slots)",
+            "void MQTTBridge::requestStop()", "void MQTTBridge::end()",
+            "void MQTTBridge::finishStopped()", "void MQTTBridge::loop()",
+            "uint32_t MQTTBridge::LifecycleOps::nowMs()",
+            "void MQTTBridge::LifecycleOps::startTask()",
+            "void MQTTBridge::LifecycleOps::deliverStop()")) + ASYNC_STOP_MAIN
+        with tempfile.TemporaryDirectory(prefix="meshcore-mqtt-async-stop-") as temp:
+            path = Path(temp) / "stop.cpp"
+            path.write_text(source, encoding="utf-8")
+            exe = Path(temp) / ("stop.exe" if os.name == "nt" else "stop")
+            result = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra",
+                                     "-I", str(ROOT / "src"), str(path), "-o", str(exe)],
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(exe)], text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_actual_worker_interrupts_startup_and_stagger_without_late_work(self):
+        compiler = shutil.which("g++") or shutil.which("c++")
+        self.assertIsNotNone(compiler, "a host C++ compiler is required")
+        bridge = "src/helpers/bridges/MQTTBridge.cpp"
+        source = TASK_PREAMBLE + method(bridge,
+            "bool MQTTBridge::waitUnlessStopping(uint32_t delay_ms)")
+        source += method(bridge, "void MQTTBridge::mqttTaskLoop()") + TASK_MAIN
+        with tempfile.TemporaryDirectory(prefix="meshcore-mqtt-stop-") as temp:
+            path = Path(temp) / "worker.cpp"
+            path.write_text(source, encoding="utf-8")
+            exe = Path(temp) / ("worker.exe" if os.name == "nt" else "worker")
+            result = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra",
+                                     str(path), "-o", str(exe)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for scenario in range(12):
+                for tick_ms in (1, 10, 50):
+                    for wrap in (0, 1):
+                        with self.subTest(scenario=scenario, tick_ms=tick_ms, wrap=wrap):
+                            result = subprocess.run([str(exe), str(scenario), str(tick_ms), str(wrap)],
+                                                    text=True, capture_output=True, timeout=5)
+                            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_real_adapter_and_bridge_methods_for_both_idf_layouts(self):
         compiler = shutil.which("g++") or shutil.which("c++")
         self.assertIsNotNone(compiler, "a host C++ compiler is required")

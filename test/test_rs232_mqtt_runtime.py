@@ -35,7 +35,8 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
             "bool setRs232BridgeState(bool enable)", "bool restartRs232Bridge()",
             "bool startSharedEspNowBridgeIfReady()", "bool isEspNowBridgeRunning()",
             "bool setEspNowBridgeState(bool enable)", "bool restartEspNowBridge()",
-            "bool isMqttBridgeRunning()", "bool setMqttBridgeState(bool enable)",
+            "bool isMqttBridgeRunning()", "bool requestMqttBridgeStop()", "bool isMqttBridgeStopping()",
+            "bool setMqttBridgeState(bool enable)",
             "bool restartMqttBridge()", "bool setBridgeState(bool enable)", "bool restartBridge()",
         ))
         defaults_start = implementation.index("// bridge defaults")
@@ -49,7 +50,7 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
             start = implementation.index("#ifdef WITH_MQTT_BRIDGE\n", start)
             end = implementation.index("  if (_logging)", start)
             routing[name] = implementation[start:end]
-        service_start = implementation.index("#if defined(WITH_ESPNOW_BRIDGE)",
+        service_start = implementation.index("#if defined(WITH_MQTT_BRIDGE)\n  // MQTT owns TLS",
                                              implementation.index("MyMesh::servicePostMeshLoop()"))
         service_end = implementation.index("  if (next_flood_advert", service_start)
         pending_start = implementation.index("#if defined(WITH_BRIDGE)",
@@ -80,7 +81,8 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
             'if (configKeyEquals(config, "bridge.uart"))',
         ))
         gets += "\nelse " + "\nelse ".join(extract_braced(observer, signature) for signature in (
-            'if (strcmp(config, "mqtt.enabled") == 0)', 'if (strcmp(config, "mqtt.running") == 0)'))
+            'if (strcmp(config, "mqtt.enabled") == 0)', 'if (strcmp(config, "mqtt.running") == 0)',
+            'if (strcmp(config, "mqtt.stopping") == 0)'))
         ota_start = cli.index('    } else if (memcmp(command, "start ota", 9)')
         ota_end = cli.index('    } else if (memcmp(command, "clock", 5)', ota_start)
         code = (ROOT / "test/fixtures/rs232_mqtt_runtime.cpp").read_text(encoding="ascii")
@@ -128,7 +130,8 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
             "RS232Bridge* createRS232Bridge()", "bool beginRS232Bridge()", "bool endRS232Bridge()",
             "bool rs232BridgeEnabled() const", "bool isBridgeRunning() const override",
             "bool isRs232BridgeRunning()", "bool setRs232BridgeState(bool enable)",
-            "bool restartRs232Bridge()", "bool isMqttBridgeRunning()", "bool setBridgeState(bool enable)",
+            "bool restartRs232Bridge()", "bool isMqttBridgeRunning()", "bool requestMqttBridgeStop()",
+            "bool isMqttBridgeStopping()", "bool setBridgeState(bool enable)",
             "bool restartBridge()"))
         code = (ROOT / "test/fixtures/rs232_mqtt_runtime.cpp").read_text(encoding="ascii")
         code = code[:code.index("int main() {")]
@@ -144,7 +147,7 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
         boot_start = implementation.index('mesh::hilStartupTrace("mesh_bridge_begin");')
         boot_start = implementation.index("#if defined(WITH_BRIDGE)", boot_start)
         boot_end = implementation.index('mesh::hilStartupTrace("mesh_bridge_ready");', boot_start)
-        service_start = implementation.index("#if defined(WITH_ESPNOW_BRIDGE)", implementation.index("MyMesh::servicePostMeshLoop()"))
+        service_start = implementation.index("#if defined(WITH_MQTT_BRIDGE)\n  // MQTT owns TLS", implementation.index("MyMesh::servicePostMeshLoop()"))
         service_end = implementation.index("  if (next_flood_advert", service_start)
         pending_start = implementation.index("#if defined(WITH_BRIDGE)", implementation.index("bool MyMesh::hasPendingWork()"))
         pending_end = implementation.index("  if (radio_driver.isWatchdogObserving()", pending_start)
@@ -199,6 +202,8 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
   cli.run("stop ota", reply);
   assert(!mesh._cli.board.ota && mesh.isMqttBridgeRunning() && Serial2.begins == uart_starts);
   cli.set("rs232.enabled off", reply); cli.set("mqtt.enabled off", reply);
+  assert(!mesh.bridge && mesh.isMqttBridgeStopping() && mesh.bridgesPreventSleep());
+  mesh.serviceBridges();
   assert(!mesh.bridge && !mesh.isMqttBridgeRunning() && !mesh.bridgesPreventSleep());
   cli.set("rs232.enabled on", reply); mesh.mqtt_bridge->fail_starts = 1;
   cli.set("mqtt.enabled on", reply);

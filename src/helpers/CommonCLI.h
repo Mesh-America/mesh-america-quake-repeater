@@ -603,6 +603,10 @@ public:
   // legacy bridge behavior by default. Combined bridge roles override
   // them to let each transport be started, stopped, and queried independently.
   virtual bool setMqttBridgeState(bool enable) { return setBridgeState(enable); }
+  // CLI disable may acknowledge before worker-owned TLS teardown finishes.
+  // Ownership barriers continue to use the synchronous state setter.
+  virtual bool requestMqttBridgeStop() { return setMqttBridgeState(false); }
+  virtual bool isMqttBridgeStopping() { return false; }
   virtual bool setEspNowBridgeState(bool enable) { return setBridgeState(enable); }
   virtual bool setRs232BridgeState(bool enable) { return setBridgeState(enable); }
   virtual bool restartMqttBridge() { return restartBridge(); }

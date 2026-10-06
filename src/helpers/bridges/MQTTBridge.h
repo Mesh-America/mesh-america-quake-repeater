@@ -300,12 +300,11 @@ private:
   // Cooperative-shutdown handshake (Phase 5). The loop task (Core 1) raises
   // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
   // sees it, tears down its own clients on Core 0 (where the mbedTLS contexts
-  // live), sets _stop_acked LAST, and self-terminates. end() waits for the ack
-  // before freeing the queue/buffers. Plain volatile matches the existing
-  // NTP/reconfigure handshake idiom above; replacing all of these with a command
-  // channel / task notifications is explicitly deferred (see MQTT_OWNERSHIP.md).
-  volatile bool _stop_requested = false;
-  volatile bool _stop_acked = false;
+  // live), sets _stop_acked LAST, and self-terminates. end() waits for the ack;
+  // loop() can instead reap it without blocking. Atomic release/acquire ordering
+  // makes client teardown visible before Core 1 frees the queue/buffers.
+  std::atomic<bool> _stop_requested{false};
+  std::atomic<bool> _stop_acked{false};
 
   // Timezone handling.
   // _timezone_storage is inline class storage (zero heap) that is reconfigured
@@ -515,6 +514,7 @@ private:
   #ifdef ESP_PLATFORM
   static void mqttTask(void* parameter);
   void mqttTaskLoop();  // Main loop for MQTT task
+  bool waitUnlessStopping(uint32_t delay_ms);
   void initializeWiFiInTask();  // WiFi initialization moved to task
   #endif
   bool publishPacket(mesh::Packet* packet, bool is_tx, bool& has_eligible_target,
@@ -551,13 +551,14 @@ private:
   // of making the bridge unusable.
   void allocateRuntimeBuffers();
   void releaseRuntimeBuffers();
+  void finishStopped();  // Core 1 only, after lifecycle resource release
 
   // --- Cooperative lifecycle (Phase 5) ---------------------------------------
   // The pure state machine, bounded stop timeout, and OTA barrier live in
   // src/helpers/MQTTLifecycle.h and are host-tested by test/test_mqtt_lifecycle/.
   // This nested Ops binds that spec to FreeRTOS/PsychicMqttClient. The
   // Coordinator is owned and driven ONLY by the loop task (Core 1) from
-  // begin()/end(); the MQTT task (Core 0) communicates solely through the
+  // begin()/requestStop()/end()/loop(); the MQTT task (Core 0) communicates solely through the
   // _stop_requested/_stop_acked flags above. Methods are defined in the .cpp.
   class LifecycleOps : public MQTTLifecycle::Ops {
    public:
@@ -587,6 +588,10 @@ public:
 
   void begin() override;
   void end() override;
+  // Core 1: request cooperative teardown without waiting or freeing resources.
+  // Call loop() to reap the acknowledgment; end() remains the OTA stop barrier.
+  void requestStop();
+  bool isStopping() const { return _lifecycle.isStopInProgress(); }
   bool isRunning() const override { return _initialized; }
   void loop() override;
   void onPacketReceived(mesh::Packet *packet) override;
@@ -681,8 +686,8 @@ public:
   int getConnectedBrokers() const;
   int getQueueSize() const;
   bool isReady() const;
-  /** True only after a CLEAN cooperative stop -- end() received the MQTT task's
-   *  acknowledgment within the timeout. A timed-out/forced stop returns false so
+  /** True only after a CLEAN cooperative stop -- the MQTT task acknowledged
+   *  its teardown before resources were released. A timed-out/forced stop returns false so
    *  OTA flashing is withheld until a clean start/stop cycle. Mirrors
    *  MQTTLifecycle::mayBeginFlash(); read on the loop task (Core 1). */
   bool canFlashAfterStop() const { return _lifecycle.mayBeginFlash(); }
