@@ -347,7 +347,6 @@ for env_name, rx, tx in (
     ("Heltec_v3_repeater_observer_mqtt", 5, 6),
     ("Heltec_WSL3_repeater_observer_mqtt", 5, 6),
     ("RAK_3112_repeater_observer_mqtt", 5, 6),
-    ("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_", 34, 25),
 ):
     require(env_name, "build_flags", "WITH_MQTT_BRIDGE=1")
     require(env_name, "build_flags", "WITH_RS232_BRIDGE=Serial2")
@@ -357,6 +356,14 @@ for env_name, rx, tx in (
     require(env_name, "build_flags", "RS232_BRIDGE_MERGED=1")
     require(env_name, "build_src_filter", "helpers/bridges/RS232Bridge.cpp")
     reject(env_name, "build_flags", "RS232_BRIDGE_DEFAULT_ON")
+
+# The T-LoRa runtime RAM budget cannot fit MQTT, ESP-NOW and UART together.
+# Keep its UART in the normal Full image and its MQTT recipe independent.
+tlora_observer = "LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_"
+require(tlora_observer, "build_flags", "WITH_MQTT_BRIDGE=1")
+reject(tlora_observer, "build_flags", "WITH_RS232_BRIDGE")
+reject(tlora_observer, "build_flags", "RS232_BRIDGE_MERGED")
+reject(tlora_observer, "build_src_filter", "helpers/bridges/RS232Bridge.cpp")
 
 # MKE keeps its ordinary role and UART wiring while exposing the existing
 # persistent bridge controls. The merged marker selects the disabled default;
@@ -1086,10 +1093,28 @@ done
 [ "$(select_ordinary_full_targets MKE_s3_repeater_bridge_espnow MKE_s3_repeater)" \
     = MKE_s3_repeater ] \
   || fail "MKE S3 bridge input order changed its canonical Full image"
-[ "$(select_ordinary_full_targets LilyGo_TLora_V2_1_1_6_repeater_bridge_espnow \
-    LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_)" \
-    = LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ ] \
-  || fail "TLora trailing-underscore observer failed to replace its ESP-NOW sibling"
+tlora_normal=LilyGo_TLora_V2_1_1_6_repeater
+tlora_observer=${tlora_normal}_observer_mqtt_
+tlora_espnow=${tlora_normal}_bridge_espnow
+[ "$(get_ordinary_full_group_key "$tlora_normal")" \
+    != "$(get_ordinary_full_group_key "$tlora_observer")" ] \
+  || fail "TLora RAM exception collapsed its independent UART and MQTT Full groups"
+for tlora_order in normal-first observer-first bridge-first; do
+  case "$tlora_order" in
+    normal-first) tlora_candidates=("$tlora_normal" "$tlora_observer" "$tlora_espnow") ;;
+    observer-first) tlora_candidates=("$tlora_observer" "$tlora_espnow" "$tlora_normal") ;;
+    bridge-first) tlora_candidates=("$tlora_espnow" "$tlora_normal" "$tlora_observer") ;;
+  esac
+  mapfile -t tlora_selected < <(select_ordinary_full_targets "${tlora_candidates[@]}")
+  [ "${#tlora_selected[@]}" = 2 ] \
+    || fail "TLora $tlora_order did not retain exactly two capacity-safe Full images"
+  [[ " ${tlora_selected[*]} " == *" $tlora_normal "* ]] \
+    || fail "TLora $tlora_order discarded its UART Full image"
+  [[ " ${tlora_selected[*]} " == *" $tlora_observer "* ]] \
+    || fail "TLora $tlora_order discarded its MQTT Full image"
+  [[ " ${tlora_selected[*]} " != *" $tlora_espnow "* ]] \
+    || fail "TLora $tlora_order retained the replaced dedicated ESP-NOW image"
+done
 ESP32_FULL_BUILD=0
 PLATFORMIO_BUILD_FLAGS=""
 PLATFORMIO_BUILD_SRC_FILTER=""
@@ -1626,7 +1651,7 @@ fi
 (
   BUILD_PROFILE_FOR_TARGET=full
   for uart_target in Heltec_v3_repeater Heltec_WSL3_repeater RAK_3112_repeater \
-      LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_; do
+      LilyGo_TLora_V2_1_1_6_repeater; do
     BUILD_EXPECTATIONS=()
     declare_build_capability_contract "$uart_target" ESP32_PLATFORM
     [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.rs232=_ZN11RS232Bridge5beginEv"* ]] \
@@ -1634,6 +1659,12 @@ fi
     [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.espnow=_ZN12ESPNowBridge5beginEv"* ]] \
       || fail "$uart_target Full contract omitted the linked ESP-NOW driver"
   done
+  BUILD_EXPECTATIONS=()
+  declare_build_capability_contract LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ ESP32_PLATFORM
+  [[ " ${BUILD_EXPECTATIONS[*]} " != *"bridge.rs232="* ]] \
+    || fail "TLora MQTT capacity exception falsely promised a linked UART driver"
+  [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.espnow=_ZN12ESPNowBridge5beginEv"* ]] \
+    || fail "TLora MQTT capacity exception omitted its linked ESP-NOW driver"
 )
 
 # A WiFi base's final -UENABLE_OTA must not win over the Full Companion's

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The ordinary release has one ESP32 Full OTA identity per board and role."""
+"""Full selection preserves qualified transports and board capacity exceptions."""
 
 import sys
 import unittest
@@ -23,7 +23,9 @@ class ReleaseFullSelectionTest(unittest.TestCase):
     def test_full_uart_source_substitution_requires_linked_driver_proof(self):
         for base in ("Heltec_v3_repeater", "Heltec_WSL3_repeater", "RAK_3112_repeater",
                      "LilyGo_TLora_V2_1_1_6_repeater"):
-            for suffix in ("", "_observer_mqtt", "_observer_mqtt_"):
+            suffixes = ("",) if base.startswith("LilyGo_TLora_") else (
+                "", "_observer_mqtt", "_observer_mqtt_")
+            for suffix in suffixes:
                 for fault in ("missing_capability", "missing_proof", "false_proof", "unverified"):
                     image = record(base + suffix, capabilities=("bridge.rs232", "bridge.espnow"))
                     manifest = image["manifest"]
@@ -40,8 +42,7 @@ class ReleaseFullSelectionTest(unittest.TestCase):
                             select_ordinary_full_records([image])
 
     def test_new_combined_full_displaces_stale_plain_and_both_dedicated_bridges(self):
-        for base in ("Heltec_v3_repeater", "Heltec_WSL3_repeater", "RAK_3112_repeater",
-                     "LilyGo_TLora_V2_1_1_6_repeater"):
+        for base in ("Heltec_v3_repeater", "Heltec_WSL3_repeater", "RAK_3112_repeater"):
             stale = record(base, capabilities=("bridge.espnow",))
             primary = record(base + "_observer_mqtt_",
                              capabilities=("bridge.rs232", "bridge.espnow"))
@@ -51,6 +52,65 @@ class ReleaseFullSelectionTest(unittest.TestCase):
                 for inputs in ([stale, primary] + old, old + [primary, stale]):
                     with self.subTest(base=base, profile=profile):
                         self.assertEqual(select_ordinary_full_records(inputs), [primary])
+
+    def test_tlora_ram_exception_keeps_uart_and_mqtt_full_images(self):
+        base = "LilyGo_TLora_V2_1_1_6_repeater"
+        normal = record(base, capabilities=("bridge.rs232", "bridge.espnow"))
+        observer = record(base + "_observer_mqtt_", capabilities=("bridge.espnow",))
+        for profile in ("standard", "full"):
+            legacy = [record(base + "_bridge_" + bridge, profile)
+                      for bridge in ("rs232", "espnow")]
+            for inputs in ([normal, observer] + legacy, legacy + [observer, normal],
+                           [observer] + legacy + [normal]):
+                with self.subTest(profile=profile, first=inputs[0]["manifest"]["target"]):
+                    selected = select_ordinary_full_records(inputs)
+                    self.assertCountEqual(selected, [normal, observer])
+                    self.assertEqual(len(selected), 2)
+                    self.assertTrue(all(item is normal or item is observer for item in selected))
+
+    def test_tlora_observer_cannot_retire_uart_without_normal_driver_proof(self):
+        base = "LilyGo_TLora_V2_1_1_6_repeater"
+        observer = record(base + "_observer_mqtt_", capabilities=("bridge.espnow",))
+        for profile in ("standard", "full"):
+            uart = record(base + "_bridge_rs232", profile, capabilities=("bridge.rs232",))
+            wireless = record(base + "_bridge_espnow", profile, capabilities=("bridge.espnow",))
+            for inputs in ([observer, uart, wireless], [wireless, uart, observer]):
+                with self.subTest(profile=profile):
+                    self.assertCountEqual(select_ordinary_full_records(inputs), [observer, uart])
+        for fault in ("missing_capability", "missing_proof", "false_proof", "unverified"):
+            normal = record(base, capabilities=("bridge.rs232", "bridge.espnow"))
+            manifest = normal["manifest"]
+            if fault == "missing_capability":
+                manifest["capabilities"].remove("bridge.rs232")
+            elif fault == "missing_proof":
+                manifest["verification"] = []
+            elif fault == "false_proof":
+                manifest["verification"][0]["present"] = False
+            else:
+                manifest["verified"] = False
+            for inputs in ([normal, observer], [observer, normal]):
+                with self.subTest(fault=fault):
+                    with self.assertRaisesRegex(ValueError, "verified RS232 bridge"):
+                        select_ordinary_full_records(inputs)
+
+    def test_tlora_legacy_espnow_needs_verified_replacement(self):
+        base = "LilyGo_TLora_V2_1_1_6_repeater"
+        for fault in ("missing_capability", "missing_proof", "false_proof", "unverified"):
+            observer = record(base + "_observer_mqtt_", capabilities=("bridge.espnow",))
+            manifest = observer["manifest"]
+            if fault == "missing_capability":
+                manifest["capabilities"] = []
+            elif fault == "missing_proof":
+                manifest["verification"] = []
+            elif fault == "false_proof":
+                manifest["verification"][0]["present"] = False
+            else:
+                manifest["verified"] = False
+            for profile in ("standard", "full"):
+                legacy = record(base + "_bridge_espnow", profile, capabilities=("bridge.espnow",))
+                with self.subTest(fault=fault, profile=profile):
+                    self.assertCountEqual(select_ordinary_full_records([observer, legacy]),
+                                          [observer, legacy])
 
     def test_meshtower_sd_primary_filters_stale_internal_images_without_relabeling(self):
         primary = "Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"
@@ -102,8 +162,8 @@ class ReleaseFullSelectionTest(unittest.TestCase):
             record("Station_G2_repeater_observer_mqtt"),
             record("Tbeam_SX1262_repeater_bridge_espnow"),
             record("Tbeam_SX1262_repeater_observer_mqtt", capabilities=("bridge.espnow",)),
-            record("LilyGo_TLora_V2_1_1_6_repeater"),
-            record("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_", capabilities=("bridge.rs232",)),
+            record("LilyGo_TLora_V2_1_1_6_repeater", capabilities=("bridge.rs232", "bridge.espnow")),
+            record("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_", capabilities=("bridge.espnow",)),
             record("Meshadventurer_sx1262_repeater"),
             record("Meshadventurer_sx1262_repeater_bridge_espnow"),
             record("RAK_4631_repeater", platform="NRF52_PLATFORM"),
@@ -113,11 +173,12 @@ class ReleaseFullSelectionTest(unittest.TestCase):
             "Heltec_v3_repeater", "Heltec_v3_room_server",
             "Station_G2_repeater_observer_mqtt",
             "Tbeam_SX1262_repeater_observer_mqtt",
+            "LilyGo_TLora_V2_1_1_6_repeater",
             "LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_",
             "Meshadventurer_sx1262_repeater_bridge_espnow",
             "RAK_4631_repeater",
         })
-        self.assertEqual(len(selected), 8)  # standard V3 remains alongside Full V3
+        self.assertEqual(len(selected), 9)  # standard V3 and both TLora Full profiles remain
 
     def test_mke_combined_repeater_filters_stale_bridge_identities_without_relabeling(self):
         primary = record("MKE_s3_repeater", capabilities=("bridge.rs232", "bridge.espnow"))
@@ -253,7 +314,7 @@ class ReleaseFullSelectionTest(unittest.TestCase):
 
     def test_combined_observer_with_trailing_underscore_replaces_matching_espnow(self):
         observer = record("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_",
-                          capabilities=("bridge.espnow", "bridge.rs232"))
+                          capabilities=("bridge.espnow",))
         legacy = record("LilyGo_TLora_V2_1_1_6_repeater_bridge_espnow",
                         capabilities=("bridge.espnow",))
         for inputs in ([observer, legacy], [legacy, observer]):

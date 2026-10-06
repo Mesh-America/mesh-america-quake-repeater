@@ -49,8 +49,11 @@ The direct observer and Full-matrix paths use the same `full-usb-wifi-ota`
 artifact and runtime output controls. The ordinary bulk release publishes one
 Full OTA identity per exact ESP32 board and role. Audited plain targets keep
 their identity while compiling the combined observer/ESP-NOW sources; G2 keeps
-its deployed observer identity. T-Beam SX1262/SX1276 and TLora V2 choose the
-observer in the ordinary release. Their plain Full recipes remain available
+its deployed observer identity. T-Beam SX1262/SX1276 choose the observer in
+the ordinary release. TLora V2 retains two Full images because UART, MQTT
+and ESP-NOW together exceed its internal RAM budget: the normal repeater
+provides UART plus ESP-NOW, and the observer provides MQTT plus ESP-NOW.
+T-Beam plain Full recipes remain available
 as explicit alternatives with different routing capacities. Build one with
 `bash build.sh build-firmware <target> --full-exact`, then deliberately install
 it over LoRa with `ota pull <MID8> flash` and `ota install` on compatible
@@ -204,10 +207,9 @@ available from a canonical image:
   target remains directly buildable with its bridge-on default but is omitted
   from bulk releases. Browser OTA pauses ESP-NOW while leaving RS-232 running;
   `stop ota` restores ESP-NOW when its saved setting is on.
-- Full Heltec V3, Wireless Stick Lite V3, RAK3112 and LilyGo T-LoRa V2.1-1.6
-  MQTT repeaters retain RS-232 alongside MQTT and ESP-NOW. The first three
-  use UART2 with RX on GPIO5 and TX on GPIO6; T-LoRa uses UART2 with RX on
-  GPIO34 and TX on GPIO25. Use `set rs232.enabled on|off` and
+- Full Heltec V3, Wireless Stick Lite V3 and RAK3112 MQTT repeaters retain
+  RS-232 alongside MQTT and ESP-NOW. They use UART2 with RX on GPIO5 and
+  TX on GPIO6. Use `set rs232.enabled on|off` and
   `get rs232.running` independently of `mqtt.enabled` and `espnow.enabled`.
   `bridge.baud` and `bridge.uart` configure the UART. Old MQTT preferences
   do not enable this newly added UART; its saved intent needs a validated
@@ -216,6 +218,12 @@ available from a canonical image:
   verifies the linked UART driver even when compiling observer sources for a
   normal repeater, and resumed release selection rejects Full images without
   that proof.
+- LilyGo T-LoRa V2.1-1.6 retains a normal Full UART/ESP-NOW repeater and a
+  separate Full MQTT/ESP-NOW observer. Real triple-transport qualification
+  fell 6,496 bytes short of the required internal heap, including the UART
+  driver allowance. The normal UART remains on RX GPIO34 and TX GPIO25;
+  use `bridge.enabled` or `rs232.enabled` to control it. Both Full identities
+  remain in bulk releases instead of reducing routing capacity or RAM margins.
 - MeshTower V2 repeaters use
   `Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors` as the one
   canonical target. Its SD OTA target `0A9DBBF0`, hardware ID

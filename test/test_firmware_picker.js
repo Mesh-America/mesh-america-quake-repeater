@@ -1287,7 +1287,7 @@ console.log('combined UART/ESP-NOW picker modes, independent commands and histor
 // MQTT, ESP-NOW and UART coexist in the same qualified Full artifact. UART
 // instructions must never use MQTT's historical ESP-NOW bridge alias.
 const tripleTargets = ['Heltec_v3_repeater', 'Heltec_WSL3_repeater',
-  'RAK_3112_repeater', 'LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_']
+  'RAK_3112_repeater']
   .map(target => target + '-full-usb-wifi');
 const tripleCatalog = picker.buildCatalog([
   release(bridgeFamily, '2026-10-05T00:00:00Z', tripleTargets.map(target =>
@@ -1317,6 +1317,52 @@ for (const profile of tripleCatalog.profiles) {
 }
 assert.strictEqual(tripleCatalog.profiles.length, tripleTargets.length);
 console.log('three-transport Full picker uses independent UART, MQTT and ESP-NOW controls');
+
+// T-LoRa cannot fit all three transports in its runtime RAM budget. Both
+// capacity-safe Full images remain selectable with their actual capabilities.
+const tloraNormalTarget = 'LilyGo_TLora_V2_1_1_6_repeater-full-usb-wifi';
+const tloraObserverTarget = 'LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_-full-usb-wifi';
+const tloraCatalog = picker.buildCatalog([
+  release(bridgeFamily, '2026-10-05T00:00:00Z', [tloraNormalTarget, tloraObserverTarget]
+    .map(target => asset(target + '-ota-' + bridgeFamily + '.bin'))),
+], {
+  familyTag: bridgeFamily,
+  profiles: {
+    [tloraNormalTarget]: {
+      platform: 'ESP32_PLATFORM', rs232: true, mqtt: false, espnowBridge: true,
+      updateMethods: ['wifi', 'lora'],
+      loggingModes: ['none', 'usb'], loggingControl: 'usb.logging',
+    },
+    [tloraObserverTarget]: {
+      platform: 'ESP32_PLATFORM', rs232: false, mqtt: true, espnowBridge: true,
+      updateMethods: ['wifi', 'lora'],
+      loggingModes: ['none', 'usb', 'wifi', 'both'], loggingControl: 'logging.output',
+    },
+  },
+});
+assert.strictEqual(tloraCatalog.profiles.length, 2);
+const tloraNormalProfile = tloraCatalog.profiles.find(profile => profile.target === tloraNormalTarget);
+const tloraObserverProfile = tloraCatalog.profiles.find(profile => profile.target === tloraObserverTarget);
+assert(tloraNormalProfile && tloraObserverProfile);
+assert.deepStrictEqual(picker.profileFieldValues(tloraNormalProfile, 'mode'),
+  ['standard', 'rs232', 'espnow']);
+assert.deepStrictEqual(picker.profileFieldValues(tloraObserverProfile, 'mode'),
+  ['standard', 'espnow']);
+assert.deepStrictEqual(picker.profileFieldValues(tloraNormalProfile, 'logging'), ['none', 'usb']);
+assert.deepStrictEqual(picker.profileFieldValues(tloraObserverProfile, 'logging'),
+  ['none', 'usb', 'wifi', 'both']);
+assert(!picker.profileMatches(tloraNormalProfile, {logging: 'wifi'}, ['logging']));
+assert(picker.profileMatches(tloraObserverProfile, {logging: 'wifi'}, ['logging']));
+const tloraNormalDirections = picker.runtimeDirections(tloraNormalProfile, {mode: 'rs232'});
+const tloraObserverDirections = picker.runtimeDirections(tloraObserverProfile, {mode: 'espnow'});
+assert(tloraNormalDirections.some(section => /^RS232 bridge/.test(section.title)));
+assert(tloraNormalDirections.some(section => section.title === 'ESP-NOW bridge'));
+assert(!tloraNormalDirections.some(section => section.title === 'MQTT broker connections'));
+assert(tloraObserverDirections.some(section => section.title === 'MQTT broker connections'));
+assert(tloraObserverDirections.some(section => section.title === 'ESP-NOW bridge'));
+assert(!tloraObserverDirections.some(section => /^RS232 bridge/.test(section.title)));
+assert(!commands(tloraObserverDirections).some(command => command.startsWith('set rs232.')));
+console.log('T-LoRa RAM exception preserves separate UART and MQTT Full picker choices');
 
 // Partition expansion uses the packager's lookup and published utility assets,
 // not hardware labels or guessed slugs (several historical names differ).
