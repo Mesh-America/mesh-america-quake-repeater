@@ -159,10 +159,65 @@ class ReleaseFullSelectionTest(unittest.TestCase):
 
     def test_qualified_combined_plain_image_replaces_only_its_matching_espnow_image(self):
         primary = record("Heltec_v3_repeater", capabilities=("bridge.espnow",))
-        legacy = record("Heltec_v3_repeater_bridge_espnow", capabilities=("bridge.espnow",))
         other_board = record("heltec_v4_tft_repeater_bridge_espnow", capabilities=("bridge.espnow",))
-        for inputs in ([primary, legacy, other_board], [legacy, primary, other_board]):
-            self.assertEqual(select_ordinary_full_records(inputs), [primary, other_board])
+        for profile in ("full", "standard"):
+            legacy = record("Heltec_v3_repeater_bridge_espnow", profile, capabilities=("bridge.espnow",))
+            for inputs in ([primary, legacy, other_board], [legacy, primary, other_board]):
+                with self.subTest(profile=profile, primary_first=inputs[0] is primary):
+                    self.assertEqual(select_ordinary_full_records(inputs), [primary, other_board])
+
+    def test_matching_dedicated_images_survive_all_missing_driver_proof_cases(self):
+        for profile in ("full", "standard"):
+            for fault in ("missing", "false", "wrong_capability", "false_verified"):
+                primary = record("heltec_v4_tft_repeater", capabilities=("bridge.espnow",))
+                if fault == "missing":
+                    primary["manifest"]["verification"] = []
+                elif fault == "false":
+                    primary["manifest"]["verification"][0]["present"] = False
+                elif fault == "wrong_capability":
+                    primary["manifest"]["verification"][0]["capability"] = "bridge.rs232"
+                else:
+                    primary["manifest"]["verified"] = False
+                legacy = record("heltec_v4_tft_repeater_bridge_espnow", profile,
+                                capabilities=("bridge.espnow",))
+                for inputs in ([primary, legacy], [legacy, primary]):
+                    with self.subTest(profile=profile, fault=fault, primary_first=inputs[0] is primary):
+                        self.assertCountEqual(select_ordinary_full_records(inputs), inputs)
+
+    def test_stale_plain_cannot_displace_the_observer_proving_the_combined_driver(self):
+        for profile in ("full", "standard"):
+            for fault in ("no_capability", "no_proof", "failed_proof", "unverified"):
+                stale = record("heltec_v4_tft_repeater", capabilities=("bridge.espnow",))
+                if fault == "no_capability":
+                    stale["manifest"]["capabilities"] = []
+                elif fault == "no_proof":
+                    stale["manifest"]["verification"] = []
+                elif fault == "failed_proof":
+                    stale["manifest"]["verification"][0]["present"] = False
+                else:
+                    stale["manifest"]["verified"] = False
+                observer = record("heltec_v4_tft_repeater_observer_mqtt",
+                                  capabilities=("bridge.espnow",))
+                legacy = record("heltec_v4_tft_repeater_bridge_espnow", profile,
+                                capabilities=("bridge.espnow",))
+                for inputs in ([stale, observer, legacy], [legacy, observer, stale],
+                               [observer, legacy, stale], [legacy, stale, observer]):
+                    with self.subTest(profile=profile, fault=fault, first=inputs[0]["manifest"]["target"]):
+                        self.assertEqual(select_ordinary_full_records(inputs), [observer])
+
+    def test_new_non_mqtt_full_repeater_replaces_case_and_underscore_legacy_names(self):
+        for primary_name, legacy_name in (
+            ("heltec_v4_tft_repeater", "heltec_v4_tft_repeater_bridge_espnow"),
+            ("ThinkNode_M2_repeater", "ThinkNode_M2_Repeater_bridge_espnow"),
+            ("nibble_zero_connect_repeater_", "nibble_zero_connect_repeater_bridge_espnow_"),
+            ("Meshadventurer_sx1262_repeater", "Meshadventurer_sx1262_repeater_bridge_espnow"),
+        ):
+            primary = record(primary_name, capabilities=("bridge.espnow",))
+            for profile in ("full", "standard"):
+                legacy = record(legacy_name, profile, capabilities=("bridge.espnow",))
+                for inputs in ([primary, legacy], [legacy, primary]):
+                    with self.subTest(primary=primary_name, profile=profile):
+                        self.assertEqual(select_ordinary_full_records(inputs), [primary])
 
     def test_combined_observer_with_trailing_underscore_replaces_matching_espnow(self):
         observer = record("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_",

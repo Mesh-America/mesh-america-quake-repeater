@@ -2536,19 +2536,34 @@ get_exact_identity_full_migration_target() {
   printf '%s\n' "$successor"
 }
 
+# Full repeaters carry ESP-NOW as a runtime transport. Plain room servers and
+# companions use different bridge wiring; only their existing MQTT recipes
+# support this overlay. Capacity exceptions keep their dedicated bridge image.
+supports_esp32_full_shared_espnow() {
+  local env_name=$1
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$env_name]:-}" = "ESP32_PLATFORM" ] \
+    && supports_esp32_full_build "$env_name" \
+    && ! is_esp32_companion_build "$env_name" \
+    && { is_mqtt_bridge_target "$env_name" || is_repeater_role_target "$env_name"; } || return 1
+  # Primary ESP-NOW radios already own the SDK callbacks and packet transport.
+  # A second bridge instance would conflict with that radio, not add a mode.
+  ! pio_env_option_contains "$env_name" build_flags "MESH_PRIMARY_ESPNOW" \
+    && ! pio_env_option_contains "$env_name" build_flags "MESH_ESPNOW_RADIO"
+}
+
 apply_esp32_full_shared_bridge_profile() {
   local env_name=$1
 
-  # Full infrastructure images use the MQTT observer recipe for WiFi/TLS and
-  # add the cooperative ESP-NOW bridge. Companion Full is a different client
-  # transport role, not an infrastructure packet bridge.
-  if [ "$ESP32_FULL_BUILD" != "1" ] \
-      || [ "${PIO_ENV_PLATFORM_BY_NAME[$env_name]:-}" != "ESP32_PLATFORM" ] \
-      || is_esp32_companion_build "$env_name" \
-      || ! is_mqtt_bridge_target "$env_name"; then
-    return 0
-  fi
+  [ "$ESP32_FULL_BUILD" = "1" ] \
+    && supports_esp32_full_shared_espnow "$env_name" || return 0
 
+  # Keep historical dedicated bridge defaults and MQTT observer behavior.
+  # Newly combined ordinary repeaters start with ESP-NOW off, including when
+  # upgrading preferences written before an ESP-NOW runtime setting existed.
+  if ! is_mqtt_bridge_target "$env_name" \
+      && ! pio_env_option_contains "$env_name" build_flags "WITH_ESPNOW_BRIDGE"; then
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DESPNOW_BRIDGE_MERGED=1"
+  fi
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DWITH_ESPNOW_BRIDGE=1"
   append_platformio_build_src_filter "+<helpers/bridges/ESPNowBridge.cpp>"
   record_build_capability "bridge.espnow"
@@ -3387,6 +3402,19 @@ declare_build_capability_contract() {
     # Do not remove the dedicated bridge images unless both real transports
     # survived linking in the canonical runtime-selectable repeater.
     record_build_expectation "bridge.rs232" "_ZN11RS232Bridge5beginEv"
+  fi
+  pio_env_name=$(get_pio_build_env "$env_name")
+  if [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
+      && is_esp32_canonical_full_release_target "$env_name"; then
+    pio_env_name=$(get_exact_identity_full_pio_env "$env_name")
+  fi
+  if [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
+      && supports_esp32_full_shared_espnow "$pio_env_name"; then
+    # A capability flag alone cannot retire a dedicated transport artifact.
+    # Verify that the actual ESP-NOW driver survived linking in every Full
+    # repeater/observer that claims it, including exact-identity source bases.
+    record_build_expectation "bridge.espnow" "_ZN12ESPNowBridge5beginEv"
+  elif [ "$env_name_lc" = mke_s3_repeater ]; then
     record_build_expectation "bridge.espnow" "_ZN12ESPNowBridge5beginEv"
   fi
   if is_nrf52_sensor_ota_pair_target "$env_name" \
@@ -5519,10 +5547,23 @@ is_firmware_role_replaced_by_canonical_artifact() {
 }
 
 get_merged_espnow_repeater_replacement() {
-  case "${1,,}" in
-    mke_s3_repeater_bridge_espnow) printf '%s\n' MKE_s3_repeater ;;
-    *) return 1 ;;
-  esac
+  local target=$1
+  local base=${target%_}
+  local candidate
+  [[ "${base,,}" == *_repeater_bridge_espnow ]] || return 1
+  base=${base%_bridge_espnow}
+  # Match resolved exact hardware, including older capitalized roles and
+  # trailing underscores. Do not fold different radios, displays or storage.
+  for candidate in "$base" "${base}_" "${!PIO_ENV_PLATFORM_BY_NAME[@]}"; do
+    [ "${candidate,,}" = "${base,,}" ] \
+      || [ "${candidate,,}" = "${base,,}_" ] || continue
+    supports_esp32_full_shared_espnow "$candidate" || continue
+    [ -n "${PIO_ENV_BOARD_BY_NAME[$target]:-}" ] \
+      && [ "${PIO_ENV_BOARD_BY_NAME[$target]}" = "${PIO_ENV_BOARD_BY_NAME[$candidate]:-}" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
 }
 
 is_runtime_setting_alias_target() {
@@ -6381,11 +6422,15 @@ get_ordinary_full_priority() {
   case "${base,,}" in
     *_observer_mqtt) echo 20 ;;
     *_bridge_espnow) echo 10 ;;
+    tbeam_sx1262_repeater|tbeam_sx1276_repeater|lilygo_tlora_v2_1_1_6_repeater) echo 0 ;;
     *)
       # G2's deployed Full identity is the observer. Other audited plain
       # targets keep their own identity, with observer sources where needed.
       if is_ordinary_partition_migration_full_target "$target" \
-          || is_esp32_full_only_bulk_target "$target"; then
+          || is_esp32_full_only_bulk_target "$target" \
+          || { supports_esp32_full_shared_espnow "$target" \
+               && ! get_unified_full_infrastructure_target "$target" >/dev/null \
+               && ! is_mqtt_bridge_target "$target"; }; then
         echo 30
       else
         echo 0

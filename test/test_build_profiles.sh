@@ -966,24 +966,95 @@ apply_esp32_full_shared_bridge_profile Station_G2_repeater_observer_mqtt
   || fail "Station G2 Full MQTT image did not include the ESP-NOW bridge"
 [[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.espnow "* ]] \
   || fail "Station G2 Full MQTT image did not report ESP-NOW capability"
+[[ "$PLATFORMIO_BUILD_FLAGS" != *"ESPNOW_BRIDGE_MERGED"* ]] \
+  || fail "Station G2 existing MQTT default changed during ESP-NOW composition"
 [[ "$(get_unified_full_infrastructure_target Station_G2_repeater_bridge_espnow)" \
     = "Station_G2_repeater_observer_mqtt" ]] \
   || fail "Station G2 Full ESP-NOW target did not resolve to the combined MQTT recipe"
 
-# Heltec V4 TFT has no combined observer recipe, so its dedicated ESP-NOW
-# image must survive release selection in either input order. MKE now owns
-# both bridges directly and is checked against its canonical alias below.
-for plain_target in heltec_v4_tft_repeater; do
+# Full repeaters without an observer compile the real bridge directly. Both
+# historical ESP-NOW defaults and unsupported role boundaries stay explicit.
+for plain_target in heltec_v4_tft_repeater Heltec_v2_repeater \
+    Heltec_ct62_repeater ThinkNode_M2_Repeater ThinkNode_M5_Repeater \
+    Meshadventurer_sx1262_repeater Meshadventurer_sx1268_repeater \
+    Generic_E22_sx1262_repeater Generic_E22_sx1268_repeater \
+    Tenstar_C3_sx1262_repeater Tenstar_C3_sx1268_repeater \
+    nibble_zero_connect_repeater_ nibble_screen_connect_repeater_ \
+    Station_G2_logging_repeater; do
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_SRC_FILTER=""
+  BUILD_CAPABILITIES=()
+  apply_esp32_full_shared_bridge_profile "$plain_target"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DWITH_ESPNOW_BRIDGE=1"* ]] \
+    || fail "$plain_target Full image omitted the runtime ESP-NOW bridge"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DESPNOW_BRIDGE_MERGED=1"* ]] \
+    || fail "$plain_target Full image omitted safe default-off migration"
+  [[ "$PLATFORMIO_BUILD_SRC_FILTER" == *"helpers/bridges/ESPNowBridge.cpp"* ]] \
+    || fail "$plain_target Full image omitted the actual ESP-NOW driver source"
+  [[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.espnow "* ]] \
+    || fail "$plain_target Full image omitted the ESP-NOW capability"
+  (
+    BUILD_PROFILE_FOR_TARGET=full
+    BUILD_EXPECTATIONS=()
+    declare_build_capability_contract "$plain_target" ESP32_PLATFORM
+    [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.espnow=_ZN12ESPNowBridge5beginEv"* ]] \
+      || fail "$plain_target Full image does not require a linked ESP-NOW driver"
+  )
+done
+for existing_target in Heltec_v2_repeater_bridge_espnow \
+    Station_G2_repeater_observer_mqtt; do
+  PLATFORMIO_BUILD_FLAGS=""
+  apply_esp32_full_shared_bridge_profile "$existing_target"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DWITH_ESPNOW_BRIDGE=1"* ]] \
+    || fail "$existing_target existing bridge source was dropped"
+  [[ "$PLATFORMIO_BUILD_FLAGS" != *"ESPNOW_BRIDGE_MERGED"* ]] \
+    || fail "$existing_target lost historical bridge-on behavior"
+done
+for excluded_target in heltec_v4_sensor heltec_v4_tft_room_server \
+    heltec_v4_tft_companion_radio_full RAK_4631_repeater; do
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_SRC_FILTER=""
+  apply_esp32_full_shared_bridge_profile "$excluded_target"
+  [ -z "$PLATFORMIO_BUILD_FLAGS$PLATFORMIO_BUILD_SRC_FILTER" ] \
+    || fail "$excluded_target acquired unsupported ESP32 repeater bridge wiring"
+done
+(
+  ESP32_FULL_BUILD=0
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_SRC_FILTER=""
+  apply_esp32_full_shared_bridge_profile heltec_v4_tft_repeater
+  [ -z "$PLATFORMIO_BUILD_FLAGS$PLATFORMIO_BUILD_SRC_FILTER" ] \
+    || fail "standard repeater acquired the expanded Full ESP-NOW overlay"
+)
+for primary_flag in MESH_PRIMARY_ESPNOW MESH_ESPNOW_RADIO; do
+  (
+    pio_env_option_contains() { [ "$3" = "$primary_flag" ]; }
+    PLATFORMIO_BUILD_FLAGS=""
+    PLATFORMIO_BUILD_SRC_FILTER=""
+    if supports_esp32_full_shared_espnow heltec_v4_tft_repeater; then
+      fail "$primary_flag radio acquired a second conflicting SDK owner"
+    fi
+    apply_esp32_full_shared_bridge_profile heltec_v4_tft_repeater
+    [ -z "$PLATFORMIO_BUILD_FLAGS$PLATFORMIO_BUILD_SRC_FILTER" ] \
+      || fail "$primary_flag primary radio acquired the secondary bridge overlay"
+  )
+done
+
+# The TFT's normal Full image now owns ESP-NOW without an observer recipe.
+# Canonical selection must replace the sibling in either input order.
+for plain_target in heltec_v4_tft_repeater Meshadventurer_sx1262_repeater; do
   espnow_target=${plain_target}_bridge_espnow
   if get_unified_full_infrastructure_target "$espnow_target" >/dev/null; then
     fail "$espnow_target unexpectedly acquired a combined observer recipe"
   fi
   [ "$(select_ordinary_full_targets "$plain_target" "$espnow_target")" \
-      = "$(printf "%s\n" "$plain_target" "$espnow_target")" ] \
-    || fail "$plain_target incorrectly replaced its dedicated ESP-NOW image"
+      = "$plain_target" ] \
+    || fail "$plain_target did not replace its dedicated ESP-NOW image"
   [ "$(select_ordinary_full_targets "$espnow_target" "$plain_target")" \
-      = "$(printf "%s\n" "$espnow_target" "$plain_target")" ] \
-    || fail "$plain_target lost its dedicated ESP-NOW image with reversed inputs"
+      = "$plain_target" ] \
+    || fail "$plain_target input order changed the combined ESP-NOW selection"
+  [ "$(get_merged_espnow_repeater_replacement "$espnow_target")" = "$plain_target" ] \
+    || fail "$plain_target ESP-NOW legacy target did not map to its combined Full image"
 done
 [ "$(get_unified_full_infrastructure_target Heltec_v3_repeater_bridge_espnow)" \
     = Heltec_v3_repeater_observer_mqtt ] \

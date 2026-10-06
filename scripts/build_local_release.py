@@ -132,6 +132,13 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
                 and manifest["build_profile"] == "full"
                 and manifest.get("verified") is True)
 
+    def proven_espnow(manifest: dict) -> bool:
+        return (qualified_full(manifest)
+                and "bridge.espnow" in (manifest.get("capabilities") or [])
+                and any(check.get("capability") == "bridge.espnow"
+                        and check.get("present") is True
+                        for check in manifest.get("verification") or []))
+
     # A resumed build directory can still contain old normal or dedicated
     # bridge images. The canonical Full image must prove both runtime bridges
     # even when no stale legacy image happens to remain beside it.
@@ -158,7 +165,7 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
     combined_espnow = set()
     for record in records:
         manifest = record["manifest"]
-        if not qualified_full(manifest) or "bridge.espnow" not in (manifest.get("capabilities") or []):
+        if not proven_espnow(manifest):
             continue
         base = manifest["target"].rstrip("_").lower()
         if base.endswith("_observer_mqtt"):
@@ -171,6 +178,13 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
     for record in records:
         manifest = record["manifest"]
         if manifest["target"].lower() in tower_legacy | mke_legacy:
+            continue
+        legacy_base = manifest["target"].rstrip("_").lower()
+        if (manifest["platform"] == "ESP32_PLATFORM"
+                and legacy_base.endswith("_repeater_bridge_espnow")
+                and legacy_base[:-len("_bridge_espnow")] in combined_espnow):
+            # Resume may contain portable legacy images as well as Full ones.
+            # Retire them only after the matching combined driver is proven.
             continue
         if manifest["platform"] != "ESP32_PLATFORM" or manifest["build_profile"] != "full":
             passthrough.append(record)
@@ -197,9 +211,16 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
             "tbeam_sx1262_repeater", "tbeam_sx1276_repeater",
             "tbeam_sx1262_room_server", "tbeam_sx1276_room_server",
             "lilygo_tlora_v2_1_1_6_repeater",
-            "meshadventurer_sx1262_repeater", "meshadventurer_sx1268_repeater",
         }
+        # Capacity exceptions may still need a dedicated bridge. Old plain
+        # Meshadventurer images without the linked driver must not supersede it.
+        if key in {"meshadventurer_sx1262_repeater", "meshadventurer_sx1268_repeater"}:
+            special = key not in combined_espnow
         priority = {"observer": 20, "bridge": 10, "plain": 0 if special else 30}[kind]
+        if key in combined_espnow and not proven_espnow(manifest):
+            # A stale normal image must not displace the proven transport
+            # while simultaneously suppressing its historical dedicated image.
+            priority = -1
         old = chosen.get(key)
         if old is None or priority > old[0]:
             chosen[key] = (priority, record)

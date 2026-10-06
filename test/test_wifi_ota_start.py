@@ -178,7 +178,7 @@ int main() {
         fixture = (ROOT / "test/fixtures/webconfig_ota_handoff.cpp").read_text()
         self.compile_and_run(fixture.replace("@METHODS@", methods))
 
-    def test_rs232_espnow_ota_pauses_only_wireless_bridge_and_restores_failures(self):
+    def test_non_mqtt_espnow_ota_pauses_wireless_and_restores_saved_intent(self):
         cli = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
         start = cli.index('    } else if (memcmp(command, "start ota", 9)')
         end = cli.index('    } else if (memcmp(command, "clock", 5)', start)
@@ -271,6 +271,9 @@ int main() {
   assert(strstr(reply.text, "; ESP-NOW resume failed"));
   // A disabled secondary must stay disabled after the upload stops.
   prefs.espnow_bridge_enabled = false;
+#if !defined(WITH_RS232_BRIDGE)
+  prefs.bridge_enabled = false;
+#endif
   callbacks.allow_resume = true;
   board.allow_start = true;
   const int resumes = callbacks.resumes;
@@ -281,9 +284,14 @@ int main() {
   assert(callbacks.uart_changes == 0 && callbacks.uart && reply.guard == 42);
 }
 '''
-        self.compile_and_run(fixture.replace("@CLI@", cli[start:end]),
-                             "-DESP_PLATFORM=1", "-DADMIN_PASSWORD=1",
-                             "-DWITH_RS232_BRIDGE=1", "-DWITH_ESPNOW_BRIDGE=1")
+        for profile, flags in (
+            ("rs232_composite", ["-DWITH_RS232_BRIDGE=1"]),
+            ("merged_sole", ["-DESPNOW_BRIDGE_MERGED=1"]),
+            ("legacy_dedicated_sole", []),
+        ):
+            with self.subTest(profile=profile):
+                self.compile_and_run(fixture.replace("@CLI@", cli[start:end]),
+                    "-DESP_PLATFORM=1", "-DADMIN_PASSWORD=1", "-DWITH_ESPNOW_BRIDGE=1", *flags)
 
     def test_background_bridge_retry_waits_until_ota_stops(self):
         fixture = r'''
@@ -303,11 +311,13 @@ struct Bridge {
   bool isRunning() const { return running; }
   void begin() { ++starts; running = true; }
 };
+using ESPNowBridge = Bridge;
 struct WiFiMock { bool isConnected() { return true; } } WiFi;
 struct Mesh {
   Cli _cli;
-  struct { bool espnow_bridge_enabled = true; } _prefs;
+  struct { bool bridge_enabled = true, espnow_bridge_enabled = true; } _prefs;
   Bridge espnow_bridge;
+  @SOLE_MEMBER@
   Bridge* @MQTT_MEMBER@ = nullptr;
   uint32_t shared_espnow_retry_at = 0;
   void configureBridgeFilter(Bridge*) {}
@@ -318,27 +328,33 @@ int main() {
   // Simulate repeated servicePostMeshLoop calls, spanning several retry windows.
   for (now = 0; now <= 30000; now += 100) {
     assert(!mesh.startSharedEspNowBridgeIfReady());
-    assert(mesh.espnow_bridge.starts == 0);
+    assert(mesh.@TRANSPORT@.starts == 0);
   }
   board.ota = false;
   assert(mesh.startSharedEspNowBridgeIfReady());
-  assert(mesh.espnow_bridge.starts == 1);
+  assert(mesh.@TRANSPORT@.starts == 1);
   assert(mesh.startSharedEspNowBridgeIfReady());
-  assert(mesh.espnow_bridge.starts == 1);
-  mesh.espnow_bridge.running = false;
+  assert(mesh.@TRANSPORT@.starts == 1);
+  mesh.@TRANSPORT@.running = false;
   mesh._prefs.espnow_bridge_enabled = false;
+  mesh._prefs.bridge_enabled = false;
   now += 30000;
   assert(!mesh.startSharedEspNowBridgeIfReady());
-  assert(mesh.espnow_bridge.starts == 1);
+  assert(mesh.@TRANSPORT@.starts == 1);
 }
 '''
-        for role, mqtt_member in (("simple_repeater", "mqtt_bridge"),
-                                  ("simple_room_server", "bridge")):
-            with self.subTest(role=role):
+        for role, mqtt_member, transport, flags in (
+            ("simple_repeater", "mqtt_bridge", "espnow_bridge", ["-DWITH_MQTT_BRIDGE=1"]),
+            ("simple_repeater", "mqtt_bridge", "espnow_bridge", ["-DWITH_RS232_BRIDGE=1"]),
+            ("simple_repeater", "mqtt_bridge", "bridge", []),
+            ("simple_room_server", "bridge", "espnow_bridge", ["-DWITH_MQTT_BRIDGE=1"]),
+        ):
+            with self.subTest(role=role, flags=flags):
                 source = (ROOT / "examples" / role / "MyMesh.h").read_text()
                 retry = extract_braced(source, "bool startSharedEspNowBridgeIfReady()")
                 self.compile_and_run(fixture.replace("@RETRY@", retry)
-                                     .replace("@MQTT_MEMBER@", mqtt_member))
+                    .replace("@MQTT_MEMBER@", mqtt_member).replace("@TRANSPORT@", transport)
+                    .replace("@SOLE_MEMBER@", "Bridge bridge;" if role == "simple_repeater" else ""), *flags)
 
     def test_full_companion_cli_reports_webconfig_stop_and_hardware_errors(self):
         source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()

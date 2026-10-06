@@ -27,10 +27,18 @@ class RS232RuntimeTests(unittest.TestCase):
         self.assertIn('def("bridge", bridge);', header)
         code = code.replace("@IMPORT@", extract_braced(source, 'if (fs->exists("/prefs.json"))'))
         for profile, macros in (
-            ("legacy_dedicated", []),
-            ("merged_default_on", ["RS232_BRIDGE_MERGED=1", "RS232_BRIDGE_DEFAULT_ON=1"]),
-            ("merged", ["RS232_BRIDGE_MERGED=1"]),
-            ("merged_composite", ["RS232_BRIDGE_MERGED=1", "ESPNOW_BRIDGE_MERGED=1"]),
+            ("legacy_dedicated", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2"]),
+            ("merged_default_on", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
+                                   "RS232_BRIDGE_MERGED=1", "RS232_BRIDGE_DEFAULT_ON=1"]),
+            ("merged", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
+                        "RS232_BRIDGE_MERGED=1"]),
+            ("merged_composite", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
+                                  "RS232_BRIDGE_MERGED=1", "WITH_ESPNOW_BRIDGE=1",
+                                  "ESPNOW_BRIDGE_MERGED=1"]),
+            ("sole_espnow_merged", ["WITH_ESPNOW_BRIDGE=1", "ESPNOW_BRIDGE_MERGED=1"]),
+            ("sole_espnow_dedicated", ["WITH_ESPNOW_BRIDGE=1"]),
+            ("sole_espnow_default_on", ["WITH_ESPNOW_BRIDGE=1", "ESPNOW_BRIDGE_MERGED=1",
+                                       "ESPNOW_BRIDGE_DEFAULT_ON=1"]),
         ):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix="rs232-json-") as directory:
                 work = Path(directory)
@@ -42,7 +50,7 @@ class RS232RuntimeTests(unittest.TestCase):
                 source_file, binary = work / "main.cpp", work / "test"
                 source_file.write_text(code, encoding="ascii")
                 result = subprocess.run([
-                    compiler, "-std=c++17", "-DWITH_RS232_BRIDGE=Serial2", "-DWITH_RS232_BRIDGE_UART=2",
+                    compiler, "-std=c++17",
                     "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
                     *["-D" + macro for macro in macros], "-I" + str(work),
                     "-I" + str(ROOT / "test/mocks"), "-I" + str(ROOT / "src"),
@@ -68,6 +76,10 @@ class RS232RuntimeTests(unittest.TestCase):
             ("rs232_espnow_merged", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
                                      "RS232_BRIDGE_MERGED=1", "WITH_ESPNOW_BRIDGE=1",
                                      "ESPNOW_BRIDGE_MERGED=1"]),
+            ("sole_espnow_merged", ["WITH_ESPNOW_BRIDGE=1", "ESPNOW_BRIDGE_MERGED=1"]),
+            ("sole_espnow_dedicated", ["WITH_ESPNOW_BRIDGE=1"]),
+            ("sole_espnow_default_on", ["WITH_ESPNOW_BRIDGE=1", "ESPNOW_BRIDGE_MERGED=1",
+                                       "ESPNOW_BRIDGE_DEFAULT_ON=1"]),
         ):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix="rs232-prefs-") as directory:
                 work = Path(directory)
