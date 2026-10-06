@@ -38,6 +38,7 @@ struct MyMesh {
   const char* getBuildDate() const { return "test"; }
   const char* getRole() const { return "test"; }
   bool startWebConfig(bool force_ap, char* reply);
+  bool startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup);
   void suspendUnconfiguredSetupBridges();
   void refresh() {
 @REFRESH@

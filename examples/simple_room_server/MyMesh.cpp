@@ -1511,7 +1511,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #endif
   if (start_webui) {
     char wc_reply[160];
-    startWebConfig(false, wc_reply);
+    startWebConfigImpl(false, wc_reply, true);
     mesh::usbConsolePort().printf("%s\r\n", wc_reply);
   }
 #endif
@@ -1973,6 +1973,10 @@ void MyMesh::suspendUnconfiguredSetupBridges() {
 }
 
 bool MyMesh::startWebConfig(bool force_ap, char* reply) {
+  return startWebConfigImpl(force_ap, reply, false);
+}
+
+bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup) {
   if (_cli.getBoard()->isOTAUpdateRunning()) {
     strcpy(reply, "Err: OTA server is running - 'stop ota' first");
     return true;
@@ -2017,7 +2021,9 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
 #ifdef WITH_ESPNOW_BRIDGE
   const bool espnow_was_running = isEspNowBridgeRunning();
 #endif
-  suspendUnconfiguredSetupBridges();
+  // Only automatic first-boot setup parks the saved default bridges. A manual
+  // WiFi start (including master-radio restoration) must retain explicit ESP-NOW.
+  if (automatic_setup) suspendUnconfiguredSetupBridges();
 
 #ifdef WITH_MQTT_BRIDGE
   _webconfig->updateWiFiOwnership(!bridge

@@ -30,11 +30,12 @@ uint32_t millis() { return now; }
 bool millisHasNowPassed(uint32_t deadline) { return int32_t(now - deadline) >= 0; }
 void delay(unsigned) {}
 using wifi_mode_t = int;
-constexpr int WIFI_OFF = 0, WIFI_MODE_NULL = 0, WIFI_STA = 1, WIFI_AP_STA = 3;
+constexpr int WIFI_OFF = 0, WIFI_MODE_NULL = 0, WIFI_STA = 1, WIFI_AP_STA = 3, WIFI_IF_STA = 0;
 constexpr int ESP_OK = 0;
 constexpr int ESP_ERR_WIFI_NOT_INIT = -1;
 bool sdk_initialized = false, sdk_started = false;
 bool fail_sdk_stop = false, fail_sdk_deinit = false;
+unsigned espnow_owners = 0;
 int sdk_mode = WIFI_OFF, sdk_channel = 1;
 unsigned sdk_stops = 0, sdk_deinits = 0;
 int esp_wifi_get_mode(wifi_mode_t* mode) {
@@ -58,8 +59,9 @@ struct WiFiMock {
   int channel() const { return sdk_initialized ? sdk_channel : 0; }
   bool isConnected() const { return connected; }
   void setAutoReconnect(bool enabled) { auto_reconnect = enabled; }
-  void disconnect(bool off, bool erase) {
-    assert(!off && !erase); ++disconnects; connected = false;
+  void disconnect(bool off, bool erase = false) {
+    assert(!erase); ++disconnects; connected = false;
+    if (off) mode(WIFI_OFF);
   }
   bool mode(int mode) {
     if (mode == WIFI_OFF) ++off_modes;
@@ -81,6 +83,10 @@ struct WiFiMock {
 } WiFi;
 namespace mesh {
 namespace bridge { constexpr int ESPNOW_FORMAT_WRAPPED = 1; }
+namespace wifi {
+  void applyProtocolMask(int) {} void restoreEspNowChannel() {}
+  bool espNowChannelConstrained() { return espnow_owners != 0; }
+}
 struct LocalIdentity { unsigned char pub_key[32] = {}; };
 struct Utils { static void toHex(char* out, const unsigned char*, int) { strcpy(out, "test"); } };
 struct Log { template<class... Args> void printf(const char*, Args...) {} };
@@ -128,7 +134,10 @@ struct AbstractBridge {
   void begin() { ++starts; running = true; WiFi.mode(WIFI_STA); }
   void end() { ++stops; running = false; } // MQTT and OTA may retain STA.
 };
-using ESPNowBridge = AbstractBridge;
+struct ESPNowBridge : AbstractBridge {
+  void begin() { if (!running) ++espnow_owners; AbstractBridge::begin(); }
+  void end() { if (running) --espnow_owners; AbstractBridge::end(); }
+};
 struct MQTTNodeInfo {
   const char* node_name; float* freq; float* bw;
   uint8_t* sf; uint8_t* cr; uint8_t* repeat_flag; bool repeat_when_nonzero;
@@ -139,6 +148,7 @@ struct MQTTBridge : AbstractBridge {
   void setBoardModel(const char*) {} void setBuildDate(const char*) {}
   template<class... Args> void setStatsSources(Args...) {}
 };
+@STOP_OWNED_WIFI@
 struct WebConfigServer {
   static bool enabled;
   static bool allow_start;
@@ -156,7 +166,7 @@ struct WebConfigServer {
   void updateWiFiOwnership(bool owner) { owns = owner; }
   bool startSetupMode(char* reply) {
     if (!allow_start) {
-      if (owns) WiFi.mode(WIFI_OFF);
+      if (owns) stopOwnedWiFiRadio();
       strcpy(reply, "Err: failed to start AP"); return false;
     }
     _mode = MODE_SETUP; _setup_started_at = millis(); running = true;
@@ -167,7 +177,7 @@ struct WebConfigServer {
   void requestStop() { running = false; stopping = true; }
   bool stopForOTA(char*) { running = stopping = false; WiFi.mode(WIFI_STA); return true; }
   void tick(uint32_t now) {
-    if (stopping) { stopping = false; if (owns) WiFi.mode(WIFI_OFF); return; }
+    if (stopping) { stopping = false; if (owns) stopOwnedWiFiRadio(); return; }
     @SETUP_WINDOW@
   }
 };
@@ -180,6 +190,7 @@ struct MyMesh {
   MQTTBridge* @WORKER@ = nullptr;
   ESPNowBridge espnow_bridge;
   WebConfigServer* _webconfig = nullptr;
+  void* _web_terminal = nullptr;
   bool _unconfigured_setup_espnow_suspended = false;
   uint32_t shared_espnow_retry_at = 0, _ota_update_at = 0;
   int _ota_update_channel = 0;
@@ -210,6 +221,7 @@ struct MyMesh {
   mesh::LocalIdentity getSelfId() { return self_id; } void* getRTCClock() { return nullptr; }
   void configureBridgeFilter(AbstractBridge*) {} void drainOutbound(unsigned) {} void otaAlert(const char*) {}
   void suspendUnconfiguredSetupBridges(); void serviceIdleWiFi();
+  bool startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup);
   bool startWebConfig(bool force_ap, char* reply); bool stopWebConfig(char* reply);
   bool hasPendingWork() const; uint32_t getPowerSaveSleepSeconds(uint32_t) const;
   @INLINE_METHODS@
@@ -220,6 +232,7 @@ struct MyMesh {
   ~MyMesh() { delete _webconfig; delete @WORKER@; }
 };
 @METHODS@
+@INFRA_BACKEND@
 struct BrowserCLI {
   Board* _board; Prefs* _prefs; MyMesh* _callbacks;
   @OTA_STATE@
@@ -344,7 +357,7 @@ int main() {
 class ESP32FullPowerLifecycleTest(unittest.TestCase):
     compile_and_run = wifi_start.WiFiOtaStartTest.compile_and_run
 
-    def fixture(self, role, checks=CHECKS):
+    def fixture(self, role, checks=CHECKS, infra_backend=""):
         source = (ROOT / "examples" / role / "MyMesh.cpp").read_text()
         header = (ROOT / "examples" / role / "MyMesh.h").read_text()
         worker = "mqtt_bridge" if role == "simple_repeater" else "bridge"
@@ -353,10 +366,12 @@ class ESP32FullPowerLifecycleTest(unittest.TestCase):
             "bool setMqttBridgeState(", "bool setBridgeState(",
             "bool isEspNowBridgeRunning()", "bool isMqttBridgeRunning()",
             "bool isMqttBridgeStopping()",
-            "bool isWebConfigActive() const", "bool stopWebConfigForOTA("))
+            "bool isWebConfigActive() const", "bool isWebConfigStopping() const",
+            "bool hasWirelessNetworkClient() const", "bool stopWebConfigForOTA("))
         methods = "\n".join(extract_braced(source, signature) for signature in (
             "void MyMesh::suspendUnconfiguredSetupBridges()", "void MyMesh::serviceIdleWiFi()",
-            "bool MyMesh::startWebConfig(", "bool MyMesh::stopWebConfig(",
+            "bool MyMesh::startWebConfig(", "bool MyMesh::startWebConfigImpl(",
+            "bool MyMesh::stopWebConfig(",
             "bool MyMesh::hasPendingWork() const", "uint32_t MyMesh::getPowerSaveSleepSeconds("))
         defaults_start = source.index("  // bridge defaults")
         defaults = source[defaults_start:source.index("  _prefs.bridge_delay", defaults_start)]
@@ -374,11 +389,14 @@ class ESP32FullPowerLifecycleTest(unittest.TestCase):
         end = cli.index('    } else if (memcmp(command, "clock", 5)', begin)
         web_source = (ROOT / "src/helpers/esp32/WebConfigServer.cpp").read_text()
         window = extract_braced(web_source, "  if (WebConfigBatch::unconfiguredSetupWindowExpired(")
+        stop_owned = extract_braced(web_source, "static void stopOwnedWiFiRadio()")
         return (FIXTURE.replace("@INLINE_METHODS@", inline.replace(" override", ""))
                 .replace("@METHODS@", methods).replace("@DEFAULTS@", defaults)
                 .replace("@STARTUP@", startup).replace("@PORTAL_LOOP@", portal_loop)
                 .replace("@MANIFEST@", manifest).replace("@OTA_CLI@", cli[begin:end])
                 .replace("@OTA_STATE@", state)
+                .replace("@INFRA_BACKEND@", infra_backend)
+                .replace("@STOP_OWNED_WIFI@", stop_owned)
                 .replace("@SETUP_WINDOW@", window).replace("@CHECKS@", checks)
                 .replace("@WORKER@", worker))
 
@@ -415,6 +433,79 @@ int main() {
         for role in ("simple_repeater", "simple_room_server"):
             with self.subTest(role=role):
                 self.compile_and_run(self.fixture(role, checks), *flags)
+
+    def test_manual_wifi_and_master_restore_preserve_actual_requested_services(self):
+        backend = extract_braced((ROOT / "examples/InfrastructureWireless.h").read_text(),
+                                 "class InfrastructureWirelessBackend") + ";"
+        backend = "MyMesh the_mesh; Board& board = the_mesh._cli.board;\n" + backend
+        checks = r'''
+void command(const char* text) {
+  char reply[160] = {};
+  auto& control = mesh::wireless::control();
+  assert(control.handle(text, reply, sizeof(reply), now, mesh::wireless::Independent));
+  assert(strncmp(reply, "OK", 2) == 0);
+  for (unsigned attempt = 0; attempt < 5 && control.pending(); ++attempt) {
+    now += 300; the_mesh.servicePortal(); control.service(now); the_mesh.serviceIdleWiFi();
+  }
+  assert(!control.pending());
+  control.handle("get 2.4ghz", reply, sizeof(reply), now, mesh::wireless::Independent);
+  assert(!strstr(reply, "failed"));
+}
+int main() {
+  using namespace mesh::wireless;
+  InfrastructureWirelessBackend backend;
+  auto& control = mesh::wireless::control(); control.begin(backend);
+  the_mesh.defaults(); assert(the_mesh._cli.prefs.wifi_ssid[0] == 0);
+  the_mesh.startupSetup();
+  assert(the_mesh._unconfigured_setup_espnow_suspended && !the_mesh.isEspNowBridgeRunning());
+  assert(the_mesh._prefs.bridge_enabled && the_mesh._prefs.espnow_bridge_enabled);
+  char reply[160] = {};
+  the_mesh.stopWebConfig(reply); the_mesh.servicePortal(); the_mesh.serviceIdleWiFi();
+  assert(backend.enabled() == 0 && !sdk_initialized);
+  constexpr uint8_t requested = @REQUESTED@;
+  if (requested & EspNow) command("set espnow on");
+  const auto espnow_stops = the_mesh.espnow_bridge.stops;
+  if (requested & mesh::wireless::WiFi) command("set wifi on");
+  // Exact hardware regression: explicit ESP-NOW, then manual WiFi on, no SSID.
+  assert(backend.enabled() == requested);
+  assert(the_mesh.espnow_bridge.stops == espnow_stops);
+  assert(!the_mesh.isMqttBridgeRunning());
+  for (unsigned repeat = 0; repeat < 2; ++repeat) {
+    command("set 2.4ghz off");
+    assert(control.masterOff() && backend.enabled() == 0 && !sdk_initialized);
+    command("set 2.4ghz on");
+    assert(!control.masterOff() && backend.enabled() == requested);
+    assert(the_mesh._prefs.bridge_enabled && the_mesh._prefs.espnow_bridge_enabled);
+    // Saved default intent must not add ESP-NOW to a WiFi-only restore.
+    if (!(requested & EspNow)) {
+      assert(the_mesh._unconfigured_setup_espnow_suspended);
+      assert(!the_mesh.startSharedEspNowBridgeIfReady());
+    }
+  }
+  if (requested == (mesh::wireless::WiFi | EspNow)) {
+    // The direct forced manual portal route preserves the same live bridge.
+    the_mesh.stopWebConfig(reply); the_mesh.servicePortal(); the_mesh.serviceIdleWiFi();
+    assert(the_mesh.isEspNowBridgeRunning() && sdk_started);
+    const auto stops = the_mesh.espnow_bridge.stops;
+    the_mesh.startWebConfig(true, reply);
+    assert(the_mesh.isWebConfigActive() && the_mesh.isEspNowBridgeRunning());
+    assert(the_mesh.espnow_bridge.stops == stops && !the_mesh._unconfigured_setup_espnow_suspended);
+  }
+}
+'''
+        for role in ("simple_repeater", "simple_room_server"):
+            for mask in ("EspNow", "mesh::wireless::WiFi", "(mesh::wireless::WiFi | EspNow)"):
+                with self.subTest(role=role, requested=mask):
+                    body = self.fixture(role, checks.replace("@REQUESTED@", mask), backend)
+                    self.compile_and_run(body, *FLAGS, "-DESP32=1")
+                    if mask.startswith("("):
+                        # Reintroducing the manual suspension must break the
+                        # exact command/replay regression, not just a source check.
+                        old = body.replace("return startWebConfigImpl(force_ap, reply, false);",
+                                           "return startWebConfigImpl(force_ap, reply, true);")
+                        self.assertNotEqual(old, body)
+                        with self.assertRaises(AssertionError):
+                            self.compile_and_run(old, *FLAGS, "-DESP32=1")
 
     def test_failed_portal_preserves_explicit_bridge_and_prior_setup_suspension(self):
         checks = r'''

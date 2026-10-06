@@ -297,9 +297,11 @@ and the selected WiFi/MQTT mode keeps reconnecting. Other setup sessions retain
 their profile's idle timeout.
 
 Full Repeater and Room Server suspend unconfigured network bridges during
-this setup session. Automatic ESP-NOW retries remain suspended after the AP
+automatic first-boot setup. Automatic ESP-NOW retries remain suspended after the AP
 closes, so they cannot keep an unused WiFi driver running. Saved bridge choices
 remain intact; explicitly enabling the bridge resumes it for this boot.
+Manual WebConfig/WiFi starts preserve an explicitly enabled ESP-NOW bridge,
+including when `set 2.4ghz on` restores the previously selected services.
 Stopping a browser OTA session restores only bridges that session actually
 paused, rather than starting services from saved intent alone.
 

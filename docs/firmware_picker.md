@@ -294,9 +294,11 @@ available as an override. A saved SSID switches to the normal indefinite
 reconnect behavior instead.
 
 Fresh ESP32 Full infrastructure defaults to USB logging off. Existing saved
-logging and device power-saving settings survive an update. The unconfigured
-setup session also pauses automatic network-bridge retries until an explicit
-bridge start, allowing its radio to turn off when the AP closes. Compact OTA
+logging and device power-saving settings survive an update. Automatic
+unconfigured boot setup also pauses network-bridge retries until an explicit
+bridge start, allowing its radio to turn off when the AP closes. Manual
+WebConfig/WiFi starts preserve an explicitly enabled ESP-NOW bridge, including
+when the master radio switch restores the selected services. Compact OTA
 images scan before raising a new AP and verify live driver readiness before
 reporting the update URL.
 
