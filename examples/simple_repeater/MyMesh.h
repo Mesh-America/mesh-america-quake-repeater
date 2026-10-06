@@ -592,6 +592,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   #endif
 #elif defined(WITH_ESPNOW_BRIDGE)
   ESPNowBridge bridge;
+  uint32_t shared_espnow_retry_at = 0;
 #endif
 #ifdef WITH_BRIDGE
   AbstractBridge* activeBridge() {
@@ -614,13 +615,18 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   }
 #endif
 
-#if defined(WITH_ESPNOW_BRIDGE) \
-    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
+#if defined(WITH_ESPNOW_BRIDGE)
   // Retry ESP-NOW without taking over an active OTA session. MQTT creates its
   // WiFi task asynchronously, so it must first associate on the shared channel.
   bool startSharedEspNowBridgeIfReady() {
-    if (espnow_bridge.isRunning()) return true;
+  #if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+    ESPNowBridge& transport = espnow_bridge;
     if (!_prefs.espnow_bridge_enabled) return false;
+  #else
+    ESPNowBridge& transport = bridge;
+    if (!_prefs.bridge_enabled) return false;
+  #endif
+    if (transport.isRunning()) return true;
     // Browser OTA pauses the bridges for the entire upload session. The
     // periodic retry must not undo that pause on its next loop iteration.
     if (_cli.getBoard()->isOTAUpdateRunning()) return false;
@@ -629,9 +635,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
     if (!millisHasNowPassed(shared_espnow_retry_at)) return false;
     shared_espnow_retry_at = millis() + 5000;
-    configureBridgeFilter(&espnow_bridge);
-    espnow_bridge.begin();
-    return espnow_bridge.isRunning();
+    configureBridgeFilter(&transport);
+    transport.begin();
+    return transport.isRunning();
   }
 #endif
 #ifdef WITH_SNMP
@@ -1386,6 +1392,12 @@ public:
         ? setEspNowBridgeState(true) : setEspNowBridgeState(false);
     return mqtt_ok && espnow_ok;
 #else
+#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+    // A standalone bridge shares its WiFi driver with the browser uploader.
+    // Preserve saved intent, but do not restart it until OTA has stopped.
+    if (enable && _cli.getBoard()->isOTAUpdateRunning()) return false;
+    shared_espnow_retry_at = 0;
+#endif
     // Disabling an already-absent heap-backed bridge is successful and must
     // not allocate an instance merely to stop it. The embedded ESP-NOW bridge
     // is always present, so it continues through the normal state check.
@@ -1477,6 +1489,10 @@ public:
 #endif
     return restartEspNowBridge() && restartMqttBridge();
 #else
+#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+    if (_cli.getBoard()->isOTAUpdateRunning()) return false;
+    shared_espnow_retry_at = 0;
+#endif
 #ifdef WITH_RS232_BRIDGE
     // RS-232 changes must be applied synchronously so the CLI can commit or
     // roll back the selected pins/baud. This branch also reconstructs a bridge

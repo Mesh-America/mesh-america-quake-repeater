@@ -5,11 +5,29 @@
 #include <helpers/esp32/WiFiRadioPolicy.h>
 
 #ifdef WITH_ESPNOW_BRIDGE
+#include <WiFi.h>
 
 static void stopBridgeWiFiIfUnused() {
   if (!(mesh::wireless::control().enabled() & mesh::wireless::WiFi)) {
-    esp_wifi_stop();
-    esp_wifi_deinit();
+    // WebConfig/OTA may have adopted an initially IDF-only bridge driver.
+    // Shut down through Arduino first so its private initialized/started
+    // caches cannot outlive the SDK driver and break the next WiFi startup.
+    // In the pinned Arduino 2/3 cores, channel() is gated by initialized but
+    // getMode() is also gated by started. A failed facade start can therefore
+    // report OFF despite retaining initialized state. Complete that start
+    // before stopping it, without allocating a facade for a pure IDF owner.
+    if (WiFi.getMode() == WIFI_OFF && WiFi.channel() > 0) {
+      if (!WiFi.mode(WIFI_STA)) return;
+    }
+    if (!WiFi.mode(WIFI_OFF)) return;
+
+    // Arduino OFF is a no-op when the bridge alone initialized the SDK.
+    // Probe the SDK separately rather than trusting the facade's mode/cache.
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&mode) == ESP_OK) {
+      esp_wifi_stop();
+      esp_wifi_deinit();
+    }
   }
 }
 

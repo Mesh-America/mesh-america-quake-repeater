@@ -3472,6 +3472,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   #endif
 #elif defined(WITH_ESPNOW_BRIDGE)
       , bridge(&_prefs, _mgr, &rtc)
+      , shared_espnow_retry_at(0)
 #endif
 {
   // Global constructors run before setup(), while the heap is still
@@ -3663,6 +3664,12 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.espnow_bridge_enabled = 0;  // merged normal repeater until explicitly enabled
 #else
   _prefs.espnow_bridge_enabled = 1;  // preserves the Full image's former combined default
+#endif
+#if defined(WITH_ESPNOW_BRIDGE) && defined(ESPNOW_BRIDGE_MERGED) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+  // The sole transport keeps its legacy primary lifecycle, while merged
+  // profiles persist the same explicit ESP-NOW intent as combined profiles.
+  _prefs.bridge_enabled = _prefs.espnow_bridge_enabled;
 #endif
   _prefs.bridge_delay   = 500;  // milliseconds
   _prefs.bridge_pkt_src = 1;    // logRx (RX packets)
@@ -12835,6 +12842,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   else startSharedEspNowBridgeIfReady();
   #else
   if (bridge.isRunning()) bridge.loop();
+  else startSharedEspNowBridgeIfReady();
   #endif
 #endif
 #if defined(WITH_RS232_BRIDGE) \

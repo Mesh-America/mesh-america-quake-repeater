@@ -193,17 +193,21 @@ Normal repeater firmware includes runtime-controlled RS-232 support where the
 board has room; use `set bridge.enabled on` after configuring `bridge.uart` and
 `bridge.baud`. The Wio-E5 remains the capacity exception and offers a separate
 RS-232 image. Choose Wi-Fi MQTT under **Logging / MQTT**; it is an output mode,
-not a second connection choice. Repeaters may still offer separate ESP-NOW or
-Ethernet bridge firmware because those paths use different compiled drivers.
+not a second connection choice. Full ESP32 LoRa repeaters include runtime
+ESP-NOW when capacity permits; dedicated ESP-NOW images remain for measured
+capacity exceptions. Ethernet still needs its exact hardware recipe.
 
 For commands and option explanations, follow the
 [ESP-NOW bridge setup guide](espnow_bridge_setup.md).
 
 An ESP-NOW bridge target keeps LoRa as its primary mesh radio. Expanded ESP32
-Full repeater and room-server images combine ESP-NOW with WiFi MQTT in the
-same firmware. MQTT and ESP-NOW are independent runtime transports: use
-`set mqtt.enabled on|off` for MQTT and `set bridge.enabled on|off` (or
-`set espnow.enabled on|off`) for ESP-NOW, so either or both can run. Both use
+Full LoRa repeaters include ESP-NOW, including boards without an MQTT
+recipe. Existing MQTT-backed Full repeater and room-server images combine
+both transports. Use `set espnow.enabled on|off` for ESP-NOW and, where
+supported, `set mqtt.enabled on|off` for MQTT. Newly combined ordinary
+repeaters start with ESP-NOW off until explicitly enabled, including the first
+upgrade from unmarked legacy preferences. Later reboots preserve that setting.
+On combined RS-232 boards `bridge.enabled` controls the UART independently. Both use
 one 2.4 GHz radio, so when both are enabled the ESP-NOW bridge channel must
 match the connected WiFi access point's fixed channel. ESP-NOW-only mode does
 not require WiFi credentials. Its runtime
@@ -214,8 +218,8 @@ backward-compatible bridge-to-bridge default using `bridge.secret`) or `raw`
 firmware choice, not two board images. Match `bridge.channel` to the primary
 nodes' `espnow.channel` before selecting `set bridge.format raw`.
 For Heltec V4 specifically, `companion_radio_full` is still a LoRa-primary
-Companion; choose the existing `heltec_v4_repeater_bridge_espnow` firmware to
-make that board the LoRa/ESP-NOW gateway. Use its exact merged artifact when
+Companion; choose the combined `heltec_v4_repeater` Full firmware and enable
+ESP-NOW to make that board the LoRa/ESP-NOW gateway. Use its exact merged artifact when
 changing roles or partition layouts.
 
 ## Share a selection

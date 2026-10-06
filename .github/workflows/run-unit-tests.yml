@@ -342,6 +342,7 @@ jobs:
           python3 -B test/test_serial_ethernet_sessions.py -v
           python3 -B test/test_companion_wifi_session.py -v
           python3 -B test/test_espnow_radio_lifecycle.py -v
+          python3 -B test/test_espnow_runtime.py -v
           # Reports the confirmed HTTP-OTA ownership/stale-server bugs as
           # explicit expected failures until the separate firmware fix lands.
           python3 -B test/test_wifi_ota_lifecycle.py -v

@@ -46,7 +46,13 @@ int main() {
       CommonCLI reader;
       reader.fs.files["/com_prefs"] = image;
       reader.loadPrefsInt(&reader.fs, "/com_prefs");
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+      // The new sole bridge stores independent ESP-NOW intent and mirrors the
+      // legacy primary alias, even if an older caller supplied different flags.
+      assert(reader.prefs.bridge_enabled == secondary);
+#else
       assert(reader.prefs.bridge_enabled == primary);
+#endif
       assert(reader.prefs.espnow_bridge_enabled == secondary);
 #ifdef WITH_RS232_BRIDGE
       assert(reader.prefs.bridge_uart == 2);
@@ -85,7 +91,7 @@ int main() {
   assert(legacy_reader.prefs.bridge_enabled == 1 && legacy_reader.prefs.bridge_uart == 2);
 #endif
 
-#ifdef ESPNOW_BRIDGE_MERGED
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
   for (unsigned invalid = 0; invalid <= 255; ++invalid) {
     if (invalid == 0xA1) continue;
     auto old = on.bytes;
@@ -94,7 +100,12 @@ int main() {
     reader.fs.files["/com_prefs"] = old;
     reader.loadPrefsInt(&reader.fs, "/com_prefs");
     assert(reader.prefs.espnow_bridge_enabled == 0);
-    assert(reader.prefs.bridge_enabled == 1 && reader._com_prefs_needs_upgrade);
+#if !defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+    assert(reader.prefs.bridge_enabled == 0);
+#else
+    assert(reader.prefs.bridge_enabled == 1);
+#endif
+    assert(reader._com_prefs_needs_upgrade);
   }
   // Old 874-byte profiles saved the unused secondary flag as one. It is not intent.
   auto old = on.bytes;
@@ -102,7 +113,12 @@ int main() {
   CommonCLI reader;
   reader.fs.files["/com_prefs"] = old;
   reader.loadPrefsInt(&reader.fs, "/com_prefs");
-  assert(reader.prefs.espnow_bridge_enabled == 0 && reader.prefs.bridge_enabled == 1);
+  assert(reader.prefs.espnow_bridge_enabled == 0);
+#if !defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+  assert(reader.prefs.bridge_enabled == 0);
+#else
+  assert(reader.prefs.bridge_enabled == 1);
+#endif
   reader.fs.files["/com_prefs"] = on.bytes;
   reader.fs.fail_read_after = static_cast<int>(marker_offset);
   reader.loadPrefsInt(&reader.fs, "/com_prefs");

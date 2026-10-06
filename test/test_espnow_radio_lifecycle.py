@@ -34,6 +34,7 @@ struct FakeWiFi {
  wifi_mode_t current=WIFI_OFF;bool autoreconnect=true;
  void persistent(bool){}
  wifi_mode_t getMode(){return current;}
+ int channel(){return current==WIFI_OFF?0:6;}
  void setAutoReconnect(bool value){autoreconnect=value;}
  bool mode(wifi_mode_t value){if(failure==1)return false;current=value;return true;}
 } WiFi;
@@ -167,14 +168,16 @@ class EspNowLifecycleTests(unittest.TestCase):
 using wifi_init_config_t=int;
 using wifi_second_chan_t=int;
 constexpr int WIFI_STORAGE_RAM=0,WIFI_MODE_STA=1,WIFI_SECOND_CHAN_NONE=0;
+constexpr wifi_mode_t WIFI_MODE_NULL=WIFI_OFF;
 constexpr int WIFI_PROTOCOL_11B=1,WIFI_PROTOCOL_11G=2,WIFI_PROTOCOL_11N=4;
-int wifi_stops=0,wifi_starts=0;uint8_t wifi_channel=6;
-int esp_wifi_init(wifi_init_config_t*){return 0;}
+int wifi_stops=0,wifi_starts=0;uint8_t wifi_channel=6;bool wifi_initialized=false;
+int esp_wifi_init(wifi_init_config_t*){wifi_initialized=true;return 0;}
 int esp_wifi_set_storage(int){return 0;}
 int esp_wifi_set_mode(int){return 0;}
 int esp_wifi_start(){++wifi_starts;return 0;}
 int esp_wifi_stop(){++wifi_stops;return 0;}
-int esp_wifi_deinit(){return 0;}
+int esp_wifi_deinit(){wifi_initialized=false;return 0;}
+int esp_wifi_get_mode(wifi_mode_t* mode){*mode=WIFI_STA;return wifi_initialized?0:-1;}
 int esp_wifi_get_channel(uint8_t* channel,wifi_second_chan_t*){*channel=wifi_channel;return 0;}
 int esp_wifi_set_channel(int channel,int){wifi_channel=channel;return 0;}
 int esp_now_del_peer(const uint8_t*){return 0;}
@@ -293,6 +296,29 @@ struct {
             subprocess.run([os.environ.get('CXX','g++'),'-std=c++17','-DWITH_ESPNOW_BRIDGE=1',
                             '-I',str(folder),'-I',str(ROOT/'src'),str(folder/'channel.cpp'),'-o',str(binary)],check=True)
             subprocess.run([str(binary)],check=True)
+
+    def test_bridge_arduino_sdk_handoffs_and_partial_startup(self):
+        source = (ROOT/'src/helpers/bridges/ESPNowBridge.cpp').read_text()
+        methods = method(source, 'static void stopBridgeWiFiIfUnused(') + '\n'
+        methods += '\n'.join(
+            method(source, f'void ESPNowBridge::{name}(').replace('ESPNowBridge::', 'Bridge::')
+            for name in ('begin', 'end')
+        )
+        fixture = (ROOT/'test/fixtures/espnow_wifi_handoff.cpp').read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder/'handoff.cpp').write_text(fixture.replace('@METHODS@', methods))
+            for arduino, idf in [(2,40400), (3,50200), (3,50500)]:
+                with self.subTest(arduino=arduino, idf=idf):
+                    binary = folder/f'handoff-{idf}'
+                    subprocess.run([
+                        os.environ.get('CXX', 'g++'), '-std=c++17',
+                        '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-pie', '-no-pie',
+                        '-I', str(ROOT/'src'), f'-DESP_IDF_VERSION={idf}',
+                        f'-DESP_ARDUINO_VERSION_MAJOR={arduino}',
+                        str(folder/'handoff.cpp'), '-o', str(binary),
+                    ], check=True)
+                    subprocess.run([str(binary)], check=True)
 
 if __name__=='__main__':
     unittest.main()

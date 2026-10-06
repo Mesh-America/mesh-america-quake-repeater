@@ -197,8 +197,10 @@ public:
   // Appended after the existing /com_prefs tail. Keep the preamble in the same
   // transaction as frequency/modulation; old images adopt /radio_profiles.
   uint16_t primary_radio_preamble = 0;
-  // Full ESP32 images can carry another bridge and ESP-NOW simultaneously. Keep the
+  // Full ESP32 images can carry another bridge and ESP-NOW simultaneously. Keep
   // ESP-NOW intent separately so either transport can be selected at runtime.
+  // Sole merged ESP-NOW profiles also use this intent and mirror bridge_enabled
+  // for their legacy single-bridge lifecycle and CLI alias.
   // Old preference images did not have this byte; they default to enabled to
   // retain the previous MQTT combined-Full behavior after an upgrade. Merged
   // default-off profiles require their appended profile marker instead.

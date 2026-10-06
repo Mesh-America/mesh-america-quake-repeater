@@ -835,6 +835,9 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #endif
 #if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
     const uint8_t previous_espnow_enabled = _prefs->espnow_bridge_enabled;
+#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+    const uint8_t previous_bridge_enabled = _prefs->bridge_enabled;
+#endif
 #endif
     if (legacy && _prefs->loadSerial(legacy)) {
       loaded = true;
@@ -853,6 +856,14 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
       // The legacy JSON schema has no independent ESP-NOW intent marker.
       _prefs->espnow_bridge_enabled = 0;
+#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+      _prefs->bridge_enabled = 0;
+#endif
+#elif defined(WITH_ESPNOW_BRIDGE) && defined(ESPNOW_BRIDGE_MERGED) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+      // An explicitly default-on compatibility profile imports its legacy
+      // single-bridge intent into the new independent ESP-NOW setting.
+      _prefs->espnow_bridge_enabled = _prefs->bridge_enabled;
 #endif
 #ifdef WITH_MQTT_BRIDGE
       node_prefs_needs_migration = true;
@@ -867,6 +878,9 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #endif
 #if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
       _prefs->espnow_bridge_enabled = previous_espnow_enabled;
+#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+      _prefs->bridge_enabled = previous_bridge_enabled;
+#endif
 #endif
     }
     if (legacy) legacy.close();
@@ -1503,6 +1517,12 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 #endif
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
     _prefs->espnow_bridge_enabled = constrain(_prefs->espnow_bridge_enabled, 0, 1);
+#if defined(WITH_ESPNOW_BRIDGE) && defined(ESPNOW_BRIDGE_MERGED) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+    // An unrelated legacy primary bridge flag cannot enable this new mode.
+    // Only the separately persisted and marker-validated ESP-NOW intent wins.
+    _prefs->bridge_enabled = _prefs->espnow_bridge_enabled;
+#endif
     _prefs->bridge_delay = constrain(_prefs->bridge_delay, 0, 10000);
     _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 1);
     _prefs->bridge_baud = constrain(_prefs->bridge_baud, 9600, BRIDGE_MAX_BAUD);
@@ -2845,10 +2865,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         webconfig_stopped = true;
       }
 #endif
-#if defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE) \
-    && !defined(WITH_MQTT_BRIDGE)
-      // Browser OTA owns the shared WiFi driver, but the independent UART
-      // bridge can keep running throughout the upload.
+#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+      // Browser OTA owns the shared WiFi driver. An independent UART bridge
+      // can keep running throughout the upload.
       const bool espnow_paused = _callbacks->isEspNowBridgeRunning();
       if (espnow_paused && !_callbacks->setEspNowBridgeState(false)) {
         strcpy(reply, "ERR: could not pause ESP-NOW for OTA");
@@ -2858,8 +2877,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       reply[0] = 0;
       if (!_board->startOTAUpdate(_prefs->node_name, reply, force_ap)) {
         if (!reply[0]) strcpy(reply, "Error");
-#if defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE) \
-    && !defined(WITH_MQTT_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
         if (espnow_paused && !_callbacks->setEspNowBridgeState(true)) {
           const size_t used = strlen(reply);
           snprintf(reply + used, 160 - used, "; ESP-NOW resume failed");
@@ -2872,8 +2890,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         _callbacks->setBridgeState(false);
       }
 #endif
-#if defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE) \
-    && !defined(WITH_MQTT_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
       else if (espnow_paused) {
         const size_t used = strlen(reply);
         snprintf(reply + used, 160 - used, "; ESP-NOW paused");
@@ -2896,9 +2913,14 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         _callbacks->setBridgeState(true);
       }
 #endif
-#if defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE) \
-    && !defined(WITH_MQTT_BRIDGE)
-      else if (_prefs->espnow_bridge_enabled) {
+#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+      else if (
+#if defined(WITH_RS232_BRIDGE) || defined(ESPNOW_BRIDGE_MERGED)
+          _prefs->espnow_bridge_enabled
+#else
+          _prefs->bridge_enabled
+#endif
+      ) {
         const bool resumed = _callbacks->setEspNowBridgeState(true);
         const size_t used = strlen(reply);
         snprintf(reply + used, 160 - used, resumed
@@ -3762,15 +3784,20 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #endif
   // Observer/MQTT/WiFi/timezone/alert/SNMP commands live in CommonCLI_Observer.cpp.
   if (handleObserverSetCmd(sender_timestamp, config, reply)) return;
-#if defined(WITH_ESPNOW_BRIDGE) \
-    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
+#if defined(WITH_ESPNOW_BRIDGE)
   if (memcmp(config, "espnow.enabled ", 15) == 0) {
     const char* value = config + 15;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
       strcpy(reply, "Error: use set espnow.enabled on|off");
     } else {
       const bool enable = strcmp(value, "on") == 0;
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) \
+    || defined(ESPNOW_BRIDGE_MERGED)
       _prefs->espnow_bridge_enabled = enable;
+#endif
+#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+      _prefs->bridge_enabled = enable;
+#endif
       const bool applied = _callbacks->setEspNowBridgeState(enable);
       savePrefs();
       strcpy(reply, applied ? "OK"
@@ -4633,10 +4660,15 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (!parseOnOffStrict(&config[15], enable)) {
       strcpy(reply, "Error: usage set bridge.enabled on|off");
     } else {
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
-      // In a combined Full image bridge.enabled retains its ESP-NOW meaning;
-      // mqtt.enabled is the independent MQTT switch.
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) \
+        || (defined(ESPNOW_BRIDGE_MERGED) && !defined(WITH_RS232_BRIDGE)))
+      // bridge.enabled retains its ESP-NOW meaning; mqtt.enabled is the
+      // independent MQTT switch when the profile also has that transport.
       _prefs->espnow_bridge_enabled = enable;
+#if !defined(WITH_MQTT_BRIDGE)
+      _prefs->bridge_enabled = enable;
+#endif
       const bool applied = _callbacks->setEspNowBridgeState(enable);
       savePrefs();
       strcpy(reply, applied ? "OK"
@@ -5320,10 +5352,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #else
             _callbacks->isBridgeRunning() ? "on" : "off");
 #endif
-#if defined(WITH_ESPNOW_BRIDGE) \
-    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
+#if defined(WITH_ESPNOW_BRIDGE)
   } else if (configKeyEquals(config, "espnow.enabled")) {
-    sprintf(reply, "> %s", _prefs->espnow_bridge_enabled ? "on" : "off");
+    sprintf(reply, "> %s",
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) \
+    || defined(ESPNOW_BRIDGE_MERGED)
+            _prefs->espnow_bridge_enabled ? "on" : "off");
+#else
+            _prefs->bridge_enabled ? "on" : "off");
+#endif
   } else if (configKeyEquals(config, "espnow.running")) {
     sprintf(reply, "> %s", _callbacks->isEspNowBridgeRunning() ? "on" : "off");
 #endif

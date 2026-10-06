@@ -66,7 +66,10 @@ int main() {
     FakeFS fs{json};
     assert(cli.import(&fs) && cli.saves == 1);
     assert(strcmp(cli.prefs.node_name, "imported node") == 0);
-#if defined(RS232_BRIDGE_MERGED) && !defined(RS232_BRIDGE_DEFAULT_ON)
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON) \
+    && !defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+    assert(cli.prefs.bridge_enabled == 0);
+#elif defined(RS232_BRIDGE_MERGED) && !defined(RS232_BRIDGE_DEFAULT_ON)
     const bool explicit_uart = strstr(json, "uart:1") || strstr(json, "uart:2");
     const bool enabled = explicit_uart && strstr(json, "en:1");
     assert(cli.prefs.bridge_enabled == enabled && cli.prefs.bridge_uart == 2);
@@ -77,6 +80,8 @@ int main() {
 #endif
 #if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
     assert(cli.prefs.espnow_bridge_enabled == 0);
+#elif defined(ESPNOW_BRIDGE_MERGED) && !defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+    assert(cli.prefs.espnow_bridge_enabled == cli.prefs.bridge_enabled);
 #else
     assert(cli.prefs.espnow_bridge_enabled == 1);
 #endif
@@ -85,9 +90,16 @@ int main() {
   }
   // Malformed JSON may partially apply scalar fields before the parser rejects it.
   CLI broken;
+  broken.prefs.espnow_bridge_enabled = 1;
   FakeFS malformed{"{bridge:{en:1,uart:1}"};
   assert(!broken.import(&malformed) && broken.saves == 0);
 #if defined(RS232_BRIDGE_MERGED) && !defined(RS232_BRIDGE_DEFAULT_ON)
   assert(broken.prefs.bridge_enabled == 0 && broken.prefs.bridge_uart == 2);
+#endif
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+  assert(broken.prefs.espnow_bridge_enabled == 1);
+#if !defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+  assert(broken.prefs.bridge_enabled == 0);
+#endif
 #endif
 }
