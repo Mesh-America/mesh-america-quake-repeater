@@ -20,6 +20,7 @@
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
 #include <Utils.h>
 #ifdef ESP_PLATFORM
+#include "NetworkLink.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <esp_wifi.h>
@@ -1031,6 +1032,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     } else {
       strcpy(reply, _mqtt_prefs.wifi_password[0] ? "> ******** (local connection only)" : "> (not set)");
     }
+  } else if (strcmp(config, "link.dns") == 0) {
+    activeNetworkLink().formatDns(reply, 160);
   } else if (memcmp(config, "wifi.status", 11) == 0) {
     wl_status_t status = WiFi.status();
     const char* status_str;

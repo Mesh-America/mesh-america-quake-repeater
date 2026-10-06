@@ -639,6 +639,7 @@ These settings apply across all MQTT slots:
 - `get wifi.ssid` - Get WiFi SSID
 - `get wifi.pwd` - Get WiFi password
 - `get wifi.status` - Get WiFi connection status, IP, RSSI, and uptime
+- `get link.dns` - Show the live DNS resolver list, the selected medium's gateway, and each medium's leased DNS servers (`-` means empty; `none` means never leased). Long lease lists may be truncated to fit the CLI reply.
 - `get wifi.powersave` - Get WiFi power save mode (none/min/max)
 
 #### Set Commands
