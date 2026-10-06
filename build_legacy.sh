@@ -3983,6 +3983,21 @@ append_platformio_extra_script() {
   export PLATFORMIO_EXTRA_SCRIPTS
 }
 
+ensure_esp32_wifi_scan_fix() {
+  local env_platform=$1
+  local pio_env_name=$2
+  local hook="pre:scripts/esp32_wifi_scan_fix.py"
+  local item
+  local -a hooks=()
+  [ "$env_platform" = "ESP32_PLATFORM" ] || return 0
+  pio_env_option_contains "$pio_env_name" extra_scripts "scripts/esp32_wifi_scan_fix.py" && return 0
+  read -r -a hooks <<< "${PLATFORMIO_EXTRA_SCRIPTS//$'\n'/ }"
+  for item in "${hooks[@]}"; do
+    [ "$item" = "$hook" ] && return 0
+  done
+  append_platformio_extra_script "$hook"
+}
+
 apply_lora_ota_flag_order_fix() {
   local env_name=$1
   local pio_env_name=$2
@@ -5107,6 +5122,9 @@ build_firmware_one_profile() {
     unset MESHCORE_REQUIRE_PACKET_LOGGING
     unset MESHCORE_COMPANION_RADIO_FULL
   fi
+
+  # Keep the reviewed scan SDK fix when a target overrides extra_scripts.
+  ensure_esp32_wifi_scan_fix "$env_platform" "$pio_env_name"
 
   if [ "$env_platform" = "ESP32_PLATFORM" ] \
       && ! pio_env_option_contains "$pio_env_name" extra_scripts \
