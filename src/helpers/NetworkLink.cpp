@@ -37,6 +37,7 @@ namespace {
 // Trailing empty slots are dropped to keep remote replies short; "-" marks an
 // empty slot before a populated one, or a list with nothing in it.
 static void formatDnsList(char* out, size_t out_size, const ip_addr_t* servers, int count) {
+  if (out == nullptr || out_size == 0) return;
   int last = count - 1;
   while (last >= 0 && ip_addr_isany_val(servers[last])) last--;
   out[0] = '\0';
@@ -158,16 +159,20 @@ class NetworkLinkBase : public NetworkLink {
   // that ever changes.)
   static esp_err_t snapshotDnsOnTcpipThread(void* ctx) {
     NetworkLinkBase* self = static_cast<NetworkLinkBase*>(ctx);
+    ip_addr_t servers[kDnsServers] = {};
     bool any = false;
     for (int i = 0; i < kDnsServers; i++) {
       const ip_addr_t* server = dns_getserver(i);
-      self->_dns_snapshot[i] = (server != nullptr) ? *server : *IP_ADDR_ANY;
-      if (!ip_addr_isany_val(self->_dns_snapshot[i])) any = true;
+      servers[i] = (server != nullptr) ? *server : *IP_ADDR_ANY;
+      if (!ip_addr_isany_val(servers[i])) any = true;
     }
     // A lease that carried no resolver at all (static configuration, or a
     // server that offered none) must not be remembered as "this medium's DNS is
     // nothing" — restoring that would wipe a working resolver for no gain.
-    if (any) self->_dns_captured = true;
+    if (any) {
+      for (int i = 0; i < kDnsServers; i++) self->_dns_snapshot[i] = servers[i];
+      self->_dns_captured = true;
+    }
     return ESP_OK;
   }
 
