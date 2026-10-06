@@ -34,6 +34,47 @@ extern void tcpipInit();
 
 namespace {
 
+// Trailing empty slots are dropped to keep remote replies short; "-" marks an
+// empty slot before a populated one, or a list with nothing in it.
+static void formatDnsList(char* out, size_t out_size, const ip_addr_t* servers, int count) {
+  int last = count - 1;
+  while (last >= 0 && ip_addr_isany_val(servers[last])) last--;
+  out[0] = '\0';
+  if (last < 0) {
+    snprintf(out, out_size, "-");
+    return;
+  }
+  for (int i = 0; i <= last; i++) {
+    size_t len = strlen(out);
+    if (i > 0 && len + 1 < out_size) {
+      out[len++] = ',';
+      out[len] = '\0';
+    }
+    if (len + 1 >= out_size) return;
+    if (ip_addr_isany_val(servers[i])) {
+      snprintf(out + len, out_size - len, "-");
+    } else {
+      ipaddr_ntoa_r(&servers[i], out + len, (int)(out_size - len));
+    }
+  }
+}
+
+static esp_err_t readDnsServersOnTcpipThread(void* ctx) {
+  ip_addr_t* servers = static_cast<ip_addr_t*>(ctx);
+  for (int i = 0; i < DNS_MAX_SERVERS; i++) {
+    const ip_addr_t* server = dns_getserver(i);
+    servers[i] = (server != nullptr) ? *server : *IP_ADDR_ANY;
+  }
+  return ESP_OK;
+}
+
+// lwIP's server list is global, so this is what every socket resolves through.
+static void formatCurrentDnsServers(char* out, size_t out_size) {
+  ip_addr_t servers[DNS_MAX_SERVERS] = {};
+  esp_netif_tcpip_exec(readDnsServersOnTcpipThread, servers);
+  formatDnsList(out, out_size, servers, DNS_MAX_SERVERS);
+}
+
 class NetworkLinkBase : public NetworkLink {
  protected:
   std::atomic<uint64_t> _outage_bits{AlertFaultPolicy::packOutageSnapshot({false, 0, 0})};
@@ -43,7 +84,7 @@ class NetworkLinkBase : public NetworkLink {
   bool _status_initialized = false;
   bool _last_connected = false;
   unsigned long _last_status_check = 0;
-  static constexpr int kDnsServers = 2;
+  static constexpr int kDnsServers = DNS_MAX_SERVERS;
   // Only ever touched on the lwIP thread (see snapshotDns()), so no atomics.
   ip_addr_t _dns_snapshot[kDnsServers] = {};
   bool _dns_captured = false;
@@ -144,6 +185,35 @@ class NetworkLinkBase : public NetworkLink {
 
  public:
   void snapshotDns() { esp_netif_tcpip_exec(snapshotDnsOnTcpipThread, this); }
+
+  // "none" until this medium has held a lease that carried a resolver.
+  void formatLeaseDns(char* out, size_t out_size) const {
+    struct Copy {
+      const NetworkLinkBase* self;
+      ip_addr_t servers[kDnsServers];
+      bool captured;
+    } copy = {this, {}, false};
+    esp_netif_tcpip_exec([](void* ctx) -> esp_err_t {
+      Copy* c = static_cast<Copy*>(ctx);
+      c->captured = c->self->_dns_captured;
+      for (int i = 0; i < kDnsServers; i++) c->servers[i] = c->self->_dns_snapshot[i];
+      return ESP_OK;
+    }, &copy);
+    if (!copy.captured) {
+      snprintf(out, out_size, "none");
+      return;
+    }
+    formatDnsList(out, out_size, copy.servers, kDnsServers);
+  }
+
+  void formatDnsFor(char* reply, size_t reply_size, IPAddress gateway) const {
+    char current[64];
+    char lease[64];
+    formatCurrentDnsServers(current, sizeof(current));
+    formatLeaseDns(lease, sizeof(lease));
+    snprintf(reply, reply_size, "> dns:%s gw:%s lease:%s",
+             current, gateway.toString().c_str(), lease);
+  }
 
   // A medium that has never held a lease with a resolver leaves the current one
   // alone rather than blanking it.
@@ -325,6 +395,10 @@ class WiFiNetworkLink final : public NetworkLinkBase {
              statusName(),
              localIP().toString().c_str());
   }
+  void formatDns(char* reply, size_t reply_size) const override {
+    formatDnsFor(reply, reply_size, WiFi.gatewayIP());
+  }
+  IPAddress gatewayIP() const { return WiFi.gatewayIP(); }
 };
 
 #if defined(NETWORK_PREFER_ETHERNET)
@@ -472,6 +546,10 @@ class EthernetNetworkLink final : public NetworkLinkBase {
     snprintf(reply, reply_size, "> ethernet:%s ip=%s",
              statusName(), localIP().toString().c_str());
   }
+  void formatDns(char* reply, size_t reply_size) const override {
+    formatDnsFor(reply, reply_size, CH390.gatewayIP());
+  }
+  IPAddress gatewayIP() const { return CH390.gatewayIP(); }
 
   EventState eventState() const {
     return static_cast<EventState>(
@@ -936,6 +1014,22 @@ class AutomaticNetworkLink final : public NetworkLink {
              _ethernet.localIP().toString().c_str(),
              wifiConfigured() ? "yes" : "no", wifi_started ? "yes" : "no",
              (wifi_started && _wifi.isConnected()) ? "up" : "down");
+  }
+  void formatDns(char* reply, size_t reply_size) const override {
+    const NetworkMedium selected = _selected.load(std::memory_order_acquire);
+    char current[64];
+    char eth_lease[64];
+    char wifi_lease[64];
+    formatCurrentDnsServers(current, sizeof(current));
+    _ethernet.formatLeaseDns(eth_lease, sizeof(eth_lease));
+    _wifi.formatLeaseDns(wifi_lease, sizeof(wifi_lease));
+    const IPAddress gateway = selected == NetworkMedium::Ethernet ? _ethernet.gatewayIP()
+                            : selected == NetworkMedium::WiFi     ? _wifi.gatewayIP()
+                                                                  : IPAddress();
+    snprintf(reply, reply_size,
+             "> dns:%s selected:%s gw:%s\neth-lease:%s wifi-lease:%s",
+             current, NetworkPolicy::mediumName(selected),
+             gateway.toString().c_str(), eth_lease, wifi_lease);
   }
   unsigned long connectedAtMillis() const override {
     const NetworkMedium selected = _selected.load(std::memory_order_acquire);
