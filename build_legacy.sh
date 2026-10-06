@@ -7572,7 +7572,13 @@ main() {
       prompt_for_logging_matrix_output_policy "clean"
     fi
   else
-    RESUME_BUILD_OUTPUT=0
+    # Single-target builds still clean by default, but an explicit output
+    # policy must survive profile selection just as it does for a matrix.
+    if [ "$OUTPUT_POLICY_EXPLICIT" -eq 1 ]; then
+      normalize_resume_build_output
+    else
+      RESUME_BUILD_OUTPUT=0
+    fi
   fi
 
   if [ "$INTERACTIVE_BUILD_SELECTION" = "1" ] \
