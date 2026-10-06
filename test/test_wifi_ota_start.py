@@ -39,7 +39,8 @@ class WiFiOtaStartTest(unittest.TestCase):
         mask = re.search(r"static constexpr uint8_t kAccessPointProtocolMask =.*?;",
                          policy, re.DOTALL).group(0)
         fixture = fixture.replace("@AP_PROTOCOL_POLICY@", mask + "\n" + extract_braced(
-            policy, "inline esp_err_t applyAccessPointProtocolMask()"))
+            policy, "inline esp_err_t applyAccessPointProtocolMask()") + "\n"
+            + extract_braced(policy, "inline int accessPointChannel()"))
         for name, implementation, flags in (
             ("lightweight infrastructure", lightweight, ["-DLIGHTWEIGHT_WIFI_OTA=1"]),
             ("lightweight companion", lightweight, ["-DLIGHTWEIGHT_WIFI_OTA=1", "-DCOMPANION_RADIO_FULL=1"]),
@@ -176,6 +177,113 @@ int main() {
             "void WebConfigServer::finalizeTeardown("))
         fixture = (ROOT / "test/fixtures/webconfig_ota_handoff.cpp").read_text()
         self.compile_and_run(fixture.replace("@METHODS@", methods))
+
+    def test_rs232_espnow_ota_pauses_only_wireless_bridge_and_restores_failures(self):
+        cli = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
+        start = cli.index('    } else if (memcmp(command, "start ota", 9)')
+        end = cli.index('    } else if (memcmp(command, "clock", 5)', start)
+        fixture = r'''
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+bool ota = false;
+struct Callbacks {
+  bool web = false, espnow = true, uart = true;
+  bool allow_pause = true, allow_resume = true;
+  int pauses = 0, resumes = 0, uart_changes = 0;
+  bool isWebConfigActive() const { return web; }
+  bool stopWebConfigForOTA(char*) { web = false; return true; }
+  bool isEspNowBridgeRunning() const { return espnow; }
+  bool setEspNowBridgeState(bool enabled) {
+    if (enabled) {
+      ++resumes; assert(!ota);
+      if (!allow_resume) return false;
+    } else {
+      ++pauses;
+      if (!allow_pause) return false;
+    }
+    espnow = enabled; return true;
+  }
+  bool setBridgeState(bool enabled) { ++uart_changes; uart = enabled; return true; }
+} callbacks;
+struct Board {
+  bool allow_start = true, allow_stop = true;
+  int starts = 0;
+  bool startOTAUpdate(const char*, char* reply, bool) {
+    assert(!callbacks.espnow && !callbacks.web); ++starts;
+    ota = allow_start;
+    strcpy(reply, allow_start ? "Started: http://192.168.4.1/update"
+                             : "ERR: OTA WiFi failed");
+    return allow_start;
+  }
+  bool stopOTAUpdate(char* reply) {
+    if (allow_stop) ota = false;
+    strcpy(reply, allow_stop ? "OK - OTA stopped" : "ERR: OTA upload active");
+    return allow_stop;
+  }
+} board;
+struct Prefs {
+  const char* node_name = "test";
+  bool bridge_enabled = true, espnow_bridge_enabled = true;
+} prefs;
+struct CLI {
+  Board* _board = &board;
+  Prefs* _prefs = &prefs;
+  Callbacks* _callbacks = &callbacks;
+  void run(const char* command, char* reply) {
+    if (false) {
+@CLI@
+    }
+  }
+};
+int main() {
+  CLI cli;
+  struct { char text[160] = {}; unsigned guard = 42; } reply;
+  cli.run("start ota invalid", reply.text);
+  assert(strstr(reply.text, "usage") && callbacks.pauses == 0 && board.starts == 0);
+  callbacks.allow_pause = false;
+  cli.run("start ota", reply.text);
+  assert(strcmp(reply.text, "ERR: could not pause ESP-NOW for OTA") == 0);
+  assert(board.starts == 0 && callbacks.espnow && callbacks.uart);
+  callbacks.allow_pause = true;
+  callbacks.web = true;
+  cli.run("start ota ap", reply.text);
+  assert(ota && !callbacks.espnow && callbacks.uart);
+  assert(strstr(reply.text, "; ESP-NOW paused") && strstr(reply.text, "; WebConfig stopped"));
+  assert(prefs.bridge_enabled && prefs.espnow_bridge_enabled);
+  const int resumed_before_failure = callbacks.resumes;
+  board.allow_stop = false;
+  cli.run("stop ota", reply.text);
+  assert(strcmp(reply.text, "ERR: OTA upload active") == 0);
+  assert(callbacks.resumes == resumed_before_failure && !callbacks.espnow);
+  board.allow_stop = true;
+  cli.run("stop ota", reply.text);
+  assert(!ota && callbacks.espnow && callbacks.uart);
+  assert(strstr(reply.text, "; ESP-NOW resumed"));
+  board.allow_start = false;
+  cli.run("start ota", reply.text);
+  assert(strcmp(reply.text, "ERR: OTA WiFi failed") == 0 && callbacks.espnow);
+  callbacks.allow_resume = false;
+  cli.run("start ota", reply.text);
+  assert(strcmp(reply.text, "ERR: OTA WiFi failed; ESP-NOW resume failed") == 0);
+  assert(!callbacks.espnow && callbacks.uart);
+  cli.run("stop ota", reply.text);
+  assert(strstr(reply.text, "; ESP-NOW resume failed"));
+  // A disabled secondary must stay disabled after the upload stops.
+  prefs.espnow_bridge_enabled = false;
+  callbacks.allow_resume = true;
+  board.allow_start = true;
+  const int resumes = callbacks.resumes;
+  cli.run("start ota", reply.text);
+  assert(!strstr(reply.text, "ESP-NOW") && !callbacks.espnow);
+  cli.run("stop ota", reply.text);
+  assert(callbacks.resumes == resumes && !callbacks.espnow);
+  assert(callbacks.uart_changes == 0 && callbacks.uart && reply.guard == 42);
+}
+'''
+        self.compile_and_run(fixture.replace("@CLI@", cli[start:end]),
+                             "-DESP_PLATFORM=1", "-DADMIN_PASSWORD=1",
+                             "-DWITH_RS232_BRIDGE=1", "-DWITH_ESPNOW_BRIDGE=1")
 
     def test_background_bridge_retry_waits_until_ota_stops(self):
         fixture = r'''

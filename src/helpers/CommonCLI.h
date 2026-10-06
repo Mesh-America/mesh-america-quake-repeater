@@ -197,10 +197,11 @@ public:
   // Appended after the existing /com_prefs tail. Keep the preamble in the same
   // transaction as frequency/modulation; old images adopt /radio_profiles.
   uint16_t primary_radio_preamble = 0;
-  // Full ESP32 images can carry MQTT and ESP-NOW simultaneously.  Keep the
+  // Full ESP32 images can carry another bridge and ESP-NOW simultaneously. Keep the
   // ESP-NOW intent separately so either transport can be selected at runtime.
   // Old preference images did not have this byte; they default to enabled to
-  // retain the previous combined-Full behavior after an upgrade.
+  // retain the previous MQTT combined-Full behavior after an upgrade. Merged
+  // default-off profiles require their appended profile marker instead.
   uint8_t espnow_bridge_enabled = 1;
   // Appended after the ESP-NOW intent. Zero keeps the board's legacy cadence.
   uint16_t gps_sync_interval_hours = 0;
@@ -593,7 +594,7 @@ public:
   virtual bool isBridgeRunning() const { return false; }
 
   // Most roles have one bridge, so the transport-specific methods retain the
-  // legacy bridge behavior by default.  Combined MQTT + ESP-NOW roles override
+  // legacy bridge behavior by default. Combined bridge roles override
   // them to let each transport be started, stopped, and queried independently.
   virtual bool setMqttBridgeState(bool enable) { return setBridgeState(enable); }
   virtual bool setEspNowBridgeState(bool enable) { return setBridgeState(enable); }

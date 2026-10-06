@@ -72,7 +72,8 @@ struct MockWiFi {
     configured_ap_ip = ip;
     return ap_config_ok;
   }
-  bool softAP(const char*, const char*) {
+  bool softAP(const char*, const char*, int channel = 1) {
+    assert(channel == 1);
     ++ap_start_calls;
     if (ap_start_ok) {
       sdk_initialized = sdk_started = sdk_ap_active = true;
@@ -85,6 +86,7 @@ struct MockWiFi {
 } WiFi;
 namespace mesh { namespace wifi {
 int applyAccessPointProtocolMask() { WiFi.ap_protocol = 7; return ESP_OK; }
+int accessPointChannel() { return 1; }
 } }
 
 int wifi_stop_calls = 0, wifi_deinit_calls = 0;

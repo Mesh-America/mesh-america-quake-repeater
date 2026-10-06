@@ -132,6 +132,7 @@ fi
 # and BLE constraints cannot silently disappear through that inheritance.
 pio project config --json-output | python3 -c '
 import json
+import re
 import sys
 
 sections = {section: dict(options) for section, options in json.load(sys.stdin)}
@@ -325,6 +326,7 @@ for env_name in (
     "solarxiao_33S_repeater",
     "Heltec_v3_repeater",
     "Heltec_WSL3_repeater",
+    "MKE_s3_repeater",
     "Heltec_t096_repeater",
     "Heltec_t096_repeater_lora_ota_no_external_sensors",
     "RAK_4631_repeater",
@@ -338,6 +340,55 @@ for env_name in (
 require("RAK_4631_repeater", "build_flags", "WITH_RS232_BRIDGE_ALT=Serial1")
 require("RAK_4631_repeater", "build_flags", "WITH_RS232_BRIDGE_UART=2")
 reject("wio-e5_repeater", "build_flags", "WITH_RS232_BRIDGE=")
+
+# MKE keeps its ordinary role and UART wiring while exposing the existing
+# persistent bridge controls. The merged marker selects the disabled default;
+# the explicit legacy bridge remains enabled for deliberate direct builds.
+for env_name in ("MKE_s3_repeater", "MKE_s3_repeater_bridge_rs232"):
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE=Serial2")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE_UART=2")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE_RX=16")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE_TX=17")
+    require(env_name, "build_src_filter", "helpers/bridges/RS232Bridge.cpp")
+reject("MKE_s3_repeater", "build_flags", "RS232_BRIDGE_DEFAULT_ON")
+reject("MKE_s3_repeater_bridge_rs232", "build_flags", "RS232_BRIDGE_MERGED")
+require("MKE_s3_repeater", "build_flags", "WITH_ESPNOW_BRIDGE=1")
+require("MKE_s3_repeater", "build_flags", "ESPNOW_BRIDGE_MERGED=1")
+require("MKE_s3_repeater", "build_src_filter", "helpers/bridges/ESPNowBridge.cpp")
+reject("MKE_s3_repeater_bridge_espnow", "build_flags", "ESPNOW_BRIDGE_MERGED")
+for env_name in (
+    "MKE_s3",
+    "MKE_s3_repeater_bridge_espnow",
+    "MKE_s3_room_server",
+    "MKE_s3_sensor",
+    "MKE_s3_terminal_chat",
+    "MKE_s3_companion_radio_usb",
+    "MKE_s3_companion_radio_ble",
+    "MKE_s3_companion_radio_wifi",
+):
+    reject(env_name, "build_flags", "WITH_RS232_BRIDGE")
+    reject(env_name, "build_src_filter", "helpers/bridges/RS232Bridge.cpp")
+require("MKE_s3_repeater_bridge_espnow", "build_flags", "WITH_ESPNOW_BRIDGE=1")
+require("MKE_s3_repeater_bridge_espnow", "build_src_filter", "helpers/bridges/ESPNowBridge.cpp")
+
+# GPIO5 is the radio reset line. Guard the complete board wiring rather than
+# accepting a bridge pin assignment that compiles but disables a peripheral.
+mke_pins = {
+    name: int(value)
+    for name, value in re.findall(
+        r"(?:^|\s)-D\s*([A-Z0-9_]+)=([0-9]+)(?=\s|$)",
+        option_text("MKE_s3_repeater", "build_flags"),
+    )
+}
+bridge_pins = {mke_pins["WITH_RS232_BRIDGE_RX"], mke_pins["WITH_RS232_BRIDGE_TX"]}
+for pin_name in (
+    "P_LORA_NSS", "P_LORA_MOSI", "P_LORA_MISO", "P_LORA_SCLK",
+    "P_LORA_BUSY", "P_LORA_RESET", "P_LORA_DIO_1",
+    "PIN_BOARD_SDA", "PIN_BOARD_SCL", "PIN_USER_BTN",
+    "PIN_GPS_RX", "PIN_GPS_TX", "PIN_GPS_EN",
+):
+    if mke_pins[pin_name] in bridge_pins:
+        raise SystemExit(f"test_build_profiles: MKE bridge UART conflicts with {pin_name}")
 
 for env_name in (
     "t1000e_companion_radio_usb",
@@ -918,6 +969,39 @@ apply_esp32_full_shared_bridge_profile Station_G2_repeater_observer_mqtt
 [[ "$(get_unified_full_infrastructure_target Station_G2_repeater_bridge_espnow)" \
     = "Station_G2_repeater_observer_mqtt" ]] \
   || fail "Station G2 Full ESP-NOW target did not resolve to the combined MQTT recipe"
+
+# Heltec V4 TFT has no combined observer recipe, so its dedicated ESP-NOW
+# image must survive release selection in either input order. MKE now owns
+# both bridges directly and is checked against its canonical alias below.
+for plain_target in heltec_v4_tft_repeater; do
+  espnow_target=${plain_target}_bridge_espnow
+  if get_unified_full_infrastructure_target "$espnow_target" >/dev/null; then
+    fail "$espnow_target unexpectedly acquired a combined observer recipe"
+  fi
+  [ "$(select_ordinary_full_targets "$plain_target" "$espnow_target")" \
+      = "$(printf "%s\n" "$plain_target" "$espnow_target")" ] \
+    || fail "$plain_target incorrectly replaced its dedicated ESP-NOW image"
+  [ "$(select_ordinary_full_targets "$espnow_target" "$plain_target")" \
+      = "$(printf "%s\n" "$espnow_target" "$plain_target")" ] \
+    || fail "$plain_target lost its dedicated ESP-NOW image with reversed inputs"
+done
+[ "$(get_unified_full_infrastructure_target Heltec_v3_repeater_bridge_espnow)" \
+    = Heltec_v3_repeater_observer_mqtt ] \
+  || fail "Heltec V3 lost its same-board combined observer recipe"
+[ "$(select_ordinary_full_targets Heltec_v3_repeater \
+    Heltec_v3_repeater_bridge_espnow Heltec_v3_repeater_observer_mqtt)" \
+    = Heltec_v3_repeater ] \
+  || fail "Heltec V3 retained duplicate ESP-NOW/observer Full images"
+[ "$(select_ordinary_full_targets MKE_s3_repeater MKE_s3_repeater_bridge_espnow)" \
+    = MKE_s3_repeater ] \
+  || fail "MKE S3 retained a duplicate ESP-NOW image after merging its sources"
+[ "$(select_ordinary_full_targets MKE_s3_repeater_bridge_espnow MKE_s3_repeater)" \
+    = MKE_s3_repeater ] \
+  || fail "MKE S3 bridge input order changed its canonical Full image"
+[ "$(select_ordinary_full_targets LilyGo_TLora_V2_1_1_6_repeater_bridge_espnow \
+    LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_)" \
+    = LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ ] \
+  || fail "TLora trailing-underscore observer failed to replace its ESP-NOW sibling"
 ESP32_FULL_BUILD=0
 PLATFORMIO_BUILD_FLAGS=""
 PLATFORMIO_BUILD_SRC_FILTER=""
@@ -1380,6 +1464,73 @@ fi
   || fail "T096 RS232 bridge did not map to merged repeater"
 is_redundant_bulk_build_target Heltec_v3_repeater_bridge_rs232 \
   || fail "merged RS232 bridge remained in canonical bulk builds"
+[ "$(get_merged_rs232_repeater_replacement MKE_s3_repeater_bridge_rs232)" \
+    = MKE_s3_repeater ] \
+  || fail "MKE S3 RS232 bridge did not map to its merged repeater"
+is_supported_build_env MKE_s3_repeater_bridge_rs232 \
+  || fail "MKE S3 legacy RS232 target stopped being directly buildable"
+[ "$(get_pio_build_env MKE_s3_repeater_bridge_rs232)" \
+    = MKE_s3_repeater_bridge_rs232 ] \
+  || fail "MKE S3 direct legacy build lost its bridge-on recipe"
+is_redundant_bulk_build_target MKE_s3_repeater_bridge_rs232 \
+  || fail "MKE S3 dedicated RS232 image remained in canonical bulk builds"
+if is_redundant_bulk_build_target MKE_s3_repeater; then
+  fail "MKE S3 canonical repeater was omitted"
+fi
+is_redundant_bulk_build_target MKE_s3_repeater_bridge_espnow \
+  || fail "MKE S3 dedicated ESP-NOW image remained beside its combined repeater"
+[ "$(get_merged_espnow_repeater_replacement MKE_s3_repeater_bridge_espnow)" \
+    = MKE_s3_repeater ] \
+  || fail "MKE S3 ESP-NOW bridge did not map to its merged repeater"
+is_supported_build_env MKE_s3_repeater_bridge_espnow \
+  || fail "MKE S3 legacy ESP-NOW target stopped being directly buildable"
+[ "$(get_pio_build_env MKE_s3_repeater_bridge_espnow)" \
+    = MKE_s3_repeater_bridge_espnow ] \
+  || fail "MKE S3 direct legacy ESP-NOW build lost its bridge-on recipe"
+(
+  SUPPORTED_PIO_ENVS=(
+    MKE_s3_repeater
+    MKE_s3_repeater_bridge_rs232
+    MKE_s3_repeater_bridge_espnow
+  )
+  [ "$(resolve_all_firmwares)" \
+      = MKE_s3_repeater ] \
+    || fail "MKE S3 bulk inventory did not consolidate both bridge images"
+  [ "$(resolve_repeater_firmwares)" \
+      = MKE_s3_repeater ] \
+    || fail "MKE S3 repeater inventory retained dedicated bridge images"
+  [ "$(resolve_full_esp32_firmwares)" \
+      = MKE_s3_repeater ] \
+    || fail "MKE S3 Full ESP32 inventory retained dedicated bridge images"
+)
+
+# A hardcoded merged-role recommendation is insufficient if its normal
+# recipe no longer exists, cannot supply Full, or belongs to another board.
+# Isolate these metadata faults so a future observer cannot mask the guard.
+for replacement_fault in missing full board; do
+  (
+    normal_target=MKE_s3_repeater
+    bridge_target=MKE_s3_repeater_bridge_espnow
+    PIO_ENV_PLATFORM_BY_NAME[$normal_target]=ESP32_PLATFORM
+    PIO_ENV_FULL_BUILD_BY_NAME[$normal_target]=1
+    PIO_ENV_BOARD_BY_NAME[$normal_target]=mke-test-board
+    PIO_ENV_PLATFORM_BY_NAME[$bridge_target]=ESP32_PLATFORM
+    PIO_ENV_FULL_BUILD_BY_NAME[$bridge_target]=1
+    PIO_ENV_BOARD_BY_NAME[$bridge_target]=mke-test-board
+    for candidate in "$normal_target" "${normal_target}_mqtt" \
+        "${normal_target}_observer_mqtt" "${normal_target}_observer_mqtt_"; do
+      PIO_ENV_MQTT_BY_NAME[$candidate]=0
+    done
+    case "$replacement_fault" in
+      missing) unset 'PIO_ENV_PLATFORM_BY_NAME[MKE_s3_repeater]' ;;
+      full) PIO_ENV_FULL_BUILD_BY_NAME[$normal_target]=0 ;;
+      board) PIO_ENV_BOARD_BY_NAME[$normal_target]=different-board ;;
+    esac
+    [ "$(get_ordinary_full_group_key "$bridge_target")" \
+        = 'mke-test-board|mke_s3_repeater_bridge_espnow' ] \
+      || fail "MKE S3 $replacement_fault replacement incorrectly suppressed its bridge"
+  )
+done
 if is_redundant_bulk_build_target wio-e5-repeater_bridge_rs232; then
   fail "capacity-constrained Wio-E5 RS232 bridge was incorrectly merged"
 fi

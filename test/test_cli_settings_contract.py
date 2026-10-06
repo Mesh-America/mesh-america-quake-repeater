@@ -85,6 +85,8 @@ class CLISettingsContractTest(unittest.TestCase):
             'esp32_mqtt_espnow': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_MQTT_BRIDGE',
                                    'WITH_ESPNOW_BRIDGE', 'WITH_BRIDGE'],
             'rs232_gps': ['WITH_BRIDGE', 'WITH_RS232_BRIDGE', 'ENV_INCLUDE_GPS'],
+            'rs232_espnow': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_BRIDGE',
+                            'WITH_RS232_BRIDGE', 'WITH_ESPNOW_BRIDGE'],
             'espnow': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_BRIDGE', 'WITH_ESPNOW_BRIDGE', 'MESH_PRIMARY_ESPNOW'],
             'lr2021': ['USE_LR2021'],
         }

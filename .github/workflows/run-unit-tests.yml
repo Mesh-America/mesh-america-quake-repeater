@@ -114,7 +114,9 @@ jobs:
         run: node scripts/test_filter_tool.js
 
       - name: Verify bridge filter wiring and shorthand permissions
-        run: python3 -B test/test_transport_filter_wiring.py -v
+        run: |
+          python3 -B test/test_transport_filter_wiring.py -v
+          python3 -B test/test_rs232_runtime.py -v
 
       - name: Verify saved repeat-off trace exception and relay guards
         run: |

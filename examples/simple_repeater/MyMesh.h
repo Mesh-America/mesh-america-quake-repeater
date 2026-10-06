@@ -586,6 +586,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #elif defined(WITH_RS232_BRIDGE)
   RS232Bridge* bridge;
   uint8_t active_rs232_bridge_uart = 0;
+  #if defined(WITH_ESPNOW_BRIDGE)
+  ESPNowBridge espnow_bridge;
+  uint32_t shared_espnow_retry_at = 0;
+  #endif
 #elif defined(WITH_ESPNOW_BRIDGE)
   ESPNowBridge bridge;
 #endif
@@ -610,17 +614,19 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   }
 #endif
 
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
-  // MQTT creates its WiFi task asynchronously. Do not let ESP-NOW touch the
-  // station interface until that task has associated, otherwise it could bring
-  // up a second WiFi owner before the AP selects the shared channel.
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
+  // Retry ESP-NOW without taking over an active OTA session. MQTT creates its
+  // WiFi task asynchronously, so it must first associate on the shared channel.
   bool startSharedEspNowBridgeIfReady() {
     if (espnow_bridge.isRunning()) return true;
     if (!_prefs.espnow_bridge_enabled) return false;
     // Browser OTA pauses the bridges for the entire upload session. The
     // periodic retry must not undo that pause on its next loop iteration.
     if (_cli.getBoard()->isOTAUpdateRunning()) return false;
+#ifdef WITH_MQTT_BRIDGE
     if (mqtt_bridge && mqtt_bridge->isRunning() && !WiFi.isConnected()) return false;
+#endif
     if (!millisHasNowPassed(shared_espnow_retry_at)) return false;
     shared_espnow_retry_at = millis() + 5000;
     configureBridgeFilter(&espnow_bridge);
@@ -1277,11 +1283,13 @@ public:
 #endif
   }
 
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   bool isEspNowBridgeRunning() override {
     return espnow_bridge.isRunning();
   }
 
+#ifdef WITH_MQTT_BRIDGE
   bool setMqttBridgeState(bool enable) override {
     if (!enable) {
       if (mqtt_bridge && mqtt_bridge->isRunning()) mqtt_bridge->end();
@@ -1322,6 +1330,7 @@ public:
     if (_prefs.espnow_bridge_enabled) startSharedEspNowBridgeIfReady();
     return mqtt_bridge->isRunning();
   }
+#endif
 
   bool setEspNowBridgeState(bool enable) override {
     if (!enable) {
@@ -1330,18 +1339,22 @@ public:
       return !espnow_bridge.isRunning();
     }
     if (espnow_bridge.isRunning()) return true;
+    if (_cli.getBoard()->isOTAUpdateRunning()) return false;
     shared_espnow_retry_at = 0;
+#ifdef WITH_MQTT_BRIDGE
     if (mqtt_bridge && mqtt_bridge->isRunning()) {
       // Association is asynchronous; servicePostMeshLoop retries once the
       // MQTT station has joined the access point on its fixed channel.
       startSharedEspNowBridgeIfReady();
       return true;
     }
+#endif
     configureBridgeFilter(&espnow_bridge);
     espnow_bridge.begin();
     return espnow_bridge.isRunning();
   }
 
+#ifdef WITH_MQTT_BRIDGE
   bool restartMqttBridge() override {
 #ifdef WITH_WEBCONFIG
     if (_wc_batch_active) {
@@ -1355,6 +1368,7 @@ public:
     _alerter.setBridge(nullptr);
     return !_prefs.bridge_enabled || setMqttBridgeState(true);
   }
+#endif
 
   bool restartEspNowBridge() override {
     if (espnow_bridge.isRunning()) espnow_bridge.end();
