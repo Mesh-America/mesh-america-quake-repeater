@@ -100,16 +100,6 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 return request->send(400, "text/plain", "MD5 parameter missing");
             }
 
-            if(!Update.setMD5(request->getParam("MD5", true)->value().c_str())) {
-                ota_upload_busy.store(false);
-                return request->send(400, "text/plain", "MD5 parameter invalid");
-            }
-
-            // The HTTP listener defaults to a three-second receive timeout.
-            // A valid OTA body can pause longer on a weak WiFi link; retain a
-            // bounded timeout on this admitted upload without changing peers.
-            request->client()->setRxTimeout(30);
-
             #if defined(ESP8266)
                 int cmd = (filename == "filesystem") ? U_FS : U_FLASH;
                 Update.runAsync(true);
@@ -123,6 +113,19 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 ota_upload_busy.store(false);
                 return request->send(400, "text/plain", "OTA could not begin");
             }
+            // Arduino Update.begin() clears the expected digest. Set it only
+            // after begin succeeds so end() actually verifies the uploaded body.
+            if(!Update.setMD5(request->getParam("MD5", true)->value().c_str())) {
+                Update.abort();
+                ota_upload_busy.store(false);
+                return request->send(400, "text/plain", "MD5 parameter invalid");
+            }
+
+            // The HTTP listener defaults to a three-second receive timeout.
+            // A valid OTA body can pause longer on a weak WiFi link; retain a
+            // bounded timeout on this admitted upload without changing peers.
+            request->client()->setRxTimeout(30);
+
             // AsyncWebServer frees this per-request allocation on disconnect.
             // hasError() alone also reports success for a POST with no upload.
             request->_tempObject = calloc(1, sizeof(bool));
