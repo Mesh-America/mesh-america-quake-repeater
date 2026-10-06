@@ -2335,6 +2335,18 @@ are shared by Companion and infrastructure. The saved preference controls
 whether power saving is allowed; active USB, logging and network services may
 keep the hardware awake. Actual sleep depends on the board.
 
+On ESP32 infrastructure boards using an external USB-to-UART chip, such as the
+Heltec V3's CP2102, the native USB host guard cannot detect an attached computer.
+With all bridges and USB logging stopped, light sleep can lose a console
+command. Use `set powersaving off` for reliable USB configuration in that state.
+If the console is already unresponsive, reset the board and send that command
+within the first 120 seconds after boot, before infrastructure sleep is allowed.
+A running MQTT, RS232 or ESP-NOW bridge keeps infrastructure awake even when
+`get powersaving` reports `on`; that readback alone does not prove MCU sleep.
+Adding UART wake alone would still discard the characters that trigger wake,
+so it cannot preserve an unmodified web console's first command. See the
+[ESP-IDF UART wake documentation](https://docs.espressif.com/projects/esp-idf/en/v4.4.7/esp32s3/api-reference/system/sleep_modes.html#uart-wakeup-light-sleep-only).
+
 For the **1.17.1.5 G3 USB-disconnect report**, use `set powersaving off` as the
 workaround. The released ESP32 sleep code can lose native USB after two
 minutes when the terminal is closed, even with a computer attached. The
