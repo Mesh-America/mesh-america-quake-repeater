@@ -2604,7 +2604,8 @@ void MyMesh::loop() {
   sampleTelemetryHistory();
 #endif
 #ifdef WITH_MQTT_BRIDGE
-  // bridge.loop() is now handled by FreeRTOS task on Core 0 - no need to call it here
+  // TLS runs on Core 0; the radio loop reaps only an acknowledged CLI stop.
+  if (bridge && bridge->isRunning()) bridge->loop();
 #endif
 #ifdef WITH_ESPNOW_BRIDGE
   if (espnow_bridge.isRunning()) espnow_bridge.loop();

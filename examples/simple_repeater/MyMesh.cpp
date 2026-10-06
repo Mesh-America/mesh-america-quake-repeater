@@ -12860,8 +12860,12 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   expireRecentRepeatersIfDue();
 #endif
 
+#if defined(WITH_MQTT_BRIDGE)
+  // MQTT owns TLS on Core 0; the radio loop only reaps an acknowledged stop.
+  if (mqtt_bridge && mqtt_bridge->isRunning()) mqtt_bridge->loop();
+#endif
 #if defined(WITH_ESPNOW_BRIDGE)
-  // MQTT runs on Core 0. ESP-NOW remains cooperative, including in the
+  // ESP-NOW remains cooperative, including in the
   // combined Full image where both transports share the WiFi station radio.
   #if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
   if (espnow_bridge.isRunning()) espnow_bridge.loop();

@@ -22,13 +22,15 @@ namespace mesh {
 void setUsbLoggingEnabled(bool value) { live_usb = value; ++usb_calls; }
 }
 struct Callbacks {
-  bool live_wifi = false, apply_ok = true;
+  bool live_wifi = false, apply_ok = true, stopping = false;
   unsigned calls = 0;
   bool setMqttBridgeState(bool value) {
     ++calls;
     if (apply_ok) live_wifi = value;
     return apply_ok;
   }
+  bool requestMqttBridgeStop() { return setMqttBridgeState(false); }
+  bool isMqttBridgeStopping() { return stopping; }
 };
 struct CLI {
   Prefs prefs, persisted;
@@ -88,6 +90,15 @@ int main() {
   assert(cli.persisted.usb_logging_enabled && cli.persisted.bridge_enabled);
   assert(live_usb && !cli.callbacks.live_wifi);
   assert(strstr(reply, "saved, but MQTT runtime change failed"));
+  // A restart during cleanup must not save ON or change either live output.
+  cli.callbacks.stopping = true;
+  cli.prefs = cli.persisted = {0, 0};
+  live_usb = false;
+  const unsigned before_saves = cli.saves, before_calls = cli.callbacks.calls;
+  cli.set("logging.output both", reply);
+  assert(strstr(reply, "MQTT is stopping"));
+  assert(cli.saves == before_saves && cli.callbacks.calls == before_calls);
+  assert(!cli.prefs.bridge_enabled && !cli.persisted.bridge_enabled && !live_usb);
 #endif
 }
 '''

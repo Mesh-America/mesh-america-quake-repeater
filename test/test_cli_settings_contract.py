@@ -68,6 +68,7 @@ OBSERVER_QUERY_EXCEPTIONS = {
     'mqtt.ntp.diag': 'NTP diagnostics',
     'mqtt.presets': 'List of available presets',
     'mqtt.running': 'Live state; set mqtt.enabled controls intent',
+    'mqtt.stopping': 'Pending worker-owned shutdown; set mqtt.enabled off requests it',
     'mqtt.stats': 'Runtime MQTT statistics',
     'wifi.status': 'Live connection status',
 }

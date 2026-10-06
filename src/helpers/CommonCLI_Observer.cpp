@@ -880,6 +880,10 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     snprintf(reply, 160, "> %s", _callbacks->isMqttBridgeRunning() ? "on" : "off");
     return true;
   }
+  if (strcmp(config, "mqtt.stopping") == 0) {
+    snprintf(reply, 160, "> %s", _callbacks->isMqttBridgeStopping() ? "on" : "off");
+    return true;
+  }
   if (memcmp(config, "snmp.community", 14) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.snmp_community);
   } else if (memcmp(config, "snmp", 4) == 0 && (config[4] == '\0' || config[4] == '\n' || config[4] == '\r')) {
