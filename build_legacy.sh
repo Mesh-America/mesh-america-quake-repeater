@@ -4858,6 +4858,8 @@ build_firmware_one_profile() {
   local BUILD_RECIPE_SHA256
   local recipe_build_flags
   local completed_recipe
+  local resume_recipe_status
+  local resume_artifact_status
   local platformio_package_lock_fd=""
   local -a pio_run_args=()
   local -a BUILD_CAPABILITIES=()
@@ -5117,13 +5119,26 @@ build_firmware_one_profile() {
     "$full_source_commit") || return 1
   if [ "$RESUME_BUILD_OUTPUT" == "1" ]; then
     if python3 scripts/firmware_build_recipe.py occupied "${OUTPUT_DIR}/${firmware_filename}"; then
+      # Keep the recipe-first short circuit while distinguishing its failure
+      # from the packaged artifact/capability/RAM gate. Report only exit codes;
+      # build inputs and raw manifests can contain private settings.
+      resume_artifact_status=not-run
       if python3 scripts/firmware_build_recipe.py matches \
           "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" "$BUILD_RECIPE_SHA256" \
-          >/dev/null 2>&1 \
-          && build_artifacts_exist "$env_name" "$env_platform" "$firmware_filename"; then
-        echo "Skipping ${env_name}; matching recipe and qualified artifacts found for ${firmware_filename}."
-        return 0
+          >/dev/null 2>&1; then
+        resume_recipe_status=0
+        if build_artifacts_exist "$env_name" "$env_platform" "$firmware_filename" \
+            >/dev/null 2>&1; then
+          echo "Skipping ${env_name}; matching recipe and qualified artifacts found for ${firmware_filename}."
+          return 0
+        else
+          resume_artifact_status=$?
+        fi
+      else
+        resume_recipe_status=$?
       fi
+      printf 'Resume qualification gates: recipe_exit=%s; artifact_capability_ram_exit=%s.\n' \
+        "$resume_recipe_status" "$resume_artifact_status" >&2
       echo "Cannot resume ${firmware_filename}: existing package has a missing/different recipe or failed qualification." >&2
       echo "Existing files were preserved. Use a fresh OUTPUT_DIR or a different --firmware-version." >&2
       return 1
