@@ -1,4 +1,4 @@
-# Heltec V4 scan-first AP validation — 2026-10-06
+# Heltec V4 scan-first AP validation - 2026-10-06
 
 The expanded-partition Full repeater is the recommended image for these V4s.
 Minimal remains a compatibility profile for the smaller portable OTA slot;
@@ -48,7 +48,7 @@ ordinary standard profiles retain their existing implementations.
 | Minimal app | PASS, 1,281,576 bytes; 29,144 bytes spare in the 1,310,720-byte portable slot; 6 capability markers and memory gate passed. |
 | Minimal SHA-256 | `4f0d55aa3c0c85e76c50a2ba60738294515552dafa5e9496d6a33d73f1072e27` |
 | Minimal running body hash | `060106D2CA3CA669` |
-| Focused host suite | PASS, 65 Python tests, including four compiled AP fixture variants: Arduino 2/3 × open/password AP. |
+| Focused host suite | PASS, 65 Python tests, including four compiled AP fixture variants: Arduino 2/3 x open/password AP. |
 | Build profile tests | PASS, `test/test_build_profiles.sh`. |
 
 New AP fixtures exercise stale independent SDK state despite successful facade
@@ -106,7 +106,7 @@ Private credentials, scanned network names, and saved secret values are excluded
 
 ## Remaining boundaries
 
-- 11–14 mA current consumption is unmeasured. There is no current meter in this
+- 11-14 mA current consumption is unmeasured. There is no current meter in this
   setup; attached native USB and enabled USB logging inhibit light sleep.
 - Requested ESP-NOW state was checked, but actual packet exchange needs a known
   second peer.
