@@ -173,6 +173,21 @@ class FirmwareRamTest(unittest.TestCase):
         }, "v4_companion")
         self.assertEqual(default, expanded)
 
+    def test_combined_uart_reserves_heap_beside_mqtt_before_enable(self):
+        defines = {"WITH_MQTT_BRIDGE": 1, "WIFI_OTA_SEEDER": 1}
+        mqtt = ram.requirements("ESP32_PLATFORM", defines, "v3_repeater")
+        combined = ram.requirements("ESP32_PLATFORM", {
+            **defines, "WITH_RS232_BRIDGE": "Serial2", "RS232_BRIDGE_MERGED": 1,
+        }, "v3_repeater")
+        self.assertEqual(combined["required_heap_bytes"] - mqtt["required_heap_bytes"], 8192)
+        self.assertEqual(combined["components"]["uart_bridge_and_driver"], 8192)
+        # A selectable alternate port does not create two UART owners.
+        alternate = ram.requirements("ESP32_PLATFORM", {
+            **defines, "WITH_RS232_BRIDGE": "Serial2", "RS232_BRIDGE_MERGED": 1,
+            "WITH_RS232_BRIDGE_ALT": "Serial1",
+        }, "v3_repeater")
+        self.assertEqual(alternate, combined)
+
     def test_published_image_tables_match_elf_and_use_its_own_reservations(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "reference.elf"

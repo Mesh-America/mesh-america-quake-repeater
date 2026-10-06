@@ -190,6 +190,8 @@ from some portable builds. The USB browser console still works without it.
 | Verbose USB diagnostics | `set usb.debug on` while USB logging is on | `set usb.debug off` | `get usb.debug` reports saved intent |
 | Capture RX log to node storage | `log start` | `log stop` | `log` prints the capture locally |
 | RS232 / ESP-NOW bridge master | `set bridge.enabled on` | `set bridge.enabled off` | `get bridge.enabled`, `get bridge.running`, `get bridge.type` |
+| Independent RS232 in combined Full MQTT images | `set rs232.enabled on` | `set rs232.enabled off` | `get rs232.enabled`, `get rs232.running` |
+| Independent ESP-NOW in combined Full images | `set espnow.enabled on` | `set espnow.enabled off` | `get espnow.enabled`, `get espnow.running` |
 | MQTT periodic status publication | `set mqtt.status on` | `set mqtt.status off` | `get mqtt.status` shows connection status |
 | MQTT packet publication | `set mqtt.packets on` | `set mqtt.packets off` | `get mqtt.packets` |
 | SNMP on supported MQTT infrastructure | `set snmp on`, then `reboot` | `set snmp off`, then `reboot` | `get snmp` |

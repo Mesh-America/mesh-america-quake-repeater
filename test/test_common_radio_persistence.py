@@ -86,7 +86,7 @@ int main() {
   auto original=cli.fs.files["/com_prefs"];
   // Appending preferences must not move the established preamble bytes.
   const size_t preamble_offset=866;
-  assert(original.size()==874);
+  assert(original.size()==877);
   assert(original[preamble_offset]==48 && original[preamble_offset+1]==0);
   assert(original[preamble_offset+2]==1);
   assert(original[preamble_offset+3]==0x50 && original[preamble_offset+4]==0x01);

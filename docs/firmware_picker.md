@@ -207,8 +207,10 @@ both transports. Use `set espnow.enabled on|off` for ESP-NOW and, where
 supported, `set mqtt.enabled on|off` for MQTT. Newly combined ordinary
 repeaters start with ESP-NOW off until explicitly enabled, including the first
 upgrade from unmarked legacy preferences. Later reboots preserve that setting.
-On combined RS-232 boards `bridge.enabled` controls the UART independently. Both use
-one 2.4 GHz radio, so when both are enabled the ESP-NOW bridge channel must
+On combined RS-232 boards without MQTT, `bridge.enabled` controls the UART.
+Full Heltec V3, WSL3, RAK3112 and T-LoRa V2.1 MQTT images also retain RS-232;
+use `set rs232.enabled on|off` and `get rs232.running` for their independent
+UART. MQTT and ESP-NOW use one 2.4 GHz radio, so when both are enabled the ESP-NOW bridge channel must
 match the connected WiFi access point's fixed channel. ESP-NOW-only mode does
 not require WiFi credentials. Its runtime
 `bridge.format` setting chooses the peer protocol: `wrapped` (the

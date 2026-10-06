@@ -26,7 +26,11 @@ Classic ESP32 additionally retains its existing 8 KiB **static DRAM** check.
 
 The policy adds allowances for task stacks, radio packet pools, screen objects
 and pixel buffers, filesystem/sensor allocations, enabled wireless stacks,
-MQTT connections, OTA scratch and transient allocations. A 160x80 ST7735
+MQTT connections, OTA scratch and transient allocations. ESP32 images with
+RS-232 reserve another 8 KiB even when UART defaults off: 4 KiB for the
+source-bounded bridge object and 4 KiB for the UART driver and buffers. This
+keeps runtime UART enablement in the budget beside MQTT and ESP-NOW.
+A 160x80 ST7735
 framebuffer needs 25,602 bytes; an OLED allowance is 4 KiB. nRF52 Full with that
 color framebuffer must have at least 72 KiB available before startup allocations.
 Headless and OLED devices use their own smaller totals. The JSON lists each

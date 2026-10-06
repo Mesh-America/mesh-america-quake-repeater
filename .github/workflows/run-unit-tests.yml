@@ -120,6 +120,8 @@ jobs:
         run: |
           python3 -B test/test_transport_filter_wiring.py -v
           python3 -B test/test_rs232_runtime.py -v
+          python3 -B test/test_rs232_mqtt_runtime.py -v
+          python3 -B test/test_rs232_driver_lifecycle.py -v
 
       - name: Verify saved repeat-off trace exception and relay guards
         run: |
@@ -346,8 +348,6 @@ jobs:
           python3 -B test/test_companion_wifi_session.py -v
           python3 -B test/test_espnow_radio_lifecycle.py -v
           python3 -B test/test_espnow_runtime.py -v
-          # Reports the confirmed HTTP-OTA ownership/stale-server bugs as
-          # explicit expected failures until the separate firmware fix lands.
           python3 -B test/test_wifi_ota_lifecycle.py -v
 
       - name: Verify message reader buttons, touch targets, and footer layouts

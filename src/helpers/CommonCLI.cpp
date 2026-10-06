@@ -844,7 +844,15 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
       is_upgrade = true;
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
     && !defined(RS232_BRIDGE_DEFAULT_ON)
-      if (_prefs->bridge_uart == 0) _prefs->bridge_enabled = 0;
+#ifdef WITH_MQTT_BRIDGE
+      _prefs->rs232_bridge_enabled = 0;
+#else
+      if (_prefs->bridge_uart != WITH_RS232_BRIDGE_UART
+#ifdef WITH_RS232_BRIDGE_ALT
+          && _prefs->bridge_uart != WITH_RS232_BRIDGE_ALT_UART
+#endif
+      ) _prefs->bridge_enabled = 0;
+#endif
       if (_prefs->bridge_uart != WITH_RS232_BRIDGE_UART
 #ifdef WITH_RS232_BRIDGE_ALT
           && _prefs->bridge_uart != WITH_RS232_BRIDGE_ALT_UART
@@ -1014,6 +1022,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
   _prefs->trace_when_repeat_off = 0;
   _prefs->gps_sync_interval_hours = 0;
   _prefs->ota_channel = 0;
+  _prefs->rs232_bridge_enabled = 0;
 #if defined(RP2040_PLATFORM)
   File file = fs->open(filename, "r");
 #else
@@ -1024,9 +1033,12 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 #if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
     bool has_runtime_espnow_intent = false;
 #endif
-#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
-    && !defined(RS232_BRIDGE_DEFAULT_ON)
+#ifdef WITH_RS232_BRIDGE
+    bool has_runtime_rs232_intent = false;
+#ifndef WITH_MQTT_BRIDGE
     bool has_runtime_bridge_uart = false;
+    bool has_rs232_intent_tail = false;
+#endif
 #endif
     // Every supported layout contains the fixed 290-byte common core. Reject
     // a truncated in-place write before it can leave strings unterminated or
@@ -1392,8 +1404,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
           if (file.available() >= (int)sizeof(_prefs->bridge_uart)) {
             file.read((uint8_t *)&_prefs->bridge_uart,
                       sizeof(_prefs->bridge_uart));
-#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
-    && !defined(RS232_BRIDGE_DEFAULT_ON)
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
             has_runtime_bridge_uart = true;
 #endif
             if (file.available() >= (int)sizeof(_prefs->bridge_format)) {
@@ -1422,12 +1433,28 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
                           if (file.available() >= (int)sizeof(_prefs->ota_channel)) {
                             file.read((uint8_t *)&_prefs->ota_channel,
                                       sizeof(_prefs->ota_channel));
-#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+                            // Reserve the profile byte in every current writer so
+                            // the appended UART intent never depends on build flags.
                             uint8_t bridge_profile = 0;
                             if (file.read(&bridge_profile, sizeof(bridge_profile)) == sizeof(bridge_profile)) {
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
                               has_runtime_espnow_intent = bridge_profile == 0xA1;
-                            }
 #endif
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+                              has_rs232_intent_tail = file.available() > 0;
+#endif
+                              if (file.available() >= 2) {
+                                uint8_t rs232_intent = 0;
+                                uint8_t rs232_profile = 0;
+                                file.read(&rs232_intent, sizeof(rs232_intent));
+                                file.read(&rs232_profile, sizeof(rs232_profile));
+                                _prefs->rs232_bridge_enabled = rs232_intent;
+#ifdef WITH_RS232_BRIDGE
+                                has_runtime_rs232_intent = rs232_profile == 0xB1
+                                    && rs232_intent <= 1;
+#endif
+                              }
+                            }
                           }
                         }
                       }
@@ -1504,19 +1531,51 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       _com_prefs_needs_upgrade = true;
     }
 #endif
-#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
-    && !defined(RS232_BRIDGE_DEFAULT_ON)
-    if (!has_runtime_bridge_uart || _prefs->bridge_uart == 0) {
-      // Pre-merge normal repeaters persisted bridge_enabled=1 even though no
-      // bridge was compiled, with either no UART tail or the no-bridge zero
-      // sentinel. Fail safe before normalizing the UART instead of claiming
-      // it unexpectedly; the user can explicitly enable the bridge.
-      _prefs->bridge_enabled = 0;
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+    const bool legacy_uart_intent = has_runtime_bridge_uart
+        && (_prefs->bridge_uart == WITH_RS232_BRIDGE_UART
+#ifdef WITH_RS232_BRIDGE_ALT
+            || _prefs->bridge_uart == WITH_RS232_BRIDGE_ALT_UART
+#endif
+        );
+#endif
+#ifdef WITH_RS232_BRIDGE
+    if (!has_runtime_rs232_intent) {
+      // Old MQTT/normal images had no UART or stored the no-bridge zero
+      // sentinel. A standalone UART profile can retain supported legacy
+      // intent; a torn/corrupt new intent never takes that fallback path.
+#ifdef WITH_MQTT_BRIDGE
+      // A nonzero old UART byte alone cannot identify the previous role.
+      // Preserve MQTT's primary intent and require the independent marker.
+      _prefs->rs232_bridge_enabled = 0;
+#else
+      _prefs->rs232_bridge_enabled = !has_rs232_intent_tail && legacy_uart_intent
+          ? (_prefs->bridge_enabled == 1 ? 1 : 0) : 0;
+      if (has_rs232_intent_tail) {
+        // A partial/corrupt new UART tail cannot inherit another profile's
+        // primary MQTT flag, including in dedicated/default-on UART images.
+        _prefs->bridge_enabled = 0;
+      }
+#if defined(RS232_BRIDGE_MERGED) && !defined(RS232_BRIDGE_DEFAULT_ON)
+      _prefs->bridge_enabled = _prefs->rs232_bridge_enabled;
+#endif
+#endif
       _com_prefs_needs_upgrade = true;
     }
+#ifndef WITH_MQTT_BRIDGE
+    // A current combined-profile file may carry MQTT on and UART off. Its
+    // validated UART byte must win before restoring the legacy primary alias.
+    if (has_runtime_rs232_intent) {
+      _prefs->bridge_enabled = _prefs->rs232_bridge_enabled;
+    }
+    _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
+#endif
+#else
+    _prefs->rs232_bridge_enabled = 0;
 #endif
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
     _prefs->espnow_bridge_enabled = constrain(_prefs->espnow_bridge_enabled, 0, 1);
+    _prefs->rs232_bridge_enabled = constrain(_prefs->rs232_bridge_enabled, 0, 1);
 #if defined(WITH_ESPNOW_BRIDGE) && defined(ESPNOW_BRIDGE_MERGED) \
     && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
     // An unrelated legacy primary bridge flag cannot enable this new mode.
@@ -1785,8 +1844,17 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   WRITE_COMMON_PREFS(&prefs->ota_channel);                     // appended WiFi OTA channel; never shift older fields
 #ifdef ESPNOW_BRIDGE_MERGED
   const uint8_t bridge_profile = 0xA1;
-  WRITE_COMMON_PREFS(&bridge_profile);                         // independent ESP-NOW intent belongs to this profile
+#else
+  const uint8_t bridge_profile = 0;
 #endif
+  WRITE_COMMON_PREFS(&bridge_profile);                         // ESP-NOW profile marker/reserved byte
+  WRITE_COMMON_PREFS(&prefs->rs232_bridge_enabled);             // independent UART intent
+#ifdef WITH_RS232_BRIDGE
+  const uint8_t rs232_profile = 0xB1;
+#else
+  const uint8_t rs232_profile = 0;
+#endif
+  WRITE_COMMON_PREFS(&rs232_profile);                          // UART intent belongs to this profile
 
 #undef WRITE_COMMON_PREFS_BYTES
 #undef WRITE_COMMON_PREFS
@@ -1801,6 +1869,11 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     _common_save_succeeded = false;
     _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
     _prefs->trace_when_repeat_off = _prefs->trace_when_repeat_off == 1 ? 1 : 0;
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+    _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
+#elif !defined(WITH_RS232_BRIDGE)
+    _prefs->rs232_bridge_enabled = 0;
+#endif
   }
 #ifdef WITH_MQTT_BRIDGE
   // Observer builds use a verified temp/backup transaction for common prefs.
@@ -1952,8 +2025,17 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->ota_channel, sizeof(_prefs->ota_channel));                       // appended WiFi OTA channel
 #ifdef ESPNOW_BRIDGE_MERGED
     const uint8_t bridge_profile = 0xA1;
-    file.write(&bridge_profile, sizeof(bridge_profile));         // independent ESP-NOW intent belongs to this profile
+#else
+    const uint8_t bridge_profile = 0;
 #endif
+    file.write(&bridge_profile, sizeof(bridge_profile));         // ESP-NOW profile marker/reserved byte
+    file.write((uint8_t *)&_prefs->rs232_bridge_enabled, sizeof(_prefs->rs232_bridge_enabled));
+#ifdef WITH_RS232_BRIDGE
+    const uint8_t rs232_profile = 0xB1;
+#else
+    const uint8_t rs232_profile = 0;
+#endif
+    file.write(&rs232_profile, sizeof(rs232_profile));           // UART intent belongs to this profile
 
     _common_save_succeeded = file.commit();
     if (!_common_save_succeeded) {
@@ -3126,7 +3208,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         }
 #ifdef WITH_RS232_BRIDGE
         if (is_gps_toggle && strcmp(value, "1") == 0
-            && _callbacks->isBridgeRunning()
+            && _callbacks->isRs232BridgeRunning()
             && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)) {
           strcpy(reply, "saved; UART GPS paused while bridge is enabled");
         } else
@@ -3170,11 +3252,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         _prefs->gps_enabled = 1;
         savePrefs();
 
-        if (_callbacks->isBridgeRunning()
+        if (
 #ifdef WITH_RS232_BRIDGE
+            _callbacks->isRs232BridgeRunning()
             && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)
 #else
-            && false
+            false
 #endif
         ) {
           strcpy(reply, "saved; UART GPS paused while bridge is enabled");
@@ -3199,7 +3282,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       if (!_prefs->gps_enabled) {
         strcpy(reply, "gps is off");
 #ifdef WITH_RS232_BRIDGE
-      } else if (_callbacks->isBridgeRunning()
+      } else if (_callbacks->isRs232BridgeRunning()
                  && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)) {
         strcpy(reply, "gps paused by RS232 bridge");
 #endif
@@ -3778,6 +3861,45 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, applied ? "OK"
                             : "Error: MQTT runtime change failed; setting saved");
+    }
+    return;
+  }
+#endif
+#ifdef WITH_RS232_BRIDGE
+  if (strncmp(config, "rs232.enabled ", 14) == 0) {
+    bool enable = false;
+    if (!parseOnOffStrict(config + 14, enable)) {
+      strcpy(reply, "Error: use set rs232.enabled on|off");
+      return;
+    }
+    if (enable && _sensors->gpsSerialTransportMayConflict(_prefs->bridge_uart)
+        && (!_sensors->gpsUsesSerialUart(_prefs->bridge_uart)
+            || !_sensors->gpsSerialTransportCanYield(_prefs->bridge_uart))) {
+      strcpy(reply, "Error: UART may be driven by GPS; use UART 2 or a no-GPS build");
+      return;
+    }
+#ifdef WITH_MQTT_BRIDGE
+    uint8_t& intent = _prefs->rs232_bridge_enabled;
+#else
+    uint8_t& intent = _prefs->bridge_enabled;
+#endif
+    const uint8_t previous_enabled = intent;
+    const bool previous_running = _callbacks->isRs232BridgeRunning();
+    intent = enable ? 1 : 0;
+    const bool applied = _callbacks->setRs232BridgeState(enable);
+    const bool saved = applied && trySavePrefs();
+    if (!saved) {
+      intent = previous_enabled;
+#ifndef WITH_MQTT_BRIDGE
+      _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
+#endif
+      const bool restored = _callbacks->setRs232BridgeState(previous_running);
+      strcpy(reply, restored
+          ? "Error: RS232 change failed; setting unchanged"
+          : "Error: RS232 change failed; previous runtime could not be restored");
+    } else {
+      strcpy(reply, enable && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)
+          ? "OK - UART GPS paused" : "OK");
     }
     return;
   }
@@ -4674,7 +4796,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, applied ? "OK"
                             : "Error: ESP-NOW runtime change failed; setting saved");
 #else
-      #ifdef WITH_RS232_BRIDGE
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
       if (enable
           && _sensors->gpsSerialTransportMayConflict(_prefs->bridge_uart)
           && (!_sensors->gpsUsesSerialUart(_prefs->bridge_uart)
@@ -4683,11 +4805,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         return;
       }
       const uint8_t previous_enabled = _prefs->bridge_enabled;
-      const bool previous_running = _callbacks->isBridgeRunning();
+      const bool previous_running = _callbacks->isRs232BridgeRunning();
       _prefs->bridge_enabled = enable;
-      const bool applied = _callbacks->setBridgeState(enable);
-      if (applied) {
-        savePrefs();
+      const bool applied = _callbacks->setRs232BridgeState(enable);
+      if (applied && trySavePrefs()) {
 #ifdef WITH_RS232_BRIDGE
         if (enable && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)) {
           strcpy(reply, "OK - UART GPS paused");
@@ -4698,12 +4819,13 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         }
       } else {
         _prefs->bridge_enabled = previous_enabled;
+        _prefs->rs232_bridge_enabled = previous_enabled == 1 ? 1 : 0;
         bool restored = true;
-        if (_callbacks->isBridgeRunning() != previous_running
+        if (_callbacks->isRs232BridgeRunning() != previous_running
             || !previous_running) {
           // The false/false case still calls disable to delete a failed,
           // non-running heap-backed bridge instance.
-          restored = _callbacks->setBridgeState(previous_running);
+          restored = _callbacks->setRs232BridgeState(previous_running);
         }
         strcpy(reply, restored
             ? "Error: bridge state change failed; setting unchanged"
@@ -4758,22 +4880,21 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (mesh::cli::parseUnsignedIntegerStrict(&config[12], baud)
         && baud >= 9600 && baud <= BRIDGE_MAX_BAUD) {
       const uint32_t previous_baud = _prefs->bridge_baud;
-      const bool previous_running = _callbacks->isBridgeRunning();
+      const bool previous_running = _callbacks->isRs232BridgeRunning();
       _prefs->bridge_baud = baud;
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
-          !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
+#ifdef WITH_MQTT_BRIDGE
+          !_prefs->rs232_bridge_enabled || _callbacks->restartRs232Bridge();
 #else
-          !_prefs->bridge_enabled || _callbacks->restartBridge();
+          !_prefs->bridge_enabled || _callbacks->restartRs232Bridge();
 #endif
-      if (applied) {
-        savePrefs();
+      if (applied && trySavePrefs()) {
         strcpy(reply, "OK");
       } else {
         _prefs->bridge_baud = previous_baud;
         const bool restored = previous_running
-            ? _callbacks->restartBridge()
-            : _callbacks->setBridgeState(false);
+            ? _callbacks->restartRs232Bridge()
+            : _callbacks->setRs232BridgeState(false);
         strcpy(reply, restored
             ? "Error: bridge failed to restart; baud unchanged"
             : "Error: bridge failed to restart; previous baud could not be restored");
@@ -4798,7 +4919,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #endif
     }
     else {
-      if (_prefs->bridge_enabled
+      if (
+#ifdef WITH_MQTT_BRIDGE
+          _prefs->rs232_bridge_enabled
+#else
+          _prefs->bridge_enabled
+#endif
           && _sensors->gpsSerialTransportMayConflict((uint8_t)uart)
           && (!_sensors->gpsUsesSerialUart((uint8_t)uart)
               || !_sensors->gpsSerialTransportCanYield((uint8_t)uart))) {
@@ -4806,28 +4932,31 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         return;
       }
       const uint8_t previous_uart = _prefs->bridge_uart;
-      const bool previous_running = _callbacks->isBridgeRunning();
+      const bool previous_running = _callbacks->isRs232BridgeRunning();
       _prefs->bridge_uart = (uint8_t)uart;
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
-          !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
+#ifdef WITH_MQTT_BRIDGE
+          !_prefs->rs232_bridge_enabled || _callbacks->restartRs232Bridge();
 #else
-          !_prefs->bridge_enabled || _callbacks->restartBridge();
+          !_prefs->bridge_enabled || _callbacks->restartRs232Bridge();
 #endif
-      if (!applied) {
+      if (!applied || !trySavePrefs()) {
         _prefs->bridge_uart = previous_uart;
         const bool restored = previous_running
-            ? _callbacks->restartBridge()
-            : _callbacks->setBridgeState(false);
+            ? _callbacks->restartRs232Bridge()
+            : _callbacks->setRs232BridgeState(false);
         strcpy(reply, restored
             ? "Error: bridge failed to restart; UART unchanged"
             : "Error: bridge failed to restart; previous UART could not be restored");
-      } else if (_prefs->bridge_enabled
+      } else if (
+#ifdef WITH_MQTT_BRIDGE
+                 _prefs->rs232_bridge_enabled
+#else
+                 _prefs->bridge_enabled
+#endif
                  && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)) {
-        savePrefs();
         strcpy(reply, "OK - UART GPS paused");
       } else {
-        savePrefs();
         strcpy(reply, "OK");
       }
     }
@@ -5323,7 +5452,11 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _callbacks->getRole());
   } else if (configKeyEquals(config, "bridge.type")) {
     sprintf(reply, "> %s",
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+            "mqtt+rs232+espnow"
+#elif defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+            "mqtt+rs232"
+#elif defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
             "mqtt+espnow"
 #elif defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
             "rs232+espnow"
@@ -5370,6 +5503,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "rx" : "tx");
 #endif
 #ifdef WITH_RS232_BRIDGE
+  } else if (configKeyEquals(config, "rs232.enabled")) {
+    sprintf(reply, "> %s",
+#ifdef WITH_MQTT_BRIDGE
+            _prefs->rs232_bridge_enabled ? "on" : "off");
+#else
+            _prefs->bridge_enabled ? "on" : "off");
+#endif
+  } else if (configKeyEquals(config, "rs232.running")) {
+    sprintf(reply, "> %s", _callbacks->isRs232BridgeRunning() ? "on" : "off");
   } else if (configKeyEquals(config, "bridge.baud")) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_baud);
   } else if (configKeyEquals(config, "bridge.uart")) {

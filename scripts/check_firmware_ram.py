@@ -74,6 +74,11 @@ def requirements(platform, defines, target):
         parts["wireless_stacks"] = max(wifi, ble) if "COMPANION_EXCLUSIVE_WIFI_BLE" in defines else wifi + ble
         if "WITH_MQTT_BRIDGE" in defines:
             parts["mqtt_connections_buffers"] = 24576
+        if "WITH_RS232_BRIDGE" in defines:
+            # The UART bridge is allocated on enable, alongside WiFi/MQTT.
+            # RS232Bridge.cpp bounds its object to 4 KiB; reserve another
+            # 4 KiB for the SDK UART task, buffers and allocator overhead.
+            parts["uart_bridge_and_driver"] = 8192
         if "ENABLE_OTA" in defines:
             parts["ota_source_scratch"] = 8192
         if ("WEBCONFIG_DISABLED" not in defines

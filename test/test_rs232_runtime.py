@@ -35,6 +35,11 @@ class RS232RuntimeTests(unittest.TestCase):
             ("merged_composite", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
                                   "RS232_BRIDGE_MERGED=1", "WITH_ESPNOW_BRIDGE=1",
                                   "ESPNOW_BRIDGE_MERGED=1"]),
+            ("mqtt_rs232", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
+                             "RS232_BRIDGE_MERGED=1", "WITH_MQTT_BRIDGE=1"]),
+            ("mqtt_rs232_espnow", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
+                                    "RS232_BRIDGE_MERGED=1", "WITH_MQTT_BRIDGE=1",
+                                    "WITH_ESPNOW_BRIDGE=1"]),
             ("sole_espnow_merged", ["WITH_ESPNOW_BRIDGE=1", "ESPNOW_BRIDGE_MERGED=1"]),
             ("sole_espnow_dedicated", ["WITH_ESPNOW_BRIDGE=1"]),
             ("sole_espnow_default_on", ["WITH_ESPNOW_BRIDGE=1", "ESPNOW_BRIDGE_MERGED=1",
@@ -71,11 +76,21 @@ class RS232RuntimeTests(unittest.TestCase):
         code += (ROOT / "test/fixtures/rs232_runtime/prefs.cpp").read_text(encoding="ascii")
         for profile, macros in (
             ("ordinary_unmerged", []),
+            ("rs232_dedicated", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2"]),
+            ("rs232_default_on", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
+                                   "RS232_BRIDGE_MERGED=1", "RS232_BRIDGE_DEFAULT_ON=1"]),
+            ("nrf52_rs232_default_on", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
+                                         "RS232_BRIDGE_MERGED=1", "RS232_BRIDGE_DEFAULT_ON=1"]),
             ("rs232_merged", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
                               "RS232_BRIDGE_MERGED=1"]),
             ("rs232_espnow_merged", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
                                      "RS232_BRIDGE_MERGED=1", "WITH_ESPNOW_BRIDGE=1",
                                      "ESPNOW_BRIDGE_MERGED=1"]),
+            ("mqtt_rs232", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
+                             "RS232_BRIDGE_MERGED=1", "WITH_MQTT_BRIDGE=1"]),
+            ("mqtt_rs232_espnow", ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2",
+                                    "RS232_BRIDGE_MERGED=1", "WITH_MQTT_BRIDGE=1",
+                                    "WITH_ESPNOW_BRIDGE=1"]),
             ("sole_espnow_merged", ["WITH_ESPNOW_BRIDGE=1", "ESPNOW_BRIDGE_MERGED=1"]),
             ("sole_espnow_dedicated", ["WITH_ESPNOW_BRIDGE=1"]),
             ("sole_espnow_default_on", ["WITH_ESPNOW_BRIDGE=1", "ESPNOW_BRIDGE_MERGED=1",
@@ -89,7 +104,7 @@ class RS232RuntimeTests(unittest.TestCase):
                 source, binary = work / "main.cpp", work / "test"
                 source.write_text(code, encoding="ascii")
                 result = subprocess.run([
-                    compiler, "-std=c++17", "-DESP32_PLATFORM=1", "-DENABLE_OTA=1",
+                    compiler, "-std=c++17", "-D" + ("NRF52_PLATFORM=1" if profile.startswith("nrf52") else "ESP32_PLATFORM=1"), "-DENABLE_OTA=1",
                     "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
                     *["-D" + macro for macro in macros], "-I" + str(work),
                     "-I" + str(ROOT / "test/fixtures/radio_profiles/mocks"),
@@ -100,27 +115,82 @@ class RS232RuntimeTests(unittest.TestCase):
                 result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_uart_intent_survives_cross_profile_upgrades_without_claiming_mqtt_intent(self):
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler, "a host C++ compiler is required")
+        base = persistence_harness().replace("#define WITH_RS232_BRIDGE_UART 1", "")
+        code = base[:base.index("struct Capture {")]
+        code += (ROOT / "test/fixtures/rs232_runtime/prefs.cpp").read_text(encoding="ascii")
+        common = ["WITH_RS232_BRIDGE=Serial2", "WITH_RS232_BRIDGE_UART=2", "RS232_BRIDGE_MERGED=1"]
+        profiles = {"normal": [*common, "WITH_ESPNOW_BRIDGE=1", "ESPNOW_BRIDGE_MERGED=1"],
+                    "dedicated": common[:2],
+                    "triple": [*common, "WITH_ESPNOW_BRIDGE=1", "WITH_MQTT_BRIDGE=1"],
+                    "mqtt_uart": [*common, "WITH_MQTT_BRIDGE=1"]}
+        with tempfile.TemporaryDirectory(prefix="rs232-profile-upgrade-") as directory:
+            work = Path(directory)
+            transaction = (ROOT / "src/helpers/ContactFileTransaction.h").read_text(encoding="ascii")
+            (work / "ContactFileTransaction.h").write_text(transaction.replace(
+                '#include "IdentityStore.h"', '#include <helpers/IdentityStore.h>'), encoding="ascii")
+            source = work / "main.cpp"
+            source.write_text(code, encoding="ascii")
+            for name, macros in profiles.items():
+                result = subprocess.run([compiler, "-std=c++17", "-DESP32_PLATFORM=1", "-DENABLE_OTA=1",
+                    "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
+                    *["-D" + macro for macro in macros], "-I" + str(work),
+                    "-I" + str(ROOT / "test/fixtures/radio_profiles/mocks"),
+                    "-I" + str(ROOT / "src"), "-I" + str(ROOT / "src/helpers"),
+                    str(source), "-o", str(work / name)], capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            def run(profile, operation, image, primary, espnow, uart, port=2):
+                result = subprocess.run([str(work / profile), operation, str(image), str(primary),
+                    str(espnow), str(uart), str(port)], capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for origin in ("triple", "mqtt_uart"):
+                for uart in (0, 1):
+                    image = work / f"{origin}-{uart}.bin"
+                    run(origin, "write", image, 1, 0, uart)
+                    self.assertEqual(len(image.read_bytes()), 877)
+                    for target in ("normal", "dedicated"):
+                        with self.subTest(origin=origin, target=target, uart=uart):
+                            run(target, "read", image, uart, 0, uart)
+                    # Old MQTT files persisted primary enabled plus UART2.
+                    # Without the new independent marker this remains MQTT only.
+                    old = work / "old-mqtt.bin"
+                    old.write_bytes(image.read_bytes()[:874])
+                    run(origin, "read", old, 1, 0, 0)
+            for origin in ("normal", "dedicated"):
+                for uart in (0, 1):
+                    image = work / f"{origin}-{uart}.bin"
+                    run(origin, "write", image, uart, 0, uart)
+                    for target in ("triple", "mqtt_uart"):
+                        with self.subTest(origin=origin, target=target, uart=uart):
+                            run(target, "read", image, uart, 0, uart)
+            image = work / "corrupt-triple.bin"
+            run("triple", "write", image, 1, 0, 1)
+            saved = image.read_bytes()
+            for tail in (saved[:875] + bytes([1]), saved[:876], saved[:876] + bytes([0])):
+                image.write_bytes(tail)
+                for target in ("normal", "dedicated"):
+                    run(target, "read", image, 0, 0, 0)
+                for target in ("triple", "mqtt_uart"):
+                    run(target, "read", image, 1, 0, 0)
+
     def test_production_defaults_upgrade_and_runtime_controls(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
         self.assertIsNotNone(compiler, "a host C++ compiler is required")
         cli = (ROOT / "src/helpers/CommonCLI.cpp").read_text(encoding="ascii")
         header = (ROOT / "examples/simple_repeater/MyMesh.h").read_text(encoding="ascii")
         implementation = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text(encoding="ascii")
-        guard = (
-            "#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \\\n"
-            "    && !defined(RS232_BRIDGE_DEFAULT_ON)"
-        )
-        declaration_start = cli.index(guard, cli.index('if (file) {'))
-        declaration = cli[declaration_start:cli.index("#endif", declaration_start) + len("#endif")]
-        esp_guard = "#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)"
-        esp_declaration = cli.index(esp_guard, cli.index('if (file) {'))
-        declaration += "\n" + cli[esp_declaration:cli.index("#endif", esp_declaration) + len("#endif")]
+        declaration_start = cli.index("#if defined(ESPNOW_BRIDGE_MERGED)", cli.index("mesh::hilStartupTrace(\"prefs_image_open_ready\")"))
+        declaration_end = cli.index("    // Every supported layout", declaration_start)
+        declaration = cli[declaration_start:declaration_end]
         read_start = cli.index("if (file.available() >= (int)sizeof(_prefs->bridge_uart))")
         read_end = cli.index("if (file.available() >= (int)sizeof(_prefs->bridge_format))", read_start)
-        # The fixture supplies a file positioned at the appended UART field.
         uart_read = cli[read_start:read_end] + "}\n"
-        marker_read_start = cli.index(esp_guard, cli.index("if (file.available() >= (int)sizeof(_prefs->ota_channel))"))
-        uart_read += cli[marker_read_start:cli.index("#endif", marker_read_start) + len("#endif")]
+        # The old image mock has just its UART byte, so marker reads return
+        # zero; execute the real marker guard rather than inventing a fallback.
+        marker_start = cli.index("uint8_t bridge_profile = 0;", cli.index("if (file.available() >= (int)sizeof(_prefs->ota_channel))"))
+        uart_read += "uint8_t bridge_profile = 0;\n" + extract_braced(cli[marker_start:], "if (file.read(&bridge_profile,")
         migrate_start = cli.index("// sanitise bad bridge pref values")
         migrate_end = cli.index("if (!mesh::bridge::isValidEspNowFormat", migrate_start)
         migration = cli[migrate_start:migrate_end]
@@ -137,7 +207,9 @@ class RS232RuntimeTests(unittest.TestCase):
         lifecycle = "\n".join(extract_braced(header, signature) for signature in (
             "AbstractBridge* activeBridge() {", "const AbstractBridge* activeBridge() const {",
             "RS232Bridge* createRS232Bridge()", "bool beginRS232Bridge()",
-            "bool endRS232Bridge()", "bool isBridgeRunning() const override",
+            "bool endRS232Bridge()", "bool rs232BridgeEnabled() const",
+            "bool isRs232BridgeRunning() const override", "bool setRs232BridgeState(bool enable)",
+            "bool restartRs232Bridge()", "bool isBridgeRunning() const override",
             "bool setBridgeState(bool enable) override", "bool restartBridge() override",
         ))
         lifecycle += "\n#ifdef WITH_ESPNOW_BRIDGE\n" + "\n".join(

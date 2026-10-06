@@ -139,6 +139,26 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
                         and check.get("present") is True
                         for check in manifest.get("verification") or []))
 
+    def proven_rs232(manifest: dict) -> bool:
+        return (qualified_full(manifest)
+                and "bridge.rs232" in (manifest.get("capabilities") or [])
+                and any(check.get("capability") == "bridge.rs232"
+                        and check.get("present") is True
+                        for check in manifest.get("verification") or []))
+
+    def role_base(target: str) -> str:
+        base = target.rstrip("_").lower()
+        if base.endswith("_observer_mqtt"):
+            base = base[:-len("_observer_mqtt")]
+        return base
+
+    # These normal repeaters already supply a UART. Full MQTT source
+    # substitution must never remove it while retiring the dedicated image.
+    uart_full_targets = {"heltec_v3_repeater", "heltec_wsl3_repeater",
+                         "rak_3112_repeater", "lilygo_tlora_v2_1_1_6_repeater"}
+    combined_rs232 = {role_base(record["manifest"]["target"]) for record in records
+                      if proven_rs232(record["manifest"])} & uart_full_targets
+
     # A resumed build directory can still contain old normal or dedicated
     # bridge images. The canonical Full image must prove both runtime bridges
     # even when no stale legacy image happens to remain beside it.
@@ -186,6 +206,10 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
             # Resume may contain portable legacy images as well as Full ones.
             # Retire them only after the matching combined driver is proven.
             continue
+        if (manifest["platform"] == "ESP32_PLATFORM"
+                and legacy_base.endswith("_repeater_bridge_rs232")
+                and legacy_base[:-len("_bridge_rs232")] in combined_rs232):
+            continue
         if manifest["platform"] != "ESP32_PLATFORM" or manifest["build_profile"] != "full":
             passthrough.append(record)
             continue
@@ -221,10 +245,18 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
             # A stale normal image must not displace the proven transport
             # while simultaneously suppressing its historical dedicated image.
             priority = -1
+        if key in combined_rs232 and not proven_rs232(manifest):
+            priority = -1
         old = chosen.get(key)
         if old is None or priority > old[0]:
             chosen[key] = (priority, record)
-    return passthrough + [item[1] for item in chosen.values()]
+    selected = [item[1] for item in chosen.values()]
+    for record in selected:
+        manifest = record["manifest"]
+        if role_base(manifest["target"]) in uart_full_targets and not proven_rs232(manifest):
+            raise ValueError(manifest["target"] + ": Full release requires the verified "
+                             "RS232 bridge from its normal repeater")
+    return passthrough + selected
 
 
 def stage_release(work: Path, migration_work: Path, destination: Path, version: str,

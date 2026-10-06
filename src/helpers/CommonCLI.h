@@ -205,6 +205,10 @@ public:
   // retain the previous MQTT combined-Full behavior after an upgrade. Merged
   // default-off profiles require their appended profile marker instead.
   uint8_t espnow_bridge_enabled = 1;
+  // Independent UART intent in MQTT-combined profiles. Non-MQTT UART roles
+  // retain bridge_enabled as their legacy alias and mirror it on save.
+  // Appended after the profile markers, never beside the legacy bridge byte.
+  uint8_t rs232_bridge_enabled = 0;
   // Appended after the ESP-NOW intent. Zero keeps the board's legacy cadence.
   uint16_t gps_sync_interval_hours = 0;
   uint8_t retry_preset = 0;
@@ -600,9 +604,12 @@ public:
   // them to let each transport be started, stopped, and queried independently.
   virtual bool setMqttBridgeState(bool enable) { return setBridgeState(enable); }
   virtual bool setEspNowBridgeState(bool enable) { return setBridgeState(enable); }
+  virtual bool setRs232BridgeState(bool enable) { return setBridgeState(enable); }
   virtual bool restartMqttBridge() { return restartBridge(); }
   virtual bool restartEspNowBridge() { return restartBridge(); }
+  virtual bool restartRs232Bridge() { return restartBridge(); }
   virtual bool isEspNowBridgeRunning() { return isBridgeRunning(); }
+  virtual bool isRs232BridgeRunning() const { return isBridgeRunning(); }
 
   virtual void restartBridgeSlot(int slot) {
     // Default: fall back to full restart

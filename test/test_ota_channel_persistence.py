@@ -66,7 +66,10 @@ void testRoundTripsAndLayout() {
   const size_t channel_offset = original.offset(&cli.prefs.ota_channel);
   const size_t trace_offset = original.offset(&cli.prefs.trace_when_repeat_off);
   assert(channel_offset == trace_offset + sizeof(cli.prefs.trace_when_repeat_off));
-  assert(channel_offset + sizeof(cli.prefs.ota_channel) == original.bytes.size());
+  assert(channel_offset + sizeof(cli.prefs.ota_channel) + 3 == original.bytes.size());
+  assert(original.bytes[channel_offset + 1] == 0); // reserved ESP-NOW profile
+  assert(original.offset(&cli.prefs.rs232_bridge_enabled) == channel_offset + 2);
+  assert(original.bytes[channel_offset + 2] == 0 && original.bytes.back() == 0);
   // The established common core remains at its public file offsets.
   assert(original.offset(cli.prefs.node_name) == 4);
   assert(original.offset(&cli.prefs.freq) == 72);
