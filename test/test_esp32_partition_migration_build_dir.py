@@ -106,7 +106,7 @@ print(json.dumps([["platformio", [["build_dir", str(directory.resolve())]]]]))
         target = spec["target"]
         ident = FwIdent(pack_version(VERSION.split("-", 1)[0]),
                         target_id_for_env(target), hardware_id_for_env(target))
-        image, _ = ensure_endf(b"\xe9qualified Full application", ident)
+        image, _ = ensure_endf(b"\xe9qualified Full application\0OTA: status", ident)
         table = bytearray(b"\xff" * 4096)
         entries = (("nvs", 1, 2, 0x9000, 0x5000),
                    ("otadata", 1, 0, 0xE000, 0x2000),
@@ -119,8 +119,14 @@ print(json.dumps([["platformio", [["build_dir", str(directory.resolve())]]]]))
         merged[0x8000:0x9000] = table
         merged.extend(image)
         stem = f"{target}-full-ota-{VERSION}-{SOURCE}"
-        manifest = dict(target=target, artifact_target=target, build_profile="full",
-                        platform="ESP32_PLATFORM", ota_update_verified=True)
+        manifest = dict(
+            schema_version=2, target=target, artifact_target=target,
+            platformio_env=target, build_profile="full", platform="ESP32_PLATFORM",
+            verified=True, capabilities=["ota.update.lora"], reductions=[],
+            verification=[dict(capability="ota.update.lora", evidence="OTA: status",
+                               present=True, source="linked image")],
+            ota_update_methods=["lora"], ota_update_verified=True,
+            ota_update_evidence="firmware fits both OTA application slots; otadata present")
         files = {stem + ".bin": image, stem + "-merged.bin": merged,
                  stem + ".capabilities.json": json.dumps(manifest).encode("ascii")}
         for name, data in files.items():
@@ -496,8 +502,6 @@ class MigrationMetadataTest(unittest.TestCase):
         import build_local_release as recipe
         spec, identity = self.fixture.qualified_full("heltec-v4")
         expected = self.fixture.utility_tree(self.fixture.custom, spec, "LOCAL PINNED")
-        manifest = json.loads(next(self.fixture.artifacts.glob("*.capabilities.json")).read_text())
-        record = {"manifest": manifest, "files": list(self.fixture.artifacts.iterdir())}
         captured = []
 
         def run(command, **options):
@@ -513,7 +517,6 @@ class MigrationMetadataTest(unittest.TestCase):
                 mock.patch.object(recipe, "BOARDS", {"heltec-v4": spec}), \
                 mock.patch.object(package, "BOARDS", {"heltec-v4": spec}), \
                 mock.patch.object(recipe, "git", return_value=SOURCE + "a" * 32), \
-                mock.patch.object(recipe, "collect_artifacts", return_value=[record]), \
                 mock.patch.dict(os.environ, environment, clear=True), \
                 mock.patch.object(subprocess, "run", side_effect=run), \
                 redirect_stdout(io.StringIO()):
@@ -527,6 +530,15 @@ class MigrationMetadataTest(unittest.TestCase):
                          str(self.fixture.custom.resolve()))
         archive, = (destination / "esp32-partition-migration").glob("*.zip")
         self.fixture.check_archive(archive, "heltec-v4", expected, identity)
+
+    def test_local_release_rejects_full_without_verified_marker(self):
+        import build_local_release as recipe
+        self.fixture.qualified_full("heltec-v4")
+        records = recipe.collect_artifacts(self.fixture.artifacts, VERSION + "-" + SOURCE)
+        self.assertEqual(recipe.select_ordinary_full_records(records), records)
+        records[0]["manifest"].pop("verified")
+        with self.assertRaisesRegex(ValueError, "requires a verified Full image"):
+            recipe.select_ordinary_full_records(records)
 
     def test_recipe_metadata_failure_stops_before_output_creation_without_private_diagnostic(self):
         import build_esp32_partition_migration as migration
