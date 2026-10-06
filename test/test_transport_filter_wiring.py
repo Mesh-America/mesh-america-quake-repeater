@@ -31,6 +31,7 @@ struct Packet {
 
 HARNESS = r'''
 #include <helpers/AbstractBridge.h>
+#include <atomic>
 #include <cassert>
 #define BRIDGE_DEBUG_PRINTLN(...) ((void)0)
 #define PUB_KEY_SIZE 32
@@ -90,6 +91,7 @@ struct ESPNowBridge : BridgeBase {
  void sendPacket(mesh::Packet*) override;
 };
 struct MQTTBridge : BridgeBase {
+ std::atomic<bool> _stop_requested{false};
  struct Obs {bool mqtt_packets_enabled=true,mqtt_rx_enabled=true;uint8_t mqtt_tx_enabled=1;} obs;
  Obs* _obs=&obs;
  struct Identity {uint8_t pub_key[32]={};} id;
@@ -126,6 +128,14 @@ int main() {
  assert(inbound.manager.queued==1 && inbound._seen_packets.marks==1);
  assert(serial.serial.writes==1 && espnow.queued==2 && mqtt.queued==2);
  assert(serial._seen_packets.marks==1 && espnow._seen_packets.marks==2);
+ // Once teardown is requested, neither RX nor TX admits more queue work,
+ // even while the bridge remains initialized until the worker acknowledges.
+ mqtt._stop_requested=true;
+ mqtt.onPacketReceived(&p);mqtt.sendPacket(&p);
+ assert(mqtt.queued==2 && mqtt._filtered_packets==2);
+ mqtt._stop_requested=false;
+ mqtt.onPacketReceived(&p);mqtt.sendPacket(&p);
+ assert(mqtt.queued==4);
  BridgeBase no_policy;no_policy.onPacketReceived(&p);assert(no_policy.manager.queued==1);
 }
 '''
