@@ -1,4 +1,5 @@
 #include "SensorMesh.h"
+#include <math.h>
 #include <helpers/IdentityGeneration.h>
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
@@ -35,10 +36,12 @@ protected:
 
   void onSensorDataRead() override {
     float batt_voltage = getVoltage(TELEM_CHANNEL_SELF);
+    // Boards without battery measurement return zero; do not alarm on it.
+    const bool battery_available = batt_voltage > 0.0f && isfinite(batt_voltage);
 
     battery_data.recordData(getRTCClock(), batt_voltage);   // record battery
-    alertIf(batt_voltage < 3.4f, critical_batt, HIGH_PRI_ALERT, "Battery is critical!");
-    alertIf(batt_voltage < 3.6f, low_batt, LOW_PRI_ALERT, "Battery is low");
+    alertIf(battery_available && batt_voltage < 3.4f, critical_batt, HIGH_PRI_ALERT, "Battery is critical!");
+    alertIf(battery_available && batt_voltage < 3.6f, low_batt, LOW_PRI_ALERT, "Battery is low");
   }
 
   int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {

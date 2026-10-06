@@ -3289,7 +3289,7 @@ is_esp32_full_only_bulk_target() {
     heltec_v4_expansionkit_repeater|heltec_v4_expansionkit_repeater_observer_mqtt|heltec_v4_expansionkit_room_server_observer_mqtt|\
     heltec_v4_tft_repeater|heltec_v4_tft_repeater_bridge_espnow|heltec_v4_tft_room_server|heltec_v4_tft_sensor|\
     lilygo_teth_elite_sx1262_repeater|lilygo_teth_elite_sx1262_room_server|lilygo_teth_elite_sx1262_repeater_observer_mqtt|lilygo_teth_elite_sx1262_room_server_observer_mqtt|\
-    station_g3_esp32_repeater|station_g3_esp32_logging_repeater|station_g3_esp32_room_server|station_g3_esp32_repeater_observer_mqtt|station_g3_esp32_room_server_observer_mqtt|\
+    station_g3_esp32_repeater|station_g3_esp32_logging_repeater|station_g3_esp32_room_server|station_g3_esp32_sensor|station_g3_esp32_r2_sensor|station_g3_esp32_repeater_observer_mqtt|station_g3_esp32_room_server_observer_mqtt|\
     rak_3112_repeater|rak_3112_repeater_bridge_rs232|rak_3112_repeater_bridge_espnow|rak_3112_repeater_observer_mqtt|rak_3112_room_server|rak_3112_room_server_observer_mqtt|rak_3112_sensor|\
     xiao_s3_wio_repeater|xiao_s3_wio_repeater_bridge_espnow|xiao_s3_wio_repeater_observer_mqtt|xiao_s3_wio_room_server|xiao_s3_wio_room_server_observer_mqtt|xiao_s3_wio_sensor|\
     lilygo_tdeck_repeater|\
@@ -3504,9 +3504,12 @@ declare_build_capability_contract() {
     record_build_expectation "sensor.ina3221" "INA3221"
   fi
 
+  # SensorMesh keeps CommonCLI's unsupported WebConfig callbacks. Its generic
+  # command text is linked even though only the board's browser OTA is usable.
   if [ "$env_platform" = "ESP32_PLATFORM" ] \
       && [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
-      && ! is_esp32_companion_build "$env_name"; then
+      && ! is_esp32_companion_build "$env_name" \
+      && ! is_sensor_role_target "$env_name"; then
     pio_env_name=$(get_pio_build_env "$env_name")
     if pio_env_option_contains "$pio_env_name" build_flags "ADMIN_PASSWORD"; then
       record_build_expectation "web.webconfig" "start webconfig"

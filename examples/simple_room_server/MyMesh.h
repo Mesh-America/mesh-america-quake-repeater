@@ -333,7 +333,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
   bool processAck(const uint8_t *data);
   mesh::Packet* createSelfAdvert();
   File openAppend(const char* fname);
-  int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
+  int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len,
+                    size_t reply_capacity = MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1));
 #if MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE
   bool evaluateFloodRuleTiming(const mesh::Packet* packet,
                                bool& fast_track);

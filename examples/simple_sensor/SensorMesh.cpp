@@ -1,6 +1,7 @@
 #include "SensorMesh.h"
 #include <helpers/CLICommandUtils.h>
 #include <helpers/ClientACLCLI.h>
+#include <helpers/ClientACLResponse.h>
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/ClientPathPersistence.h>
 #include <helpers/LazyPersistence.h>
@@ -198,7 +199,11 @@ void SensorMesh::updateGpsTelemetryPolicy() {
 
 uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp,
                                   uint8_t req_type, uint8_t* payload,
-                                  size_t payload_len) {
+                                  size_t payload_len, size_t reply_capacity) {
+  if (from == NULL || (payload == NULL && payload_len != 0) || reply_capacity < 4) return 0;
+  if (reply_capacity > mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY) {
+    reply_capacity = mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY;
+  }
   const uint8_t perms = from->isAdmin() ? 0xFF : from->permissions;
 
   memcpy(reply_data, &sender_timestamp, 4);   // reflect sender_timestamp back in response packet (kind of like a 'tag')
@@ -263,12 +268,13 @@ uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp,
     return ofs;
   }
   if (req_type == REQ_TYPE_GET_ACCESS_LIST && payload_len >= 2
-      && (perms & PERM_ACL_ROLE_MASK) == PERM_ACL_ADMIN) {
+      && from->isAdmin()) {
     uint8_t res1 = payload[0];   // reserved for future  (extra query params)
     uint8_t res2 = payload[1];
     if (res1 == 0 && res2 == 0) {
-      uint8_t ofs = 4;
-      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= sizeof(reply_data) - 4; i++) {
+      size_t ofs = 4;
+      // Preserve the legacy seven-byte entries within the encrypted route budget.
+      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= reply_capacity; i++) {
         auto c = acl.getClientByIdx(i);
         if (c->permissions == 0) continue;  // skip deleted entries
         memcpy(&reply_data[ofs], c->id.pub_key, 6); ofs += 6;  // just 6-byte pub_key prefix
@@ -351,7 +357,7 @@ void SensorMesh::sendAlert(const ClientInfo* c, Trigger* t) {
 
   auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, c->id, c->shared_secret, data, 5 + text_len);
   if (pkt) {
-    if (c->out_path_len != OUT_PATH_UNKNOWN) {  // we have an out_path, so send DIRECT
+    if (mesh::Packet::isValidPathLen(c->out_path_len)) {  // we have an out_path, so send DIRECT
       sendDirect(pkt, c->out_path, c->out_path_len);
     } else {
       unsigned long delay_millis = 0;
@@ -629,7 +635,7 @@ void SensorMesh::onUserGpioTimerCompleted(uint8_t pin, uint8_t state,
                                         5 + (size_t)text_len);
   if (!packet) return;
   packet->radio_reply = true;  // delayed GPIO command completion
-  if (client->out_path_len == OUT_PATH_UNKNOWN) {
+  if (!mesh::Packet::isValidPathLen(client->out_path_len)) {
     sendFlood(packet, CLI_REPLY_DELAY_MILLIS, path_hash_size);
   } else {
     sendDirect(packet, client->out_path, client->out_path_len,
@@ -843,7 +849,7 @@ void SensorMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
 }
 
 void SensorMesh::sendAckTo(const ClientInfo& dest, uint32_t ack_hash, uint8_t path_hash_size) {
-  if (dest.out_path_len == OUT_PATH_UNKNOWN) {
+  if (!mesh::Packet::isValidPathLen(dest.out_path_len)) {
     mesh::Packet* ack = createAck(ack_hash);
     if (ack) sendFloodScoped(default_scope, ack, TXT_ACK_DELAY, path_hash_size);
   } else {
@@ -869,30 +875,35 @@ void SensorMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_i
   ClientInfo* from = acl.getClientByIdx(i);
 
   if (type == PAYLOAD_TYPE_REQ) {  // request (from a known contact)
+    if (len < 5) return;  // timestamp plus request type must be present
     uint32_t timestamp;
     memcpy(&timestamp, data, 4);
 
     if (timestamp > from->last_timestamp) {  // prevent replay attacks
-      uint8_t reply_len = handleRequest(from, timestamp, data[4], &data[5], len - 5);
+      const size_t reply_capacity =
+          mesh::clientACLReplyCapacity(packet->isRouteFlood(), packet->path_len);
+      uint8_t reply_len = handleRequest(from, timestamp, data[4], &data[5], len - 5, reply_capacity);
       if (reply_len == 0) return;  // invalid command
 
-      from->last_timestamp = timestamp;
-      from->last_activity = getRTCClock()->getCurrentTime();
-
+      bool reply_queued = false;
       if (packet->isRouteFlood()) {
         // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
         mesh::Packet* path = createPathReturn(from->id, secret, packet->path, packet->path_len,
                                               PAYLOAD_TYPE_RESPONSE, reply_data, reply_len);
-        if (path) sendFloodReply(path, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+        if (path) reply_queued = sendFloodReply(path, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
       } else {
         mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, from->id, secret, reply_data, reply_len);
         if (reply) {
-          if (from->out_path_len != OUT_PATH_UNKNOWN) {  // we have an out_path, so send DIRECT
-            sendDirect(reply, from->out_path, from->out_path_len, SERVER_RESPONSE_DELAY);
+          if (mesh::Packet::isValidPathLen(from->out_path_len)) {  // we have an out_path, so send DIRECT
+            reply_queued = sendDirect(reply, from->out_path, from->out_path_len, SERVER_RESPONSE_DELAY);
           } else {
-            sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+            reply_queued = sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
           }
         }
+      }
+      if (reply_queued) {
+        from->last_timestamp = timestamp;
+        from->last_activity = getRTCClock()->getCurrentTime();
       }
     } else {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");
@@ -944,7 +955,7 @@ void SensorMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_i
 
           auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, from->id, secret, temp, 5 + text_len);
           if (reply) {
-            if (from->out_path_len == OUT_PATH_UNKNOWN) {
+            if (!mesh::Packet::isValidPathLen(from->out_path_len)) {
               sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
             } else {
               sendDirect(reply, from->out_path, from->out_path_len, CLI_REPLY_DELAY_MILLIS);
@@ -1225,17 +1236,17 @@ bool SensorMesh::scheduleNormalRadio() {
   return true;
 }
 
-void SensorMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* packet,
+bool SensorMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* packet,
                                  uint32_t delay_millis, uint8_t path_hash_size) {
   if (scope.isNull()) {
-    sendFlood(packet, delay_millis, path_hash_size);
+    return sendFlood(packet, delay_millis, path_hash_size);
   } else {
     uint16_t codes[2] = {scope.calcTransportCode(packet), 0};
-    sendFlood(packet, codes, delay_millis, path_hash_size);
+    return sendFlood(packet, codes, delay_millis, path_hash_size);
   }
 }
 
-void SensorMesh::sendFloodReply(mesh::Packet* packet,
+bool SensorMesh::sendFloodReply(mesh::Packet* packet,
                                 unsigned long delay_millis,
                                 uint8_t path_hash_size) {
   TransportKey request_scope;
@@ -1245,15 +1256,13 @@ void SensorMesh::sendFloodReply(mesh::Packet* packet,
   switch (mesh::chooseReplyScope(request_scope_known, wildcard,
                                  !default_scope.isNull())) {
     case mesh::REPLY_SCOPE_REQUEST:
-      sendFloodScoped(request_scope, packet, delay_millis, path_hash_size);
-      break;
+      return sendFloodScoped(request_scope, packet, delay_millis, path_hash_size);
     case mesh::REPLY_SCOPE_DEFAULT:
-      sendFloodScoped(default_scope, packet, delay_millis, path_hash_size);
-      break;
+      return sendFloodScoped(default_scope, packet, delay_millis, path_hash_size);
     case mesh::REPLY_SCOPE_NONE:
-      sendFlood(packet, delay_millis, path_hash_size);
-      break;
+      return sendFlood(packet, delay_millis, path_hash_size);
   }
+  return false;
 }
 
 void SensorMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
@@ -1446,7 +1455,7 @@ void SensorMesh::loop() {
           PAYLOAD_TYPE_RESPONSE, client->id, client->shared_secret,
           reply_data, 8 + telemetry_len);
       if (reply) {
-        if (client->out_path_len != OUT_PATH_UNKNOWN) {
+        if (mesh::Packet::isValidPathLen(client->out_path_len)) {
           sendDirect(reply, client->out_path, client->out_path_len, 0);
         } else {
           sendFloodScoped(scope, reply, 0, _prefs.path_hash_mode + 1);

@@ -34,7 +34,8 @@ USB_CDC = "ARDUINO_USB_CDC_ON_BOOT"
 USB_MACROS = (USB_MODE, USB_CDC)
 
 # These are the eight native-USB families that used TinyUSB before migration.
-# G2 already used HWCDC for its observer repeater and KISS roles.
+# G2 already used HWCDC for its observer repeater and KISS roles. New
+# Sensor roles inherit the same reviewed backend rather than migrating it.
 MIGRATED_BOARD_COUNTS = {
     "heltec_e213": 8,
     "heltec_e290": 9,
@@ -42,7 +43,7 @@ MIGRATED_BOARD_COUNTS = {
     "heltec_tracker_v1_1": 2,
     "heltec_tracker_v2": 15,
     "station-g2": 12,
-    "station-g3-esp32": 14,
+    "station-g3-esp32": 16,
     "t_beam_1w": 11,
 }
 PREVIOUS_G2_HWCDC = {"Station_G2_repeater_observer_mqtt", "Station_G2_kiss_modem"}
@@ -215,7 +216,7 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 "esp32": esp32, "kind": kind, "manifest": manifest,
             }
 
-    def test_all_78_migrated_roles_select_hwcdc_and_its_sdk_patch(self):
+    def test_all_reviewed_family_roles_select_hwcdc_and_its_sdk_patch(self):
         counts = Counter()
         migrated = set()
         for name, row in self.rows.items():
@@ -237,7 +238,7 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                     migrated.add(name)
         self.assertEqual(counts, MIGRATED_BOARD_COUNTS)
         self.assertTrue(PREVIOUS_G2_HWCDC <= self.rows.keys())
-        self.assertEqual(len(migrated), 78)
+        self.assertEqual(len(migrated), 80)
 
     def test_migrated_uploads_use_hardware_reset_without_touch_or_port_wait(self):
         for name, row in self.rows.items():
@@ -265,7 +266,7 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 self.assertEqual(self.sdk["hwcdc_primary_enabled"](row["env"]),
                                  row["kind"] == "hwcdc")
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
-        self.assertEqual(counts, {"hwcdc": 317, "uart": 122, "classic_uart": 61})
+        self.assertEqual(counts, {"hwcdc": 319, "uart": 122, "classic_uart": 61})
 
     def test_uart_existing_hwcdc_and_newer_mcu_recipes_keep_their_transports(self):
         counts = Counter()
