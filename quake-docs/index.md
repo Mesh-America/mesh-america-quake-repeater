@@ -39,13 +39,13 @@ features:
     details: A restart or update will not set the repeater's clock back, which would otherwise stop the MeshCore app logging in.
   - iconName: cpu-chip-01
     title: A normal repeater first
-    details: Built on Keymind Cascade for the RAK3401. It repeats like any other node, with or without a sensor fitted.
+    details: Built on Keymind Cascade for the RAK3401 and, as an alpha, the RAK10703 kit. It repeats like any other node, with or without a sensor fitted.
 ---
 
 ## What an alert looks like
 
 <div class="alert-sample">
-  <p class="alert-sample__meta">Channel #quake-alerts</p>
+  <p class="alert-sample__meta">Channel #seismic</p>
   <p>Shaking detected near 47.61,-122.33. Strength 43.3 cm/s, peak acceleration 148 gal. This does not necessarily indicate an earthquake.</p>
 </div>
 
@@ -57,6 +57,8 @@ One sensor, in one place, felt strong shaking. It does not say how big an earthq
 
 ## Where to go next
 
+- **[Placement, mounting and testing](placement-and-testing.md)**: how to mount a repeater so it is not shaken by the wind, and why to run it on a test channel for a week or two first.
+- **[Supported hardware](hardware.md)**: the RAK3401 build, and the RAK10703 earthquake sensor kit (alpha).
 - **[Get started](getting-started.md)**: flash a repeater, set its location and alert channel, and test it.
 - **[How to admin your repeater](admin-guide.md)**: every command an owner needs, in plain language: the clock, region, alerts and status.
 - **[Update over the air](ota-updates.md)**: update a repeater on a roof or ridge without a cable.

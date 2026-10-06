@@ -56,9 +56,12 @@ The practical effects:
 
 The sensor responds to vibration of any cause, not just earthquakes:
 
+- Wind moving the repeater, or the mast, pole or cable it hangs from
 - Hitting, dropping or moving the repeater or the mast it is on
 - Construction, blasting, heavy machinery, trains
 - A sensor that has itself reported a fault
+
+Most of these come down to how and where the repeater is mounted: see [placement, mounting and testing](placement-and-testing.md), and run a new repeater on a test channel for a week or two before it reaches a channel people rely on.
 
 This is why every message ends with "This does not necessarily indicate an earthquake." If several repeaters in different places report at about the same moment, that is much stronger evidence than a single report. The repeaters do not compare notes with each other, so that comparison is up to the people reading the channel.
 

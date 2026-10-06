@@ -14,10 +14,10 @@ Status: experimental, first released as an alpha. The alert logic is unit tested
    ```
 
    A location of exactly 0,0 (the factory default) counts as not set.
-2. **Set the channel.** Any hashtag channel your community uses; letters, digits and dashes only:
+2. **Set the channel.** Any hashtag channel your community uses; letters, digits and dashes only. **Start with a test channel**, for example `#seismic-test`, and move to the production channel (for example `#seismic`) only after one to two weeks of quiet running in the repeater's final position: see [placement, mounting and testing](placement-and-testing.md).
 
    ```
-   set earthquake.channel #quake-alerts
+   set earthquake.channel #seismic-test
    ```
 
    `set earthquake.channel off` turns alerts off again. `#test`, `#bot` and the Public channel are refused, because bots and every nearby phone answer there.
