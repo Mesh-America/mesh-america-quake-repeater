@@ -3,7 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import serial
-from profile_switch import exchange, exchange_ready, configure_session
+from profile_switch import exchange, exchange_ready, open_session
 
 CASES = [
     ("production_batch", 0, 2), ("manual_full_control", 128, 2),
@@ -45,9 +45,8 @@ def main():
     port = serial.Serial()
     port.port, port.baudrate, port.timeout = args.port, 115200, 0.25
     port.write_timeout = 2
-    configure_session(port)
     try:
-        port.open()
+        open_session(port)
         port.reset_input_buffer()
         info = exchange(port, "info", "bench", 5)
         if info.get("bench") != "production-profile-switch-v8" or not info.get("ready"):

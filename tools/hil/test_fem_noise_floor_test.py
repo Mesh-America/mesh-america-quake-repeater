@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import struct
+import os
 import time
 import unittest
+from unittest import mock
+from types import SimpleNamespace
 
 import esp32_companion_serial_stress as companion
 import fem_noise_floor_test as hil
@@ -62,17 +65,71 @@ def fast_config(**overrides):
 
 
 class PayloadValidationTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "Requires the POSIX pySerial backend")
+    def test_actual_posix_open_preserves_selected_fem_dtr_without_reset(self):
+        try:
+            import serial
+            from test_profile_switch_host import PosixModemSerial
+        except ImportError:
+            self.skipTest("pySerial is required for the real open-order regression")
+        master, slave = os.openpty()
+        try:
+            for transport_type in (hil.CompanionFemTransport, hil.CliFemTransport):
+                for selected, vid, expected in (("off", 0x303A, False), ("on", 0x10C4, True),
+                                                ("auto", 0x10C4, False), ("auto", 0x1A86, False),
+                                                ("auto", 0x303A, True), ("auto", 0x2886, True),
+                                                ("auto", 0x239A, True)):
+                    with self.subTest(transport=transport_type.__name__, dtr=selected, vid=vid):
+                        transport = transport_type(fast_config(
+                            port=os.ttyname(slave), dtr=selected, open_delay=0))
+                        try:
+                            with mock.patch.object(serial, "Serial", PosixModemSerial), mock.patch(
+                                    "profile_switch.list_ports.comports", return_value=[
+                                        SimpleNamespace(device=os.ttyname(slave), vid=vid)]):
+                                transport.open()
+                            port = transport.port
+                            self.assertFalse(port.has_reset_transition(), port.modem_edges)
+                            self.assertEqual(port.modem_lines, {"dtr": expected, "rts": False})
+                            self.assertFalse(port.dsrdtr)
+                        finally:
+                            transport.close()
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_fem_open_or_release_failure_closes_unpublished_port(self):
+        from test_profile_switch_host import FailingSessionPort
+        import serial
+
+        for transport_type in (hil.CompanionFemTransport, hil.CliFemTransport):
+            for phase in ("open", "rts", "dtr", "restore"):
+                with self.subTest(transport=transport_type.__name__, phase=phase):
+                    port = FailingSessionPort(phase)
+                    transport = transport_type(fast_config(dtr="off", open_delay=0))
+                    with mock.patch.object(serial, "Serial", return_value=port), mock.patch(
+                            "serial_session.os.name", "posix"):
+                        with self.assertRaisesRegex(RuntimeError, phase + " failed"):
+                            transport.open()
+                    self.assertIsNone(transport.port)
+                    self.assertFalse(port.is_open)
+                    self.assertFalse(port.dsrdtr)
+                    self.assertEqual(port.close_count, 1)
+
     def test_automatic_dtr_matches_transport_session_requirements(self):
-        self.assertTrue(hil._resolve_dtr(fast_config(protocol="cli")))
-        self.assertTrue(hil._resolve_dtr(fast_config(
-            port="/dev/serial/by-id/usb-Heltec_HT-n5262G_test-if00",
-        )))
-        self.assertFalse(hil._resolve_dtr(fast_config(
-            port="/dev/serial/by-id/usb-Espressif_USB_JTAG_test-if00",
-        )))
-        self.assertFalse(hil._resolve_dtr(fast_config(
-            protocol="cli", dtr="off",
-        )))
+        from test_profile_switch_host import SessionPort
+
+        for protocol in ("cli", "companion"):
+            for vid, expected in ((0x303A, True), (0x2886, True), (0x239A, True),
+                                  (0x10C4, False), (0x1A86, False), (None, False)):
+                with self.subTest(protocol=protocol, vid=vid):
+                    port = SessionPort("test")
+                    with mock.patch("profile_switch.list_ports.comports", return_value=[
+                            SimpleNamespace(device="test", vid=vid)]):
+                        self.assertEqual(hil._resolve_dtr(fast_config(protocol=protocol), port), expected)
+        with mock.patch("profile_switch.list_ports.comports") as inventory:
+            for selected, expected in (("on", True), ("off", False)):
+                self.assertEqual(hil._resolve_dtr(fast_config(dtr=selected), SessionPort("test")), expected)
+            inventory.assert_not_called()
 
     def test_fem_get_and_set_payloads(self):
         self.assertTrue(hil.validate_fem_get_response(b"\x00\x01")["enabled"])

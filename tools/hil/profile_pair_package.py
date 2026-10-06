@@ -30,7 +30,7 @@ for target in (TXS[0],TXS[3]):
     add(target['env']+'.zip',data)
     manifest['files'][target['env']+'.zip'].update(app_base=min(addresses),image_end=max(addresses)+1)
 for name in ('firmware.bin','partitions.bin'):add('rx-'+name,(root/'.pio/build'/RX['env']/name).read_bytes())
-for name in ('profile_pair.py','profile_pair_deploy.py','profile_pair_run.py','profile_switch.py','profile_four_tx_fixture.py',
+for name in ('profile_pair.py','profile_pair_deploy.py','profile_pair_run.py','profile_switch.py','serial_session.py','profile_four_tx_fixture.py',
              'ProfilePairPlan.h','ProfileSwitchUsb.h','profile_fixed_tx.cpp','profile_fixed_tx.ini',
              'profile_switch.cpp','profile_switch.ini','profile_switch_channels.h','profile_switch_experiments.h',
              'profile_stationary_baseline.h','ProfileChannelVisitClock.h','ProfileChannelTrace.h','ProfileFrequencyOffset.h'):

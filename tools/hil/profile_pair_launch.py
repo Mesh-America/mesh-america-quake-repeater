@@ -1,5 +1,6 @@
 """Launch the bounded pair collector only once; inspect status separately."""
 import hashlib
+import ast
 import json
 from pathlib import Path
 import subprocess
@@ -7,7 +8,14 @@ root=Path.home()/'hwtest/runs/pair-sf8-32-20260914'
 if (root/'launch.json').exists() or (root/'results.json').exists():raise RuntimeError('Already launched')
 if not json.loads((root/'deployment.json').read_text()).get('complete'):raise RuntimeError('Deployment incomplete')
 manifest=json.loads((root/'manifest.json').read_text())
-for name in ('profile_pair.py','profile_pair_run.py','profile_switch.py','profile_four_tx_fixture.py'):
+dependencies=('profile_pair.py','profile_pair_run.py','profile_switch.py','profile_four_tx_fixture.py')
+# Historical bundles remain immutable. Require the helper only when their
+# own shipped profile_switch imports it, then verify its recorded hash too.
+if any((isinstance(node,ast.ImportFrom) and node.module=='serial_session')
+       or (isinstance(node,ast.Import) and any(alias.name=='serial_session' for alias in node.names))
+       for node in ast.walk(ast.parse((root/'profile_switch.py').read_bytes()))):
+    dependencies+=('serial_session.py',)
+for name in dependencies:
     if hashlib.sha256((root/name).read_bytes()).hexdigest()!=manifest['files'][name]['sha256']:
         raise RuntimeError('Collector/dependency changed')
 with (root/'collector.log').open('x') as log:

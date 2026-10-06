@@ -7,7 +7,7 @@ import subprocess
 import time
 import zipfile
 from profile_four_tx_fixture import TXS,RX,resolve
-from profile_switch import exchange,configure_session
+from profile_switch import exchange,open_session
 import serial
 from serial.tools import list_ports
 
@@ -52,7 +52,7 @@ def ready(t):
         try:
             name=resolve(t)
             p=serial.Serial();p.port=name;p.baudrate=115200;p.timeout=.2;p.write_timeout=2
-            configure_session(p);p.open()
+            open_session(p)
             try:
                 info=exchange(p,'info','board',3)
                 if info.get('bench')!='production-profile-switch-v8' or not info.get('ready'):

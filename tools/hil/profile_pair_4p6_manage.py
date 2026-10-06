@@ -37,7 +37,7 @@ if args.action=='prepare':
         manifest['files'][name]={'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
     for name in ('firmware.bin','partitions.bin'):add('rx-'+name,root/'.pio/build/profile_four_tx_v4_rx'/name)
     for name in ('profile_pair.py','profile_pair_4p6_collect.py','profile_pair_run.py','profile_pair_4p6_deploy.py',
-                 'profile_switch.py','profile_four_tx_fixture.py','ProfilePairPlan.h','ProfileSwitchUsb.h',
+                 'profile_switch.py','serial_session.py','profile_four_tx_fixture.py','ProfilePairPlan.h','ProfileSwitchUsb.h',
                  'profile_switch.cpp','profile_switch.ini','profile_switch_channels.h','profile_switch_experiments.h',
                  'profile_stationary_baseline.h','ProfileChannelVisitClock.h','ProfileChannelTrace.h','ProfileFrequencyOffset.h'):
         add(name,root/'tools/hil'/name)

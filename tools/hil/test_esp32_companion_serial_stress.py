@@ -6,6 +6,7 @@ from __future__ import annotations
 from contextlib import redirect_stdout
 import io
 import json
+import os
 import struct
 import sys
 import types
@@ -214,18 +215,42 @@ class PayloadValidationTest(unittest.TestCase):
 
 
 class StressModesTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "Requires the POSIX pySerial backend")
+    def test_actual_posix_open_avoids_companion_reset(self) -> None:
+        try:
+            import serial
+            from test_profile_switch_host import PosixModemSerial
+        except ImportError:
+            self.skipTest("pySerial is required for the real open-order regression")
+        master, slave = os.openpty()
+        try:
+            with mock.patch.object(serial, "Serial", PosixModemSerial):
+                port = hil._make_pyserial_factory()(fast_config(port=os.ttyname(slave)))
+            try:
+                self.assertFalse(port.has_reset_transition(), port.modem_edges)
+                self.assertEqual(port.modem_lines, {"dtr": False, "rts": False})
+                self.assertFalse(port.dsrdtr)
+            finally:
+                port.close()
+        finally:
+            os.close(master)
+            os.close(slave)
+
     def test_selected_control_lines_are_set_while_port_is_closed(self) -> None:
         class Serial:
             def __init__(self):
                 self.is_open = False
+                self.dsrdtr = False
+                self.events = []
 
             def __setattr__(self, name, value):
                 if name in ("dtr", "rts"):
-                    assert not self.is_open
+                    self.events.append((name, value))
                 object.__setattr__(self, name, value)
 
             def open(self):
                 assert self.rts is False
+                self.events.append(("open", self.dtr))
                 self.is_open = True
 
         with mock.patch.dict(sys.modules, {"serial": types.SimpleNamespace(Serial=Serial)}):
@@ -235,6 +260,43 @@ class StressModesTest(unittest.TestCase):
                     port = factory(fast_config(dtr=dtr))
                     self.assertIs(port.dtr, dtr)
                     self.assertTrue(port.is_open)
+                    opened = port.events.index(("open", dtr))
+                    self.assertLess(port.events.index(("dtr", dtr)), opened)
+                    self.assertLess(port.events.index(("rts", False)), opened)
+                    self.assertFalse(port.dsrdtr)
+
+    def test_other_backend_keeps_manual_companion_lines_without_dsr_handoff(self) -> None:
+        from test_profile_switch_host import SessionPort
+
+        class OtherBackendPort(SessionPort):
+            def __init__(self):
+                super().__init__("test")
+
+            def __setattr__(self, name, value):
+                if name == "dsrdtr" and value:
+                    raise AssertionError("Other backend entered DSR handshaking")
+                super().__setattr__(name, value)
+
+        with mock.patch.dict(sys.modules, {"serial": types.SimpleNamespace(Serial=OtherBackendPort)}), mock.patch(
+                "serial_session.os.name", "nt"):
+            port = hil._make_pyserial_factory()(fast_config())
+        self.assertTrue(port.is_open)
+        self.assertEqual(port.opened_control_lines, (False, False))
+        self.assertFalse(port.dsrdtr)
+
+    def test_factory_open_or_release_failure_closes_and_restores_flow(self) -> None:
+        from test_profile_switch_host import FailingSessionPort
+
+        for phase in ("open", "rts", "dtr", "restore"):
+            with self.subTest(phase=phase):
+                port = FailingSessionPort(phase)
+                with mock.patch.dict(sys.modules, {"serial": types.SimpleNamespace(Serial=lambda: port)}), mock.patch(
+                        "serial_session.os.name", "posix"):
+                    with self.assertRaisesRegex(RuntimeError, phase + " failed"):
+                        hil._make_pyserial_factory()(fast_config())
+                self.assertFalse(port.is_open)
+                self.assertFalse(port.dsrdtr)
+                self.assertEqual(port.close_count, 1)
 
     def test_dtr_cli_opt_in_preserves_default_and_rejects_non_boolean_config(self) -> None:
         parser = hil.build_argument_parser()

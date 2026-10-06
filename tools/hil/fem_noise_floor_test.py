@@ -42,6 +42,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import esp32_companion_serial_stress as companion
+from serial_session import open_configured_session
 
 
 CMD_GET_FEM_RX_GAIN = 0x42
@@ -141,16 +142,17 @@ def _radio_stats_spec() -> companion.RequestSpec:
     )
 
 
-def _resolve_dtr(config: FemTestConfig) -> bool:
+def _resolve_dtr(config: FemTestConfig, port: Any) -> bool:
     if config.dtr == "on":
         return True
     if config.dtr == "off":
         return False
-    # Text consoles require an asserted host session on both nRF52 USB CDC and
-    # ESP32-S3 USB-Serial/JTAG. Companion framing on V4 remains usable without
-    # DTR and avoids changing the device's host-session state during a binary
-    # protocol test.
-    return config.protocol == "cli" or "HT-n5262" in config.port
+    # AUTO follows the actual USB transport, not the CLI/framing protocol.
+    # A bridge's DTR may hold GPIO0; native CDC uses it as a host session.
+    # Import only after open() has requested the optional serial dependency.
+    from profile_switch import configure_session
+    configure_session(port)
+    return bool(port.dtr)
 
 
 class CompanionFemTransport:
@@ -176,9 +178,9 @@ class CompanionFemTransport:
             self.config.read_poll_timeout, self.config.response_timeout
         )
         port.write_timeout = self.config.write_timeout
-        port.dtr = _resolve_dtr(self.config)
+        port.dtr = _resolve_dtr(self.config, port)
         port.rts = False
-        port.open()
+        open_configured_session(port)
         self.counters.ports_opened += 1
         self.port = port
         try:
@@ -292,9 +294,9 @@ class CliFemTransport:
             self.config.read_poll_timeout, self.config.response_timeout
         )
         port.write_timeout = self.config.write_timeout
-        port.dtr = _resolve_dtr(self.config)
+        port.dtr = _resolve_dtr(self.config, port)
         port.rts = False
-        port.open()
+        open_configured_session(port)
         self.port = port
         try:
             if self.config.open_delay:

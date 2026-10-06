@@ -11,7 +11,7 @@ import sys
 import time
 
 import serial
-from profile_switch import configure_session
+from profile_switch import open_session
 
 
 DWELLS = tuple(value / 10 for value in range(41, 82, 5))
@@ -49,9 +49,8 @@ def reboot_boards(names):
     for name in names:
         port = serial.Serial()
         port.port, port.baudrate, port.timeout, port.write_timeout = name, 115200, .25, 2
-        configure_session(port)
         try:
-            port.open()
+            open_session(port)
             port.write(b"reboot\n")
             port.flush()
         finally:
