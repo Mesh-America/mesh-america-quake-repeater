@@ -7,13 +7,31 @@ import tempfile
 import unittest
 
 from test_replay_reset_integration import extract_braced
+from test_esp32_hwcdc_recipes import (
+    ProjectConfig, USB_CDC, USB_MODE, flag_environment, usb_values,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+C6_USB_ENV = "env:M5Stack_Unit_C6L_companion_radio_usb"
 
 
 def source(path: str) -> str:
     return (ROOT / path).read_text()
+
+
+def c6_usb_config():
+    # Resolve tracked inheritance only; never load a developer's local config.
+    config = ProjectConfig(str(ROOT / "platformio.ini"), parse_extra=False)
+    config.read(str(ROOT / "variants/m5stack_unit_c6l/platformio.ini"), parse_extra=False)
+    return config
+
+
+def c6_usb_flags(config):
+    return flag_environment(
+        build_flags=config.get(C6_USB_ENV, "build_flags", []),
+        build_unflags=config.get(C6_USB_ENV, "build_unflags", []),
+    )
 
 
 class Esp32UsbSerialHygieneTest(unittest.TestCase):
@@ -325,10 +343,32 @@ int main() {
         self.assertNotIn("usb_serial_jtag_ll_pad_backup_and_disable()", reset)
         self.assertNotIn("usb_serial_jtag_ll_phy_enable_pad(", reset)
 
-        c6 = source("variants/m5stack_unit_c6l/platformio.ini")
-        usb = c6[c6.index("[env:M5Stack_Unit_C6L_companion_radio_usb]") :]
-        self.assertIn("-D ARDUINO_USB_MODE=1", usb)
-        self.assertIn("-D ENABLE_USB_INTERFACE", usb)
+        # The USB role inherits native console selectors from the C6L base.
+        # Check the effective recipe, including any child build_unflags.
+        usb = c6_usb_flags(c6_usb_config())
+        self.assertEqual(usb_values(usb), {USB_MODE: "1", USB_CDC: "1"})
+        self.assertIn("ENABLE_USB_INTERFACE", usb.get("CPPDEFINES", []))
+
+    def test_c6_usb_recipe_detects_missing_and_disabled_child_selectors(self):
+        cases = (
+            ("missing inheritance", ["-D ENABLE_USB_INTERFACE"], [],
+             {USB_MODE: "0", USB_CDC: "0"}),
+            ("removed selectors", ["${M5Stack_Unit_C6L.build_flags}",
+                                   "-D ENABLE_USB_INTERFACE"],
+             ["-DARDUINO_USB_MODE=1", "-DARDUINO_USB_CDC_ON_BOOT=1"],
+             {USB_MODE: "0", USB_CDC: "0"}),
+            ("disabled backend", ["${M5Stack_Unit_C6L.build_flags}",
+                                  "-D ARDUINO_USB_MODE=0", "-D ENABLE_USB_INTERFACE"],
+             ["-DARDUINO_USB_MODE=1"], {USB_MODE: "0", USB_CDC: "1"}),
+        )
+        for label, flags, unflags, expected in cases:
+            with self.subTest(recipe=label):
+                config = c6_usb_config()
+                config.set(C6_USB_ENV, "build_flags", flags)
+                config.set(C6_USB_ENV, "build_unflags", unflags)
+                usb = c6_usb_flags(config)
+                self.assertIn("ENABLE_USB_INTERFACE", usb.get("CPPDEFINES", []))
+                self.assertEqual(usb_values(usb), expected)
 
     def test_hwcdc_host_presence_uses_sof_signal(self):
         board = source("src/helpers/ESP32Board.h")
