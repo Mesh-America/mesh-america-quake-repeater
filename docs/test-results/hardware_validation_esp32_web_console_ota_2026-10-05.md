@@ -101,4 +101,6 @@ firmware profile, or radio traffic load. USB-attached console checks do not
 establish CPU sleep, measured current or button wake. The subsequent V4
 button-wake profile correction passed host/build validation and another native
 GUI fresh-flash plus 180-second open/closed console check, as recorded in that
-linked report; physical button wake remains untested.
+linked report. On 2026-10-06 the user separately confirmed V4 button screen wake;
+its firmware revision and CPU sleep state were not specified. The operator
+USB tests included no actual button press or sleep/current measurement.

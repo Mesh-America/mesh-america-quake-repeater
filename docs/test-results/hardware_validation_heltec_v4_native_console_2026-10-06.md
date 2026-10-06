@@ -15,6 +15,11 @@ and another native fresh-flash GUI connection with 180-second open/closed
 console intervals. That updated-source checkpoint is recorded separately below;
 it does not extend the older source's 600-second measurements to the new image.
 
+On 2026-10-06, the user separately confirmed that a Heltec V4 button press wakes
+the screen. This is a user-reported manual confirmation; its firmware revision
+and CPU sleep state were not specified. It does not supply a current measurement
+or a V4-R8 manual result.
+
 These results extend the [earlier startup investigation](hardware_validation_esp32_web_console_startup_2026-10-05.md)
 to the current normal Full image and native hardware CDC. They are physical
 console stability checks, not a measurement of sleep current, radio traffic
@@ -143,10 +148,11 @@ qualified results.
 The USB cable remained attached throughout these trials. The native-host sleep
 guard keeps CPU command service available while the USB host is connected,
 including when its serial port is closed. Power saving on is therefore not
-proof of CPU light-sleep entry, measured current, or physical button wake.
+proof of CPU light-sleep entry, measured current, or an operator button test.
 At this source, V4 lacks the momentary-button wake profile flag. Its subsequent
-software/build and console validation is recorded below. No physical button
-access is available in this setup, so physical button wake remains unqualified.
+software/build and console validation is recorded below. The operator had no
+physical button access in this setup. The user's separate screen-wake
+confirmation does not establish this historical image's CPU sleep state.
 
 These checks qualify this historical `c88885a3` Full application, native Pi Chromium setup,
 protected active-slot application flash, and measured intervals. They do not
@@ -203,7 +209,9 @@ service states were restored, and no Pi network configuration changed.
 
 The compact safe audit records this as `updated_source_checkpoint`, separate
 from the older 600-second trials. The updated source qualifies these
-180-second console intervals; physical button wake, CPU sleep and current draw
-remain untested with USB attached. GitHub unit run `37426156162` for this new
+180-second console intervals. The operator did not physically press the button;
+the user's manual screen-wake confirmation is recorded above without assigning
+it a firmware SHA or CPU sleep state. CPU sleep and current draw were not
+measured in these USB-attached tests. GitHub unit run `37426156162` for this new
 source is still in progress at this checkpoint. Release 1.17.1.9 remains held
 and unpublished.
