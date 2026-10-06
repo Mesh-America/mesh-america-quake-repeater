@@ -30,8 +30,9 @@ from the published firmware assets.
     <p>
       For a new installation, choose the exact board and role, prefer a
       <strong>FULL / complete profile</strong> when it is available, and select
-      <strong>Full install / layout migration (merged .bin)</strong>. Narrower profiles
-      remain available when their reduced transport or feature set is intentional.
+      <strong>Full install / layout migration (merged .bin)</strong>. Current ESP32
+      releases combine the supported features in Full; use runtime settings to
+      choose the active transports. Other chip families retain their qualified profiles.
     </p>
     <p>
       Upgrading an existing ESP32 infrastructure node from a smaller partition
@@ -255,13 +256,16 @@ settings** button creates a public website link that other people can open.
 
 ## FULL versus standard
 
-For a new installation, use the FULL / complete profile when it exists and the
-board has enough flash. FULL profiles keep the complete supported feature set
-and CLI. Standard profiles remain useful for boards without a FULL build, for
-an intentionally narrower transport, or when retaining an existing compatible
-partition layout.
+Current ESP32 ordinary releases use one Full / complete image per exact board
+and role. Full keeps the supported feature set and CLI; runtime switches select
+USB, Bluetooth, Wi-Fi, logging, and other qualified features. Separate portable,
+minimal, and single-transport ESP32 images are installation/recovery recipes,
+not additional ordinary release choices. The documented T-LoRa UART/MQTT RAM
+split remains two Full images. Other chip families retain their qualified
+capacity and sensor-profile choices.
 
-Changing between standard and FULL ESP32 layouts requires a partition migration.
+Moving an older ESP32 installation to an expanded Full layout requires a
+partition migration.
 Use the exact-board merged image over USB, or a supported exact board and role
 staged migration ZIP from the [utility release](https://github.com/mikecarper/MeshCore/releases/tag/utility-v1.17.1.8-halo-keymind-cascade-dev-9053038f).
 Read that ZIP's README before choosing the Wi-Fi or LoRa route. Do not send a

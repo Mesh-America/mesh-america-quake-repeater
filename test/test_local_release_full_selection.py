@@ -20,6 +20,96 @@ def record(target: str, profile: str = "full", platform: str = "ESP32_PLATFORM",
 
 
 class ReleaseFullSelectionTest(unittest.TestCase):
+    def test_resume_discards_everyday_esp32_standard_profiles_with_or_without_full(self):
+        for target in ("heltec_v4_repeater", "heltec_v4_room_server", "heltec_v4_sensor",
+                       "Station_G3_ESP32_r2_repeater", "Ebyte_EoRa-S3_Repeater",
+                       "Station_G2_companion_radio_full"):
+            primary = record(target)
+            for profile in ("standard", "auto", "reduced"):
+                stale = record(target, profile)
+                with self.subTest(target=target, profile=profile):
+                    self.assertEqual(select_ordinary_full_records([stale]), [])
+                    for inputs in ([primary, stale], [stale, primary]):
+                        selected = select_ordinary_full_records(inputs)
+                        self.assertEqual(selected, [primary])
+                        self.assertIs(selected[0], primary)
+
+    def test_reduced_esp32_identities_are_not_relabelled_as_full_releases(self):
+        for base in ("heltec_v4_repeater", "Ebyte_EoRa-S3_Repeater",
+                     "LilyGo_Tlora_C6_room_server_"):
+            primary = record(base)
+            alias = base.rstrip("_") + "_lora_ota_no_external_sensors"
+            for profile in ("standard", "auto", "full"):
+                legacy = record(alias, profile)
+                with self.subTest(base=base, profile=profile):
+                    self.assertEqual(select_ordinary_full_records([legacy]), [])
+                    self.assertEqual(select_ordinary_full_records([legacy, primary]), [primary])
+                    self.assertEqual(primary["manifest"]["target"], base)
+                    self.assertEqual(legacy["manifest"]["target"], alias)
+
+    def test_legacy_companion_transport_names_do_not_survive_resumed_releases(self):
+        primary = record("Station_G2_companion_radio_full")
+        for transport in ("usb", "ble", "wifi"):
+            for profile in ("standard", "full"):
+                legacy = record("Station_G2_companion_radio_" + transport, profile)
+                with self.subTest(transport=transport, profile=profile):
+                    self.assertEqual(select_ordinary_full_records([legacy]), [])
+                    self.assertEqual(select_ordinary_full_records([legacy, primary]), [primary])
+        terminal = record("Station_G2_terminal_chat")
+        self.assertEqual(select_ordinary_full_records([terminal, primary]), [primary])
+
+    def test_migration_and_local_hil_utilities_stay_out_of_ordinary_release(self):
+        primary = record("heltec_v4_repeater")
+        for target in ("heltec_v4_partition_migrator", "Xiao_S3_WIO_partition_expander",
+                       "xiao_s3_partition_legacy_seed", "profile_switch_heltec_v4",
+                       "profile_fixed_esp32_tx", "profile_four_tx_v4_rx",
+                       "heltec_v4_repeater_legacy_partition_test",
+                       "Heltec_v3_repeater_observer_mqtt_sim"):
+            for profile in ("standard", "full"):
+                utility = record(target, profile)
+                with self.subTest(target=target, profile=profile):
+                    self.assertEqual(select_ordinary_full_records([utility]), [])
+                    self.assertEqual(select_ordinary_full_records([utility, primary]), [primary])
+
+    def test_kiss_is_a_distinct_host_modem_role_and_not_a_reduced_node(self):
+        companion = record("Station_G2_companion_radio_full")
+        for target in ("Station_G2_kiss_modem", "nibble_screen_connect_kiss_modem_"):
+            for profile in ("standard", "auto", "full"):
+                modem = record(target, profile)
+                with self.subTest(target=target, profile=profile):
+                    self.assertEqual(select_ordinary_full_records([modem]), [modem])
+                    self.assertCountEqual(select_ordinary_full_records([companion, modem]),
+                                          [companion, modem])
+
+    def test_unverified_selected_esp32_full_image_cannot_enter_release(self):
+        for target in ("heltec_v4_room_server", "Station_G2_companion_radio_full"):
+            for verified in (False, None):
+                image = record(target)
+                image["manifest"]["verified"] = verified
+                with self.subTest(target=target, verified=verified):
+                    with self.assertRaisesRegex(ValueError, "verified"):
+                        select_ordinary_full_records([image])
+
+    def test_exact_hardware_and_application_roles_remain_distinct_full_records(self):
+        images = [record(target) for target in (
+            "heltec_v4_repeater", "heltec_v4_tft_repeater", "heltec_v4_r8_repeater",
+            "heltec_v4_room_server", "heltec_v4_sensor",
+            "heltec_v4_2_v4_3_companion_radio_full_femon",
+            "heltec_v4_tft_companion_radio_full_femon",
+        )]
+        for inputs in (images, list(reversed(images))):
+            selected = select_ordinary_full_records(inputs)
+            self.assertCountEqual(selected, images)
+            self.assertEqual(len(selected), len(images))
+
+    def test_other_platform_profiles_and_reduced_identities_are_unchanged(self):
+        for platform in ("NRF52_PLATFORM", "RP2040_PLATFORM", "STM32_PLATFORM"):
+            for profile in ("standard", "auto", "full"):
+                for suffix in ("", "_lora_ota_no_external_sensors"):
+                    image = record("other_repeater" + suffix, profile, platform)
+                    with self.subTest(platform=platform, profile=profile, suffix=suffix):
+                        self.assertEqual(select_ordinary_full_records([image]), [image])
+
     def test_full_uart_source_substitution_requires_linked_driver_proof(self):
         for base in ("Heltec_v3_repeater", "Heltec_WSL3_repeater", "RAK_3112_repeater",
                      "LilyGo_TLora_V2_1_1_6_repeater"):
@@ -76,7 +166,8 @@ class ReleaseFullSelectionTest(unittest.TestCase):
             wireless = record(base + "_bridge_espnow", profile, capabilities=("bridge.espnow",))
             for inputs in ([observer, uart, wireless], [wireless, uart, observer]):
                 with self.subTest(profile=profile):
-                    self.assertCountEqual(select_ordinary_full_records(inputs), [observer, uart])
+                    expected = [observer, uart] if profile == "full" else [observer]
+                    self.assertCountEqual(select_ordinary_full_records(inputs), expected)
         for fault in ("missing_capability", "missing_proof", "false_proof", "unverified"):
             normal = record(base, capabilities=("bridge.rs232", "bridge.espnow"))
             manifest = normal["manifest"]
@@ -109,8 +200,12 @@ class ReleaseFullSelectionTest(unittest.TestCase):
             for profile in ("standard", "full"):
                 legacy = record(base + "_bridge_espnow", profile, capabilities=("bridge.espnow",))
                 with self.subTest(fault=fault, profile=profile):
-                    self.assertCountEqual(select_ordinary_full_records([observer, legacy]),
-                                          [observer, legacy])
+                    if fault == "unverified":
+                        with self.assertRaisesRegex(ValueError, "verified"):
+                            select_ordinary_full_records([observer, legacy])
+                    else:
+                        expected = [observer, legacy] if profile == "full" else [observer]
+                        self.assertCountEqual(select_ordinary_full_records([observer, legacy]), expected)
 
     def test_meshtower_sd_primary_filters_stale_internal_images_without_relabeling(self):
         primary = "Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"
@@ -151,7 +246,7 @@ class ReleaseFullSelectionTest(unittest.TestCase):
                 variants.append(item)
             self.assertEqual(select_ordinary_full_records(variants), variants)
 
-    def test_resume_filters_sibling_full_images_only(self):
+    def test_resume_filters_standard_and_sibling_full_images(self):
         inputs = [
             record("Heltec_v3_repeater_observer_mqtt"),
             record("Heltec_v3_repeater_bridge_espnow"),
@@ -178,7 +273,7 @@ class ReleaseFullSelectionTest(unittest.TestCase):
             "Meshadventurer_sx1262_repeater_bridge_espnow",
             "RAK_4631_repeater",
         })
-        self.assertEqual(len(selected), 9)  # standard V3 and both TLora Full profiles remain
+        self.assertEqual(len(selected), 8)  # both TLora Full transport profiles remain
 
     def test_mke_combined_repeater_filters_stale_bridge_identities_without_relabeling(self):
         primary = record("MKE_s3_repeater", capabilities=("bridge.rs232", "bridge.espnow"))
@@ -237,12 +332,12 @@ class ReleaseFullSelectionTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "qualified combined repeater"):
                     select_ordinary_full_records([primary])
 
-    def test_mke_full_contract_does_not_apply_to_other_platforms_or_standard_profiles(self):
+    def test_other_platform_passthrough_and_standard_mke_is_not_a_release(self):
         other_platform = record("RAK_4631_repeater", platform="NRF52_PLATFORM")
         other_platform["manifest"].update(verified=None, capabilities=None, verification=None)
         standard_mke = record("MKE_s3_repeater", "standard")
         inputs = [other_platform, standard_mke]
-        self.assertEqual(select_ordinary_full_records(inputs), inputs)
+        self.assertEqual(select_ordinary_full_records(inputs), [other_platform])
 
     def test_dedicated_espnow_survives_when_plain_image_lacks_the_capability(self):
         inputs = [record("heltec_v4_tft_repeater"),
@@ -275,7 +370,12 @@ class ReleaseFullSelectionTest(unittest.TestCase):
                                 capabilities=("bridge.espnow",))
                 for inputs in ([primary, legacy], [legacy, primary]):
                     with self.subTest(profile=profile, fault=fault, primary_first=inputs[0] is primary):
-                        self.assertCountEqual(select_ordinary_full_records(inputs), inputs)
+                        if fault == "false_verified":
+                            with self.assertRaisesRegex(ValueError, "verified"):
+                                select_ordinary_full_records(inputs)
+                        else:
+                            expected = inputs if profile == "full" else [primary]
+                            self.assertCountEqual(select_ordinary_full_records(inputs), expected)
 
     def test_stale_plain_cannot_displace_the_observer_proving_the_combined_driver(self):
         for profile in ("full", "standard"):
@@ -324,7 +424,8 @@ class ReleaseFullSelectionTest(unittest.TestCase):
         primary = record("heltec_v4_tft_repeater", capabilities=("bridge.espnow",))
         primary["manifest"]["verified"] = False
         legacy = record("heltec_v4_tft_repeater_bridge_espnow", capabilities=("bridge.espnow",))
-        self.assertEqual(select_ordinary_full_records([primary, legacy]), [primary, legacy])
+        with self.assertRaisesRegex(ValueError, "verified"):
+            select_ordinary_full_records([primary, legacy])
 
 
 if __name__ == "__main__":
