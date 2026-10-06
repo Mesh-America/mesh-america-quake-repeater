@@ -3,6 +3,7 @@
 import argparse
 import json
 import itertools
+import os
 import secrets
 from pathlib import Path
 import time
@@ -14,10 +15,12 @@ _run_sequences = itertools.count(secrets.randbelow(0x3fffffff) + 1)
 
 
 def configure_session(port):
-    # Native Espressif/Seeed/Adafruit USB and a CH340 bridge differ in DTR semantics.
+    # Native Espressif/Seeed/Adafruit USB and CP2102/CH340 bridges differ in DTR semantics.
     # DTR keeps the native session active; on a bridge it can drive BOOT/GPIO0.
     port.rts = False
-    port.dtr = any(info.vid in (0x303A, 0x2886, 0x239A) and info.device.casefold() == str(port.port).casefold()
+    device = os.path.realpath(str(port.port)).casefold()
+    port.dtr = any(info.vid in (0x303A, 0x2886, 0x239A)
+                   and os.path.realpath(str(info.device)).casefold() == device
                    for info in list_ports.comports())
 
 

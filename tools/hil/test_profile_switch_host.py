@@ -1,5 +1,7 @@
 """Regression tests for the serial HIL result reader."""
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from types import SimpleNamespace
 from profile_switch import read_response, exchange_ready, configure_session, exchange
@@ -19,6 +21,19 @@ class Port:
         return next(self.parts)
 
 
+class SessionPort:
+    def __init__(self, device):
+        self.port = device
+        self.is_open = False
+        self.dtr = True
+        self.rts = True
+        self.opened_control_lines = None
+
+    def open(self):
+        self.opened_control_lines = (self.dtr, self.rts)
+        self.is_open = True
+
+
 class ResultReaderTests(unittest.TestCase):
     def test_timing_runs_get_correlated_cached_replies(self):
         port = Port([])
@@ -29,14 +44,42 @@ class ResultReaderTests(unittest.TestCase):
         self.assertTrue(result["transport_recovered"])
 
     def test_native_usb_and_bridge_have_distinct_control_lines(self):
-        for vid, expected in ((0x303A, True), (0x2886, True), (0x239A, True), (0x1A86, False), (None, False)):
-            port = Port([])
+        for vid, expected in ((0x303A, True), (0x2886, True), (0x239A, True),
+                              (0x1A86, False), (0x10C4, False), (None, False)):
+            port = SessionPort("test")
             with patch("profile_switch.list_ports.comports", return_value=[
                     SimpleNamespace(device="TEST", vid=vid),
                     SimpleNamespace(device="different", vid=0x303A)]):
                 configure_session(port)
+            self.assertFalse(port.is_open)
+            port.open()
+            self.assertEqual(port.opened_control_lines, (expected, False))
             self.assertEqual(port.dtr, expected)
             self.assertFalse(port.rts)
+
+    def test_by_id_symlinks_select_the_actual_native_or_cp2102_device(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            native = root / "ttyACM0"
+            bridge = root / "ttyUSB0"
+            native.touch()
+            bridge.touch()
+            by_id = root / "serial" / "by-id"
+            by_id.mkdir(parents=True)
+            native_id = by_id / "usb-Espressif_USB_JTAG-if00"
+            bridge_id = by_id / "usb-Silicon_Labs_CP2102-if00-port0"
+            native_id.symlink_to(native)
+            bridge_id.symlink_to(bridge)
+            inventory = [SimpleNamespace(device=str(native), vid=0x303A),
+                         SimpleNamespace(device=str(bridge), vid=0x10C4)]
+            for device, expected in ((native_id, True), (bridge_id, False)):
+                with self.subTest(device=device.name):
+                    port = SessionPort(str(device))
+                    with patch("profile_switch.list_ports.comports", return_value=inventory):
+                        configure_session(port)
+                    self.assertFalse(port.is_open)
+                    port.open()
+                    self.assertEqual(port.opened_control_lines, (expected, False))
 
     def test_timeout_replays_cached_result_without_repeating_tx(self):
         port = Port([])
