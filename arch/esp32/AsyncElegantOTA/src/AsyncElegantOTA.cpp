@@ -59,7 +59,9 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 return request->requestAuthentication();
             }
         }
-        if (request->isSent()) return; // Preserve an earlier upload error.
+        // send() queues a response until the request body has finished. Keep
+        // an earlier upload error even before it has reached the wire.
+        if (request->isSent() || request->getResponse()) return;
         const bool complete = request->_tempObject
             && *static_cast<bool*>(request->_tempObject) && !Update.hasError();
         AsyncWebServerResponse *response = request->beginResponse(complete?200:500, "text/plain", complete?"OK":"FAIL");
@@ -68,6 +70,7 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
         request->send(response);
     }, [&](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         //Upload handler chunks in data
+        if (request->isSent() || request->getResponse()) return;
         if(_authRequired){
             if(!request->authenticate(_username.c_str(), _password.c_str())){
                 return request->requestAuthentication();
@@ -102,6 +105,11 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 return request->send(400, "text/plain", "MD5 parameter invalid");
             }
 
+            // The HTTP listener defaults to a three-second receive timeout.
+            // A valid OTA body can pause longer on a weak WiFi link; retain a
+            // bounded timeout on this admitted upload without changing peers.
+            request->client()->setRxTimeout(30);
+
             #if defined(ESP8266)
                 int cmd = (filename == "filesystem") ? U_FS : U_FLASH;
                 Update.runAsync(true);
@@ -112,7 +120,6 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
                 int cmd = (filename == "filesystem") ? U_SPIFFS : U_FLASH;
                 if (!Update.begin(UPDATE_SIZE_UNKNOWN, cmd)) { // Start with max available size
             #endif
-                Update.printError(Serial);
                 ota_upload_busy.store(false);
                 return request->send(400, "text/plain", "OTA could not begin");
             }
@@ -144,13 +151,12 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
         // Write chunked data to the free sketch space
         if(len){
             if (Update.write(data, len) != len) {
-                return request->send(400, "text/plain", "OTA could not begin");
+                return request->send(400, "text/plain", "OTA flash write failed");
             }
         }
             
         if (final) { // if the final flag is set then this is the last frame of data
             if (!Update.end(true)) { //true to set the size to the current progress
-                Update.printError(Serial);
                 return request->send(400, "text/plain", "Could not end OTA");
             }
             *static_cast<bool*>(request->_tempObject) = true;
