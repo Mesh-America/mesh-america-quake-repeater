@@ -67,6 +67,47 @@ TEST_F(Notifications, ContactAndChannelOverrideEachOutputAndConditionIndependent
   uint8_t channel[16];memset(channel,2,sizeof(channel));
   c.message(nullptr,channel,false,0);EXPECT_TRUE(sink.led);EXPECT_TRUE(sink.vibration);
 }
+TEST_F(Notifications, DocumentedChannelNineExceptionKeepsOtherMessagesQuiet) {
+  // notifications.md: numeric slots are resolved to channel keys by MyMesh.
+  // Exercise the same recipe with slot 9's already-resolved key.
+  for (const char* command : {
+      "set notify.enabled on",
+      "set notify.vibration all off",
+      "set notify.sound all off",
+      "set notify.led all off",
+      "set notify.screen all off",
+      "set notify.gpio all off",
+      "set notify.repeat all 1",
+      "set notify.gap all 500",
+      "set notify.stop all button",
+      "set notify.sound on",
+      "set notify.sound channel:09090909090909090909090909090909 ch9:d=8,o=5,b=180:c,e,g"}) {
+    EXPECT_EQ("OK", cmd(command)) << command;
+  }
+  unsigned rules = 0;
+  for (const auto& rule : c.settings().rules) if (rule.used) ++rules;
+  EXPECT_EQ(2U, rules);
+  for (bool connected : {false, true}) {
+    for (unsigned slot = 0; slot < 40; ++slot) {
+      uint8_t channel[16];memset(channel, slot, sizeof(channel));
+      ASSERT_TRUE(c.message(nullptr, channel, connected, 0));
+      EXPECT_EQ(slot == 9 ? "ch9:d=8,o=5,b=180:c,e,g" : "", sink.tune);
+      EXPECT_FALSE(sink.vibration);EXPECT_FALSE(sink.led);EXPECT_FALSE(sink.gpio);
+      EXPECT_EQ(0, sink.screen_state);
+      EXPECT_TRUE(c.overridesScreen());
+      c.loop(1000, connected);EXPECT_FALSE(c.active());
+    }
+    uint8_t contact[32];memset(contact, 1, sizeof(contact));
+    ASSERT_TRUE(c.message(contact, nullptr, connected, 0));
+    EXPECT_TRUE(sink.tune.empty());EXPECT_FALSE(sink.vibration);EXPECT_FALSE(sink.led);
+    EXPECT_EQ(0, sink.screen_state);
+    c.stop();
+  }
+  EXPECT_EQ("OK", cmd("set notify.sound off"));
+  uint8_t channel[16];memset(channel, 9, sizeof(channel));
+  ASSERT_TRUE(c.message(nullptr, channel, false, 0));
+  EXPECT_TRUE(sink.tune.empty()); // A rule cannot bypass its master switch.
+}
 TEST_F(Notifications, ButtonConnectedAndNeverStopPolicies) {
   cmd("set notify.led all 50");cmd("set notify.repeat all forever");
   c.loop(0,false);c.message(nullptr,nullptr,false,0);EXPECT_TRUE(c.button());EXPECT_FALSE(c.active());
