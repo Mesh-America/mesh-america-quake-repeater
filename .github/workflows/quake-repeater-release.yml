@@ -1,7 +1,9 @@
 name: Quake Repeater Build and Release
 
-# Builds the Mesh America Quake Repeater image (the only firmware this repository ships), checks it,
-# and on a tag publishes a GitHub release for the web flasher to pick up.
+# Builds the Mesh America Quake Repeater images (RAK3401 and RAK4631, the only firmware this repository
+# ships), checks them, and on a tag publishes one GitHub release carrying both for the web flasher to
+# pick up. Both images carry the same version (FIRMWARE_VERSION in variants/meshamerica_quake/platformio.ini
+# is set in each environment): the release fails if they differ.
 #
 #   pull request / push to next  ->  build and verify only
 #   push to main                 ->  build and verify, then, if the version inside the image has no
@@ -45,12 +47,20 @@ concurrency:
   group: quake-repeater-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  PIO_ENV: MeshAmerica_Quake_Repeater_RAK3401
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The first board keeps the manifest name the flasher's earlier releases used.
+          - env: MeshAmerica_Quake_Repeater_RAK3401
+            manifest: manifest.json
+          - env: MeshAmerica_Quake_Repeater_RAK4631
+            manifest: manifest-MeshAmerica_Quake_Repeater_RAK4631.json
+    env:
+      PIO_ENV: ${{ matrix.env }}
     steps:
       - name: Clone Repo
         uses: actions/checkout@v6
@@ -61,7 +71,7 @@ jobs:
           path: |
             ~/.cache/pip
             ~/.platformio/.cache
-          key: ${{ runner.os }}-pio-quake
+          key: ${{ runner.os }}-pio-quake-${{ matrix.env }}
 
       - name: Install Python
         uses: actions/setup-python@v6
@@ -93,12 +103,12 @@ jobs:
             --env "$PIO_ENV" \
             --commit "$GITHUB_SHA" \
             "${TAG_ARGS[@]}" \
-            --out dist
+            --manifest-name "${{ matrix.manifest }}"             --out dist
 
       - name: Upload build result
         uses: actions/upload-artifact@v7
         with:
-          name: quake-repeater-release
+          name: quake-repeater-release-${{ matrix.env }}
           path: dist
           if-no-files-found: error
 
@@ -115,7 +125,8 @@ jobs:
       - name: Download build result
         uses: actions/download-artifact@v8
         with:
-          name: quake-repeater-release
+          pattern: quake-repeater-release-*
+          merge-multiple: true
           path: dist
 
       - name: Work out the tag
@@ -129,13 +140,19 @@ jobs:
             TAG="quake-v$(python3 -c 'import json; print(json.load(open("dist/manifest.json"))["version"])')"
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          # The web flasher requires the manifest to name its release tag. On main the manifest was
-          # built before the tag was known, so record it now.
+          # The web flasher requires each manifest to name its release tag. On main the manifests were
+          # built before the tag was known, so record it now. Every image in a release must carry the
+          # same version.
           TAG="$TAG" python3 - <<'PY'
-          import json, os
-          m = json.load(open("dist/manifest.json"))
-          m["tag"] = os.environ["TAG"]
-          json.dump(m, open("dist/manifest.json", "w"), indent=2)
+          import glob, json, os
+          paths = sorted(glob.glob("dist/manifest*.json"))
+          manifests = {p: json.load(open(p)) for p in paths}
+          versions = {m["version"] for m in manifests.values()}
+          if len(manifests) < 2 or len(versions) != 1:
+              raise SystemExit(f"::error::expected one manifest per image, all with the same version; found {len(manifests)} with versions {sorted(versions)}")
+          for path, m in manifests.items():
+              m["tag"] = os.environ["TAG"]
+              json.dump(m, open(path, "w"), indent=2)
           PY
           if [[ "${GITHUB_REF}" != refs/tags/* ]] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists; nothing to publish."
@@ -151,18 +168,27 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           python3 - <<'PY' > notes.md
-          import json
-          m = json.load(open("dist/manifest.json"))
-          print(f"Mesh America Quake Repeater firmware {m['version']} for the RAK3401 (RAK12027 earthquake sensor in sensor slot A).")
+          import glob, json
+          BOARDS = {
+              "MeshAmerica_Quake_Repeater_RAK3401": "RAK3401 (RAK12027 earthquake sensor in sensor slot A)",
+              "MeshAmerica_Quake_Repeater_RAK4631": "RAK4631 on a RAK19003 base (RAK12027 in sensor slot C or D, as in the RAK10703 earthquake sensor kit). ALPHA: not yet run on this hardware",
+          }
+          manifests = [json.load(open(p)) for p in sorted(glob.glob("dist/manifest*.json"))]
+          manifests.sort(key=lambda m: m["env"])
+          print(f"Mesh America Quake Repeater firmware {manifests[0]['version']}.")
           print()
           print("Install it with the web flasher at https://apps.meshamerica.com/quake-repeater/, which also has the over-the-air update files and a guide. Already running this firmware? The same page configures it over USB.")
+          for m in manifests:
+              print()
+              print(f"### {BOARDS.get(m['env'], m['env'])}")
+              print()
+              print(f"- Package: `{m['package']['file']}` ({m['package']['size']} bytes)")
+              print(f"- SHA-256: `{m['package']['sha256']}`")
+              if "hex" in m:
+                  print(f"- Firmware image: `{m['hex']['file']}` ({m['hex']['size']} bytes), SHA-256 `{m['hex']['sha256']}`. Keep it: updating a node over LoRa (OTA) is built from the new `.hex` and, for a delta, from the `.hex` the node runs now.")
+              print(f"- OTA target id: `{m['targetId']}`, hardware tag `{m['hardwareId']}`")
           print()
-          print(f"- Package: `{m['package']['file']}` ({m['package']['size']} bytes)")
-          print(f"- SHA-256: `{m['package']['sha256']}`")
-          if "hex" in m:
-              print(f"- Firmware image: `{m['hex']['file']}` ({m['hex']['size']} bytes), SHA-256 `{m['hex']['sha256']}`. Keep it: updating a node over LoRa (OTA) is built from the new `.hex` and, for a delta, from the `.hex` the node runs now.")
-          print(f"- OTA target id: `{m['targetId']}`, hardware tag `{m['hardwareId']}`")
-          print(f"- Built from commit `{m['commit']}`")
+          print(f"Built from commit `{manifests[0]['commit']}`")
           PY
           # A pushed tag already exists. On main, creating the release creates the tag at this commit.
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
@@ -170,7 +196,7 @@ jobs:
           else
             TAG_FLAGS=(--target "$GITHUB_SHA")
           fi
-          gh release create "$TAG" dist/*.zip dist/*.hex dist/manifest.json \
+          gh release create "$TAG" dist/*.zip dist/*.hex dist/manifest*.json \
             --repo "$GITHUB_REPOSITORY" \
             "${TAG_FLAGS[@]}" \
             --latest \

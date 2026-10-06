@@ -163,6 +163,23 @@ class ManifestTest(unittest.TestCase):
             written = json.loads((root / "dist" / "manifest.json").read_text())
             self.assertTrue((root / "dist" / written["package"]["file"]).is_file())
 
+    def test_main_can_name_the_manifest_for_a_second_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "firmware.zip").write_bytes(package(image()))
+            name = "manifest-" + ENV + ".json"
+            code = qrm.main(["--zip", str(root / "firmware.zip"), "--env", ENV, "--commit", "abc", "--out", str(root / "dist"), "--manifest-name", name])
+            self.assertEqual(code, 0)
+            self.assertTrue((root / "dist" / name).is_file())
+            self.assertFalse((root / "dist" / "manifest.json").exists())
+
+    def test_main_refuses_a_manifest_name_with_a_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "firmware.zip").write_bytes(package(image()))
+            with self.assertRaises(SystemExit):
+                qrm.main(["--zip", str(root / "firmware.zip"), "--env", ENV, "--commit", "abc", "--out", str(root / "dist"), "--manifest-name", "../x.json"])
+
     def test_main_fails_without_writing_anything_when_the_package_is_bad(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
