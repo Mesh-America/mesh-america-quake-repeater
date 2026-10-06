@@ -438,6 +438,51 @@ require(rak_usb, "build_flags", "FORCE_GPS_ALIVE")
 # replace each with that exact board's Full target.
 init_project_context >/dev/null
 
+# The interactive board menu must offer the same ordinary Full choices as the
+# release, while exact compatibility/development recipes stay directly usable.
+# Test real board inheritance: dropping aliases by suffix alone would also
+# discard the measured TLora transport split or special nRF52 storage wiring.
+(
+  mapfile -t menu_targets < <(get_interactive_build_targets)
+  menu_text=$(printf '%s\n' "${menu_targets[@]}")
+  for expected in Heltec_v3_companion_radio_full Heltec_v3_repeater \
+      LilyGo_TLora_V2_1_1_6_repeater \
+      LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ \
+      RAK_3401_repeater \
+      RAK_4631_repeater_rak15001_slot_c_lora_ota \
+      RAK_4631_repeater_w25q16_lora_ota \
+      RAK_4631_repeater_bridge_rs232_serial1_lora_ota_no_external_sensors \
+      RAK_4631_repeater_bridge_rs232_serial2_lora_ota_no_external_sensors; do
+    grep -Fxq "$expected" <<<"$menu_text" \
+      || fail "ordinary board menu omitted needed choice $expected"
+  done
+  for hidden in Heltec_v3_companion_radio_usb Heltec_v3_companion_radio_ble \
+      Heltec_v3_repeater_observer_mqtt \
+      Heltec_v3_repeater_lora_ota_no_external_sensors \
+      RAK_3401_repeater_lora_ota_no_external_sensors \
+      heltec_v4_partition_migrator; do
+    if grep -Fxq "$hidden" <<<"$menu_text"; then
+      fail "ordinary board menu still offers redundant/recovery choice $hidden"
+    fi
+    is_supported_build_env "$hidden" \
+      || fail "hiding $hidden from the board menu removed its exact build"
+  done
+  board=$(get_board_family_for_env Heltec_v3_repeater)
+  variants=$(get_variants_for_board "$board")
+  grep -Fxq Heltec_v3_companion_radio_full <<<"$variants" \
+    || fail "board submenu lost its Full Companion"
+  if grep -Eq 'companion_radio_(usb|ble|wifi)|_observer_mqtt|no_external_sensors' <<<"$variants"; then
+    fail "board submenu reintroduced transport/profile choices"
+  fi
+  [ "$(get_nrf52_sensor_ota_pair_target RAK_3401_repeater)" \
+      = "$(get_nrf52_sensor_ota_pair_target RAK_3401_repeater_lora_ota_no_external_sensors)" ] \
+    || fail "menu folded nRF52 targets with different output identities"
+  # Prefer the ordinary name even when a caller supplies the alias first.
+  SUPPORTED_PIO_ENVS=(RAK_3401_repeater_lora_ota_no_external_sensors RAK_3401_repeater)
+  [ "$(get_interactive_build_targets)" = RAK_3401_repeater ] \
+    || fail "nRF52 menu depends on alias input order"
+)
+
 # Expanded partitions make Full the ordinary ESP32 node release. Legacy lean
 # names still address installed firmware and must remain directly buildable,
 # but cannot reappear in either the all-role or a role-specific release list.

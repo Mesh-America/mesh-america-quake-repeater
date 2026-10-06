@@ -11,13 +11,15 @@ default ASCII terminal on USB Companion and infrastructure roles.
 Pick the choices in any order. The controls stay limited to compatible
 firmware combinations that were actually built in the current release set.
 The result count stays visible while you scroll through the filters on a phone.
-**Same firmware** marks choices that do not narrow the builds any further;
-they remain usable because they can change the setup instructions.
+Once the exact board and role are selected, the picker skips logging,
+connection, and profile choices that all select the same firmware. Logging
+settings move into **Restore your settings after flashing** beneath the files.
+Choices that select different images remain visible.
 The optional chip-family filter (ESP32, nRF52, RP2040, or STM32) can narrow the
 hardware list first. You can skip it: picking hardware fills it in automatically.
 Chip family and hardware are the only dropdowns. All remaining choices use
 buttons. **Firmware profile** combines OTA support, Full/standard, and sensor
-or storage differences in one choice.
+or storage differences when a choice between different images is needed.
 
 The picker reads public release metadata from GitHub. It does not upload device
 information. Hardware names, target names, and download links come directly
@@ -28,11 +30,12 @@ from the published firmware assets.
     <strong>Current release set</strong>
     <p data-role="release-set">Loading release information...</p>
     <p>
-      For a new installation, choose the exact board and role, prefer a
-      <strong>FULL / complete profile</strong> when it is available, and select
+      For a new installation, choose the exact board and role, and select
       <strong>Full install / layout migration (merged .bin)</strong>. Current ESP32
       releases combine the supported features in Full; use runtime settings to
-      choose the active transports. Other chip families retain their qualified profiles.
+      choose the active transports. Where separate profiles remain, prefer
+      <strong>FULL / complete</strong> when it meets your update and hardware
+      requirements. Other chip families retain their qualified profiles.
     </p>
     <p>
       Upgrading an existing ESP32 infrastructure node from a smaller partition
@@ -180,7 +183,7 @@ from the published firmware assets.
 | USB logging / USB-connected MQTT | Node remains attached to a computer over a data-capable USB cable |
 | Wi-Fi MQTT observer | Firmware connects directly to MQTT over Wi-Fi; this is not USB logging |
 | USB logging + Wi-Fi MQTT | Unified FULL image sends to both paths; avoid two publishers aimed at the same broker unless messages are deduplicated |
-| No logging | Normal standalone operation without the dedicated logging/MQTT profile |
+| No logging | Normal standalone operation with external logging output disabled |
 | Receives LoRa OTA | Repeater, room server, or sensor image that can stage an exact matching update received over LoRa; any sensor/storage tradeoff appears on the same Firmware profile button |
 | Receives LoRa OTA - Reduced optional sensors | Compact OTA image that omits selected optional environmental/ranging drivers while retaining generic I2C and supported board peripherals |
 | Reduced sensors + LoRa OTA | Qualified nRF52 repeater, room server, or sensor build with the reduced optional sensor recipe and LoRa OTA retained |
@@ -193,8 +196,9 @@ Ethernet transports.
 Normal repeater firmware includes runtime-controlled RS-232 support where the
 board has room; use `set bridge.enabled on` after configuring `bridge.uart` and
 `bridge.baud`. The Wio-E5 remains the capacity exception and offers a separate
-RS-232 image. Choose Wi-Fi MQTT under **Logging / MQTT**; it is an output mode,
-not a second connection choice. Full ESP32 LoRa repeaters include runtime
+RS-232 image. Choose Wi-Fi MQTT in the result's saved logging settings when
+it shares the Full image; separate MQTT images retain a **Logging / MQTT**
+filter. Full ESP32 LoRa repeaters include runtime
 ESP-NOW when capacity permits; dedicated ESP-NOW images remain for measured
 capacity exceptions. Ethernet still needs its exact hardware recipe.
 
@@ -278,11 +282,11 @@ guess cannot confirm the installed layout. See the
 that command.
 
 Current `full-usb-wifi` profiles use one binary for no external output, USB
-packet logging/USB-connected MQTT, direct WiFi MQTT, or both. The picker shows
-that same exact binary for each compatible logging choice; select the saved
+packet logging/USB-connected MQTT, direct WiFi MQTT, or both. The picker skips
+the logging filter when these modes use the same file; select the saved
 runtime mode with `set logging.output off|usb|wifi|both`. A FULL logging-fallback
-profile is listed only when no WiFi MQTT sibling exists; it appears for both
-the no-output and USB choices because `set usb.logging off|on` is persistent.
+profile is listed only when no WiFi MQTT sibling exists; it supports both
+the no-output and USB settings because `set usb.logging off|on` is persistent.
 On a fresh unified FULL install with no saved SSID, the setup AP and WiFi radio
 remain available for 30 minutes per boot, then turn off automatically until the
 next reboot or power cycle. An explicit administrator `start webconfig` remains
@@ -450,6 +454,8 @@ buttons. They separate revisions, display type, expansion kit, radio/PA layout,
 pin map, and other physical differences without crowding the Hardware dropdown.
 **Firmware profile** buttons combine OTA support, Full/standard, and choices
 that need a different image or wiring, such as serial port or external storage.
+The picker skips this step when all available profile choices lead to the
+same firmware file.
 Future nRF52 repeater, room-server and sensor releases publish two separately
 qualified choices: **Reduced sensors + LoRa OTA** and
 **Full supported sensors + LoRa OTA**, with `-reduced-ota` and `-full-ota` artifact suffixes. Each keeps
