@@ -26,7 +26,8 @@ Open each board's [USB console](https://flasher.meshcore.io/console) at
 get bridge.type
 ```
 
-The answer can be `espnow`, `mqtt+espnow`, or `rs232+espnow`. Confirm the
+The answer can be `espnow`, `mqtt+espnow`, `rs232+espnow`, or
+`mqtt+rs232+espnow`, depending on the image. Confirm the
 independent ESP-NOW control is present with `get espnow.enabled` and
 `get espnow.running`. The `espnow` commands select this transport without
 changing another bridge in a combined image.

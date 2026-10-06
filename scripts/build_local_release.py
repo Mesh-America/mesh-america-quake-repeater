@@ -154,8 +154,17 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
 
     # These normal repeaters already supply a UART. Full MQTT source
     # substitution must never remove it while retiring the dedicated image.
+    # TLora cannot fit all three transports; its normal and observer Full
+    # images remain separate, and only its normal image requires UART.
     uart_full_targets = {"heltec_v3_repeater", "heltec_wsl3_repeater",
                          "rak_3112_repeater", "lilygo_tlora_v2_1_1_6_repeater"}
+    tlora_uart_target = "lilygo_tlora_v2_1_1_6_repeater"
+
+    def requires_uart_full(target: str) -> bool:
+        base = role_base(target)
+        return (base in uart_full_targets
+                and (base != tlora_uart_target or target.rstrip("_").lower() == base))
+
     combined_rs232 = {role_base(record["manifest"]["target"]) for record in records
                       if proven_rs232(record["manifest"])} & uart_full_targets
 
@@ -227,6 +236,8 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
                 base = bridge_base
             kind = "bridge"
         key = base.lower()
+        if key == tlora_uart_target and kind == "observer":
+            key = target.rstrip("_").lower()
         # G2's observer is the deployed Full identity. The other listed
         # observer/bridge recipes offer features that their plain images do
         # not combine, so keep the richer ordinary release choice.
@@ -234,7 +245,6 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
             "station_g2_repeater", "station_g2_room_server",
             "tbeam_sx1262_repeater", "tbeam_sx1276_repeater",
             "tbeam_sx1262_room_server", "tbeam_sx1276_room_server",
-            "lilygo_tlora_v2_1_1_6_repeater",
         }
         # Capacity exceptions may still need a dedicated bridge. Old plain
         # Meshadventurer images without the linked driver must not supersede it.
@@ -253,7 +263,7 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
     selected = [item[1] for item in chosen.values()]
     for record in selected:
         manifest = record["manifest"]
-        if role_base(manifest["target"]) in uart_full_targets and not proven_rs232(manifest):
+        if requires_uart_full(manifest["target"]) and not proven_rs232(manifest):
             raise ValueError(manifest["target"] + ": Full release requires the verified "
                              "RS232 bridge from its normal repeater")
     return passthrough + selected

@@ -2460,8 +2460,8 @@ get_unified_full_infrastructure_target() {
 
   # These plain Full recipes retain more routing capacity than their MQTT
   # siblings (T-Beam flood rules / room neighbors, TLora repeater neighbors).
-  # Keep them available for an explicit exact-identity build; the ordinary
-  # release chooses the MQTT observer for these board/role groups.
+  # T-Beam keeps the observer as its ordinary release choice. TLora retains
+  # both identities: its UART cannot fit alongside MQTT and ESP-NOW.
   case "${mqtt_base,,}" in
     tbeam_sx1262_repeater|tbeam_sx1276_repeater|\
     tbeam_sx1262_room_server|tbeam_sx1276_room_server|\
@@ -6372,7 +6372,8 @@ get_esp32_full_profile_target() {
   echo "$target"
 }
 
-# The ordinary release offers one Full image per physical board and role.
+# The ordinary release combines Full images per physical board and role
+# where the runtime memory budget permits all transports.
 # Keep the exact environment names for direct --full-exact builds and for
 # legacy/partition migration packages; this selection applies only to bulk
 # Full passes. Include the board in the key so similarly named recipes cannot
@@ -6416,6 +6417,12 @@ get_ordinary_full_group_key() {
     *_repeater|*_room_server) ;;
     *) role_base=$base ;;
   esac
+  # Real qualification found the triple-transport TLora image 6496 bytes
+  # short of its required internal heap. Preserve UART and MQTT as two Full
+  # identities, with ESP-NOW available in each.
+  if [ "${base,,}" = lilygo_tlora_v2_1_1_6_repeater_observer_mqtt ]; then
+    role_base=$base
+  fi
   printf '%s|%s\n' "${PIO_ENV_BOARD_BY_NAME[$target]:-$target}" "${role_base,,}"
 }
 
@@ -6425,7 +6432,7 @@ get_ordinary_full_priority() {
   case "${base,,}" in
     *_observer_mqtt) echo 20 ;;
     *_bridge_espnow) echo 10 ;;
-    tbeam_sx1262_repeater|tbeam_sx1276_repeater|lilygo_tlora_v2_1_1_6_repeater) echo 0 ;;
+    tbeam_sx1262_repeater|tbeam_sx1276_repeater) echo 0 ;;
     *)
       # G2's deployed Full identity is the observer. Other audited plain
       # targets keep their own identity, with observer sources where needed.
