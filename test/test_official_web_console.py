@@ -43,7 +43,8 @@ def official_console():
     return path.resolve()
 
 
-def firmware_harness(*, lose_sleep_guard=False, lose_crlf=False):
+def firmware_harness(*, lose_sleep_guard=False, lose_crlf=False,
+                     lose_raw_uart_guard=False):
     # Retain the existing host peripheral boundary; use the production methods
     # and a virtual clock to exercise minutes/hours without slowing CI.
     source = HARNESS.split("int main()", 1)[0]
@@ -58,6 +59,10 @@ def firmware_harness(*, lose_sleep_guard=False, lose_crlf=False):
         methods = methods.replace("usb_host_sleep_policy.shouldKeepAwake(\n"
                                   "        millis(), MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS)",
                                   "false")
+    if lose_raw_uart_guard:
+        expression = "keep_awake = keep_awake || static_cast<bool>(Serial);"
+        assert expression in methods, "Missing raw UART negative-control boundary"
+        methods = methods.replace(expression, "keep_awake = keep_awake || false;")
     source = source.replace("@METHODS@", methods)
     source = source.replace("  uint32_t irq = 48;", "  void loop() {}\n  uint32_t irq = 48;")
     cli = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
@@ -85,31 +90,45 @@ class OfficialWebConsoleTests(unittest.TestCase):
             raise unittest.SkipTest("Node 18+ and a host C++17 compiler are required")
         cls.console = official_console()
 
-    def run_contract(self, *, lose_sleep_guard=False, lose_crlf=False):
+    def run_contract(self, *, lose_sleep_guard=False, lose_crlf=False,
+                     raw_uart=False, lose_raw_uart_guard=False):
         with tempfile.TemporaryDirectory(prefix="official-web-console-") as tmp:
             tmp = Path(tmp)
             source = tmp / "firmware.cpp"
             source.write_text(firmware_harness(lose_sleep_guard=lose_sleep_guard,
-                                              lose_crlf=lose_crlf), encoding="ascii")
+                                              lose_crlf=lose_crlf,
+                                              lose_raw_uart_guard=lose_raw_uart_guard), encoding="ascii")
             binary = tmp / "firmware"
             sanitizers = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                            "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else [])
             result = subprocess.run([self.compiler, "-std=c++17", "-Wall", "-Wextra",
-                "-DARDUINO_USB_MODE=1", "-DARDUINO_USB_CDC_ON_BOOT=1",
-                "-DESP32_PLATFORM=1", "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=1",
-                "-DMESH_USB_CONSOLE_COOPERATIVE=1", "-DMESH_USB_LOGGING_AVAILABLE=1",
+                "-DARDUINO_USB_MODE=1", "-DARDUINO_USB_CDC_ON_BOOT=" + str(int(not raw_uart)),
+                "-DESP32_PLATFORM=1",
+                "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=" + str(int(not raw_uart)),
+                "-DMESH_USB_CONSOLE_COOPERATIVE=" + str(int(not raw_uart)),
+                "-DMESH_USB_LOGGING_AVAILABLE=1",
                 "-DCONFIG_TINYUSB_ENABLED=0", "-I", str(ROOT / "src"),
                 *sanitizers, str(source), "-o", str(binary)],
                 text=True, capture_output=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             result = subprocess.run([self.node,
                 str(ROOT / "test/fixtures/official_web_console/contract.mjs"),
-                str(self.console), str(binary)], text=True, capture_output=True, timeout=20)
+                str(self.console), str(binary), str(int(raw_uart))],
+                text=True, capture_output=True, timeout=20)
             return result
 
     def test_stock_console_crlf_idle_power_saving_and_reopen(self):
         result = self.run_contract()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_raw_uart_stock_console_idle_power_saving_and_reopen(self):
+        result = self.run_contract(raw_uart=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_missing_raw_uart_sleep_guard_breaks_stock_console(self):
+        result = self.run_contract(raw_uart=True, lose_raw_uart_guard=True)
+        self.assertNotEqual(result.returncode, 0, "Negative control did not lose the console")
+        self.assertIn("idle query", result.stderr)
 
     def test_missing_usb_sleep_guard_breaks_stock_console(self):
         result = self.run_contract(lose_sleep_guard=True)

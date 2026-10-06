@@ -119,6 +119,13 @@ public:
     // not leave the last positive native USB host signal stale.
     const bool usb_host_connected = isUsbHostConnected();
     bool keep_awake = inhibit_sleep || usb_host_connected || isRadioTestActive();
+#if !defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT
+    // External USB-to-UART chips cannot report host attachment here. Light
+    // sleep loses their first input bytes; UART wake loses the wake character
+    // too. HardwareSerial's bool reports an installed driver, not a USB host.
+    // Keep an enabled console available even before its first command.
+    keep_awake = keep_awake || static_cast<bool>(Serial);
+#endif
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
     // HWCDC loses its SOF host signal after about 5 ms. A warm Pi reboot,
     // especially on a USB 1.1 bus, must not put us in a 30-second light sleep

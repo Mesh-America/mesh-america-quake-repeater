@@ -82,7 +82,8 @@ int main() {
   std::string line;
   while (std::getline(std::cin, line)) {
     if (line.rfind("WRITE ", 0) == 0) {
-      // A USB peripheral suspended in light sleep cannot deliver new bytes.
+      // A sleeping console cannot deliver the first complete command during
+      // the stock reply window; no UART wake source was configured.
       if (sleep_calls == 0) {
         for (size_t n = 6; n < line.size(); n += 2) {
           unsigned byte; assert(n + 1 < line.size());
@@ -97,6 +98,8 @@ int main() {
       console.input.clear(); console.output.clear(); command[0] = 0;
     } else if (line == "HOST_OFF") {
       attachHost(false);
+    } else if (line == "DRIVER_END") {
+      Serial.end();
     } else { assert(false && "Unknown peripheral operation"); }
     emit();
   }

@@ -10,6 +10,7 @@ import {setImmediate as turn} from 'node:timers/promises';
 
 const firmware=spawn(process.argv[4],[],{stdio:['pipe','pipe','inherit']});
 const readyMs=Number(process.argv[5]);
+const preconnectIdleMs=Number(process.argv[6]||0);
 let output, pending;
 createInterface({input:firmware.stdout}).on('line',line=>{
   if(line.startsWith('DATA ')){
@@ -65,6 +66,12 @@ const bootstrap=Function('cli','app','showMessage','getData','getPresets','alert
   readFileSync(process.argv[3],'utf8')+'\nreturn {connect,disconnect};');
 const gui=bootstrap(cli,app,()=>{},async()=>{dataReads++;},async()=>{},message=>alerts.push(message));
 let finished=false;
+if(preconnectIdleMs>0){
+  // No host byte or SerialCLI operation precedes this idle interval. The
+  // first complete command remains the untouched GUI's single time request.
+  await device('TIME '+preconnectIdleMs);
+  assert.equal(writes,0,'Preconnect idle gained artificial UART traffic');
+}
 const connection=gui.connect().finally(()=>{finished=true;});
 try{
   for(let step=0;step<20&&!finished;step++){
