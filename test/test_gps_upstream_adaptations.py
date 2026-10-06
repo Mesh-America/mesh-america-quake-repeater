@@ -100,17 +100,28 @@ CAYENNE = r'''
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <helpers/sensors/LPPDataHelpers.h>
 class CayenneLPP {
  uint8_t data[64]={};
+ uint8_t size=0;
+ void addScalar(uint8_t channel,uint8_t type,float value){
+  data[size++]=channel;data[size++]=type;
+  size+=LPPData::putFloat(data+size,value,2,LPPData::getMultiplier(type),true);
+ }
 public:
  unsigned resets=0,gps_count=0;
  explicit CayenneLPP(size_t){}
- void reset(){++resets;}
- void addVoltage(uint8_t,float){}
- void addTemperature(uint8_t,float){}
- void addGPS(uint8_t,float,float,float){++gps_count;}
+ void reset(){++resets;size=0;}
+ void addVoltage(uint8_t channel,float value){addScalar(channel,LPP_VOLTAGE,value);}
+ void addTemperature(uint8_t channel,float value){addScalar(channel,LPP_TEMPERATURE,value);}
+ void addGPS(uint8_t channel,float latitude,float longitude,float altitude){
+  ++gps_count;data[size++]=channel;data[size++]=LPP_GPS;
+  size+=LPPData::putFloat(data+size,latitude,3,LPP_GPS_LAT_LON_MULT,true);
+  size+=LPPData::putFloat(data+size,longitude,3,LPP_GPS_LAT_LON_MULT,true);
+  size+=LPPData::putFloat(data+size,altitude,3,LPP_GPS_ALT_MULT,true);
+ }
  const uint8_t* getBuffer()const{return data;}
- uint8_t getSize()const{return 0;}
+ uint8_t getSize()const{return size;}
 };
 '''
 
@@ -119,6 +130,7 @@ QUERY = r'''
 #include <limits>
 #include <helpers/SensorManager.h>
 #include <helpers/sensors/MicroNMEALocationProvider.h>
+#include <helpers/sensors/LPPDataHelpers.h>
 void LocationProvider::sendSentence(const char*){}
 struct Uart:Stream {
  std::deque<char> incoming;
@@ -157,7 +169,8 @@ struct SensorRequestHarness {
  struct {int telemetry_access=0;} _prefs;
  uint8_t reply_data[128]={};
  explicit SensorRequestHarness(TestSensors& s):sensors(s){}
- uint8_t request(uint8_t perms,uint8_t mask=0,uint8_t length=1){
+ uint8_t request(uint8_t perms,uint8_t mask=0,uint8_t length=1,
+                 size_t reply_capacity=sizeof(reply_data)){
   uint8_t payload[1]={mask};
   size_t payload_len=length;
   const unsigned req_type=3;
@@ -235,6 +248,24 @@ int main(){
  now_ms=1000+static_cast<uint32_t>(GPS_READ_INTERVAL_SECS)*1000U-1;
  requests.request(TELEM_PERM_LOCATION);assert(MicroNMEA::clears==before+1);
  ++now_ms;requests.request(TELEM_PERM_LOCATION);assert(MicroNMEA::clears==before+2);
+
+ // The production request now bounds complete LPP records to the caller's
+ // reply capacity. Exercise real voltage/temperature bytes at both edges of
+ // each four-byte record; no partial entry or write beyond the budget is valid.
+ for(size_t capacity=4;capacity<=16;++capacity){
+  memset(requests.reply_data,0xA5,sizeof(requests.reply_data));
+  const uint8_t length=requests.request(TELEM_PERM_BASE,0,1,capacity);
+  const size_t payload_size=capacity>=12?8:capacity>=8?4:0;
+  const uint8_t* expected=requests.telemetry.getBuffer();
+  assert(requests.telemetry.getSize()==8);
+  assert(expected[0]==TELEM_CHANNEL_SELF&&expected[1]==LPP_VOLTAGE);
+  assert(expected[4]==TELEM_CHANNEL_SELF&&expected[5]==LPP_TEMPERATURE);
+  assert(length==4+payload_size&&length<=capacity);
+  assert(!memcmp(requests.reply_data+4,expected,payload_size));
+  for(size_t offset=length;offset<sizeof(requests.reply_data);++offset){
+   assert(requests.reply_data[offset]==0xA5);
+  }
+ }
 }
 '''
 
