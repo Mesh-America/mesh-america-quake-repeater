@@ -32,7 +32,7 @@ static_assert(HasChargeControl<mesh::MainBoard>::value == bool(EXPECT_CHARGE_CON
 '''
         supported = ("TBEAM_SX1262", "TBEAM_SX1276", "TBEAM_SUPREME_SX1262",
                      "HELTEC_MESH_SOLAR")
-        unrelated = (None, "STM32", "NRF52", "ESP32", "HELTEC_V4")
+        unrelated = (None, "STM32", "NRF52", "ESP32", "HELTEC_V4", "TBEAM_1W")
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "test.cpp"
             path.write_text(source, encoding="ascii")
