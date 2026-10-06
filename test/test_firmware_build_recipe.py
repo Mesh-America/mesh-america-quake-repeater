@@ -680,5 +680,31 @@ printf 'RESULT:%s BATCH:%s\n' "$status" "$BATCH_BUILD_MODE"
             self.assertEqual(before, (original.read_bytes(), original.stat().st_ino, original.stat().st_mtime_ns))
 
 
+class CompilerJobLimitTests(unittest.TestCase):
+    def test_serial_matrix_passes_validated_job_limit_and_restores_caller_state(self):
+        for requested, expected in (("4", "4"), ("2", "2"), ("0", "8"), ("invalid", "8")):
+            with self.subTest(requested=requested), tempfile.TemporaryDirectory(prefix="mesh-compiler-jobs-") as temporary:
+                script = r'''
+source "$1/build_legacy.sh"
+OUTPUT_DIR=$2
+OPTION3_PIO_JOBS=$3
+PIO_BUILD_JOBS_OVERRIDE=3
+pio() { printf 'FORBIDDEN_PLATFORMIO\n' >&2; return 99; }
+build_firmware() {
+  printf '%s:%s:%s\n' "$1" "$PIO_BUILD_JOBS_OVERRIDE" "$BATCH_BUILD_MODE" >> "$OUTPUT_DIR/jobs-observed.txt"
+}
+run_logged_build_targets first second
+status=$?
+printf 'RESULT:%s RESTORED_JOBS:%s RESTORED_BATCH:%s\n' "$status" "$PIO_BUILD_JOBS_OVERRIDE" "$BATCH_BUILD_MODE"
+'''
+                result = subprocess.run(["bash", "-c", script, "jobs-test", str(ROOT), temporary, requested],
+                                        cwd=temporary, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("FORBIDDEN_PLATFORMIO", result.stdout + result.stderr)
+                self.assertIn("RESULT:0 RESTORED_JOBS:3 RESTORED_BATCH:0", result.stdout)
+                self.assertEqual((Path(temporary) / "jobs-observed.txt").read_text().splitlines(),
+                                 ["first:" + expected + ":1", "second:" + expected + ":1"])
+
+
 if __name__ == "__main__":
     unittest.main()
