@@ -136,7 +136,8 @@ bool SensorMesh::telemHasChanged(ClientInfo* c) {
     uint8_t ch = c->extra.sensor.min_deltas[i];    // Get channel #
     uint8_t t = c->extra.sensor.min_deltas[i + 1];     // Get data type
     uint8_t sz = LPPData::getDataSize(t);
-    if (sz > c->extra.sensor.min_deltas_len - i - 2) return false;
+    if (!LPPData::isScalarType(t)
+        || sz > c->extra.sensor.min_deltas_len - i - 2) return false;
 
     float min_delta = LPPData::getFloat(&c->extra.sensor.min_deltas[i + 2], sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
     float pv = LPPData::getFloat(&c->extra.sensor.prev_telem[i + 2], sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
@@ -146,25 +147,28 @@ bool SensorMesh::telemHasChanged(ClientInfo* c) {
 
     i += 2 + sz;  // skip
   }
-  if (changed) {
-    // take snapshot of all _monitored_ telem values, for next cycle
-    i = 0;
-    while (i + 2 < c->extra.sensor.min_deltas_len) {
-      uint8_t ch = c->extra.sensor.min_deltas[i];    // Get channel #
-      uint8_t t = c->extra.sensor.min_deltas[i + 1];     // Get data type
-      uint8_t sz = LPPData::getDataSize(t);
-      if (sz > c->extra.sensor.min_deltas_len - i - 2) return false;
-
-      c->extra.sensor.prev_telem[i] = ch;
-      c->extra.sensor.prev_telem[i + 1] = t;
-
-      float v = findTelemValue(buf, size, ch, t, 0.0f);
-      LPPData::putFloat(&c->extra.sensor.prev_telem[i + 2], v, sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
-
-      i += 2 + sz;  // skip
-    }
-  }
   return changed;
+}
+
+void SensorMesh::snapshotTelemetry(ClientInfo* c) {
+  // Only advance thresholds after the corresponding push is queued.
+  auto buf = telemetry.getBuffer();
+  uint8_t size = telemetry.getSize();
+  uint8_t i = 0;
+  while (i + 2 < c->extra.sensor.min_deltas_len) {
+    uint8_t ch = c->extra.sensor.min_deltas[i];
+    uint8_t t = c->extra.sensor.min_deltas[i + 1];
+    uint8_t sz = LPPData::getDataSize(t);
+    if (!LPPData::isScalarType(t)
+        || sz > c->extra.sensor.min_deltas_len - i - 2) return;
+
+    c->extra.sensor.prev_telem[i] = ch;
+    c->extra.sensor.prev_telem[i + 1] = t;
+    float v = findTelemValue(buf, size, ch, t, 0.0f);
+    LPPData::putFloat(&c->extra.sensor.prev_telem[i + 2], v, sz,
+                      LPPData::getMultiplier(t), LPPData::isSigned(t));
+    i += 2 + sz;
+  }
 }
 
 static uint8_t getTelemetryPermissions(uint8_t acl_perms, uint8_t telemetry_access) {
@@ -228,12 +232,14 @@ uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp,
     }
     sensors.querySensors(telemetry_permissions, telemetry);
     // TODO: let requester know permissions they have:  telemetry.addPresence(TELEM_CHANNEL_SELF, perms);
-    uint8_t tlen = telemetry.getSize();
-    memcpy(&reply_data[4], telemetry.getBuffer(), tlen);
+    const uint8_t* tbuf = telemetry.getBuffer();
+    const size_t tlen = LPPData::boundedPrefix(tbuf, telemetry.getSize(), reply_capacity - 4);
+    memcpy(&reply_data[4], tbuf, tlen);
     return 4 + tlen;  // reply_len
   }
   if (req_type == REQ_TYPE_GET_AVG_MIN_MAX && payload_len >= 10
       && (perms & PERM_ACL_ROLE_MASK) >= PERM_ACL_READ_ONLY) {
+    if (reply_capacity < 8) return 0;  // tag and current timestamp
     uint32_t start_secs_ago, end_secs_ago;
     memcpy(&start_secs_ago, &payload[0], 4);
     memcpy(&end_secs_ago, &payload[4], 4);
@@ -248,7 +254,8 @@ uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp,
       n = 0;
     }
 
-    uint8_t ofs = 4;
+    if (n < 0 || n > int(sizeof(data) / sizeof(data[0]))) return 0;
+    size_t ofs = 4;
     {
       uint32_t now = getRTCClock()->getCurrentTime();
       memcpy(&reply_data[ofs], &now, 4); ofs += 4;
@@ -256,9 +263,13 @@ uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp,
 
     for (int i = 0; i < n; i++) {
       auto d = &data[i];
+      if (!LPPData::isScalarType(d->_lpp_type)
+          || !isfinite(d->_min) || !isfinite(d->_max) || !isfinite(d->_avg)) continue;
+      const uint8_t sz = LPPData::getDataSize(d->_lpp_type);
+      const size_t item_len = 2 + 3 * sz;
+      if (item_len > reply_capacity - ofs) break;
       reply_data[ofs++] = d->_channel;
       reply_data[ofs++] = d->_lpp_type;
-      uint8_t sz = LPPData::getDataSize(d->_lpp_type);
       uint32_t mult = LPPData::getMultiplier(d->_lpp_type);
       bool is_signed = LPPData::isSigned(d->_lpp_type);
       ofs += LPPData::putFloat(&reply_data[ofs], d->_min, sz, mult, is_signed);
@@ -284,7 +295,6 @@ uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp,
     }
   }
   if (req_type == REQ_TYPE_SUBSCRIBE && payload_len >= 8 && (perms & PERM_ACL_ROLE_MASK) >= PERM_ACL_READ_ONLY) {
-    memcpy(&from->extra.sensor.push_tag, &payload[0], 4);
     uint16_t timeout_secs;
     memcpy(&timeout_secs, &payload[4], 2);
     const uint8_t min_deltas_len = payload[7];
@@ -303,11 +313,14 @@ uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp,
         valid_deltas = false;
         break;
       }
-      const size_t item_len = 2 + LPPData::getDataSize(payload[8 + i + 1]);
-      valid_deltas = item_len <= min_deltas_len - i;
+      const uint8_t type = payload[8 + i + 1];
+      const size_t item_len = 2 + LPPData::getDataSize(type);
+      valid_deltas = LPPData::isScalarType(type)
+          && item_len <= min_deltas_len - i;
       i += item_len;
     }
     if (r && valid_deltas) {
+      memcpy(&from->extra.sensor.push_tag, &payload[0], 4);
       from->extra.sensor.scope_region_id = r->id;
       from->extra.sensor.expiry_timestamp = getRTCClock()->getCurrentTime() + timeout_secs;
       from->extra.sensor.min_deltas_len = min_deltas_len;
@@ -1059,7 +1072,7 @@ SensorMesh::SensorMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::Millise
       region_map(key_store), temp_map(key_store),
       _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
       _clock_sync(radio, ms, rtc, acl, sensors, _prefs.tx_delay_factor, this),
-      telemetry(MAX_PACKET_PAYLOAD - 4)
+      telemetry(mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY - 8)
 {
   next_local_advert = next_flood_advert = 0;
   dirty_contacts_expiry = 0;
@@ -1446,7 +1459,7 @@ void SensorMesh::loop() {
       TransportKey scope;
       if (region_map.getTransportKeysFor(*region, &scope, 1) == 0) continue;
       const uint8_t telemetry_len = telemetry.getSize();
-      if (telemetry_len > sizeof(reply_data) - 8) continue;
+      if (telemetry_len > mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY - 8) continue;
       memcpy(reply_data, &client->extra.sensor.push_tag, 4);
       const uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
       memcpy(&reply_data[4], &timestamp, 4);
@@ -1455,11 +1468,10 @@ void SensorMesh::loop() {
           PAYLOAD_TYPE_RESPONSE, client->id, client->shared_secret,
           reply_data, 8 + telemetry_len);
       if (reply) {
-        if (mesh::Packet::isValidPathLen(client->out_path_len)) {
-          sendDirect(reply, client->out_path, client->out_path_len, 0);
-        } else {
-          sendFloodScoped(scope, reply, 0, _prefs.path_hash_mode + 1);
-        }
+        const bool queued = mesh::Packet::isValidPathLen(client->out_path_len)
+            ? sendDirect(reply, client->out_path, client->out_path_len, 0)
+            : sendFloodScoped(scope, reply, 0, _prefs.path_hash_mode + 1);
+        if (queued) snapshotTelemetry(client);
       }
     }
 

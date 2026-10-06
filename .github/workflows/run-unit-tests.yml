@@ -288,6 +288,8 @@ jobs:
           python3 -B test/test_gps_sync_preferences.py -v
           python3 -B test/test_t1000e_sensor_power.py -v
           python3 -B test/test_sensor_battery_alerts.py -v
+          python3 -B test/test_sensor_subscriptions.py -v
+          python3 -B test/test_sensor_reply_bounds.py -v
 
       - name: Verify Companion ASCII defaults and USB session cleanup
         run: |
