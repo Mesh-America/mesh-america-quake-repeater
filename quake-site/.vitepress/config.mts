@@ -47,6 +47,7 @@ export default defineConfig({
           { text: 'Supported hardware', link: '/hardware' },
           { text: 'Flash and set up', link: '/getting-started' },
           { text: 'How to admin your repeater', link: '/admin-guide' },
+          { text: 'Placement and testing', link: '/placement-and-testing' },
           { text: 'Update over the air (OTA)', link: '/ota-updates' },
         ],
       },

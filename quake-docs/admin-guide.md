@@ -62,7 +62,7 @@ When the sensor reports strong shaking, the repeater posts one short message to 
 - An alert is dropped, not saved for later, if something is missing when it is due. Fixing the setting does not resend an old event.
 - Two repeaters that both feel the same shaking each post once.
 
-More in [Earthquake channel alerts](earthquake-alerts.md).
+Start a new repeater on a test channel such as `#seismic-test` and move it to the production channel only after one to two weeks of quiet running: see [Placement, mounting and testing](placement-and-testing.md). More in [Earthquake channel alerts](earthquake-alerts.md).
 
 ## When status says "NOT READY"
 

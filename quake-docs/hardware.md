@@ -30,6 +30,10 @@ On the RAK19003 the RAK12027 goes in **slot D**. It is 23 mm long; slot D takes 
 
 Unlike the RAK3401, the sensor does not share a signal with the base board's power enable here, so the firmware needs no special handling for it. Details and what is still unverified are in the [D7S integration notes](d7s-integration.md).
 
+### Mounting
+
+The kit's enclosure has a solar panel and mounting plate, so it suits an outdoor post or wall. Choose a rigid mount that wind cannot move, as described in [Placement, mounting and testing](placement-and-testing.md): the sensor reads the movement of its own enclosure.
+
 ### What to expect
 
 - **Range.** The RAK4631's radio transmits at up to 22 dBm, with no amplifier like the RAK3401's 1 W module. Expect a shorter range for the same antenna and site.
