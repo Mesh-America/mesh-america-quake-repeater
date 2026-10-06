@@ -28,6 +28,7 @@ REPO_BLOB = "https://github.com/Mesh-America/mesh-america-quake-repeater/blob/ma
 FROM_DOCS = [
     "earthquake-alerts.md",
     "reading-the-sensor.md",
+    "placement-and-testing.md",
     "clock-floor.md",
     "d7s-integration.md",
     "d7s-measurement-contract.md",

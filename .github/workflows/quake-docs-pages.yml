@@ -12,6 +12,7 @@ on:
     paths:
       - 'docs/earthquake-alerts.md'
       - 'docs/reading-the-sensor.md'
+      - 'docs/placement-and-testing.md'
       - 'docs/clock-floor.md'
       - 'docs/d7s-integration.md'
       - 'docs/d7s-measurement-contract.md'
@@ -23,6 +24,7 @@ on:
     paths:
       - 'docs/earthquake-alerts.md'
       - 'docs/reading-the-sensor.md'
+      - 'docs/placement-and-testing.md'
       - 'docs/clock-floor.md'
       - 'docs/d7s-integration.md'
       - 'docs/d7s-measurement-contract.md'
