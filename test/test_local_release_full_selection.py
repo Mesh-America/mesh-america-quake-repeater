@@ -9,8 +9,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from build_local_release import select_ordinary_full_records
 
 
-def record(target: str, profile: str = "full", platform: str = "ESP32_PLATFORM") -> dict:
-    return {"manifest": {"target": target, "build_profile": profile, "platform": platform},
+def record(target: str, profile: str = "full", platform: str = "ESP32_PLATFORM",
+           capabilities: tuple[str, ...] = ()) -> dict:
+    return {"manifest": {"target": target, "build_profile": profile, "platform": platform,
+                         "verified": True, "capabilities": list(capabilities),
+                         "verification": [{"capability": capability, "present": True,
+                                           "source": "linked image", "evidence": capability}
+                                          for capability in capabilities]},
             "files": []}
 
 
@@ -58,13 +63,13 @@ class ReleaseFullSelectionTest(unittest.TestCase):
         inputs = [
             record("Heltec_v3_repeater_observer_mqtt"),
             record("Heltec_v3_repeater_bridge_espnow"),
-            record("Heltec_v3_repeater"),
+            record("Heltec_v3_repeater", capabilities=("bridge.espnow",)),
             record("Heltec_v3_repeater", "standard"),
             record("Heltec_v3_room_server"),
             record("Station_G2_repeater"),
             record("Station_G2_repeater_observer_mqtt"),
             record("Tbeam_SX1262_repeater_bridge_espnow"),
-            record("Tbeam_SX1262_repeater_observer_mqtt"),
+            record("Tbeam_SX1262_repeater_observer_mqtt", capabilities=("bridge.espnow",)),
             record("LilyGo_TLora_V2_1_1_6_repeater"),
             record("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_"),
             record("Meshadventurer_sx1262_repeater"),
@@ -81,6 +86,97 @@ class ReleaseFullSelectionTest(unittest.TestCase):
             "RAK_4631_repeater",
         })
         self.assertEqual(len(selected), 8)  # standard V3 remains alongside Full V3
+
+    def test_mke_combined_repeater_filters_stale_bridge_identities_without_relabeling(self):
+        primary = record("MKE_s3_repeater", capabilities=("bridge.rs232", "bridge.espnow"))
+        legacy = [record("MKE_s3_repeater_bridge_" + bridge, profile)
+                  for bridge in ("rs232", "espnow") for profile in ("full", "standard")]
+        for inputs in ([primary], legacy + [primary], [primary] + legacy):
+            with self.subTest(primary_first=inputs[0] is primary):
+                selected = select_ordinary_full_records(inputs)
+                self.assertEqual(selected, [primary])
+                self.assertIs(selected[0], primary)
+                self.assertEqual(selected[0]["manifest"]["target"], "MKE_s3_repeater")
+
+    def test_mke_legacy_images_require_a_qualified_combined_primary(self):
+        incomplete = []
+        incomplete.append([])
+        incomplete.append([record("MKE_s3_repeater", "standard",
+                                  capabilities=("bridge.rs232", "bridge.espnow"))])
+        for capability in ("bridge.rs232", "bridge.espnow"):
+            incomplete.append([record("MKE_s3_repeater", capabilities=(capability,))])
+        unqualified = record("MKE_s3_repeater", capabilities=("bridge.rs232", "bridge.espnow"))
+        unqualified["manifest"]["verified"] = False
+        incomplete.append([unqualified])
+        for capability in ("bridge.rs232", "bridge.espnow"):
+            missing = record("MKE_s3_repeater", capabilities=("bridge.rs232", "bridge.espnow"))
+            next(check for check in missing["manifest"]["verification"]
+                 if check["capability"] == capability)["present"] = False
+            incomplete.append([missing])
+        unproven = record("MKE_s3_repeater", capabilities=("bridge.rs232", "bridge.espnow"))
+        unproven["manifest"]["verification"] = []
+        incomplete.append([unproven])
+        for bridge in ("rs232", "espnow"):
+            for normal in incomplete:
+                with self.subTest(bridge=bridge, normal=normal):
+                    with self.assertRaisesRegex(ValueError, "qualified combined repeater"):
+                        select_ordinary_full_records(normal + [record("MKE_s3_repeater_bridge_" + bridge)])
+
+    def test_mke_full_primary_requires_verified_bridges_without_legacy_images(self):
+        incomplete = [record("MKE_s3_repeater", capabilities=capabilities)
+                      for capabilities in ((), ("bridge.rs232",), ("bridge.espnow",))]
+        unqualified = record("MKE_s3_repeater", capabilities=("bridge.rs232", "bridge.espnow"))
+        unqualified["manifest"]["verified"] = False
+        incomplete.append(unqualified)
+        unproven = record("MKE_s3_repeater", capabilities=("bridge.rs232", "bridge.espnow"))
+        unproven["manifest"]["verification"] = []
+        incomplete.append(unproven)
+        wrong_platform = record("MKE_s3_repeater", platform="NRF52_PLATFORM",
+                                capabilities=("bridge.rs232", "bridge.espnow"))
+        incomplete.append(wrong_platform)
+        for capability in ("bridge.rs232", "bridge.espnow"):
+            missing = record("MKE_s3_repeater", capabilities=("bridge.rs232", "bridge.espnow"))
+            next(check for check in missing["manifest"]["verification"]
+                 if check["capability"] == capability)["present"] = False
+            incomplete.append(missing)
+        for primary in incomplete:
+            with self.subTest(primary=primary):
+                with self.assertRaisesRegex(ValueError, "qualified combined repeater"):
+                    select_ordinary_full_records([primary])
+
+    def test_mke_full_contract_does_not_apply_to_other_platforms_or_standard_profiles(self):
+        other_platform = record("RAK_4631_repeater", platform="NRF52_PLATFORM")
+        other_platform["manifest"].update(verified=None, capabilities=None, verification=None)
+        standard_mke = record("MKE_s3_repeater", "standard")
+        inputs = [other_platform, standard_mke]
+        self.assertEqual(select_ordinary_full_records(inputs), inputs)
+
+    def test_dedicated_espnow_survives_when_plain_image_lacks_the_capability(self):
+        inputs = [record("heltec_v4_tft_repeater"),
+                  record("heltec_v4_tft_repeater_bridge_espnow", capabilities=("bridge.espnow",))]
+        for ordered in (inputs, list(reversed(inputs))):
+            self.assertEqual(select_ordinary_full_records(ordered), ordered)
+
+    def test_qualified_combined_plain_image_replaces_only_its_matching_espnow_image(self):
+        primary = record("Heltec_v3_repeater", capabilities=("bridge.espnow",))
+        legacy = record("Heltec_v3_repeater_bridge_espnow", capabilities=("bridge.espnow",))
+        other_board = record("heltec_v4_tft_repeater_bridge_espnow", capabilities=("bridge.espnow",))
+        for inputs in ([primary, legacy, other_board], [legacy, primary, other_board]):
+            self.assertEqual(select_ordinary_full_records(inputs), [primary, other_board])
+
+    def test_combined_observer_with_trailing_underscore_replaces_matching_espnow(self):
+        observer = record("LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_",
+                          capabilities=("bridge.espnow",))
+        legacy = record("LilyGo_TLora_V2_1_1_6_repeater_bridge_espnow",
+                        capabilities=("bridge.espnow",))
+        for inputs in ([observer, legacy], [legacy, observer]):
+            self.assertEqual(select_ordinary_full_records(inputs), [observer])
+
+    def test_unqualified_plain_image_cannot_replace_dedicated_espnow(self):
+        primary = record("heltec_v4_tft_repeater", capabilities=("bridge.espnow",))
+        primary["manifest"]["verified"] = False
+        legacy = record("heltec_v4_tft_repeater_bridge_espnow", capabilities=("bridge.espnow",))
+        self.assertEqual(select_ordinary_full_records([primary, legacy]), [primary, legacy])
 
 
 if __name__ == "__main__":

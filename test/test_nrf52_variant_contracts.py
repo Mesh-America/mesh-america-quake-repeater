@@ -432,8 +432,11 @@ class Nrf52VariantContractsTest(unittest.TestCase):
         )
         # Declaration, persisted-tail detection, and migration must share the
         # same guard. A broader use breaks dedicated default-on bridge builds.
-        self.assertEqual(cli.count(guard), 3)
-        self.assertEqual(cli.count("has_runtime_bridge_uart"), 3)
+        loader_start = cli.index("void CommonCLI::loadPrefsInt(")
+        loader_end = cli.index("static bool writeCommonPrefsImage(", loader_start)
+        binary_loader = cli[loader_start:loader_end]
+        self.assertEqual(binary_loader.count(guard), 3)
+        self.assertEqual(binary_loader.count("has_runtime_bridge_uart"), 3)
 
     def test_gat562_30s_gps_enable_and_buzzer_pins_are_distinct(self) -> None:
         recipe = (

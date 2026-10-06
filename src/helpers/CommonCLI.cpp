@@ -825,13 +825,48 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #else
     File legacy = fs->open("/prefs.json", "r");
 #endif
+#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
+    && !defined(RS232_BRIDGE_DEFAULT_ON)
+    const uint8_t previous_bridge_uart = _prefs->bridge_uart;
+    const uint8_t previous_bridge_enabled = _prefs->bridge_enabled;
+    // JSON profiles can contain the unused enabled flag without any UART.
+    // Require an explicit nonzero UART before treating it as bridge intent.
+    _prefs->bridge_uart = 0;
+#endif
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+    const uint8_t previous_espnow_enabled = _prefs->espnow_bridge_enabled;
+#endif
     if (legacy && _prefs->loadSerial(legacy)) {
       loaded = true;
       is_upgrade = true;
+#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
+    && !defined(RS232_BRIDGE_DEFAULT_ON)
+      if (_prefs->bridge_uart == 0) _prefs->bridge_enabled = 0;
+      if (_prefs->bridge_uart != WITH_RS232_BRIDGE_UART
+#ifdef WITH_RS232_BRIDGE_ALT
+          && _prefs->bridge_uart != WITH_RS232_BRIDGE_ALT_UART
+#endif
+      ) {
+        _prefs->bridge_uart = WITH_RS232_BRIDGE_UART;
+      }
+#endif
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+      // The legacy JSON schema has no independent ESP-NOW intent marker.
+      _prefs->espnow_bridge_enabled = 0;
+#endif
 #ifdef WITH_MQTT_BRIDGE
       node_prefs_needs_migration = true;
 #else
       savePrefs(fs);
+#endif
+    } else {
+#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
+    && !defined(RS232_BRIDGE_DEFAULT_ON)
+      _prefs->bridge_uart = previous_bridge_uart;
+      _prefs->bridge_enabled = previous_bridge_enabled;
+#endif
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+      _prefs->espnow_bridge_enabled = previous_espnow_enabled;
 #endif
     }
     if (legacy) legacy.close();
@@ -972,6 +1007,9 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 #endif
   mesh::hilStartupTrace("prefs_image_open_ready");
   if (file) {
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+    bool has_runtime_espnow_intent = false;
+#endif
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
     && !defined(RS232_BRIDGE_DEFAULT_ON)
     bool has_runtime_bridge_uart = false;
@@ -1370,6 +1408,12 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
                           if (file.available() >= (int)sizeof(_prefs->ota_channel)) {
                             file.read((uint8_t *)&_prefs->ota_channel,
                                       sizeof(_prefs->ota_channel));
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+                            uint8_t bridge_profile = 0;
+                            if (file.read(&bridge_profile, sizeof(bridge_profile)) == sizeof(bridge_profile)) {
+                              has_runtime_espnow_intent = bridge_profile == 0xA1;
+                            }
+#endif
                           }
                         }
                       }
@@ -1438,12 +1482,21 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->loop_detect = constrain(_prefs->loop_detect, 0, 3);          // LOOP_DETECT_OFF..LOOP_DETECT_STRICT
 
     // sanitise bad bridge pref values
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+    if (!has_runtime_espnow_intent) {
+      // Older profiles saved an unused ESP-NOW flag as on. Only the appended
+      // combined-profile marker proves that this was an explicit setting.
+      _prefs->espnow_bridge_enabled = 0;
+      _com_prefs_needs_upgrade = true;
+    }
+#endif
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
     && !defined(RS232_BRIDGE_DEFAULT_ON)
-    if (!has_runtime_bridge_uart) {
+    if (!has_runtime_bridge_uart || _prefs->bridge_uart == 0) {
       // Pre-merge normal repeaters persisted bridge_enabled=1 even though no
-      // bridge was compiled. Fail safe on the first merged boot instead of
-      // unexpectedly claiming a UART; the user can explicitly enable it.
+      // bridge was compiled, with either no UART tail or the no-bridge zero
+      // sentinel. Fail safe before normalizing the UART instead of claiming
+      // it unexpectedly; the user can explicitly enable the bridge.
       _prefs->bridge_enabled = 0;
       _com_prefs_needs_upgrade = true;
     }
@@ -1710,6 +1763,10 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   WRITE_COMMON_PREFS(&prefs->usb_debug_enabled);               // appended USB debug intent
   WRITE_COMMON_PREFS(&prefs->trace_when_repeat_off);            // appended repeater trace exception
   WRITE_COMMON_PREFS(&prefs->ota_channel);                     // appended WiFi OTA channel; never shift older fields
+#ifdef ESPNOW_BRIDGE_MERGED
+  const uint8_t bridge_profile = 0xA1;
+  WRITE_COMMON_PREFS(&bridge_profile);                         // independent ESP-NOW intent belongs to this profile
+#endif
 
 #undef WRITE_COMMON_PREFS_BYTES
 #undef WRITE_COMMON_PREFS
@@ -1873,6 +1930,10 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->usb_debug_enabled, sizeof(_prefs->usb_debug_enabled));           // appended
     file.write((uint8_t *)&_prefs->trace_when_repeat_off, sizeof(_prefs->trace_when_repeat_off));   // appended
     file.write((uint8_t *)&_prefs->ota_channel, sizeof(_prefs->ota_channel));                       // appended WiFi OTA channel
+#ifdef ESPNOW_BRIDGE_MERGED
+    const uint8_t bridge_profile = 0xA1;
+    file.write(&bridge_profile, sizeof(bridge_profile));         // independent ESP-NOW intent belongs to this profile
+#endif
 
     _common_save_succeeded = file.commit();
     if (!_common_save_succeeded) {
@@ -2784,14 +2845,38 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         webconfig_stopped = true;
       }
 #endif
+#if defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE) \
+    && !defined(WITH_MQTT_BRIDGE)
+      // Browser OTA owns the shared WiFi driver, but the independent UART
+      // bridge can keep running throughout the upload.
+      const bool espnow_paused = _callbacks->isEspNowBridgeRunning();
+      if (espnow_paused && !_callbacks->setEspNowBridgeState(false)) {
+        strcpy(reply, "ERR: could not pause ESP-NOW for OTA");
+        return;
+      }
+#endif
       reply[0] = 0;
       if (!_board->startOTAUpdate(_prefs->node_name, reply, force_ap)) {
         if (!reply[0]) strcpy(reply, "Error");
+#if defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE) \
+    && !defined(WITH_MQTT_BRIDGE)
+        if (espnow_paused && !_callbacks->setEspNowBridgeState(true)) {
+          const size_t used = strlen(reply);
+          snprintf(reply + used, 160 - used, "; ESP-NOW resume failed");
+        }
+#endif
       }
 #if defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA)
       else {
         // Keep WiFi up, but release MQTT/TLS heap while the browser uploader runs.
         _callbacks->setBridgeState(false);
+      }
+#endif
+#if defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE) \
+    && !defined(WITH_MQTT_BRIDGE)
+      else if (espnow_paused) {
+        const size_t used = strlen(reply);
+        snprintf(reply + used, 160 - used, "; ESP-NOW paused");
       }
 #endif
       if (webconfig_stopped) {
@@ -2809,6 +2894,15 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #endif
       ) {
         _callbacks->setBridgeState(true);
+      }
+#endif
+#if defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE) \
+    && !defined(WITH_MQTT_BRIDGE)
+      else if (_prefs->espnow_bridge_enabled) {
+        const bool resumed = _callbacks->setEspNowBridgeState(true);
+        const size_t used = strlen(reply);
+        snprintf(reply + used, 160 - used, resumed
+            ? "; ESP-NOW resumed" : "; ESP-NOW resume failed");
       }
 #endif
     } else if (memcmp(command, "clock", 5) == 0) {
@@ -3668,15 +3762,19 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #endif
   // Observer/MQTT/WiFi/timezone/alert/SNMP commands live in CommonCLI_Observer.cpp.
   if (handleObserverSetCmd(sender_timestamp, config, reply)) return;
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   if (memcmp(config, "espnow.enabled ", 15) == 0) {
     const char* value = config + 15;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
       strcpy(reply, "Error: use set espnow.enabled on|off");
     } else {
-      char canonical[28];
-      snprintf(canonical, sizeof(canonical), "set bridge.enabled %s", value);
-      handleSetCmd(sender_timestamp, canonical, reply);
+      const bool enable = strcmp(value, "on") == 0;
+      _prefs->espnow_bridge_enabled = enable;
+      const bool applied = _callbacks->setEspNowBridgeState(enable);
+      savePrefs();
+      strcpy(reply, applied ? "OK"
+                            : "Error: ESP-NOW runtime change failed; setting saved");
     }
     return;
   }
@@ -4711,7 +4809,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
             &config[15], _prefs->bridge_format, channel)) {
       _prefs->bridge_channel = channel;
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
           !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
 #else
           !_prefs->bridge_enabled || _callbacks->restartBridge();
@@ -4731,7 +4829,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       StrHelper::strncpy(_prefs->bridge_secret, secret, sizeof(_prefs->bridge_secret));
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
           !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
 #else
           !_prefs->bridge_enabled || _callbacks->restartBridge();
@@ -4750,7 +4848,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       _prefs->bridge_format = format;
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
           !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
 #else
           !_prefs->bridge_enabled || _callbacks->restartBridge();
@@ -5195,6 +5293,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s",
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
             "mqtt+espnow"
+#elif defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+            "rs232+espnow"
 #elif defined(WITH_RS232_BRIDGE)
             "rs232"
 #elif WITH_ESPNOW_BRIDGE
@@ -5220,7 +5320,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #else
             _callbacks->isBridgeRunning() ? "on" : "off");
 #endif
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   } else if (configKeyEquals(config, "espnow.enabled")) {
     sprintf(reply, "> %s", _prefs->espnow_bridge_enabled ? "on" : "off");
   } else if (configKeyEquals(config, "espnow.running")) {

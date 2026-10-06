@@ -185,6 +185,25 @@ available from a canonical image:
   releases. Wio-E5 remains separate because its normal image has only 916
   bytes free, while the combined image exceeds the fixed 240 KiB application
   partition by 2,192 bytes.
+  `MKE_s3_repeater` includes the bridge on UART 2, with RX on GPIO16 and TX on
+  GPIO17. Fresh installs leave it disabled at 115200 baud; upgrades from normal
+  repeaters keep it disabled, while existing saved RS-232 settings are retained.
+  Use `set bridge.baud 115200` and `set bridge.enabled on` to enable it, or
+  `set bridge.enabled off` to stop it. `set bridge.uart 2` selects its fixed
+  UART; other UART numbers are rejected. Successful changes take effect
+  immediately and persist across reboots. The historical
+  `MKE_s3_repeater_bridge_rs232` name remains directly buildable with its
+  bridge-on default for compatibility but is omitted from bulk releases.
+  The same MKE image includes ESP-NOW, controlled independently with
+  `set espnow.enabled on|off` and `get espnow.running`. Both bridges can run
+  together and share `bridge.source` and `bridge.delay`; `bridge.channel`,
+  `bridge.secret`, and `bridge.format` apply only to ESP-NOW. Its first boot
+  after an upgrade leaves ESP-NOW off, including upgrades from the dedicated
+  ESP-NOW image: run `set espnow.enabled on` to enable it. Subsequent reboots
+  retain the saved setting. The historical `MKE_s3_repeater_bridge_espnow`
+  target remains directly buildable with its bridge-on default but is omitted
+  from bulk releases. Browser OTA pauses ESP-NOW while leaving RS-232 running;
+  `stop ota` restores ESP-NOW when its saved setting is on.
 - MeshTower V2 repeaters use
   `Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors` as the one
   canonical target. Its SD OTA target `0A9DBBF0`, hardware ID

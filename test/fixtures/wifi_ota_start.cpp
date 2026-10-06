@@ -18,6 +18,7 @@ constexpr uint8_t WIFI_PROTOCOL_11B = 1, WIFI_PROTOCOL_11G = 2;
 constexpr uint8_t WIFI_PROTOCOL_11N = 4, WIFI_PROTOCOL_LR = 8;
 using esp_err_t = int;
 bool allow_protocol_reset = true;
+bool constrain_espnow_channel = true;
 struct IPAddress {
   std::string value;
   IPAddress() = default;
@@ -31,6 +32,7 @@ struct IPAddress {
 struct WiFiFake {
   bool connected = true, ap = false, allow_ap = true;
   unsigned starts = 0;
+  int ap_channel = 0;
   uint8_t ap_protocol = 15; // Valid driver state, but LR beacons hide the AP from ordinary clients.
   int status() const { return connected ? WL_CONNECTED : 0; }
   int getMode() const { return ap ? WIFI_AP : 0; }
@@ -41,8 +43,9 @@ struct WiFiFake {
     assert(mask.value == "255.255.255.0");
     return allow_ap;
   }
-  bool softAP(const char* ssid, const char* password) {
+  bool softAP(const char* ssid, const char* password, int channel = 1) {
     assert(strcmp(ssid, "MeshCore-OTA") == 0 && password == nullptr);
+    ap_channel = channel;
     ++starts; ap = allow_ap; return ap;
   }
   void softAPdisconnect(bool) { ap = false; }
@@ -54,6 +57,8 @@ esp_err_t esp_wifi_set_protocol(int interface_id, uint8_t protocols) {
   return ESP_OK;
 }
 namespace mesh { namespace wifi {
+bool espNowChannelConstrained() { return constrain_espnow_channel; }
+uint8_t activeEspNowChannel() { return 6; }
 @AP_PROTOCOL_POLICY@
 } }
 static unsigned server_starts = 0;
@@ -123,7 +128,10 @@ int main() {
         + "/update";
     assert(strncmp(reply.text, url.c_str(), url.size()) == 0);
     assert(strstr(reply.text, instruction));
-    if (ap || !WiFi.connected) assert(WiFi.ap_protocol == 7);
+    if (ap || !WiFi.connected) {
+      assert(WiFi.ap_protocol == 7);
+      assert(WiFi.ap_channel == (constrain_espnow_channel ? 6 : 1));
+    }
     assert(strlen(reply.text) < 160 && reply.guard == 0x12345678);
   };
   // Normal start reports the actual LAN address and does not disconnect it.
@@ -174,6 +182,7 @@ int main() {
   assert(board.stopOTAUpdate(reply.text));
   assert(!board.inhibit_sleep && !board.ota_server && !WiFi.ap && WiFi.connected);
 
+  constrain_espnow_channel = false;
   WiFi.connected = false;
   allow_protocol_reset = false;
   assert(!board.startOTAUpdate("test node", reply.text, false));

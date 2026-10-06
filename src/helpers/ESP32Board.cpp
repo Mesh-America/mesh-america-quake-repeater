@@ -303,7 +303,8 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
       const IPAddress ap_ip(192, 168, 4, 1);
       const IPAddress ap_mask(255, 255, 255, 0);
       ota_started_ap = WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
-          && WiFi.softAP("MeshCore-OTA", nullptr);
+          && WiFi.softAP("MeshCore-OTA", nullptr,
+                         mesh::wifi::accessPointChannel());
     }
     // A valid IP does not imply a discoverable hotspot. An LR protocol bit
     // left by ESP-NOW makes AP beacons incompatible with ordinary clients.
@@ -398,7 +399,8 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
       const IPAddress ap_ip(192, 168, 4, 1);
       const IPAddress ap_mask(255, 255, 255, 0);
       ota_started_ap = WiFi.softAPConfig(ap_ip, ap_ip, ap_mask)
-          && WiFi.softAP("MeshCore-OTA", NULL);
+          && WiFi.softAP("MeshCore-OTA", NULL,
+                         mesh::wifi::accessPointChannel());
     }
     if (ota_started_ap && mesh::wifi::applyAccessPointProtocolMask() != ESP_OK) {
       WiFi.softAPdisconnect(true);

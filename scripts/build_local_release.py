@@ -122,11 +122,55 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
     if targets & tower_legacy and tower_primary not in targets:
         raise ValueError("MeshTower V2 release requires the SD primary; old internal-only "
                          "artifacts cannot substitute for its distinct OTA identity")
+
+    mke_primary = "mke_s3_repeater"
+    mke_legacy = {mke_primary + "_bridge_rs232", mke_primary + "_bridge_espnow"}
+    mke_bridges = {"bridge.rs232", "bridge.espnow"}
+
+    def qualified_full(manifest: dict) -> bool:
+        return (manifest["platform"] == "ESP32_PLATFORM"
+                and manifest["build_profile"] == "full"
+                and manifest.get("verified") is True)
+
+    # A resumed build directory can still contain old normal or dedicated
+    # bridge images. The canonical Full image must prove both runtime bridges
+    # even when no stale legacy image happens to remain beside it.
+    mke_full = [record["manifest"] for record in records
+                if record["manifest"]["target"].lower() == mke_primary
+                and record["manifest"]["build_profile"] == "full"]
+    if mke_full or targets & mke_legacy:
+        if not mke_full or any(
+            not qualified_full(manifest)
+            or not mke_bridges <= set(manifest.get("capabilities") or [])
+            or not mke_bridges <= {
+                check["capability"] for check in manifest.get("verification") or []
+                if check.get("present") is True
+            }
+            for manifest in mke_full
+        ):
+            raise ValueError("MKE S3 release requires a qualified combined repeater "
+                             "with verified RS232 and ESP-NOW bridges; old normal or "
+                             "legacy bridge artifacts cannot replace that canonical image")
+
+    # A dedicated ESP-NOW image is redundant only when the matching normal or
+    # observer Full image really advertises that capability. Filename suffixes
+    # alone previously suppressed V4 TFT's only ESP-NOW implementation.
+    combined_espnow = set()
+    for record in records:
+        manifest = record["manifest"]
+        if not qualified_full(manifest) or "bridge.espnow" not in (manifest.get("capabilities") or []):
+            continue
+        base = manifest["target"].rstrip("_").lower()
+        if base.endswith("_observer_mqtt"):
+            base = base[:-len("_observer_mqtt")]
+        if base.endswith("_repeater"):
+            combined_espnow.add(base)
+
     chosen: dict[str, tuple[int, dict]] = {}
     passthrough: list[dict] = []
     for record in records:
         manifest = record["manifest"]
-        if manifest["target"].lower() in tower_legacy:
+        if manifest["target"].lower() in tower_legacy | mke_legacy:
             continue
         if manifest["platform"] != "ESP32_PLATFORM" or manifest["build_profile"] != "full":
             passthrough.append(record)
@@ -138,7 +182,11 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
             base = base[:-len("_observer_mqtt")]
             kind = "observer"
         elif base.lower().endswith("_bridge_espnow"):
-            base = base[:-len("_bridge_espnow")]
+            bridge_base = base[:-len("_bridge_espnow")]
+            if bridge_base.lower() in combined_espnow or bridge_base.lower() in {
+                "meshadventurer_sx1262_repeater", "meshadventurer_sx1268_repeater",
+            }:
+                base = bridge_base
             kind = "bridge"
         key = base.lower()
         # G2's observer is the deployed Full identity. The other listed

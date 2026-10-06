@@ -3383,6 +3383,12 @@ declare_build_capability_contract() {
 
   declare_full_logging_application_contract "$env_name"
   record_build_capability "profile.${BUILD_PROFILE_FOR_TARGET}"
+  if [ "$env_name_lc" = mke_s3_repeater ]; then
+    # Do not remove the dedicated bridge images unless both real transports
+    # survived linking in the canonical runtime-selectable repeater.
+    record_build_expectation "bridge.rs232" "_ZN11RS232Bridge5beginEv"
+    record_build_expectation "bridge.espnow" "_ZN12ESPNowBridge5beginEv"
+  fi
   if is_nrf52_sensor_ota_pair_target "$env_name" \
       && [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; then
     record_build_capability "sensor.profile.${NRF52_OTA_SENSOR_PROFILE}"
@@ -5488,6 +5494,9 @@ get_merged_rs232_repeater_replacement() {
     heltec_wsl3_repeater_bridge_rs232)
       printf '%s\n' Heltec_WSL3_repeater
       ;;
+    mke_s3_repeater_bridge_rs232)
+      printf '%s\n' MKE_s3_repeater
+      ;;
     lilygo_tlora_v2_1_1_6_repeater_bridge_rs232)
       printf '%s\n' LilyGo_TLora_V2_1_1_6_repeater
       ;;
@@ -5505,7 +5514,15 @@ is_firmware_role_replaced_by_canonical_artifact() {
     || get_full_companion_replacement "$1" >/dev/null 2>&1 \
     || get_terminal_chat_companion_replacement "$1" >/dev/null \
     || get_combined_usb_ble_companion_replacement "$1" >/dev/null \
-    || get_merged_rs232_repeater_replacement "$1" >/dev/null
+    || get_merged_rs232_repeater_replacement "$1" >/dev/null \
+    || get_merged_espnow_repeater_replacement "$1" >/dev/null
+}
+
+get_merged_espnow_repeater_replacement() {
+  case "${1,,}" in
+    mke_s3_repeater_bridge_espnow) printf '%s\n' MKE_s3_repeater ;;
+    *) return 1 ;;
+  esac
 }
 
 is_runtime_setting_alias_target() {
@@ -5591,7 +5608,7 @@ resolve_full_companion_firmwares() {
 resolve_repeater_firmwares() {
   local env_name
   while IFS= read -r env_name; do
-    if ! get_unified_meshtower_repeater_replacement "$env_name" >/dev/null; then
+    if ! is_redundant_bulk_build_target "$env_name"; then
       printf '%s\n' "$env_name"
     fi
   done < <(get_pio_envs_for_variant_role repeater)
@@ -5613,7 +5630,8 @@ resolve_full_esp32_firmwares() {
   local env_name
 
   for env_name in "${SUPPORTED_PIO_ENVS[@]}"; do
-    if supports_esp32_full_build "$env_name"; then
+    if supports_esp32_full_build "$env_name" \
+        && ! is_redundant_bulk_build_target "$env_name"; then
       printf '%s\n' "$env_name"
     fi
   done
@@ -6326,7 +6344,31 @@ get_ordinary_full_group_key() {
     *_repeater_observer_mqtt|*_room_server_observer_mqtt)
       role_base=${base%_observer_mqtt} ;;
     *_repeater_bridge_espnow)
-      role_base=${base%_bridge_espnow} ;;
+      # Merged repeaters and observer-backed Full images include ESP-NOW at
+      # runtime. Keep dedicated images for boards without that replacement.
+      local combined_target=""
+      local repeater_base=${base%_bridge_espnow}
+      combined_target=$(get_merged_espnow_repeater_replacement "$target") || combined_target=""
+      if [ -n "$combined_target" ] \
+          && is_supported_build_env "$combined_target" \
+          && supports_esp32_full_build "$combined_target" \
+          && [ -n "${PIO_ENV_BOARD_BY_NAME[$target]:-}" ] \
+          && [ "${PIO_ENV_BOARD_BY_NAME[$target]}" = "${PIO_ENV_BOARD_BY_NAME[$combined_target]:-}" ]; then
+        role_base=$repeater_base
+      else
+        combined_target=$(get_mqtt_enabled_target "$repeater_base") || combined_target=""
+        if [ -n "$combined_target" ] \
+            && supports_esp32_full_build "$combined_target" \
+            && [ -n "${PIO_ENV_BOARD_BY_NAME[$target]:-}" ] \
+            && [ "${PIO_ENV_BOARD_BY_NAME[$target]}" = "${PIO_ENV_BOARD_BY_NAME[$combined_target]:-}" ]; then
+          role_base=$repeater_base
+        elif is_mqtt_bridge_target "${repeater_base}_observer_mqtt_" \
+            && supports_esp32_full_build "${repeater_base}_observer_mqtt_" \
+            && [ -n "${PIO_ENV_BOARD_BY_NAME[$target]:-}" ] \
+            && [ "${PIO_ENV_BOARD_BY_NAME[$target]}" = "${PIO_ENV_BOARD_BY_NAME[${repeater_base}_observer_mqtt_]:-}" ]; then
+          role_base=$repeater_base
+        fi
+      fi ;;
     *_repeater|*_room_server) ;;
     *) role_base=$base ;;
   esac
