@@ -1743,3 +1743,218 @@ assert(!picker.choicesUseSameFirmware([], {}, 'role', feedbackOptions(['companio
 assert.strictEqual(JSON.stringify(feedbackCatalog), feedbackSnapshot);
 assert.deepStrictEqual(feedbackFilters, {hardware: 'Heltec_v3', role: 'companion'});
 console.log('build counts, non-refining choices, install safety and partial-link feedback passed');
+
+// Exact board and role are deliberate intent. Runtime settings and a sole
+// available install format must not keep an already identified download locked.
+const simpleFilters = {...feedbackFilters, hardwareFamily: 'Heltec_v3'};
+const simpleRequirements = picker.selectionRequirements(feedbackCatalog, simpleFilters);
+assert.deepStrictEqual(simpleRequirements.hiddenFields, ['logging', 'firmwareProfile', 'mode']);
+assert.deepStrictEqual(simpleRequirements.missingFields, ['install']);
+for (const install of ['bin', 'merged-bin']) {
+  const requirements = picker.selectionRequirements(feedbackCatalog, {...simpleFilters, install});
+  assert.deepStrictEqual(requirements.missingFields, []);
+  assert.strictEqual(requirements.installKind, install);
+}
+const soleInstallCatalog = [{...feedbackCatalog[0], installKinds: ['bin']}];
+const soleInstall = picker.selectionRequirements(soleInstallCatalog, simpleFilters);
+assert.deepStrictEqual(soleInstall.hiddenFields, ['logging', 'firmwareProfile', 'mode', 'install']);
+assert.deepStrictEqual(soleInstall.missingFields, []);
+assert.strictEqual(soleInstall.installKind, 'bin');
+assert.deepStrictEqual(picker.resolveProfileAssets(soleInstallCatalog, soleInstall.installKind)
+  .map(entry => entry.asset.name), [picker.canonicalAsset(soleInstallCatalog[0].files, 'bin').name]);
+const soleUf2 = picker.selectionRequirements([{...nrf, installKinds: ['uf2']}], {
+  hardwareFamily: nrf.hardwareFamily, hardware: nrf.hardware, role: nrf.role,
+});
+assert.strictEqual(soleUf2.installKind, 'uf2');
+assert(soleUf2.hiddenFields.includes('install'));
+assert(picker.installSteps(nrf, soleUf2.installKind).some(step => step.includes('UF2')));
+for (const filters of [{}, {hardware: 'Heltec_v3'}, {role: 'companion'}]) {
+  const requirements = picker.selectionRequirements(soleInstallCatalog, filters);
+  assert.deepStrictEqual(requirements.hiddenFields, []);
+  if (!filters.hardware) assert(requirements.missingFields.includes('hardware'));
+  if (!filters.role) assert(requirements.missingFields.includes('role'));
+}
+assert(picker.selectionRequirements([], simpleFilters).missingFields.includes('install'));
+
+// Unsupported choices in an old/manual URL must remain visible to clear.
+// Inferring the sole BIN for an explicitly requested ZIP would conceal the
+// invalid constraint while actual matching still returned no files.
+const usbOnlyCatalog = [{...soleInstallCatalog[0],
+  loggingModes: ['none', 'usb'], connectionModes: ['usb']}];
+for (const [field, value] of [['install', 'zip'], ['logging', 'wifi'], ['mode', 'wifi'],
+                             ['feature', 'missing'], ['ota', 'missing'], ['variant', 'missing']]) {
+  const selection = {...simpleFilters, [field]: value};
+  const before = JSON.stringify(selection);
+  const requirements = picker.selectionRequirements(usbOnlyCatalog, selection);
+  const control = picker.PROFILE_FIELDS.includes(field) ? 'firmwareProfile' : field;
+  assert(!requirements.hiddenFields.includes(control), control + ' must stay clearable');
+  assert.strictEqual(JSON.stringify(selection), before);
+  assert.strictEqual(new URL(picker.selectionUrl('https://example.test/picker/', selection, false))
+    .searchParams.get(field), value);
+  if (field === 'install') assert.strictEqual(requirements.installKind, 'zip');
+}
+
+// A selected setting that currently narrows to one image must remain visible
+// if another choice would select a different image.
+const distinctRequirements = picker.selectionRequirements(feedbackAlternatives, {
+  ...simpleFilters, logging: 'usb', mode: 'usb',
+  feature: 'full', ota: 'lora-source', variant: 'default',
+});
+for (const field of ['logging', 'mode', 'firmwareProfile']) {
+  assert(!distinctRequirements.hiddenFields.includes(field),
+    field + ' must remain clearable even when other selected facets narrow to one image');
+}
+// Test each facet independently of other already narrowing choices.
+assert(!picker.selectionRequirements(feedbackAlternatives, {...simpleFilters, logging: 'usb'})
+  .hiddenFields.includes('logging'));
+assert(!picker.selectionRequirements(feedbackAlternatives, {...simpleFilters, mode: 'usb'})
+  .hiddenFields.includes('mode'));
+assert(!picker.selectionRequirements(feedbackAlternatives, {...simpleFilters,
+  feature: 'full', ota: 'lora-source', variant: 'default'})
+  .hiddenFields.includes('firmwareProfile'));
+assert.strictEqual(distinctRequirements.installKind, '');
+const tloraRequirements = picker.selectionRequirements(tloraCatalog.profiles, {
+  hardwareFamily: tloraNormalProfile.hardwareFamily,
+  hardware: tloraNormalProfile.hardware, role: 'repeater',
+});
+assert(!tloraRequirements.hiddenFields.includes('logging'));
+assert(!tloraRequirements.hiddenFields.includes('mode'));
+// Both capacity-safe images share the Full/OTA tuple. Logging and transport
+// still distinguish their different files; the identical tuple adds no choice.
+assert(tloraRequirements.hiddenFields.includes('firmwareProfile'));
+assert(tloraRequirements.missingFields.includes('logging'));
+assert(tloraRequirements.missingFields.includes('mode'));
+const selectedTlora = picker.selectionRequirements(tloraCatalog.profiles, {
+  hardwareFamily: tloraNormalProfile.hardwareFamily,
+  hardware: tloraNormalProfile.hardware, role: 'repeater',
+  logging: 'wifi', mode: 'espnow', feature: 'full', ota: tloraObserverProfile.ota,
+  variant: tloraObserverProfile.variant,
+});
+assert(!selectedTlora.hiddenFields.includes('logging'));
+assert(!selectedTlora.hiddenFields.includes('mode'));
+for (const item of sensorCatalog.profiles) {
+  const requirements = picker.selectionRequirements(sensorCatalog.profiles, {
+    hardwareFamily: item.hardwareFamily, hardware: item.hardware, role: item.role,
+  });
+  assert(!requirements.hiddenFields.includes('firmwareProfile'), item.target);
+  assert(!requirements.hiddenFields.includes('install'), 'ZIP and UF2 stay distinct');
+  const selected = picker.selectionRequirements(sensorCatalog.profiles, {
+    hardwareFamily: item.hardwareFamily, hardware: item.hardware, role: item.role,
+    logging: item.loggingModes[0], mode: item.mode, install: 'zip',
+    ota: item.ota, feature: item.feature, variant: item.variant,
+  });
+  assert(!selected.hiddenFields.includes('firmwareProfile'),
+    'Selected sensor profile must remain clearable: ' + item.target);
+}
+for (const partial of [{feature: 'full'}, {ota: 'lora-source'}]) {
+  const selection = {...simpleFilters, ...partial};
+  const before = JSON.stringify(selection);
+  const requirements = picker.selectionRequirements(soleInstallCatalog, selection);
+  assert.deepStrictEqual(requirements.missingFields, []);
+  assert.strictEqual(JSON.stringify(selection), before);
+  const link = picker.selectionUrl('https://example.test/picker/', selection, false);
+  assert(!new URL(link).searchParams.has('install'));
+  for (const field of picker.PROFILE_FIELDS) {
+    if (!partial[field]) assert(!new URL(link).searchParams.has(field));
+  }
+}
+assert.strictEqual(JSON.stringify(feedbackCatalog), feedbackSnapshot);
+assert.deepStrictEqual(simpleFilters, {...feedbackFilters, hardwareFamily: 'Heltec_v3'});
+console.log('same-image selectors skip redundant steps while distinct profiles and install routes stay explicit');
+
+// Logging choices remain available beneath the download. Linked choices
+// preselect their exact commands; an unselected logging mode shows off steps.
+for (const logging of ['none', 'usb', 'wifi', 'both']) {
+  const sections = picker.runtimePanelDirections(observer, {logging}, ['logging', 'mode']);
+  const section = sections.find(item => item.title === 'Logging / MQTT output');
+  assert.deepStrictEqual(section.actions.map(action => action.selection.logging),
+    ['none', 'usb', 'wifi', 'both']);
+  assert.strictEqual(section.actions[section.selectedIndex].selection.logging, logging);
+  assert.deepStrictEqual(section.actions[section.selectedIndex].commands,
+    picker.runtimeDirections(observer, {logging})[0].actions[0].commands);
+}
+const defaultLogging = picker.runtimePanelDirections(observer, {}, ['logging'])[0];
+assert.strictEqual(defaultLogging.actions[defaultLogging.selectedIndex].selection.logging, 'none');
+const nrfLogging = picker.runtimePanelDirections(nrf, {logging: 'usb'}, ['logging'])[0];
+assert.deepStrictEqual(nrfLogging.actions[nrfLogging.selectedIndex].commands, ['set usb.logging on reboot']);
+assert.strictEqual(picker.runtimePanelDirections(observer, {logging: 'usb'}, [])[0].actions.length, 1);
+for (const mode of ['', 'standard', 'rs232', 'espnow']) {
+  const profile = tripleCatalog.profiles[0];
+  const sections = picker.runtimePanelDirections(profile, {mode}, ['mode']);
+  const uart = sections.find(section => /^RS232 bridge/.test(section.title));
+  const wireless = sections.find(section => section.title === 'ESP-NOW bridge');
+  assert.strictEqual(uart.actions[uart.selectedIndex].label, mode === 'rs232' ? 'On' : 'Off');
+  assert.strictEqual(wireless.actions[wireless.selectedIndex].label, mode === 'espnow' ? 'On' : 'Off');
+}
+
+// Exercise the actual command renderer, including the preselected radio and
+// later logging change, without sending anything to a device or the network.
+class RuntimeElement {
+  constructor(tag, text = '') {
+    this.tagName = tag.toUpperCase();
+    this.children = [];
+    this.dataset = {};
+    this.listeners = {};
+    this.ownText = text;
+  }
+  appendChild(child) { this.children.push(child); return child; }
+  replaceChildren(...children) { this.children = children; this.ownText = ''; }
+  addEventListener(name, handler) { this.listeners[name] = handler; }
+  get textContent() { return this.ownText + this.children.map(child => child.textContent).join(''); }
+  set textContent(text) { this.ownText = text; this.children = []; }
+}
+function descendants(element, predicate) {
+  return element.children.flatMap(child =>
+    (predicate(child) ? [child] : []).concat(descendants(child, predicate)));
+}
+const previousDocument = global.document;
+global.document = {
+  createElement: tag => new RuntimeElement(tag),
+  createTextNode: text => new RuntimeElement('#text', text),
+};
+try {
+  const card = new RuntimeElement('article');
+  const changes = [];
+  picker.renderRuntimeDirections(card, observer, {logging: 'wifi'}, {
+    runtimeFields: ['logging'], onSelectionChange: selection => changes.push(selection),
+  });
+  const loggingDetails = descendants(card, node => node.tagName === 'DETAILS')
+    .find(node => node.children[0].textContent === 'Logging / MQTT output');
+  const inputs = descendants(loggingDetails, node => node.tagName === 'INPUT');
+  assert.strictEqual(inputs.length, 4);
+  assert.deepStrictEqual(inputs.map(input => !!input.checked), [false, false, true, false]);
+  assert.strictEqual(descendants(loggingDetails, node => node.tagName === 'CODE')[0].textContent,
+    'set logging.output wifi\nget logging.output');
+  const choices = descendants(loggingDetails, node => node.className === 'firmware-picker-radio-options')[0];
+  choices.listeners.change({target: inputs[1]});
+  assert.deepStrictEqual(changes, [{logging: 'usb'}]);
+  assert.strictEqual(descendants(loggingDetails, node => node.tagName === 'CODE')[0].textContent,
+    'set powersaving off\nset logging.output usb\nget logging.output');
+  const url = picker.selectionUrl('https://example.test/picker/', {...simpleFilters, ...changes[0]}, false);
+  assert.strictEqual(new URL(url).searchParams.get('logging'), 'usb');
+  const resolveLogging = logging => picker.resolveProfileAssets([observer].filter(profile =>
+    picker.profileMatchesFacets(profile, {logging})), 'bin').map(entry => entry.asset.name);
+  assert.deepStrictEqual(resolveLogging(changes[0].logging), resolveLogging('wifi'));
+  assert.strictEqual(resolveLogging(changes[0].logging).length, 1);
+
+  // When logging still distinguishes images, candidate command controls are
+  // directions only. Their preview cannot silently change filters or URLs.
+  const refiningCard = new RuntimeElement('article');
+  const refiningChanges = [];
+  picker.renderRuntimeDirections(refiningCard, observer, {}, {
+    runtimeFields: [], onSelectionChange: selection => refiningChanges.push(selection),
+  });
+  const refiningDetails = descendants(refiningCard, node => node.tagName === 'DETAILS')
+    .find(node => node.children[0].textContent === 'Restore the selected logging mode');
+  const refiningInputs = descendants(refiningDetails, node => node.tagName === 'INPUT');
+  const refiningChoices = descendants(refiningDetails,
+    node => node.className === 'firmware-picker-radio-options')[0];
+  refiningChoices.listeners.change({target: refiningInputs[2]});
+  assert.strictEqual(descendants(refiningDetails, node => node.tagName === 'CODE')[0].textContent,
+    'set logging.output wifi\nget logging.output');
+  assert.deepStrictEqual(refiningChanges, []);
+} finally {
+  if (previousDocument === undefined) delete global.document;
+  else global.document = previousDocument;
+}
+console.log('result logging and bridge controls preserve linked modes and show deliberate default commands');

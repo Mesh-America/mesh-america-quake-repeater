@@ -1473,15 +1473,11 @@ get_variants_for_board() {
   local board_family=$1
   local env
 
-  for env in "${SUPPORTED_PIO_ENVS[@]}"; do
-    if ! is_supported_build_env "$env"; then
-      continue
-    fi
-
+  while IFS= read -r env; do
     if [ "$(get_board_family_for_env "$env")" == "$board_family" ]; then
       echo "$env"
     fi
-  done | sort_lines_case_insensitive
+  done < <(get_interactive_build_targets) | sort_lines_case_insensitive
 }
 
 prompt_for_variant_for_board() {
@@ -1555,17 +1551,13 @@ prompt_for_board_target() {
     exit 1
   fi
 
-  for env in "${SUPPORTED_PIO_ENVS[@]}"; do
-    if ! is_supported_build_env "$env"; then
-      continue
-    fi
-
+  while IFS= read -r env; do
     board=$(get_board_family_for_env "$env")
     if [ -z "${seen_boards[$board]}" ]; then
       seen_boards["$board"]=1
       boards+=("$board")
     fi
-  done
+  done < <(get_interactive_build_targets)
 
   mapfile -t boards < <(printf '%s\n' "${boards[@]}" | sort_lines_case_insensitive)
 
@@ -6546,6 +6538,48 @@ select_ordinary_full_targets() {
   for key in "${keys[@]}"; do
     printf '%s\n' "${choice[$key]}"
   done
+}
+
+# The board menu is for ordinary installations, so use the same Full choices
+# as the release matrix instead of asking users to select a transport/default
+# alias or an older partition recipe. Exact names remain accepted by direct
+# build commands and migration tooling. Preserve other platforms' qualified
+# hardware/storage contracts and KISS, which is a separate host-modem role.
+get_interactive_build_targets() {
+  local target key priority pair_target
+  local -a full_targets=() other_keys=()
+  local -A other_choice=() other_priority=()
+  for target in "${SUPPORTED_PIO_ENVS[@]}"; do
+    is_supported_build_env "$target" || continue
+    is_redundant_bulk_build_target "$target" && continue
+    if [ "${PIO_ENV_PLATFORM_BY_NAME[$target]:-}" = ESP32_PLATFORM ] \
+        && supports_esp32_full_build "$target"; then
+      full_targets+=("$target")
+    else
+      key=$target
+      priority=0
+      # A normal nRF52 target and its generated reduced alias can both build
+      # the exact same Full/Reduced pair. Offer that operation once, preferring
+      # the ordinary board/role name. The existing resolver preserves distinct
+      # deployed IDs and external-storage contracts, so those remain choices.
+      if pair_target=$(get_nrf52_sensor_ota_pair_target "$target"); then
+        key=$pair_target
+        if ! is_lora_ota_only_target "$target"; then priority=1; fi
+      fi
+      if [ -z "${other_choice[$key]+x}" ]; then
+        other_keys+=("$key")
+        other_choice[$key]=$target
+        other_priority[$key]=$priority
+      elif [ "$priority" -gt "${other_priority[$key]}" ]; then
+        other_choice[$key]=$target
+        other_priority[$key]=$priority
+      fi
+    fi
+  done
+  for key in "${other_keys[@]}"; do
+    printf '%s\n' "${other_choice[$key]}"
+  done
+  select_ordinary_full_targets "${full_targets[@]}"
 }
 
 has_esp32_full_profile() {

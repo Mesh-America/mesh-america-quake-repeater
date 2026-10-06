@@ -59,17 +59,23 @@ as explicit alternatives with different routing capacities. Build one with
 it over LoRa with `ota pull <MID8> flash` and `ota install` on compatible
 hardware and partition layouts.
 
-Standard and reduced OTA images, including images that fit the 1.25 MiB
-portable application slot, remain available and remain in the standard matrix
-pass. Select `--build-profile standard` to retain the original target and
-partition contract. Moving from a plain target to its MQTT sibling changes the
-LoRa OTA target identity; a partition layout change needs its matching
-migration step.
-For the normal-role partition migrations, the matrix also publishes a
-canonical Full image under the normal target identity. Install its matching
-merged image over USB once; mOTA rejects the incompatible partition signature
-until that migration is complete, then later Full updates use the normal
-target ID. The portable image remains available while deployed nodes move.
+The ordinary ESP32 release publishes Full images. Standard and reduced OTA
+recipes, including those that fit a 1.25 MiB portable application slot, remain
+available through explicit builds for recovery and migration. Select
+`--build-profile standard` to retain an exact target's original partition
+contract. They are omitted from the ordinary release and interactive board
+menu. That menu also omits transport/default aliases covered by Full and
+development utilities; it retains distinct hardware, roles, storage, and
+measured capacity exceptions. Exact legacy names remain accepted by
+`build-firmware` and `build-matching-firmwares`.
+
+For the normal-role partition migrations, the release publishes a canonical
+Full image under the normal target identity. Use its qualified wireless
+expansion package when one exists, or install its matching merged image over
+USB. mOTA rejects an incompatible partition signature until that migration
+is complete, then later Full updates use the normal target ID. Moving from a
+plain target to a differently named sibling can also change the LoRa OTA
+identity; partition expansion does not by itself authorize that transition.
 
 Legacy supported ESP32 Wi-Fi repeaters can use the
 [Wi-Fi partition migration](esp32_wifi_partition_migration.md) bridge to
