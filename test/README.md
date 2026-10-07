@@ -28,6 +28,7 @@ python3 test/test_nimble_companion.py           # real adapter, fixed/random PIN
 python3 test/test_companion_pairing_display.py # real OLED pairing wake, USB coexistence and button navigation
 python3 test/test_companion_identity_startup.py # real saved/missing/unreadable identity branch and truthful startup phases
 python3 test/test_startup_screen.py            # early display ordering and cooperative entropy progress
+python3 -B test/test_common_prefs_legacy_rxgain.py -v # compact stock gain, appended tails and truncation
 python3 test/test_companion_settings_persistence_contract.py  # Atomic settings and appended Bluetooth fields
 python3 test/test_webconfig_ui.py              # Web controls, reboot handling and generated-page consistency
 python3 test/test_webconfig_ui_runtime.py      # Real Chromium, including independent stealth toggle
@@ -61,6 +62,14 @@ The WebConfig browser suite skips if no Chromium-family browser is available.
 With a sandboxed browser that cannot read `/tmp`, set `TMPDIR` to a writable
 directory visible to that browser before running it. The Bluetooth settings
 contracts and WebConfig suites also run in the unit-test GitHub workflow.
+
+The common preference gain tests compile the current reader and writer sections
+with unmodified, commit-bound stock 1.14.0 and 1.14.1 writer excerpts. They cover
+the saved enabled gain in a compact 290-byte image, newer explicit on/off tails,
+legacy MQTT gaps, truncation, and a reverted-code failure. Zero at the old offset
+is indistinguishable from pre-1.14.1 padding, so the compact-image fallback keeps
+the board default for zero or invalid values. These are host tests, not a
+physical upgrade test.
 
 ### Linux native Web Serial preflight
 
