@@ -153,7 +153,12 @@ const char* MQTTBridge::repeatStatus() const {
 }
 
 #ifdef ESP_PLATFORM
+static bool mqttStationWiFiMutationAllowed() {
+  return mesh::wifi::stationMutationAllowed();
+}
+
 void MQTTBridge::beginWiFiStation() {
+  if (!mqttStationWiFiMutationAllowed()) return;
   mesh::wifi::beginStation(_wifi_ssid, _wifi_password);
 }
 
@@ -1408,11 +1413,19 @@ void MQTTBridge::mqttTask(void* parameter) {
   vTaskDelete(nullptr);
 }
 
-void MQTTBridge::initializeWiFiInTask() {
-  MQTT_DEBUG_PRINTLN("Initializing WiFi in MQTT task...");
+bool MQTTBridge::initializeWiFiInTask() {
+  // OTA and setup APs own the shared driver. Starting/restarting MQTT must
+  // wait for their teardown instead of changing AP+STA to STA and dropping
+  // the operator's connection. Consult the SDK even if Arduino reports OFF.
+  if (!mqttStationWiFiMutationAllowed()) return false;
 
-  // Initialize WiFi
-  WiFi.mode(WIFI_STA);
+  // Use Arduino's additive STA API instead of deliberately removing AP.
+  // Its mode snapshot is not atomic; recheck before reconnect/event/NTP work.
+  if (!WiFi.enableSTA(true)) return false;
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&mode) != ESP_OK || (mode & WIFI_MODE_AP)) return false;
+
+  MQTT_DEBUG_PRINTLN("Initializing WiFi in MQTT task...");
 
   // A primary ESP-NOW radio must reconnect through the fixed-channel policy;
   // other ESP32 targets retain the driver's normal automatic reconnect.
@@ -1480,6 +1493,7 @@ void MQTTBridge::initializeWiFiInTask() {
   // before NTP sync just wastes heap on TLS handshakes that will be rejected.
 
   MQTT_DEBUG_PRINTLN("WiFi initialization started in task");
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1503,8 +1517,11 @@ bool MQTTBridge::waitUnlessStopping(uint32_t delay_ms) {
 // mqttTaskLoop() - main loop running on Core 0
 // ---------------------------------------------------------------------------
 void MQTTBridge::mqttTaskLoop() {
-  // Initialize WiFi first
-  initializeWiFiInTask();
+  // An active OTA/setup AP can outlive MQTT's start request. Stay stoppable
+  // while waiting, and leave slot/TLS work until station initialization ran.
+  while (!_stop_requested && !initializeWiFiInTask()) {
+    if (!waitUnlessStopping(100)) break;
+  }
 
   // Wait a bit for WiFi to start connecting
   waitUnlessStopping(1000);
@@ -3069,6 +3086,11 @@ void MQTTBridge::checkConfigurationMismatch() {
 }
 
 bool MQTTBridge::handleWiFiConnection(unsigned long now) {
+#ifdef ESP_PLATFORM
+  // An AP can start after this worker initialized. Defer channel enforcement,
+  // reconnect/disconnect and radio power changes until that owner releases it.
+  if (!mqttStationWiFiMutationAllowed()) return false;
+#endif
   wl_status_t current_wifi_status = WiFi.status();
 #ifdef ESP_PLATFORM
   if (current_wifi_status == WL_CONNECTED

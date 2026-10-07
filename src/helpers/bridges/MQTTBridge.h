@@ -517,7 +517,7 @@ private:
   static void mqttTask(void* parameter);
   void mqttTaskLoop();  // Main loop for MQTT task
   bool waitUnlessStopping(uint32_t delay_ms);
-  void initializeWiFiInTask();  // WiFi initialization moved to task
+  bool initializeWiFiInTask();  // False while an AP owns the shared driver.
   #endif
   bool publishPacket(mesh::Packet* packet, bool is_tx, bool& has_eligible_target,
                      const uint8_t* raw_data = nullptr, int raw_len = 0,

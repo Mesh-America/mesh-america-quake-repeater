@@ -232,7 +232,7 @@ struct MQTTBridge {
     if (_stop_requested) ++late_work;
     assert(!_stop_acked);
   }
-  void initializeWiFiInTask() {}
+  bool initializeWiFiInTask() { return true; }
   bool handleWiFiConnection(unsigned long) { work(); return false; }
   bool syncTimeWithNTP(bool = false, bool = false) {
     work();

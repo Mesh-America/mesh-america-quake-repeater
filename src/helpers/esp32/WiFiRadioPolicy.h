@@ -140,6 +140,15 @@ inline esp_err_t checkLongRangeRadioStart() {
   return (mode & WIFI_MODE_AP) ? ESP_ERR_INVALID_STATE : ESP_OK;
 }
 
+// Background station owners must defer while an OTA/setup AP owns WiFi.
+// Only the setup owner's deliberate AP+STA credential handoff may opt in.
+inline bool stationMutationAllowed(bool setup_handoff = false) {
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  const esp_err_t result = esp_wifi_get_mode(&mode);
+  return result == ESP_ERR_WIFI_NOT_INIT
+      || (result == ESP_OK && (!(mode & WIFI_MODE_AP) || setup_handoff));
+}
+
 inline esp_err_t applyAccessPointProtocolMask() {
   return esp_wifi_set_protocol(WIFI_IF_AP, kAccessPointProtocolMask);
 }

@@ -104,7 +104,7 @@ class CompanionWiFiNtpIntegrationTests(unittest.TestCase):
     def test_mqtt_boot_paths_and_fresh_success_begin_daily_cadence(self):
         mqtt = source(MQTT)
         initialize = mqtt[
-            mqtt.index("void MQTTBridge::initializeWiFiInTask()") :
+            mqtt.index("bool MQTTBridge::initializeWiFiInTask()") :
             mqtt.index("void MQTTBridge::mqttTaskLoop()")
         ]
         task_loop = mqtt[

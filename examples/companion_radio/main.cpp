@@ -2245,6 +2245,8 @@ void halt() {
 #ifdef WITH_WEBCONFIG
     if (the_mesh.isWebConfigActiveOrStopping()) return;
 #endif
+    // Retain the pending reload until the operator's OTA/setup AP closes.
+    if (!mesh::wifi::stationMutationAllowed()) return;
 
     companion_wifi_credential_reload_pending = false;
     companion_wifi_credential_reload_at = 0;
@@ -2268,6 +2270,7 @@ void halt() {
   static void startCompanionWiFi() {
     if (mesh::wireless::control().blocked(mesh::wireless::WiFi)) return;
     if (companion_wifi_active) return;
+    if (!mesh::wifi::stationMutationAllowed()) return;
 
     board.setInhibitSleep(true);
     mesh::wifi::setStationAutoReconnect(true);
@@ -3803,6 +3806,20 @@ void loop() {
     ota_console_loop();  // service the local text console (port 5002)
   #endif
   const unsigned long wifi_now = millis();
+  // The owner of a recovery setup AP may deliberately retry its saved SSID
+  // in AP+STA mode. Other APs, including browser OTA, must remain untouched by
+  // this background station maintenance and its five-minute reconnect timer.
+  const bool setup_station_handoff =
+#ifdef COMPANION_RADIO_FULL
+      !board.isOTAUpdateRunning() &&
+#endif
+#ifdef WITH_WEBCONFIG
+      the_mesh.isWebConfigSetupActive()
+          && (wifi_setup_recovery_mode || the_mesh.isWebConfigWiFiRecoveryActive());
+#else
+      wifiSetupPortal().isActive();
+#endif
+  if (mesh::wifi::stationMutationAllowed(setup_station_handoff)) {
   const bool station_channel_ok = mesh::wifi::enforceStationChannel();
   if (station_channel_ok && WiFi.status() == WL_CONNECTED) {
     wifi_reconnect_tracker.noteConnected();
@@ -3895,6 +3912,7 @@ void loop() {
     WiFi.disconnect(false, false);
     mesh::wifi::beginStation(
         configured_wifi_ssid, configured_wifi_password);
+  }
   }
 #ifdef WITH_MQTT_BRIDGE
   the_mesh.serviceMQTT(configured_wifi_ssid, configured_wifi_password);
