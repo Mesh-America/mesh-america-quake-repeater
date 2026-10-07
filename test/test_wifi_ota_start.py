@@ -36,7 +36,9 @@ class WiFiOtaStartTest(unittest.TestCase):
         policy = (ROOT / "src/helpers/esp32/WiFiRadioPolicy.h").read_text()
         mask = re.search(r"static constexpr uint8_t kAccessPointProtocolMask =.*?;",
                          policy, re.DOTALL).group(0)
-        fixture = fixture.replace("@AP_PROTOCOL_POLICY@", mask + "\n" + extract_braced(
+        owner_policy = policy[policy.index("static constexpr uint8_t kLongRangeRadioOwner ="):]
+        owner_policy = owner_policy[:owner_policy.index("// A bridge can start/stop")]
+        fixture = fixture.replace("@AP_PROTOCOL_POLICY@", mask + "\n" + owner_policy + extract_braced(
             policy, "inline esp_err_t applyAccessPointProtocolMask()") + "\n"
             + extract_braced(policy, "inline int accessPointChannel()"))
         lifecycle = (ROOT / "src/helpers/esp32/WiFiAccessPointPolicy.h").read_text()

@@ -141,6 +141,10 @@ struct Facade {
 } WiFi;
 
 namespace mesh { namespace wifi {
+constexpr uint8_t kLongRangeBridgeOwner=2;
+void setLongRangeOwner(uint8_t,bool){}
+int checkLongRangeRadioStart() { return sdk_initialized && (sdk_mode & WIFI_AP) ? -1 : ESP_OK; }
+int applyStationProtocolMask(uint8_t mask, bool) { return esp_wifi_set_protocol(WIFI_IF_STA, mask); }
 std::atomic<uint8_t>& bridgeEspNowChannel() { static std::atomic<uint8_t> channel{0}; return channel; }
 } }
 struct Backend : mesh::wireless::Backend {

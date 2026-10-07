@@ -80,6 +80,11 @@ void ESPNowBridge::begin() {
 
   _active_format = mesh::bridge::isValidEspNowFormat(_prefs->bridge_format)
       ? _prefs->bridge_format : mesh::bridge::ESPNOW_FORMAT_WRAPPED;
+  const bool raw_format = _active_format == mesh::bridge::ESPNOW_FORMAT_RAW;
+  if (raw_format && mesh::wifi::checkLongRangeRadioStart() != ESP_OK) {
+    BRIDGE_DEBUG_PRINTLN("ESP-NOW LR start deferred while a WiFi AP is active\n");
+    return;
+  }
   portENTER_CRITICAL(&_rx_mux);
   _rx_head = 0;
   _rx_tail = 0;
@@ -126,14 +131,12 @@ void ESPNowBridge::begin() {
     return;
   }
 
-  const bool raw_format =
-      _active_format == mesh::bridge::ESPNOW_FORMAT_RAW;
   if (raw_format) {
     // Primary ESPNOWRadio nodes use Espressif's LR PHY. Retain B/G/N receive
     // support as well, but force this peer's outgoing frames to LR below.
     const uint8_t protocols = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G
         | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_LR;
-    if (esp_wifi_set_protocol(WIFI_IF_STA, protocols) != ESP_OK) {
+    if (mesh::wifi::applyStationProtocolMask(protocols, true) != ESP_OK) {
       BRIDGE_DEBUG_PRINTLN("Error enabling ESP-NOW LR protocol\n");
       stopBridgeWiFiIfUnused();
       return;
@@ -207,6 +210,7 @@ void ESPNowBridge::begin() {
 
   // Update bridge state
   _initialized = true;
+  mesh::wifi::setLongRangeOwner(mesh::wifi::kLongRangeBridgeOwner, raw_format);
   mesh::wifi::bridgeEspNowChannel().store(_prefs->bridge_channel);
 }
 
@@ -231,6 +235,7 @@ void ESPNowBridge::end() {
 
   // Infrastructure WiFi may still own this shared radio.
   mesh::wifi::bridgeEspNowChannel().store(0);
+  mesh::wifi::setLongRangeOwner(mesh::wifi::kLongRangeBridgeOwner, false);
   stopBridgeWiFiIfUnused();
 
   portENTER_CRITICAL(&_rx_mux);

@@ -1,6 +1,7 @@
 // WiFi and the HTTP server are peripheral fakes; both OTA lifecycle methods
 // are inserted verbatim from ESP32Board.cpp by test_wifi_ota_start.py.
 #include <cassert>
+#include <atomic>
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -222,6 +223,15 @@ const esp_partition_t* esp_ota_get_next_update_partition(void*) {
 int main() {
   ESP32Board board;
   struct { char text[160] = {}; uint32_t guard = 0x12345678; } reply;
+  for (uint8_t owner : {mesh::wifi::kLongRangeRadioOwner, mesh::wifi::kLongRangeBridgeOwner}) {
+    mesh::wifi::setLongRangeOwner(owner, true);
+    assert(!board.startOTAUpdate("test node", reply.text, true));
+    assert(strstr(reply.text, "stop ESP-NOW") && WiFi.starts == 0 && !WiFi.ap);
+    assert(!board.inhibit_sleep && !board.ota_server);
+    assert(!mesh::wifi::startOpenAccessPoint("MeshCore-OTA", false));
+    assert(WiFi.starts == 0 && !WiFi.ap);
+    mesh::wifi::setLongRangeOwner(owner, false);
+  }
   auto start = [&](bool ap, const char* ip, const char* instruction) {
     assert(board.startOTAUpdate("test node", reply.text, ap));
     assert(board.inhibit_sleep && board.ota_server);

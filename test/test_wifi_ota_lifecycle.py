@@ -123,6 +123,7 @@ struct MockWiFi {
   void scanDelete() {}
 } WiFi;
 namespace mesh { namespace wifi {
+bool accessPointCompatibleWithLongRange() { return true; }
 constexpr uint8_t kAccessPointProtocolMask = 7;
 int applyAccessPointProtocolMask() { WiFi.ap_protocol = 7; return ESP_OK; }
 int applyProtocolMask(int) { return ESP_OK; }

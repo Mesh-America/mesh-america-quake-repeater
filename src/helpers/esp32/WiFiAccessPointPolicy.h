@@ -59,6 +59,7 @@ inline bool scanBeforeAccessPoint() {
 }
 
 inline bool startOpenAccessPoint(const char* ssid, bool reuse_existing) {
+  if (!accessPointCompatibleWithLongRange()) return false;
   const int channel = accessPointChannel();
   // Repeated OTA commands retain joined clients when the AP is already live.
   if (reuse_existing && applyAccessPointProtocolMask() == ESP_OK
@@ -96,6 +97,12 @@ inline bool startOpenAccessPoint(const char* ssid, bool reuse_existing) {
 }
 
 inline void stopTemporaryAccessPointRadio(bool started_radio) {
+  // Removing AP releases its shared LR constraint. The station policy checks
+  // the live SDK mode and cannot re-enable LR while AP is still present.
+  if (espNowChannelConstrained()) {
+    applyProtocolMask(WIFI_IF_STA);
+    return;
+  }
   // Only restore OFF when this AP initialized the radio. A station inherited
   // from WebConfig/MQTT belongs to the caller's service ownership policy.
   if (started_radio && !espNowChannelConstrained()

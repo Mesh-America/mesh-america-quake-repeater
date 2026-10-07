@@ -34,6 +34,9 @@ class WebConfigApStartTest(unittest.TestCase):
         policy = (ROOT / "src/helpers/esp32/WiFiRadioPolicy.h").read_text(encoding="utf-8")
         mask = policy[policy.index("static constexpr uint8_t kAccessPointProtocolMask ="):]
         mask = mask[:mask.index(";") + 1]
+        owner_policy = policy[policy.index("static constexpr uint8_t kLongRangeRadioOwner ="):]
+        owner_policy = owner_policy[:owner_policy.index("// A bridge can start/stop")]
+        mask += "\n" + owner_policy
         fixture = FIXTURE.read_text(encoding="utf-8").replace("@AP_MASK@", mask)
         ap_policy = (ROOT / "src/helpers/esp32/WiFiAccessPointPolicy.h").read_text(encoding="utf-8")
         scanner = "namespace mesh { namespace wifi {\n" + "\n".join(

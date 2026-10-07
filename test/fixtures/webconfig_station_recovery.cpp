@@ -22,7 +22,7 @@ struct FakeWiFi {
   bool next_begin_connects = false;
   std::string ssid, password;
   int status() const { return state; }
-  void mode(int) {}
+  bool mode(int) { return true; }
   void disconnect(bool, bool) { ++disconnects; state = WL_DISCONNECTED; }
   void softAPdisconnect(bool) {}
   IP localIP() const { return {}; }
