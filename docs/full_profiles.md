@@ -84,11 +84,11 @@ credentials, a channel mismatch, or a UART conflict can prevent operation.
 `bridge.enabled` is a historical alias with different meanings between
 recipes; use the explicit transport controls on combined images.
 
-For an MQTT-capable image, this example selects a custom broker:
+For an MQTT-capable image, first follow its role's
+[WiFi/MQTT setup](WiFi.md#mqtt-observer-setup) and verify the actual connection
+with `get wifi.status`. Once connected, this example selects a custom broker:
 
 ```text
-set wifi.ssid MyNetwork
-set wifi.pwd my-password
 set mqtt.iata SEA
 set mqtt1.preset custom
 set mqtt1.server broker.example.com
@@ -97,7 +97,7 @@ set mqtt.enabled on
 get mqtt.status
 ```
 
-Replace the sample network and broker values. Add the broker's username and
+Replace the sample broker value. Add the broker's username and
 password if needed. Use the [WiFi/MQTT guide](WiFi.md#how-the-mqtt-bridge-works)
 for TLS, publication settings, broker-slot limits, and reconnect behavior.
 Where MQTT and USB logging coexist, `set logging.output off|usb|wifi|both`
