@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/research/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Research
 
 Engineering investigations, design notes, diagnostic methods, and historical update-chain studies live here. For measured outcomes, see [Test Results](../test-results/index.md); for current installation instructions, use the [documentation homepage](../index.md).

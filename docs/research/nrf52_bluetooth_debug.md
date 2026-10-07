@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/research/nrf52_bluetooth_debug/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # nRF52 Companion Bluetooth diagnostic firmware
 
 The T1000-E diagnostic image is Full Companion firmware with the normal radio,

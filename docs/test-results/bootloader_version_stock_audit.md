@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/bootloader_version_stock_audit/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Stock nRF52 bootloader version audit
 
 Checked **2026-09-29**, against the 40 nRF52 variant families resolving to 26

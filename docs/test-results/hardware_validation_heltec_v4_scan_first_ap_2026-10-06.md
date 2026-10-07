@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/hardware_validation_heltec_v4_scan_first_ap_2026-10-06/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Heltec V4 scan-first AP validation - 2026-10-06
 
 The expanded-partition Full repeater is the recommended image for these V4s.

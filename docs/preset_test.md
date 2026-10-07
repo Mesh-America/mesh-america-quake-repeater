@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/preset_test/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # <span data-role="preset-test-page-title">Temporary radio test builder</span>
 
 <span data-role="preset-test-page-summary">Choose a window and radio tuple to

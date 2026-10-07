@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/spiffs_regular_file_reads/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SPIFFS regular-file reads and login replay state
 
 Arduino-ESP32 SPIFFS can return a truthy directory handle from a read-open of a

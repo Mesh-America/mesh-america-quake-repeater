@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/research/esp32_full_build_audit_2026-10-06/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Why ESP32 builds still have options besides Full
 
 Audit date: 2026-10-06. Source baseline: `2ee62b981435df7dc4bcd79de39e61a4d5e98652` on `keymindCascade`.

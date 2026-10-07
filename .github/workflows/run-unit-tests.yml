@@ -27,6 +27,7 @@ jobs:
           python3 -B test/test_management_report.py -v
           python3 -B test/test_management_cli_wrapper.py -v
           node test/test_management_decoder.js
+          node scripts/test_telemetry_decoder.js
 
   stm32-companion-smoke:
     runs-on: ubuntu-latest
@@ -499,3 +500,17 @@ jobs:
         with:
           name: test-results
           path: .pio/build/native/
+
+  hosted-doc-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install the documentation renderer
+        run: python3 -m pip install mkdocs==1.6.1 mkdocs-material==9.7.7
+      - name: Verify source links and published page routes
+        run: python3 -B test/test_hosted_doc_links.py -v
+      - name: Verify hosted-link visibility and navigation
+        run: node test/test_hosted_doc_links.js

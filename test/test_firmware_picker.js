@@ -1156,8 +1156,10 @@ const currentCatalog = picker.buildCatalog([
 assert.strictEqual(currentCatalog.rows.length, currentAssets.length);
 assert(currentCatalog.profiles.every(profile => profile.controls && profile.chipFamily !== 'unknown'));
 const expandedEsp32 = currentCatalog.profiles.find(profile =>
-  profile.target === 'Ebyte_EoRa-S3_Repeater-full-logging');
+  profile.target === 'Ebyte_EoRa-S3_Repeater-full-usb-wifi');
 assert(expandedEsp32);
+assert.strictEqual(expandedEsp32.ota, 'lora-receiver');
+assert.deepStrictEqual(expandedEsp32.loggingModes, ['none', 'usb', 'wifi', 'both']);
 assert(picker.installSteps(expandedEsp32, 'bin').some(step =>
   step.includes('exact board/role migration ZIP')));
 assert(picker.installSteps(expandedEsp32, 'merged-bin').some(step =>
@@ -1166,40 +1168,66 @@ assert.strictEqual(
   picker.migrationReleaseUrl(expandedEsp32, expandedEsp32.files[0]),
   'https://github.com/mikecarper/MeshCore/releases/tag/utility-' +
     currentControls.familyTag);
-const ordinaryEsp32 = currentCatalog.profiles.find(profile =>
-  profile.target === 'Ebyte_EoRa-S3_Repeater');
-assert(ordinaryEsp32);
+// Infrastructure now ships as the combined Full profile. A Companion remains
+// a real, non-expanded negative case; do not invent a removed ordinary image.
+const companionEsp32 = currentCatalog.profiles.find(profile =>
+  profile.target === 'Ebyte_EoRa-S3_companion_radio_full');
+assert(companionEsp32);
 assert.strictEqual(
-  picker.migrationReleaseUrl(ordinaryEsp32, ordinaryEsp32.files[0]), '');
-const ikokaNormal = currentCatalog.profiles.find(profile =>
-  profile.target === 'ikoka_stick_nrf_30dbm_repeater');
+  picker.migrationReleaseUrl(companionEsp32, companionEsp32.files[0]), '');
+const ikokaBase = 'ikoka_stick_nrf_30dbm_repeater';
+const ikokaProfiles = ['full', 'reduced'].map(policy => {
+  const profile = currentCatalog.profiles.find(item => item.target === ikokaBase + '-' + policy);
+  assert(profile, 'The qualified current release must retain the ' + policy + ' nRF52 profile');
+  assert.strictEqual(profile.sensorProfile, policy);
+  assert.strictEqual(profile.feature, policy === 'full' ? 'full' : 'standard');
+  assert.strictEqual(profile.ota, 'lora-receiver');
+  assert.strictEqual(profile.logging, 'usb-runtime');
+  assert.deepStrictEqual(profile.loggingModes, ['none', 'usb']);
+  assert.deepStrictEqual(picker.runtimeDirections(profile, {logging: 'usb'})[0].actions[0].commands,
+    ['set usb.logging on']);
+  return profile;
+});
 assert(!currentCatalog.profiles.some(profile =>
-  profile.target === 'ikoka_stick_nrf_30dbm_repeater_lora_ota_no_external_sensors'));
-assert.strictEqual(ikokaNormal.ota, 'lora-receiver');
-assert.strictEqual(ikokaNormal.logging, 'usb-runtime');
-assert.deepStrictEqual(ikokaNormal.loggingModes, ['none', 'usb']);
-assert.deepStrictEqual(picker.runtimeDirections(ikokaNormal, {logging: 'usb'})[0].actions[0].commands,
-  ['set usb.logging on']);
+  [ikokaBase, ikokaBase + '_lora_ota_no_external_sensors'].includes(profile.target)));
 const ikokaUrl = 'https://example.com/firmware_picker/?chipFamily=nrf52&hardwareFamily=ikoka_stick_nrf_30dbm&hardware=ikoka_stick_nrf_30dbm&role=repeater&variant=default&install=zip&chipAuto=1';
 const ikokaRelease = release(currentControls.familyTag, '2026-09-13T00:00:00Z',
-  [ikokaNormal].map(profile => {
+  ikokaProfiles.flatMap(profile => {
     const source = currentControls.profiles[profile.target].loggingSource;
     const tag = currentControls.familyTag.replace(/-[0-9a-f]{8}$/, '-' + source.slice(0, 8));
-    return asset(profile.target + '-ota-' + tag + '.zip');
+    return ['zip', 'uf2'].map(extension => asset(profile.target + '-ota-' + tag + '.' + extension));
   }));
 const ikokaCatalog = picker.buildCatalog([ikokaRelease], currentControls);
 const ikokaSelection = picker.selectionFromUrl(ikokaUrl, ikokaCatalog.profiles);
 assert.deepStrictEqual(ikokaSelection.unavailable, []);
 assert.deepStrictEqual(ikokaCatalog.profiles.filter(profile =>
   picker.profileMatchesFacets(profile, ikokaSelection.filters)).map(profile => profile.target),
-  ['ikoka_stick_nrf_30dbm_repeater']);
-const mismatchedIkoka = picker.buildCatalog([
-  release(currentControls.familyTag, '2026-09-13T00:00:00Z', [
-    asset('ikoka_stick_nrf_30dbm_repeater-ota-' +
-      currentControls.familyTag.replace(/-[0-9a-f]{8}$/, '-306feebe') + '.zip'),
-  ]),
-], currentControls).profiles[0];
-assert.strictEqual(mismatchedIkoka.logging, 'none', 'Logging metadata must match the published build source');
+  ikokaProfiles.map(profile => profile.target));
+for (const profile of ikokaProfiles) {
+  const policyUrl = ikokaUrl + '&feature=' + profile.feature + '&ota=lora-receiver';
+  const selection = picker.selectionFromUrl(policyUrl, ikokaCatalog.profiles);
+  assert.deepStrictEqual(selection.unavailable, []);
+  assert.deepStrictEqual(ikokaCatalog.profiles.filter(item =>
+    picker.profileMatchesFacets(item, selection.filters)).map(item => item.target), [profile.target]);
+  const current = ikokaCatalog.profiles.find(item => item.target === profile.target);
+  assert.deepStrictEqual(current.installKinds, ['zip', 'uf2']);
+  const choices = picker.firmwareProfileChoices(ikokaCatalog.profiles, {
+    hardware: current.hardware, role: current.role, install: 'zip',
+  });
+  const choice = choices.find(item => item.value === picker.firmwareProfileValue(current));
+  assert(choice, 'Both current Full/Reduced profiles must have distinct picker choices');
+  assert.deepStrictEqual(ikokaCatalog.profiles.filter(item => picker.profileMatchesFacets(item,
+    {...choice.filters, hardware: current.hardware, role: current.role, install: 'zip'}))
+    .map(item => item.target), [current.target]);
+  const mismatched = picker.buildCatalog([
+    release(currentControls.familyTag, '2026-09-13T00:00:00Z', [
+      asset(profile.target + '-ota-' +
+        currentControls.familyTag.replace(/-[0-9a-f]{8}$/, '-306feebe') + '.zip'),
+    ]),
+  ], currentControls).profiles[0];
+  assert.strictEqual(mismatched.logging, 'none', 'Logging metadata must match the published build source');
+  assert.strictEqual(mismatched.sensorProfile, undefined, 'Sensor policy must match the published build source');
+}
 const capacityProfiles = currentCatalog.profiles.filter(profile => profile.controls.memoryNote);
 assert(capacityProfiles.length > 0, 'Regeneration must preserve capacity directions');
 for (const profile of capacityProfiles) {
@@ -1384,6 +1412,13 @@ function migrationCatalog(assets = migrationAssets, metadata = currentControls, 
 const withMigrations = migrationCatalog();
 assert.strictEqual(withMigrations.rows.length, currentCatalog.rows.length,
   'Migration ZIPs must not become firmware/Serial DFU choices');
+const expandedWithMigration = withMigrations.profiles.find(profile =>
+  profile.target === expandedEsp32.target);
+assert.strictEqual(expandedWithMigration.migrationPackage, 'ebyte-eora-s3-repeater');
+assert.deepStrictEqual(picker.migrationLink(expandedWithMigration, expandedWithMigration.files[0]), {
+  url: migrationZip('ebyte-eora-s3-repeater').browser_download_url,
+  label: 'Download exact partition-expansion ZIP',
+});
 const g2Target = 'Station_G2_repeater_observer_mqtt-full-usb-wifi';
 function g2MigrationLink(catalog) {
   const profile = catalog.profiles.find(item => item.target === g2Target);
@@ -1431,8 +1466,10 @@ for (const profile of currentMigrationProfiles) {
   assert.strictEqual(picker.migrationLink(profile, profile.files[0]).url,
     migrationZip(profile.migrationPackage).browser_download_url, profile.target);
 }
-assert.strictEqual(picker.migrationLink(ordinaryEsp32, ordinaryEsp32.files[0]), null);
-assert.strictEqual(picker.migrationLink(ikokaNormal, ikokaNormal.files[0]), null);
+assert.strictEqual(picker.migrationLink(companionEsp32, companionEsp32.files[0]), null);
+for (const profile of ikokaProfiles) {
+  assert.strictEqual(picker.migrationLink(profile, profile.files[0]), null);
+}
 const unmappedVariant = withMigrations.profiles.find(profile =>
   profile.target === 'Station_G3_ESP32_r2_repeater_observer_mqtt-full-usb-wifi');
 assert(unmappedVariant);

@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/nimble_companion_trial/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # ESP32-S3 NimBLE Full Companion trial
 
 These optional builds use NimBLE-Arduino 2.5.1 with the existing ESP32 Arduino

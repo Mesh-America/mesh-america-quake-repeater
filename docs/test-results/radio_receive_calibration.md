@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/radio_receive_calibration/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Radio receive calibration and recovery
 
 Noise calibration collects 64 idle RSSI samples at least 50 ms apart. A quiet

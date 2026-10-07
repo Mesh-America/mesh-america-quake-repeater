@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/sf125_settling_limits_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Descending SF10..SF5 / 125 kHz settling limits
 
 Experiment started 2026-09-14. **Stopped at the user's request to replace the

@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/double_frequency_v4_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Double center-frequency write: V4 transmitter / XIAO receiver
 
 2026-09-14. **Completed bounded comparison: neither single nor duplicate

@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/upgrading_1.17.1.8_to_1.17.1.9/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Upgrading from 1.17.1.8 to 1.17.1.9 over WiFi
 
 For a supported ESP32 node that already has compatible application slots,

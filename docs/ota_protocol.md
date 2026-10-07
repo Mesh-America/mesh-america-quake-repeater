@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/ota_protocol/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # MeshCore OTA - `.mota` container & LoRa protocol
 
 This is the **single source of truth** for MeshCore's over-the-air firmware update system ("mOTA"). It is

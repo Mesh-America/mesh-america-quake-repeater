@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/sf10_10hz_cr_detour_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SF10/125: tiny first-pass frequency offset and coding-rate detour
 
 2026-09-14. **The requested offset no longer rounds to zero. Actual outgoing

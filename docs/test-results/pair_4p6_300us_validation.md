@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/pair_4p6_300us_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SF7/62.5 + SF8/500: 4.6 slow chirps, 0.3 ms reserve
 
 User-requested follow-up to the [original pair test](pair_preamble32_validation.md).

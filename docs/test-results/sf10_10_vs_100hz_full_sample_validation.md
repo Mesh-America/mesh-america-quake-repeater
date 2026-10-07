@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/sf10_10_vs_100hz_full_sample_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SF10/125 full samples: 10 Hz versus 100 Hz first-pass detour
 
 2026-09-14. **Both 400-packet samples completed: 100 attempts on each of four

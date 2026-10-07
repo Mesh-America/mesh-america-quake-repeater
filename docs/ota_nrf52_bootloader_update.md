@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/ota_nrf52_bootloader_update/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # nRF52 bootloader updates over LoRa
 
 For **1.17.1.5**, use the exact board/storage profile from

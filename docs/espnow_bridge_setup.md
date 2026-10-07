@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/espnow_bridge_setup/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # ESP-NOW bridge: simple setup
 
 Use two ESP32 LoRa boards to join two MeshCore networks with different radio

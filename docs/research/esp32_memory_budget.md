@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/research/esp32_memory_budget/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Classic ESP32 image memory budget
 
 Classic ESP32 has 320 KiB of internal DRAM, but at most 160 KiB can hold

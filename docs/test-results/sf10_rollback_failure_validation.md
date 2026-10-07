@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/sf10_rollback_failure_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SF10/125 rollback and wider-spacing failure isolation
 
 2026-09-14. **No strict four-channel 400/400 pass. Reverting the switching

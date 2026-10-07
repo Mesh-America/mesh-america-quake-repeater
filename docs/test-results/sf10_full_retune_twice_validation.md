@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/sf10_full_retune_twice_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SF10/125: apply the full radio settings twice per hop
 
 2026-09-14. **Two full retune passes were verified, averaging 1.276 ms per

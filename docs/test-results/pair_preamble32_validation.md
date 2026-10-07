@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/pair_preamble32_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SF7/62.5 + SF8/500, fast switching and preamble 32
 
 User-requested hardware validation, 2026-09-14. This is a finite HIL experiment,

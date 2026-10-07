@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # MeshCore documentation
 
 Choose firmware with the [firmware picker](firmware_picker.md). For help with a device already in service, start with the [FAQ](faq.md).

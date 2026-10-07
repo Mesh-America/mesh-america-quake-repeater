@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/preview-1.17.1.8/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # 1.17.1.8 Preview 1 test results
 
 This preview contains USA Cascade builds for RAK3401 Repeater and Heltec V4 OLED Full Companion, Full Repeater, Full Room Server, and Full Sensor. The [GitHub prerelease](https://github.com/mikecarper/MeshCore/releases/tag/rak3401-preview-v1.17.1.8-halo-keymind-cascade-dev-d5853b9c) has the matching firmware assets.

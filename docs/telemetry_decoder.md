@@ -1,4 +1,11 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/telemetry_decoder/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Telemetry decoder
+
+The decoder runs on the documentation website. GitHub's Markdown preview shows
+the instructions but cannot run the decoder's buttons or JavaScript.
 
 Paste raw hexadecimal packet data copied from the
 [Let's Mesh packet analyzer](https://analyzer.letsmesh.net/packets) to decode a
@@ -57,56 +64,12 @@ can be changed; the firmware does not overwrite an unmigrated legacy file.
 
 ## Decode a packet
 
+If you are reading this on GitHub, [open the working decoder on the documentation
+website](https://mikecarper.github.io/MeshCore/telemetry_decoder/#decode-a-packet)
+to paste a packet, load an example, or download CSV.
+
 <div class="telemetry-tool" data-telemetry-decoder>
-  <div class="telemetry-examples" aria-label="Load an example reply">
-    <strong>Try an analyzer example:</strong>
-    <button type="button" data-telemetry-example="packetTemperature">Temperature packet</button>
-    <button type="button" data-telemetry-example="packetVoltage">Voltage packet</button>
-    <button type="button" data-telemetry-example="packetExternalVoltage">I2C voltage packet</button>
-    <button type="button" data-telemetry-example="externalVoltage">I2C voltage CLI page</button>
-  </div>
-
-  <label for="telemetry-reply-input">Raw packet or payload hex</label>
-  <textarea
-    id="telemetry-reply-input"
-    data-role="input"
-    spellcheck="false"
-    autocomplete="off"
-    placeholder="Paste hexadecimal Raw Data from the analyzer packet page"
-    aria-describedby="telemetry-input-help"
-  ></textarea>
-  <p class="telemetry-tool-help" id="telemetry-input-help">
-    Spaces, line breaks, colons, dashes, a leading <code>0x</code>, and a quoted
-    JSON field are accepted. CLI Base64 replies are also auto-detected. Paste
-    multiple compatible packet or reply lines together to merge them by
-    timestamp before downloading one CSV. Press Ctrl/Command+Enter to decode.
-  </p>
-
-  <div class="telemetry-actions">
-    <button class="telemetry-primary-action" type="button" data-role="decode">Decode telemetry</button>
-    <button type="button" data-role="clear">Clear</button>
-    <label class="telemetry-local-time">
-      <input type="checkbox" data-role="local-time">
-      Show browser-local time
-    </label>
-  </div>
-
-  <div class="telemetry-error" data-role="error" role="alert" aria-live="polite" hidden></div>
-
-  <section class="telemetry-results" data-role="results" aria-live="polite" hidden>
-    <div class="telemetry-results-header">
-      <h2 data-role="result-title">Decoded telemetry</h2>
-      <button type="button" data-role="download">Download CSV</button>
-    </div>
-    <dl class="telemetry-summary" data-role="summary"></dl>
-    <div class="telemetry-warnings" data-role="warnings" hidden>
-      <strong>Decode notes</strong>
-      <ul data-role="warning-list"></ul>
-    </div>
-    <div class="telemetry-table-wrap">
-      <table class="telemetry-table" data-role="table"></table>
-    </div>
-  </section>
+  <p>Enable JavaScript on the documentation website to use the decoder.</p>
 </div>
 
 ## Analyzer hex examples

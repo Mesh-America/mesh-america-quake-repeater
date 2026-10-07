@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/nrf52-usb-ready-fix/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # nRF52 USB READY hang
 
 The RAK3401 on Mercer was found stuck in the framework's TinyUSB power handler:
