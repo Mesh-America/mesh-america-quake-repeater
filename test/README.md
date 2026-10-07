@@ -92,6 +92,33 @@ python3 -B test/test_hil_linux_web_serial.py -v
 
 See [the scoped G2 comparison and Chromium source evidence](../docs/research/linux_chromium_web_serial_tty.md).
 
+### Timed WiFi return guard
+
+The host-only SlowFi guard tests use fake NetworkManager responses and local
+locks. They cover recurring recovery after more than five failures, bounded
+attempts, exact original UUID plus connected-state proof, overlapping attempts,
+cleanup refusal while the original network is unproven, owned-profile collisions,
+and timer-stop side effects with uncertain results. They do not test a real
+systemd timer, WiFi association, a Pi, or a radio:
+
+```sh
+python3 -B test/test_hil_slowfi_guard.py -v
+```
+
+The helper's CLI defaults to a plan and makes no NetworkManager/systemd calls:
+
+```sh
+python3 -B -m tools.hil.slowfi_guard --config /path/to/reviewed-config.json
+```
+
+A future hardware test must separately bind and stage the reviewed host config,
+use a fresh owned unit identity, and prove the actual first timer deadline before
+changing the Pi's network. The rendered guard first attempts the original UUID
+after 660 seconds, then retries 30 seconds after each bounded attempt until the
+original UUID is connected. It never edits the original profile. Live recovery
+and cleanup require explicit authorization, root-owned staged files and host
+identity checks; cleanup also refuses unless the original network is proven.
+
 The bootloader-version regression compiles the production reader with a C++17
 `g++` (or `CXX`) compiler. Its offline cases include the MeshTower V2 SD 2.4.6
 missing-UF2-text failure, OTAFIX metadata versus cached base-version precedence,
