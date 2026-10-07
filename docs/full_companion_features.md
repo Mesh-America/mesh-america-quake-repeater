@@ -101,9 +101,16 @@ WiFi modem sleep is independent of device power saving. Use
 state with `get wifi.powersave`. `max` is available only where the firmware's
 radio coexistence policy permits it.
 
-Most Full Companions provide BLE alongside their other transports. There is
-no universal `set bluetooth off` command. SenseCAP Indicator selects one
-secondary wireless transport per boot:
+Most Full Companions provide BLE alongside their other transports. On
+Bluetooth-capable ESP32 and nRF52 Companions, `get bluetooth` reports the
+running state and `set bluetooth on|off` saves the service preference.
+Plain `off` requires another active management connection;
+`set bluetooth off force` explicitly permits disconnecting the only client.
+Reboot does not undo a saved-off preference. See
+[Bluetooth controls](cli_commands.md#turn-bluetooth-on-or-off-companion) for
+reply draining, connection checks, and unavailable boot modes.
+
+SenseCAP Indicator selects one secondary wireless transport per boot:
 
 ```text
 set companion.transport wifi

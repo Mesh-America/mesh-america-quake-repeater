@@ -166,7 +166,13 @@ is accepted only where the BLE/WiFi coexistence policy allows it. Read back
 with `get wifi.powersave`. This is separate from device power saving and RXPS.
 The assigned WiFi button/display switch controls WiFi services on supported
 boards. `stop webconfig` closes only the portal; it is not a WiFi master switch.
-There is no universal Bluetooth-off or Ethernet-off text command.
+On Bluetooth-capable ESP32 and nRF52 Companions, `get bluetooth` reports the
+running state and `set bluetooth on|off` saves the service preference.
+Plain `off` requires another active management connection;
+`set bluetooth off force` explicitly permits disconnecting the only client.
+See [Bluetooth controls](cli_commands.md#turn-bluetooth-on-or-off-companion)
+for reply draining and boot-transport restrictions. Ethernet controls remain
+specific to the board's recipe; there is no universal Ethernet-off command.
 
 **SenseCAP Indicator Full only:** `set companion.transport wifi` followed by
 `reboot` selects WiFi; `set companion.transport ble` followed by `reboot`

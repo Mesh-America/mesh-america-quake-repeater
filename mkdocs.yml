@@ -53,6 +53,7 @@ nav:
   - Documentation:
       - Getting started and features:
           - faq.md
+          - full_profiles.md
           - role_feature_switches.md
           - full_companion_features.md
           - companion_radio_full.md
