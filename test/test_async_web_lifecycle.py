@@ -40,6 +40,7 @@ static std::atomic<bool> ota_upload_busy{false};"""
         accept=re.search(r"c->setRxTimeout\(\d+\);",web).group(0)
         rx=tcp[tcp.index("  // RX Timeout"):tcp.index("  // Everything is fine")]
         return (fixture.replace("@REBOOT_STATE@",state)
+            .replace("@UPLOAD_STATE@",extract_braced(source,"struct OtaUploadState")+";")
             .replace("@BEGIN@",begin)
             .replace("@RESTART@",extract_braced(source,"void AsyncElegantOtaClass::restart()"))
             .replace("@ACCEPT_TIMEOUT@",accept).replace("@RX_TIMEOUT@",rx))
@@ -66,6 +67,34 @@ static std::atomic<bool> ota_upload_busy{false};"""
         self.assertNotEqual(fixture,old,"The negative control must remove the production timeout fix")
         with self.assertRaises(AssertionError):
             self.compile_and_run(old,"-DESP32=1","-DTEST_OTA_BODY_TIMEOUT=1")
+
+    def premature_commit_fixture(self, fixture):
+        commit=extract_braced(fixture,"if (state && state->file_final")
+        end=extract_braced(commit,"if (!Update.end(true))")
+        final="static_cast<OtaUploadState*>(request->_tempObject)->file_final = true;"
+        # Restore the old policy using the actual end/error block: commit at
+        # file-final, before the complete multipart POST has been accepted.
+        old=fixture.replace(commit,"",1).replace(final,end+"\n"
+            +"static_cast<OtaUploadState*>(request->_tempObject)->committed = true;\n"
+            +final,1)
+        self.assertNotEqual(fixture,old,"The negative control must restore premature file commit")
+        return old
+
+    def test_second_file_rejection_does_not_commit_first_file_or_reboot(self):
+        fixture=self.uploader_fixture()
+        flags=("-DESP32=1","-DTEST_OTA_SECOND_FILE=1")
+        self.compile_and_run(fixture,*flags)
+        with self.assertRaisesRegex(AssertionError,r"Assertion (?:.* failed|failed:)") as failure:
+            self.compile_and_run(self.premature_commit_fixture(fixture),*flags)
+        self.assertRegex(str(failure.exception),r"Update\.ends==0 && Update\.boot_commits==0")
+
+    def test_file_final_disconnect_before_post_completion_does_not_commit_or_reboot(self):
+        fixture=self.uploader_fixture()
+        flags=("-DESP32=1","-DTEST_OTA_INCOMPLETE_POST=1")
+        self.compile_and_run(fixture,*flags)
+        with self.assertRaisesRegex(AssertionError,r"Assertion (?:.* failed|failed:)") as failure:
+            self.compile_and_run(self.premature_commit_fixture(fixture),*flags)
+        self.assertRegex(str(failure.exception),r"Update\.ends==0 && Update\.boot_commits==0")
 
     def test_md5_survives_begin_and_rejected_digest_releases_update(self):
         fixture=self.uploader_fixture()

@@ -32,6 +32,7 @@ int xTaskCreate(Task task, const char*, unsigned, void*, unsigned, void*) {
   assert(!pending_task); pending_task=task; return pdPASS;
 }
 @REBOOT_STATE@
+@UPLOAD_STATE@
 // Independent MD5 vectors: eight zero bytes, and that payload with byte zero
 // changed to one. The fake models Update's lifecycle rather than its digest
 // algorithm; both vectors are fixed independently of the uploader callbacks.
@@ -100,7 +101,7 @@ struct AsyncWebServer {
 };
 struct UpdateFake {
   bool error=false, running=false, fail_begin=false, fail_end=false, fail_write=false;
-  int aborts=0, writes=0, begins=0, md5_checks=0;
+  int aborts=0, writes=0, begins=0, md5_checks=0, ends=0, boot_commits=0;
   String target_md5;
   std::vector<uint8_t> received;
   bool hasError() const { return error; }
@@ -126,6 +127,7 @@ struct UpdateFake {
     return size;
   }
   bool end(bool) {
+    ++ends;
     if (error || !running) return false;
     if (fail_end) { error=true; running=false; return false; }
     assert(received.size()==8);
@@ -140,6 +142,9 @@ struct UpdateFake {
       if (target_md5!=actual_md5) { error=true; running=false; return false; }
     }
     running=false;
+    // Pinned UpdateClass::_verifyEnd() activates the boot partition when end()
+    // succeeds. Track that irreversible effect separately from file receipt.
+    ++boot_commits;
     return true;
   }
   void abort() { error=true; running=false; ++aborts; }
@@ -173,6 +178,47 @@ int main() {
     server.upload(&request,"firmware",0,data,sizeof(data),true);
     in_network_callback=false;
   };
+#if defined(TEST_OTA_SECOND_FILE) || defined(TEST_OTA_INCOMPLETE_POST)
+  {
+  Request rejected;
+  upload(rejected);
+  assert(ota_upload_owner==&rejected && ota_upload_busy.load()
+      && !rejected.isSent() && !rejected.getResponse());
+#ifdef TEST_OTA_SECOND_FILE
+  // AsyncWebServer starts each multipart file at index zero. A second file
+  // must keep its queued 409 instead of committing the already received file.
+  upload(rejected);
+  assert(!rejected.isSent() && rejected.getResponse() && rejected.code==409);
+  complete(rejected);
+  assert(rejected.code==409 && rejected.body=="OTA upload already active");
+#else
+  // The file-final boundary can arrive without the closing POST boundary.
+  // Do not invoke the completion callback for this interrupted request.
+  assert(rejected.code==0);
+#endif
+  in_network_callback=true; rejected.disconnected(); in_network_callback=false;
+  // Execute any incorrectly scheduled restart so the negative control checks
+  // both scheduling and the boot effect, rather than leaving work pending.
+  if (pending_task) { auto task=pending_task; pending_task=nullptr; task(nullptr); }
+  assert(Update.ends==0 && Update.boot_commits==0 && Update.md5_checks==0
+      && Update.aborts==1 && !Update.running && !ota_upload_owner
+      && !ota_upload_busy.load() && !ota_reboot_pending.load()
+      && !pending_task && ESP.restarts==0);
+  // Cleanup permits a valid upload on the same listener without restarting it.
+  Request valid;
+  upload(valid);
+  assert(Update.ends==0 && Update.boot_commits==0 && Update.running);
+  complete(valid);
+  assert(valid.code==200 && valid.body=="OK" && Update.ends==1
+      && Update.boot_commits==1 && Update.md5_checks==1 && !Update.running
+      && ota_upload_owner==&valid && !pending_task && ESP.restarts==0);
+  in_network_callback=true; valid.disconnected(); in_network_callback=false;
+  assert(!ota_upload_owner && !ota_upload_busy.load() && pending_task && ESP.restarts==0);
+  auto task=pending_task; pending_task=nullptr; task(nullptr);
+  assert(ESP.restarts==1);
+  return 0;
+  }
+#endif
 #ifdef TEST_OTA_BODY_TIMEOUT
   {
   uint8_t chunk[4]={};
@@ -285,7 +331,7 @@ int main() {
   upload(mismatched_md5); complete(mismatched_md5);
   assert(mismatched_md5.code==400 && mismatched_md5.body=="Could not end OTA"
       && ota_upload_owner==&mismatched_md5 && ota_upload_busy.load()
-      && !*static_cast<bool*>(mismatched_md5._tempObject)
+      && !static_cast<OtaUploadState*>(mismatched_md5._tempObject)->committed
       && Update.md5_checks==1 && !pending_task && ESP.restarts==0);
   in_network_callback=true; mismatched_md5.disconnected(); in_network_callback=false;
   assert(Update.aborts==2 && !ota_upload_owner && !ota_upload_busy.load()
@@ -300,7 +346,7 @@ int main() {
   complete(corrupt_bytes);
   assert(corrupt_bytes.code==400 && corrupt_bytes.body=="Could not end OTA"
       && ota_upload_owner==&corrupt_bytes && ota_upload_busy.load()
-      && !*static_cast<bool*>(corrupt_bytes._tempObject)
+      && !static_cast<OtaUploadState*>(corrupt_bytes._tempObject)->committed
       && Update.md5_checks==2 && !pending_task && ESP.restarts==0);
   in_network_callback=true; corrupt_bytes.disconnected(); in_network_callback=false;
   assert(Update.aborts==3 && !ota_upload_owner && !ota_upload_busy.load()
@@ -344,9 +390,14 @@ int main() {
   assert(Update.aborts==6 && !ota_upload_owner && !ota_upload_busy.load());
   Update.fail_write=false;
   Request valid;
-  upload(valid); complete(valid);
+  const int ends_before_valid=Update.ends, commits_before_valid=Update.boot_commits;
+  upload(valid);
+  assert(Update.ends==ends_before_valid && Update.boot_commits==commits_before_valid
+      && Update.running && !static_cast<OtaUploadState*>(valid._tempObject)->committed);
+  complete(valid);
   assert(valid.code==200 && valid.disconnected && !pending_task && ESP.restarts==0
-      && Update.md5_checks==3 && !Update.running);
+      && Update.md5_checks==3 && !Update.running
+      && Update.ends==ends_before_valid+1 && Update.boot_commits==commits_before_valid+1);
   // The response drains before disconnect; its callback only schedules work.
   in_network_callback=true; valid.disconnected(); in_network_callback=false;
   assert(pending_task && ESP.restarts==0);
