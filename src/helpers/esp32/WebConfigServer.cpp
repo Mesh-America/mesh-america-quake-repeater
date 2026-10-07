@@ -802,6 +802,10 @@ bool WebConfigServer::startSetupMode(char reply[]) {
     strcpy(reply, "Error: WiFi disabled; use set wifi on or set 2.4ghz on");
     return false;
   }
+  if (!mesh::wifi::accessPointCompatibleWithLongRange()) {
+    strcpy(reply, "Error: stop ESP-NOW before starting a setup AP");
+    return false;
+  }
   const bool promote_lan = _mode == MODE_LAN && !_owns_wifi && !_stopping;
   if ((_mode != MODE_OFF && !promote_lan) || _stopping) {
     strcpy(reply, "Err: webconfig busy");
@@ -1208,7 +1212,8 @@ void WebConfigServer::tick(uint32_t now) {
         _dns = NULL;
       }
       WiFi.softAPdisconnect(true);
-      WiFi.mode(WIFI_STA);
+      if (!WiFi.mode(WIFI_STA)
+          || mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) return;
       mesh::wifi::setStationAutoReconnect(true);
       _was_setup_ap = false;
       _initial_setup = false;
@@ -1302,7 +1307,8 @@ void WebConfigServer::tick(uint32_t now) {
         _dns = NULL;
       }
       WiFi.softAPdisconnect(true);
-      WiFi.mode(WIFI_STA);
+      if (!WiFi.mode(WIFI_STA)
+          || mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) return;
       mesh::wifi::setStationAutoReconnect(true);
       _was_setup_ap = false;
       _initial_setup = false;

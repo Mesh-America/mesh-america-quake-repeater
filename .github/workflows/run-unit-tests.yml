@@ -367,6 +367,7 @@ jobs:
           python3 -B test/test_serial_ethernet_sessions.py -v
           python3 -B test/test_companion_wifi_session.py -v
           python3 -B test/test_espnow_radio_lifecycle.py -v
+          python3 -B test/test_wifi_ap_lr_safety.py -v
           python3 -B test/test_espnow_runtime.py -v
           python3 -B test/test_wifi_ota_lifecycle.py -v
 

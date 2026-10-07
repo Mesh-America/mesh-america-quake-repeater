@@ -41,6 +41,10 @@ struct FakeWiFi {
 namespace mesh {
  enum class RadioParamApplyResult {APPLIED};
  namespace wifi {
+  constexpr uint8_t kProtocolMask=15,kLongRangeRadioOwner=1,kLongRangeBridgeOwner=2;
+  void setLongRangeOwner(uint8_t,bool){}
+  int checkLongRangeRadioStart(){return WiFi.current&WIFI_AP?-1:0;}
+  int applyStationProtocolMask(uint8_t,bool){return failure==2?-1:0;}
   int applyProtocolMask(int){return failure==2?-1:0;}
   int restoreEspNowChannel(){return failure==3?-1:0;}
  }
@@ -94,9 +98,11 @@ int main(){
  OnDataSent(nullptr,ESP_NOW_SEND_SUCCESS); // callback arriving while disabled
  deliver(raw,4);assert(radio.recvRaw(out,sizeof(out))==0);
  radio.end();assert(wake_refs==0&&!sdk_active);
- // Starting alongside a setup AP preserves it and restores the configured TX power.
+ // LR cannot restart alongside a conventional setup AP on the shared PHY.
  WiFi.current=WIFI_AP_STA;WiFi.autoreconnect=true;radio.init();
- assert(WiFi.current==WIFI_AP_STA&&WiFi.autoreconnect&&power==52);
+ assert(!radio.isEnabled()&&!sdk_active&&WiFi.current==WIFI_AP_STA);
+ WiFi.current=WIFI_STA;radio.init();
+ assert(WiFi.current==WIFI_STA&&WiFi.autoreconnect&&power==52);
  assert(!radio.isSendComplete()); // restarting before Dispatcher's timeout cannot fake TX success
  radio.onSendFinished(); // Dispatcher acknowledges the cancelled operation
  assert(radio.recvRaw(out,sizeof(out))==0&&radio.isInRecvMode());
@@ -250,16 +256,20 @@ int main(){
     def test_bridge_channel_constraint_tracks_runtime_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)
-            (folder/'esp_err.h').write_text('#pragma once\nusing esp_err_t=int;\nconstexpr int ESP_OK=0;\n')
+            (folder/'esp_err.h').write_text('#pragma once\nusing esp_err_t=int;\nconstexpr int ESP_OK=0,ESP_ERR_INVALID_STATE=-2,ESP_ERR_WIFI_NOT_INIT=-3;\n')
             (folder/'esp_wifi.h').write_text(r'''
 #pragma once
 #include <cstdint>
 #include <esp_err.h>
-using wifi_interface_t=int;using wifi_second_chan_t=int;
+using wifi_interface_t=int;using wifi_second_chan_t=int;using wifi_mode_t=int;
+constexpr int WIFI_MODE_NULL=0,WIFI_MODE_STA=1,WIFI_MODE_AP=2,WIFI_STORAGE_RAM=0;
 constexpr int WIFI_IF_STA=0,WIFI_IF_AP=1,WIFI_SECOND_CHAN_NONE=0;
 constexpr int WIFI_PROTOCOL_11B=1,WIFI_PROTOCOL_11G=2,WIFI_PROTOCOL_11N=4,WIFI_PROTOCOL_LR=8;
 uint8_t current_channel=1,last_protocol=0;
 int esp_wifi_set_protocol(int,uint8_t p){last_protocol=p;return 0;}
+int esp_wifi_get_mode(int* p){*p=WIFI_MODE_STA;return 0;}
+int esp_wifi_get_protocol(int,uint8_t* p){*p=7;return 0;}
+int esp_wifi_set_storage(int){return 0;}
 int esp_wifi_get_channel(uint8_t* p,int*){*p=current_channel;return 0;}
 int esp_wifi_set_channel(uint8_t p,int){current_channel=p;return 0;}
 ''')

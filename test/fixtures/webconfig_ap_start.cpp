@@ -1,6 +1,7 @@
 // Only peripheral endpoints are doubles. The readiness helper and startup
 // method are extracted verbatim from production WebConfigServer.cpp.
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -368,6 +369,16 @@ void reset(Fault fault = Fault::None) {
   DNSServer::starts = 0; mesh::wireless::control().disabled = false;
 }
 int main() {
+  // A live LR transport must remain untouched instead of being silently
+  // downgraded when a conventional setup access point is requested.
+  for (uint8_t owner : {mesh::wifi::kLongRangeRadioOwner, mesh::wifi::kLongRangeBridgeOwner}) {
+    reset(); mesh::wifi::setLongRangeOwner(owner, true);
+    WebConfigServer portal; char reply[160] = {};
+    assert(!portal.startSetupMode(reply));
+    assert(strstr(reply, "stop ESP-NOW") && WiFi.live_mode == WIFI_STA);
+    assert(WiFi.sta_only_calls == 0 && WiFi.ap_calls == 0 && WiFi.scans == 0);
+    mesh::wifi::setLongRangeOwner(owner, false);
+  }
   for (Fault fault : {Fault::StaleSsid, Fault::HiddenSsid, Fault::WrongChannel,
                      Fault::WrongProtocol, Fault::MissingMode, Fault::NotStarted,
                      Fault::ZeroIp, Fault::SetterFailure, Fault::WrongAuth, Fault::StillConnected,

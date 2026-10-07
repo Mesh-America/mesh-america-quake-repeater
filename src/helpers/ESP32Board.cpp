@@ -299,6 +299,11 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   if (!use_ap) {
     ip = WiFi.localIP();
   } else {
+    if (!mesh::wifi::accessPointCompatibleWithLongRange()) {
+      inhibit_sleep = ota_server != nullptr;
+      strcpy(reply, "ERR: stop ESP-NOW before starting an OTA AP");
+      return false;
+    }
     ota_started_radio = ota_started_radio || WiFi.getMode() == WIFI_OFF;
     ota_started_ap = mesh::wifi::startOpenAccessPoint("MeshCore-OTA", ota_started_ap);
     if (!ota_started_ap) {
@@ -397,6 +402,11 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[], bool force_ap) {
   if (!use_ap) {
     ip = WiFi.localIP();
   } else {
+    if (!mesh::wifi::accessPointCompatibleWithLongRange()) {
+      inhibit_sleep = ota_server != nullptr;
+      strcpy(reply, "ERR: stop ESP-NOW before starting an OTA AP");
+      return false;
+    }
     ota_started_radio = ota_started_radio || WiFi.getMode() == WIFI_OFF;
     ota_started_ap = mesh::wifi::startOpenAccessPoint("MeshCore-OTA", ota_started_ap);
     if (!ota_started_ap) {
