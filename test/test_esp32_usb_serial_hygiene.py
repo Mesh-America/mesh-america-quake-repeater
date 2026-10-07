@@ -481,15 +481,121 @@ int main() {
             )
         self.assertNotIn("nvs.begin(NVS_NAMESPACE, true)", mqtt_setup)
 
-        for text in (wifi_setup, webconfig):
-            self.assertIn('isKey("ssid")', text)
-            self.assertIn('isKey("password")', text)
+        self.assertIn('isKey("ssid")', wifi_setup)
+        self.assertIn('isKey("password")', wifi_setup)
         self.assertIn('isKey("enabled")', webconfig)
         self.assertIn('isKey("cli")', webconfig)
-        self.assertIn('isKey("powersave")', webconfig)
         self.assertIn('isKey("espnow_ch")', radio_policy)
         self.assertIn("nvs.isKey(NVS_VERSION_KEY)", mqtt_setup)
         self.assertIn("nvs.isKey(NVS_PREFS_KEY)", mqtt_setup)
+
+        # WebConfig now delegates credential reads to the shared resolver.
+        # Exercise that production path instead of asserting which file owns
+        # its key guards. Arduino Preferences logs an absent read-only namespace
+        # and missing value reads; isKey/getType themselves are silent.
+        preferences = source("test/fixtures/wifi_credentials_preferences.h")
+        preferences = preferences.replace(
+            "bool begin(const char* name, bool) {",
+            "bool begin(const char* name, bool read_only) { assert(!read_only);",
+        ).replace(
+            "String getString(const char* key, const char* fallback) {",
+            "String getString(const char* key, const char* fallback) { assert(isKey(key));",
+        ).replace(
+            "uint8_t getUChar(const char* key, uint8_t fallback) {",
+            "uint8_t getUChar(const char* key, uint8_t fallback) { assert(isKey(key));",
+        )
+        functions = "\n".join(extract_braced(webconfig, signature) for signature in (
+            "mesh::wifi::CredentialState WebConfigServer::resolveWiFi(",
+            "bool WebConfigServer::hasConfiguredWiFi(",
+            "bool WebConfigServer::loadStandaloneWiFi(",
+        ))
+        harness = r'''
+#include <cstring>
+#include "helpers/esp32/WiFiCredentials.h"
+#include "helpers/MQTTPrefsStorage.h"
+uint8_t effectiveWiFiPowerSave(uint8_t value) { return value; }
+struct WebConfigServer {
+  static mesh::wifi::CredentialState resolveWiFi(mesh::wifi::Credentials&, const void* = nullptr);
+  static bool hasConfiguredWiFi(const void* = nullptr);
+  static bool loadStandaloneWiFi(char*, size_t, char*, size_t, uint8_t*, const void* = nullptr);
+};
+@FUNCTIONS@
+int main() {
+  using mesh::wifi::CredentialState;
+  using mesh::wifi::Credentials;
+  reset_nvs();
+  Credentials credentials;
+  assert(mesh::wifi::readCredentials(credentials) == CredentialState::Absent);
+  assert(!credentials.ssid[0] && !credentials.password[0]);
+  assert(credentials.power_save == mesh::wifi::kDefaultPowerSave);
+  char ssid[32] = "stale", password[65] = "stale";
+  uint8_t power_save = 255;
+  assert(!WebConfigServer::loadStandaloneWiFi(
+      ssid, sizeof(ssid), password, sizeof(password), &power_save));
+  assert(!ssid[0] && !password[0]);
+  assert(power_save == mesh::wifi::kDefaultPowerSave);
+  assert(!WebConfigServer::hasConfiguredWiFi());
+  assert(nvs_writes == 0 && nvs_values.empty());
+
+  // A fresh canonical store can use legacy observer settings without reading
+  // absent values or manufacturing a canonical credential save.
+  MQTTPrefs legacy{};
+  strcpy(legacy.wifi_ssid, "legacy");
+  strcpy(legacy.wifi_password, "password");
+  legacy.wifi_power_save = mesh::wifi::kPowerSaveMax;
+  assert(WebConfigServer::loadStandaloneWiFi(
+      ssid, sizeof(ssid), password, sizeof(password), &power_save, &legacy));
+  assert(!strcmp(ssid, "legacy") && !strcmp(password, "password"));
+  assert(power_save == mesh::wifi::kPowerSaveMax);
+  assert(nvs_writes == 0 && nvs_values.empty());
+
+  // Historical open networks have only an SSID key. Missing password and
+  // power-save reads must remain silent on this upgrade path too.
+  nvs_values["ssid"] = {PT_STR, "open-network", 0};
+  assert(WebConfigServer::loadStandaloneWiFi(
+      ssid, sizeof(ssid), password, sizeof(password), &power_save));
+  assert(!strcmp(ssid, "open-network") && !password[0]);
+  assert(nvs_writes == 0);
+}
+'''
+        header = source("src/helpers/esp32/WiFiCredentials.h")
+        unguarded = header.replace(
+            'ssid_present && valid ? nvs.getString("ssid", "") : String()',
+            'nvs.getString("ssid", "")',
+        )
+        read_only = header.replace('nvs.begin("mesh-wifi", false)',
+                                   'nvs.begin("mesh-wifi", true)')
+        self.assertNotEqual(header, unguarded)
+        self.assertNotEqual(header, read_only)
+        with tempfile.TemporaryDirectory(prefix="fresh-nvs-silence-") as directory:
+            path = Path(directory)
+            (path / "Preferences.h").write_text(preferences)
+            shared = path / "helpers/esp32/WiFiCredentials.h"
+            shared.parent.mkdir(parents=True)
+            cpp, binary = path / "fresh-nvs.cpp", path / "fresh-nvs"
+            cpp.write_text(harness.replace("@FUNCTIONS@", functions))
+            for name, implementation, should_pass in (
+                ("shared-reader", header, True),
+                ("missing-key-regression", unguarded, False),
+                ("read-only-regression", read_only, False),
+            ):
+                with self.subTest(name=name):
+                    shared.write_text(implementation)
+                    build = subprocess.run([
+                        "g++", "-std=c++17", "-fsanitize=address,undefined",
+                        "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
+                        "-DWITH_MQTT_BRIDGE=1", "-I", str(path),
+                        "-I", str(ROOT / "src"), str(cpp), "-o", str(binary),
+                    ], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+                    run = subprocess.run([str(binary)], capture_output=True,
+                                         text=True, timeout=15)
+                    if should_pass:
+                        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                        self.assertEqual(run.stdout + run.stderr, "")
+                    else:
+                        self.assertNotEqual(run.returncode, 0)
+                        self.assertIn("Assertion", run.stderr)
 
     def test_indicator_reports_specific_hardware(self):
         header = source("variants/sensecap_indicator-espnow/target.h")
