@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/sf8_5p1_trace_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SF8 / 125 kHz: four-channel comparison at 5.1 chirps
 
 Measured 2026-09-14. **12 packets received, then packet 13 missed.** The first

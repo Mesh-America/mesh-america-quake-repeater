@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/hardware_validation_esp32_web_console_startup_2026-10-05/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # ESP32 native browser console startup - 2026-10-05
 
 This is a local validation report, not a release approval. No GitHub upload,

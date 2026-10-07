@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/cli_commands/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # CLI Commands
 
 See [two LoRa profiles](radio_profiles.md) for `radio2`, `tempradio2`, scheduling,

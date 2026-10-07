@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/old-releases/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Old Releases
 
 Historical release notes and their supporting files are kept here for reference. Use the [current 1.17.1.8 release notes](../releases/1.17.1.8.md) for current firmware.

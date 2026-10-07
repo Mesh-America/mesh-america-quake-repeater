@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/full_usb_logging_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Full USB logging repair - 1.17.1.6
 
 Audit date: 2026-09-13. Release firmware source: `306feebe6d648a247f925894f876be9d747fc8d2`.

@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/research/firmware_choice_followup_2026-10-06/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Further firmware choice consolidation audit - 6 October 2026
 
 Baseline: pulled commit `08bf174ea30e2e075cdd9fc74111580662b461bb`.

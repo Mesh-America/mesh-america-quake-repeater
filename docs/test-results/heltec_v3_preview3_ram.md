@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/heltec_v3_preview3_ram/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Full Companion RAM audit and Heltec V3 preview 3
 
 Date: 2026-10-02. Baseline: `0ccac453` plus the early startup-screen changes

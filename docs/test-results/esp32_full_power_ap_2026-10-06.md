@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/esp32_full_power_ap_2026-10-06/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # ESP32 Full idle power and compact AP validation — 2026-10-06
 
 Tested firmware source: `219e936ef82d16539111f03bc7982dd5654412df`, after pulling

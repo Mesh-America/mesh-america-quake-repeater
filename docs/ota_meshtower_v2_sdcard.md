@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/ota_meshtower_v2_sdcard/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # MeshTower V2 microSD LoRa OTA
 
 `Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors` is the one

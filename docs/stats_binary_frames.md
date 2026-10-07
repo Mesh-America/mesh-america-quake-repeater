@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/stats_binary_frames/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Stats Binary Frame Structures
 
 Binary frame structures for companion radio stats commands. All multi-byte integers use little-endian byte order.
