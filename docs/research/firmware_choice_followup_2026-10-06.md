@@ -1,4 +1,4 @@
-# Further firmware choice consolidation audit — 6 October 2026
+# Further firmware choice consolidation audit - 6 October 2026
 
 Baseline: pulled commit `08bf174ea30e2e075cdd9fc74111580662b461bb`.
 The user requested fewer choices after the ESP32 Full-only release change.
@@ -53,7 +53,7 @@ download or install firmware, contact a device, or publish the website.
 ## nRF52 sensor pairs: policy versus demonstrated need
 
 At this baseline, `is_nrf52_sensor_ota_pair_target()` in
-[`build_legacy.sh`](../../build_legacy.sh) includes every nRF52 repeater,
+[`build_legacy.sh`](https://github.com/mikecarper/MeshCore/blob/08bf174ea30e2e075cdd9fc74111580662b461bb/build_legacy.sh) includes every nRF52 repeater,
 room-server, and sensor recipe, including external-QSPI and SD recipes.
 `run_nrf52_sensor_ota_pair()` requires Full to pass, then builds Reduced; a
 successful Reduced build cannot replace a failed Full build. Thus the pair is
@@ -145,7 +145,7 @@ qualifying actual duplicate removal. For each candidate:
    images and verify staging geometry, reconstruction, and the matched deployed
    bootloader. A passing local-install image does not prove a delta fits.
 4. Change publication validation and fixtures deliberately before emitting one
-   artifact. [`validate_nrf52_sensor_pairs()`](../../scripts/package_cascade_release.py)
+   artifact. [`validate_nrf52_sensor_pairs()`](https://github.com/mikecarper/MeshCore/blob/08bf174ea30e2e075cdd9fc74111580662b461bb/scripts/package_cascade_release.py)
    currently requires exactly one qualified Full and one Reduced with matching
    target, hardware, version, source, and layout; it does not prove either member
    saves space or is needed. Preserve legacy endpoints needed by qualified chains.
@@ -158,18 +158,18 @@ exact-delta evidence. No PlatformIO process was started for this audit.
 
 ## Storage and bootloader choices that need real distinctions
 
-[`OtaFlashLayout_nrf52.h`](../../src/helpers/ota/OtaFlashLayout_nrf52.h) derives
+[`OtaFlashLayout_nrf52.h`](https://github.com/mikecarper/MeshCore/blob/08bf174ea30e2e075cdd9fc74111580662b461bb/src/helpers/ota/OtaFlashLayout_nrf52.h) derives
 internal staging space from the trusted live EndF application extent, rounded
 to a 4 KiB page, and the effective bootloader ceiling.
-[`OtaStoreFlashNrf52.cpp`](../../src/helpers/ota/OtaStoreFlashNrf52.cpp) adds
+[`OtaStoreFlashNrf52.cpp`](https://github.com/mikecarper/MeshCore/blob/08bf174ea30e2e075cdd9fc74111580662b461bb/src/helpers/ota/OtaStoreFlashNrf52.cpp) adds
 64 KiB of retained RAM only with the matching `MOTARAMA` capability and at least
 one available flash page. Its hybrid application path accepts deltas, not full
 application containers. A **Full sensor firmware** can still be the destination
-of a delta; the two uses of “Full” must not be confused.
+of a delta; the two uses of "Full" must not be confused.
 
 The historical [RAK3401 chain](rak3401_mota_chain.md) proves tight exact-package
 geometry under an older bootloader: multiple transitions have zero margin;
-steps 1–9 were physically passed, while the replacement final step has offline
+steps 1-9 were physically passed, while the replacement final step has offline
 reconstruction and exact-bootloader simulation only. It does not compare the
 current sensor pair and must not be generalized to all nRF52 boards.
 

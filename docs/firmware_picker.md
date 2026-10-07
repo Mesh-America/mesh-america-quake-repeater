@@ -25,7 +25,7 @@ The picker reads public release metadata from GitHub. It does not upload device
 information. Hardware names, target names, and download links come directly
 from the published firmware assets.
 
-<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.8-runtime-1" data-bootloaders-url="../_data/bootloader_manifest.json?v=20261002-1" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
+<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.9-88c85108" data-bootloaders-url="../_data/bootloader_manifest.json?v=20261002-1" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
   <div class="firmware-picker-intro" role="note">
     <strong>Current release set</strong>
     <p data-role="release-set">Loading release information...</p>
@@ -271,7 +271,7 @@ capacity and sensor-profile choices.
 Moving an older ESP32 installation to an expanded Full layout requires a
 partition migration.
 Use the exact-board merged image over USB, or a supported exact board and role
-staged migration ZIP from the [utility release](https://github.com/mikecarper/MeshCore/releases/tag/utility-v1.17.1.8-halo-keymind-cascade-dev-9053038f).
+staged migration ZIP from the [utility release](https://github.com/mikecarper/MeshCore/releases/tag/utility-v1.17.1.9-halo-keymind-cascade-dev-88c85108).
 Read that ZIP's README before choosing the Wi-Fi or LoRa route. Do not send a
 loose app-only Full `.bin` directly to an older layout: the running application
 cannot move its own active and inactive partitions. Run
@@ -465,7 +465,7 @@ pin map, and other physical differences without crowding the Hardware dropdown.
 that need a different image or wiring, such as serial port or external storage.
 The picker skips this step when all available profile choices lead to the
 same firmware file.
-Future nRF52 repeater, room-server and sensor releases publish two separately
+The 1.17.1.9 nRF52 repeater, room-server and sensor releases publish two separately
 qualified choices: **Reduced sensors + LoRa OTA** and
 **Full supported sensors + LoRa OTA**, with `-reduced-ota` and `-full-ota` artifact suffixes. Each keeps
 its exact board/role OTA identity and storage layout; the suffix is not a new
@@ -512,7 +512,7 @@ retains its optional dedicated interface `02`.
 Exact filename search finds compatibility images included in the selected
 release family. For older releases, open their GitHub release pages.
 
-The 1.17.1.8 public matrix keeps one ESP32 Full image per board and role.
+The current public matrix keeps one ESP32 Full image per board and role.
 Some richer images, including Station G2 Full, retain an observer-named OTA
 identity. Exact older identities needed by a partition migration are packaged
 inside that board and role's migration ZIP instead of adding a second ordinary
@@ -520,8 +520,8 @@ Full download. A deliberate target-ID override does not make a different
 partition layout or physical board compatible.
 
 Some normal ESP32 roles begin in the legacy 1.25 MiB dual-OTA layout but have
-a Full image with larger slots. The 1.17.1.8 utility release contains 94 exact
-board and role migration ZIPs. Each package checks its source layout and target
+a Full image with larger slots. The utility release lists the exact
+board and role migration ZIPs available for that release. Each package checks its source layout and target
 identity, contains the bridge and Full application files for its supported
 routes, and documents what saved data it preserves. Use the package's own Full
 application after the bridge; do not substitute a loose Full image with a

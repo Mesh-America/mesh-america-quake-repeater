@@ -39,6 +39,13 @@ names, sizes and checksums before switching the catalogs. Regenerate the
 downloadable picker from the same family and update its checksum on every
 page. Documentation-only follow-up commits do not move firmware tags.
 
+Include the [1.17.1.9 release notes](docs/releases/1.17.1.9.md) and
+[1.17.1.8 WiFi upgrade guide](docs/upgrading_1.17.1.8_to_1.17.1.9.md) in the
+publication review. Replace the release notes' final package-validation gate
+with the completed inventory only after packaging passes. Keep the firmware
+source separate from a later documentation-only commit, and retain the
+measured hardware scope and old-updater completion limitation.
+
 For the USA Cascade 1.17.1.5 matrix, use
 [the option 3 release instructions](docs/old-releases/1.17.1.5.md).
 Package the qualified outputs with `scripts/package_cascade_release.py`.
