@@ -61,6 +61,7 @@ nav:
           - companion_offline_queue.md
           - halo_keymind_settings.md
       - Firmware updates and partitions:
+          - upgrading_1.17.1.8_to_1.17.1.9.md
           - ota_user_guide.md
           - ota_easy.md
           - lora_ota_automation.md
