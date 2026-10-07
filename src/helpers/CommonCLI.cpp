@@ -1071,7 +1071,15 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->tx_power_dbm, sizeof(_prefs->tx_power_dbm));        // 76
     file.read((uint8_t *)&_prefs->disable_fwd, sizeof(_prefs->disable_fwd));          // 77
     file.read((uint8_t *)&_prefs->advert_interval, sizeof(_prefs->advert_interval));  // 78
-    file.read(pad, 1);                                                                // 79 : 1 byte unused (was rx_boosted_gain in v1.14.1, moved to end for upgrade compat)
+    uint8_t legacy_rx_boosted_gain = 0xFF;
+    file.read(&legacy_rx_boosted_gain, 1);                                             // 79 : rx_boosted_gain in v1.14.1
+    // v1.14.1 saved gain here in its 290-byte image. Earlier images of the
+    // same size wrote zero padding, so zero cannot safely override a board
+    // default. Only recover an unambiguous enabled value from that layout;
+    // longer images use their existing appended gain field below.
+    if (file.size() == 290 && legacy_rx_boosted_gain == 1) {
+      _prefs->rx_boosted_gain = 1;
+    }
     file.read((uint8_t *)&_prefs->rx_delay_base, sizeof(_prefs->rx_delay_base));      // 80
     file.read((uint8_t *)&_prefs->tx_delay_factor, sizeof(_prefs->tx_delay_factor));  // 84
     file.read((uint8_t *)&_prefs->guest_password[0], sizeof(_prefs->guest_password)); // 88

@@ -1,0 +1,17 @@
+{
+  "v1.14.0-writer.inc": {
+    "commit": "9f1a3eafcc04a1bb200e75ba8cd5921cc04ce203",
+    "excerpt_sha256": "14d7a3b41fba5e433db270d6ac3802435f26fd2440a027bef32229fa3768d3a6",
+    "path": "src/helpers/CommonCLI.cpp",
+    "scope": "Unmodified fixed-core serializer body from uint8_t pad[8] through owner_info at170; 290 bytes. No private radio data.",
+    "source_sha256": "c2b49cce5e9ee8590e33d0bb36d0a52e56e24f1be9ef25894b98f03f5720ffc3",
+    "tag_object": "fbd968bb7abe4d8ab9697919e72f6788a2bf9708"
+  },
+  "v1.14.1-writer.inc": {
+    "commit": "467959cc3bfc884e5f3425caac89453a450151b6",
+    "excerpt_sha256": "0e85a4e0aa9ea1084cee2015450419fa40f6dfa9d7e2c8ce3cdcc99eb68957c1",
+    "path": "src/helpers/CommonCLI.cpp",
+    "scope": "Unmodified fixed-core serializer body from uint8_t pad[8] through owner_info at170; 290 bytes. No private radio data.",
+    "source_sha256": "e70d829b2773570cc655016406600230e4bb22333eedddce1697383d7557d72a"
+  }
+}
