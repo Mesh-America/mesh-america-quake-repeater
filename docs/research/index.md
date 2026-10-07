@@ -10,6 +10,7 @@ Engineering investigations, design notes, diagnostic methods, and historical upd
 
 ## Diagnostics and update-chain studies
 
+- [Linux Chromium Web Serial after pyserial](linux_chromium_web_serial_tty.md)
 - [nRF52 Companion Bluetooth diagnostic firmware](nrf52_bluetooth_debug.md)
 - [RAK3401 compact LoRa update chain](rak3401_mota_chain.md)
 - [RAK3401 1.16.07 to 1.17.1.7 with legacy bootloader](rak3401_1.17.1.7_legacy24.md)

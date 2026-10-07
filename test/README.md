@@ -62,6 +62,36 @@ With a sandboxed browser that cannot read `/tmp`, set `TMPDIR` to a writable
 directory visible to that browser before running it. The Bluetooth settings
 contracts and WebConfig suites also run in the unit-test GitHub workflow.
 
+### Linux native Web Serial preflight
+
+After the last pyserial query, prepare the explicit radio TTY before a native
+Chromium Web Serial trial. Some Linux Chromium builds inherit `VMIN=0` from
+pyserial and mistake an idle read for device loss. Pause other serial clients
+first; another opener can change these settings or consume replies.
+
+```python
+from tools.hil.linux_web_serial import prepared_linux_web_serial
+
+with prepared_linux_web_serial("/dev/serial/by-id/<exact-radio>-if00") as host:
+    # Run the native browser controller here and record host with its receipt.
+    # Its finally cleanup must close the browser reader, writer and port.
+    # Controllers must route termination signals into that same cleanup.
+    ...
+```
+
+The helper changes/checks only `VMIN=1, VTIME=0`, closes its descriptor before
+the trial, and restores all original termios attributes on context exit or
+failed preparation. It does not call DTR/RTS, reset USB, send data, change
+firmware, extend a deadline, or retry a command. Endpoint replacement and
+failed readback are explicit failures. The real Linux pseudoterminal regression
+uses no radio and is included in the unit-test workflow:
+
+```sh
+python3 -B test/test_hil_linux_web_serial.py -v
+```
+
+See [the scoped G2 comparison and Chromium source evidence](../docs/research/linux_chromium_web_serial_tty.md).
+
 The bootloader-version regression compiles the production reader with a C++17
 `g++` (or `CXX`) compiler. Its offline cases include the MeshTower V2 SD 2.4.6
 missing-UF2-text failure, OTAFIX metadata versus cached base-version precedence,
