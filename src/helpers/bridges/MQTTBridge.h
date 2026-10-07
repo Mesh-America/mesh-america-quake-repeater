@@ -56,6 +56,8 @@ struct MQTTNodeInfo {
   const uint8_t* cr = nullptr;
   const uint8_t* repeat_flag = nullptr;
   bool repeat_when_nonzero = true;
+  // ESP32 infrastructure only; Companion and Pico retain their existing owner.
+  bool canonical_wifi = false;
 };
 
 // Periodic neighbors publication keys off the mesh neighbor cache (sized by
@@ -578,6 +580,15 @@ private:
   MQTTPrefs* _obs = nullptr;
   MQTTNodeInfo _node_info;
   bool _manage_wifi;
+#ifdef ESP_PLATFORM
+  // Frozen before Core 0 starts; changed only after its stop barrier.
+  char _wifi_ssid[32] = {};
+  char _wifi_password[65] = {};
+  uint8_t _wifi_power_save = 0;
+  bool _wifi_configured = false;
+  bool prepareWiFiCredentials();
+  void beginWiFiStation();
+#endif
 
   const char* repeatStatus() const;
 
@@ -779,7 +790,7 @@ public:
   };
   static bool getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out);
   /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */
-  static bool isConfigValid(const MQTTPrefs* obs);
+  static bool isConfigValid(const MQTTPrefs* obs, bool canonical_wifi = false);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
   static uint8_t getLastWifiDisconnectReason();
   static unsigned long getLastWifiDisconnectTime();

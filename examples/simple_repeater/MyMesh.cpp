@@ -3851,6 +3851,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
     node_info.cr = &_prefs.cr;
     node_info.repeat_flag = &_prefs.disable_fwd;
     node_info.repeat_when_nonzero = false;
+#ifdef WITH_WEBCONFIG
+    node_info.canonical_wifi = true;
+#endif
     mqtt_bridge = new MQTTBridge(node_info, _cli.getObserverPrefs(),
                                  getRTCClock(), &self_id);
 #endif
@@ -3939,8 +3942,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // Preserve the MQTT observer's first-boot setup experience even though the
   // persistent WebUI master switch defaults off on infrastructure roles.
   start_webui = start_webui || (_prefs.bridge_enabled
-      && _cli.getObserverPrefs()->wifi_ssid[0] == 0);
-  if (start_webui && _cli.getObserverPrefs()->wifi_ssid[0] == 0) {
+      && !WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs()));
+  if (start_webui && !WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs())) {
   #if defined(WITH_ESPNOW_BRIDGE)
     if (espnow_bridge.isRunning()) espnow_bridge.end();
   #endif
@@ -10931,7 +10934,7 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
 void MyMesh::suspendUnconfiguredSetupBridges() {
 #if defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
 #ifdef WITH_MQTT_BRIDGE
-  if (_cli.getObserverPrefs()->wifi_ssid[0]) return;
+  if (WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs())) return;
 #else
   char ssid[33] = {};
   WebConfigServer::loadStandaloneWiFi(ssid, sizeof(ssid), nullptr, 0);
@@ -10974,7 +10977,7 @@ bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup
   // out. Require an explicit stop before a portal that would take its radio.
   if ((isMqttBridgeRunning() || isMqttBridgeStopping()) && (force_ap
 #if defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
-      || _cli.getObserverPrefs()->wifi_ssid[0] == 0
+      || !WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs())
 #endif
      )) {
     strcpy(reply, isMqttBridgeStopping() ? "Err: MQTT bridge is stopping - retry shortly"
@@ -11088,15 +11091,15 @@ bool MyMesh::getWebUIStatus(char* reply) const {
 }
 
 bool MyMesh::getWiFiSSID(char* reply) const {
-  return WebConfigServer::formatWiFiSSID(reply, 160);
+  return WebConfigServer::formatWiFiSSID(reply, 160, canonicalWiFiLegacyPrefs());
 }
 
 bool MyMesh::getWiFiStatus(char* reply) const {
-  return WebConfigServer::formatWiFiStatus(reply, 160);
+  return WebConfigServer::formatWiFiStatus(reply, 160, nullptr, canonicalWiFiLegacyPrefs());
 }
 
 bool MyMesh::getWiFiPowerSave(char* reply) const {
-  return WebConfigServer::formatWiFiPowerSave(reply, 160);
+  return WebConfigServer::formatWiFiPowerSave(reply, 160, canonicalWiFiLegacyPrefs());
 }
 
 bool MyMesh::getWiFiCLI(char* reply) const {
@@ -11104,7 +11107,7 @@ bool MyMesh::getWiFiCLI(char* reply) const {
 }
 
 bool MyMesh::setWiFiSSID(const char* value, char* reply) {
-  if (WebConfigServer::setStandaloneWiFiSSID(value, reply, 160)) {
+  if (WebConfigServer::setStandaloneWiFiSSID(value, reply, 160, canonicalWiFiLegacyPrefs())) {
     const bool was_running = _webconfig && _webconfig->isRunning();
     if (was_running) _webconfig->requestStop();
     if (_webconfig) _webconfig->reloadStandaloneWiFi();
@@ -11116,7 +11119,7 @@ bool MyMesh::setWiFiSSID(const char* value, char* reply) {
 }
 
 bool MyMesh::setWiFiPassword(const char* value, char* reply) {
-  if (WebConfigServer::setStandaloneWiFiPassword(value, reply, 160)) {
+  if (WebConfigServer::setStandaloneWiFiPassword(value, reply, 160, canonicalWiFiLegacyPrefs())) {
     const bool was_running = _webconfig && _webconfig->isRunning();
     if (was_running) _webconfig->requestStop();
     if (_webconfig) _webconfig->reloadStandaloneWiFi();
@@ -11128,7 +11131,7 @@ bool MyMesh::setWiFiPassword(const char* value, char* reply) {
 }
 
 bool MyMesh::setWiFiPowerSave(const char* value, char* reply) {
-  if (WebConfigServer::setStandaloneWiFiPowerSave(value, reply, 160)
+  if (WebConfigServer::setStandaloneWiFiPowerSave(value, reply, 160, canonicalWiFiLegacyPrefs())
       && _webconfig) {
     _webconfig->reloadStandaloneWiFi();
   }

@@ -1,5 +1,6 @@
 #pragma once
 
+
 // Shared browser configuration portal for ESP32 infrastructure and WiFi
 // companion builds. The UI removes MQTT controls when no bridge is present.
 //
@@ -23,6 +24,8 @@
 #if defined(ESP_PLATFORM) && !defined(WEBCONFIG_DISABLED)
 
 #define WITH_WEBCONFIG 1
+
+#include <helpers/esp32/WiFiCredentials.h>
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -201,23 +204,27 @@ public:
   static bool saveCliEnabled(bool enabled);
   static bool loadStandaloneWiFi(char* ssid, size_t ssid_len,
                                  char* password, size_t password_len,
-                                 uint8_t* power_save = NULL);
+                                 uint8_t* power_save = NULL, const void* legacy_prefs = NULL);
+  static bool hasConfiguredWiFi(const void* legacy_prefs = NULL);
+  static mesh::wifi::CredentialState resolveWiFi(mesh::wifi::Credentials& out,
+                                                const void* legacy_prefs = NULL);
   static bool saveStandaloneWiFi(const char* ssid, const char* password,
                                  uint8_t power_save);
   static bool setStandaloneWiFiSSID(const char* value, char* reply,
-                                    size_t reply_len);
+                                    size_t reply_len, const void* legacy_prefs = NULL);
   static bool setStandaloneWiFiPassword(const char* value, char* reply,
-                                        size_t reply_len);
+                                        size_t reply_len, const void* legacy_prefs = NULL);
   static bool setStandaloneWiFiPowerSave(const char* value, char* reply,
-                                         size_t reply_len);
+                                         size_t reply_len, const void* legacy_prefs = NULL);
   static bool setWiFiCliEnabled(const char* value, char* reply,
                                 size_t reply_len);
-  static bool formatWiFiSSID(char* reply, size_t reply_len);
-  static bool formatWiFiPassword(char* reply, size_t reply_len);
+  static bool formatWiFiSSID(char* reply, size_t reply_len, const void* legacy_prefs = NULL);
+  static bool formatWiFiPassword(char* reply, size_t reply_len, const void* legacy_prefs = NULL);
   static bool formatWiFiStatus(
       char* reply, size_t reply_len,
-      const mesh::wifi::CompanionWiFiRuntimeState* companion_runtime = NULL);
-  static bool formatWiFiPowerSave(char* reply, size_t reply_len);
+      const mesh::wifi::CompanionWiFiRuntimeState* companion_runtime = NULL,
+      const void* legacy_prefs = NULL);
+  static bool formatWiFiPowerSave(char* reply, size_t reply_len, const void* legacy_prefs = NULL);
   static bool formatWiFiCliStatus(char* reply, size_t reply_len);
 
   // UI tasks use an otherwise-unused multi-click gesture without reaching into

@@ -354,20 +354,9 @@ WebConfigServer::WebConfigServer(Callbacks* callbacks, void* mqtt_prefs, bool ow
     // Companion and standalone FULL builds keep their canonical connection
     // credentials in mesh-wifi NVS. Do not round-trip a 64-hex raw PSK through
     // the fixed-layout MQTTPrefs wifi_password[64] field.
-    const bool loaded_standalone = loadStandaloneWiFi(
-        _wifi_ssid, sizeof(_wifi_ssid),
-        _wifi_password, sizeof(_wifi_password), &_wifi_power_save);
-#ifdef WITH_MQTT_BRIDGE
-    // Preserve the upgrade path from older WiFi-MQTT Companion installs that
-    // have not written the canonical namespace yet. Once mesh-wifi exists it
-    // always wins, including when it contains a 64-hex PSK.
-    if (!loaded_standalone && obs) {
-      strncpy(_wifi_ssid, obs->wifi_ssid, sizeof(_wifi_ssid) - 1);
-      strncpy(_wifi_password, obs->wifi_password, sizeof(_wifi_password) - 1);
-      _wifi_power_save = obs->wifi_power_save <= mesh::wifi::kPowerSaveMax
-          ? obs->wifi_power_save : mesh::wifi::kDefaultPowerSave;
-    }
-#endif
+    loadStandaloneWiFi(_wifi_ssid, sizeof(_wifi_ssid),
+                       _wifi_password, sizeof(_wifi_password), &_wifi_power_save,
+                       _mqtt_prefs);
   }
   _wifi_power_save = effectiveWiFiPowerSave(_wifi_power_save);
 }
@@ -414,144 +403,128 @@ bool WebConfigServer::saveCliEnabled(bool enabled) {
   return written == sizeof(uint8_t);
 }
 
+mesh::wifi::CredentialState WebConfigServer::resolveWiFi(
+    mesh::wifi::Credentials& out, const void* legacy_prefs) {
+#ifdef WITH_MQTT_BRIDGE
+  const MQTTPrefs* obs = static_cast<const MQTTPrefs*>(legacy_prefs);
+  return mesh::wifi::resolveCredentials(out, obs ? obs->wifi_ssid : nullptr,
+      obs ? obs->wifi_password : nullptr,
+      obs ? obs->wifi_power_save : mesh::wifi::kDefaultPowerSave);
+#else
+  (void)legacy_prefs;
+  return mesh::wifi::resolveCredentials(out);
+#endif
+}
+
+bool WebConfigServer::hasConfiguredWiFi(const void* legacy_prefs) {
+  mesh::wifi::Credentials credentials;
+  return resolveWiFi(credentials, legacy_prefs) == mesh::wifi::CredentialState::Ready;
+}
+
 bool WebConfigServer::loadStandaloneWiFi(char* ssid, size_t ssid_len,
                                          char* password, size_t password_len,
-                                         uint8_t* power_save) {
-  if (!ssid || ssid_len == 0 || !password || password_len == 0) return false;
+                                         uint8_t* power_save, const void* legacy_prefs) {
+  if (!ssid || !ssid_len || (password && !password_len)) return false;
   ssid[0] = 0;
-  password[0] = 0;
-  Preferences nvs;
-  if (!nvs.begin("mesh-wifi", false)) return false;
-  // Preferences::getString() logs an error for a missing key even when the
-  // caller supplied a default. Missing credentials are expected on first boot.
-  String stored_ssid = nvs.isKey("ssid")
-      ? nvs.getString("ssid", "") : String();
-  String stored_password = nvs.isKey("password")
-      ? nvs.getString("password", "") : String();
-  uint8_t stored_ps = nvs.isKey("powersave")
-      ? nvs.getUChar("powersave", mesh::wifi::kDefaultPowerSave)
-      : mesh::wifi::kDefaultPowerSave;
-  nvs.end();
-  if (stored_ssid.length() >= ssid_len
-      || stored_password.length() >= password_len
-      || !mesh::cli::standaloneWiFiPasswordValid(stored_password.c_str())) {
-    return false;
-  }
-  strncpy(ssid, stored_ssid.c_str(), ssid_len - 1);
-  ssid[ssid_len - 1] = 0;
-  strncpy(password, stored_password.c_str(), password_len - 1);
-  password[password_len - 1] = 0;
-  if (power_save) *power_save = effectiveWiFiPowerSave(stored_ps);
-  return stored_ssid.length() != 0;
+  if (password) password[0] = 0;
+  mesh::wifi::Credentials credentials;
+  const auto state = resolveWiFi(credentials, legacy_prefs);
+  if (state == mesh::wifi::CredentialState::Invalid
+      || state == mesh::wifi::CredentialState::Unavailable
+      || strlen(credentials.ssid) >= ssid_len
+      || (password && strlen(credentials.password) >= password_len)) return false;
+  memcpy(ssid, credentials.ssid, strlen(credentials.ssid) + 1);
+  if (password) memcpy(password, credentials.password, strlen(credentials.password) + 1);
+  if (power_save) *power_save = effectiveWiFiPowerSave(credentials.power_save);
+  return state == mesh::wifi::CredentialState::Ready;
 }
 
 bool WebConfigServer::saveStandaloneWiFi(const char* ssid, const char* password,
                                          uint8_t power_save) {
-  power_save = effectiveWiFiPowerSave(power_save);
-  const char* pwd = password ? password : "";
-  if (!ssid || !ssid[0] || strlen(ssid) >= 32
-      || !mesh::cli::standaloneWiFiPasswordValid(pwd)
-      || power_save > mesh::wifi::kPowerSaveMax) {
+  if (!mesh::cli::standaloneWiFiSSIDValid(ssid)
+      || !mesh::cli::standaloneWiFiPasswordValid(password ? password : "")) return false;
+  mesh::wifi::Credentials credentials;
+  strcpy(credentials.ssid, ssid);
+  strcpy(credentials.password, password ? password : "");
+  credentials.power_save = effectiveWiFiPowerSave(power_save);
+  return mesh::wifi::writeCredentials(credentials);
+}
+
+static bool loadWiFiEdit(mesh::wifi::Credentials& credentials,
+                         const void* legacy_prefs, char* reply, size_t reply_len) {
+  const auto state = WebConfigServer::resolveWiFi(credentials, legacy_prefs);
+  if (state == mesh::wifi::CredentialState::Invalid
+      || state == mesh::wifi::CredentialState::Unavailable) {
+    snprintf(reply, reply_len, "Error: WiFi settings unreadable; use WebConfig to save a complete pair");
     return false;
   }
-  Preferences nvs;
-  if (!nvs.begin("mesh-wifi", false)) return false;
-  bool ok = nvs.putString("ssid", ssid) == strlen(ssid);
-  nvs.putString("password", pwd);  // empty String legitimately writes zero bytes
-  ok = ok && nvs.getString("password", "\x01") == pwd;
-  ok = ok && nvs.putUChar("powersave", power_save) == sizeof(uint8_t);
-  nvs.end();
-  return ok;
+  return true;
 }
 
 bool WebConfigServer::setStandaloneWiFiSSID(const char* value, char* reply,
-                                             size_t reply_len) {
-  if (!reply || reply_len == 0) return false;
-  if (!mesh::cli::standaloneWiFiSSIDValid(value)) {
+                                             size_t reply_len, const void* legacy_prefs) {
+  if (!reply || !reply_len) return false;
+  // MQTT infrastructure historically allows clearing its SSID from the CLI.
+  // Persist the complete empty canonical pair; never fall back to the old store.
+  const bool clearing = legacy_prefs && value && !value[0];
+  if (!clearing && !mesh::cli::standaloneWiFiSSIDValid(value)) {
     snprintf(reply, reply_len, "Error: WiFi SSID must be 1-31 characters");
     return false;
   }
-
-  Preferences nvs;
-  if (!nvs.begin("mesh-wifi", false)) {
-    snprintf(reply, reply_len, "Error: failed to open WiFi settings");
-    return false;
-  }
-  const bool ok = nvs.putString("ssid", value) == strlen(value);
-  nvs.end();
-  snprintf(reply, reply_len, ok ? "OK - WiFi SSID saved"
+  mesh::wifi::Credentials credentials;
+  if (!loadWiFiEdit(credentials, legacy_prefs, reply, reply_len)) return false;
+  strcpy(credentials.ssid, value);
+  const bool ok = mesh::wifi::writeCredentials(credentials);
+  snprintf(reply, reply_len, ok ? "OK - WiFi SSID saved; reboot to apply"
                                 : "Error: failed to save WiFi SSID");
   return ok;
 }
 
 bool WebConfigServer::setStandaloneWiFiPassword(const char* value, char* reply,
-                                                 size_t reply_len) {
-  if (!reply || reply_len == 0) return false;
+                                                 size_t reply_len, const void* legacy_prefs) {
+  if (!reply || !reply_len) return false;
   if (!mesh::cli::standaloneWiFiPasswordValid(value)) {
-    snprintf(reply, reply_len,
-             "Error: WiFi password must be 0-63 characters or 64 hex characters");
+    snprintf(reply, reply_len, "Error: WiFi password must be 0-63 characters or 64 hex characters");
     return false;
   }
-
-  Preferences nvs;
-  if (!nvs.begin("mesh-wifi", false)) {
-    snprintf(reply, reply_len, "Error: failed to open WiFi settings");
-    return false;
-  }
-  nvs.putString("password", value);
-  const bool ok = nvs.getString("password", "\x01") == value;
-  nvs.end();
-  snprintf(reply, reply_len, ok ? "OK - WiFi password saved"
+  mesh::wifi::Credentials credentials;
+  if (!loadWiFiEdit(credentials, legacy_prefs, reply, reply_len)) return false;
+  strcpy(credentials.password, value);
+  const bool ok = mesh::wifi::writeCredentials(credentials);
+  snprintf(reply, reply_len, ok ? "OK - WiFi password saved; reboot to apply"
                                 : "Error: failed to save WiFi password");
   return ok;
 }
 
 bool WebConfigServer::setStandaloneWiFiPowerSave(const char* value, char* reply,
-                                                  size_t reply_len) {
-  if (!reply || reply_len == 0) return false;
+                                                  size_t reply_len, const void* legacy_prefs) {
+  if (!reply || !reply_len) return false;
   uint8_t power_save = mesh::wifi::kDefaultPowerSave;
   if (!mesh::cli::parseStandaloneWiFiPowerSave(value, power_save)) {
     snprintf(reply, reply_len, "Error: power save must be none, min, or max");
     return false;
   }
-  if (mesh::wifi::kPrimaryEspNowRadio
-      && power_save == mesh::wifi::kPowerSaveMax) {
-    snprintf(reply, reply_len,
-             "Error: power save max is unavailable while ESP-NOW is the primary radio");
+  if (mesh::wifi::kPrimaryEspNowRadio && power_save == mesh::wifi::kPowerSaveMax) {
+    snprintf(reply, reply_len, "Error: power save max is unavailable while ESP-NOW is the primary radio");
     return false;
   }
   if (effectiveWiFiPowerSave(power_save) != power_save) {
-    snprintf(reply, reply_len,
-             "Error: power save none is unavailable while Bluetooth is active");
+    snprintf(reply, reply_len, "Error: power save none is unavailable while Bluetooth is active");
     return false;
   }
-  Preferences nvs;
-  if (!nvs.begin("mesh-wifi", false)) {
-    snprintf(reply, reply_len, "Error: failed to open WiFi settings");
-    return false;
-  }
-  const bool ok =
-      nvs.putUChar("powersave", power_save) == sizeof(uint8_t);
-  nvs.end();
-  if (!ok) {
+  mesh::wifi::Credentials credentials;
+  if (!loadWiFiEdit(credentials, legacy_prefs, reply, reply_len)) return false;
+  credentials.power_save = power_save;
+  if (!mesh::wifi::writeCredentials(credentials)) {
     snprintf(reply, reply_len, "Error: failed to save WiFi power save");
     return false;
   }
-
-  esp_err_t apply_result = ESP_OK;
   if (WiFi.getMode() != WIFI_OFF) {
-    const wifi_ps_type_t ps_mode =
-        power_save == mesh::wifi::kPowerSaveNone ? WIFI_PS_NONE
-        : power_save == mesh::wifi::kPowerSaveMax ? WIFI_PS_MAX_MODEM
-                                                   : WIFI_PS_MIN_MODEM;
-    apply_result = esp_wifi_set_ps(ps_mode);
+    const wifi_ps_type_t mode = power_save == mesh::wifi::kPowerSaveNone ? WIFI_PS_NONE
+        : power_save == mesh::wifi::kPowerSaveMax ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM;
+    esp_wifi_set_ps(mode);
   }
-  if (apply_result == ESP_OK) {
-    snprintf(reply, reply_len, "OK - WiFi power save set to %s", value);
-  } else {
-    snprintf(reply, reply_len,
-             "OK - saved; WiFi power save applies on next connection");
-  }
+  snprintf(reply, reply_len, "OK - WiFi power save saved; reboot to apply");
   return true;
 }
 
@@ -578,34 +551,37 @@ bool WebConfigServer::setWiFiCliEnabled(const char* value, char* reply,
 bool WebConfigServer::reloadStandaloneWiFi() {
   return loadStandaloneWiFi(
       _wifi_ssid, sizeof(_wifi_ssid),
-      _wifi_password, sizeof(_wifi_password), &_wifi_power_save);
+      _wifi_password, sizeof(_wifi_password), &_wifi_power_save, _mqtt_prefs);
 }
 
-bool WebConfigServer::formatWiFiSSID(char* reply, size_t reply_len) {
+bool WebConfigServer::formatWiFiSSID(char* reply, size_t reply_len, const void* legacy_prefs) {
   if (!reply || reply_len == 0) return false;
 
   char ssid[32] = "";
   char password[65] = "";
   uint8_t power_save = mesh::wifi::kDefaultPowerSave;
   bool configured = loadStandaloneWiFi(
-      ssid, sizeof(ssid), password, sizeof(password), &power_save);
-  if (_active && _active->_wifi_ssid[0]) {
-    strncpy(ssid, _active->_wifi_ssid, sizeof(ssid) - 1);
-    ssid[sizeof(ssid) - 1] = 0;
-    configured = true;
+      ssid, sizeof(ssid), password, sizeof(password), &power_save, legacy_prefs);
+  if (!legacy_prefs && _active && _active->_wifi_ssid[0]) {
+    mesh::wifi::Credentials canonical;
+    if (mesh::wifi::readCredentials(canonical) == mesh::wifi::CredentialState::Absent) {
+      strlcpy(ssid, _active->_wifi_ssid, sizeof(ssid));
+      configured = true;
+    }
   }
 
   snprintf(reply, reply_len, configured ? "> %s" : "> (not configured)", ssid);
   return true;
 }
 
-bool WebConfigServer::formatWiFiPassword(char* reply, size_t reply_len) {
+bool WebConfigServer::formatWiFiPassword(char* reply, size_t reply_len, const void* legacy_prefs) {
   if (!reply || !reply_len) return false;
-  char ssid[33] = {}, password[65] = {};
-  if (!loadStandaloneWiFi(ssid, sizeof(ssid), password, sizeof(password))) {
-    if (_active) {
-      strlcpy(password, _active->_wifi_password, sizeof(password));
-    }
+  char password[65] = {};
+  mesh::wifi::Credentials credentials;
+  const auto state = resolveWiFi(credentials, legacy_prefs);
+  memcpy(password, credentials.password, sizeof(password));
+  if (!legacy_prefs && state == mesh::wifi::CredentialState::Absent) {
+    if (_active) strlcpy(password, _active->_wifi_password, sizeof(password));
 #ifdef WIFI_PWD
     else strlcpy(password, WIFI_PWD, sizeof(password));
 #endif
@@ -615,25 +591,13 @@ bool WebConfigServer::formatWiFiPassword(char* reply, size_t reply_len) {
   return true;
 }
 
-bool WebConfigServer::formatWiFiPowerSave(char* reply, size_t reply_len) {
-  if (!reply || reply_len == 0) return false;
-
-  uint8_t power_save = mesh::wifi::kDefaultPowerSave;
-  if (_active) {
-    power_save = _active->_wifi_power_save;
-  } else {
-    char ssid[32] = "";
-    char password[65] = "";
-    loadStandaloneWiFi(
-        ssid, sizeof(ssid), password, sizeof(password), &power_save);
-  }
-
-  const char* name = "none";
-  if (power_save == mesh::wifi::kPowerSaveMin) {
-    name = "min";
-  } else if (power_save == mesh::wifi::kPowerSaveMax) {
-    name = "max";
-  }
+bool WebConfigServer::formatWiFiPowerSave(char* reply, size_t reply_len, const void* legacy_prefs) {
+  if (!reply || !reply_len) return false;
+  mesh::wifi::Credentials credentials;
+  resolveWiFi(credentials, legacy_prefs);
+  const uint8_t power_save = effectiveWiFiPowerSave(credentials.power_save);
+  const char* name = power_save == mesh::wifi::kPowerSaveMin ? "min"
+      : power_save == mesh::wifi::kPowerSaveMax ? "max" : "none";
   snprintf(reply, reply_len, "> %s", name);
   return true;
 }
@@ -657,19 +621,22 @@ bool WebConfigServer::formatWiFiCliStatus(char* reply, size_t reply_len) {
 
 bool WebConfigServer::formatWiFiStatus(
     char* reply, size_t reply_len,
-    const mesh::wifi::CompanionWiFiRuntimeState* companion_runtime) {
+    const mesh::wifi::CompanionWiFiRuntimeState* companion_runtime,
+    const void* legacy_prefs) {
   if (!reply || reply_len == 0) return false;
 
   char ssid[32] = "";
   char password[65] = "";
   uint8_t power_save = mesh::wifi::kDefaultPowerSave;
   bool configured = loadStandaloneWiFi(
-      ssid, sizeof(ssid), password, sizeof(password), &power_save);
+      ssid, sizeof(ssid), password, sizeof(password), &power_save, legacy_prefs);
   WebConfigServer* active = _active;
-  if (active && active->_wifi_ssid[0]) {
-    strncpy(ssid, active->_wifi_ssid, sizeof(ssid) - 1);
-    ssid[sizeof(ssid) - 1] = 0;
-    configured = true;
+  if (!legacy_prefs && active && active->_wifi_ssid[0]) {
+    mesh::wifi::Credentials canonical;
+    if (mesh::wifi::readCredentials(canonical) == mesh::wifi::CredentialState::Absent) {
+      strlcpy(ssid, active->_wifi_ssid, sizeof(ssid));
+      configured = true;
+    }
   }
 
   if (active && active->_mode == MODE_SETUP) {
@@ -1533,6 +1500,9 @@ void WebConfigServer::drainBatch(uint32_t now) {
   if (_standalone_wifi_dirty) {
     _standalone_wifi_dirty = false;
     if (!saveStandaloneWiFi(_wifi_ssid, _wifi_password, _wifi_power_save)) {
+      // Cached edits must not be used by a later portal station attempt after
+      // a failed save. Reload the committed pair, or clear a blocked partial one.
+      reloadStandaloneWiFi();
       // Attribute the persistence failure to the last WiFi field so it is
       // visible beside a concrete input in the UI.
       for (int i = _batch_count - 1; i >= 0; i--) {

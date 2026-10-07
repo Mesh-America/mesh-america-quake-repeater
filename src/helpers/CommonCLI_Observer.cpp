@@ -183,6 +183,14 @@ static void formatMQTTPresetListReply(char* reply, size_t reply_size, int start)
 
 bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
+  if (_callbacks->usesCanonicalWiFi()) {
+    const char* value = nullptr;
+    const auto key = mesh::cli::classifyStandaloneWiFiSet(config, &value);
+    if (key == mesh::cli::StandaloneWiFiKey::SSID) { _callbacks->setWiFiSSID(value, reply); return true; }
+    if (key == mesh::cli::StandaloneWiFiKey::Password) { _callbacks->setWiFiPassword(value, reply); return true; }
+    if (key == mesh::cli::StandaloneWiFiKey::PowerSave) { _callbacks->setWiFiPowerSave(value, reply); return true; }
+  }
+
   bool handled = true;
   const auto restart_observer_bridge = [this]() {
     return mesh::cli::restartBridgeIfEnabled(
@@ -872,6 +880,21 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 
 bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
+  if (_callbacks->usesCanonicalWiFi()) {
+    if (strcmp(config, "wifi.pwd") == 0) {
+      _callbacks->getWiFiPassword(reply);
+      if (sender_timestamp) {
+        const bool has_password = strlen(reply) > 2;
+        strcpy(reply, has_password ? "> ******** (local connection only)" : "> (not set)");
+      }
+      return true;
+    }
+    const auto key = mesh::cli::classifyStandaloneWiFiGet(config);
+    if (key == mesh::cli::StandaloneWiFiKey::SSID) { _callbacks->getWiFiSSID(reply); return true; }
+    if (key == mesh::cli::StandaloneWiFiKey::Status) { _callbacks->getWiFiStatus(reply); return true; }
+    if (key == mesh::cli::StandaloneWiFiKey::PowerSave) { _callbacks->getWiFiPowerSave(reply); return true; }
+  }
+
   bool handled = true;
   if (strcmp(config, "mqtt.enabled") == 0) {
     snprintf(reply, 160, "> %s", _prefs->bridge_enabled ? "on" : "off");
@@ -1127,7 +1150,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       strcpy(reply, "> (not set)");
     }
   } else if (memcmp(config, "mqtt.config.valid", 17) == 0) {
-    bool valid = MQTTBridge::isConfigValid(&_mqtt_prefs);
+    bool valid = MQTTBridge::isConfigValid(&_mqtt_prefs, _callbacks->usesCanonicalWiFi());
     sprintf(reply, "> %s", valid ? "valid" : "invalid");
 #endif
   } else if (memcmp(config, "alert.hashtag", 13) == 0) {
