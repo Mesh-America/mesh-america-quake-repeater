@@ -103,8 +103,17 @@ public:
   WebConfigServer(Callbacks*, void*, bool, const uint8_t*, const char*,
                   const char*, const char*, const char*, bool);
   static bool loadCliEnabled(bool value) { return value; }
-  static bool loadStandaloneWiFi(char* ssid, size_t, char* pwd, size_t, uint8_t* ps) {
-    if (!canonical_available) return false;
+  static bool loadStandaloneWiFi(char* ssid, size_t, char* pwd, size_t, uint8_t* ps, const void* legacy = nullptr) {
+    if (!canonical_available) {
+#ifdef WITH_MQTT_BRIDGE
+      if (legacy) {
+        const auto* obs = static_cast<const MQTTPrefs*>(legacy);
+        strcpy(ssid, obs->wifi_ssid); strcpy(pwd, obs->wifi_password);
+        *ps = obs->wifi_power_save; return ssid[0] != 0;
+      }
+#endif
+      return false;
+    }
     strcpy(ssid, canonical_ssid); strcpy(pwd, canonical_password.c_str()); *ps = 0;
     return true;
   }

@@ -1377,6 +1377,9 @@ public:
       node_info.cr = &_prefs.cr;
       node_info.repeat_flag = &_prefs.disable_fwd;
       node_info.repeat_when_nonzero = false;
+#ifdef WITH_WEBCONFIG
+      node_info.canonical_wifi = true;
+#endif
       mqtt_bridge = new MQTTBridge(node_info, _cli.getObserverPrefs(),
                                    getRTCClock(), &self_id);
       if (!mqtt_bridge) return false;
@@ -1486,6 +1489,9 @@ public:
       node_info.cr = &_prefs.cr;
       node_info.repeat_flag = &_prefs.disable_fwd;
       node_info.repeat_when_nonzero = false;
+#ifdef WITH_WEBCONFIG
+      node_info.canonical_wifi = true;
+#endif
       mqtt_bridge = new MQTTBridge(node_info, _cli.getObserverPrefs(),
                                    getRTCClock(), &self_id);
       if (!mqtt_bridge) return false;
@@ -1743,9 +1749,17 @@ public:
   }
   bool setWebUIEnabled(bool enabled, char* reply) override;
   bool getWebUIStatus(char* reply) const override;
+  bool usesCanonicalWiFi() const override { return true; }
+  const void* canonicalWiFiLegacyPrefs() const {
+#ifdef WITH_MQTT_BRIDGE
+    return _cli.getObserverPrefs();
+#else
+    return nullptr;
+#endif
+  }
   bool getWiFiSSID(char* reply) const override;
   bool getWiFiPassword(char* reply) const override {
-    return WebConfigServer::formatWiFiPassword(reply, 160);
+    return WebConfigServer::formatWiFiPassword(reply, 160, canonicalWiFiLegacyPrefs());
   }
   bool getWiFiStatus(char* reply) const override;
   bool getWiFiPowerSave(char* reply) const override;

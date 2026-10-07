@@ -655,6 +655,7 @@ public:
     (void)reply;
     return false;
   };
+  virtual bool usesCanonicalWiFi() const { return false; }
   virtual bool getWiFiSSID(char* reply) const {
     (void)reply;
     return false;

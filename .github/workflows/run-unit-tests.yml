@@ -480,6 +480,8 @@ jobs:
           python3 -B test/test_webconfig_gzip.py
           python3 -B test/test_webconfig_secret_masking.py
           python3 -B test/test_webconfig_station_ownership.py -v
+          python3 -B test/test_mqtt_canonical_wifi.py -v
+          python3 -B test/test_heltec_v4_wifi_setup_page.py -v
           python3 -B test/test_sensor_webconfig_capabilities.py -v
           python3 -B test/test_webconfig_ui_runtime.py
 

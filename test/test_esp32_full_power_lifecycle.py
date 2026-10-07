@@ -140,7 +140,7 @@ struct ESPNowBridge : AbstractBridge {
 };
 struct MQTTNodeInfo {
   const char* node_name; float* freq; float* bw;
-  uint8_t* sf; uint8_t* cr; uint8_t* repeat_flag; bool repeat_when_nonzero;
+  uint8_t* sf; uint8_t* cr; uint8_t* repeat_flag; bool repeat_when_nonzero; bool canonical_wifi = false;
 };
 struct MQTTBridge : AbstractBridge {
   template<class... Args> explicit MQTTBridge(Args...) {}
@@ -161,6 +161,7 @@ struct WebConfigServer {
     if (prefs) strcpy(_wifi_ssid, static_cast<ObserverPrefs*>(prefs)->wifi_ssid);
   }
   static bool loadEnabled(bool) { return enabled; }
+  static bool hasConfiguredWiFi(const void* prefs) { return static_cast<const ObserverPrefs*>(prefs)->wifi_ssid[0] != 0; }
   bool isRunning() const { return running; }
   bool isStopping() const { return stopping; }
   void updateWiFiOwnership(bool owner) { owns = owner; }

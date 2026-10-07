@@ -1,5 +1,8 @@
 #define MQTT_PRESETS_IMPLEMENTATION
 #include "MQTTBridge.h"
+#ifdef ESP_PLATFORM
+#include <helpers/esp32/WiFiCredentials.h>
+#endif
 #include "../MQTTConnectionPolicy.h"
 #include "../MQTTMessageBuilder.h"
 #include "../MQTTPacketQueuePolicy.h"
@@ -149,8 +152,47 @@ const char* MQTTBridge::repeatStatus() const {
   return enabled ? "on" : "off";
 }
 
+#ifdef ESP_PLATFORM
+void MQTTBridge::beginWiFiStation() {
+  mesh::wifi::beginStation(_wifi_ssid, _wifi_password);
+}
+
+bool MQTTBridge::prepareWiFiCredentials() {
+  mesh::wifi::Credentials credentials;
+  if (!_obs) return _wifi_configured = false;
+  const auto state = _manage_wifi && _node_info.canonical_wifi
+      ? mesh::wifi::resolveCredentials(credentials, _obs->wifi_ssid,
+          _obs->wifi_password, _obs->wifi_power_save)
+      : mesh::wifi::CredentialState::Absent;
+  if (!_manage_wifi || !_node_info.canonical_wifi) {
+    // The Companion owns its live station; do not read infrastructure NVS.
+    if (strnlen(_obs->wifi_ssid, sizeof(_obs->wifi_ssid)) >= sizeof(credentials.ssid)
+        || strnlen(_obs->wifi_password, sizeof(_obs->wifi_password)) >= sizeof(_obs->wifi_password))
+      return _wifi_configured = false;
+    strcpy(credentials.ssid, _obs->wifi_ssid);
+    strcpy(credentials.password, _obs->wifi_password);
+    credentials.power_save = _obs->wifi_power_save;
+  } else if (state != mesh::wifi::CredentialState::Ready) {
+    return _wifi_configured = false;
+  }
+  memcpy(_wifi_ssid, credentials.ssid, sizeof(_wifi_ssid));
+  memcpy(_wifi_password, credentials.password, sizeof(_wifi_password));
+  _wifi_power_save = credentials.power_save;
+  return _wifi_configured = _wifi_ssid[0] != 0;
+}
+#endif
+
 // Helper function to check if WiFi credentials are valid
-static bool isWiFiConfigValid(const MQTTPrefs* obs) {
+static bool isWiFiConfigValid(const MQTTPrefs* obs, bool canonical_wifi = false) {
+#ifdef ESP_PLATFORM
+  if (canonical_wifi && obs) {
+    mesh::wifi::Credentials credentials;
+    return mesh::wifi::resolveCredentials(credentials, obs->wifi_ssid, obs->wifi_password,
+        obs->wifi_power_save) == mesh::wifi::CredentialState::Ready;
+  }
+#else
+  (void)canonical_wifi;
+#endif
   // Check if WiFi SSID is configured (not empty)
   if (!obs || strlen(obs->wifi_ssid) == 0) {
     return false;
@@ -170,8 +212,8 @@ static bool customEndpointComplete(const char* host, uint16_t port) {
   return host[0] != '\0' && (port != 0 || strstr(host, "://") != nullptr);
 }
 
-bool MQTTBridge::isConfigValid(const MQTTPrefs* obs) {
-  if (!obs || !isWiFiConfigValid(obs)) return false;
+bool MQTTBridge::isConfigValid(const MQTTPrefs* obs, bool canonical_wifi) {
+  if (!obs || !isWiFiConfigValid(obs, canonical_wifi)) return false;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     const char* preset_name = obs->mqtt_slot_preset[i];
     if (preset_name[0] == '\0' || strcmp(preset_name, MQTT_PRESET_NONE) == 0) continue;
@@ -969,7 +1011,12 @@ void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("Max active slots: %d", _max_active_slots);
 
   // Check if WiFi credentials are configured first
-  if (!isWiFiConfigValid(_obs)) {
+#ifdef ESP_PLATFORM
+  const bool wifi_configured = prepareWiFiCredentials();
+#else
+  const bool wifi_configured = isWiFiConfigValid(_obs);
+#endif
+  if (!wifi_configured) {
     MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - WiFi credentials not configured");
     return;
   }
@@ -1421,7 +1468,7 @@ void MQTTBridge::initializeWiFiInTask() {
   // because _ntp_synced persists across end() (only _slots_setup_done is reset).
   if (WiFi.status() != WL_CONNECTED) {
     if (_manage_wifi) {
-      mesh::wifi::beginStation(_obs->wifi_ssid, _obs->wifi_password);
+      beginWiFiStation();
     }
   } else if (!_ntp_synced.load(std::memory_order_acquire)
              && !_ntp_sync_pending) {
@@ -3064,7 +3111,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
       #ifdef ESP_PLATFORM
       wifi_ps_type_t ps_mode;
       uint8_t ps_pref = mesh::wifi::effectivePowerSave(
-          _obs->wifi_power_save,
+          _manage_wifi && _node_info.canonical_wifi ? _wifi_power_save : _obs->wifi_power_save,
 #if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
           false,
 #elif defined(BLE_PIN_CODE) && defined(WIFI_SSID)
@@ -3122,7 +3169,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
             MQTTConnectionPolicy::nextWifiBackoffAttempt(_wifi_reconnect_backoff_attempt);
         WiFi.disconnect();
 #ifdef ESP_PLATFORM
-        mesh::wifi::beginStation(_obs->wifi_ssid, _obs->wifi_password);
+        beginWiFiStation();
 #else
         WiFi.begin(_obs->wifi_ssid, _obs->wifi_password);
 #endif
@@ -3135,7 +3182,11 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
 
 bool MQTTBridge::isReady() const {
   return _initialized && !_stop_requested.load(std::memory_order_acquire)
+#ifdef ESP_PLATFORM
+      && _wifi_configured;
+#else
       && isWiFiConfigValid(_obs);
+#endif
 }
 
 bool MQTTBridge::isIATAValid() const {
