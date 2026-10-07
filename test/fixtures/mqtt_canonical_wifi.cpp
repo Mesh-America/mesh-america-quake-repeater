@@ -19,6 +19,11 @@ uint8_t effectiveWiFiPowerSave(uint8_t value) { return value; }
 enum { WIFI_OFF, WIFI_STA, WIFI_PS_NONE, WIFI_PS_MAX_MODEM, WIFI_PS_MIN_MODEM };
 struct { int getMode() { return WIFI_STA; } } WiFi;
 using wifi_ps_type_t = int;
+using wifi_mode_t = int;
+using esp_err_t = int;
+constexpr int ESP_OK = 0, ESP_ERR_WIFI_NOT_INIT = -1;
+constexpr int WIFI_MODE_NULL = WIFI_OFF, WIFI_MODE_AP = 2;
+int esp_wifi_get_mode(wifi_mode_t* mode) { *mode = WIFI_STA; return ESP_OK; }
 int esp_wifi_set_ps(int) { return 0; }
 
 size_t strlcpy(char* to, const char* from, size_t size) {

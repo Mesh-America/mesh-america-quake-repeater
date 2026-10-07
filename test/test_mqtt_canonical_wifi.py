@@ -43,6 +43,7 @@ class MQTTCanonicalWiFiTest(unittest.TestCase):
         cli_get = extract_braced(observer[observer.index("bool CommonCLI::handleObserverGetCmd"):],
                                  "  if (_callbacks->usesCanonicalWiFi())")
         mqtt_methods = "\n".join(extract_braced(mqtt, signature) for signature in (
+            "static bool mqttStationWiFiMutationAllowed(",
             "bool MQTTBridge::prepareWiFiCredentials(",
             "void MQTTBridge::beginWiFiStation(",
             "static bool isWiFiConfigValid(",
@@ -50,6 +51,9 @@ class MQTTCanonicalWiFiTest(unittest.TestCase):
             "bool MQTTBridge::isConfigValid(",
             "bool MQTTBridge::isReady(",
         ))
+        policy = (ROOT / "src/helpers/esp32/WiFiRadioPolicy.h").read_text(encoding="ascii")
+        mqtt_methods = ("namespace mesh { namespace wifi {\n" + extract_braced(
+            policy, "inline bool stationMutationAllowed(") + "\n}}\n" + mqtt_methods)
         begin = mqtt.index("  // Check if WiFi credentials are configured first")
         begin_end = mqtt.index("  // These are begin()/end()-scoped", begin)
         # These are the exact production early gate and the reconnect call;
