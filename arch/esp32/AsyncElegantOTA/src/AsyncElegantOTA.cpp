@@ -8,6 +8,10 @@ static std::atomic<bool> ota_reboot_pending{false};
 // All upload callbacks run on AsyncTCP's task. Update is a global singleton;
 // retain one request as its owner until that request disconnects.
 static AsyncWebServerRequest* ota_upload_owner = nullptr;
+struct OtaUploadState {
+    bool file_final;
+    bool committed;
+};
 
 AsyncElegantOtaClass AsyncElegantOTA;
 
@@ -62,8 +66,18 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
         // send() queues a response until the request body has finished. Keep
         // an earlier upload error even before it has reached the wire.
         if (request->isSent() || request->getResponse()) return;
-        const bool complete = request->_tempObject
-            && *static_cast<bool*>(request->_tempObject) && !Update.hasError();
+        auto* state = static_cast<OtaUploadState*>(request->_tempObject);
+        // A file boundary can precede more multipart fields or another file.
+        // Update.end() selects the next boot partition, so commit only after
+        // the whole POST has completed without an earlier upload error.
+        if (state && state->file_final && !state->committed
+            && ota_upload_owner == request && !Update.hasError()) {
+            if (!Update.end(true)) {
+                return request->send(400, "text/plain", "Could not end OTA");
+            }
+            state->committed = true;
+        }
+        const bool complete = state && state->committed && !Update.hasError();
         AsyncWebServerResponse *response = request->beginResponse(complete?200:500, "text/plain", complete?"OK":"FAIL");
         response->addHeader("Connection", "close");
         response->addHeader("Access-Control-Allow-Origin", "*");
@@ -128,7 +142,7 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
 
             // AsyncWebServer frees this per-request allocation on disconnect.
             // hasError() alone also reports success for a POST with no upload.
-            request->_tempObject = calloc(1, sizeof(bool));
+            request->_tempObject = calloc(1, sizeof(OtaUploadState));
             if (!request->_tempObject) {
                 Update.abort();
                 ota_upload_busy.store(false);
@@ -138,7 +152,7 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
             request->onDisconnect([this, request]() {
                 if (ota_upload_owner != request) return;
                 ota_upload_owner = nullptr;
-                if (*static_cast<bool*>(request->_tempObject)) {
+                if (static_cast<OtaUploadState*>(request->_tempObject)->committed) {
                     // Let the response drain and the network callback return
                     // before rebooting from the separate restart task.
                     restart();
@@ -158,13 +172,8 @@ void AsyncElegantOtaClass::begin(AsyncWebServer *server, const char* username, c
             }
         }
             
-        if (final) { // if the final flag is set then this is the last frame of data
-            if (!Update.end(true)) { //true to set the size to the current progress
-                return request->send(400, "text/plain", "Could not end OTA");
-            }
-            *static_cast<bool*>(request->_tempObject) = true;
-        }else{
-            return;
+        if (final) {
+            static_cast<OtaUploadState*>(request->_tempObject)->file_final = true;
         }
     });
 }
