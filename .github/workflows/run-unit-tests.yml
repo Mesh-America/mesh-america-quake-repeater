@@ -260,7 +260,13 @@ jobs:
           path: ~/.cache/meshcore-tests
           key: official-clients-84bc39a950735aaffa93d912556852a4c22e235d0cc4e4d04790113207f13a68-aff42ad8ef2b332f24d644ff6a783f8272a88ff2
 
+      # TEMPORARILY SKIPPED (Mesh America, 2026-10-08): app.meshcore.nz/main.dart.js was rebuilt, so the
+      # pinned bundle hash no longer matches and the contract fixture cannot find the minified functions
+      # it extracts. The fixture has to be rebuilt against the new app (Keymind's test). Remove this
+      # `if` once Keymind updates the pin and fixture and we have merged it. See the tracking issue
+      # "Re-enable the official app compatibility test".
       - name: Verify stock app radio and Access Control compatibility
+        if: ${{ false }}
         run: |
           node --version
           python3 -B test/test_official_app_compatibility.py -v
