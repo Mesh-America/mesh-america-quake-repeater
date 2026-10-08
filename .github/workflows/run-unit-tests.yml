@@ -258,7 +258,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/meshcore-tests
-          key: official-clients-92cf5f5d5cdab35c6e6768c44b7cdcf1bcb6f464b6d76be9387dacb5c1bac692-aff42ad8ef2b332f24d644ff6a783f8272a88ff2
+          key: official-clients-84bc39a950735aaffa93d912556852a4c22e235d0cc4e4d04790113207f13a68-aff42ad8ef2b332f24d644ff6a783f8272a88ff2
 
       - name: Verify stock app radio and Access Control compatibility
         run: |

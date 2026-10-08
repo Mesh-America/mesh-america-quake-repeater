@@ -26,8 +26,8 @@ from test_replay_reset_integration import extract_braced
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_URL = "https://app.meshcore.nz/main.dart.js"
-APP_SHA256 = "92cf5f5d5cdab35c6e6768c44b7cdcf1bcb6f464b6d76be9387dacb5c1bac692"
-APP_BYTES = 9484089
+APP_SHA256 = "84bc39a950735aaffa93d912556852a4c22e235d0cc4e4d04790113207f13a68"
+APP_BYTES = 9494192
 JS = ROOT / "test/fixtures/official_app_compatibility/app_contract.js"
 SANITIZERS = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else [])
