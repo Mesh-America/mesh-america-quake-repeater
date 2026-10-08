@@ -3,6 +3,9 @@
 #include <helpers/IdentityGeneration.h>
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#include <helpers/UsbLoggingWatchdog.h>
+#include <helpers/UsbLoggingClientActivity.h>
+#include <helpers/HilStartupTrace.h>
 #if MESH_PACKET_LOGGING
   #include <helpers/SerialPacketLog.h>
 #endif
@@ -13,6 +16,7 @@
 #endif
 #if defined(ESP32_PLATFORM)
   #include <helpers/ESP32TrueRandom.h>
+  #include <helpers/esp32/BootFileSystem.h>
 #endif
 #if defined(NRF52_PLATFORM)
   #include <helpers/nrf52/InternalPrimaryFsBoot.h>
@@ -97,18 +101,22 @@ void setup() {
   mesh::wireless::control().begin(infrastructure_wireless);
   mesh::prepareUsbLoggingPort();
   Serial.begin(115200);
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::beginUsbLoggingPort();
 #endif
 #if MESH_PACKET_LOGGING
   mesh::serialLogBegin();
 #endif
+  mesh::hilStartupTrace("serial_ready");
+  mesh::hilStartupTrace("board_begin");
   board.begin();
+  mesh::hilStartupTrace("board_ready");
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();
 #endif
 
+  mesh::hilStartupTrace("fs_begin");
   FILESYSTEM* fs;
 #if defined(NRF52_PLATFORM)
   bool volatile_primary_fs = false;
@@ -144,7 +152,9 @@ void setup() {
 #else
   #error "need to define filesystem"
 #endif
+  mesh::hilStartupTrace("fs_ready");
 #ifdef DISPLAY_CLASS
+  mesh::hilStartupTrace("display_begin");
   mesh::ui::loadDisplayPowerSettings(fs, false);
   mesh::ui::StartupScreen startup_screen;
   display_ready = display.begin();
@@ -152,6 +162,7 @@ void setup() {
     startup_screen.begin(&display,
         board.isExternalPowered() || board.isUsbHostConnected());
   }
+  mesh::hilStartupTrace("display_ready");
 #endif
 
   // Let serial settle after the display is already showing startup.
@@ -163,6 +174,7 @@ void setup() {
   delay(5000);
 #endif
 
+  mesh::hilStartupTrace("radio_begin");
   int radioinit_attempts = 0;
   while (!radio_init()) {
     ++radioinit_attempts;
@@ -177,7 +189,7 @@ void setup() {
       radioinit_attempts = 0;
       const uint32_t retry_started = millis();
       while (millis() - retry_started < 60000UL) {
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
         mesh::serviceUsbLoggingPort();
         mesh::serviceUsbTerminalPort();
 #endif
@@ -196,9 +208,11 @@ void setup() {
     }
     delay(500);
   }
+  mesh::hilStartupTrace("radio_ready");
 
   fast_rng.begin(radio_driver.getRngSeed());
 
+  mesh::hilStartupTrace("identity_begin");
 #if defined(NRF52_PLATFORM)
   IdentityLoadResult identity_load = volatile_primary_fs
       ? store.loadResult("_main", the_mesh.self_id)
@@ -248,6 +262,15 @@ void setup() {
     board.reboot();
     return;
   }
+  mesh::hilStartupTrace("identity_ready");
+
+#if defined(ESP32_PLATFORM)
+  // Identity recovery/persistence has finished before taking the inventory.
+  // The mesh retains this FS view after setup, so the view has static lifetime.
+  static mesh::Esp32BootFileSystem boot_fs(*fs);
+  fs = &boot_fs;
+  boot_fs.beginInventory();
+#endif
 
   // Print the running firmware version at boot so it's visible after an OTA
   // reboot without having to issue `ver` manually.
@@ -274,9 +297,23 @@ void setup() {
   }
 #endif
 
+  mesh::hilStartupTrace("sensors_begin");
   sensors.begin();
+  mesh::hilStartupTrace("sensors_ready");
 
+  mesh::hilStartupTrace("mesh_begin");
   the_mesh.begin(fs);
+  mesh::hilStartupTrace("mesh_ready");
+
+  mesh::hilStartupTrace("watchdog_begin");
+#if defined(NRF52_PLATFORM)
+  mesh::loadUsbLoggingWatchdog(fs, !volatile_primary_fs,
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#else
+  mesh::loadUsbLoggingWatchdog(fs, true,
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#endif
+  mesh::hilStartupTrace("watchdog_ready");
 
 #if defined(NRF52_PLATFORM)
   if (volatile_primary_fs) {
@@ -290,6 +327,7 @@ void setup() {
 
 #ifdef DISPLAY_CLASS
   if (display_ready) {
+    mesh::hilStartupTrace("display_task_begin");
 #ifdef WITH_MQTT_BRIDGE
     ui_task.setObserverPrefs(the_mesh.getObserverPrefs());
 #endif
@@ -297,6 +335,7 @@ void setup() {
     ui_task.setActivityWindow(the_mesh.getActivityWindow());
 #endif
     ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
+    mesh::hilStartupTrace("display_task_ready");
   }
 #endif
 
@@ -309,12 +348,27 @@ void setup() {
   the_mesh.sendSelfAdvertisement(16000, false);
 #endif
 
+  mesh::hilStartupTrace("boot_complete_begin");
+#if defined(ESP32_PLATFORM)
+  mesh::endEsp32BootFileInventory();
+#endif
   board.onBootComplete();
+  mesh::hilStartupTrace("boot_complete_ready");
 }
 
 static void __attribute__((noinline)) serviceCommandInterfaces() {
+#if defined(MESH_HIL_STARTUP_TRACE) && MESH_HIL_STARTUP_TRACE
+  static bool first_cli_entry = true;
+  static bool first_cli_ready = true;
+  static bool first_cli_blocked = true;
+  static bool first_cli_rx = true;
+  if (first_cli_entry) {
+    first_cli_entry = false;
+    mesh::hilStartupTrace("cli_first_entry");
+  }
+#endif
   bool usb_ready = true;
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::serviceUsbLoggingPort();
   mesh::serviceUsbTerminalPort();
   if (mesh::takeUsbTerminalSessionReset()) {
@@ -329,6 +383,19 @@ static void __attribute__((noinline)) serviceCommandInterfaces() {
       && mesh::canAcceptUsbConsoleCommand();
 #endif
   Stream& console = mesh::usbConsolePort();
+#if defined(MESH_HIL_STARTUP_TRACE) && MESH_HIL_STARTUP_TRACE
+  if (usb_ready && first_cli_ready) {
+    first_cli_ready = false;
+    mesh::hilStartupTrace("cli_ready");
+  } else if (!usb_ready && first_cli_blocked) {
+    first_cli_blocked = false;
+    mesh::hilStartupTrace("cli_gate_blocked");
+  }
+  if (usb_ready && first_cli_rx && console.available() > 0) {
+    first_cli_rx = false;
+    mesh::hilStartupTrace("cli_rx_seen");
+  }
+#endif
   // Handle Serial CLI
   int len = strlen(command);
   bool line_complete = false;
@@ -374,6 +441,8 @@ static void __attribute__((noinline)) serviceCommandInterfaces() {
     console.print('\n');
     char reply[160];
     reply[0] = 0;
+    if (strlen(command) == static_cast<size_t>(len))
+      mesh::noteUsbLoggingStatsCommand(command);
 #if defined(MESH_SOAK_DIAGNOSTICS)
     if (mesh::hil::handleSoakCommand(command, reply, sizeof(reply))) {
       console.print("  -> ");
@@ -428,7 +497,23 @@ static void __attribute__((noinline)) serviceCommandInterfaces() {
 #endif
 }
 
+static bool usbLoggingRecoverySafe(void*) {
+  if (board.isOTAUpdateRunning() || board.isRadioTestActive()
+      || radio_driver.isWatchdogObserving() || radio_driver.isCalibratingNoiseFloor()
+      || !the_mesh.canRecoverUsbLogging()) return false;
+  const auto usb = mesh::usbLoggingStatus();
+  // A stale line/listing from a disconnected or stalled host cannot lock out
+  // recovery forever. Protect a functional live command pump, not diagnostics.
+  return !usb.reader_connected || usb.stalled
+      || (!command[0] && !command_overflow
+#if MESH_USB_CONSOLE_COOPERATIVE
+          && !the_mesh.hasPendingSerialOutput()
+#endif
+      );
+}
+
 void loop() {
+  mesh::serviceUsbLoggingPort();
   mesh::wireless::control().service(millis());
 #if defined(NRF52_PLATFORM)
   board.feedWatchdog(the_mesh.getNodePrefs()->system_watchdog_enabled != 0);
@@ -456,7 +541,8 @@ void loop() {
   if (display_ready) ui_task.loop();
 #endif
   rtc_clock.tick();
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+  if (mesh::serviceUsbLoggingWatchdog(usbLoggingRecoverySafe)) board.reboot();
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::serviceUsbTerminalPort();
 #endif
 
@@ -469,6 +555,7 @@ void loop() {
 #endif
   bool can_power_save = the_mesh.getNodePrefs()->powersaving_enabled
       && !board.isUsbDataConnected()
+      && !mesh::isUsbLoggingWatchdogArmed()
       && !mesh::wireless::control().pending();
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP \

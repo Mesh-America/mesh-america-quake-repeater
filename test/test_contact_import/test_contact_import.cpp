@@ -73,7 +73,7 @@ public:
   void onDiscoveredContact(ContactInfo&, bool, uint8_t, const uint8_t*) override {
     ++discovered;
   }
-  ContactInfo* processAck(const uint8_t*) override { return nullptr; }
+  bool processAck(const uint8_t*, ContactInfo*& peer) override { peer = nullptr; return false; }
   void onContactPathUpdated(const ContactInfo&) override {}
   void onMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}
   void onCommandDataRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}

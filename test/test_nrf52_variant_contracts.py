@@ -398,7 +398,7 @@ class Nrf52VariantContractsTest(unittest.TestCase):
         cli = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
 
         self.assertIn("bool isBridgeRunning() const override", header)
-        self.assertIn("if (isBridgeRunning()) reply_data[8] |= 0x01", implementation)
+        self.assertIn("if (isRs232BridgeRunning()) reply_data[8] |= 0x01", implementation)
         self.assertIn("if (isBridgeRunning()) reply_data[8] |= 0x03", implementation)
         boot_failure = implementation[
             implementation.index("if (!bridge || !beginRS232Bridge())"):
@@ -406,7 +406,7 @@ class Nrf52VariantContractsTest(unittest.TestCase):
                 "if (!bridge || !beginRS232Bridge())"
             ))
         ]
-        self.assertIn("setBridgeState(false)", boot_failure)
+        self.assertIn("setRs232BridgeState(false)", boot_failure)
         self.assertNotIn("_prefs.bridge_enabled", boot_failure)
         self.assertIn("parseOnOffStrict(&config[15], enable)", cli)
         self.assertIn("parseUnsignedIntegerStrict(&config[12], baud)", cli)
@@ -417,7 +417,7 @@ class Nrf52VariantContractsTest(unittest.TestCase):
         self.assertIn('_prefs->bridge_pkt_src ? "rx" : "tx"', cli)
         self.assertIn("!defined(RS232_BRIDGE_DEFAULT_ON)", cli)
 
-    def test_default_on_rs232_profile_skips_default_off_tail_migration(self) -> None:
+    def test_default_on_rs232_profile_retains_legacy_alias_and_checks_new_intent(self) -> None:
         cli = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
         xiao = (ROOT / "variants/xiao_nrf52/platformio.ini").read_text()
         dedicated = ini_section(
@@ -426,14 +426,18 @@ class Nrf52VariantContractsTest(unittest.TestCase):
 
         self.assertIn("extends = env:solarxiao_30S_repeater", dedicated)
         self.assertRegex(dedicated, r"-D\s+RS232_BRIDGE_DEFAULT_ON=1\b")
-        guard = (
-            "#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \\\n"
-            "    && !defined(RS232_BRIDGE_DEFAULT_ON)"
-        )
-        # Declaration, persisted-tail detection, and migration must share the
-        # same guard. A broader use breaks dedicated default-on bridge builds.
-        self.assertEqual(cli.count(guard), 3)
-        self.assertEqual(cli.count("has_runtime_bridge_uart"), 3)
+        # Dedicated compatibility profiles retain their old primary UART alias;
+        # every current UART profile checks the independent marker before a
+        # newer MQTT image can donate intent. Executable nRF52/default-on and
+        # cross-profile round trips are covered by test_rs232_runtime.py.
+        loader_start = cli.index("void CommonCLI::loadPrefsInt(")
+        loader_end = cli.index("static bool writeCommonPrefsImage(", loader_start)
+        binary_loader = cli[loader_start:loader_end]
+        self.assertTrue("has_runtime_rs232_intent = rs232_profile == 0xB1" in binary_loader)
+        self.assertTrue("&& rs232_intent <= 1" in binary_loader)
+        self.assertTrue("if (!has_runtime_rs232_intent)" in binary_loader)
+        self.assertTrue("legacy_uart_intent" in binary_loader)
+        self.assertTrue("_prefs->bridge_enabled = _prefs->rs232_bridge_enabled;" in binary_loader)
 
     def test_gat562_30s_gps_enable_and_buzzer_pins_are_distinct(self) -> None:
         recipe = (

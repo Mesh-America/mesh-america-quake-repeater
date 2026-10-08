@@ -32,6 +32,7 @@ class Esp32TinyUsbNonblockingTest(unittest.TestCase):
                         f"-I{FIXTURE / 'mocks'}", f"-I{ROOT / 'src'}",
                         str(FIXTURE / "test_esp32_tinyusb_nonblocking.cpp"),
                         str(ROOT / "src/helpers/UsbLogging.cpp"),
+                        str(ROOT / "src/helpers/UsbLoggingClientActivity.cpp"),
                         "-o", str(binary),
                     ]
                     if companion:

@@ -4,6 +4,7 @@
 #if defined(ESP32_PLATFORM)
 #include <errno.h>
 #include <sys/stat.h>
+#include <helpers/esp32/BootFilePresence.h>
 #endif
 
 namespace mesh {
@@ -16,6 +17,10 @@ bool filePresence(Filesystem* fs, const char* path, bool& present) {
   char absolute[128];
   const int length = snprintf(absolute, sizeof(absolute), "/spiffs%s", path);
   if (length < 0 || static_cast<size_t>(length) >= sizeof(absolute)) return false;
+  if (esp32BootFileKnownAbsent(fs, path)) {
+    present = false;
+    return true;
+  }
   struct stat info;
   const int result = ::stat(absolute, &info);
   if (result != 0 && errno != ENOENT) return false;

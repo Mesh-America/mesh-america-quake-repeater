@@ -25,6 +25,17 @@
  */
 
 // Pinned framework d541301: real power handler before the build-local fix.
+// The actual disconnect path is retained too: pull-up disable alone does NOT
+// produce a POWER removal edge, so local session recovery needs this event.
+void dcd_disconnect(uint8_t rhport) {
+  (void) rhport;
+  NRF_USBD->USBPULLUP = 0;
+
+  // Disable Pull-up does not trigger Power USB Removed, in fact it have no
+  // impact on the USB Power status at all -> need to submit unplugged event to the stack.
+  dcd_event_bus_signal(0, DCD_EVENT_UNPLUGGED, false);
+}
+
 void tusb_hal_nrf_power_event(uint32_t event);
 void tusb_hal_nrf_power_event(uint32_t event) {
   // Value is chosen to be as same as NRFX_POWER_USB_EVT_* in nrfx_power.h

@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/full_companion_usb_switcher/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Companion USB CLI and binary switcher
 
 USB Companion uses one primary USB serial interface for two incompatible wire
@@ -82,8 +86,9 @@ switched; they remain binary.
 1. Companion initializes the normal USB Binary Companion interface, then
    gives its primary stream to the ASCII terminal before normal loop service
    begins.
-2. While the prompt has no buffered input, the terminal peeks at the next byte.
-   It does not remove that byte.
+2. While the prompt has no buffered input, the terminal skips blank CR/LF
+   delimiters and peeks at the next byte without removing it. A queued binary
+   frame after a blank line is detected before any ASCII banner is emitted.
 3. If the byte is `<`, the terminal temporarily releases the stream and enables
    the existing `ArduinoSerialInterface` frame parser.
 4. The parser consumes the original `<`, the two-byte length, and the payload.
@@ -94,10 +99,20 @@ switched; they remain binary.
 6. If no complete frame arrives within one second, the parser state is reset
    and the ASCII terminal prints a new banner and prompt.
 
-The switcher checks framing, not client identity. Any syntactically complete
-Binary Companion frame confirms binary mode; it does not require the first
+The switcher checks framing, not client identity. A complete Binary Companion
+frame with 1-176 payload bytes confirms binary mode; it does not require the first
 command to be `CMD_APP_START` or `CMD_DEVICE_QUERY`. Normal command validation
 still occurs after the frame parser returns the payload.
+
+Oversized frames are consumed and discarded, never truncated into executable
+commands or counted as proof of a Binary client. ASCII, framed Binary, and mOTA
+input handlers process at most the initial queued-byte count, so a continuously
+sending host cannot keep the radio loop trapped in one input call.
+
+ASCII and mOTA reject an entire line containing an embedded NUL or exceeding its
+line buffer, discarding through the next CR/LF. A valid-looking suffix is not
+executed. Binary payloads may still contain NUL bytes. The immediate manual
+terminal-stop token remains an exception to ordinary line-oriented handling.
 
 The empty-prompt requirement prevents a literal `<` in the middle of a command
 from silently changing modes. A literal `<` typed as the first character does
@@ -172,6 +187,36 @@ available while USB is logging. ESP32 Full builds use the Arduino-ESP32 2.x
 base where supported; RC32 and ESP32-C6 keep their board-required Arduino 3.x
 platform but follow the same one-TTY policy. No ESP32 Full build enumerates a
 second CDC interface.
+
+`usb.logging` is the saved master for USB packet output. `usb.debug` separately
+saves verbose diagnostic intent and defaults off, including when older
+preferences do not contain the new field. RAW/RX/TX packet records need only
+the master; diagnostics need both switches and compiled debug support. Turning
+the master off preserves debug intent. `get usb.debug` reports that saved
+choice, not whether USB currently owns a plaintext logging stream.
+
+Full Companion now emits complete received frames as uppercase ASCII `RAW:`
+hex, separately from decoded RX summaries and TX summaries. Leave debug off
+for USB-to-MQTT capture. These are bounded best-effort records; drops and host
+disconnects can separate a RAW/summary pair. The dedicated nRF52 log CDC cannot
+answer CLI/identity queries: programs expecting one bidirectional CLI/log port
+need separate control-port support, not just a change to the serial pathname.
+Companion supports `get public.key` in the primary terminal or framed CLI;
+the reply is `> ` followed by 64 uppercase hex characters. This query does not
+make the dedicated log CDC input-capable or establish full bridge compatibility.
+Send `get/set usb.debug` to the primary ASCII terminal; changing verbosity
+needs no USB-interface reboot and does not relax Binary/mOTA ownership rules.
+
+Current source adds `get usb.watchdog` and saved `set usb.watchdog off|on|auto`, defaulting to
+Auto until 14 continuous healthy logging-client days qualify it for On.
+Existing USB stats polls renew a 15-minute client lease; a cable or DTR alone
+does not count. A lost confirmed client can trigger USB-only recovery after
+lease expiry plus five minutes. MCU resets additionally require On and a
+full physical-fault interval, a verified tier save, and clear protocol/update
+ownership. Active Binary USB and mOTA sessions veto recovery. On dual CDC,
+only logging CDC1 accepts the bounded stats markers; primary CDC0 stats do not
+renew that lease. CDC1 still provides no CLI/statistics replies.
+See [USB logging watchdog](usb_logging_watchdog.md) for status and limitations.
 
 With logging enabled on a shared port, the stop token is rejected with
 `ERROR: set usb.logging off before Binary mode`. Turn logging off first; a

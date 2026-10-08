@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/research/rak3401_mota_chain/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # RAK3401 1W repeater compact LoRa update chain
 
 > Status: **published prerelease for controlled, recoverable lab use.** On

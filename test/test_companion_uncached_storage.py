@@ -22,7 +22,7 @@ class CompanionUncachedStorageTest(unittest.TestCase):
 
     def run_platform(self, platform):
         source = (ROOT / "examples/companion_radio/DataStore.cpp").read_text()
-        signatures = (
+        signatures = [
             "static bool companionPathPresence(",
             "bool DataStore::loadMainIdentity(",
             "bool DataStore::canCreateMainIdentity() const",
@@ -31,7 +31,22 @@ class CompanionUncachedStorageTest(unittest.TestCase):
             "void DataStore::loadContacts(",
             "bool DataStore::saveContacts(",
             "bool DataStore::hasIncompleteContactLoad() const",
-        )
+        ]
+        if platform == "ESP32_PLATFORM":
+            signatures.extend((
+                "static bool serializeContactRecord(",
+                "DataStore::~DataStore()",
+                "void DataStore::cancelContactWrite(",
+                "bool DataStore::serviceContactWrite(",
+                "bool DataStore::markContactDirty(",
+                "bool DataStore::releaseContact(",
+                "bool DataStore::serviceContactWrites(",
+                "bool DataStore::flushContactWrites(",
+                "bool DataStore::hasPendingContactWrites() const",
+            ))
+            # The serializer must be declared before save/service uses it.
+            signatures.insert(0, signatures.pop(signatures.index(
+                "static bool serializeContactRecord(")))
         packet = (ROOT / "src/Packet.cpp").read_text()
         generated = "namespace mesh {\n" + extract_braced(
             packet, "bool Packet::isValidPathLen(") + "\n}\n"
@@ -39,6 +54,10 @@ class CompanionUncachedStorageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="mesh-uncached-store-") as temp:
             temp = Path(temp)
             (temp / "store_under_test.h").write_text(generated)
+            header = (ROOT / "examples/companion_radio/DataStore.h").read_text()
+            start = header.index("  mesh::ContactFileTransaction* _contact_write")
+            end = header.index("\n#endif", start)
+            (temp / "contact_write_state_under_test.h").write_text(header[start:end])
             # IdentityStore.h only needs the platform filesystem declaration;
             # the concrete mock below implements the same file API.
             (temp / "FS.h").write_text(

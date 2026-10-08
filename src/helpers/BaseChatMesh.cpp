@@ -24,6 +24,12 @@ bool BaseChatMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Pack
   return sendFlood(pkt, delay_millis);
 }
 
+// Share the value reset without replacing ContactInfo's assignment/RAII rules.
+__attribute__((noinline))
+void BaseChatMesh::resetContactValue(ContactInfo& contact) {
+  contact = ContactInfo();
+}
+
 bool BaseChatMesh::initializeContactStorage() {
 #if defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
   const int requested_capacity = MAX_CONTACTS + MAX_ANON_CONTACTS;
@@ -48,10 +54,14 @@ bool BaseChatMesh::initializeContactStorage() {
   for (int i = 0; i < requested_capacity; ++i) new (&expanded_contacts[i]) ContactInfo();
   for (int i = 0; i < num_contacts; ++i) {
     expanded_contacts[i] = contacts[i];
-    contacts[i] = ContactInfo();
+    onContactReferenceChanged(&contacts[i], &expanded_contacts[i]);
+    resetContactValue(contacts[i]);
   }
 #else
   memcpy(expanded_contacts, contacts, sizeof(ContactInfo) * num_contacts);
+  for (int i = 0; i < num_contacts; ++i) {
+    onContactReferenceChanged(&contacts[i], &expanded_contacts[i]);
+  }
 #endif
   contacts = expanded_contacts;
   sort_array = expanded_sort_array;
@@ -145,6 +155,7 @@ ContactInfo* BaseChatMesh::allocateContactSlot(bool transient_only) {
     }
     if (oldest_idx >= 0) {
       // NOTE: do NOT call onContactOverwrite()
+      onContactReferenceChanged(&contacts[oldest_idx], NULL);
       return &contacts[oldest_idx];
     }
   } else {
@@ -169,6 +180,7 @@ ContactInfo* BaseChatMesh::allocateContactSlot(bool transient_only) {
         if (!onContactOverwrite(contacts[oldest_idx])) {
           return NULL;
         }
+        onContactReferenceChanged(&contacts[oldest_idx], NULL);
         contact_table_revision++;
         return &contacts[oldest_idx];
       }
@@ -178,7 +190,7 @@ ContactInfo* BaseChatMesh::allocateContactSlot(bool transient_only) {
 }
 
 void BaseChatMesh::populateContactFromAdvert(ContactInfo& ci, const mesh::Identity& id, const AdvertDataParser& parser, uint32_t timestamp) {
-  ci = ContactInfo();
+  resetContactValue(ci);
 #if defined(NRF52_PLATFORM)
   ci.storage_slot = mesh::storage::CONTACT_SLOT_NONE;
 #endif
@@ -228,11 +240,9 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
     packet->header = save;
   }
 
+  ContactInfo* transient = NULL;
   if (from && from->type == ADV_TYPE_NONE) {   // already in contacts, but from a temporary ANON_REQ ?
-    *from = ContactInfo();  // release the anon/temp path as well
-#if defined(NRF52_PLATFORM)
-    from->storage_slot = mesh::storage::CONTACT_SLOT_NONE;
-#endif
+    transient = from; // preserve its references if filters/allocation refuse promotion
     from = NULL;  // do normal 'add' flow
   }
 
@@ -283,6 +293,7 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
   }
   from->last_advert_timestamp = timestamp;
   from->lastmod = getRTCClock()->getCurrentTime();
+  if (transient != NULL) clearTransientContact(*transient, from);
 
   onDiscoveredContact(*from, is_new, packet->path_len, packet->path);       // let UI know
 }
@@ -470,7 +481,8 @@ bool BaseChatMesh::onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_
 
   if (extra_type == PAYLOAD_TYPE_ACK && extra_len >= 4) {
     // also got an encoded ACK!
-    if (processAck(extra) != NULL) {
+    ContactInfo* peer;
+    if (processAck(extra, peer)) {
       txt_send_timeout = 0;   // matched one we're waiting for, cancel timeout timer
     }
   } else if (extra_type == PAYLOAD_TYPE_RESPONSE && extra_len > 0) {
@@ -481,14 +493,15 @@ bool BaseChatMesh::onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_
 
 void BaseChatMesh::onAckRecv(mesh::Packet* packet, uint32_t ack_crc) {
   ContactInfo* from;
-  if ((from = processAck((uint8_t *)&ack_crc)) != NULL) {
+  if (processAck((uint8_t *)&ack_crc, from)) {
     txt_send_timeout = 0;   // matched one we're waiting for, cancel timeout timer
-    packet->markDoNotRetransmit();   // ACK was for this node, so don't retransmit
 
-    if (packet->isRouteFlood() && from->out_path_len != OUT_PATH_UNKNOWN) {
+    if (from != NULL && packet->isRouteFlood() && from->out_path_len != OUT_PATH_UNKNOWN) {
       // we have direct path, but other node is still sending flood, so maybe they didn't receive reciprocal path properly(?)
       handleReturnPathRetry(*from, packet->path, packet->path_len);
     }
+    // Check the received route before marking, which replaces the header.
+    packet->markDoNotRetransmit();   // ACK was for this node, so don't retransmit
   }
 }
 
@@ -801,11 +814,16 @@ int BaseChatMesh::sendLogin(const ContactInfo& recipient, const char* password, 
   return MSG_SEND_FAILED;
 }
 
+bool BaseChatMesh::allocateRequestTag(uint32_t& tag) {
+  tag = getRTCClock()->getCurrentTimeUnique();
+  return allowRequestTag(tag);
+}
+
 int BaseChatMesh::sendAnonReq(const ContactInfo& recipient, const uint8_t* data, uint8_t len, uint32_t& tag, uint32_t& est_timeout) {
   mesh::Packet* pkt;
   {
     uint8_t temp[MAX_PACKET_PAYLOAD];
-    tag = getRTCClock()->getCurrentTimeUnique();
+    if (!allocateRequestTag(tag)) return MSG_SEND_FAILED;
     memcpy(temp, &tag, 4);   // tag to match later (also extra blob to help make packet_hash unique)
     memcpy(&temp[4], data, len);
 
@@ -832,7 +850,7 @@ int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t* req_
   mesh::Packet* pkt;
   {
     uint8_t temp[MAX_PACKET_PAYLOAD];
-    tag = getRTCClock()->getCurrentTimeUnique();
+    if (!allocateRequestTag(tag)) return MSG_SEND_FAILED;
     memcpy(temp, &tag, 4);   // mostly an extra blob to help make packet_hash unique
     memcpy(&temp[4], req_data, data_len);
 
@@ -857,7 +875,7 @@ int  BaseChatMesh::sendRequest(const ContactInfo& recipient, uint8_t req_type, u
   mesh::Packet* pkt;
   {
     uint8_t temp[13];
-    tag = getRTCClock()->getCurrentTimeUnique();
+    if (!allocateRequestTag(tag)) return MSG_SEND_FAILED;
     memcpy(temp, &tag, 4);   // mostly an extra blob to help make packet_hash unique
     temp[4] = req_type;
     memset(&temp[5], 0, 4);  // reserved (possibly for 'since' param)
@@ -932,9 +950,11 @@ void BaseChatMesh::markConnectionActive(const ContactInfo& contact) {
   }
 }
 
-ContactInfo* BaseChatMesh::checkConnectionsAck(const uint8_t* data) {
+bool BaseChatMesh::checkConnectionsAck(const uint8_t* data, ContactInfo*& peer) {
+  peer = NULL;
   for (int i = 0; i < MAX_CONNECTIONS; i++) {
-    if (connections[i].keep_alive_millis > 0 && memcmp(&connections[i].expected_ack, data, 4) == 0) {
+    if (connections[i].keep_alive_millis > 0 && connections[i].expected_ack != 0
+        && memcmp(&connections[i].expected_ack, data, 4) == 0) {
       // yes, got an ack for our keep_alive request!
       connections[i].expected_ack = 0;
       connections[i].last_activity = getRTCClock()->getCurrentTime();
@@ -943,10 +963,11 @@ ContactInfo* BaseChatMesh::checkConnectionsAck(const uint8_t* data) {
       connections[i].next_ping = futureMillis(connections[i].keep_alive_millis);
 
       auto id = &connections[i].server_id;
-      return lookupContactByPubKey(id->pub_key, PUB_KEY_SIZE);  // yes, a match
+      peer = lookupContactByPubKey(id->pub_key, PUB_KEY_SIZE);
+      return true; // owned even if its contact was removed
     }
   }
-  return NULL;  /// no match
+  return false;  /// no match
 }
 
 void BaseChatMesh::checkConnections() {
@@ -1069,9 +1090,10 @@ bool BaseChatMesh::isTransientContact(const ContactInfo& contact) const {
   return false;
 }
 
-bool BaseChatMesh::clearTransientContact(ContactInfo& contact) {
+bool BaseChatMesh::clearTransientContact(ContactInfo& contact, ContactInfo* replacement) {
   if (!isTransientContact(contact)) return false;
-  contact = ContactInfo();
+  onContactReferenceChanged(&contact, replacement);
+  resetContactValue(contact);
 #if defined(NRF52_PLATFORM)
   contact.storage_slot = mesh::storage::CONTACT_SLOT_NONE;
 #endif
@@ -1098,12 +1120,14 @@ bool BaseChatMesh::removeContact(ContactInfo& contact) {
   if (idx >= num_contacts) return false;   // not found
 
   // remove from contacts array
+  onContactReferenceChanged(&contacts[idx], NULL);
   num_contacts--;
   while (idx < num_contacts) {
     contacts[idx] = contacts[idx + 1];
+    onContactReferenceChanged(&contacts[idx + 1], &contacts[idx]);
     idx++;
   }
-  contacts[num_contacts] = ContactInfo(); // release the retired tail path
+  resetContactValue(contacts[num_contacts]); // release the retired tail path
   contact_table_revision++;
   return true;  // Success
 }

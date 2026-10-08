@@ -118,6 +118,7 @@ bool canAccess(void* opaque) {
 CapacityStream logging_port;
 mesh::WholeRecordNonBlockingStream<> bounded_logging_port(logging_port);
 bool logging_enabled = true;
+bool debug_enabled = true;
 
 }  // namespace
 
@@ -131,6 +132,10 @@ bool isUsbLoggingEnabled() {
   return logging_enabled;
 }
 
+bool isUsbDebugEnabled() {
+  return debug_enabled;
+}
+
 Stream& usbLoggingPort() {
   return bounded_logging_port;
 }
@@ -141,6 +146,7 @@ class Nrf52DebugOutputTest : public testing::Test {
  protected:
   void SetUp() override {
     logging_enabled = true;
+    debug_enabled = true;
     logging_port.reset(256);
   }
 };
@@ -194,6 +200,16 @@ TEST_F(Nrf52DebugOutputTest, DisabledLoggingDoesNotTouchThePort) {
 
   EXPECT_EQ(logging_port.available_calls_, 0);
   EXPECT_EQ(logging_port.write_calls_, 0);
+}
+
+TEST_F(Nrf52DebugOutputTest, PacketOutputDoesNotEnableDebugVerbosity) {
+  debug_enabled = false;
+  MESH_DEBUG_PRINTLN("quiet");
+  BRIDGE_DEBUG_PRINTLN("quiet");
+  POWERSAVING_DEBUG_PRINTLN("quiet");
+  EXPECT_EQ(logging_port.available_calls_, 0);
+  EXPECT_EQ(logging_port.write_calls_, 0);
+  EXPECT_TRUE(mesh::isUsbLoggingEnabled());
 }
 
 TEST_F(Nrf52DebugOutputTest, ReentrantDebugOutputIsDroppedWithoutWaiting) {

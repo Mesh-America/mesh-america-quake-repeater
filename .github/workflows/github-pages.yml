@@ -32,8 +32,11 @@ jobs:
           MKDOCS_EDIT_URI: edit/${{ github.ref_name }}/docs/
         run: |
           pip install mkdocs-material
+          node test/test_firmware_picker.js
+          node test/test_partition_catalog_viewer.js
           python scripts/sync_bootloader_manifest.py
           mkdocs build
+          cmp firmware/esp32_partition_catalog.json site/_data/esp32_partition_catalog.json
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4.1.0

@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/faq/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Frequently Asked Questions
 
 For this fork's **1.17.1.5 USA Cascade** release, start with
@@ -872,13 +876,13 @@ After this bootloader is flashed onto the device, you can trigger an over-the-ai
    filename).
 2. From the MeshCore app, log in remotely to the repeater you want to update with admin privileges.
 3. Go to the Command Line tab, type `start ota` and hit enter.
-4. You should see `OK` to confirm the repeater device is now in OTA mode.
+4. The reply confirms WiFi is on and gives the OTA upload URL and network to use.
 5. If the ESP32 is not already joined to Wi-Fi, `start ota` starts an open hotspot named `MeshCore-OTA` at `192.168.4.1`. If it is already joined, the command reports and uses its router-assigned address instead.
 6. From your phone or computer, connect to the `MeshCore-OTA` hotspot when one was started.
 7. Open the URL reported by `start ota` and upload the non-merged bin from the flasher. When the device started `MeshCore-OTA`, the URL is <http://192.168.4.1/update>.
 
-On an MQTT observer, stop WebConfig before running `start ota`; both servers use
-HTTP port 80. Likewise, stop the OTA uploader before running `start webconfig`.
+`start ota` automatically stops WebConfig and reports the change; both servers
+use HTTP port 80. Stop the OTA uploader before running `start webconfig` again.
 
 
 ### 7.3. Q: Is there a way to lower the chance of a failed OTA device firmware update (DFU)?

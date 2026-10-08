@@ -81,6 +81,12 @@ static void OnDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
 
 void ESPNOWRadio::init() {
   if (initialized_ || mesh::wireless::control().blocked(mesh::wireless::EspNow)) return;
+  // A conventional AP and the LR PHY share one enable flag on IDF 4.4. Do not
+  // hide the AP or claim a successful new LR start while AP requires B/G/N.
+  if (mesh::wifi::checkLongRangeRadioStart() != ESP_OK) {
+    ESPNOW_DEBUG_PRINTLN("ESP-NOW LR start deferred while a WiFi AP is active");
+    return;
+  }
   portENTER_CRITICAL(&rx_mux);
   rx_head = 0;
   rx_tail = 0;
@@ -112,13 +118,13 @@ void ESPNOWRadio::init() {
   // access points while retaining LR for ESP-NOW, and pin both transports to
   // one channel because an ESP32 cannot associate and send ESP-NOW on two
   // different channels simultaneously.
-  if (mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) {
+  if (mesh::wifi::applyStationProtocolMask(mesh::wifi::kProtocolMask, true) != ESP_OK) {
     ESPNOW_DEBUG_PRINTLN("Error configuring ESP-NOW/WiFi coexistence");
     return;
   }
 #else
   // Dedicated ESP-NOW targets retain the original LR-only behavior.
-  if (esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR) != ESP_OK) {
+  if (mesh::wifi::applyStationProtocolMask(WIFI_PROTOCOL_LR, true) != ESP_OK) {
     ESPNOW_DEBUG_PRINTLN("Error configuring ESP-NOW LR protocol");
     return;
   }
@@ -203,6 +209,7 @@ void ESPNOWRadio::init() {
   #endif
 #endif
     accepting_packets.store(true);
+    mesh::wifi::setLongRangeOwner(mesh::wifi::kLongRangeRadioOwner, true);
     ESPNOW_DEBUG_PRINTLN("init success");
   } else {
     end();
@@ -212,6 +219,7 @@ void ESPNOWRadio::init() {
 void ESPNOWRadio::end() {
   if (send_active_) send_cancelled_ = true;
   accepting_packets.store(false);
+  mesh::wifi::setLongRangeOwner(mesh::wifi::kLongRangeRadioOwner, false);
   if (initialized_) {
     esp_now_unregister_send_cb();
     esp_now_unregister_recv_cb();

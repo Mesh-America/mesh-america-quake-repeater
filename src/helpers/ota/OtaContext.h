@@ -12,6 +12,7 @@
 #include "OtaFormat.h"
 #include "OtaByteIO.h"
 #include "OtaSelf.h"          // ota_self_firmware() - prefer self-describing EndF identity at begin()
+#include "OtaSelfServePolicy.h"
 #include "OtaBlInfo.h"        // bootloader OTA-apply capability marker (nRF52); cached after first read
 
 // Storage policy for the mOTA context. A "dynamic" context is created on demand
@@ -26,7 +27,10 @@
   #define OTA_DYNAMIC_CONTEXT 0
 #endif
 
-#if defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
+#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+  #include "OtaStoreTowerNrf52.h"
+  #include "OtaCacheSdNrf52.h"
+#elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
   #include "OtaStoreAdaptiveNrf52.h"
 #elif defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
   #include "OtaStoreQspiNrf52.h"
@@ -109,6 +113,9 @@ struct OtaContext {
   // store object for OtaManager, while folder captures replace it with the
   // host-backed FolderMotaStore for the duration of the pull.
   OtaStoreRam<1> fetch_store;
+#elif defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+  OtaStoreTowerNrf52 fetch_store;            // SD primary, qualified internal delta fallback
+  OtaCacheSdNrf52 sd_cache;                 // always owns the stable SD store
 #elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
   OtaStoreAdaptiveNrf52 fetch_store;
 #elif defined(NRF52_PLATFORM) && defined(OTA_QSPI_STORE)
@@ -144,6 +151,10 @@ struct OtaContext {
 #endif
   uint32_t serve_expected = 0;   // size declared by `ota stage`
   bool     serving = false;      // manager.serve() succeeded
+  // RAK application-storage eligibility survives privileged staging changes.
+  // Tower eligibility is established after its deferred SD probe and changes
+  // only when an operator ends the pinned transfer and selects storage again.
+  bool     self_serve_supported = false;
   // flash-backed self-serve: cached merkle leaves (heap, freed on re-serve) + assembled manifest of our
   // own running firmware. The payload is read from flash per block; only the metadata is held in RAM.
   // serve_self_proof is the proof-gen working buffer (>= block_count*4) - sized to OUR image's block
@@ -286,6 +297,12 @@ struct OtaContext {
           strncpy(msg, "refused: use ota bootloader install <MID8> <HASH16>", 96);
           msg[95] = 0; return false;
         }
+#if defined(OTA_TOWER_AUTO_STORE)
+        if (!mm.is_signed()) {
+          strncpy(msg, "refused: MeshTower application OTA requires a trusted signature", 96);
+          msg[95] = 0; return false;
+        }
+#endif
         if (trusted_auto) {
           SelfFwInfo self;
           if (!mm.is_signed()) {
@@ -309,7 +326,7 @@ struct OtaContext {
       }
     }
     bool ok;
-#if defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
+#if defined(NRF52_PLATFORM) && (defined(OTA_RAK_AUTO_STORE) || defined(OTA_TOWER_AUTO_STORE))
     ok = fetch_store.usesExternal()
         ? ota_apply_mota_nrf52(fetch_store.externalStore(), allow, apply_st, msg)
         : fetch_store.usesInternal()
@@ -358,7 +375,15 @@ struct OtaContext {
       msg[95] = 0; return false;
     }
     const OtaBootloaderIdentity& installed = bootloaderIdentity();
-#if defined(OTA_RAK_AUTO_STORE)
+#if defined(OTA_TOWER_AUTO_STORE)
+    if (!fetch_store.usesExternal()) {
+      strncpy(msg, "bootloader package must be staged on SD", 96);
+      msg[95] = 0; return false;
+    }
+    bool ok = ota_prepare_bootloader_update_nrf52(
+        fetch_store.sdStore(), allow, installed, manager.fetchManifestId(), operator_mid,
+        operator_hash8, apply_st, msg);
+#elif defined(OTA_RAK_AUTO_STORE)
     if (!fetch_store.usesInternal()) {
       strncpy(msg, "bootloader package must be staged in internal flash", 96);
       msg[95] = 0; return false;
@@ -497,13 +522,16 @@ struct OtaContext {
   // Attach/detach an external folder of `.mota` served by a host daemon over the seeder UART (the node
   // then advertises + relays them alongside its own fw). Only built when OTA_FOLDER_SERIAL is configured.
 #if defined(OTA_FOLDER_SERIAL)
-  bool attach_folder(char* msg, size_t cap) {
+  static SerialMotaSource& serialFolderSource() {
     static SerialMotaSource src(OTA_FOLDER_SERIAL_STREAM,
                                 OTA_FOLDER_SERIAL_WRITE_POLICY, 600);
+    return src;
+  }
+  bool attach_folder(char* msg, size_t cap) {
 #ifdef OTA_FOLDER_SERIAL_BEGIN
     OTA_FOLDER_SERIAL_STREAM.begin(OTA_FOLDER_SERIAL_BAUD);     // dedicated UART; console is already up
 #endif
-    return attach_folder_source(&src, FOLDER_LINK_SERIAL, "serial", msg, cap);
+    return attach_folder_source(&serialFolderSource(), FOLDER_LINK_SERIAL, "serial", msg, cap);
   }
 #endif
   void detach_folder(bool preserve_capture = false) {
@@ -537,10 +565,45 @@ struct OtaContext {
   }
 
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+  OtaStoreSdNrf52& sdStagingStore() {
+#if defined(OTA_TOWER_AUTO_STORE)
+    return fetch_store.sdStore();
+#else
+    return fetch_store;
+#endif
+  }
+
+#if defined(OTA_TOWER_AUTO_STORE)
+  // Probe only after startup or an explicit OTA command. Selection is latched
+  // until operator cancellation, including a failed/paused transfer.
+  bool prepareTowerStorage() {
+    const bool usable = fetch_store.selectStorage();
+    const bool external = usable && fetch_store.usesExternal();
+    const bool was_self_serve_supported = self_serve_supported;
+    manager.set_accept_full(external);
+    manager.set_accept_bootloader(external &&
+        ota_bootloader_self_update_caps_valid(bootloaderUpdateCaps()));
+    self_serve_supported = ota_self_serve_supported(external);
+    if (was_self_serve_supported && !self_serve_supported &&
+        manager.servingPrimaryManifest(serve_self_manifest)) {
+      manager.clear_primary();
+      serving = false;
+    }
+#if MESHCORE_OTA_DEVICE_DEFLATE
+    manager.set_transport_deflate_encoder(self_serve_supported ? ota_transport_deflate : nullptr);
+#endif
+    if (!external) manager.set_archive_interest(false);
+    return usable;
+  }
+#endif
+
   // Initialize and attach the persistent source lazily. This lets Mesh::begin finish quickly when no card
   // is inserted, while archive interest is already enabled so early OTA advertisements still get queried.
   bool ensureSdCache() {
-    sd_cache.attach(fetch_store);
+    sd_cache.attach(sdStagingStore());
+#if defined(OTA_TOWER_AUTO_STORE)
+    if (!prepareTowerStorage() || !fetch_store.usesExternal()) return false;
+#endif
     if (!sd_cache.initialize()) return false;
     if (!_sd_cache_source_attached) {
       if (!manager.add_source(&sd_cache)) return false;
@@ -590,11 +653,21 @@ struct OtaContext {
 
   void finishSdCardReset(uint32_t now) {
     sd_cache.resetMedia();
+#if defined(OTA_TOWER_AUTO_STORE)
+    fetch_store.resetSelection();
+#endif
     _sd_cache_init_retry_at = now;
     ensureSdCache();
   }
 
   void serviceSdCache(uint32_t now) {
+#if defined(OTA_TOWER_AUTO_STORE)
+    if (!prepareTowerStorage() || !fetch_store.usesExternal()) {
+      if (_sd_cache_source_attached) manager.remove_source(&sd_cache);
+      _sd_cache_source_attached = false;
+      return;
+    }
+#endif
     if (!_sd_cache_source_attached) {
       if (_sd_cache_init_retry_at && (int32_t)(now - _sd_cache_init_retry_at) < 0) return;
       if (!ensureSdCache()) {
@@ -686,6 +759,11 @@ struct OtaContext {
     manager.set_accept_full(true);
     manager.set_autofetch(OtaManager::AUTOFETCH_OFF);
     autoinstall = AUTOINSTALL_OFF;
+#elif defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+    // An SD probe can block when the socket is empty. Bring up USB and the
+    // radio before determining the optional storage backend in the main loop.
+    manager.set_accept_full(false);
+    manager.set_apply_codec(CODEC_DETOOLS_INPLACE);
 #elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE)
     manager.set_accept_full(fetch_store.usesExternal());
     manager.set_apply_codec(CODEC_DETOOLS_INPLACE);
@@ -703,7 +781,9 @@ struct OtaContext {
 #if defined(NRF52_PLATFORM) && \
     (defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
      defined(OTA_SD_BOOTLOADER_UPDATE))
-#if defined(OTA_RAK_AUTO_STORE)
+#if defined(OTA_TOWER_AUTO_STORE)
+    manager.set_accept_bootloader(false);
+#elif defined(OTA_RAK_AUTO_STORE)
     manager.set_accept_bootloader(
         ota_bootloader_self_update_caps_valid(ota_bootloader_update_caps()));
 #else
@@ -713,8 +793,21 @@ struct OtaContext {
     manager.set_accept_bootloader(false);
 #endif
     manager.set_fetch_store(&fetch_store);
+#if defined(NRF52_PLATFORM) && defined(OTA_TOWER_AUTO_STORE)
+    self_serve_supported = false;
+#elif defined(NRF52_PLATFORM) && defined(OTA_RAK_AUTO_STORE) && !defined(OTA_SEEDER_ONLY)
+    self_serve_supported = ota_self_serve_supported(fetch_store.usesExternal());
+#else
+    self_serve_supported = ota_self_serve_supported();
+#endif
+#if MESHCORE_OTA_DEVICE_DEFLATE
+    // Register only on qualified full-image nodes (adaptive RAK eligibility
+    // is the application backend latched above). Host precompressed blocks
+    // still take precedence in OtaManager; receiver checks are unchanged.
+    manager.set_transport_deflate_encoder(self_serve_supported ? ota_transport_deflate : nullptr);
+#endif
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
-    sd_cache.attach(fetch_store);
+    sd_cache.attach(sdStagingStore());
     manager.set_archive_interest(true);        // default on; the SD marker can turn it off at first mount
 #endif
   }

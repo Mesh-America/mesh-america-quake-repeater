@@ -154,6 +154,22 @@ int main() {
     assert(w._profile_refresh_required==!success);
   }
   {
+    RadioLibWrapper w; state=STATE_IDLE;
+    assert(w.tryRestoreCodingRate(5)==Result::APPLIED);
+    assert(w.coding_writes==1 && state==STATE_IDLE && !w._profile_refresh_required);
+  }
+  {
+    RadioLibWrapper w; w.failRxStarts=1;
+    assert(w.tryRestoreCodingRate(5)==Result::FAILED);
+    assert(w.coding_writes==1 && state==STATE_IDLE && w._profile_refresh_required);
+    // The normal receive re-arm and profile refresh can recover after a
+    // transient restart failure; a later coding-rate restore then succeeds.
+    w.startRecv(); w.serviceProfileScan();
+    assert(w.isInRecvMode() && !w._profile_refresh_required);
+    assert(w.tryRestoreCodingRate(5)==Result::APPLIED);
+    assert(w.coding_writes==2 && w.isInRecvMode() && !w._profile_refresh_required);
+  }
+  {
     // Force only admits a reply on an active RX-only profile. It cannot
     // enable a disabled profile or erase an in-progress reception.
     RadioLibWrapper w; w.enable();
@@ -328,6 +344,47 @@ int main() {
     w._profiles.setSecondary({},false); w.serviceProfileScan();
     assert(w.chip.standbyXOSC && !w._profile_standby_held && !w._rx_ps_enabled);
     w.setProfileStandbyWarm(false); assert(w.chip.standbyXOSC);
+  }
+  for (bool preamble_only : {false,true}) {
+    RadioLibWrapper w; w.enable();
+    const auto original=w._profiles;
+    auto requested=original.primary;
+    if (preamble_only) requested.preamble=64;
+    assert(w.trySetPrimaryParams(requested,!preamble_only)==Result::APPLIED);
+    assert(w._profiles.primary==requested && w._profiles.primary_temporary==!preamble_only);
+    assert(w._profiles.generation[0]==original.generation[0]+1);
+    assert(!w._profiles.switchTestReady() && w._profiles.switchBudgetUs()==0);
+    assert(w._profiles.switch_test_samples[0]==0 && w._profiles.switch_test_samples[1]==0);
+    w.serviceProfileScan(); assert(w._profiles.switchTestReady());
+  }
+  {
+    RadioLibWrapper w; w.enable();
+    const auto original=w._profiles;
+    assert(w.trySetPrimaryParams(original.primary,false)==Result::APPLIED);
+    assert(w._profiles.generation[0]==original.generation[0]);
+    assert(w._profiles.switchTestReady() && w._profiles.switchBudgetUs()==original.switchBudgetUs());
+    for (unsigned i=0;i<2;++i) {
+      assert(w._profiles.switch_test_samples[i]==original.switch_test_samples[i]);
+      assert(w._profiles.switch_test_max_us[i]==original.switch_test_max_us[i]);
+    }
+  }
+  for (bool preamble_only : {false,true}) for (bool busy : {false,true}) {
+    RadioLibWrapper w; w.enable();
+    const auto original=w._profiles;
+    const auto original_preamble=w._physical_preamble;
+    auto requested=original.primary;
+    if (preamble_only) requested.preamble=64;
+    w.packet=busy;
+    if (!busy) w.failRxStarts=1;
+    assert(w.trySetPrimaryParams(requested,!preamble_only)==(busy?Result::BUSY:Result::FAILED));
+    assert(w._profiles.primary==original.primary && !w._profiles.primary_temporary);
+    assert(w._profiles.generation[0]==original.generation[0]);
+    assert(w._physical_preamble==original_preamble);
+    assert(w._profiles.switchTestReady() && w._profiles.switchBudgetUs()==original.switchBudgetUs());
+    for (unsigned i=0;i<2;++i) {
+      assert(w._profiles.switch_test_samples[i]==original.switch_test_samples[i]);
+      assert(w._profiles.switch_test_max_us[i]==original.switch_test_max_us[i]);
+    }
   }
   for (int reason=0;reason<4;++reason) {
     RadioLibWrapper w;

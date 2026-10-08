@@ -32,12 +32,23 @@ def role_handler(role, source):
     # The room source opens its next conditional branch's preprocessor guard
     # immediately before the closing brace of the local ACL branch.
     local = re.sub(r"\n#if defined\(WITH_MQTT_NEIGHBORS\)\n\s*}$", "\n}", local)
+    usb_acl_helper = ""
+    if role != "sensor":
+        # Keep local dispatch attached to the actual USB listing helper. These
+        # fixtures exercise legacy/nonnative USB; native-USB short writes are
+        # covered separately by test_esp32_tinyusb_cooperative_output.py.
+        usb_acl_helper = extract_braced(source, "void MyMesh::printAclSerial()")
+        usb_acl_helper = usb_acl_helper.replace(
+            "void MyMesh::printAclSerial()",
+            f"static void {role}PrintAclSerial(ClientACL& acl)", 1)
+        local = local.replace("printAclSerial();", f"{role}PrintAclSerial(acl);")
     guard = ""
     if role == "repeater":
         guard_start = body.rindex("if (sender && !sender->isAdmin())", 0,
                                  body.index("mesh::cli::handleACLGet("))
         guard = extract_braced(body[guard_start:], "if (sender && !sender->isAdmin())")
     return f"""
+{usb_acl_helper}
 static void {role}Command(ClientACL& acl, ClientInfo* sender,
                           uint32_t sender_timestamp, char* command, char* reply) {{
   const int gpio_client_index = sender == nullptr ? -1 : 0;
@@ -95,6 +106,7 @@ namespace mesh { class Utils { public:
                     result = subprocess.run([
                         compiler, "-std=c++17", "-Wall", "-Wextra", "-DESP32=1",
                         "-DESP32_PLATFORM=1", "-DMESH_ENABLE_FLOOD_RULE_ENGINE=1",
+                        "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=0",
                         f"-DMAX_CLIENTS={clients}", f"-I{work}", f"-I{ACL_MOCKS}",
                         f"-I{ROOT / 'src'}", str(FIXTURE / "test_client_acl_cli.cpp"),
                         "-o", str(binary),

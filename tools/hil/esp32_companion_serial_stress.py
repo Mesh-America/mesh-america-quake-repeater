@@ -30,6 +30,7 @@ import struct
 import sys
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from serial_session import open_configured_session
 
 
 HOST_FRAME_MARKER = ord("<")
@@ -92,6 +93,7 @@ class StressConfig:
     cycle_delay: float = 0.05
     close_delay: float = 0.10
     verbose: bool = False
+    dtr: bool = False
 
 
 @dataclass
@@ -431,6 +433,8 @@ def _validate_config(config: StressConfig) -> None:
         raise ValueError("count must be at least 1")
     if config.baudrate < 1:
         raise ValueError("baudrate must be positive")
+    if not isinstance(config.dtr, bool):
+        raise ValueError("dtr must be a boolean")
     for name in config.queries:
         if name not in SAFE_QUERY_SPECS:
             raise ValueError(f"unknown or unsafe query {name!r}")
@@ -463,16 +467,17 @@ def _make_pyserial_factory() -> Callable[[StressConfig], Any]:
         ) from exc
 
     def factory(config: StressConfig) -> Any:
-        # Configure DTR/RTS while closed so opening a port never deliberately
-        # asserts a reset/boot strap control line.
+        # Native USB/JTAG devices may require DTR for the CDC session. POSIX
+        # pySerial opens bridges by applying DTR before RTS; defer DTR there
+        # so a kernel's initial asserted lines cannot pulse the ESP reset line.
         port = serial.Serial()
         port.port = config.port
         port.baudrate = config.baudrate
         port.timeout = min(config.read_poll_timeout, config.response_timeout)
         port.write_timeout = config.write_timeout
-        port.dtr = False
+        port.dtr = config.dtr
         port.rts = False
-        port.open()
+        open_configured_session(port)
         return port
 
     return factory
@@ -771,6 +776,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="cycles per selected mode (default: 100)",
     )
     parser.add_argument("--baudrate", type=_positive_int, default=115200)
+    parser.add_argument(
+        "--dtr", choices=("on", "off"), default="off",
+        help="CDC DTR state set before opening; RTS stays off (default: off)",
+    )
     parser.add_argument("--app-name", default="MeshCore-HIL-Stress")
     parser.add_argument(
         "--queries", type=_safe_query_list,
@@ -837,6 +846,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cycle_delay=args.cycle_delay,
         close_delay=args.close_delay,
         verbose=args.verbose,
+        dtr=args.dtr == "on",
     )
     summary = run_stress(config)
     print(json.dumps(summary, indent=2 if args.pretty else None, sort_keys=True))

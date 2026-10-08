@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/cli_settings_audit/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # CLI setting dispatch audit
 
 The 1.17.1.5 source retained `get path.hash.mode` in `CommonCLI` but lost its

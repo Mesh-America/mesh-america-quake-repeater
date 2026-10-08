@@ -4,12 +4,19 @@
 #include <stddef.h>
 #include <string.h>
 #include <math.h>
+#include "UsbLoggingStatus.h"
 
 // Portable management wire format. No update authorization is granted by this
 // protocol. See docs/management_reports.md for the byte layout and trust model.
 namespace mesh { namespace management {
 constexpr size_t HEADER = 83, TAG = 16, ENTRY = 13, PER_PAGE = 6;
-constexpr size_t MAX_KEYS = 36, MAX_PAGES = 6, MAX_PAYLOAD = HEADER + TAG + PER_PAGE * ENTRY;
+constexpr size_t USB_STATUS_SIZE = 15;
+constexpr size_t WATCHDOG_EVENT_OFFSET = HEADER + USB_STATUS_SIZE;
+constexpr size_t CURRENT_HEADER = WATCHDOG_EVENT_OFFSET + USB_WATCHDOG_EVENT_SIZE;
+constexpr size_t CURRENT_PER_PAGE = 4;
+constexpr size_t MAX_KEYS = 36, MAX_PAGES = 9;
+constexpr size_t MAX_PAYLOAD = CURRENT_HEADER + TAG + CURRENT_PER_PAGE * ENTRY;
+static_assert(MAX_PAYLOAD == 179, "MGR2 must fit the legacy padded payload budget");
 constexpr uint32_t DAY = 86400, FLOOD_INTERVAL = 21 * DAY;
 enum Feature : uint8_t { WIFI = 1, GPS = 2, NTP = 4, USB = 8, OTA = 16 };
 enum Valid : uint16_t { FIRMWARE = 1, BOOTLOADER = 2, BASE = 4, STORE = 8,
@@ -95,19 +102,61 @@ bool seal(const uint8_t key[32], const uint8_t* aad, size_t aad_len,
 bool open(const uint8_t key[32], const uint8_t* aad, size_t aad_len,
           uint8_t* data, size_t len, const uint8_t tag[16]);
 bool equal(const uint8_t* a, const uint8_t* b, size_t size);
-inline size_t pageSize(const uint8_t* p) { return HEADER + p[82] * ENTRY + TAG; }
+inline bool currentPage(const uint8_t* p) { return !memcmp(p, "MGR2", 4); }
+inline bool usbPage(const uint8_t* p) { return currentPage(p); }
+inline size_t headerSize(const uint8_t* p) {
+  return currentPage(p) ? CURRENT_HEADER : HEADER;
+}
+inline size_t entriesPerPage(const uint8_t* p) {
+  return currentPage(p) ? CURRENT_PER_PAGE : PER_PAGE;
+}
+inline size_t pageSize(const uint8_t* p) { return headerSize(p) + p[82] * ENTRY + TAG; }
 inline size_t floodSize(size_t canonical) { return 3 + ((canonical - 3 + 15) / 16) * 16; }
+#if defined(STM32_PLATFORM) && defined(__GNUC__) && !defined(__clang__)
+// The two Mesh callers use different padding modes. Keep one validator on
+// flash-constrained STM32 targets instead of LTO specializing each call site.
+__attribute__((noinline, noclone))
+#endif
 inline bool validPage(const uint8_t* p, size_t size, bool flood_padding = false) {
-  if (!p || size < HEADER + TAG || size > (flood_padding ? 179 : MAX_PAYLOAD) || memcmp(p, "MGR1", 4)) return false;
+  if (!p || size < HEADER + TAG || size > MAX_PAYLOAD) return false;
+  const uint32_t magic = read32(p);
+  if ((magic & 0xffffffu) != 0x52474du) return false; // exact MGR prefix
+  const unsigned version = (magic >> 24) - '1';
+  if (version > 1) return false;
+  const size_t minimum = (version ? CURRENT_HEADER : HEADER) + TAG;
+  const size_t per_page = version ? CURRENT_PER_PAGE : PER_PAGE;
+  if (size < minimum) return false;
+  // Reserved bits occupy the upper flag byte and upper two stage bits.
+  if (version && (read16(p + HEADER + 1) & 0xc0f8u)) return false;
+  if (version && !validUsbWatchdogEvent(p + WATCHDOG_EVENT_OFFSET)) return false;
   const unsigned page = p[78], pages = p[79], total = p[80], first = p[81], count = p[82];
-  const unsigned expected_pages = total ? (total + PER_PAGE - 1) / PER_PAGE : 1;
-  if (total > MAX_KEYS || pages != expected_pages || page >= pages || first != page * PER_PAGE || first > total) return false;
+  const unsigned expected_pages = total ? (total + per_page - 1) / per_page : 1;
+  if (total > MAX_KEYS || pages != expected_pages || page >= pages || first != page * per_page) return false;
+  // Canonical pages and page bounds imply first <= total (also for total 0).
   const unsigned remaining = total - first;
-  if (count != (remaining < PER_PAGE ? remaining : PER_PAGE)) return false;
-  const size_t canonical = pageSize(p);
-  if (size != (flood_padding ? floodSize(canonical) : canonical)) return false;
+  if (count != (remaining < per_page ? remaining : per_page)) return false;
+  const size_t canonical = minimum + count * ENTRY;
+  // Exactly one length in [canonical, canonical + 15] is 3 modulo 16.
+  // Unsigned underflow also rejects lengths shorter than canonical.
+  const size_t padding = size - canonical;
+  if (padding > (flood_padding ? 15u : 0u) ||
+      (flood_padding && (size & 15u) != 3)) return false;
   for (size_t i = canonical; i < size; ++i) if (p[i]) return false;
   return true;
+}
+
+// MGR2 public USB snapshot. The AES-SIV AAD authenticates every byte.
+inline void encodeUsbStatus(uint8_t* p, const UsbLoggingStatus& status) {
+  const uint16_t flags = (status.supported ? 1u : 0u) |
+      (status.logging_enabled ? 2u : 0u) | (status.watchdog_enabled ? 4u : 0u) |
+      (status.host_connected ? 8u : 0u) | (status.reader_connected ? 16u : 0u) |
+      (status.stalled ? 32u : 0u) | (status.recovering ? 64u : 0u) |
+      (status.recovery_deferred ? 128u : 0u) | (status.persistence_ready ? 256u : 0u) |
+      (status.watchdog_auto ? 512u : 0u) | (status.logger_active ? 1024u : 0u);
+  write16(p, flags);
+  p[2] = (status.stage & 3u) | ((status.backoff_step & 15u) << 2);
+  write32(p + 3, status.retry_seconds); write32(p + 7, status.inactive_seconds);
+  write32(p + 11, status.auto_connected_seconds);
 }
 
 struct AclList {
@@ -120,6 +169,8 @@ struct AclList {
     if (count == MAX_KEYS) return false;
     memcpy(entries[count], token, 12); entries[count++][12] = permissions; return true;
   }
-  uint8_t pages() const { return count ? (count + PER_PAGE - 1) / PER_PAGE : 1; }
+  uint8_t pages(size_t per_page = CURRENT_PER_PAGE) const {
+    return count ? (count + per_page - 1) / per_page : 1;
+  }
 };
 } }

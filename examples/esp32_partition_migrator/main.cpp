@@ -2,7 +2,7 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include <AsyncElegantOTA.h>
+#include "../../arch/esp32/AsyncElegantOTA/src/AsyncElegantOTA.h"
 #include <Preferences.h>
 #include <SPIFFS.h>
 #include <esp_ota_ops.h>

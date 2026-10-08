@@ -34,12 +34,17 @@ struct FakeWiFi {
  wifi_mode_t current=WIFI_OFF;bool autoreconnect=true;
  void persistent(bool){}
  wifi_mode_t getMode(){return current;}
+ int channel(){return current==WIFI_OFF?0:6;}
  void setAutoReconnect(bool value){autoreconnect=value;}
  bool mode(wifi_mode_t value){if(failure==1)return false;current=value;return true;}
 } WiFi;
 namespace mesh {
  enum class RadioParamApplyResult {APPLIED};
  namespace wifi {
+  constexpr uint8_t kProtocolMask=15,kLongRangeRadioOwner=1,kLongRangeBridgeOwner=2;
+  void setLongRangeOwner(uint8_t,bool){}
+  int checkLongRangeRadioStart(){return WiFi.current&WIFI_AP?-1:0;}
+  int applyStationProtocolMask(uint8_t,bool){return failure==2?-1:0;}
   int applyProtocolMask(int){return failure==2?-1:0;}
   int restoreEspNowChannel(){return failure==3?-1:0;}
  }
@@ -93,9 +98,11 @@ int main(){
  OnDataSent(nullptr,ESP_NOW_SEND_SUCCESS); // callback arriving while disabled
  deliver(raw,4);assert(radio.recvRaw(out,sizeof(out))==0);
  radio.end();assert(wake_refs==0&&!sdk_active);
- // Starting alongside a setup AP preserves it and restores the configured TX power.
+ // LR cannot restart alongside a conventional setup AP on the shared PHY.
  WiFi.current=WIFI_AP_STA;WiFi.autoreconnect=true;radio.init();
- assert(WiFi.current==WIFI_AP_STA&&WiFi.autoreconnect&&power==52);
+ assert(!radio.isEnabled()&&!sdk_active&&WiFi.current==WIFI_AP_STA);
+ WiFi.current=WIFI_STA;radio.init();
+ assert(WiFi.current==WIFI_STA&&WiFi.autoreconnect&&power==52);
  assert(!radio.isSendComplete()); // restarting before Dispatcher's timeout cannot fake TX success
  radio.onSendFinished(); // Dispatcher acknowledges the cancelled operation
  assert(radio.recvRaw(out,sizeof(out))==0&&radio.isInRecvMode());
@@ -120,7 +127,17 @@ class EspNowLifecycleTests(unittest.TestCase):
         self.assertIn('uint8_t espnow_bridge_enabled = 1;', prefs)
         self.assertIn('setEspNowBridgeState(enable)', common)
         self.assertIn('_prefs->espnow_bridge_enabled', common)
-        self.assertIn('setMqttBridgeState(enable)', common)
+        mqtt_switch = method(common, 'if (strncmp(config, "mqtt.enabled ", 13) == 0)')
+        self.assertIn('enable ? _callbacks->setMqttBridgeState(true)', mqtt_switch)
+        self.assertIn(': _callbacks->requestMqttBridgeStop()', mqtt_switch)
+        # Reject an unsafe restart before changing saved intent. An accepted
+        # OFF command saves successfully before signalling cooperative stop.
+        self.assertLess(mqtt_switch.index('isMqttBridgeStopping()'),
+                        mqtt_switch.index('_prefs->bridge_enabled ='))
+        self.assertLess(mqtt_switch.index('if (!trySavePrefs())'),
+                        mqtt_switch.index('setMqttBridgeState(true)'))
+        self.assertLess(mqtt_switch.index('if (!trySavePrefs())'),
+                        mqtt_switch.index('requestMqttBridgeStop()'))
         self.assertIn('isMqttBridgeRunning()', observer)
         for role in ('simple_repeater', 'simple_room_server'):
             header = (ROOT/f'examples/{role}/MyMesh.h').read_text()
@@ -128,8 +145,12 @@ class EspNowLifecycleTests(unittest.TestCase):
             self.assertIn('setMqttBridgeState(true)', combined)
             self.assertIn('setEspNowBridgeState(true)', combined)
             mqtt = method(header, 'bool setMqttBridgeState(bool enable) override')
+            stop = method(header, 'bool requestMqttBridgeStop() override')
             espnow = method(header, 'bool setEspNowBridgeState(bool enable) override')
             self.assertIn('if (espnow_bridge.isRunning()) espnow_bridge.end();', mqtt)
+            self.assertLess(mqtt.index('isStopping()'), mqtt.index('espnow_bridge.end()'))
+            self.assertIn('->requestStop()', stop)
+            self.assertNotIn('->end()', stop)
             self.assertIn('if (mqtt_bridge' if role == 'simple_repeater' else 'if (bridge', espnow)
 
     def test_sdk_failures_stop_and_restart(self):
@@ -167,14 +188,16 @@ class EspNowLifecycleTests(unittest.TestCase):
 using wifi_init_config_t=int;
 using wifi_second_chan_t=int;
 constexpr int WIFI_STORAGE_RAM=0,WIFI_MODE_STA=1,WIFI_SECOND_CHAN_NONE=0;
+constexpr wifi_mode_t WIFI_MODE_NULL=WIFI_OFF;
 constexpr int WIFI_PROTOCOL_11B=1,WIFI_PROTOCOL_11G=2,WIFI_PROTOCOL_11N=4;
-int wifi_stops=0,wifi_starts=0;uint8_t wifi_channel=6;
-int esp_wifi_init(wifi_init_config_t*){return 0;}
+int wifi_stops=0,wifi_starts=0;uint8_t wifi_channel=6;bool wifi_initialized=false;
+int esp_wifi_init(wifi_init_config_t*){wifi_initialized=true;return 0;}
 int esp_wifi_set_storage(int){return 0;}
 int esp_wifi_set_mode(int){return 0;}
 int esp_wifi_start(){++wifi_starts;return 0;}
 int esp_wifi_stop(){++wifi_stops;return 0;}
-int esp_wifi_deinit(){return 0;}
+int esp_wifi_deinit(){wifi_initialized=false;return 0;}
+int esp_wifi_get_mode(wifi_mode_t* mode){*mode=WIFI_STA;return wifi_initialized?0:-1;}
 int esp_wifi_get_channel(uint8_t* channel,wifi_second_chan_t*){*channel=wifi_channel;return 0;}
 int esp_wifi_set_channel(int channel,int){wifi_channel=channel;return 0;}
 int esp_now_del_peer(const uint8_t*){return 0;}
@@ -233,16 +256,20 @@ int main(){
     def test_bridge_channel_constraint_tracks_runtime_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)
-            (folder/'esp_err.h').write_text('#pragma once\nusing esp_err_t=int;\nconstexpr int ESP_OK=0;\n')
+            (folder/'esp_err.h').write_text('#pragma once\nusing esp_err_t=int;\nconstexpr int ESP_OK=0,ESP_ERR_INVALID_STATE=-2,ESP_ERR_WIFI_NOT_INIT=-3;\n')
             (folder/'esp_wifi.h').write_text(r'''
 #pragma once
 #include <cstdint>
 #include <esp_err.h>
-using wifi_interface_t=int;using wifi_second_chan_t=int;
+using wifi_interface_t=int;using wifi_second_chan_t=int;using wifi_mode_t=int;
+constexpr int WIFI_MODE_NULL=0,WIFI_MODE_STA=1,WIFI_MODE_AP=2,WIFI_STORAGE_RAM=0;
 constexpr int WIFI_IF_STA=0,WIFI_IF_AP=1,WIFI_SECOND_CHAN_NONE=0;
 constexpr int WIFI_PROTOCOL_11B=1,WIFI_PROTOCOL_11G=2,WIFI_PROTOCOL_11N=4,WIFI_PROTOCOL_LR=8;
 uint8_t current_channel=1,last_protocol=0;
 int esp_wifi_set_protocol(int,uint8_t p){last_protocol=p;return 0;}
+int esp_wifi_get_mode(int* p){*p=WIFI_MODE_STA;return 0;}
+int esp_wifi_get_protocol(int,uint8_t* p){*p=7;return 0;}
+int esp_wifi_set_storage(int){return 0;}
 int esp_wifi_get_channel(uint8_t* p,int*){*p=current_channel;return 0;}
 int esp_wifi_set_channel(uint8_t p,int){current_channel=p;return 0;}
 ''')
@@ -293,6 +320,29 @@ struct {
             subprocess.run([os.environ.get('CXX','g++'),'-std=c++17','-DWITH_ESPNOW_BRIDGE=1',
                             '-I',str(folder),'-I',str(ROOT/'src'),str(folder/'channel.cpp'),'-o',str(binary)],check=True)
             subprocess.run([str(binary)],check=True)
+
+    def test_bridge_arduino_sdk_handoffs_and_partial_startup(self):
+        source = (ROOT/'src/helpers/bridges/ESPNowBridge.cpp').read_text()
+        methods = method(source, 'static void stopBridgeWiFiIfUnused(') + '\n'
+        methods += '\n'.join(
+            method(source, f'void ESPNowBridge::{name}(').replace('ESPNowBridge::', 'Bridge::')
+            for name in ('begin', 'end')
+        )
+        fixture = (ROOT/'test/fixtures/espnow_wifi_handoff.cpp').read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder/'handoff.cpp').write_text(fixture.replace('@METHODS@', methods))
+            for arduino, idf in [(2,40400), (3,50200), (3,50500)]:
+                with self.subTest(arduino=arduino, idf=idf):
+                    binary = folder/f'handoff-{idf}'
+                    subprocess.run([
+                        os.environ.get('CXX', 'g++'), '-std=c++17',
+                        '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-pie', '-no-pie',
+                        '-I', str(ROOT/'src'), f'-DESP_IDF_VERSION={idf}',
+                        f'-DESP_ARDUINO_VERSION_MAJOR={arduino}',
+                        str(folder/'handoff.cpp'), '-o', str(binary),
+                    ], check=True)
+                    subprocess.run([str(binary)], check=True)
 
 if __name__=='__main__':
     unittest.main()

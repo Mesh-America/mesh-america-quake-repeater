@@ -44,6 +44,14 @@ class UITask : public AbstractUITask {
   int _msgcount;
   bool _need_refresh = true;
   bool _displayWasOn = false;  // Track display state before button press
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  // ANY_PRESS runs once per click: keep the first acknowledged notification
+  // until the eventual single/multi-click handler consumes the sequence.
+  bool _button_notification_cleared = false;
+  bool _shutdown_pending = false;
+  bool _shutdown_restart = false;
+  uint32_t _shutdown_started_at = 0;
+#endif
   unsigned long _pairing_screen_until;
   unsigned long ui_started_at;
   uint32_t _radio_profile_page_started_at = 0;
@@ -69,6 +77,9 @@ class UITask : public AbstractUITask {
   void handleButtonTriplePress();
   void handleButtonQuadruplePress();
   void handleButtonLongPress();
+#if defined(PIN_BUZZER) && MESH_GPS_VOICE
+  void servicePendingShutdown();
+#endif
   bool shouldPlayMessageTone() const;
   bool isPairingScreenActive() const;
   void resetRadioProfileDisplayPage();
@@ -112,6 +123,9 @@ public:
   void notificationMelody(const char* text) override;
   void notificationScreen(int8_t mode) override;
   void loop() override;
+#ifdef MESH_BUTTON_AUDIO_HIL
+  bool handleButtonAudioTest(const char* command, char* reply, size_t size) override;
+#endif
 
   void shutdown(bool restart = false);
 };

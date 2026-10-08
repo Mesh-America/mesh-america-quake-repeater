@@ -9,10 +9,35 @@ fail() {
   exit 1
 }
 
+# Optional debug settings must remain usable by strict shell callers before
+# any PlatformIO flags have been initialized.
+(
+  unset DISABLE_DEBUG PLATFORMIO_BUILD_FLAGS
+  disable_debug_flags
+  [ -z "${PLATFORMIO_BUILD_FLAGS+x}" ] \
+    || fail "default debug policy unexpectedly set build flags"
+  DISABLE_DEBUG=0
+  PLATFORMIO_BUILD_FLAGS=-DKEEP_CALLER_FLAG=1
+  disable_debug_flags
+  [ "$PLATFORMIO_BUILD_FLAGS" = -DKEEP_CALLER_FLAG=1 ] \
+    || fail "disabled debug override changed caller flags"
+  DISABLE_DEBUG=1
+  unset PLATFORMIO_BUILD_FLAGS
+  disable_debug_flags
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-UMESH_DEBUG -UMESH_PACKET_LOGGING"* ]] \
+    || fail "explicit debug disable lost the USB debug undefines"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DCFG_DEBUG=0"* ]] \
+    || fail "explicit debug disable lost CFG_DEBUG"
+  PLATFORMIO_BUILD_FLAGS=-DKEEP_CALLER_FLAG=1
+  disable_debug_flags
+  [[ "$PLATFORMIO_BUILD_FLAGS" == -DKEEP_CALLER_FLAG=1* ]] \
+    || fail "explicit debug disable discarded caller flags"
+)
+
 [ "$OPTION3_BUILD_WORKERS" -eq 1 ] \
   || fail "logging matrix permits concurrent PlatformIO target builds"
 
-for utility in profile_switch_t096_sx1262 xiao_s3_partition_migrator \
+for utility in profile_switch_t096_sx1262 profile_four_tx_v4_rx xiao_s3_partition_migrator \
     heltec_v4_partition_migrator_test_hold xiao_s3_partition_legacy_seed \
     esp32_4mb_partition_migrator_lora \
     heltec_v4_partition_migrator_lora_repeater \
@@ -107,6 +132,7 @@ fi
 # and BLE constraints cannot silently disappear through that inheritance.
 pio project config --json-output | python3 -c '
 import json
+import re
 import sys
 
 sections = {section: dict(options) for section, options in json.load(sys.stdin)}
@@ -300,6 +326,7 @@ for env_name in (
     "solarxiao_33S_repeater",
     "Heltec_v3_repeater",
     "Heltec_WSL3_repeater",
+    "MKE_s3_repeater",
     "Heltec_t096_repeater",
     "Heltec_t096_repeater_lora_ota_no_external_sensors",
     "RAK_4631_repeater",
@@ -313,6 +340,79 @@ for env_name in (
 require("RAK_4631_repeater", "build_flags", "WITH_RS232_BRIDGE_ALT=Serial1")
 require("RAK_4631_repeater", "build_flags", "WITH_RS232_BRIDGE_UART=2")
 reject("wio-e5_repeater", "build_flags", "WITH_RS232_BRIDGE=")
+
+# Full source substitution must preserve the normal repeater UART rather
+# than retiring its legacy bridge while compiling an MQTT-only recipe.
+for env_name, rx, tx in (
+    ("Heltec_v3_repeater_observer_mqtt", 5, 6),
+    ("Heltec_WSL3_repeater_observer_mqtt", 5, 6),
+    ("RAK_3112_repeater_observer_mqtt", 5, 6),
+):
+    require(env_name, "build_flags", "WITH_MQTT_BRIDGE=1")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE=Serial2")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE_UART=2")
+    require(env_name, "build_flags", f"WITH_RS232_BRIDGE_RX={rx}")
+    require(env_name, "build_flags", f"WITH_RS232_BRIDGE_TX={tx}")
+    require(env_name, "build_flags", "RS232_BRIDGE_MERGED=1")
+    require(env_name, "build_src_filter", "helpers/bridges/RS232Bridge.cpp")
+    reject(env_name, "build_flags", "RS232_BRIDGE_DEFAULT_ON")
+
+# The T-LoRa runtime RAM budget cannot fit MQTT, ESP-NOW and UART together.
+# Keep its UART in the normal Full image and its MQTT recipe independent.
+tlora_observer = "LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_"
+require(tlora_observer, "build_flags", "WITH_MQTT_BRIDGE=1")
+reject(tlora_observer, "build_flags", "WITH_RS232_BRIDGE")
+reject(tlora_observer, "build_flags", "RS232_BRIDGE_MERGED")
+reject(tlora_observer, "build_src_filter", "helpers/bridges/RS232Bridge.cpp")
+
+# MKE keeps its ordinary role and UART wiring while exposing the existing
+# persistent bridge controls. The merged marker selects the disabled default;
+# the explicit legacy bridge remains enabled for deliberate direct builds.
+for env_name in ("MKE_s3_repeater", "MKE_s3_repeater_bridge_rs232"):
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE=Serial2")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE_UART=2")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE_RX=16")
+    require(env_name, "build_flags", "WITH_RS232_BRIDGE_TX=17")
+    require(env_name, "build_src_filter", "helpers/bridges/RS232Bridge.cpp")
+reject("MKE_s3_repeater", "build_flags", "RS232_BRIDGE_DEFAULT_ON")
+reject("MKE_s3_repeater_bridge_rs232", "build_flags", "RS232_BRIDGE_MERGED")
+require("MKE_s3_repeater", "build_flags", "WITH_ESPNOW_BRIDGE=1")
+require("MKE_s3_repeater", "build_flags", "ESPNOW_BRIDGE_MERGED=1")
+require("MKE_s3_repeater", "build_src_filter", "helpers/bridges/ESPNowBridge.cpp")
+reject("MKE_s3_repeater_bridge_espnow", "build_flags", "ESPNOW_BRIDGE_MERGED")
+for env_name in (
+    "MKE_s3",
+    "MKE_s3_repeater_bridge_espnow",
+    "MKE_s3_room_server",
+    "MKE_s3_sensor",
+    "MKE_s3_terminal_chat",
+    "MKE_s3_companion_radio_usb",
+    "MKE_s3_companion_radio_ble",
+    "MKE_s3_companion_radio_wifi",
+):
+    reject(env_name, "build_flags", "WITH_RS232_BRIDGE")
+    reject(env_name, "build_src_filter", "helpers/bridges/RS232Bridge.cpp")
+require("MKE_s3_repeater_bridge_espnow", "build_flags", "WITH_ESPNOW_BRIDGE=1")
+require("MKE_s3_repeater_bridge_espnow", "build_src_filter", "helpers/bridges/ESPNowBridge.cpp")
+
+# GPIO5 is the radio reset line. Guard the complete board wiring rather than
+# accepting a bridge pin assignment that compiles but disables a peripheral.
+mke_pins = {
+    name: int(value)
+    for name, value in re.findall(
+        r"(?:^|\s)-D\s*([A-Z0-9_]+)=([0-9]+)(?=\s|$)",
+        option_text("MKE_s3_repeater", "build_flags"),
+    )
+}
+bridge_pins = {mke_pins["WITH_RS232_BRIDGE_RX"], mke_pins["WITH_RS232_BRIDGE_TX"]}
+for pin_name in (
+    "P_LORA_NSS", "P_LORA_MOSI", "P_LORA_MISO", "P_LORA_SCLK",
+    "P_LORA_BUSY", "P_LORA_RESET", "P_LORA_DIO_1",
+    "PIN_BOARD_SDA", "PIN_BOARD_SCL", "PIN_USER_BTN",
+    "PIN_GPS_RX", "PIN_GPS_TX", "PIN_GPS_EN",
+):
+    if mke_pins[pin_name] in bridge_pins:
+        raise SystemExit(f"test_build_profiles: MKE bridge UART conflicts with {pin_name}")
 
 for env_name in (
     "t1000e_companion_radio_usb",
@@ -337,6 +437,200 @@ require(rak_usb, "build_flags", "FORCE_GPS_ALIVE")
 # aliases remain directly buildable, but canonical release resolution must
 # replace each with that exact board's Full target.
 init_project_context >/dev/null
+
+# The interactive board menu must offer the same ordinary Full choices as the
+# release, while exact compatibility/development recipes stay directly usable.
+# Test real board inheritance: dropping aliases by suffix alone would also
+# discard the measured TLora transport split or special nRF52 storage wiring.
+(
+  mapfile -t menu_targets < <(get_interactive_build_targets)
+  menu_text=$(printf '%s\n' "${menu_targets[@]}")
+  for expected in Heltec_v3_companion_radio_full Heltec_v3_repeater \
+      LilyGo_TLora_V2_1_1_6_repeater \
+      LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ \
+      RAK_3401_repeater \
+      RAK_4631_repeater_rak15001_slot_c_lora_ota \
+      RAK_4631_repeater_w25q16_lora_ota \
+      RAK_4631_repeater_bridge_rs232_serial1_lora_ota_no_external_sensors \
+      RAK_4631_repeater_bridge_rs232_serial2_lora_ota_no_external_sensors; do
+    grep -Fxq "$expected" <<<"$menu_text" \
+      || fail "ordinary board menu omitted needed choice $expected"
+  done
+  for hidden in Heltec_v3_companion_radio_usb Heltec_v3_companion_radio_ble \
+      Heltec_v3_repeater_observer_mqtt \
+      Heltec_v3_repeater_lora_ota_no_external_sensors \
+      RAK_3401_repeater_lora_ota_no_external_sensors \
+      heltec_v4_partition_migrator; do
+    if grep -Fxq "$hidden" <<<"$menu_text"; then
+      fail "ordinary board menu still offers redundant/recovery choice $hidden"
+    fi
+    is_supported_build_env "$hidden" \
+      || fail "hiding $hidden from the board menu removed its exact build"
+  done
+  board=$(get_board_family_for_env Heltec_v3_repeater)
+  variants=$(get_variants_for_board "$board")
+  grep -Fxq Heltec_v3_companion_radio_full <<<"$variants" \
+    || fail "board submenu lost its Full Companion"
+  if grep -Eq 'companion_radio_(usb|ble|wifi)|_observer_mqtt|no_external_sensors' <<<"$variants"; then
+    fail "board submenu reintroduced transport/profile choices"
+  fi
+  [ "$(get_nrf52_sensor_ota_pair_target RAK_3401_repeater)" \
+      = "$(get_nrf52_sensor_ota_pair_target RAK_3401_repeater_lora_ota_no_external_sensors)" ] \
+    || fail "menu folded nRF52 targets with different output identities"
+  # Prefer the ordinary name even when a caller supplies the alias first.
+  SUPPORTED_PIO_ENVS=(RAK_3401_repeater_lora_ota_no_external_sensors RAK_3401_repeater)
+  [ "$(get_interactive_build_targets)" = RAK_3401_repeater ] \
+    || fail "nRF52 menu depends on alias input order"
+)
+
+# Expanded partitions make Full the ordinary ESP32 node release. Legacy lean
+# names still address installed firmware and must remain directly buildable,
+# but cannot reappear in either the all-role or a role-specific release list.
+for resolver in resolve_all_firmwares resolve_repeater_firmwares \
+    resolve_room_server_firmwares resolve_sensor_firmwares; do
+  while IFS= read -r release_env; do
+    [ "${PIO_ENV_PLATFORM_BY_NAME[$release_env]:-}" = ESP32_PLATFORM ] || continue
+    if is_lora_ota_no_external_sensors_target "$release_env"; then
+      fail "$resolver republishes reduced ESP32 alias $release_env"
+    fi
+    is_redundant_bulk_build_target "$release_env" \
+      && fail "$resolver republishes utility or legacy alias $release_env"
+    if is_kiss_modem_target "$release_env"; then
+      if is_esp32_full_release_build_target "$release_env"; then
+        fail "$release_env host modem was promoted into the node Full profile"
+      fi
+    else
+      is_esp32_full_release_build_target "$release_env" \
+        || fail "$resolver selected ESP32 node without a Full release: $release_env"
+    fi
+  done < <("$resolver")
+done
+
+# Cover the former allowlist gaps as well as migration hardware and a named
+# Full Companion. Their ordinary release profile is Full; the older helper
+# continues to describe the narrower same-partition OTA identity contract.
+for release_env in Station_G3_ESP32_r2_repeater WHY2025_badge_repeater_ \
+    GEPRC_Linkflow_900_repeater Generic_ESPNOW_repeatr \
+    LilyGo_Tlora_C6_room_server_ Meshadventurer_sx1262_repeater \
+    Ebyte_EoRa-S3_Repeater Heltec_ct62_sensor Station_G2_companion_radio_full; do
+  is_esp32_full_release_build_target "$release_env" \
+    || fail "$release_env retained a standard ordinary ESP32 release slot"
+done
+if is_esp32_full_only_bulk_target Ebyte_EoRa-S3_Repeater; then
+  fail "release consolidation incorrectly advertised same-partition EoRa migration"
+fi
+if is_esp32_full_release_build_target RAK_3401_repeater; then
+  fail "nRF52 role acquired ESP32 Full-only release policy"
+fi
+
+for direct_env in Heltec_v3_repeater_lora_ota_no_external_sensors \
+    Ebyte_EoRa-S3_Repeater_lora_ota_no_external_sensors \
+    Heltec_v3_companion_radio_usb heltec_v4_partition_migrator \
+    heltec_v4_partition_migrator_lora_repeater; do
+  is_supported_build_env "$direct_env" \
+    || fail "ordinary consolidation removed direct compatibility target $direct_env"
+  [ -n "$(get_pio_build_env "$direct_env")" ] \
+    || fail "$direct_env no longer resolves a direct PlatformIO recipe"
+done
+(
+  BATCH_BUILD_MODE=0
+  SINGLE_TARGET_FULL_BUILD=0
+  EXACT_IDENTITY_FULL_BUILD=0
+  BUILD_PROFILE_OVERRIDE=standard
+  BUILD_PROFILE_EXPLICIT=1
+  RESOLVED_BUILD_TARGETS=(Ebyte_EoRa-S3_Repeater)
+  configure_effective_build_profile build-firmware >/dev/null
+  [ "$BUILD_PROFILE_EFFECTIVE" = standard ] \
+    || fail "explicit standard recovery profile was promoted to Full"
+  [ "${RESOLVED_BUILD_TARGETS[*]}" = Ebyte_EoRa-S3_Repeater ] \
+    || fail "explicit recovery profile changed its deployed target identity"
+  BUILD_PROFILE_OVERRIDE=auto
+  BUILD_PROFILE_EXPLICIT=0
+  RESOLVED_BUILD_TARGETS=(Heltec_v3_repeater_lora_ota_no_external_sensors)
+  configure_effective_build_profile build-firmware >/dev/null
+  [ "$BUILD_PROFILE_EFFECTIVE" = standard ] \
+    || fail "direct reduced compatibility request was promoted to Full"
+  [ "${RESOLVED_BUILD_TARGETS[*]}" = Heltec_v3_repeater_lora_ota_no_external_sensors ] \
+    || fail "direct reduced request changed its deployed target identity"
+)
+
+# Named Full Companion already selects its own combined profile. In a bulk
+# pass it must compile the real source recipe, including generated Full names,
+# without entering the infrastructure promotion path. Stop at recipe capture,
+# before any dependency install, PlatformIO invocation, or artifact collection.
+(
+  BATCH_BUILD_MODE=1
+  BUILD_PROFILE_EXPLICIT=0
+  BUILD_PROFILE_EFFECTIVE=standard
+  ESP32_FULL_BUILD=0
+  FIRMWARE_VERSION=vtest-full-companion-routing
+  RESUME_BUILD_OUTPUT=0
+  companion_probe_marker=$(mktemp)
+  trap 'rm -f "$companion_probe_marker"' EXIT
+  compute_build_recipe_digest() {
+    printf '%s|%s|%s\n' "$1" "$3" "$ESP32_FULL_BUILD" > "$companion_probe_marker"
+    return 77
+  }
+  for full_companion in Heltec_v3_companion_radio_full Heltec_ct62_companion_radio_full; do
+    source_recipe=$(get_pio_build_env "$full_companion")
+    [ "$(get_exact_identity_full_pio_env "$full_companion")" = "$source_recipe" ] \
+      || fail "$full_companion tried to compile a logical Full name as its source recipe"
+    : > "$companion_probe_marker"
+    if build_firmware_one_profile "$full_companion" >/dev/null; then
+      fail "$full_companion bypassed the pre-PlatformIO recipe probe"
+    fi
+    [ "$(cat "$companion_probe_marker")" = "$full_companion|$source_recipe|0" ] \
+      || fail "$full_companion entered infrastructure promotion or lost its real source recipe"
+  done
+)
+
+# Exercise actual matrix scheduling while replacing only its final build
+# dispatch. This verifies the portable pass cannot return through an old
+# allowlist gap, migration target, or later duplicate profile pass.
+(
+  REQUIRE_OTA_UPDATES=0
+  BATCH_BUILD_MODE=1
+  BUILD_PROFILE_EXPLICIT=0
+  BUILD_PROFILE_EFFECTIVE=standard
+  ESP32_FULL_BUILD=0
+  matrix_builds=()
+  run_logged_build_targets() {
+    local target
+    for target in "$@"; do
+      matrix_builds+=("$target:$ESP32_FULL_BUILD")
+      if [ "${PIO_ENV_PLATFORM_BY_NAME[$target]:-}" = ESP32_PLATFORM ] \
+          && ! is_kiss_modem_target "$target" \
+          && ! is_companion_radio_full_target "$target"; then
+        [ "$ESP32_FULL_BUILD" = 1 ] \
+          || fail "ordinary matrix scheduled a portable ESP32 node: $target"
+      fi
+    done
+    return 0
+  }
+  run_logging_matrix_build_targets \
+    Station_G3_ESP32_r2_repeater Ebyte_EoRa-S3_Repeater \
+    Generic_ESPNOW_repeatr heltec_v4_room_server heltec_v4_sensor \
+    Station_G2_companion_radio_full heltec_v4_kiss_modem \
+    RAK_3401_repeater_lora_ota_no_external_sensors >/dev/null
+  for target in Station_G3_ESP32_r2_repeater Ebyte_EoRa-S3_Repeater \
+      Generic_ESPNOW_repeatr heltec_v4_room_server heltec_v4_sensor; do
+    matches=0
+    for call in "${matrix_builds[@]}"; do
+      if [ "$call" = "$target:1" ]; then matches=$((matches + 1)); fi
+    done
+    [ "$matches" -eq 1 ] \
+      || fail "ordinary matrix built $target $matches times instead of one Full image"
+  done
+  for expected in Station_G2_companion_radio_full:0 heltec_v4_kiss_modem:0 \
+      RAK_3401_repeater_lora_ota_no_external_sensors:0; do
+    found=0
+    for call in "${matrix_builds[@]}"; do
+      if [ "$call" = "$expected" ]; then found=$((found + 1)); fi
+    done
+    [ "$found" -eq 1 ] \
+      || fail "matrix changed the distinct Companion/KISS/nRF52 recipe: $expected"
+  done
+)
 
 # ESP32 room servers and sensors use their expanded Full image for LoRa OTA.
 for full_role_env in Heltec_v3_room_server Heltec_v3_sensor; do
@@ -890,9 +1184,131 @@ apply_esp32_full_shared_bridge_profile Station_G2_repeater_observer_mqtt
   || fail "Station G2 Full MQTT image did not include the ESP-NOW bridge"
 [[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.espnow "* ]] \
   || fail "Station G2 Full MQTT image did not report ESP-NOW capability"
+[[ "$PLATFORMIO_BUILD_FLAGS" != *"ESPNOW_BRIDGE_MERGED"* ]] \
+  || fail "Station G2 existing MQTT default changed during ESP-NOW composition"
 [[ "$(get_unified_full_infrastructure_target Station_G2_repeater_bridge_espnow)" \
     = "Station_G2_repeater_observer_mqtt" ]] \
   || fail "Station G2 Full ESP-NOW target did not resolve to the combined MQTT recipe"
+
+# Full repeaters without an observer compile the real bridge directly. Both
+# historical ESP-NOW defaults and unsupported role boundaries stay explicit.
+for plain_target in heltec_v4_tft_repeater Heltec_v2_repeater \
+    Heltec_ct62_repeater ThinkNode_M2_Repeater ThinkNode_M5_Repeater \
+    Meshadventurer_sx1262_repeater Meshadventurer_sx1268_repeater \
+    Generic_E22_sx1262_repeater Generic_E22_sx1268_repeater \
+    Tenstar_C3_sx1262_repeater Tenstar_C3_sx1268_repeater \
+    nibble_zero_connect_repeater_ nibble_screen_connect_repeater_ \
+    Station_G2_logging_repeater; do
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_SRC_FILTER=""
+  BUILD_CAPABILITIES=()
+  apply_esp32_full_shared_bridge_profile "$plain_target"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DWITH_ESPNOW_BRIDGE=1"* ]] \
+    || fail "$plain_target Full image omitted the runtime ESP-NOW bridge"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DESPNOW_BRIDGE_MERGED=1"* ]] \
+    || fail "$plain_target Full image omitted safe default-off migration"
+  [[ "$PLATFORMIO_BUILD_SRC_FILTER" == *"helpers/bridges/ESPNowBridge.cpp"* ]] \
+    || fail "$plain_target Full image omitted the actual ESP-NOW driver source"
+  [[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.espnow "* ]] \
+    || fail "$plain_target Full image omitted the ESP-NOW capability"
+  (
+    BUILD_PROFILE_FOR_TARGET=full
+    BUILD_EXPECTATIONS=()
+    declare_build_capability_contract "$plain_target" ESP32_PLATFORM
+    [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.espnow=_ZN12ESPNowBridge5beginEv"* ]] \
+      || fail "$plain_target Full image does not require a linked ESP-NOW driver"
+  )
+done
+for existing_target in Heltec_v2_repeater_bridge_espnow \
+    Station_G2_repeater_observer_mqtt; do
+  PLATFORMIO_BUILD_FLAGS=""
+  apply_esp32_full_shared_bridge_profile "$existing_target"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DWITH_ESPNOW_BRIDGE=1"* ]] \
+    || fail "$existing_target existing bridge source was dropped"
+  [[ "$PLATFORMIO_BUILD_FLAGS" != *"ESPNOW_BRIDGE_MERGED"* ]] \
+    || fail "$existing_target lost historical bridge-on behavior"
+done
+for excluded_target in heltec_v4_sensor heltec_v4_tft_room_server \
+    heltec_v4_tft_companion_radio_full RAK_4631_repeater; do
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_SRC_FILTER=""
+  apply_esp32_full_shared_bridge_profile "$excluded_target"
+  [ -z "$PLATFORMIO_BUILD_FLAGS$PLATFORMIO_BUILD_SRC_FILTER" ] \
+    || fail "$excluded_target acquired unsupported ESP32 repeater bridge wiring"
+done
+(
+  ESP32_FULL_BUILD=0
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_SRC_FILTER=""
+  apply_esp32_full_shared_bridge_profile heltec_v4_tft_repeater
+  [ -z "$PLATFORMIO_BUILD_FLAGS$PLATFORMIO_BUILD_SRC_FILTER" ] \
+    || fail "standard repeater acquired the expanded Full ESP-NOW overlay"
+)
+for primary_flag in MESH_PRIMARY_ESPNOW MESH_ESPNOW_RADIO; do
+  (
+    pio_env_option_contains() { [ "$3" = "$primary_flag" ]; }
+    PLATFORMIO_BUILD_FLAGS=""
+    PLATFORMIO_BUILD_SRC_FILTER=""
+    if supports_esp32_full_shared_espnow heltec_v4_tft_repeater; then
+      fail "$primary_flag radio acquired a second conflicting SDK owner"
+    fi
+    apply_esp32_full_shared_bridge_profile heltec_v4_tft_repeater
+    [ -z "$PLATFORMIO_BUILD_FLAGS$PLATFORMIO_BUILD_SRC_FILTER" ] \
+      || fail "$primary_flag primary radio acquired the secondary bridge overlay"
+  )
+done
+
+# The TFT's normal Full image now owns ESP-NOW without an observer recipe.
+# Canonical selection must replace the sibling in either input order.
+for plain_target in heltec_v4_tft_repeater Meshadventurer_sx1262_repeater; do
+  espnow_target=${plain_target}_bridge_espnow
+  if get_unified_full_infrastructure_target "$espnow_target" >/dev/null; then
+    fail "$espnow_target unexpectedly acquired a combined observer recipe"
+  fi
+  [ "$(select_ordinary_full_targets "$plain_target" "$espnow_target")" \
+      = "$plain_target" ] \
+    || fail "$plain_target did not replace its dedicated ESP-NOW image"
+  [ "$(select_ordinary_full_targets "$espnow_target" "$plain_target")" \
+      = "$plain_target" ] \
+    || fail "$plain_target input order changed the combined ESP-NOW selection"
+  [ "$(get_merged_espnow_repeater_replacement "$espnow_target")" = "$plain_target" ] \
+    || fail "$plain_target ESP-NOW legacy target did not map to its combined Full image"
+done
+[ "$(get_unified_full_infrastructure_target Heltec_v3_repeater_bridge_espnow)" \
+    = Heltec_v3_repeater_observer_mqtt ] \
+  || fail "Heltec V3 lost its same-board combined observer recipe"
+[ "$(select_ordinary_full_targets Heltec_v3_repeater \
+    Heltec_v3_repeater_bridge_espnow Heltec_v3_repeater_observer_mqtt)" \
+    = Heltec_v3_repeater ] \
+  || fail "Heltec V3 retained duplicate ESP-NOW/observer Full images"
+[ "$(select_ordinary_full_targets MKE_s3_repeater MKE_s3_repeater_bridge_espnow)" \
+    = MKE_s3_repeater ] \
+  || fail "MKE S3 retained a duplicate ESP-NOW image after merging its sources"
+[ "$(select_ordinary_full_targets MKE_s3_repeater_bridge_espnow MKE_s3_repeater)" \
+    = MKE_s3_repeater ] \
+  || fail "MKE S3 bridge input order changed its canonical Full image"
+tlora_normal=LilyGo_TLora_V2_1_1_6_repeater
+tlora_observer=${tlora_normal}_observer_mqtt_
+tlora_espnow=${tlora_normal}_bridge_espnow
+[ "$(get_ordinary_full_group_key "$tlora_normal")" \
+    != "$(get_ordinary_full_group_key "$tlora_observer")" ] \
+  || fail "TLora RAM exception collapsed its independent UART and MQTT Full groups"
+for tlora_order in normal-first observer-first bridge-first; do
+  case "$tlora_order" in
+    normal-first) tlora_candidates=("$tlora_normal" "$tlora_observer" "$tlora_espnow") ;;
+    observer-first) tlora_candidates=("$tlora_observer" "$tlora_espnow" "$tlora_normal") ;;
+    bridge-first) tlora_candidates=("$tlora_espnow" "$tlora_normal" "$tlora_observer") ;;
+  esac
+  mapfile -t tlora_selected < <(select_ordinary_full_targets "${tlora_candidates[@]}")
+  [ "${#tlora_selected[@]}" = 2 ] \
+    || fail "TLora $tlora_order did not retain exactly two capacity-safe Full images"
+  [[ " ${tlora_selected[*]} " == *" $tlora_normal "* ]] \
+    || fail "TLora $tlora_order discarded its UART Full image"
+  [[ " ${tlora_selected[*]} " == *" $tlora_observer "* ]] \
+    || fail "TLora $tlora_order discarded its MQTT Full image"
+  [[ " ${tlora_selected[*]} " != *" $tlora_espnow "* ]] \
+    || fail "TLora $tlora_order retained the replaced dedicated ESP-NOW image"
+done
 ESP32_FULL_BUILD=0
 PLATFORMIO_BUILD_FLAGS=""
 PLATFORMIO_BUILD_SRC_FILTER=""
@@ -1056,17 +1472,24 @@ uses_merged_standard_usb_logging esp_repeater \
 # were dead ends.
 verify_esp32_field_browser_ota() {
   local env_name=$1
+  local minimal_lora_ota=${2:-0}
   local PLATFORMIO_BUILD_FLAGS=""
   local PLATFORMIO_BUILD_UNFLAGS=""
   local BUILD_PROFILE_FOR_TARGET=standard
   local ESP32_FULL_BUILD=0
+  local MESHDEBUG_OVERRIDE=off
+  local PACKET_LOGGING_OVERRIDE=off
+  local MQTT_BRIDGE_OVERRIDE=off
+  local FIRMWARE_FILENAME_INFIX=""
+  local PIO_CONFIG_JSON='[]'
   local -a BUILD_CAPABILITIES=()
   local -a BUILD_REDUCTIONS=()
   local -a BUILD_EXPECTATIONS=()
-  local capabilities reductions expectations
+  local capabilities reductions expectations compact_flag
 
   PIO_ENV_PLATFORM_BY_NAME[$env_name]=ESP32_PLATFORM
-  PIO_ENV_OTA_BY_NAME[$env_name]=0
+  PIO_ENV_OTA_BY_NAME[$env_name]=$minimal_lora_ota
+  apply_lora_ota_override "$env_name"
   apply_esp32_lora_ota_size_profile "$env_name"
 
   [[ "$PLATFORMIO_BUILD_FLAGS" == *-DLIGHTWEIGHT_WIFI_OTA=1* ]] \
@@ -1086,11 +1509,46 @@ verify_esp32_field_browser_ota() {
   expectations=" ${BUILD_EXPECTATIONS[*]} "
   [[ "$expectations" == *"web.lightweight_browser_ota=MeshCore firmware update"* ]] \
     || fail "$env_name does not verify browser OTA in the linked image"
+  for compact_flag in ED25519_COMPACT_BASE ED25519_COMPACT_SHA512 OTA_TARGET_NAME_FRONT_CODED; do
+    if [ "$minimal_lora_ota" = 1 ]; then
+      [[ "$PLATFORMIO_BUILD_FLAGS" == *"-D${compact_flag}=1"* ]] \
+        || fail "$env_name did not enable its feature-preserving flash trim"
+    else
+      [[ "$PLATFORMIO_BUILD_FLAGS" != *"${compact_flag}"* ]] \
+        || fail "$env_name changed the ordinary standard implementation"
+    fi
+  done
+  if [ "$minimal_lora_ota" = 1 ]; then
+    [[ "$PLATFORMIO_BUILD_FLAGS" == *-DENABLE_OTA=1* \
+       && "$PLATFORMIO_BUILD_FLAGS" == *-DOTA_FLASH_STORE=1* \
+       && "$PLATFORMIO_BUILD_FLAGS" == *-DOTA_FOLDER_SERIAL* ]] \
+      || fail "$env_name removed a LoRa OTA or USB seeding feature to fit"
+    [[ "$expectations" == *"ota.update.lora=image_hash MISMATCH after decode"* \
+       && "$expectations" == *"ota.cli=OTA: status"* ]] \
+      || fail "$env_name stopped verifying its LoRa OTA implementation"
+  fi
 }
 
 verify_esp32_field_browser_ota heltec_v4_repeater
 verify_esp32_field_browser_ota heltec_v4_room_server
 verify_esp32_field_browser_ota heltec_v4_sensor
+verify_esp32_field_browser_ota heltec_v4_repeater_lora_ota_no_external_sensors 1
+verify_esp32_field_browser_ota heltec_v4_room_server_lora_ota_no_external_sensors 1
+
+# The new storage representation is confined to portable ESP32 minimal OTA
+# artifacts. Full images and other platforms retain their existing policies.
+(
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_UNFLAGS=""
+  BUILD_PROFILE_FOR_TARGET=full
+  ESP32_FULL_BUILD=1
+  apply_esp32_lora_ota_size_profile heltec_v4_repeater_lora_ota_no_external_sensors
+  [ -z "$PLATFORMIO_BUILD_FLAGS" ] || fail "Full image received portable flash trims"
+  BUILD_PROFILE_FOR_TARGET=standard
+  ESP32_FULL_BUILD=0
+  apply_esp32_lora_ota_size_profile nrf_repeater_lora_ota_no_external_sensors
+  [ -z "$PLATFORMIO_BUILD_FLAGS" ] || fail "nRF52 image received ESP32 portable flash trims"
+)
 
 # Personal/attached roles can retain their established transport policy; the
 # fail-safe is deliberately scoped to remotely installed field/server images.
@@ -1355,9 +1813,95 @@ fi
   || fail "T096 RS232 bridge did not map to merged repeater"
 is_redundant_bulk_build_target Heltec_v3_repeater_bridge_rs232 \
   || fail "merged RS232 bridge remained in canonical bulk builds"
+[ "$(get_merged_rs232_repeater_replacement MKE_s3_repeater_bridge_rs232)" \
+    = MKE_s3_repeater ] \
+  || fail "MKE S3 RS232 bridge did not map to its merged repeater"
+is_supported_build_env MKE_s3_repeater_bridge_rs232 \
+  || fail "MKE S3 legacy RS232 target stopped being directly buildable"
+[ "$(get_pio_build_env MKE_s3_repeater_bridge_rs232)" \
+    = MKE_s3_repeater_bridge_rs232 ] \
+  || fail "MKE S3 direct legacy build lost its bridge-on recipe"
+is_redundant_bulk_build_target MKE_s3_repeater_bridge_rs232 \
+  || fail "MKE S3 dedicated RS232 image remained in canonical bulk builds"
+if is_redundant_bulk_build_target MKE_s3_repeater; then
+  fail "MKE S3 canonical repeater was omitted"
+fi
+is_redundant_bulk_build_target MKE_s3_repeater_bridge_espnow \
+  || fail "MKE S3 dedicated ESP-NOW image remained beside its combined repeater"
+[ "$(get_merged_espnow_repeater_replacement MKE_s3_repeater_bridge_espnow)" \
+    = MKE_s3_repeater ] \
+  || fail "MKE S3 ESP-NOW bridge did not map to its merged repeater"
+is_supported_build_env MKE_s3_repeater_bridge_espnow \
+  || fail "MKE S3 legacy ESP-NOW target stopped being directly buildable"
+[ "$(get_pio_build_env MKE_s3_repeater_bridge_espnow)" \
+    = MKE_s3_repeater_bridge_espnow ] \
+  || fail "MKE S3 direct legacy ESP-NOW build lost its bridge-on recipe"
+(
+  SUPPORTED_PIO_ENVS=(
+    MKE_s3_repeater
+    MKE_s3_repeater_bridge_rs232
+    MKE_s3_repeater_bridge_espnow
+  )
+  [ "$(resolve_all_firmwares)" \
+      = MKE_s3_repeater ] \
+    || fail "MKE S3 bulk inventory did not consolidate both bridge images"
+  [ "$(resolve_repeater_firmwares)" \
+      = MKE_s3_repeater ] \
+    || fail "MKE S3 repeater inventory retained dedicated bridge images"
+  [ "$(resolve_full_esp32_firmwares)" \
+      = MKE_s3_repeater ] \
+    || fail "MKE S3 Full ESP32 inventory retained dedicated bridge images"
+)
+
+# A hardcoded merged-role recommendation is insufficient if its normal
+# recipe no longer exists, cannot supply Full, or belongs to another board.
+# Isolate these metadata faults so a future observer cannot mask the guard.
+for replacement_fault in missing full board; do
+  (
+    normal_target=MKE_s3_repeater
+    bridge_target=MKE_s3_repeater_bridge_espnow
+    PIO_ENV_PLATFORM_BY_NAME[$normal_target]=ESP32_PLATFORM
+    PIO_ENV_FULL_BUILD_BY_NAME[$normal_target]=1
+    PIO_ENV_BOARD_BY_NAME[$normal_target]=mke-test-board
+    PIO_ENV_PLATFORM_BY_NAME[$bridge_target]=ESP32_PLATFORM
+    PIO_ENV_FULL_BUILD_BY_NAME[$bridge_target]=1
+    PIO_ENV_BOARD_BY_NAME[$bridge_target]=mke-test-board
+    for candidate in "$normal_target" "${normal_target}_mqtt" \
+        "${normal_target}_observer_mqtt" "${normal_target}_observer_mqtt_"; do
+      PIO_ENV_MQTT_BY_NAME[$candidate]=0
+    done
+    case "$replacement_fault" in
+      missing) unset 'PIO_ENV_PLATFORM_BY_NAME[MKE_s3_repeater]' ;;
+      full) PIO_ENV_FULL_BUILD_BY_NAME[$normal_target]=0 ;;
+      board) PIO_ENV_BOARD_BY_NAME[$normal_target]=different-board ;;
+    esac
+    [ "$(get_ordinary_full_group_key "$bridge_target")" \
+        = 'mke-test-board|mke_s3_repeater_bridge_espnow' ] \
+      || fail "MKE S3 $replacement_fault replacement incorrectly suppressed its bridge"
+  )
+done
 if is_redundant_bulk_build_target wio-e5-repeater_bridge_rs232; then
   fail "capacity-constrained Wio-E5 RS232 bridge was incorrectly merged"
 fi
+
+(
+  BUILD_PROFILE_FOR_TARGET=full
+  for uart_target in Heltec_v3_repeater Heltec_WSL3_repeater RAK_3112_repeater \
+      LilyGo_TLora_V2_1_1_6_repeater; do
+    BUILD_EXPECTATIONS=()
+    declare_build_capability_contract "$uart_target" ESP32_PLATFORM
+    [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.rs232=_ZN11RS232Bridge5beginEv"* ]] \
+      || fail "$uart_target Full contract omitted the linked UART driver"
+    [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.espnow=_ZN12ESPNowBridge5beginEv"* ]] \
+      || fail "$uart_target Full contract omitted the linked ESP-NOW driver"
+  done
+  BUILD_EXPECTATIONS=()
+  declare_build_capability_contract LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ ESP32_PLATFORM
+  [[ " ${BUILD_EXPECTATIONS[*]} " != *"bridge.rs232="* ]] \
+    || fail "TLora MQTT capacity exception falsely promised a linked UART driver"
+  [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.espnow=_ZN12ESPNowBridge5beginEv"* ]] \
+    || fail "TLora MQTT capacity exception omitted its linked ESP-NOW driver"
+)
 
 # A WiFi base's final -UENABLE_OTA must not win over the Full Companion's
 # source-only OTA overlay. That mismatch compiles out both the TCP terminal and

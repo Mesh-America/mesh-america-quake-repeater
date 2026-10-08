@@ -7,6 +7,7 @@
 #if defined(ESP32_PLATFORM)
 #include <errno.h>
 #include <sys/stat.h>
+#include <helpers/esp32/BootFilePresence.h>
 #endif
 
 namespace mesh { namespace ota {
@@ -36,6 +37,10 @@ bool pathPresence(const char* path, bool& present) {
   char vfs_path[48];
   const int length = snprintf(vfs_path, sizeof(vfs_path), "/spiffs%s", path);
   if (length < 0 || static_cast<size_t>(length) >= sizeof(vfs_path)) return false;
+  if (esp32BootFileKnownAbsent(settings_fs, path)) {
+    present = false;
+    return true;
+  }
   struct stat info;
   const int result = ::stat(vfs_path, &info);
   if (result != 0 && errno != ENOENT) return false;

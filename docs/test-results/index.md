@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Test Results
 
 Completed validation reports, experiments, and test guides are collected here. Older page addresses redirect to these copies. Results are tied to the hardware and firmware versions named in each report; they do not automatically qualify a newer build.

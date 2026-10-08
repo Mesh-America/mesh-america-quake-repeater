@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/firmware_picker/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Firmware picker
 
 Each result now includes **Restore your settings after flashing**. Its commands
@@ -8,27 +12,34 @@ MQTT and GPS show their app/WebConfig steps instead. See
 The [USB web console](https://flasher.meshcore.io/console) works with the
 default ASCII terminal on USB Companion and infrastructure roles.
 
-Pick the choices in any order. Every selection narrows all the other controls
-to firmware combinations that were actually built in the current release set.
+Pick the choices in any order. The controls stay limited to compatible
+firmware combinations that were actually built in the current release set.
+The result count stays visible while you scroll through the filters on a phone.
+Once the exact board and role are selected, the picker skips logging,
+connection, and profile choices that all select the same firmware. Logging
+settings move into **Restore your settings after flashing** beneath the files.
+Choices that select different images remain visible.
 The optional chip-family filter (ESP32, nRF52, RP2040, or STM32) can narrow the
 hardware list first. You can skip it: picking hardware fills it in automatically.
 Chip family and hardware are the only dropdowns. All remaining choices use
 buttons. **Firmware profile** combines OTA support, Full/standard, and sensor
-or storage differences in one choice.
+or storage differences when a choice between different images is needed.
 
 The picker reads public release metadata from GitHub. It does not upload device
 information. Hardware names, target names, and download links come directly
 from the published firmware assets.
 
-<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.8-runtime-1" data-bootloaders-url="../_data/bootloader_manifest.json?v=20261002-1" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
+<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.9-88c85108" data-bootloaders-url="../_data/bootloader_manifest.json?v=20261002-1" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
   <div class="firmware-picker-intro" role="note">
     <strong>Current release set</strong>
     <p data-role="release-set">Loading release information...</p>
     <p>
-      For a new installation, choose the exact board and role, prefer a
-      <strong>FULL / complete profile</strong> when it is available, and select
-      <strong>Full install / layout migration (merged .bin)</strong>. Narrower profiles
-      remain available when their reduced transport or feature set is intentional.
+      For a new installation, choose the exact board and role, and select
+      <strong>Full install / layout migration (merged .bin)</strong>. Current ESP32
+      releases combine the supported features in Full; use runtime settings to
+      choose the active transports. Where separate profiles remain, prefer
+      <strong>FULL / complete</strong> when it meets your update and hardware
+      requirements. Other chip families retain their qualified profiles.
     </p>
     <p>
       Upgrading an existing ESP32 infrastructure node from a smaller partition
@@ -51,6 +62,14 @@ from the published firmware assets.
   </p>
 
   <form class="firmware-picker-form" data-role="form">
+    <div class="firmware-picker-feedback firmware-picker-wide" data-role="filter-feedback" hidden>
+      <div aria-live="polite" aria-atomic="true">
+        <strong data-role="filter-count"></strong>
+        <p data-role="filter-note"></p>
+      </div>
+      <a data-role="view-results" hidden>View files</a>
+    </div>
+
     <details class="firmware-picker-chip-family firmware-picker-wide">
       <summary data-role="chip-family-summary">Optional: chip family</summary>
       <p id="firmware-picker-chip-help">Skip this if you know your board. Picking hardware selects its chip family automatically. Choose Any to clear this filter.</p>
@@ -168,7 +187,7 @@ from the published firmware assets.
 | USB logging / USB-connected MQTT | Node remains attached to a computer over a data-capable USB cable |
 | Wi-Fi MQTT observer | Firmware connects directly to MQTT over Wi-Fi; this is not USB logging |
 | USB logging + Wi-Fi MQTT | Unified FULL image sends to both paths; avoid two publishers aimed at the same broker unless messages are deduplicated |
-| No logging | Normal standalone operation without the dedicated logging/MQTT profile |
+| No logging | Normal standalone operation with external logging output disabled |
 | Receives LoRa OTA | Repeater, room server, or sensor image that can stage an exact matching update received over LoRa; any sensor/storage tradeoff appears on the same Firmware profile button |
 | Receives LoRa OTA - Reduced optional sensors | Compact OTA image that omits selected optional environmental/ranging drivers while retaining generic I2C and supported board peripherals |
 | Reduced sensors + LoRa OTA | Qualified nRF52 repeater, room server, or sensor build with the reduced optional sensor recipe and LoRa OTA retained |
@@ -181,19 +200,28 @@ Ethernet transports.
 Normal repeater firmware includes runtime-controlled RS-232 support where the
 board has room; use `set bridge.enabled on` after configuring `bridge.uart` and
 `bridge.baud`. The Wio-E5 remains the capacity exception and offers a separate
-RS-232 image. Choose Wi-Fi MQTT under **Logging / MQTT**; it is an output mode,
-not a second connection choice. Repeaters may still offer separate ESP-NOW or
-Ethernet bridge firmware because those paths use different compiled drivers.
+RS-232 image. Choose Wi-Fi MQTT in the result's saved logging settings when
+it shares the Full image; separate MQTT images retain a **Logging / MQTT**
+filter. Full ESP32 LoRa repeaters include runtime
+ESP-NOW when capacity permits; dedicated ESP-NOW images remain for measured
+capacity exceptions. Ethernet still needs its exact hardware recipe.
 
 For commands and option explanations, follow the
 [ESP-NOW bridge setup guide](espnow_bridge_setup.md).
 
 An ESP-NOW bridge target keeps LoRa as its primary mesh radio. Expanded ESP32
-Full repeater and room-server images combine ESP-NOW with WiFi MQTT in the
-same firmware. MQTT and ESP-NOW are independent runtime transports: use
-`set mqtt.enabled on|off` for MQTT and `set bridge.enabled on|off` (or
-`set espnow.enabled on|off`) for ESP-NOW, so either or both can run. Both use
-one 2.4 GHz radio, so when both are enabled the ESP-NOW bridge channel must
+Full LoRa repeaters include ESP-NOW, including boards without an MQTT
+recipe. Existing MQTT-backed Full repeater and room-server images combine
+both transports. Use `set espnow.enabled on|off` for ESP-NOW and, where
+supported, `set mqtt.enabled on|off` for MQTT. Newly combined ordinary
+repeaters start with ESP-NOW off until explicitly enabled, including the first
+upgrade from unmarked legacy preferences. Later reboots preserve that setting.
+On combined RS-232 boards without MQTT, `bridge.enabled` controls the UART.
+Full Heltec V3, WSL3 and RAK3112 MQTT images also retain RS-232;
+use `set rs232.enabled on|off` and `get rs232.running` for their independent
+UART. T-LoRa V2.1 keeps two Full choices due to its internal RAM limit:
+the normal repeater has UART plus ESP-NOW, and the observer has MQTT plus
+ESP-NOW. MQTT and ESP-NOW use one 2.4 GHz radio, so when both are enabled the ESP-NOW bridge channel must
 match the connected WiFi access point's fixed channel. ESP-NOW-only mode does
 not require WiFi credentials. Its runtime
 `bridge.format` setting chooses the peer protocol: `wrapped` (the
@@ -203,8 +231,8 @@ backward-compatible bridge-to-bridge default using `bridge.secret`) or `raw`
 firmware choice, not two board images. Match `bridge.channel` to the primary
 nodes' `espnow.channel` before selecting `set bridge.format raw`.
 For Heltec V4 specifically, `companion_radio_full` is still a LoRa-primary
-Companion; choose the existing `heltec_v4_repeater_bridge_espnow` firmware to
-make that board the LoRa/ESP-NOW gateway. Use its exact merged artifact when
+Companion; choose the combined `heltec_v4_repeater` Full firmware and enable
+ESP-NOW to make that board the LoRa/ESP-NOW gateway. Use its exact merged artifact when
 changing roles or partition layouts.
 
 ## Share a selection
@@ -236,15 +264,18 @@ settings** button creates a public website link that other people can open.
 
 ## FULL versus standard
 
-For a new installation, use the FULL / complete profile when it exists and the
-board has enough flash. FULL profiles keep the complete supported feature set
-and CLI. Standard profiles remain useful for boards without a FULL build, for
-an intentionally narrower transport, or when retaining an existing compatible
-partition layout.
+Current ESP32 ordinary releases use one Full / complete image per exact board
+and role. Full keeps the supported feature set and CLI; runtime switches select
+USB, Bluetooth, Wi-Fi, logging, and other qualified features. Separate portable,
+minimal, and single-transport ESP32 images are installation/recovery recipes,
+not additional ordinary release choices. The documented T-LoRa UART/MQTT RAM
+split remains two Full images. Other chip families retain their qualified
+capacity and sensor-profile choices.
 
-Changing between standard and FULL ESP32 layouts requires a partition migration.
+Moving an older ESP32 installation to an expanded Full layout requires a
+partition migration.
 Use the exact-board merged image over USB, or a supported exact board and role
-staged migration ZIP from the [utility release](https://github.com/mikecarper/MeshCore/releases/tag/utility-v1.17.1.8-halo-keymind-cascade-dev-9053038f).
+staged migration ZIP from the [utility release](https://github.com/mikecarper/MeshCore/releases/tag/utility-v1.17.1.9-halo-keymind-cascade-dev-88c85108).
 Read that ZIP's README before choosing the Wi-Fi or LoRa route. Do not send a
 loose app-only Full `.bin` directly to an older layout: the running application
 cannot move its own active and inactive partitions. Run
@@ -255,16 +286,25 @@ guess cannot confirm the installed layout. See the
 that command.
 
 Current `full-usb-wifi` profiles use one binary for no external output, USB
-packet logging/USB-connected MQTT, direct WiFi MQTT, or both. The picker shows
-that same exact binary for each compatible logging choice; select the saved
+packet logging/USB-connected MQTT, direct WiFi MQTT, or both. The picker skips
+the logging filter when these modes use the same file; select the saved
 runtime mode with `set logging.output off|usb|wifi|both`. A FULL logging-fallback
-profile is listed only when no WiFi MQTT sibling exists; it appears for both
-the no-output and USB choices because `set usb.logging off|on` is persistent.
+profile is listed only when no WiFi MQTT sibling exists; it supports both
+the no-output and USB settings because `set usb.logging off|on` is persistent.
 On a fresh unified FULL install with no saved SSID, the setup AP and WiFi radio
 remain available for 30 minutes per boot, then turn off automatically until the
 next reboot or power cycle. An explicit administrator `start webconfig` remains
 available as an override. A saved SSID switches to the normal indefinite
 reconnect behavior instead.
+
+Fresh ESP32 Full infrastructure defaults to USB logging off. Existing saved
+logging and device power-saving settings survive an update. Automatic
+unconfigured boot setup also pauses network-bridge retries until an explicit
+bridge start, allowing its radio to turn off when the AP closes. Manual
+WebConfig/WiFi starts preserve an explicitly enabled ESP-NOW bridge, including
+when the master radio switch restores the selected services. Compact OTA
+images scan before raising a new AP and verify live driver readiness before
+reporting the update URL.
 
 Full Companion profiles use one binary for USB, BLE, ordinary Wi-Fi on ESP32,
 source-only LoRa OTA, Terminal Chat, optional USB packet logging, and any
@@ -427,7 +467,9 @@ buttons. They separate revisions, display type, expansion kit, radio/PA layout,
 pin map, and other physical differences without crowding the Hardware dropdown.
 **Firmware profile** buttons combine OTA support, Full/standard, and choices
 that need a different image or wiring, such as serial port or external storage.
-Future nRF52 repeater, room-server and sensor releases publish two separately
+The picker skips this step when all available profile choices lead to the
+same firmware file.
+The 1.17.1.9 nRF52 repeater, room-server and sensor releases publish two separately
 qualified choices: **Reduced sensors + LoRa OTA** and
 **Full supported sensors + LoRa OTA**, with `-reduced-ota` and `-full-ota` artifact suffixes. Each keeps
 its exact board/role OTA identity and storage layout; the suffix is not a new
@@ -474,7 +516,7 @@ retains its optional dedicated interface `02`.
 Exact filename search finds compatibility images included in the selected
 release family. For older releases, open their GitHub release pages.
 
-The 1.17.1.8 public matrix keeps one ESP32 Full image per board and role.
+The current public matrix keeps one ESP32 Full image per board and role.
 Some richer images, including Station G2 Full, retain an observer-named OTA
 identity. Exact older identities needed by a partition migration are packaged
 inside that board and role's migration ZIP instead of adding a second ordinary
@@ -482,8 +524,8 @@ Full download. A deliberate target-ID override does not make a different
 partition layout or physical board compatible.
 
 Some normal ESP32 roles begin in the legacy 1.25 MiB dual-OTA layout but have
-a Full image with larger slots. The 1.17.1.8 utility release contains 94 exact
-board and role migration ZIPs. Each package checks its source layout and target
+a Full image with larger slots. The utility release lists the exact
+board and role migration ZIPs available for that release. Each package checks its source layout and target
 identity, contains the bridge and Full application files for its supported
 routes, and documents what saved data it preserves. Use the package's own Full
 application after the bridge; do not substitute a loose Full image with a

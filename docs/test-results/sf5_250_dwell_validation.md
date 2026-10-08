@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/sf5_250_dwell_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SF5 / 250 kHz: four-channel dwell sweep
 
 Measured 2026-09-14. **No tested dwell from 4.1 through 8.1 chirps passed.**

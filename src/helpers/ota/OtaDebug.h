@@ -1,12 +1,12 @@
 #pragma once
 
 // Opt-in OTA tracing over Serial: build with -D OTA_DEBUG to watch the fetch (ADV/REQ/block/page-flush)
-// during bring-up. Compiles to nothing otherwise, and on the native host (no Arduino), so it never
+// during bring-up, with usb.logging and usb.debug enabled. Compiles to nothing otherwise, and on the native host (no Arduino), so it never
 // touches a non-debug or test build.
 #if defined(OTA_DEBUG) && defined(ARDUINO)
   #include <Arduino.h>
   #include <helpers/UsbLogging.h>
-  #define OTA_DBG(...) do { if (mesh::isUsbLoggingEnabled()) { mesh::usbLoggingPort().printf(__VA_ARGS__); } } while (0)
+  #define OTA_DBG(...) do { if (mesh::isUsbDebugLoggingEnabled()) { mesh::usbLoggingPort().printf(__VA_ARGS__); } } while (0)
 #else
   #define OTA_DBG(...) do {} while (0)
 #endif

@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/companion_radio_full/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Full Companion
 
 Configure message alerts with the [Companion notification builder](notifications.md).
@@ -46,6 +50,86 @@ a busy radio rollback remains pending for recovery instead of reporting success.
 | Ethernet Companion | On targets with an Ethernet module | On RAK4631 with RAK13800 |
 | LoRa self-update | No | No |
 | Optional self-update | WiFi on existing dual-app layouts; USB on single-app layouts | Bluetooth DFU with a compatible bootloader; USB always supported |
+
+### Screenless nRF52 spoken button confirmations
+
+Full Companion builds for T1000-E, RAK WisMesh Tag, MeshTracker X1,
+Muziworks R1 Neo and ThinkNode M3 use prerecorded spoken confirmations for
+their shared single-button controls. Other roles, legacy USB/BLE-only builds,
+screened boards and all Wio profiles retain their existing audio behavior.
+Set `MESH_GPS_VOICE=0` at build time to retain tones on an eligible Full build.
+
+| User-button gesture | Action / spoken confirmation |
+| --- | --- |
+| One press | Acknowledge an active notification: "Notification cleared"; otherwise "Ready" |
+| Two presses | "Advert queued" or "Advert failed" |
+| Three presses | "Sound on" or "Sound off" after the preference is saved |
+| Four presses | "GPS on" or "GPS off" when the GPS setting is available |
+| Hold more than three seconds | "Shutting down"; shutdown remains nonblocking while audio drains |
+| Hold during the first eight seconds of UI startup | "USB setup" for terminal/rescue mode |
+
+MeshTracker X1's three-press gesture instead cycles "Sound and vibration",
+"Sound only", "Vibration only", and "Silent". The new setting must save before
+either live alert output changes. A failed save restores both preferences and
+announces "Action failed". An explicit mute or alert-mode change permits one
+courtesy confirmation without unmuting ordinary notifications. The four
+additional mode clips are compiled only for `HAS_DRV2605` builds.
+Notification timers cannot cancel control speech, and the committed alert
+mode remains authoritative for vibration even if a notification-mask save fails.
+
+Power-on and wake wiring remain board-specific. Speech is nonblocking and uses
+the existing nRF52 PWM player; each buzzer still needs a physical listening
+test for intelligibility. All spoken button, alert-mode and GPS recordings use
+Microsoft Zira Desktop with the selected compressed Companion voice profile.
+GPS on/off use three stored audio spans: one shared encoded GPS prefix and two
+phrase tails. Advert queued/failed also share an identical encoded prefix;
+Sound off/Sound only share one only on `HAS_DRV2605` boards. The tails are not
+independently decodable words. Playback treats each prefix and tail as one
+continuous compressed stream, without resetting its codec, bit position,
+interpolation or DMA at the seam. The approved full-phrase PCM and PWM output
+remain bit-for-bit identical, including pronunciation and pauses.
+
+The IMA audio payload is 3,881 bytes smaller on ordinary voice boards, or
+4,971 bytes smaller on vibration-equipped boards, before the small segmented
+descriptor/decoder overhead. Tiny shared silence prefixes are not split.
+A representative Cortex-M4 GCC 14.2 size-optimized/LTO player-and-catalog
+build saves 3,732 or 4,792 bytes respectively after that overhead; final
+firmware savings can vary with toolchain and surrounding code.
+The existing generators still synthesize the two complete GPS phrases and
+button confirmations, then share byte-identical encoded prefixes; they do not
+try to identify word boundaries or splice independently spoken words. Windows
+Zira synthesis still requires Windows' local `System.Speech` tooling.
+R1 Neo's buzzer pin aliases its optional QSPI clock, so voice is
+not default-enabled when `QSPIFLASH` is selected. ThinkNode M4 is deliberately
+excluded: its former
+buzzer definitions incorrectly claimed I2C SDA and a battery-status LED, not
+verified audio hardware. Its Companion recipes no longer drive those pins as
+a buzzer.
+
+The optional ESP32 RC32-without-display recipe is not part of this nRF52
+extension: its fitted audio hardware needs verification and its `ui-new`
+controls require an ESP32 playback backend, not the nRF52 PWM player.
+
+#### Experimental G.726 speech
+
+Ordinary builds still use the approved Zira IMA recordings. G.726 is a hardware
+test option only: set both `MESH_BUTTON_AUDIO_HIL=1` and
+`MESH_GPS_VOICE_G726_BITRATE=16` or `24`. Invalid bitrates or a missing test gate
+are rejected. The generated catalog selects exactly one bitrate, retains the
+original sample counts, and omits the X1-only mode prompts on other boards.
+
+The decoder needs 52 bytes of state, no heap or full-clip buffer, and about
+1.2 KiB of Cortex-M4 code/tables. Its packing, resets and PWM lifecycle are
+checked against independently pinned FFmpeg output. At 24 kbps the audio
+payload is 25% smaller; at 16 kbps it is 50% smaller with more waveform error.
+Neither software comparisons nor successful builds qualify physical buzzer
+intelligibility or the refill deadline under Bluetooth/radio load.
+
+`scripts/generate_g726_voice.py` regenerates both experimental catalogs from
+the approved mono 8 kHz Zira WAVs using FFmpeg's MSB-first `g726` encoder.
+Production IMA headers cannot be selected as its output. The decoder's Sun
+provenance, attributed FFmpeg MIX interpolation and LGPL license are retained
+in `src/helpers/ui/g726`; no claim of independent ITU conformance is made.
 
 ### nRF52 Bluetooth reconnect qualification
 
@@ -478,13 +562,44 @@ or UART backpressure pauses the contact stream; a frame may drain through a
 smaller hardware FIFO in ordered chunks, but its remainder is retained and no
 later frame can interleave with it or cause it to be discarded.
 
+Binary login, status, telemetry, path-discovery, binary-request, and trace
+results also have bounded producer retention when that transport queue is
+full. One request result and one trace result can wait independently, on their
+original captured interfaces. Their required `SENT` frames are retained and
+admitted before the final result. A first valid radio result gets up to ten
+seconds for whole-frame queue admission; a still-blocked `SENT` keeps its
+earlier ten-second deadline. Duplicate callbacks cannot replace the retained
+result or extend these deadlines. Disconnect, cancellation, or expiry drops
+an unadmitted result. Queue admission is not proof of physical host receipt.
+
+Reflected request tags are matched against the complete peer public key.
+Recent request and trace history has eight slots each, reserved before radio
+transmission; live entries are never evicted to accept a newer request. A full
+history or a quarantined identifier returns `ERR_BAD_STATE`, so clients must
+back off. Retired reflected tags and trace tag/auth tuples are suppressed for
+at least ten seconds and through the original radio deadline plus ten seconds
+when longer. Login retries to the same peer have at least a thirty-second
+quarantine. Positively matched newer status/telemetry/binary replies still work
+after login, but otherwise unsolicited responses from that login peer can be
+suppressed during the quarantine.
+
+These guards are finite and clear at reboot. Login replies carry a server
+timestamp, not an echoed request nonce; sufficiently late replies or a
+timestamp collision cannot always be distinguished without a protocol change.
+Trace tag/auth fields are correlation data, not cryptographic authentication.
+The guards do not authenticate a host process or retract frames already
+accepted by a transport. In particular, the same-IP TCP queue replay described
+above remains unchanged, including its lack of authentication.
+
 When a BLE client requests pairing, a display-equipped build wakes the screen,
 switches to the first home page, and keeps the active six-digit PIN visible
 until Bluetooth connects or the two-minute pairing window expires. USB, WiFi,
 Ethernet, and hardware-serial connections do not suppress this screen. With no
 saved BLE PIN, display builds generate a new PIN at boot; builds without a
-physical display use `123456`. A PIN saved through the Companion protocol takes
-effect after reboot.
+physical display use `123456`. Use `set pin 654321` in the Companion CLI to save
+a fixed pairing PIN, then `reboot` to activate it. `set pin 0` restores the
+default/generated PIN policy. A PIN saved through the Companion protocol also
+takes effect after reboot. See the [PIN command reference](cli_commands.md#set-the-bluetooth-pairing-pin-companion).
 
 The Bluetooth device name is independently configurable. In the text terminal,
 use `get bluetooth.name` and `set bluetooth.name <name>`; use
@@ -613,7 +728,17 @@ that a reboot is required. Use `set usb.logging on reboot` to save it and have
 the node reboot automatically after the reply. The second interface appears
 after that reboot. Likewise, `set usb.logging off reboot` removes interface
 `02`. The optional `reboot` word is accepted only in these exact command forms
-and triggers a reboot only when the descriptor actually needs to change.
+and triggers a reboot only when the USB logging mode or descriptor needs to change.
+
+For serial bridges that use one port for both commands and packets, including
+unmodified Cisien/meshcoretomqtt, use `set usb.logging stream reboot` instead.
+This saved packet-stream mode keeps only interface `00` and emits plaintext
+RAW/RX/TX records together with repeater-style `  -> ` CLI replies. Configure
+the bridge with the stable `*-if00` path. Binary Companion and serial mOTA are
+unavailable on that port while logging is enabled; `set usb.logging off` stops
+the stream and leaves the ASCII terminal active. BLE remains available.
+`get usb.logging` reports `stream` and the primary port after reboot. To return
+to separate logging, use `set usb.logging on reboot`.
 
 These are Full Companion **text-terminal** commands. The superficially similar
 `meshcli ... get usb.logging` command uses the Binary Companion parameter
