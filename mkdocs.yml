@@ -6,6 +6,17 @@ repo_name: !ENV [MKDOCS_REPO_NAME, 'meshcore-dev/meshcore']
 repo_url: !ENV [MKDOCS_REPO_URL, 'https://github.com/meshcore-dev/meshcore/']
 edit_uri: !ENV [MKDOCS_EDIT_URI, 'edit/main/docs/']
 
+# Mesh America Quake Repeater documents. They are published by the Quake Repeater docs site
+# (quake-site/, see scripts/build_quake_site.py), not by this site, so they carry no MeshCore
+# hosted-page link.
+exclude_docs: |
+  /earthquake-alerts.md
+  /reading-the-sensor.md
+  /placement-and-testing.md
+  /clock-floor.md
+  /d7s-integration.md
+  /d7s-measurement-contract.md
+
 hooks:
   - scripts/docs_partition_catalog.py
 

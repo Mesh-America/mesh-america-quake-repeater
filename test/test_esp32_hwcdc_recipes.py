@@ -314,7 +314,10 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
             if row["esp32"]:
                 continue
             with self.subTest(environment=name):
-                count += 1
+                # Mesh America's own environments are checked below but not counted, so the
+                # expected total tracks Keymind's recipes.
+                if not name.startswith("MeshAmerica_"):
+                    count += 1
                 self.assertEqual(row["values"], {USB_MODE: "0", USB_CDC: "0"})
                 self.assertFalse(self.sdk["hwcdc_primary_enabled"](row["env"]))
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
