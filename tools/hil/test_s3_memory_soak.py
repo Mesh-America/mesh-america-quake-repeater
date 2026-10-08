@@ -12,6 +12,28 @@ soak=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(soak)
 
 class TelemetryTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'Requires the POSIX pySerial backend')
+    def test_actual_posix_soak_open_avoids_board_reset(self):
+        import serial
+        from test_profile_switch_host import PosixModemSerial
+
+        master,slave=os.openpty()
+        device=soak.Device('test',os.ttyname(slave),'test')
+        try:
+            with patch.object(serial,'Serial',PosixModemSerial), patch.object(
+                    device,'read',return_value=''), patch.object(
+                    device,'_command',return_value='test'):
+                device.connect()
+            port=device.stream
+            self.assertFalse(port.has_reset_transition(),port.modem_edges)
+            self.assertEqual(port.modem_lines,{'dtr':False,'rts':False})
+            self.assertFalse(port.dsrdtr)
+            self.assertEqual(device.connections,1)
+        finally:
+            device.close()
+            os.close(master)
+            os.close(slave)
+
     def test_diagnostics_without_key_override_need_no_private_header(self):
         # Preprocess a clean copy: the developer's ignored key header must not
         # satisfy an accidental unconditional include during this check.

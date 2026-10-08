@@ -315,6 +315,7 @@ class Dispatcher {
   unsigned long next_floor_calib_time, next_agc_reset_time;
   int   armed_agc_reset_interval;
   bool  agc_reset_armed;
+  bool  radio_nonrx_timer_armed;
   bool  prev_isrecv_mode;
   bool  radio_available;
   bool  dispatcher_started;
@@ -392,6 +393,7 @@ protected:
     agc_reset_armed = false;
     _err_flags = 0;
     radio_nonrx_start = 0;
+    radio_nonrx_timer_armed = false;
     prev_isrecv_mode = true;
     radio_available = true;
     dispatcher_started = false;

@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/qr_codes/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # QR Codes
 
 This document provides an overview of QR Code formats that can be used for sharing MeshCore channels and contacts. The formats described below are supported by the MeshCore mobile app.

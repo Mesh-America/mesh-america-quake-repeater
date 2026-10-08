@@ -194,6 +194,27 @@ assert(!releaseSet.releases.some(function (item) {
   return item.tag_name.startsWith("nrf52-mota-");
 }));
 
+// Numbered pages are emitted when a category exceeds the asset limit.
+// Include them only for the exact family and known category names.
+const chunkTags = ["companion-2-", "lora-ota-2-", "full-profiles-10-"];
+const chunkedReleases = releases.concat(chunkTags.map(function (prefix, index) {
+  return release(prefix + family, "2026-08-23T12:00:00Z", [
+    asset("Extra" + index + "_repeater-" + family + ".uf2")
+  ]);
+}));
+for (const prefix of ["companion-1-", "lora-ota-0-", "lora-ota-02-", "unknown-2-"]) {
+  chunkedReleases.push(release(prefix + family, "2026-08-23T12:00:00Z", []));
+}
+chunkedReleases.push(release("lora-ota-2-" + family + "-other", "2026-08-23T12:00:00Z", []));
+chunkedReleases.push(release("lora-ota-3-" + family, "2026-08-23T12:00:00Z", [], { draft: true }));
+const chunkedSet = picker.selectReleaseSet(chunkedReleases);
+assert.strictEqual(chunkedSet.releases.length, releaseSet.releases.length + chunkTags.length);
+for (const prefix of chunkTags) assert(chunkedSet.releases.some(r => r.tag_name === prefix + family));
+const chunkedCatalog = picker.buildCatalog(chunkedReleases);
+for (let index = 0; index < chunkTags.length; ++index) {
+  assert(chunkedCatalog.profiles.some(p => p.target === "Extra" + index + "_repeater"));
+}
+
 const catalog = picker.buildCatalog(releases);
 assert.strictEqual(catalog.releaseSet.familyTag, family);
 assert.strictEqual(catalog.profiles.length, 12);
@@ -1135,8 +1156,10 @@ const currentCatalog = picker.buildCatalog([
 assert.strictEqual(currentCatalog.rows.length, currentAssets.length);
 assert(currentCatalog.profiles.every(profile => profile.controls && profile.chipFamily !== 'unknown'));
 const expandedEsp32 = currentCatalog.profiles.find(profile =>
-  profile.target === 'Ebyte_EoRa-S3_Repeater-full-logging');
+  profile.target === 'Ebyte_EoRa-S3_Repeater-full-usb-wifi');
 assert(expandedEsp32);
+assert.strictEqual(expandedEsp32.ota, 'lora-receiver');
+assert.deepStrictEqual(expandedEsp32.loggingModes, ['none', 'usb', 'wifi', 'both']);
 assert(picker.installSteps(expandedEsp32, 'bin').some(step =>
   step.includes('exact board/role migration ZIP')));
 assert(picker.installSteps(expandedEsp32, 'merged-bin').some(step =>
@@ -1145,40 +1168,66 @@ assert.strictEqual(
   picker.migrationReleaseUrl(expandedEsp32, expandedEsp32.files[0]),
   'https://github.com/mikecarper/MeshCore/releases/tag/utility-' +
     currentControls.familyTag);
-const ordinaryEsp32 = currentCatalog.profiles.find(profile =>
-  profile.target === 'Ebyte_EoRa-S3_Repeater');
-assert(ordinaryEsp32);
+// Infrastructure now ships as the combined Full profile. A Companion remains
+// a real, non-expanded negative case; do not invent a removed ordinary image.
+const companionEsp32 = currentCatalog.profiles.find(profile =>
+  profile.target === 'Ebyte_EoRa-S3_companion_radio_full');
+assert(companionEsp32);
 assert.strictEqual(
-  picker.migrationReleaseUrl(ordinaryEsp32, ordinaryEsp32.files[0]), '');
-const ikokaNormal = currentCatalog.profiles.find(profile =>
-  profile.target === 'ikoka_stick_nrf_30dbm_repeater');
+  picker.migrationReleaseUrl(companionEsp32, companionEsp32.files[0]), '');
+const ikokaBase = 'ikoka_stick_nrf_30dbm_repeater';
+const ikokaProfiles = ['full', 'reduced'].map(policy => {
+  const profile = currentCatalog.profiles.find(item => item.target === ikokaBase + '-' + policy);
+  assert(profile, 'The qualified current release must retain the ' + policy + ' nRF52 profile');
+  assert.strictEqual(profile.sensorProfile, policy);
+  assert.strictEqual(profile.feature, policy === 'full' ? 'full' : 'standard');
+  assert.strictEqual(profile.ota, 'lora-receiver');
+  assert.strictEqual(profile.logging, 'usb-runtime');
+  assert.deepStrictEqual(profile.loggingModes, ['none', 'usb']);
+  assert.deepStrictEqual(picker.runtimeDirections(profile, {logging: 'usb'})[0].actions[0].commands,
+    ['set usb.logging on']);
+  return profile;
+});
 assert(!currentCatalog.profiles.some(profile =>
-  profile.target === 'ikoka_stick_nrf_30dbm_repeater_lora_ota_no_external_sensors'));
-assert.strictEqual(ikokaNormal.ota, 'lora-receiver');
-assert.strictEqual(ikokaNormal.logging, 'usb-runtime');
-assert.deepStrictEqual(ikokaNormal.loggingModes, ['none', 'usb']);
-assert.deepStrictEqual(picker.runtimeDirections(ikokaNormal, {logging: 'usb'})[0].actions[0].commands,
-  ['set usb.logging on']);
+  [ikokaBase, ikokaBase + '_lora_ota_no_external_sensors'].includes(profile.target)));
 const ikokaUrl = 'https://example.com/firmware_picker/?chipFamily=nrf52&hardwareFamily=ikoka_stick_nrf_30dbm&hardware=ikoka_stick_nrf_30dbm&role=repeater&variant=default&install=zip&chipAuto=1';
 const ikokaRelease = release(currentControls.familyTag, '2026-09-13T00:00:00Z',
-  [ikokaNormal].map(profile => {
+  ikokaProfiles.flatMap(profile => {
     const source = currentControls.profiles[profile.target].loggingSource;
     const tag = currentControls.familyTag.replace(/-[0-9a-f]{8}$/, '-' + source.slice(0, 8));
-    return asset(profile.target + '-ota-' + tag + '.zip');
+    return ['zip', 'uf2'].map(extension => asset(profile.target + '-ota-' + tag + '.' + extension));
   }));
 const ikokaCatalog = picker.buildCatalog([ikokaRelease], currentControls);
 const ikokaSelection = picker.selectionFromUrl(ikokaUrl, ikokaCatalog.profiles);
 assert.deepStrictEqual(ikokaSelection.unavailable, []);
 assert.deepStrictEqual(ikokaCatalog.profiles.filter(profile =>
   picker.profileMatchesFacets(profile, ikokaSelection.filters)).map(profile => profile.target),
-  ['ikoka_stick_nrf_30dbm_repeater']);
-const mismatchedIkoka = picker.buildCatalog([
-  release(currentControls.familyTag, '2026-09-13T00:00:00Z', [
-    asset('ikoka_stick_nrf_30dbm_repeater-ota-' +
-      currentControls.familyTag.replace(/-[0-9a-f]{8}$/, '-306feebe') + '.zip'),
-  ]),
-], currentControls).profiles[0];
-assert.strictEqual(mismatchedIkoka.logging, 'none', 'Logging metadata must match the published build source');
+  ikokaProfiles.map(profile => profile.target));
+for (const profile of ikokaProfiles) {
+  const policyUrl = ikokaUrl + '&feature=' + profile.feature + '&ota=lora-receiver';
+  const selection = picker.selectionFromUrl(policyUrl, ikokaCatalog.profiles);
+  assert.deepStrictEqual(selection.unavailable, []);
+  assert.deepStrictEqual(ikokaCatalog.profiles.filter(item =>
+    picker.profileMatchesFacets(item, selection.filters)).map(item => item.target), [profile.target]);
+  const current = ikokaCatalog.profiles.find(item => item.target === profile.target);
+  assert.deepStrictEqual(current.installKinds, ['zip', 'uf2']);
+  const choices = picker.firmwareProfileChoices(ikokaCatalog.profiles, {
+    hardware: current.hardware, role: current.role, install: 'zip',
+  });
+  const choice = choices.find(item => item.value === picker.firmwareProfileValue(current));
+  assert(choice, 'Both current Full/Reduced profiles must have distinct picker choices');
+  assert.deepStrictEqual(ikokaCatalog.profiles.filter(item => picker.profileMatchesFacets(item,
+    {...choice.filters, hardware: current.hardware, role: current.role, install: 'zip'}))
+    .map(item => item.target), [current.target]);
+  const mismatched = picker.buildCatalog([
+    release(currentControls.familyTag, '2026-09-13T00:00:00Z', [
+      asset(profile.target + '-ota-' +
+        currentControls.familyTag.replace(/-[0-9a-f]{8}$/, '-306feebe') + '.zip'),
+    ]),
+  ], currentControls).profiles[0];
+  assert.strictEqual(mismatched.logging, 'none', 'Logging metadata must match the published build source');
+  assert.strictEqual(mismatched.sensorProfile, undefined, 'Sensor policy must match the published build source');
+}
 const capacityProfiles = currentCatalog.profiles.filter(profile => profile.controls.memoryNote);
 assert(capacityProfiles.length > 0, 'Regeneration must preserve capacity directions');
 for (const profile of capacityProfiles) {
@@ -1202,8 +1251,146 @@ const combinedDirections = picker.runtimeDirections(combinedObserver, {logging: 
 assert(combinedDirections.some(section => section.title === 'MQTT broker connections'));
 assert(combinedDirections.some(section => section.title === 'ESP-NOW bridge'));
 assert.strictEqual(commands(combinedDirections).filter(command => command === 'set mqtt.enabled on').length, 1);
-assert.strictEqual(commands(combinedDirections).filter(command => command === 'set bridge.enabled on').length, 1);
+assert.strictEqual(commands(combinedDirections).filter(command => command === 'set espnow.enabled on').length, 1);
+assert.strictEqual(commands(combinedDirections).filter(command => command === 'set bridge.enabled on').length, 0);
 console.log('current release metadata and capacity directions tests passed');
+
+// The normal Full repeater can carry both independent bridges. Neither its
+// mode choices nor its ESP-NOW instructions may overwrite the UART transport.
+const bridgeFamily = 'v1.17.1.9-halo-keymind-cascade-dev-5f10e7d6';
+const bridgeTargets = ['MKE_s3_repeater-full-logging', 'heltec_v4_tft_repeater-full-logging',
+  'Heltec_v2_repeater_bridge_espnow'];
+const bridgeProfiles = {
+  [bridgeTargets[0]]: {platform: 'ESP32_PLATFORM', rs232: true, espnowBridge: true,
+    mqtt: false, updateMethods: ['wifi', 'lora']},
+  [bridgeTargets[1]]: {platform: 'ESP32_PLATFORM', rs232: false, espnowBridge: true,
+    mqtt: false, updateMethods: ['wifi', 'lora']},
+  [bridgeTargets[2]]: {platform: 'ESP32_PLATFORM', rs232: false, espnowBridge: true,
+    mqtt: false, updateMethods: []},
+};
+const bridgeRelease = release(bridgeFamily, '2026-10-05T00:00:00Z',
+  bridgeTargets.map(target => asset(target + '-ota-' + bridgeFamily + '.bin')));
+const bridgeCatalog = picker.buildCatalog([bridgeRelease], {
+  familyTag: bridgeFamily, profiles: bridgeProfiles, partitionMigrations: {},
+});
+const findBridge = target => bridgeCatalog.profiles.find(profile => profile.target === target);
+const mkeBridge = findBridge(bridgeTargets[0]);
+assert.deepStrictEqual(picker.profileFieldValues(mkeBridge, 'mode'), ['standard', 'rs232', 'espnow']);
+for (const mode of ['standard', 'rs232', 'espnow']) {
+  assert(picker.profileMatches(mkeBridge, {mode}, ['mode']));
+  const directions = picker.runtimeDirections(mkeBridge, {mode});
+  const uart = directions.find(section => /^RS232 bridge/.test(section.title));
+  const wireless = directions.find(section => section.title === 'ESP-NOW bridge');
+  assert(uart && wireless);
+  assert(commands([uart]).includes('set bridge.enabled on'));
+  assert(!commands([uart]).some(command => command.includes('espnow.enabled')));
+  assert.deepStrictEqual(wireless.actions.map(action => action.commands), [
+    ['set espnow.enabled on'], ['set espnow.enabled off'], ['get espnow.running'],
+  ]);
+  assert(!commands([wireless]).some(command => command.includes('bridge.enabled')));
+  assert(wireless.note.includes('Independent of RS-232'));
+}
+const plainBridge = findBridge(bridgeTargets[1]);
+assert.deepStrictEqual(picker.profileFieldValues(plainBridge, 'mode'), ['standard', 'espnow']);
+assert(picker.profileMatches(plainBridge, {mode: 'espnow'}, ['mode']));
+const plainDirections = picker.runtimeDirections(plainBridge, {mode: 'espnow'});
+assert(!plainDirections.some(section => /^RS232 bridge/.test(section.title)));
+assert(commands(plainDirections.filter(section => section.title === 'ESP-NOW bridge'))
+  .includes('set bridge.enabled on'));
+// Historical dedicated images did not expose espnow.enabled. Keep their
+// directions compatible without guessing support from the release version.
+const legacyDirections = picker.runtimeDirections(findBridge(bridgeTargets[2]), {mode: 'espnow'});
+assert.deepStrictEqual(legacyDirections.find(section => section.title === 'ESP-NOW bridge')
+  .actions.map(action => action.commands), [
+    ['set bridge.enabled on'], ['set bridge.enabled off'], ['get bridge.running'],
+  ]);
+const staleBridgeMetadata = picker.buildCatalog([bridgeRelease], {
+  familyTag: 'v1.17.1.8', profiles: bridgeProfiles,
+});
+assert(staleBridgeMetadata.profiles.every(profile => !profile.controls));
+assert(!picker.runtimeDirections(staleBridgeMetadata.profiles.find(profile =>
+  profile.target === bridgeTargets[0]), {mode: 'espnow'}).some(section => section.title === 'ESP-NOW bridge'));
+console.log('combined UART/ESP-NOW picker modes, independent commands and historical compatibility passed');
+
+// MQTT, ESP-NOW and UART coexist in the same qualified Full artifact. UART
+// instructions must never use MQTT's historical ESP-NOW bridge alias.
+const tripleTargets = ['Heltec_v3_repeater', 'Heltec_WSL3_repeater',
+  'RAK_3112_repeater']
+  .map(target => target + '-full-usb-wifi');
+const tripleCatalog = picker.buildCatalog([
+  release(bridgeFamily, '2026-10-05T00:00:00Z', tripleTargets.map(target =>
+    asset(target + '-ota-' + bridgeFamily + '.bin'))),
+], {
+  familyTag: bridgeFamily,
+  profiles: Object.fromEntries(tripleTargets.map(target => [target, {
+    platform: 'ESP32_PLATFORM', rs232: true, mqtt: true, espnowBridge: true,
+    updateMethods: ['wifi', 'lora'],
+  }])),
+});
+for (const profile of tripleCatalog.profiles) {
+  assert.deepStrictEqual(picker.profileFieldValues(profile, 'mode'),
+    ['standard', 'rs232', 'espnow']);
+  const directions = picker.runtimeDirections(profile, {mode: 'rs232'});
+  const uart = directions.find(section => /^RS232 bridge/.test(section.title));
+  const wireless = directions.find(section => section.title === 'ESP-NOW bridge');
+  const mqtt = directions.find(section => section.title === 'MQTT broker connections');
+  assert(uart && wireless && mqtt);
+  assert.deepStrictEqual(uart.actions.map(action => action.commands), [
+    ['set rs232.enabled on', 'get rs232.running'], ['set rs232.enabled off'],
+    ['set rs232.enabled off', 'set bridge.baud 115200', 'set rs232.enabled on'],
+  ]);
+  assert(commands([wireless]).includes('set espnow.enabled on'));
+  assert(commands([mqtt]).includes('set mqtt.enabled on'));
+  assert(!commands([uart, wireless, mqtt]).some(command => command.includes('bridge.enabled')));
+}
+assert.strictEqual(tripleCatalog.profiles.length, tripleTargets.length);
+console.log('three-transport Full picker uses independent UART, MQTT and ESP-NOW controls');
+
+// T-LoRa cannot fit all three transports in its runtime RAM budget. Both
+// capacity-safe Full images remain selectable with their actual capabilities.
+const tloraNormalTarget = 'LilyGo_TLora_V2_1_1_6_repeater-full-usb-wifi';
+const tloraObserverTarget = 'LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_-full-usb-wifi';
+const tloraCatalog = picker.buildCatalog([
+  release(bridgeFamily, '2026-10-05T00:00:00Z', [tloraNormalTarget, tloraObserverTarget]
+    .map(target => asset(target + '-ota-' + bridgeFamily + '.bin'))),
+], {
+  familyTag: bridgeFamily,
+  profiles: {
+    [tloraNormalTarget]: {
+      platform: 'ESP32_PLATFORM', rs232: true, mqtt: false, espnowBridge: true,
+      updateMethods: ['wifi', 'lora'],
+      loggingModes: ['none', 'usb'], loggingControl: 'usb.logging',
+    },
+    [tloraObserverTarget]: {
+      platform: 'ESP32_PLATFORM', rs232: false, mqtt: true, espnowBridge: true,
+      updateMethods: ['wifi', 'lora'],
+      loggingModes: ['none', 'usb', 'wifi', 'both'], loggingControl: 'logging.output',
+    },
+  },
+});
+assert.strictEqual(tloraCatalog.profiles.length, 2);
+const tloraNormalProfile = tloraCatalog.profiles.find(profile => profile.target === tloraNormalTarget);
+const tloraObserverProfile = tloraCatalog.profiles.find(profile => profile.target === tloraObserverTarget);
+assert(tloraNormalProfile && tloraObserverProfile);
+assert.deepStrictEqual(picker.profileFieldValues(tloraNormalProfile, 'mode'),
+  ['standard', 'rs232', 'espnow']);
+assert.deepStrictEqual(picker.profileFieldValues(tloraObserverProfile, 'mode'),
+  ['standard', 'espnow']);
+assert.deepStrictEqual(picker.profileFieldValues(tloraNormalProfile, 'logging'), ['none', 'usb']);
+assert.deepStrictEqual(picker.profileFieldValues(tloraObserverProfile, 'logging'),
+  ['none', 'usb', 'wifi', 'both']);
+assert(!picker.profileMatches(tloraNormalProfile, {logging: 'wifi'}, ['logging']));
+assert(picker.profileMatches(tloraObserverProfile, {logging: 'wifi'}, ['logging']));
+const tloraNormalDirections = picker.runtimeDirections(tloraNormalProfile, {mode: 'rs232'});
+const tloraObserverDirections = picker.runtimeDirections(tloraObserverProfile, {mode: 'espnow'});
+assert(tloraNormalDirections.some(section => /^RS232 bridge/.test(section.title)));
+assert(tloraNormalDirections.some(section => section.title === 'ESP-NOW bridge'));
+assert(!tloraNormalDirections.some(section => section.title === 'MQTT broker connections'));
+assert(tloraObserverDirections.some(section => section.title === 'MQTT broker connections'));
+assert(tloraObserverDirections.some(section => section.title === 'ESP-NOW bridge'));
+assert(!tloraObserverDirections.some(section => /^RS232 bridge/.test(section.title)));
+assert(!commands(tloraObserverDirections).some(command => command.startsWith('set rs232.')));
+console.log('T-LoRa RAM exception preserves separate UART and MQTT Full picker choices');
 
 // Partition expansion uses the packager's lookup and published utility assets,
 // not hardware labels or guessed slugs (several historical names differ).
@@ -1225,6 +1412,13 @@ function migrationCatalog(assets = migrationAssets, metadata = currentControls, 
 const withMigrations = migrationCatalog();
 assert.strictEqual(withMigrations.rows.length, currentCatalog.rows.length,
   'Migration ZIPs must not become firmware/Serial DFU choices');
+const expandedWithMigration = withMigrations.profiles.find(profile =>
+  profile.target === expandedEsp32.target);
+assert.strictEqual(expandedWithMigration.migrationPackage, 'ebyte-eora-s3-repeater');
+assert.deepStrictEqual(picker.migrationLink(expandedWithMigration, expandedWithMigration.files[0]), {
+  url: migrationZip('ebyte-eora-s3-repeater').browser_download_url,
+  label: 'Download exact partition-expansion ZIP',
+});
 const g2Target = 'Station_G2_repeater_observer_mqtt-full-usb-wifi';
 function g2MigrationLink(catalog) {
   const profile = catalog.profiles.find(item => item.target === g2Target);
@@ -1272,8 +1466,10 @@ for (const profile of currentMigrationProfiles) {
   assert.strictEqual(picker.migrationLink(profile, profile.files[0]).url,
     migrationZip(profile.migrationPackage).browser_download_url, profile.target);
 }
-assert.strictEqual(picker.migrationLink(ordinaryEsp32, ordinaryEsp32.files[0]), null);
-assert.strictEqual(picker.migrationLink(ikokaNormal, ikokaNormal.files[0]), null);
+assert.strictEqual(picker.migrationLink(companionEsp32, companionEsp32.files[0]), null);
+for (const profile of ikokaProfiles) {
+  assert.strictEqual(picker.migrationLink(profile, profile.files[0]), null);
+}
 const unmappedVariant = withMigrations.profiles.find(profile =>
   profile.target === 'Station_G3_ESP32_r2_repeater_observer_mqtt-full-usb-wifi');
 assert(unmappedVariant);
@@ -1513,3 +1709,289 @@ assert(!picker.firmwareProfileChoices(catalog.profiles, {
   hardware: 'Station_G2', role: 'repeater', variant: 'missing',
 }).some(item => item.filters.variant === 'missing'));
 console.log('combined firmware profile choices and legacy links passed');
+
+// Mobile progress counts builds, not the installation files for each build.
+const feedbackFilters = {hardware: 'Heltec_v3', role: 'companion'};
+const v3Feedback = controlled.profiles.find(p => p.target === 'Heltec_v3_companion_radio_full');
+const feedbackCatalog = [Object.assign({}, v3Feedback, {
+  installKinds: ['merged-bin', 'bin'],
+})];
+const feedbackSnapshot = JSON.stringify(feedbackCatalog);
+assert.deepStrictEqual(picker.selectionProgress(feedbackCatalog, feedbackFilters), {
+  count: 1, state: 'single', title: '1 firmware build left',
+  note: 'Choose an install operation.',
+});
+for (const install of ['merged-bin', 'bin']) {
+  const progress = picker.selectionProgress(feedbackCatalog, {...feedbackFilters, install});
+  assert.strictEqual(progress.count, 1);
+  assert(progress.note.includes('Confirm your board and install choice'));
+}
+assert.strictEqual(picker.selectionProgress(controlled.profiles, {}).state, 'multiple');
+assert.strictEqual(picker.selectionProgress(controlled.profiles, {}).count, controlled.profiles.length);
+assert.strictEqual(picker.selectionProgress(feedbackCatalog, {hardware: 'Missing'}).state, 'empty');
+assert.strictEqual(picker.selectionProgress([], {}).count, 0);
+assert.strictEqual(picker.selectionProgress([], {}).title, 'No matching firmware builds');
+assert.strictEqual(picker.selectionProgress(feedbackCatalog).count, 1);
+
+function feedbackOptions(values) {
+  return [{value: ''}].concat(values.map(value => ({value})));
+}
+assert(picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'logging',
+  feedbackOptions(v3Feedback.loggingModes)));
+assert(picker.choicesUseSameFirmware(feedbackCatalog, {...feedbackFilters, logging: 'usb'}, 'logging',
+  feedbackOptions(v3Feedback.loggingModes)));
+assert(picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'mode',
+  feedbackOptions(picker.profileFieldValues(v3Feedback, 'mode'))));
+assert(picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'firmwareProfile',
+  picker.firmwareProfileChoices(feedbackCatalog, feedbackFilters)));
+// A sole available option can be marked without disabling it or selecting it.
+assert(picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'role',
+  feedbackOptions(['companion'])));
+assert(!picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'install',
+  feedbackOptions(['merged-bin', 'bin'])));
+
+// One currently selected build is not enough: alternatives may change builds.
+const feedbackAlternatives = [
+  {...feedbackCatalog[0], loggingModes: ['none', 'usb'], mode: 'usb', connectionModes: ['usb']},
+  {...feedbackCatalog[0], target: 'second-build', loggingModes: ['wifi'],
+    mode: 'wifi', connectionModes: ['wifi'], feature: 'standard', ota: 'none'},
+];
+const selectedFeedback = {...feedbackFilters, logging: 'usb'};
+assert.strictEqual(picker.selectionProgress(feedbackAlternatives, selectedFeedback).count, 1);
+assert(!picker.choicesUseSameFirmware(feedbackAlternatives, selectedFeedback, 'logging',
+  feedbackOptions(['none', 'usb', 'wifi'])));
+assert(!picker.choicesUseSameFirmware(feedbackAlternatives, {...feedbackFilters, mode: 'usb'}, 'mode',
+  feedbackOptions(['usb', 'wifi'])));
+const selectedProfileFeedback = {...feedbackFilters, feature: 'full', ota: 'lora-source', variant: 'default'};
+assert(!picker.choicesUseSameFirmware(feedbackAlternatives, selectedProfileFeedback, 'firmwareProfile',
+  picker.firmwareProfileChoices(feedbackAlternatives, selectedProfileFeedback)));
+// Multiple builds can all share a runtime choice; report that accurately too.
+assert(picker.choicesUseSameFirmware(feedbackAlternatives.map(p => ({...p, loggingModes: ['none', 'usb']})),
+  feedbackFilters, 'logging', feedbackOptions(['none', 'usb'])));
+for (const partial of [{feature: 'full'}, {ota: 'lora-source'}]) {
+  const selection = {...feedbackFilters, ...partial};
+  assert(picker.choicesUseSameFirmware(feedbackCatalog, selection, 'firmwareProfile',
+    picker.firmwareProfileChoices(feedbackCatalog, selection)));
+}
+assert(!picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'firmwareProfile',
+  [{value: 'invalid'}]));
+assert(!picker.choicesUseSameFirmware(feedbackCatalog, feedbackFilters, 'role', [{value: ''}]));
+assert(!picker.choicesUseSameFirmware([], {}, 'role', feedbackOptions(['companion'])));
+assert.strictEqual(JSON.stringify(feedbackCatalog), feedbackSnapshot);
+assert.deepStrictEqual(feedbackFilters, {hardware: 'Heltec_v3', role: 'companion'});
+console.log('build counts, non-refining choices, install safety and partial-link feedback passed');
+
+// Exact board and role are deliberate intent. Runtime settings and a sole
+// available install format must not keep an already identified download locked.
+const simpleFilters = {...feedbackFilters, hardwareFamily: 'Heltec_v3'};
+const simpleRequirements = picker.selectionRequirements(feedbackCatalog, simpleFilters);
+assert.deepStrictEqual(simpleRequirements.hiddenFields, ['logging', 'firmwareProfile', 'mode']);
+assert.deepStrictEqual(simpleRequirements.missingFields, ['install']);
+for (const install of ['bin', 'merged-bin']) {
+  const requirements = picker.selectionRequirements(feedbackCatalog, {...simpleFilters, install});
+  assert.deepStrictEqual(requirements.missingFields, []);
+  assert.strictEqual(requirements.installKind, install);
+}
+const soleInstallCatalog = [{...feedbackCatalog[0], installKinds: ['bin']}];
+const soleInstall = picker.selectionRequirements(soleInstallCatalog, simpleFilters);
+assert.deepStrictEqual(soleInstall.hiddenFields, ['logging', 'firmwareProfile', 'mode', 'install']);
+assert.deepStrictEqual(soleInstall.missingFields, []);
+assert.strictEqual(soleInstall.installKind, 'bin');
+assert.deepStrictEqual(picker.resolveProfileAssets(soleInstallCatalog, soleInstall.installKind)
+  .map(entry => entry.asset.name), [picker.canonicalAsset(soleInstallCatalog[0].files, 'bin').name]);
+const soleUf2 = picker.selectionRequirements([{...nrf, installKinds: ['uf2']}], {
+  hardwareFamily: nrf.hardwareFamily, hardware: nrf.hardware, role: nrf.role,
+});
+assert.strictEqual(soleUf2.installKind, 'uf2');
+assert(soleUf2.hiddenFields.includes('install'));
+assert(picker.installSteps(nrf, soleUf2.installKind).some(step => step.includes('UF2')));
+for (const filters of [{}, {hardware: 'Heltec_v3'}, {role: 'companion'}]) {
+  const requirements = picker.selectionRequirements(soleInstallCatalog, filters);
+  assert.deepStrictEqual(requirements.hiddenFields, []);
+  if (!filters.hardware) assert(requirements.missingFields.includes('hardware'));
+  if (!filters.role) assert(requirements.missingFields.includes('role'));
+}
+assert(picker.selectionRequirements([], simpleFilters).missingFields.includes('install'));
+
+// Unsupported choices in an old/manual URL must remain visible to clear.
+// Inferring the sole BIN for an explicitly requested ZIP would conceal the
+// invalid constraint while actual matching still returned no files.
+const usbOnlyCatalog = [{...soleInstallCatalog[0],
+  loggingModes: ['none', 'usb'], connectionModes: ['usb']}];
+for (const [field, value] of [['install', 'zip'], ['logging', 'wifi'], ['mode', 'wifi'],
+                             ['feature', 'missing'], ['ota', 'missing'], ['variant', 'missing']]) {
+  const selection = {...simpleFilters, [field]: value};
+  const before = JSON.stringify(selection);
+  const requirements = picker.selectionRequirements(usbOnlyCatalog, selection);
+  const control = picker.PROFILE_FIELDS.includes(field) ? 'firmwareProfile' : field;
+  assert(!requirements.hiddenFields.includes(control), control + ' must stay clearable');
+  assert.strictEqual(JSON.stringify(selection), before);
+  assert.strictEqual(new URL(picker.selectionUrl('https://example.test/picker/', selection, false))
+    .searchParams.get(field), value);
+  if (field === 'install') assert.strictEqual(requirements.installKind, 'zip');
+}
+
+// A selected setting that currently narrows to one image must remain visible
+// if another choice would select a different image.
+const distinctRequirements = picker.selectionRequirements(feedbackAlternatives, {
+  ...simpleFilters, logging: 'usb', mode: 'usb',
+  feature: 'full', ota: 'lora-source', variant: 'default',
+});
+for (const field of ['logging', 'mode', 'firmwareProfile']) {
+  assert(!distinctRequirements.hiddenFields.includes(field),
+    field + ' must remain clearable even when other selected facets narrow to one image');
+}
+// Test each facet independently of other already narrowing choices.
+assert(!picker.selectionRequirements(feedbackAlternatives, {...simpleFilters, logging: 'usb'})
+  .hiddenFields.includes('logging'));
+assert(!picker.selectionRequirements(feedbackAlternatives, {...simpleFilters, mode: 'usb'})
+  .hiddenFields.includes('mode'));
+assert(!picker.selectionRequirements(feedbackAlternatives, {...simpleFilters,
+  feature: 'full', ota: 'lora-source', variant: 'default'})
+  .hiddenFields.includes('firmwareProfile'));
+assert.strictEqual(distinctRequirements.installKind, '');
+const tloraRequirements = picker.selectionRequirements(tloraCatalog.profiles, {
+  hardwareFamily: tloraNormalProfile.hardwareFamily,
+  hardware: tloraNormalProfile.hardware, role: 'repeater',
+});
+assert(!tloraRequirements.hiddenFields.includes('logging'));
+assert(!tloraRequirements.hiddenFields.includes('mode'));
+// Both capacity-safe images share the Full/OTA tuple. Logging and transport
+// still distinguish their different files; the identical tuple adds no choice.
+assert(tloraRequirements.hiddenFields.includes('firmwareProfile'));
+assert(tloraRequirements.missingFields.includes('logging'));
+assert(tloraRequirements.missingFields.includes('mode'));
+const selectedTlora = picker.selectionRequirements(tloraCatalog.profiles, {
+  hardwareFamily: tloraNormalProfile.hardwareFamily,
+  hardware: tloraNormalProfile.hardware, role: 'repeater',
+  logging: 'wifi', mode: 'espnow', feature: 'full', ota: tloraObserverProfile.ota,
+  variant: tloraObserverProfile.variant,
+});
+assert(!selectedTlora.hiddenFields.includes('logging'));
+assert(!selectedTlora.hiddenFields.includes('mode'));
+for (const item of sensorCatalog.profiles) {
+  const requirements = picker.selectionRequirements(sensorCatalog.profiles, {
+    hardwareFamily: item.hardwareFamily, hardware: item.hardware, role: item.role,
+  });
+  assert(!requirements.hiddenFields.includes('firmwareProfile'), item.target);
+  assert(!requirements.hiddenFields.includes('install'), 'ZIP and UF2 stay distinct');
+  const selected = picker.selectionRequirements(sensorCatalog.profiles, {
+    hardwareFamily: item.hardwareFamily, hardware: item.hardware, role: item.role,
+    logging: item.loggingModes[0], mode: item.mode, install: 'zip',
+    ota: item.ota, feature: item.feature, variant: item.variant,
+  });
+  assert(!selected.hiddenFields.includes('firmwareProfile'),
+    'Selected sensor profile must remain clearable: ' + item.target);
+}
+for (const partial of [{feature: 'full'}, {ota: 'lora-source'}]) {
+  const selection = {...simpleFilters, ...partial};
+  const before = JSON.stringify(selection);
+  const requirements = picker.selectionRequirements(soleInstallCatalog, selection);
+  assert.deepStrictEqual(requirements.missingFields, []);
+  assert.strictEqual(JSON.stringify(selection), before);
+  const link = picker.selectionUrl('https://example.test/picker/', selection, false);
+  assert(!new URL(link).searchParams.has('install'));
+  for (const field of picker.PROFILE_FIELDS) {
+    if (!partial[field]) assert(!new URL(link).searchParams.has(field));
+  }
+}
+assert.strictEqual(JSON.stringify(feedbackCatalog), feedbackSnapshot);
+assert.deepStrictEqual(simpleFilters, {...feedbackFilters, hardwareFamily: 'Heltec_v3'});
+console.log('same-image selectors skip redundant steps while distinct profiles and install routes stay explicit');
+
+// Logging choices remain available beneath the download. Linked choices
+// preselect their exact commands; an unselected logging mode shows off steps.
+for (const logging of ['none', 'usb', 'wifi', 'both']) {
+  const sections = picker.runtimePanelDirections(observer, {logging}, ['logging', 'mode']);
+  const section = sections.find(item => item.title === 'Logging / MQTT output');
+  assert.deepStrictEqual(section.actions.map(action => action.selection.logging),
+    ['none', 'usb', 'wifi', 'both']);
+  assert.strictEqual(section.actions[section.selectedIndex].selection.logging, logging);
+  assert.deepStrictEqual(section.actions[section.selectedIndex].commands,
+    picker.runtimeDirections(observer, {logging})[0].actions[0].commands);
+}
+const defaultLogging = picker.runtimePanelDirections(observer, {}, ['logging'])[0];
+assert.strictEqual(defaultLogging.actions[defaultLogging.selectedIndex].selection.logging, 'none');
+const nrfLogging = picker.runtimePanelDirections(nrf, {logging: 'usb'}, ['logging'])[0];
+assert.deepStrictEqual(nrfLogging.actions[nrfLogging.selectedIndex].commands, ['set usb.logging on reboot']);
+assert.strictEqual(picker.runtimePanelDirections(observer, {logging: 'usb'}, [])[0].actions.length, 1);
+for (const mode of ['', 'standard', 'rs232', 'espnow']) {
+  const profile = tripleCatalog.profiles[0];
+  const sections = picker.runtimePanelDirections(profile, {mode}, ['mode']);
+  const uart = sections.find(section => /^RS232 bridge/.test(section.title));
+  const wireless = sections.find(section => section.title === 'ESP-NOW bridge');
+  assert.strictEqual(uart.actions[uart.selectedIndex].label, mode === 'rs232' ? 'On' : 'Off');
+  assert.strictEqual(wireless.actions[wireless.selectedIndex].label, mode === 'espnow' ? 'On' : 'Off');
+}
+
+// Exercise the actual command renderer, including the preselected radio and
+// later logging change, without sending anything to a device or the network.
+class RuntimeElement {
+  constructor(tag, text = '') {
+    this.tagName = tag.toUpperCase();
+    this.children = [];
+    this.dataset = {};
+    this.listeners = {};
+    this.ownText = text;
+  }
+  appendChild(child) { this.children.push(child); return child; }
+  replaceChildren(...children) { this.children = children; this.ownText = ''; }
+  addEventListener(name, handler) { this.listeners[name] = handler; }
+  get textContent() { return this.ownText + this.children.map(child => child.textContent).join(''); }
+  set textContent(text) { this.ownText = text; this.children = []; }
+}
+function descendants(element, predicate) {
+  return element.children.flatMap(child =>
+    (predicate(child) ? [child] : []).concat(descendants(child, predicate)));
+}
+const previousDocument = global.document;
+global.document = {
+  createElement: tag => new RuntimeElement(tag),
+  createTextNode: text => new RuntimeElement('#text', text),
+};
+try {
+  const card = new RuntimeElement('article');
+  const changes = [];
+  picker.renderRuntimeDirections(card, observer, {logging: 'wifi'}, {
+    runtimeFields: ['logging'], onSelectionChange: selection => changes.push(selection),
+  });
+  const loggingDetails = descendants(card, node => node.tagName === 'DETAILS')
+    .find(node => node.children[0].textContent === 'Logging / MQTT output');
+  const inputs = descendants(loggingDetails, node => node.tagName === 'INPUT');
+  assert.strictEqual(inputs.length, 4);
+  assert.deepStrictEqual(inputs.map(input => !!input.checked), [false, false, true, false]);
+  assert.strictEqual(descendants(loggingDetails, node => node.tagName === 'CODE')[0].textContent,
+    'set logging.output wifi\nget logging.output');
+  const choices = descendants(loggingDetails, node => node.className === 'firmware-picker-radio-options')[0];
+  choices.listeners.change({target: inputs[1]});
+  assert.deepStrictEqual(changes, [{logging: 'usb'}]);
+  assert.strictEqual(descendants(loggingDetails, node => node.tagName === 'CODE')[0].textContent,
+    'set powersaving off\nset logging.output usb\nget logging.output');
+  const url = picker.selectionUrl('https://example.test/picker/', {...simpleFilters, ...changes[0]}, false);
+  assert.strictEqual(new URL(url).searchParams.get('logging'), 'usb');
+  const resolveLogging = logging => picker.resolveProfileAssets([observer].filter(profile =>
+    picker.profileMatchesFacets(profile, {logging})), 'bin').map(entry => entry.asset.name);
+  assert.deepStrictEqual(resolveLogging(changes[0].logging), resolveLogging('wifi'));
+  assert.strictEqual(resolveLogging(changes[0].logging).length, 1);
+
+  // When logging still distinguishes images, candidate command controls are
+  // directions only. Their preview cannot silently change filters or URLs.
+  const refiningCard = new RuntimeElement('article');
+  const refiningChanges = [];
+  picker.renderRuntimeDirections(refiningCard, observer, {}, {
+    runtimeFields: [], onSelectionChange: selection => refiningChanges.push(selection),
+  });
+  const refiningDetails = descendants(refiningCard, node => node.tagName === 'DETAILS')
+    .find(node => node.children[0].textContent === 'Restore the selected logging mode');
+  const refiningInputs = descendants(refiningDetails, node => node.tagName === 'INPUT');
+  const refiningChoices = descendants(refiningDetails,
+    node => node.className === 'firmware-picker-radio-options')[0];
+  refiningChoices.listeners.change({target: refiningInputs[2]});
+  assert.strictEqual(descendants(refiningDetails, node => node.tagName === 'CODE')[0].textContent,
+    'set logging.output wifi\nget logging.output');
+  assert.deepStrictEqual(refiningChanges, []);
+} finally {
+  if (previousDocument === undefined) delete global.document;
+  else global.document = previousDocument;
+}
+console.log('result logging and bridge controls preserve linked modes and show deliberate default commands');

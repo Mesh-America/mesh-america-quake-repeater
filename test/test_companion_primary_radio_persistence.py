@@ -9,6 +9,7 @@ import unittest
 
 from test_companion_preferences_transaction import HARNESS as PREFERENCES_HARNESS
 from test_companion_preferences_transaction import esp_recovery_helpers
+from test_radio_profile_spiffs_missing import STAT_HEADER
 from test_replay_reset_integration import extract_braced
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,8 +18,22 @@ HARNESS = r'''
 #include <helpers/RadioProfileCLI.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/radiolib/RXPowerSaving.h>
+#include <sys/stat.h>
 #include <limits>
 #define constrain(value,low,high) ((value)<(low)?(low):((value)>(high)?(high):(value)))
+// The production SPIFFS metadata syscall sees the same mounted filesystem as
+// the File peripheral. The standalone header keeps this fake away from libc.
+static MemoryFS* profile_metadata_fs = nullptr;
+static bool profile_metadata_error = false;
+static unsigned profile_metadata_probes = 0;
+int stat(const char* path, struct stat* info) {
+  assert(profile_metadata_fs && !strncmp(path, "/spiffs/radio_profiles", 22));
+  ++profile_metadata_probes;
+  if (profile_metadata_error) { errno = EIO; return -1; }
+  if (!profile_metadata_fs->exists(path + 7)) { errno = ENOENT; return -1; }
+  info->st_mode = 0100000;
+  return 0;
+}
 struct Clock : mesh::RTCClock {
   uint32_t getCurrentTime() override { return 1700000000; }
   void setCurrentTime(uint32_t) override {}
@@ -55,6 +70,7 @@ struct MyMesh {
     _prefs.freq=909.5f; _prefs.bw=62.5f; _prefs.sf=7; _prefs.cr=5;
     _prefs.airtime_factor=1; _prefs.rx_ps_level=1; _prefs.rx_ps_preamble=16;
     _prefs.rx_ps_rx_us=3000; _prefs.rx_ps_sleep_us=4000;
+    profile_metadata_fs=&profile_fs;
     _radio_profiles.begin(&profile_fs,&radio,&clock);
     assert(_radio_profiles.savePrimaryPreamble(48));
     assert(savePrefs());
@@ -63,6 +79,7 @@ struct MyMesh {
   void bootSanitize() { @COMPANION_SANITIZE@ }
   bool handleCommand(const char*,uint32_t,char*);
   const char* command(const char* value,uint32_t timestamp=0) {
+    profile_metadata_fs=&profile_fs;
     memset(reply,0,sizeof(reply));
     assert(handleCommand(value,timestamp,reply));
     assert(memchr(reply,0,sizeof(reply)));
@@ -73,6 +90,7 @@ struct MyMesh {
     assert(store.loadPrefs(loaded,lat,lon));
   }
   uint16_t rebootPreamble() {
+    profile_metadata_fs=&profile_fs;
     Radio reboot_radio;mesh::RadioProfileCLI reboot_cli;
     reboot_cli.begin(&profile_fs,&reboot_radio,&clock);
     return reboot_cli.primaryPreamble();
@@ -181,55 +199,80 @@ int main() {
     assert(error(m.command(command)));assert(m.store.fs.files["/new_prefs"]==prefs);
     assert(m._prefs.airtime_factor==1);++checks;
   }
+  { // Unreadable metadata must protect the existing committed profile image.
+    MyMesh m;
+    const auto files=m.profile_fs.files;
+    Radio reboot_radio;mesh::RadioProfileCLI reboot_cli;
+    profile_metadata_error=true;
+    reboot_cli.begin(&m.profile_fs,&reboot_radio,&m.clock);
+    assert(!reboot_cli.savePrimaryPreamble(32));
+    assert(m.profile_fs.files==files);
+    profile_metadata_error=false;
+    m.expectOriginal();++checks;
+  }
+  assert(profile_metadata_probes>0);
   printf("%u production primary-radio persistence scenarios passed\n",checks);
 }
 '''
 
 
+def production_primary_radio_harness():
+    companion = (ROOT/'examples/companion_radio/MyMesh.cpp').read_text(encoding='utf-8')
+    header = (ROOT/'examples/companion_radio/MyMesh.h').read_text(encoding='utf-8')
+    infra = (ROOT/'src/helpers/CommonCLI.cpp').read_text(encoding='utf-8')
+    datastore = (ROOT/'examples/companion_radio/DataStore.cpp').read_text(encoding='utf-8')
+    handler = extract_braced(companion, 'bool MyMesh::handleCommand(')
+    # Keep the complete preprocessing sequence through the shared primary
+    # tuple validation. Only unrelated dispatch routes are omitted.
+    dispatch = handler[:handler.index('  if (sender_timestamp == 0 && handleDirectCommand')]
+    dispatch += extract_braced(handler, 'if (isCompanionRadioPrefsCommand(command))')
+    dispatch += '\nreturn false;\n}'
+
+    def boot_checks(source, member):
+        nonfinite = re.search(r'if \(!isfinite\(' + re.escape(member) + r'\)\)[^;]+;', source)
+        clamp = re.search(re.escape(member) + r' = constrain\([^;]+;', source)
+        assert nonfinite is not None
+        assert clamp is not None
+        return nonfinite.group() + '\n' + clamp.group()
+
+    support = PREFERENCES_HARNESS[:PREFERENCES_HARNESS.index('int main(')]
+    support = support.replace('@METHODS@', esp_recovery_helpers(datastore) + '\n'.join(extract_braced(datastore, sig) for sig in (
+        'bool DataStore::loadPrefs(', 'bool DataStore::loadPrefsInt(', 'bool DataStore::savePrefs(')))
+    replacements = {
+        '@SAVE_PREFS@': extract_braced(header, 'bool savePrefs()'),
+        '@COMMAND_FILTER@': extract_braced(companion, 'static bool isCompanionRadioPrefsCommand('),
+        '@DISPATCH@': dispatch,
+        '@COMPANION_SANITIZE@': boot_checks(companion, '_prefs.airtime_factor'),
+        '@INFRA_SANITIZE@': boot_checks(infra, '_prefs->airtime_factor'),
+        '@INFRA_SETTER@': extract_braced(infra, 'if (memcmp(config, "dutycycle ", 10) == 0)'),
+        '@INFRA_RADIO@': extract_braced(infra, 'if (configKeyEquals(config, "radio"))').split('{', 1)[1].rsplit('}', 1)[0],
+    }
+    harness = support + HARNESS
+    for marker, value in replacements.items():
+        harness = harness.replace(marker, value)
+    # Saving an unrelated field must not resurrect a failed tuple later.
+    harness = harness.replace('static bool error(', '''static bool saveUnrelated(MyMesh& m) {
+      m._prefs.ble_pin=654321;return m.savePrefs();
+    }
+    static bool error(''')
+    return harness
+
+
+def prepare_profile_metadata_boundary(work):
+    """Supply only the SPIFFS syscall declaration, shared with the app test."""
+    work = Path(work)
+    (work / 'sys').mkdir(exist_ok=True)
+    (work / 'sys/stat.h').write_text(STAT_HEADER, encoding='ascii')
+
+
 class CompanionPrimaryRadioPersistenceTests(unittest.TestCase):
     def test_production_validation_rollback_and_dutycycle_boot(self):
-        companion = (ROOT/'examples/companion_radio/MyMesh.cpp').read_text(encoding='utf-8')
-        header = (ROOT/'examples/companion_radio/MyMesh.h').read_text(encoding='utf-8')
-        infra = (ROOT/'src/helpers/CommonCLI.cpp').read_text(encoding='utf-8')
-        datastore = (ROOT/'examples/companion_radio/DataStore.cpp').read_text(encoding='utf-8')
-        handler = extract_braced(companion, 'bool MyMesh::handleCommand(')
-        # Keep the complete preprocessing sequence through the shared primary
-        # tuple validation. Only unrelated dispatch routes are omitted.
-        dispatch = handler[:handler.index('  if (sender_timestamp == 0 && handleDirectCommand')]
-        dispatch += extract_braced(handler, 'if (isCompanionRadioPrefsCommand(command))')
-        dispatch += '\nreturn false;\n}'
-
-        def boot_checks(source, member):
-            nonfinite = re.search(r'if \(!isfinite\(' + re.escape(member) + r'\)\)[^;]+;', source)
-            clamp = re.search(re.escape(member) + r' = constrain\([^;]+;', source)
-            self.assertIsNotNone(nonfinite)
-            self.assertIsNotNone(clamp)
-            return nonfinite.group() + '\n' + clamp.group()
-
-        support = PREFERENCES_HARNESS[:PREFERENCES_HARNESS.index('int main(')]
-        support = support.replace('@METHODS@', esp_recovery_helpers(datastore) + '\n'.join(extract_braced(datastore, sig) for sig in (
-            'bool DataStore::loadPrefs(', 'bool DataStore::loadPrefsInt(', 'bool DataStore::savePrefs(')))
-        replacements = {
-            '@SAVE_PREFS@': extract_braced(header, 'bool savePrefs()'),
-            '@COMMAND_FILTER@': extract_braced(companion, 'static bool isCompanionRadioPrefsCommand('),
-            '@DISPATCH@': dispatch,
-            '@COMPANION_SANITIZE@': boot_checks(companion, '_prefs.airtime_factor'),
-            '@INFRA_SANITIZE@': boot_checks(infra, '_prefs->airtime_factor'),
-            '@INFRA_SETTER@': extract_braced(infra, 'if (memcmp(config, "dutycycle ", 10) == 0)'),
-            '@INFRA_RADIO@': extract_braced(infra, 'if (configKeyEquals(config, "radio"))').split('{', 1)[1].rsplit('}', 1)[0],
-        }
-        harness = support + HARNESS
-        for marker, value in replacements.items():
-            harness = harness.replace(marker, value)
-        # Saving an unrelated field must not resurrect a failed tuple later.
-        harness = harness.replace('static bool error(', '''static bool saveUnrelated(MyMesh& m) {
-  m._prefs.ble_pin=654321;return m.savePrefs();
-}
-static bool error(''')
+        harness = production_primary_radio_harness()
         compiler = shutil.which('g++') or shutil.which('clang++')
         self.assertIsNotNone(compiler)
         with tempfile.TemporaryDirectory(prefix='companion-primary-radio-') as directory:
             work = Path(directory)
+            prepare_profile_metadata_boundary(work)
             # Reuse the profile fixture's identity/crypto mocks and add only
             # unused JSON conversion links required by real NodePrefs adapters.
             utils = (ROOT/'test/mocks/Utils.h').read_text()

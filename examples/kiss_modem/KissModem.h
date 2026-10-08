@@ -240,6 +240,9 @@ public:
             mesh::Radio& radio, mesh::MainBoard& board, SensorManager& sensors);
 
   void begin();
+  // Drop partial host input and queued frame suffixes at a USB bus reset.
+  // Radio transmissions and profile settings belong to the radio lifecycle.
+  void resetHostSession();
   void loop();
 
   void setRadioCallback(SetRadioCallback cb) { _setRadioCallback = cb; }

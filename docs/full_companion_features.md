@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/full_companion_features/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Full Companion: turn features on and off
 
 For side-by-side Companion and infrastructure commands, see
@@ -51,6 +55,7 @@ editor does not necessarily forward them.
 | External FEM TX gain | `set radio.fem.txgain on` | `set radio.fem.txgain off` | Immediately; saved; controllable PA only |
 | ESP32 USB packet/debug logging | For 1.17.1.5: `set powersaving off`, then `set usb.logging on` | `set usb.logging off` | Immediately; saved; logging owns the USB terminal |
 | nRF52 separate USB logging port | `set usb.logging on reboot` | `set usb.logging off reboot` | Saves and reboots to add/remove the second USB port |
+| nRF52 one-port packet stream | `set usb.logging stream reboot` | `set usb.logging off` | Saved; CLI and packets share the primary port for stock serial bridges |
 | ESP32 browser settings | `set webui on` | `set webui off` | Saved; starts/stops WebConfig |
 | ESP32 temporary setup portal | `start webconfig ap` | `stop webconfig` | This session; opens a setup network/QR where available |
 | ESP32 WiFi firmware uploader | `start ota` or `start ota ap` | `stop ota` | This session; only usable with two application slots |
@@ -100,9 +105,16 @@ WiFi modem sleep is independent of device power saving. Use
 state with `get wifi.powersave`. `max` is available only where the firmware's
 radio coexistence policy permits it.
 
-Most Full Companions provide BLE alongside their other transports. There is
-no universal `set bluetooth off` command. SenseCAP Indicator selects one
-secondary wireless transport per boot:
+Most Full Companions provide BLE alongside their other transports. On
+Bluetooth-capable ESP32 and nRF52 Companions, `get bluetooth` reports the
+running state and `set bluetooth on|off` saves the service preference.
+Plain `off` requires another active management connection;
+`set bluetooth off force` explicitly permits disconnecting the only client.
+Reboot does not undo a saved-off preference. See
+[Bluetooth controls](cli_commands.md#turn-bluetooth-on-or-off-companion) for
+reply draining, connection checks, and unavailable boot modes.
+
+SenseCAP Indicator selects one secondary wireless transport per boot:
 
 ```text
 set companion.transport wifi
@@ -117,6 +129,12 @@ For GPS-equipped boards, use `get gps`, `set gps on`, and `set gps off`.
 The Companion app's `gps=1` / `gps=0` custom setting controls the same GPS.
 Only boards with a compiled GPS provider expose this setting. Sharing location
 with contacts is a separate setting.
+
+Use `set gps.sync.interval <hours>` to save an automatic clock-sync interval of
+1-336 hours (two weeks); `get gps.sync.interval` reports it. Larger inputs are
+capped at 336 and the reply shows the applied value. Existing GPS timings are
+unchanged until configured. This controls clock synchronization, not the
+position-update `gps_interval` or location-sharing policy.
 
 When the exact Full image includes MQTT, use WebConfig's MQTT cards or the
 same CLI settings used by infrastructure, such as `set mqtt1.preset custom`
@@ -181,8 +199,9 @@ For ESP32 with two application slots, `start ota` returns the WiFi uploader
 URL, normally `http://DEVICE_IP:8080/update`. `start ota ap` explicitly opens
 `MeshCore-OTA`; join it and use the returned URL. Upload the exact board's
 application `.bin`. The device reboots when the upload succeeds. Use
-`stop ota` to close an unused uploader. Port 8080 keeps WebConfig on port 80
-available. Use a trusted local network or a temporary setup network.
+`stop ota` to close an unused uploader. Starting OTA enables WiFi as needed,
+stops WebConfig automatically, and reports the network and URL to use. Use a
+trusted local network or a temporary setup network.
 
 The 4 MB Full layouts and T-Beam 1W Full use a single application slot and
 require USB; the command reports that limitation. The artifact's

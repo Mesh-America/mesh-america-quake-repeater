@@ -41,10 +41,25 @@ static constexpr uint8_t kProtocolMask = WIFI_PROTOCOL_11B
     | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
 #endif
 
-// LR is private to ESP-NOW on the station interface. A setup SoftAP must keep
-// an ordinary b/g/n protocol bitmap so phones and laptops can discover it.
+// ESP-IDF 4.4 shares the LR enable flag between STA and AP. A later STA LR
+// write can therefore change AP beacons even after AP was configured as B/G/N.
+// Conventional setup access points take precedence while they are enabled.
 static constexpr uint8_t kAccessPointProtocolMask = WIFI_PROTOCOL_11B
     | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
+
+static constexpr uint8_t kLongRangeRadioOwner = 1;
+static constexpr uint8_t kLongRangeBridgeOwner = 2;
+inline std::atomic<uint8_t>& longRangeOwners() {
+  static std::atomic<uint8_t> owners{0};
+  return owners;
+}
+inline void setLongRangeOwner(uint8_t owner, bool active) {
+  if (active) longRangeOwners().fetch_or(owner);
+  else longRangeOwners().fetch_and(static_cast<uint8_t>(~owner));
+}
+inline bool accessPointCompatibleWithLongRange() {
+  return longRangeOwners().load() == 0;
+}
 
 // A bridge can start/stop independently of infrastructure WiFi. Its channel
 // constraint exists only while it runs; primary ESP-NOW keeps its boot policy.
@@ -115,12 +130,76 @@ inline bool saveConfiguredEspNowChannel(uint8_t) {
 }
 #endif
 
-inline esp_err_t applyProtocolMask(wifi_interface_t interface_id) {
-  return esp_wifi_set_protocol(interface_id, kProtocolMask);
+// Check the SDK rather than Arduino's facade: an ESP-NOW bridge can own a
+// driver which Arduino has not initialized. An absent driver is safe to start.
+inline esp_err_t checkLongRangeRadioStart() {
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  const esp_err_t result = esp_wifi_get_mode(&mode);
+  if (result == ESP_ERR_WIFI_NOT_INIT) return ESP_OK;
+  if (result != ESP_OK) return result;
+  return (mode & WIFI_MODE_AP) ? ESP_ERR_INVALID_STATE : ESP_OK;
+}
+
+// Background station owners must defer while an OTA/setup AP owns WiFi.
+// Only the setup owner's deliberate AP+STA credential handoff may opt in.
+inline bool stationMutationAllowed(bool setup_handoff = false) {
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  const esp_err_t result = esp_wifi_get_mode(&mode);
+  return result == ESP_ERR_WIFI_NOT_INIT
+      || (result == ESP_OK && (!(mode & WIFI_MODE_AP) || setup_handoff));
 }
 
 inline esp_err_t applyAccessPointProtocolMask() {
   return esp_wifi_set_protocol(WIFI_IF_AP, kAccessPointProtocolMask);
+}
+
+inline esp_err_t applyStationProtocolMask(uint8_t protocols, bool require_lr = false) {
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  esp_err_t result = esp_wifi_get_mode(&mode);
+  if (result != ESP_OK) return result;
+  if ((mode & WIFI_MODE_AP) && require_lr) return ESP_ERR_INVALID_STATE;
+  if (mode & WIFI_MODE_AP) protocols = kAccessPointProtocolMask;
+
+  // persistent(false) only changes Arduino's next initialization preference.
+  // Select RAM on this already initialized SDK driver before any LR write.
+  if (protocols & WIFI_PROTOCOL_LR) {
+    result = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (result != ESP_OK) return result;
+  }
+  result = esp_wifi_set_protocol(WIFI_IF_STA, protocols);
+  if (result != ESP_OK) return result;
+
+  // Recheck after the write so an AP enabled by another owner is repaired too.
+  result = esp_wifi_get_mode(&mode);
+  if (result != ESP_OK) {
+    // Unknown mode is not proof that LR is safe. Best-effort B/G/N rollback
+    // also clears the shared LR flag if an AP appeared during this write.
+    // An established LR owner already prevents AP startup. Do not silently
+    // downgrade that owner when a later infrastructure-only mode read fails.
+    if (accessPointCompatibleWithLongRange()) {
+      esp_wifi_set_protocol(WIFI_IF_STA, kAccessPointProtocolMask);
+      applyAccessPointProtocolMask();
+    }
+    return result;
+  }
+  if (mode & WIFI_MODE_AP) {
+    result = applyAccessPointProtocolMask();
+    if (result != ESP_OK) {
+      esp_wifi_set_protocol(WIFI_IF_STA, kAccessPointProtocolMask);
+      return result;
+    }
+    uint8_t actual = 0;
+    result = esp_wifi_get_protocol(WIFI_IF_AP, &actual);
+    if (result != ESP_OK) return result;
+    if (actual != kAccessPointProtocolMask || require_lr) return ESP_ERR_INVALID_STATE;
+  }
+  return ESP_OK;
+}
+
+inline esp_err_t applyProtocolMask(wifi_interface_t interface_id) {
+  return interface_id == WIFI_IF_STA
+      ? applyStationProtocolMask(kProtocolMask)
+      : esp_wifi_set_protocol(interface_id, kProtocolMask);
 }
 
 // An ESP-NOW radio and an associated station cannot occupy different channels.

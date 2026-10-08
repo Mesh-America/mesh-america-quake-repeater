@@ -13,8 +13,6 @@ import json
 import struct
 import time
 
-import serial
-
 from esp32_companion_serial_stress import (
     DeviceFrameReader,
     FrameTimeout,
@@ -27,7 +25,16 @@ from esp32_companion_serial_stress import (
 
 class Link:
     def __init__(self, port: str) -> None:
-        self.port = serial.Serial(port, 115200, timeout=0.1, write_timeout=2)
+        import serial
+
+        # Native USB/JTAG CDC needs DTR. Configure while closed and leave RTS
+        # deasserted so the ESP reset line is not deliberately driven.
+        self.port = serial.Serial(baudrate=115200, timeout=0.1,
+                                  write_timeout=2, exclusive=True)
+        self.port.port = port
+        self.port.dtr = True
+        self.port.rts = False
+        self.port.open()
         self.reader = DeviceFrameReader(TransportCounters())
         self.pushes: list[bytes] = []
 
@@ -83,8 +90,34 @@ class Link:
         return self.request(bytes([0x42]) + command.encode(), (0x1D,))[1:].decode()
 
 
+def consume_expected_dm(recipient: Link, sender_key: bytes, timestamp: int,
+                        text: bytes, queue_capacity: int) -> dict:
+    """Find this test's DM in a bounded FIFO scan without exposing other text."""
+    if queue_capacity not in (256, 512):
+        raise ValueError("queue capacity must be 256 or 512")
+    skipped = 0
+    for _ in range(queue_capacity):
+        queued = recipient.request(bytes([10]), (7, 8, 10, 16, 17))
+        if queued[0] == 10:
+            return {"matched": False, "skipped": skipped, "empty": True}
+        if queued[0] in (7, 16):
+            start = 1 if queued[0] == 7 else 4
+            if len(queued) < start + 12:
+                raise RuntimeError("truncated queued contact message")
+            if (queued[start:start + 6] == sender_key[:6]
+                    and queued[start + 7] == 0  # plaintext DM
+                    and struct.unpack_from("<I", queued, start + 8)[0] == timestamp
+                    and queued[start + 12:] == text):
+                return {"matched": True, "skipped": skipped, "empty": False}
+        skipped += 1
+    return {"matched": False, "skipped": skipped, "empty": False}
+
+
 def run(sender_port: str, recipient_port: str, reset_contact: bool,
-        zero_hop: bool, invalid_signature_first: bool) -> dict:
+        zero_hop: bool, invalid_signature_first: bool,
+        queue_capacity: int = 256) -> dict:
+    if queue_capacity not in (256, 512):
+        raise ValueError("queue capacity must be 256 or 512")
     sender = Link(sender_port)
     recipient = Link(recipient_port)
     prior_dm_setting = None
@@ -188,8 +221,9 @@ def run(sender_port: str, recipient_port: str, reset_contact: bool,
         )
         waiting = any(frame[0] == 0x83 for frame in recipient.pushes)
         learned = recipient.contact(sender_key) is not None
-        queued = recipient.request(bytes([10]), (7, 10, 16))
-        replayed = queued[0] in (7, 16) and text in queued
+        queue_scan = consume_expected_dm(recipient, sender_key, timestamp,
+                                         text, queue_capacity)
+        replayed = queue_scan["matched"]
         result = {
             "sender_prefix": sender_key[:6].hex(),
             "recipient_prefix": recipient_key[:6].hex(),
@@ -200,6 +234,9 @@ def run(sender_port: str, recipient_port: str, reset_contact: bool,
             "synthetic_advert_offered": offered is not None,
             "signed_refusal_received": rejected,
             "held_message_replayed": replayed,
+            "offline_messages_skipped": queue_scan["skipped"],
+            "offline_queue_empty": queue_scan["empty"],
+            "offline_queue_scan_limit": queue_capacity,
             "timeout_ms": timeout_ms,
         }
         if invalid_signature_first:
@@ -227,7 +264,10 @@ if __name__ == "__main__":
                         help="set a direct zero-hop path; use only when both radios are nearby")
     parser.add_argument("--invalid-signature-first", action="store_true",
                         help="verify an encrypted introduction with a bad signature is rejected")
+    parser.add_argument("--queue-capacity", type=int, choices=(256, 512), default=256,
+                        help="recipient offline queue capacity; 512 for PSRAM builds (default: 256)")
     args = parser.parse_args()
     print(json.dumps(run(args.sender, args.recipient, args.reset_contact,
-                         args.zero_hop, args.invalid_signature_first),
+                         args.zero_hop, args.invalid_signature_first,
+                         args.queue_capacity),
                      sort_keys=True))

@@ -221,13 +221,16 @@ class BufferedNonBlockingWriteStream : public Stream {
     return written;
   }
 
-  void discardPending() {
-    if (_busy.test_and_set(std::memory_order_acquire)) return;
+  bool tryDiscardPending() {
+    if (_busy.test_and_set(std::memory_order_acquire)) return false;
     _head = 0;
     _tail = 0;
     _count = 0;
     _busy.clear(std::memory_order_release);
+    return true;
   }
+
+  void discardPending() { (void)tryDiscardPending(); }
 
   size_t queuedByteCount() {
     if (_busy.test_and_set(std::memory_order_acquire)) return CAPACITY;

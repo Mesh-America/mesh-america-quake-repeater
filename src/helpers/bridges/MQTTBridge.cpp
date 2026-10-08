@@ -1,5 +1,8 @@
 #define MQTT_PRESETS_IMPLEMENTATION
 #include "MQTTBridge.h"
+#ifdef ESP_PLATFORM
+#include <helpers/esp32/WiFiCredentials.h>
+#endif
 #include "../MQTTConnectionPolicy.h"
 #include "../MQTTMessageBuilder.h"
 #include "../MQTTPacketQueuePolicy.h"
@@ -149,8 +152,52 @@ const char* MQTTBridge::repeatStatus() const {
   return enabled ? "on" : "off";
 }
 
+#ifdef ESP_PLATFORM
+static bool mqttStationWiFiMutationAllowed() {
+  return mesh::wifi::stationMutationAllowed();
+}
+
+void MQTTBridge::beginWiFiStation() {
+  if (!mqttStationWiFiMutationAllowed()) return;
+  mesh::wifi::beginStation(_wifi_ssid, _wifi_password);
+}
+
+bool MQTTBridge::prepareWiFiCredentials() {
+  mesh::wifi::Credentials credentials;
+  if (!_obs) return _wifi_configured = false;
+  const auto state = _manage_wifi && _node_info.canonical_wifi
+      ? mesh::wifi::resolveCredentials(credentials, _obs->wifi_ssid,
+          _obs->wifi_password, _obs->wifi_power_save)
+      : mesh::wifi::CredentialState::Absent;
+  if (!_manage_wifi || !_node_info.canonical_wifi) {
+    // The Companion owns its live station; do not read infrastructure NVS.
+    if (strnlen(_obs->wifi_ssid, sizeof(_obs->wifi_ssid)) >= sizeof(credentials.ssid)
+        || strnlen(_obs->wifi_password, sizeof(_obs->wifi_password)) >= sizeof(_obs->wifi_password))
+      return _wifi_configured = false;
+    strcpy(credentials.ssid, _obs->wifi_ssid);
+    strcpy(credentials.password, _obs->wifi_password);
+    credentials.power_save = _obs->wifi_power_save;
+  } else if (state != mesh::wifi::CredentialState::Ready) {
+    return _wifi_configured = false;
+  }
+  memcpy(_wifi_ssid, credentials.ssid, sizeof(_wifi_ssid));
+  memcpy(_wifi_password, credentials.password, sizeof(_wifi_password));
+  _wifi_power_save = credentials.power_save;
+  return _wifi_configured = _wifi_ssid[0] != 0;
+}
+#endif
+
 // Helper function to check if WiFi credentials are valid
-static bool isWiFiConfigValid(const MQTTPrefs* obs) {
+static bool isWiFiConfigValid(const MQTTPrefs* obs, bool canonical_wifi = false) {
+#ifdef ESP_PLATFORM
+  if (canonical_wifi && obs) {
+    mesh::wifi::Credentials credentials;
+    return mesh::wifi::resolveCredentials(credentials, obs->wifi_ssid, obs->wifi_password,
+        obs->wifi_power_save) == mesh::wifi::CredentialState::Ready;
+  }
+#else
+  (void)canonical_wifi;
+#endif
   // Check if WiFi SSID is configured (not empty)
   if (!obs || strlen(obs->wifi_ssid) == 0) {
     return false;
@@ -170,8 +217,8 @@ static bool customEndpointComplete(const char* host, uint16_t port) {
   return host[0] != '\0' && (port != 0 || strstr(host, "://") != nullptr);
 }
 
-bool MQTTBridge::isConfigValid(const MQTTPrefs* obs) {
-  if (!obs || !isWiFiConfigValid(obs)) return false;
+bool MQTTBridge::isConfigValid(const MQTTPrefs* obs, bool canonical_wifi) {
+  if (!obs || !isWiFiConfigValid(obs, canonical_wifi)) return false;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     const char* preset_name = obs->mqtt_slot_preset[i];
     if (preset_name[0] == '\0' || strcmp(preset_name, MQTT_PRESET_NONE) == 0) continue;
@@ -270,7 +317,7 @@ static unsigned long s_wifi_disconnect_time = 0;
 // #region agent log
 static void agentLogHeap(const char* location, const char* message, const char* hypothesisId,
                          size_t free_h, size_t max_alloc, unsigned long internal_free, unsigned long spiram_free) {
-  if (!mesh::isUsbLoggingEnabled()) return;
+  if (!mesh::isUsbDebugLoggingEnabled()) return;
   char buf[320];
   snprintf(buf, sizeof(buf),
           "{\"sessionId\":\"debug-session\",\"location\":\"%s\",\"message\":\"%s\",\"hypothesisId\":\"%s\","
@@ -683,7 +730,7 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
 // end() returns as soon as the task acks (it checks _stop_acked before ticking
 // the timeout), so a larger bound does NOT slow a healthy stop -- it only length-
 // ens the wait before force-killing a genuinely wedged task. The timeout is set
-// per stop in end() via computeStopTimeoutMs() based on the enabled-slot count.
+// per stop in requestStop() based on the enabled-slot count.
 static const uint32_t MQTT_STOP_TIMEOUT_BASE_MS     = 5000;   // fixed teardown overhead
 static const uint32_t MQTT_STOP_TIMEOUT_PER_SLOT_MS = 8000;   // ~5-6 s measured + headroom
 
@@ -899,8 +946,8 @@ void MQTTBridge::begin() {
 
   // Idempotent start: a second begin() would re-run allocation and re-create
   // the task, leaking the previous queue and task.
-  if (_initialized) {
-    MQTT_DEBUG_PRINTLN("MQTT Bridge already running - begin() ignored");
+  if (_initialized || _lifecycle.isStopInProgress()) {
+    MQTT_DEBUG_PRINTLN("MQTT Bridge running or stopping - begin() ignored");
     return;
   }
 
@@ -969,7 +1016,12 @@ void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("Max active slots: %d", _max_active_slots);
 
   // Check if WiFi credentials are configured first
-  if (!isWiFiConfigValid(_obs)) {
+#ifdef ESP_PLATFORM
+  const bool wifi_configured = prepareWiFiCredentials();
+#else
+  const bool wifi_configured = isWiFiConfigValid(_obs);
+#endif
+  if (!wifi_configured) {
     MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - WiFi credentials not configured");
     return;
   }
@@ -1078,6 +1130,10 @@ void MQTTBridge::begin() {
     }
   }
 
+  // Reset the handshake before starting either the worker or cooperative loop.
+  _stop_requested.store(false, std::memory_order_release);
+  _stop_acked.store(false, std::memory_order_release);
+
   #ifdef ESP_PLATFORM
   // Create FreeRTOS queue; use PSRAM storage when available
   #ifdef BOARD_HAS_PSRAM
@@ -1121,11 +1177,6 @@ void MQTTBridge::begin() {
   // Task stack: dynamic allocation (internal RAM). A PSRAM-backed stack was tried and
   // reverted -- it resets some boards (e.g. Heltec V4) when the task runs from PSRAM.
   _mqtt_task_handle = nullptr;
-  // Clear the cooperative-stop handshake before the new task starts reading it.
-  // deliverStop() leaves _stop_requested latched true after a stop cycle, so a
-  // restart must reset it or the fresh task would self-terminate immediately.
-  _stop_requested = false;
-  _stop_acked = false;
   BaseType_t create_result = xTaskCreatePinnedToCore(
     mqttTask,
     "MQTTBridge",
@@ -1179,16 +1230,11 @@ void MQTTBridge::begin() {
 }
 
 // ---------------------------------------------------------------------------
-// end()
+// requestStop() - signal only; worker retains ownership until acknowledgment
 // ---------------------------------------------------------------------------
-void MQTTBridge::end() {
-  MQTT_DEBUG_PRINTLN("Stopping MQTT Bridge...");
-
-  // Idempotent stop: nothing to tear down if we never started (or already stopped).
-  if (!_initialized) {
-    MQTT_DEBUG_PRINTLN("MQTT Bridge already stopped - end() ignored");
-    return;
-  }
+void MQTTBridge::requestStop() {
+  // A repeated request must not clear an acknowledgment or restart its budget.
+  if (!_initialized || _lifecycle.isStopInProgress()) return;
 
   // Stop new diagnostic reads through the singleton before teardown begins.
   s_mqtt_bridge_instance = nullptr;
@@ -1216,12 +1262,28 @@ void MQTTBridge::end() {
   // task mid-mbedTLS and then free client buffers on a corrupted heap.
   _lifecycle.requestStop();  // Running -> StopRequested; deliverStop() sets _stop_requested
 
+#ifndef ESP_PLATFORM
+  // The cooperative implementation has no worker to acknowledge separately.
+  _stop_acked.store(true, std::memory_order_release);
+  _lifecycle.onTaskStopped();
+  finishStopped();
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// end() - synchronous barrier for OTA and other ownership transfers
+// ---------------------------------------------------------------------------
+void MQTTBridge::end() {
+  MQTT_DEBUG_PRINTLN("Stopping MQTT Bridge...");
+  if (!_initialized) return;
+  requestStop();  // Joins an existing request without re-delivering its signal.
+
 #ifdef ESP_PLATFORM
   // Wait (bounded) for the task to acknowledge. tick() synthesizes the timeout
   // fallback if the task never acks. Checking the ack first each iteration means
   // a stop that completes right as the timeout expires is still treated as clean.
   while (_lifecycle.isStopInProgress()) {
-    if (_stop_acked) {
+    if (_stop_acked.load(std::memory_order_acquire)) {
       _lifecycle.onTaskStopped();   // StopRequested -> Stopped (clean): releaseResources()
       break;
     }
@@ -1229,14 +1291,12 @@ void MQTTBridge::end() {
     if (!_lifecycle.isStopInProgress()) break;
     vTaskDelay(pdMS_TO_TICKS(20));
   }
-#else
-  // Non-ESP32: the bridge runs cooperatively in loop(); there is no separate
-  // task to signal. Drive straight to a clean Stopped and let releaseResources()
-  // perform the (unchanged) synchronous teardown.
-  _stop_acked = true;
-  _lifecycle.onTaskStopped();
 #endif
+  finishStopped();
+}
 
+void MQTTBridge::finishStopped() {
+  if (!_initialized || _lifecycle.isStopInProgress()) return;
   // Timezone is inline class storage (_timezone_storage) - nothing to delete.
   // The shared JSON document's pools were freed by releaseRuntimeBuffers() above.
   _initialized = false;
@@ -1249,6 +1309,7 @@ void MQTTBridge::end() {
   _ntp_estimate_done = false;
   _ntp_estimate_ok = false;
   _ntp_estimate_epoch = 0;
+  _staged_raw_valid = false;
   MQTT_DEBUG_PRINTLN("MQTT Bridge stopped (%s)",
                      _lifecycle.stopTimedOut() ? "forced/timeout - OTA blocked" : "clean");
 }
@@ -1256,7 +1317,7 @@ void MQTTBridge::end() {
 // ---------------------------------------------------------------------------
 // LifecycleOps - binds MQTTLifecycle::Ops (the pure, host-tested spec) to the
 // FreeRTOS / PsychicMqttClient runtime. Every method runs on the loop task
-// (Core 1): the Coordinator that calls them is driven only from begin()/end().
+// (Core 1): begin(), requestStop(), end(), and loop() own the Coordinator.
 // ---------------------------------------------------------------------------
 uint32_t MQTTBridge::LifecycleOps::nowMs() {
   return (uint32_t)millis();
@@ -1271,8 +1332,8 @@ void MQTTBridge::LifecycleOps::deliverStop() {
   // Clear any stale ack before raising the request (same ordering as the NTP
   // handshake: clear the done-flag, then set the request). The MQTT task polls
   // _stop_requested at the top of mqttTaskLoop().
-  _b->_stop_acked = false;
-  _b->_stop_requested = true;
+  _b->_stop_acked.store(false, std::memory_order_release);
+  _b->_stop_requested.store(true, std::memory_order_release);
 }
 
 void MQTTBridge::LifecycleOps::releaseResources() {
@@ -1352,11 +1413,19 @@ void MQTTBridge::mqttTask(void* parameter) {
   vTaskDelete(nullptr);
 }
 
-void MQTTBridge::initializeWiFiInTask() {
-  MQTT_DEBUG_PRINTLN("Initializing WiFi in MQTT task...");
+bool MQTTBridge::initializeWiFiInTask() {
+  // OTA and setup APs own the shared driver. Starting/restarting MQTT must
+  // wait for their teardown instead of changing AP+STA to STA and dropping
+  // the operator's connection. Consult the SDK even if Arduino reports OFF.
+  if (!mqttStationWiFiMutationAllowed()) return false;
 
-  // Initialize WiFi
-  WiFi.mode(WIFI_STA);
+  // Use Arduino's additive STA API instead of deliberately removing AP.
+  // Its mode snapshot is not atomic; recheck before reconnect/event/NTP work.
+  if (!WiFi.enableSTA(true)) return false;
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&mode) != ESP_OK || (mode & WIFI_MODE_AP)) return false;
+
+  MQTT_DEBUG_PRINTLN("Initializing WiFi in MQTT task...");
 
   // A primary ESP-NOW radio must reconnect through the fixed-channel policy;
   // other ESP32 targets retain the driver's normal automatic reconnect.
@@ -1412,7 +1481,7 @@ void MQTTBridge::initializeWiFiInTask() {
   // because _ntp_synced persists across end() (only _slots_setup_done is reset).
   if (WiFi.status() != WL_CONNECTED) {
     if (_manage_wifi) {
-      mesh::wifi::beginStation(_obs->wifi_ssid, _obs->wifi_password);
+      beginWiFiStation();
     }
   } else if (!_ntp_synced.load(std::memory_order_acquire)
              && !_ntp_sync_pending) {
@@ -1424,17 +1493,38 @@ void MQTTBridge::initializeWiFiInTask() {
   // before NTP sync just wastes heap on TLS handshakes that will be rejected.
 
   MQTT_DEBUG_PRINTLN("WiFi initialization started in task");
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Preserve startup/TLS spacing while allowing the owning task to stop promptly.
+// Unsigned tick subtraction remains valid across the FreeRTOS tick wrap.
+bool MQTTBridge::waitUnlessStopping(uint32_t delay_ms) {
+  const TickType_t duration = pdMS_TO_TICKS(delay_ms);
+  const TickType_t started = xTaskGetTickCount();
+  TickType_t quantum = pdMS_TO_TICKS(20);
+  if (quantum == 0) quantum = 1;
+  while (!_stop_requested) {
+    const TickType_t elapsed = xTaskGetTickCount() - started;
+    if (elapsed >= duration) return !_stop_requested;
+    const TickType_t remaining = duration - elapsed;
+    vTaskDelay(remaining < quantum ? remaining : quantum);
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
 // mqttTaskLoop() - main loop running on Core 0
 // ---------------------------------------------------------------------------
 void MQTTBridge::mqttTaskLoop() {
-  // Initialize WiFi first
-  initializeWiFiInTask();
+  // An active OTA/setup AP can outlive MQTT's start request. Stay stoppable
+  // while waiting, and leave slot/TLS work until station initialization ran.
+  while (!_stop_requested && !initializeWiFiInTask()) {
+    if (!waitUnlessStopping(100)) break;
+  }
 
   // Wait a bit for WiFi to start connecting
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  waitUnlessStopping(1000);
 
   // Main task loop
   #ifdef MQTT_MEMORY_DEBUG
@@ -1454,7 +1544,7 @@ void MQTTBridge::mqttTaskLoop() {
         teardownSlot(i);
       }
       destroySlotClients();
-      _stop_acked = true;   // release semantics: set only after teardown is done
+      _stop_acked.store(true, std::memory_order_release);  // teardown precedes Core 1 release
       return;
     }
 
@@ -1556,6 +1646,10 @@ void MQTTBridge::mqttTaskLoop() {
     }
 #endif
 
+    // Network/time probes may have yielded while Core 1 requested a stop.
+    // Return to the owner-core teardown before allocating another client.
+    if (_stop_requested) continue;
+
     // Deferred slot setup: wait until NTP is synced so JWT tokens get valid timestamps.
     // This avoids wasted TLS handshakes that get rejected due to bad token times.
     if (_ntp_synced.load(std::memory_order_acquire) && !_slots_setup_done) {
@@ -1570,6 +1664,7 @@ void MQTTBridge::mqttTaskLoop() {
 
       MQTT_DEBUG_PRINTLN("NTP synced, setting up MQTT slots (max %d active)...", _max_active_slots);
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+        if (_stop_requested) break;
         if (_slots[i].enabled) {
           if (!canActivateSlot(i)) {
             MQTT_DEBUG_PRINTLN("MQTT%d skipped: max active slots (%d) reached", i + 1, _max_active_slots);
@@ -1588,20 +1683,26 @@ void MQTTBridge::mqttTaskLoop() {
           // Stagger connections: 5s between slots to avoid simultaneous TLS handshakes
           // which compete for ~40KB internal heap each
           if (i < RUNTIME_MQTT_SLOTS - 1) {
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            if (!waitUnlessStopping(5000)) break;
           }
         }
       }
     }
 
+    // A stop during a stagger must not fall through into reconfiguration,
+    // publication, or connection maintenance before the next loop iteration.
+    if (_stop_requested) continue;
+
     // Process pending slot reconfigures (queued from CLI on Core 1)
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      if (_stop_requested) break;
       if (_slot_reconfigure_pending[i]) {
         _slot_reconfigure_pending[i] = false;
         MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for MQTT%d (preset: %s)", i + 1, _obs->mqtt_slot_preset[i]);
         applySlotPreset(i, _obs->mqtt_slot_preset[i]);
       }
     }
+    if (_stop_requested) continue;
 
     // Publish on-connect status for slots whose onConnect callback fired since
     // the last loop. Raised on the esp-mqtt event task, consumed here on the
@@ -1610,17 +1711,21 @@ void MQTTBridge::mqttTaskLoop() {
     // reconnect during the publish re-arms for the next loop rather than being
     // lost; publishStatusToSlot() re-checks slot.connected and no-ops if dropped.
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      if (_stop_requested) break;
       if (_status_publish_pending[i]) {
         _status_publish_pending[i] = false;
         publishStatusToSlot(i);
       }
     }
+    if (_stop_requested) continue;
 
     // Maintain slot connections (token renewal, reconnect with backoff)
     maintainSlotConnections();
+    if (_stop_requested) continue;
 
     // Process packet queue
     processPacketQueue();
+    if (_stop_requested) continue;
 
 #if defined(WITH_MQTT_NEIGHBORS)
     // Consume a pending neighbors snapshot handed over by the mesh (Core 1).
@@ -1939,6 +2044,7 @@ bool MQTTBridge::canActivateSlot(int index) const {
 // maintainSlotConnections() will retry it -- the allocation failures below are transient
 // memory conditions, not permanent misconfiguration.
 bool MQTTBridge::setupSlot(int index) {
+  if (_stop_requested.load(std::memory_order_acquire)) return false;
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
 
@@ -2209,6 +2315,7 @@ void MQTTBridge::teardownSlot(int index, bool force) {
 
 esp_err_t MQTTBridge::reconnectSlotClient(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return ESP_ERR_INVALID_ARG;
+  if (_stop_requested.load(std::memory_order_acquire)) return ESP_ERR_INVALID_STATE;
   MQTTSlot& slot = _slots[index];
   if (slot.client == nullptr) return ESP_ERR_INVALID_STATE;
 
@@ -2234,6 +2341,7 @@ esp_err_t MQTTBridge::reconnectSlotClient(int index) {
 }
 
 void MQTTBridge::maintainSlotConnections() {
+  if (_stop_requested.load(std::memory_order_acquire)) return;
   if (!_identity) return;
 
   // Check WiFi status first
@@ -2271,6 +2379,7 @@ void MQTTBridge::maintainSlotConnections() {
   bool setup_retry_this_cycle = false;
 
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_stop_requested) return;
     if (!_slots[i].enabled) continue;
 
     // JWT slots need time sync before we can manage tokens
@@ -2617,6 +2726,7 @@ bool MQTTBridge::createSlotAuthToken(int index) {
 }
 
 bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload, size_t payload_len, bool retained, uint8_t qos) {
+  if (_stop_requested.load(std::memory_order_acquire)) return false;
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
   if (!slot.client || !slot.connected) {
@@ -2854,6 +2964,7 @@ bool MQTTBridge::isAnySlotConnected() {
 }
 
 void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
+  if (_stop_requested.load(std::memory_order_acquire)) return;
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
 
   // On ESP32, teardown/setup involves TLS and must run on the MQTT task (Core 0).
@@ -2871,6 +2982,7 @@ void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
 }
 
 void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
+  if (_stop_requested.load(std::memory_order_acquire)) return;
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[slot_index];
 
@@ -2943,6 +3055,7 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
 
 void MQTTBridge::setSlotCustomBroker(int slot_index, const char* host, uint16_t port,
                                       const char* username, const char* password) {
+  if (_stop_requested.load(std::memory_order_acquire)) return;
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return;
   MQTTSlot& slot = _slots[slot_index];
 
@@ -2973,6 +3086,11 @@ void MQTTBridge::checkConfigurationMismatch() {
 }
 
 bool MQTTBridge::handleWiFiConnection(unsigned long now) {
+#ifdef ESP_PLATFORM
+  // An AP can start after this worker initialized. Defer channel enforcement,
+  // reconnect/disconnect and radio power changes until that owner releases it.
+  if (!mqttStationWiFiMutationAllowed()) return false;
+#endif
   wl_status_t current_wifi_status = WiFi.status();
 #ifdef ESP_PLATFORM
   if (current_wifi_status == WL_CONNECTED
@@ -3015,7 +3133,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
       #ifdef ESP_PLATFORM
       wifi_ps_type_t ps_mode;
       uint8_t ps_pref = mesh::wifi::effectivePowerSave(
-          _obs->wifi_power_save,
+          _manage_wifi && _node_info.canonical_wifi ? _wifi_power_save : _obs->wifi_power_save,
 #if defined(COMPANION_EXCLUSIVE_WIFI_BLE)
           false,
 #elif defined(BLE_PIN_CODE) && defined(WIFI_SSID)
@@ -3073,7 +3191,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
             MQTTConnectionPolicy::nextWifiBackoffAttempt(_wifi_reconnect_backoff_attempt);
         WiFi.disconnect();
 #ifdef ESP_PLATFORM
-        mesh::wifi::beginStation(_obs->wifi_ssid, _obs->wifi_password);
+        beginWiFiStation();
 #else
         WiFi.begin(_obs->wifi_ssid, _obs->wifi_password);
 #endif
@@ -3085,7 +3203,12 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
 }
 
 bool MQTTBridge::isReady() const {
-  return _initialized && isWiFiConfigValid(_obs);
+  return _initialized && !_stop_requested.load(std::memory_order_acquire)
+#ifdef ESP_PLATFORM
+      && _wifi_configured;
+#else
+      && isWiFiConfigValid(_obs);
+#endif
 }
 
 bool MQTTBridge::isIATAValid() const {
@@ -3135,13 +3258,20 @@ bool MQTTBridge::isSlotReady(int index, char* reason_buf, size_t reason_size) co
 }
 
 // ---------------------------------------------------------------------------
-// loop() - non-ESP32 main loop (ESP32 uses mqttTaskLoop via FreeRTOS task)
+// loop() - Core 1 stop reaping on ESP32; cooperative processing elsewhere
 // ---------------------------------------------------------------------------
 void MQTTBridge::loop() {
   if (!_initialized) return;
 
   #ifdef ESP_PLATFORM
-  // On ESP32, loop() is a no-op - all processing happens in the FreeRTOS task
+  // Poll only: a slow TLS teardown must not stall radio/UART forwarding or
+  // force-delete the worker. Only end(), the synchronous OTA barrier, owns
+  // the existing bounded-timeout fallback.
+  if (_lifecycle.isStopInProgress()
+      && _stop_acked.load(std::memory_order_acquire)) {
+    _lifecycle.onTaskStopped();
+    finishStopped();
+  }
   return;
   #else
   unsigned long now = millis();
@@ -3271,7 +3401,8 @@ void MQTTBridge::loop() {
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
-  if (!_initialized || !_obs->mqtt_packets_enabled || !_obs->mqtt_rx_enabled) return;
+  if (!_initialized || _stop_requested.load(std::memory_order_acquire)
+      || !_obs->mqtt_packets_enabled || !_obs->mqtt_rx_enabled) return;
 
   // Drop before the queue copy when no configured slot allows this payload
   // type. A QueuedPacket carries the packet plus up to 256 bytes of raw radio
@@ -3295,7 +3426,8 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
   uint8_t tx_mode = _obs->mqtt_tx_enabled;  // Read live from prefs (no restart needed)
-  if (!_initialized || !_obs->mqtt_packets_enabled || tx_mode == 0) return;
+  if (!_initialized || _stop_requested.load(std::memory_order_acquire)
+      || !_obs->mqtt_packets_enabled || tx_mode == 0) return;
 
   // Advert mode: only queue self-originated advert packets
   if (tx_mode == 2) {
@@ -4000,7 +4132,7 @@ void MQTTBridge::requestPublishNeighbors(const char* json, size_t len) {
   if (_neighbors_publish_pending.load(std::memory_order_acquire)) return;
   // A discovery can finish after bridge shutdown. Do not allocate a buffer
   // which has no task left to consume or release it.
-  if (!isRunning()) return;
+  if (!isRunning() || _stop_requested.load(std::memory_order_acquire)) return;
   _neighbors_json_buffer = static_cast<char*>(
       MQTTRuntimeBufferLifecycle::allocateIfMissing(
           _neighbors_json_buffer, NEIGHBORS_JSON_BUFFER_SIZE, psram_malloc));
@@ -4047,6 +4179,7 @@ bool MQTTBridge::publishNeighbors() {
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
+  if (!_initialized || _stop_requested.load(std::memory_order_acquire)) return;
   #ifdef ESP_PLATFORM
   // Use FreeRTOS queue for thread-safe operation
   if (_packet_queue_handle == nullptr) {
@@ -4174,6 +4307,7 @@ void MQTTBridge::dequeuePacket() {
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi) {
+  if (!_initialized || _stop_requested.load(std::memory_order_acquire)) return;
   // Writes into the Core 1-only staging area. No mutex needed: this function and
   // queuePacket() are both called from Core 1 in guaranteed sequence for each packet.
   if (len > 0 && len <= (int)LAST_RAW_DATA_SIZE) {
@@ -4549,7 +4683,7 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
 }
 
 bool MQTTBridge::requestForcedNtpSync(uint32_t timeout_ms) {
-  if (!isRunning()) return false;
+  if (!isRunning() || _stop_requested.load(std::memory_order_acquire)) return false;
 
   // Publish the request to the MQTT task. Clear the completion flags before
   // raising _ntp_force_requested so the task can't observe a stale result.
@@ -4618,7 +4752,8 @@ void MQTTBridge::runNtpEstimateProbe() {
 }
 
 bool MQTTBridge::requestNtpTimeEstimate() {
-  if (!isRunning() || WiFi.status() != WL_CONNECTED || _ntp_estimate_requested) return false;
+  if (!isRunning() || _stop_requested.load(std::memory_order_acquire)
+      || WiFi.status() != WL_CONNECTED || _ntp_estimate_requested) return false;
   _ntp_estimate_done = false;
   _ntp_estimate_ok = false;
   _ntp_estimate_epoch = 0;
@@ -4636,7 +4771,8 @@ bool MQTTBridge::takeNtpTimeEstimate(uint32_t& epoch, bool& finished) {
 }
 
 bool MQTTBridge::ntpDiag(char* reply, size_t reply_size, bool verbose) {
-  if (!isRunning() || reply == nullptr || reply_size == 0) return false;
+  if (!isRunning() || _stop_requested.load(std::memory_order_acquire)
+      || reply == nullptr || reply_size == 0) return false;
 
   // Marshal the probe onto the MQTT task (Core 0); clear the completion flag first.
   _ntp_diag_done = false;

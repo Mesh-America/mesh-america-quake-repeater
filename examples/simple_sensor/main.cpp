@@ -1,4 +1,5 @@
 #include "SensorMesh.h"
+#include <math.h>
 #include <helpers/IdentityGeneration.h>
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
@@ -7,6 +8,8 @@
   #include <helpers/nrf52/RamFallbackFileSystem.h>
 #endif
 #include <helpers/UsbLogging.h>
+#include <helpers/UsbLoggingWatchdog.h>
+#include <helpers/UsbLoggingClientActivity.h>
 
 #if defined(ESP32_PLATFORM)
   #include <helpers/ESP32TrueRandom.h>
@@ -33,10 +36,12 @@ protected:
 
   void onSensorDataRead() override {
     float batt_voltage = getVoltage(TELEM_CHANNEL_SELF);
+    // Boards without battery measurement return zero; do not alarm on it.
+    const bool battery_available = batt_voltage > 0.0f && isfinite(batt_voltage);
 
     battery_data.recordData(getRTCClock(), batt_voltage);   // record battery
-    alertIf(batt_voltage < 3.4f, critical_batt, HIGH_PRI_ALERT, "Battery is critical!");
-    alertIf(batt_voltage < 3.6f, low_batt, LOW_PRI_ALERT, "Battery is low");
+    alertIf(battery_available && batt_voltage < 3.4f, critical_batt, HIGH_PRI_ALERT, "Battery is critical!");
+    alertIf(battery_available && batt_voltage < 3.6f, low_batt, LOW_PRI_ALERT, "Battery is low");
   }
 
   int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
@@ -73,7 +78,7 @@ static const unsigned long POWERSAVING_FIRST_SLEEP_SECS = 120;
 void setup() {
   mesh::prepareUsbLoggingPort();
   Serial.begin(115200);
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::beginUsbLoggingPort();
 #endif
   board.begin();
@@ -210,6 +215,14 @@ void setup() {
   the_mesh.begin(fs);
 
 #if defined(NRF52_PLATFORM)
+  mesh::loadUsbLoggingWatchdog(fs, !volatile_primary_fs,
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#else
+  mesh::loadUsbLoggingWatchdog(fs, true,
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#endif
+
+#if defined(NRF52_PLATFORM)
   if (volatile_primary_fs) {
     strncpy(the_mesh.getNodePrefs()->node_name,
             mesh::storage::BAD_FILESYSTEM_NODE_NAME,
@@ -233,12 +246,21 @@ void setup() {
   board.onBootComplete();
 }
 
+static bool usbLoggingRecoverySafe(void*) {
+  if (board.isOTAUpdateRunning() || board.isRadioTestActive()
+      || radio_driver.isWatchdogObserving() || radio_driver.isCalibratingNoiseFloor()
+      || !the_mesh.canRecoverUsbLogging()) return false;
+  const auto usb = mesh::usbLoggingStatus();
+  return !usb.reader_connected || usb.stalled || !command[0];
+}
+
 void loop() {
+  mesh::serviceUsbLoggingPort();
 #if defined(NRF52_PLATFORM)
   board.feedWatchdog(the_mesh.getNodePrefs()->system_watchdog_enabled != 0);
 #endif
   bool usb_ready = true;
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::serviceUsbLoggingPort();
   mesh::serviceUsbTerminalPort();
   if (mesh::takeUsbTerminalSessionReset()) command[0] = 0;
@@ -271,6 +293,9 @@ void loop() {
     command[len - 1] = 0;  // replace newline with C string null terminator
     char reply[160];
     reply[0] = 0;
+    if (len < static_cast<int>(sizeof(command) - 1)
+        && strlen(command) == static_cast<size_t>(len - 1))
+      mesh::noteUsbLoggingStatsCommand(command);
     the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
     if (reply[0]) {
       console.print("  -> ");
@@ -288,7 +313,8 @@ void loop() {
   if (display_ready) ui_task.loop();
 #endif
   rtc_clock.tick();
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+  if (mesh::serviceUsbLoggingWatchdog(usbLoggingRecoverySafe)) board.reboot();
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::serviceUsbTerminalPort();
 #endif
 #ifdef HAS_EXTERNAL_WATCHDOG
@@ -296,7 +322,8 @@ void loop() {
 #endif
 
   bool can_power_save = the_mesh.getNodePrefs()->powersaving_enabled
-      && !board.isUsbDataConnected();
+      && !board.isUsbDataConnected()
+      && !mesh::isUsbLoggingWatchdogArmed();
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP \
     && defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)

@@ -6,6 +6,20 @@ repo_name: !ENV [MKDOCS_REPO_NAME, 'meshcore-dev/meshcore']
 repo_url: !ENV [MKDOCS_REPO_URL, 'https://github.com/meshcore-dev/meshcore/']
 edit_uri: !ENV [MKDOCS_EDIT_URI, 'edit/main/docs/']
 
+# Mesh America Quake Repeater documents. They are published by the Quake Repeater docs site
+# (quake-site/, see scripts/build_quake_site.py), not by this site, so they carry no MeshCore
+# hosted-page link.
+exclude_docs: |
+  /earthquake-alerts.md
+  /reading-the-sensor.md
+  /placement-and-testing.md
+  /clock-floor.md
+  /d7s-integration.md
+  /d7s-measurement-contract.md
+
+hooks:
+  - scripts/docs_partition_catalog.py
+
 # Keep historical URLs for bookmarks while showing only the organized copies.
 not_in_nav: |
   /*_validation.md
@@ -50,6 +64,7 @@ nav:
   - Documentation:
       - Getting started and features:
           - faq.md
+          - full_profiles.md
           - role_feature_switches.md
           - full_companion_features.md
           - companion_radio_full.md
@@ -57,6 +72,7 @@ nav:
           - companion_offline_queue.md
           - halo_keymind_settings.md
       - Firmware updates and partitions:
+          - upgrading_1.17.1.8_to_1.17.1.9.md
           - ota_user_guide.md
           - ota_easy.md
           - lora_ota_automation.md
@@ -93,6 +109,7 @@ nav:
   - Research: research/index.md
   - Releases:
       - Current release:
+          - 1.17.1.9 USA Cascade: releases/1.17.1.9.md
           - 1.17.1.8 USA Cascade: releases/1.17.1.8.md
           - Test Results: test-results/index.md
       - Old Releases: old-releases/index.md
@@ -107,20 +124,23 @@ theme:
     - search.suggest
 
 extra_css:
-  - _stylesheets/notification_builder.css
+  - _stylesheets/notification_builder.css?v=20261006-channel9
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.css
   - _stylesheets/extra.css
-  - _stylesheets/firmware_picker.css?v=20260929-1
+  - _stylesheets/firmware_picker.css?v=20261001-feedback-1
   - _stylesheets/telemetry_decoder.css
   - _stylesheets/management_decoder.css
   - _stylesheets/filter_tool.css
   - _stylesheets/preset_test.css?v=20260923-2
+  - _stylesheets/esp32_partition_catalog.css?v=20261001-1
 
 extra_javascript:
-  - _javascript/notification_builder.js?v=20260930-audio-start
+  - _javascript/hosted_doc_links.js?v=20261007-1
+  - _javascript/notification_builder.js?v=20261006-channel9
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.js
-  - _javascript/firmware_picker.js?v=20260929-4
-  - _javascript/telemetry_decoder.js
+  - _javascript/firmware_picker.js?v=20261006-simplify-1
+  - _javascript/telemetry_decoder.js?v=20261007-hosted-form
   - _javascript/management_decoder.js
   - _javascript/filter_tool.js?v=20261002-hashbytes-2plus
   - _javascript/preset_test.js?v=20260923-2
+  - _javascript/esp32_partition_catalog.js?v=20261001-1

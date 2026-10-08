@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/preview-1.17.1.8/heltec-v4-preview4-bluetooth-oled/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Heltec V4 preview4 Bluetooth/OLED regression validation
 
 Date: 2026-10-02. These are observations on one physical Heltec V4.3 OLED,

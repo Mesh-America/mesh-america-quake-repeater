@@ -118,7 +118,7 @@ class RadioProfiles {
     if (!isfinite(p.freq) || !isfinite(p.bw) || p.freq < 150 || p.freq > 2500
         || p.sf < 5 || p.sf > 12 || p.cr < 5 || p.cr > 8
         || (p.preamble != 0 && (p.preamble < 8 || p.preamble > MaxPreamble))) return false;
-    const float bandwidths[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f,
+    static constexpr float bandwidths[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f,
                                62.5f, 125, 250, 500, 1000, 812.5f, 1625};
     for (float bw : bandwidths) if (fabsf(p.bw - bw) < 0.01f) return true;
     return false;
@@ -126,12 +126,23 @@ class RadioProfiles {
   static double symbolUs(const RadioProfileParams& p) {
     return p.bw > 0 && p.sf <= 12 ? (double)(1U << p.sf) * 1000.0 / p.bw : 0;
   }
+#if defined(STM32_PLATFORM) && defined(__GNUC__) && !defined(__clang__)
+  // Share the complete validation on flash-constrained STM32 targets.
+  __attribute__((noinline, noclone))
+#endif
   static bool safePreamble(const RadioProfileParams& p, uint16_t symbols) {
     const double symbol = symbolUs(p);
     if (symbol <= 0) return false;
     const int de = symbol >= 16000 ? 1 : 0;
-    const double payload = 8 + ceil((8.0 * 255 - 4 * p.sf
-        + (p.sf <= 6 ? 20 : 28) + 16) / (4 * (p.sf - 2 * de))) * 8;
+    const int denominator = 4 * (p.sf - 2 * de);
+    // The payload expression is integral apart from this small rational
+    // ceiling. Preserve even invalid-SF behavior: a zero denominator was
+    // infinite (and failed the limit), while signed division rounds a
+    // negative quotient toward zero, exactly its mathematical ceiling.
+    if (!denominator) return false;
+    const int numerator = 8 * 255 - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16;
+    const double payload = 8 + (denominator > 0
+        ? (numerator + denominator - 1) / denominator : numerator / denominator) * 8;
     // RadioLib's microsecond airtime calculation multiplies by four before
     // dividing. Reject settings that overflow that intermediate for a full
     // packet, including a retry using coding rate 4/8.

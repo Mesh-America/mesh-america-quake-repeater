@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Optional browser checks for notification audio. Requires Playwright and its browser.
+"""Optional browser checks for notification audio/editor. Requires Playwright and its browser.
 
-Use MESHCORE_PREVIEW_BROWSER=webkit to also check the Safari engine, or set
+Use MESHCORE_PREVIEW_BROWSER=webkit to also check the Safari engine, set
+MESHCORE_PREVIEW_EXECUTABLE to use an installed browser executable, or set
 MESHCORE_NOTIFICATION_PREVIEW_URL to check the deployed editor.
 """
 
@@ -57,7 +58,9 @@ class NotificationAudioTest(unittest.TestCase):
         cls.playwright = sync_playwright().start()
         engine = getattr(cls.playwright, os.environ.get("MESHCORE_PREVIEW_BROWSER", "chromium"))
         try:
-            cls.browser = engine.launch(headless=True)
+            executable = os.environ.get("MESHCORE_PREVIEW_EXECUTABLE")
+            options = {"executable_path": executable} if executable else {}
+            cls.browser = engine.launch(headless=True, **options)
         except Exception:
             cls.playwright.stop()
             raise
@@ -91,6 +94,118 @@ class NotificationAudioTest(unittest.TestCase):
     def audible(self):
         # Inspect decoded audio at the speaker output, not just a successful play() call.
         self.page.wait_for_function("previewAudioStats.rms > 0.05")
+
+    def test_only_channel_9_button_sets_quiet_default_and_editable_exception(self):
+        self.page.locator('[data-example="channel9"]').click()
+        expected = {
+            "kind": "channel", "id": "9", "when": "any", "vibration": "off",
+            "led": "off", "sound": "ch9:d=8,o=5,b=180:c,e,g", "screen": "off",
+            "gpio": "off", "repeat": "1", "gap": "500", "stop": "button",
+        }
+        for name, value in expected.items():
+            self.assertEqual(self.page.locator('[name="' + name + '"]').input_value(), value)
+        self.assertTrue(self.page.locator('[name="quietOthers"]').is_checked())
+        self.assertTrue(self.page.locator('[data-role="quiet-warning"]').is_visible())
+        self.assertEqual(self.page.locator('[data-role="error"]').inner_text(), "")
+        commands = self.page.locator('[data-role="commands"]').inner_text().splitlines()
+        self.assertEqual(commands[:9], self.quiet_prefix())
+        self.assertIn("set notify.sound channel:9 ch9:d=8,o=5,b=180:c,e,g", commands)
+        self.assertNotIn("!notify ", self.page.locator('[data-role="dm"]').inner_text())
+        self.assertRegex(self.page.locator('[data-role="dm"]').inner_text(), "CLI|USB")
+        self.page.locator('[name="id"]').fill("8")
+        edited = self.page.locator('[data-role="commands"]').inner_text().splitlines()
+        self.assertEqual(edited[:9], self.quiet_prefix())
+        self.assertIn("set notify.sound channel:8 ch9:d=8,o=5,b=180:c,e,g", edited)
+        self.assertNotIn("channel:9", "\n".join(edited))
+        self.page.locator('[name="quietOthers"]').uncheck()
+        normal = self.page.locator('[data-role="commands"]').inner_text()
+        self.assertNotIn(" all ", normal)
+        self.assertNotIn("set notify.enabled on", normal)
+        self.assertTrue(self.page.locator('[data-role="dm"]').inner_text().startswith("!notify "))
+        self.assertFalse(self.page.locator('[data-role="quiet-warning"]').is_visible())
+        self.page.locator('[data-example="channel9"]').click()
+        self.page.locator('[name="kind"]').select_option("all")
+        self.assertFalse(self.page.locator('[name="quietOthers"]').is_checked())
+        self.assertTrue(self.page.locator('[name="quietOthers"]').is_disabled())
+        self.assertNotIn("set notify.enabled on", self.page.locator('[data-role="commands"]').inner_text())
+        self.assertEqual(self.page.locator('[data-role="error"]').inner_text(), "")
+
+    def test_switching_example_clears_quiet_default(self):
+        for example in ("food", "find", "vip"):
+            self.page.locator('[data-example="channel9"]').click()
+            self.assertTrue(self.page.locator('[name="quietOthers"]').is_checked())
+            self.page.locator('[data-example="' + example + '"]').click()
+            self.assertFalse(self.page.locator('[name="quietOthers"]').is_checked())
+            if example == "vip":
+                self.page.locator('[name="id"]').fill("01" * 32)
+            commands = self.page.locator('[data-role="commands"]').inner_text()
+            self.assertNotIn("set notify.enabled on", commands)
+            self.assertNotIn("set notify.sound all off", commands)
+            self.assertEqual(self.page.locator('[data-role="error"]').inner_text(), "")
+            self.assertTrue(self.page.locator('[data-role="dm"]').inner_text().startswith("!notify "))
+
+    @staticmethod
+    def quiet_prefix():
+        return [
+            "set notify.enabled on", "set notify.vibration all off",
+            "set notify.sound all off", "set notify.led all off",
+            "set notify.screen all off", "set notify.gpio all off",
+            "set notify.repeat all 1", "set notify.gap all 500", "set notify.stop all button",
+        ]
+
+    def mock_usb(self, reject_channel=False):
+        self.page.evaluate("""rejectChannel => {
+            let incoming, active = 0;
+            window.notificationUsbMock = { commands: [], maxActive: 0, replies: 0 };
+            const port = {
+                readable: new ReadableStream({ start(controller) { incoming = controller; } }),
+                writable: new WritableStream({ write(bytes) {
+                    const text = new TextDecoder().decode(bytes.slice(4));
+                    const tag = text.slice(0, 2), command = text.slice(3);
+                    notificationUsbMock.commands.push(command);
+                    notificationUsbMock.maxActive = Math.max(notificationUsbMock.maxActive, ++active);
+                    setTimeout(() => {
+                        let value = command === 'get notify' ? 'supported=31' : 'OK';
+                        if (command.startsWith('get notify.sound channel:'))
+                            value = rejectChannel ? 'Error: channel slot is not configured' : 'inherit';
+                        const body = new TextEncoder().encode(tag + '|' + value);
+                        active--; notificationUsbMock.replies++;
+                        incoming.enqueue(Uint8Array.from([62, body.length + 1, 0, 0x1d, ...body]));
+                    }, 10);
+                } }),
+                async open() {}, async setSignals() {}, async close() {},
+            };
+            Object.defineProperty(navigator, 'serial', { configurable: true, value: {
+                async requestPort() { return port; }
+            } });
+        }""", reject_channel)
+
+    def test_only_channel_9_usb_save_sends_default_then_exception_sequentially(self):
+        self.mock_usb()
+        self.page.locator('[data-example="channel9"]').click()
+        expected = self.page.locator('[data-role="commands"]').inner_text().splitlines()
+        self.assertEqual(expected[:9], self.quiet_prefix())
+        self.click("connect")
+        self.page.wait_for_function("notificationUsbMock.replies === 2 && !document.querySelector('[data-action=apply]').disabled")
+        self.click("apply")
+        self.page.wait_for_function("notificationUsbMock.replies === " + str(len(expected) + 3) + " && !document.querySelector('[data-action=apply]').disabled")
+        self.assertEqual(self.page.evaluate("notificationUsbMock.commands"), ["get notify", "get notify.gpio.pins", "get notify.sound channel:9"] + expected)
+        self.assertEqual(self.page.evaluate("notificationUsbMock.maxActive"), 1)
+        self.assertEqual(self.page.locator('[data-role="error"]').inner_text(), "")
+        self.click("disconnect")
+        self.page.wait_for_function("document.querySelector('[data-role=device-status]').textContent === 'Device disconnected'")
+
+    def test_unconfigured_channel_is_rejected_before_quiet_default_is_written(self):
+        self.mock_usb(reject_channel=True)
+        self.page.locator('[data-example="channel9"]').click()
+        self.click("connect")
+        self.page.wait_for_function("notificationUsbMock.replies === 2 && !document.querySelector('[data-action=apply]').disabled")
+        self.click("apply")
+        self.page.wait_for_function("notificationUsbMock.replies === 3 && !document.querySelector('[data-action=apply]').disabled")
+        self.assertEqual(self.page.evaluate("notificationUsbMock.commands"), ["get notify", "get notify.gpio.pins", "get notify.sound channel:9"])
+        self.assertIn("channel slot is not configured", self.page.locator('[data-role="error"]').inner_text())
+        self.click("disconnect")
+        self.page.wait_for_function("document.querySelector('[data-role=device-status]').textContent === 'Device disconnected'")
 
     def test_examples_play_audible_melodies_once_without_a_recipient(self):
         for index, example in enumerate(("food", "find", "vip"), 1):

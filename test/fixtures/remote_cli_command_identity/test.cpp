@@ -11,6 +11,7 @@
 #include <helpers/ReplayResetCommand.h>
 #include <helpers/TempRadioReplyBarrier.h>
 #include <helpers/HostCliBridge.h>
+#include <helpers/ClientACLResponse.h>
 #include <array>
 
 #undef MESH_DEBUG_PRINTLN
@@ -18,9 +19,6 @@
 #ifndef MESH_ENABLE_HOST_CLI
 #define MESH_ENABLE_HOST_CLI 0
 #endif
-#define PAYLOAD_TYPE_REQ 0
-#define PAYLOAD_TYPE_RESPONSE 1
-#define PAYLOAD_TYPE_TXT_MSG 2
 #define TXT_TYPE_PLAIN 0
 #define TXT_TYPE_CLI_DATA 1
 #define TXT_TYPE_CLI_COMMAND 2
@@ -28,13 +26,6 @@
 #define TXT_ACK_DELAY 1
 
 namespace mesh {
-struct Packet {
-  uint8_t path[MAX_PATH_SIZE] = {};
-  uint8_t path_len = 0, radio_profile = 0;
-  uint32_t radio_generation = 1;
-  bool isRouteFlood() const { return false; }
-  uint8_t getPathHashSize() const { return 1; }
-};
 struct Utils {
   template <typename... Args>
   static void sha256(uint8_t* dest, size_t size, Args...) { memset(dest, 0, size); }
@@ -135,18 +126,21 @@ public:
   std::vector<ClientInfo> reply_destinations;
 
   MyMesh() { now_millis = 100;mesh::console.records.clear();
+             queued_ack.header = ROUTE_TYPE_DIRECT; queued_ack.radio_generation = 1;
              acl.clients[0].id.pub_key[0] = 0x12; acl.clients[1].id.pub_key[0] = 0x77;
              acl.clients[2].id.pub_key[0] = 0x88; }
   Clock* getRTCClock() { return &clock; }
   RNG* getRNG() { return &rng; }
   uint32_t futureMillis(uint32_t delay) const { return millis() + delay; }
   bool millisHasNowPassed(uint32_t deadline) const { return int32_t(millis() - deadline) >= 0; }
-  int handleRequest(ClientInfo*, uint32_t, uint8_t*, size_t) { return 0; }
+  int handleRequest(ClientInfo*, uint32_t, uint8_t*, size_t, size_t) { return 0; }
   template <typename... Args> mesh::Packet* createPathReturn(Args...) { return nullptr; }
   template <typename... Args> mesh::Packet* createDatagram(Args...) { return nullptr; }
-  template <typename... Args> void sendFloodReply(Args...) {}
+  template <typename... Args> bool sendFloodReply(Args...) { return queue_accepts; }
   mesh::Packet* createAck(uint32_t) { return nullptr; }
-  template <typename... Args> void sendClientReply(Args...) { ++acknowledgements; }
+  template <typename... Args> bool sendClientReply(Args...) {
+    ++acknowledgements; return queue_accepts;
+  }
   bool sendRemoteCliReply(ClientInfo* client, const uint8_t* secret, uint8_t, uint32_t,
                          const char* reply, const TransportKey*, mesh::Packet** queued = nullptr) {
     if (!queue_accepts) return false;
@@ -209,6 +203,8 @@ public:
                                                       5, strlen(text), logical_id);
     assert(size != 0);
     mesh::Packet packet;
+    packet.header = ROUTE_TYPE_DIRECT;
+    packet.radio_generation = 1;
     onPeerDataRecv(&packet, PAYLOAD_TYPE_TXT_MSG, sender, secret, wire, size);
     if (process) processDeferredCliCommand();
   }

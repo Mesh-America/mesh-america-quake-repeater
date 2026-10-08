@@ -17,6 +17,13 @@
 #include <driver/rtc_io.h>
 #include "ESP32TrueRandom.h"
 #include "UsbLogging.h"
+#include "UsbHostSleepPolicy.h"
+
+#ifndef MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS
+  #define MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS 120000UL
+#endif
+static_assert(MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS <= 0x7fffffffUL,
+              "USB host-loss sleep grace must fit a bounded millis interval");
 
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT && \
     (!defined(ARDUINO_USB_MODE) || !ARDUINO_USB_MODE)
@@ -32,6 +39,11 @@ class ESP32Board : public mesh::MainBoard {
 protected:
   uint8_t startup_reason;
   bool inhibit_sleep = false;
+  bool ota_started_ap = false;
+  bool ota_started_radio = false;
+#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+  mesh::UsbHostSleepPolicy usb_host_sleep_policy;
+#endif
 #if defined(LIGHTWEIGHT_WIFI_OTA)
   void* ota_server = nullptr;
 #else
@@ -104,7 +116,17 @@ public:
     // Native USB loses its connection in light sleep. An enumerated host
     // still needs USB serviced when no terminal asserts CDC DTR (for example,
     // after a Pi closes its serial port). Guard every caller here.
-    bool keep_awake = inhibit_sleep || isUsbHostConnected() || isRadioTestActive();
+    // Sample even when another blocker is active, so an open console/OTA does
+    // not leave the last positive native USB host signal stale.
+    const bool usb_sleep_held = isUsbSleepHeld();
+    bool keep_awake = inhibit_sleep || usb_sleep_held || isRadioTestActive();
+#if !defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT
+    // External USB-to-UART chips cannot report host attachment here. Light
+    // sleep loses their first input bytes; UART wake loses the wake character
+    // too. HardwareSerial's bool reports an installed driver, not a USB host.
+    // Keep an enabled console available even before its first command.
+    keep_awake = keep_awake || static_cast<bool>(Serial);
+#endif
 #if MESH_USB_LOGGING_AVAILABLE
     // A live logging stream must also remain available before a host opens
     // it and across host disconnects. Compiled-out logging is not a blocker.
@@ -226,14 +248,19 @@ public:
   bool startOTAUpdate(const char* id, char reply[], bool force_ap = false) override;
   bool stopOTAUpdate(char reply[]) override;
   bool isOTAUpdateRunning() const override { return ota_server != nullptr; }
-  bool otaFromManifest(const char* current_ver, bool dry_run, char reply[]) override;
+  bool otaFromManifest(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) override;
   // Heavy body (TLS + JSON + flash streaming). Runs in a dedicated large-stack task
   // spawned by otaFromManifest() - public only so that task entry point can call
   // it; not meant to be invoked directly.
-  bool otaFromManifestImpl(const char* current_ver, bool dry_run, char reply[]);
+  bool otaFromManifestImpl(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]);
 
   bool isUsbDataConnected() override {
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+    // Role loops may never call sleep() while a CDC client is open. Keep the
+    // native-host signal history current here too; host detection never calls us.
+    (void)isUsbHostConnected();
+#endif
     return (bool)Serial;
 #else
     return false;
@@ -241,21 +268,37 @@ public:
   }
 
   bool isUsbHostConnected() override {
+    bool host_connected = false;
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
 #if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE
-    return Serial.isPlugged();
+    host_connected = Serial.isPlugged();
 #elif defined(CONFIG_TINYUSB_ENABLED) && CONFIG_TINYUSB_ENABLED
-    return (bool)USB;
+    host_connected = (bool)USB;
 #else
-    return (bool)Serial;
+    host_connected = (bool)Serial;
 #endif
-#else
-    return false;
 #endif
+#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+    usb_host_sleep_policy.observe(host_connected, millis());
+#endif
+    // The grace is a sleep policy, not proof that a USB host is still present.
+    return host_connected;
   }
 
   void setInhibitSleep(bool inhibit) {
     inhibit_sleep = inhibit;
+  }
+
+  bool isUsbSleepHeld() {
+    // Share the native host-loss grace with short Companion sleep slices.
+    // Sample even when another inhibitor is active, preserving reconnects.
+    const bool host_connected = isUsbHostConnected();
+#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+    return host_connected || usb_host_sleep_policy.shouldKeepAwake(
+        millis(), MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS);
+#else
+    return host_connected;
+#endif
   }
 
   uint32_t getResetReason() const override {

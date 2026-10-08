@@ -52,6 +52,9 @@ public:
   bool eraseCard(MainBoard& board);
   bool getSpace(MainBoard& board, uint64_t& used_bytes, uint64_t& free_bytes);
   bool listFiles(MainBoard& board, uint16_t page, char* reply, size_t cap);
+  // Mount-only probe for the MeshTower selector. Never opens/removes staging
+  // files or changes their live session state.
+  bool probeMedia() { return mount() && capacity() != 0u; }
   const char* last_error() const { return _error; }
 
 private:

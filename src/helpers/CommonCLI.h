@@ -182,6 +182,12 @@ public:
   // older images remain readable and merged standard builds keep the former
   // logging artifact's enabled-at-first-boot behavior.
   uint8_t usb_logging_enabled = 1;
+  // USB diagnostics are opt-in independently of the packet output gate.
+  // Appended after GPS sync cadence in /com_prefs, not beside usb_log.
+  uint8_t usb_debug_enabled = 0;
+  // Repeater-only opt-in for routed trace diagnostics while repeat is off.
+  // Appended after usb_debug in /com_prefs; existing images stay disabled.
+  uint8_t trace_when_repeat_off = 0;
   // Runtime UART choice for merged RS-232 repeater artifacts. Appended at
   // /com_prefs offset 862; single-UART builds keep their compiled port here.
   uint8_t bridge_uart = 0;
@@ -191,11 +197,20 @@ public:
   // Appended after the existing /com_prefs tail. Keep the preamble in the same
   // transaction as frequency/modulation; old images adopt /radio_profiles.
   uint16_t primary_radio_preamble = 0;
-  // Full ESP32 images can carry MQTT and ESP-NOW simultaneously.  Keep the
+  // Full ESP32 images can carry another bridge and ESP-NOW simultaneously. Keep
   // ESP-NOW intent separately so either transport can be selected at runtime.
+  // Sole merged ESP-NOW profiles also use this intent and mirror bridge_enabled
+  // for their legacy single-bridge lifecycle and CLI alias.
   // Old preference images did not have this byte; they default to enabled to
-  // retain the previous combined-Full behavior after an upgrade.
+  // retain the previous MQTT combined-Full behavior after an upgrade. Merged
+  // default-off profiles require their appended profile marker instead.
   uint8_t espnow_bridge_enabled = 1;
+  // Independent UART intent in MQTT-combined profiles. Non-MQTT UART roles
+  // retain bridge_enabled as their legacy alias and mirror it on save.
+  // Appended after the profile markers, never beside the legacy bridge byte.
+  uint8_t rs232_bridge_enabled = 0;
+  // Appended after the ESP-NOW intent. Zero keeps the board's legacy cadence.
+  uint16_t gps_sync_interval_hours = 0;
   uint8_t retry_preset = 0;
   uint8_t direct_retry_attempts = 0;
   uint16_t direct_retry_base_ms = 0;
@@ -225,6 +240,7 @@ public:
   uint8_t legacy_flood_channel_block_max_hops = 0;
   uint8_t flood_channel_data_max_hops = 0;
   uint8_t telemetry_access = 0;
+  uint8_t ota_channel = 0;      // WiFi OTA release channel: 0=native, 1=prod, 2=beta
 
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) were moved out of
   // NodePrefs into MQTTPrefs (persisted to /mqtt_prefs) so this struct stays
@@ -331,6 +347,7 @@ private:
       def("secret", _parent->bridge_secret, sizeof(_parent->bridge_secret));
       def("format", _parent->bridge_format);
       def("usb_log", _parent->usb_logging_enabled);
+      def("usb_dbg", _parent->usb_debug_enabled);
     }
 
   public:
@@ -345,6 +362,7 @@ private:
     void structure() override {
       def("en", _parent->gps_enabled);
       def("int", _parent->gps_interval);
+      def("sync_hours", _parent->gps_sync_interval_hours);
       def("adv_loc", _parent->advert_loc_policy);
     }
 
@@ -373,6 +391,7 @@ private:
   protected:
     void structure() override {
       def("disable", _parent->disable_fwd);
+      def("trace_off", _parent->trace_when_repeat_off);
       def("f_max", _parent->flood_max);
       def("f_max_uns", _parent->flood_max_unscoped);
       def("f_max_adv", _parent->flood_max_advert);
@@ -410,6 +429,7 @@ protected:
     def("lat", node_lat);
     def("lon", node_lon);
     def("disc_mod", discovery_mod_timestamp);
+    def("ota_ch", ota_channel);   // WiFi OTA release channel selector
     def("radio", radio);
     def("bridge", bridge);
     def("gps", gps);
@@ -580,13 +600,20 @@ public:
   virtual bool isBridgeRunning() const { return false; }
 
   // Most roles have one bridge, so the transport-specific methods retain the
-  // legacy bridge behavior by default.  Combined MQTT + ESP-NOW roles override
+  // legacy bridge behavior by default. Combined bridge roles override
   // them to let each transport be started, stopped, and queried independently.
   virtual bool setMqttBridgeState(bool enable) { return setBridgeState(enable); }
+  // CLI disable may acknowledge before worker-owned TLS teardown finishes.
+  // Ownership barriers continue to use the synchronous state setter.
+  virtual bool requestMqttBridgeStop() { return setMqttBridgeState(false); }
+  virtual bool isMqttBridgeStopping() { return false; }
   virtual bool setEspNowBridgeState(bool enable) { return setBridgeState(enable); }
+  virtual bool setRs232BridgeState(bool enable) { return setBridgeState(enable); }
   virtual bool restartMqttBridge() { return restartBridge(); }
   virtual bool restartEspNowBridge() { return restartBridge(); }
+  virtual bool restartRs232Bridge() { return restartBridge(); }
   virtual bool isEspNowBridgeRunning() { return isBridgeRunning(); }
+  virtual bool isRs232BridgeRunning() const { return isBridgeRunning(); }
 
   virtual void restartBridgeSlot(int slot) {
     // Default: fall back to full restart
@@ -612,6 +639,10 @@ public:
     (void)reply;
     return false;
   };
+  virtual bool stopWebConfigForOTA(char* reply) {
+    (void)reply;
+    return false;
+  };
   virtual bool isWebConfigActive() const {
     return false;
   };
@@ -624,6 +655,7 @@ public:
     (void)reply;
     return false;
   };
+  virtual bool usesCanonicalWiFi() const { return false; }
   virtual bool getWiFiSSID(char* reply) const {
     (void)reply;
     return false;
@@ -762,6 +794,13 @@ class CommonCLI {
   NodePrefs* _prefs;
   CommonCLICallbacks* _callbacks;
   mesh::MainBoard* _board;
+#if defined(WITH_ESPNOW_BRIDGE) \
+    || (defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA))
+  // Browser OTA restores only transports it actually paused, not saved
+  // defaults suspended by an unconfigured first-boot setup session.
+  bool _wifi_ota_resume_mqtt = false;
+  bool _wifi_ota_resume_espnow = false;
+#endif
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)
   UserGpio _user_gpio;
 #endif
@@ -839,6 +878,8 @@ public:
   bool resolveDataTxScope(TransportKey& scope, char* resolved_name = nullptr,
                           size_t resolved_name_size = 0,
                           bool* ambiguous = nullptr) const;
+  // True if a saved shared route already takes precedence or the legacy path
+  // was committed. False means migration failed and reporting must stop.
   bool adoptLegacyDataTxPath(const uint8_t* path, uint8_t path_len);
   bool setDataTxPath(const char* spec, char* reply, size_t reply_size);
   bool saveCommonPrefs();

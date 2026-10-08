@@ -9,6 +9,9 @@
 #include <helpers/ContactSecretCache.h>
 #endif
 #include <helpers/CompanionReaderConfig.h>
+#if defined(ESP32_PLATFORM)
+namespace mesh { class ContactFileTransaction; }
+#endif
 #if COMPANION_FEATURE_READER
 #include <helpers/bible/Reader.h>
 #endif
@@ -44,6 +47,71 @@ class DataStore
 #if defined(ESP32_PLATFORM)
   const char* _prefs_recovery_source = nullptr;
   const char* _channel_recovery_source = nullptr;
+  mesh::ContactFileTransaction* _contact_write = nullptr;
+  DataStoreHost* _contact_write_host = nullptr;
+  bool (*_contact_write_filter)(const ContactInfo&) = nullptr;
+  uint32_t _contact_write_revision = 0;
+  uint32_t _contact_write_active_revision = 0;
+  uint32_t _contact_write_index = 0;
+  bool _contact_write_verifying = false;
+  bool _contact_write_requested = false;
+  bool _contact_write_servicing = false;
+  void cancelContactWrite();
+  bool serviceContactWrite(DataStoreHost* host,
+                          bool (*filter)(const ContactInfo&));
+#endif
+#if defined(ESP32_PLATFORM)
+  // Advert packets are reconstructable cache data. Keep accepted updates in
+  // RAM while their filesystem operations run on separate loop passes.
+  struct AdvertWriteState {
+    static constexpr uint8_t CAPACITY = 4;
+    struct Slot {
+      uint8_t key[8] = {};
+      uint8_t bytes[255] = {};
+      uint32_t revision = 0;
+      uint8_t key_len = 0;
+      uint8_t len = 0;
+    } slots[CAPACITY];
+    enum class Stage : uint8_t {
+      Idle, TargetProbe, BackupProbe, RestoreBackup, RemoveBackup,
+      TempProbe, RemoveTemp, OpenWrite, ConfigureWrite, Write, CloseWrite,
+      OpenVerify, ConfigureVerify, VerifySize, Verify, CloseVerify,
+      PublishTargetProbe, PublishBackupProbe, PublishRemoveBackup,
+      PublishBackup, Publish, PublishCleanup, CancelClose
+    } stage = Stage::Idle;
+    File file;
+    uint8_t scratch[64] = {};
+    uint8_t active_key[8] = {};
+    uint8_t active_key_len = 0;
+    char target[24] = {};
+    char backup[28] = {};
+    uint32_t revision = 0;
+    uint32_t active_revision = 0;
+    uint32_t retry_at = 0;
+    uint8_t active = CAPACITY;
+    uint8_t next = 0;
+    uint8_t offset = 0;
+    uint8_t failures = 0;
+    bool target_present = false;
+    bool backup_present = false;
+    bool temp_present = false;
+    bool cancelling = false;
+    bool synchronous_io = false;
+    ~AdvertWriteState() { file.close(); }
+    void pause() {
+      file.close();
+      stage = Stage::Idle;
+      active = CAPACITY;
+      retry_at = 0;
+    }
+    void clear() {
+      pause();
+      for (auto& slot : slots) slot.len = 0;
+      failures = 0;
+    }
+  } _advert_write;
+  void invalidateAdvertWrite(const uint8_t key[], int key_len);
+  void retireAdvertWrite(const uint8_t key[], int key_len);
 #endif
 #if !defined(NRF52_PLATFORM)
   bool _channel_load_incomplete = false;
@@ -59,6 +127,9 @@ class DataStore
 #endif
   bool readStoredPath(uint16_t source, uint8_t path[64]) override;
   bool flushCachedPaths() override;
+#if defined(ESP32_PLATFORM)
+  bool cancelCooperativeWrite() override;
+#endif
 #if MESH_CONTACT_SECRET_FLASH_CACHE
   uint32_t _secret_retry_at = 0;
   bool readSavedSecret(const uint8_t peer[32], const uint8_t identity[32],
@@ -103,6 +174,7 @@ class DataStore
 
 public:
   DataStore(FILESYSTEM& fs, mesh::RTCClock& clock);
+  ~DataStore();
   DataStore(FILESYSTEM& fs, FILESYSTEM& fsExtra, mesh::RTCClock& clock);
   void begin();
   bool formatFileSystem();
@@ -144,6 +216,15 @@ public:
   uint8_t getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]);
   bool putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], uint8_t len);
   bool deleteBlobByKey(const uint8_t key[], int key_len);
+#if defined(ESP32_PLATFORM)
+  bool queueAdvertByKey(const uint8_t key[], int key_len,
+                        const uint8_t src_buf[], uint8_t len);
+  bool serviceAdvertWrites(uint32_t now);
+  bool flushAdvertWrites(uint32_t now = 0);
+  bool hasPendingAdvertWrites() const;
+  bool isAdvertWriteDue(uint32_t now) const;
+  bool consumeSynchronousAdvertIO();
+#endif
   File openRead(const char* filename);
   File openRead(FILESYSTEM* fs, const char* filename);
   File openDirectory(const char* path);

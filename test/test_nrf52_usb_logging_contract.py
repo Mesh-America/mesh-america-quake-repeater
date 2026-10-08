@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import unittest
 
+from test_replay_reset_integration import extract_braced
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -255,7 +257,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         ):]
         self.assertIn("if (instance == 1)", bridge)
         self.assertIn("handleDedicatedUsbLoggingLineState(dtr);", bridge)
-        self.assertIn("tud_cdc_n_write_clear(1);", source)
+        self.assertIn("clearNrf52UsbTxForSession(1);", source)
         self.assertIn("endPrimaryUsbHostSession(true);", bridge)
         self.assertIn("if (instance == 0 && !dtr)", bridge)
         self.assertIn("tud_cdc_get_line_coding(&coding);", bridge)
@@ -294,7 +296,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
 
         session_end = source[source.index(
             "static void endPrimaryUsbHostSession("
-        ):source.index("#endif", source.index(
+        ):source.index("\n}\n#endif", source.index(
             "static void endPrimaryUsbHostSession("
         ))]
         self.assertIn("primary_usb_line_state_dtr.exchange(", session_end)
@@ -306,7 +308,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         )
         self.assertLess(
             session_end.index("tud_cdc_n_read_flush(0)"),
-            session_end.index("tud_cdc_n_write_clear(0)"),
+            session_end.index("clearNrf52UsbTxForSession(0)"),
         )
         self.assertIn(
             "dedicated_usb_logging_line_state_dtr.exchange(", source
@@ -332,7 +334,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         restart_gate = restart.index(
             "dedicated_usb_logging_port_connected.store(false"
         )
-        restart_fifo = restart.index("tud_cdc_n_write_clear(1)")
+        restart_fifo = restart.index("clearNrf52UsbTxForSession(1)")
         restart_state = restart.index("resetDedicatedUsbLoggingUsbTaskState()")
         restart_quiet = restart.index("dedicated_usb_logging_quiet_sofs =")
         restart_generation = restart.index(
@@ -368,7 +370,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         self.assertLess(marker_write, queued_drain)
 
         quiet_block = owner_service[quiet_start:positive_gate]
-        quiet_fifo = quiet_block.index("tud_cdc_n_write_clear(1)")
+        quiet_fifo = quiet_block.index("clearNrf52UsbTxForSession(1)")
         quiet_state = quiet_block.index(
             "resetDedicatedUsbLoggingUsbTaskState()"
         )
@@ -518,11 +520,8 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
             main.index("static void cancelUsbSerialOperations()"):
             main.index("static void enterUsbTerminalMode(")
         ]
-        route_check = usb_cancel.index(
-            "interface_manager.isReplyRouteFor(&usb_serial_interface)"
-        )
         route_cancel = usb_cancel.index(
-            "the_mesh.cancelSerialResponseStream()"
+            "the_mesh.cancelSerialResponseStream(&usb_serial_interface)"
         )
         delayed_cancel = usb_cancel.index(
             "the_mesh.cancelSerialOperationsForRoute(&usb_serial_interface)"
@@ -530,7 +529,6 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         route_forget = usb_cancel.index(
             "interface_manager.forgetReplyRouteForDisconnected("
         )
-        self.assertLess(route_check, route_cancel)
         self.assertLess(route_cancel, delayed_cancel)
         self.assertLess(delayed_cancel, route_forget)
         self.assertIn("the_mesh.resetUsbHostSessionInput();", reset_helper)
@@ -546,7 +544,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
             mesh_source.index("void MyMesh::handleCmdFrame(")
         ]
         self.assertIn(
-            "pending_serial_reply_route == route", session_operations
+            "_delayed_replies.request.route == route", session_operations
         )
         self.assertIn(
             "command_radio_reply_route == route", session_operations
@@ -560,21 +558,31 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
 
         # Every delayed Binary mesh response uses a captured requester. A
         # missing/disconnected route fails closed instead of broadcasting.
-        self.assertEqual(
-            mesh_source.count(
-                "pending_serial_reply_route = _serial->captureReplyRoute();"
-            ),
-            6,
-        )
+        delayed_source = (ROOT / "src/helpers/CompanionDelayedReplies.cpp").read_text()
+        begin = extract_braced(mesh_source, "bool MyMesh::beginPendingRequest(")
+        self.assertIn("_serial->captureReplyRoute()", begin)
+        self.assertIn("_delayed_replies.reserveRequest(kind, contact.id.pub_key,", begin)
+        for command, kind in (("LOGIN", "Login"), ("ANON_REQ", "Binary"),
+                              ("STATUS_REQ", "Status"), ("PATH_DISCOVERY_REQ", "Discovery"),
+                              ("TELEMETRY_REQ", "Telemetry"), ("BINARY_REQ", "Binary")):
+            branch = extract_braced(mesh_source, "} else if (cmd_frame[0] == CMD_SEND_" + command)
+            self.assertIn(f"beginPendingRequest(mesh::CompanionDelayedReplies::{kind}, *recipient)", branch)
+            self.assertIn("finishPendingRequest(result, tag, est_timeout);", branch)
         self.assertGreaterEqual(
-            mesh_source.count("writePendingSerialFrame(out_frame, i);"), 5
+            mesh_source.count("writePendingSerialFrame(out_frame, i, now)"), 5
         )
         pending_writer = mesh_source[
             mesh_source.index("size_t MyMesh::writePendingSerialFrame("):
             mesh_source.index("void MyMesh::writeDisabledFrame(")
         ]
-        self.assertIn("pending_serial_reply_route == NULL", pending_writer)
-        self.assertIn("writeFrameToRoute(", pending_writer)
+        self.assertIn("_delayed_replies.storeRequest(frame, len, now)", pending_writer)
+        self.assertIn("_delayed_replies.serviceRequest(_serial, now);", pending_writer)
+        reserve = extract_braced(delayed_source, "bool CompanionDelayedReplies::reserveRequest(")
+        self.assertIn("(!terminal && route == nullptr)", reserve)
+        service = extract_braced(delayed_source, "bool CompanionDelayedReplies::service(")
+        self.assertIn("serial->isReplyRouteAvailable(reply.route)", service)
+        self.assertIn("serial->writeFrameToRoute(reply.route,", service)
+        self.assertNotRegex(service, r"serial->writeFrame\(")
         self.assertNotIn("_serial->writeFrame(out_frame, i);", pending_writer)
         self.assertIn(
             "command_radio_reply_route = _serial->captureReplyRoute();",
@@ -595,7 +603,7 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         # A second purge after the settle gate would erase a new host's
         # immediately sent APP_START (meshcli does not delay after open).
         self.assertNotIn("tud_cdc_n_read_flush(0);", completion)
-        self.assertIn("tud_cdc_n_write_clear(0);", completion)
+        self.assertIn("clearNrf52UsbTxForSession(0);", completion)
         self.assertIn("primary_usb_allowed_generation.store(", completion)
         self.assertIn(".tryRunExclusive(", source)
         self.assertIn("primary_usb_reset_settle_until.store(", source)
@@ -627,15 +635,15 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         self.assertIn(
             "entry.reply_route = _serial->captureReplyRoute();", source
         )
-        self.assertIn(
-            "_serial->writeFrameToRoute(expected_ack_table[i].reply_route,",
-            source,
-        )
         self.assertIn("expected_ack_table[i].reply_route == route", source)
         ack_expiry = source[
             source.index("void MyMesh::expireExpectedAcks()") :
             source.index("MyMesh::AckTableEntry* MyMesh::findPendingTextMessage(")
         ]
+        self.assertIn(
+            "_serial->writeFrameToRoute(entry.reply_route, confirmation, 9) == 9",
+            ack_expiry,
+        )
         self.assertIn("entry.reply_route = NULL;", ack_expiry)
         self.assertNotIn("clearExpectedAck(entry);", ack_expiry)
         route_cancel = source[
@@ -653,26 +661,24 @@ class Nrf52UsbLoggingContractTest(unittest.TestCase):
         self.assertIn(
             "starts_long_lived_request && hasPendingReqs()", source
         )
-        self.assertEqual(
-            source.count(
-                "pending_serial_reply_deadline =\n"
-                "            futureMillis(est_timeout + est_timeout / 5);"
-            ),
-            6,
-        )
+        self.assertEqual(source.count("finishPendingRequest(result, tag, est_timeout);"), 6)
+        delayed = (ROOT / "src/helpers/CompanionDelayedReplies.cpp").read_text()
+        arm = extract_braced(delayed, "void CompanionDelayedReplies::arm(")
+        # Exact timeout windows and delayed SENT admission are exercised by
+        # test_companion_delayed_reply_delivery.py against real callbacks.
+        self.assertIn("radioBudget(reply)", arm)
+        self.assertIn("reply.sent_deadline = now + DELIVERY_GRACE_MS;", arm)
         self.assertIn("servicePendingSerialReply();", source)
         self.assertIn(
             "another Companion request is still pending", source
         )
 
-        self.assertIn(
-            "binary_trace_reply_route = _serial->captureReplyRoute();",
-            source,
-        )
-        self.assertIn(
-            "_serial->writeFrameToRoute(binary_trace_reply_route,", source
-        )
-        self.assertIn("binary_trace_reply_route == route", source)
+        trace = extract_braced(source, "} else if (cmd_frame[0] == CMD_SEND_TRACE_PATH")
+        self.assertIn("_delayed_replies.reserveBinaryTrace(tag, auth,", trace)
+        self.assertIn("_serial->captureReplyRoute(), _ms->getMillis())", trace)
+        self.assertIn("_delayed_replies.armBinaryTrace(est_timeout, _ms->getMillis());", trace)
+        self.assertIn("_delayed_replies.serviceBinaryTrace(_serial, now);", source)
+        self.assertIn("_delayed_replies.trace.route == route", source)
 
         self.assertIn("sign_data_reply_route != signing_route", source)
         self.assertIn("sign_data_reply_route == route", source)

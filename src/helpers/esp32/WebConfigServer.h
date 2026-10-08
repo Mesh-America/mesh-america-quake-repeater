@@ -1,5 +1,6 @@
 #pragma once
 
+
 // Shared browser configuration portal for ESP32 infrastructure and WiFi
 // companion builds. The UI removes MQTT controls when no bridge is present.
 //
@@ -23,6 +24,8 @@
 #if defined(ESP_PLATFORM) && !defined(WEBCONFIG_DISABLED)
 
 #define WITH_WEBCONFIG 1
+
+#include <helpers/esp32/WiFiCredentials.h>
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -166,8 +169,22 @@ public:
   WebConfigServer(Callbacks* callbacks, void* mqtt_prefs, bool owns_wifi,
                   const uint8_t* pub_key, const char* fw_ver,
                   const char* build_date,
-                  const char* role, const char* board_name);
+                  const char* role, const char* board_name,
+                  bool standalone_wifi = false);
   ~WebConfigServer();
+
+  // Infrastructure roles refresh this from the actual MQTT worker state.
+  // A compiled-in but stopped/unconfigured bridge cannot reconnect WiFi.
+  // Companion runtimes retain their own station ownership. Loop task only.
+  void updateWiFiOwnership(bool owns_wifi) {
+    _runtime_wifi_ownership_managed = true;
+    if (_owns_wifi == owns_wifi) return;
+    _owns_wifi = owns_wifi;
+    // Discard only our attempt state. Never disconnect another owner's STA.
+    _connect_deadline = 0;
+    _setup_reconnect_in_progress = false;
+    _setup_reconnect_deadline = 0;
+  }
 
   // For the device display: true while a setup-mode portal is active.
   // Fills the AP SSID and portal IP; either buffer may be NULL to just poll.
@@ -187,23 +204,27 @@ public:
   static bool saveCliEnabled(bool enabled);
   static bool loadStandaloneWiFi(char* ssid, size_t ssid_len,
                                  char* password, size_t password_len,
-                                 uint8_t* power_save = NULL);
+                                 uint8_t* power_save = NULL, const void* legacy_prefs = NULL);
+  static bool hasConfiguredWiFi(const void* legacy_prefs = NULL);
+  static mesh::wifi::CredentialState resolveWiFi(mesh::wifi::Credentials& out,
+                                                const void* legacy_prefs = NULL);
   static bool saveStandaloneWiFi(const char* ssid, const char* password,
                                  uint8_t power_save);
   static bool setStandaloneWiFiSSID(const char* value, char* reply,
-                                    size_t reply_len);
+                                    size_t reply_len, const void* legacy_prefs = NULL);
   static bool setStandaloneWiFiPassword(const char* value, char* reply,
-                                        size_t reply_len);
+                                        size_t reply_len, const void* legacy_prefs = NULL);
   static bool setStandaloneWiFiPowerSave(const char* value, char* reply,
-                                         size_t reply_len);
+                                         size_t reply_len, const void* legacy_prefs = NULL);
   static bool setWiFiCliEnabled(const char* value, char* reply,
                                 size_t reply_len);
-  static bool formatWiFiSSID(char* reply, size_t reply_len);
-  static bool formatWiFiPassword(char* reply, size_t reply_len);
+  static bool formatWiFiSSID(char* reply, size_t reply_len, const void* legacy_prefs = NULL);
+  static bool formatWiFiPassword(char* reply, size_t reply_len, const void* legacy_prefs = NULL);
   static bool formatWiFiStatus(
       char* reply, size_t reply_len,
-      const mesh::wifi::CompanionWiFiRuntimeState* companion_runtime = NULL);
-  static bool formatWiFiPowerSave(char* reply, size_t reply_len);
+      const mesh::wifi::CompanionWiFiRuntimeState* companion_runtime = NULL,
+      const void* legacy_prefs = NULL);
+  static bool formatWiFiPowerSave(char* reply, size_t reply_len, const void* legacy_prefs = NULL);
   static bool formatWiFiCliStatus(char* reply, size_t reply_len);
 
   // UI tasks use an otherwise-unused multi-click gesture without reaching into
@@ -217,6 +238,9 @@ public:
   bool startAutoMode(char reply[]);    // use saved WiFi, or setup AP when absent
   bool reloadStandaloneWiFi();
   void requestStop();                  // stop listening and detach this session
+  // Release HTTP/DNS for the updater without delayed teardown taking its
+  // WiFi down. Existing HTTP request objects still drain through tick().
+  bool stopForOTA(char reply[]);
   void tick(uint32_t now);             // call every loop iteration
 
   Mode mode() const { return _mode; }
@@ -256,6 +280,12 @@ private:
   Callbacks* _cb;
   void* _mqtt_prefs;
   bool _owns_wifi;
+  // Legacy Companion/manual portals preserve their original start behavior;
+  // infrastructure opts into worker ownership through updateWiFiOwnership.
+  bool _runtime_wifi_ownership_managed = false;
+  // Credential storage is fixed at construction, independently of which
+  // runtime currently owns the station. Async UI handlers read this flag.
+  const bool _standalone_wifi;
   const uint8_t* _pub_key;
   const char* _fw_ver;
   const char* _build_date;
@@ -267,6 +297,7 @@ private:
   SemaphoreHandle_t _mux;
   Mode _mode = MODE_OFF;
   bool _stopping = false;
+  bool _keep_wifi_on_stop = false;
   bool _was_setup_ap = false;
   bool _initial_setup = false;
   uint32_t _setup_started_at = 0;
@@ -337,6 +368,7 @@ private:
   bool _board_cmds_probed = false;
 
   void createServer();
+  bool beginSavedStation(uint32_t now);
   void registerRoutes();
   typedef void (WebConfigServer::*RequestHandler)(AsyncWebServerRequest*);
   static void dispatchRequest(AsyncWebServerRequest* req, RequestHandler handler);

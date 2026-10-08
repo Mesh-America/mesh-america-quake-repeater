@@ -16,6 +16,7 @@ import socketserver
 import subprocess
 import threading
 import time
+from serial_session import open_configured_session
 
 
 class Device:
@@ -68,7 +69,7 @@ class Device:
             # Keep RTS low; a held handle avoids repeated reset transitions.
             stream.dtr = os.name == 'nt'
             stream.rts = False
-            stream.open()
+            open_configured_session(stream)
             self.stream = stream
             self.read(time.monotonic()+20)
             self.write(b'\r')

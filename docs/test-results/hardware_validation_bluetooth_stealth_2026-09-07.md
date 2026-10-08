@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/hardware_validation_bluetooth_stealth_2026-09-07/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # XIAO Bluetooth stealth hardware validation - 2026-09-07
 
 Historical command syntax: the initial run used stealth as a MAC mode.

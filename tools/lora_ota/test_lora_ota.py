@@ -7446,6 +7446,7 @@ class Rak3401KnownUnsafeReleaseTests(unittest.TestCase):
             discovery_interval=8,
             poll_seconds=60,
             transfer_timeout_minutes=90,
+            seeder_prepare_wait=123,
             seeder_start_wait=5,
             reboot_wait=90,
             relay=[],
@@ -7477,6 +7478,7 @@ class Rak3401KnownUnsafeReleaseTests(unittest.TestCase):
                     )
                 command = nested.call_args.args[0]
                 self.assertEqual(command.count("--debug"), int(enabled))
+                self.assertEqual(command[command.index("--seeder-prepare-wait") + 1], "123")
                 self.assertEqual(command[command.index("--ota-hops") + 1], "3")
                 self.assertEqual(command[1], target_key)
                 self.assertEqual(command[command.index("--relay") + 1], f"{relay_key}=relay-password")

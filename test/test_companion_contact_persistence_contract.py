@@ -152,7 +152,7 @@ class CompanionContactPersistenceContractTests(unittest.TestCase):
         )
         error = section.index("writeErrFrame(ERR_CODE_FILE_IO_ERROR)", rollback)
         ok = section.index("writeOKFrame()", schedule)
-        clear_transient = section.index("clearTransientContact(*transient)", schedule)
+        clear_transient = section.index("clearTransientContact(*transient, recipient)", schedule)
         self.assertLess(snapshot, mutation)
         self.assertLess(mutation, schedule)
         self.assertLess(schedule, clear_transient)
@@ -227,10 +227,11 @@ class CompanionContactPersistenceContractTests(unittest.TestCase):
         self.assertLess(update_ok, update_rollback)
         self.assertLess(update_rollback, update_error)
 
-        promotion = section.index("Promotion must free the exact transient prefix slot")
+        promotion = section.index("Preserve the transient and its pending ACK references")
         add_section = section[promotion:]
-        clear = add_section.index("clearTransientContact(*transient)")
         add = add_section.index("addContact(candidate)")
+        schedule = add_section.index("added != NULL && scheduleContactWrite(*added)")
+        clear = add_section.index("clearTransientContact(*transient, added)")
         add_schedule = section.index(
             "added != NULL && scheduleContactWrite(*added)", update_error
         )
@@ -239,11 +240,13 @@ class CompanionContactPersistenceContractTests(unittest.TestCase):
         add_error = section.index(
             "writeErrFrame(ERR_CODE_FILE_IO_ERROR)", add_rollback
         )
-        self.assertLess(clear, add)
+        self.assertLess(add, schedule)
+        self.assertLess(schedule, clear)
         self.assertLess(add_schedule, add_ok)
         self.assertLess(add_ok, add_rollback)
         self.assertLess(add_rollback, add_error)
-        self.assertIn("if (transient != NULL) *transient = previous_transient", add_section)
+        self.assertNotIn("clearTransientContact", add_section[:schedule])
+        self.assertNotIn("previous_transient", section)
 
     def test_transient_prefix_is_never_compacted(self):
         transient_lookup = function_body(

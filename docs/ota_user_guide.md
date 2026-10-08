@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/ota_user_guide/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Updating your node over the air (OTA) - user guide
 
 For **1.17.1.5**, use the exact board/storage profile from
@@ -571,6 +575,61 @@ offers it to *its* neighbours too. So a new firmware spreads outward node-to-nod
 hammering the one node that had it first. Discovery remains background traffic; an actual transfer is
 primary traffic for the duration of its TempRadio maintenance window.
 
+### Share the firmware already running on a node
+
+OTA-enabled ESP32 and external-storage nRF52 repeater, room-server, and sensor
+builds automatically offer their running application during a TempRadio window.
+Both source and receiver need overlapping windows on the same radio settings.
+Adaptive RAK builds offer it only when the application has selected a usable,
+bootloader-matched external store. Internal-only nRF52 nodes do not automatically
+offer full images; they still need a computer-built delta to receive an update.
+
+Start the overlapping TempRadio windows before explicitly publishing the source.
+Boards with an on-demand OTA workspace release it when the window ends, so the
+source is available only during the window. To check or publish it:
+
+```
+ota serve status
+ota serve self
+```
+
+`ota serve self` selects the running application as the primary source and
+announces it. It replaces any manually staged primary image; attached host folders
+remain available. Automatic offering never replaces a manually staged primary.
+The receiver uses the normal `ota ls`, `ota get <mid8> flash`, and `ota install`
+commands. It must have compatible hardware, enough staging/application space,
+and the required OTA-capable bootloader. ESP32 reads the running A or B app
+partition; nRF52 reads only its application region. Private keys, ACLs, node names,
+and saved radio settings are not part of the shared image and are not copied from
+the source. Existing update paths preserve the receiver's saved data.
+
+The generated package is **full and unsigned**, streamed directly from flash
+without keeping the whole image in RAM. This does not enable automatic download
+or installation, bypass trust checks, or generate deltas on-device. Trusted-only
+automatic installation rejects it. SD-backed nRF52 receivers also require a
+trusted signed application package for manual installation: those sources can
+export their image, but installation there needs a computer-packaged, signed
+`.mota`. Source-only Companions continue to offer host-provided files instead.
+
+Eligible repeater, room-server, and sensor builds can compress their own-image
+blocks on the serving radio with a small, bounded raw-DEFLATE encoder. The
+receiver uses the existing `tinf` decoder; no second decoder is added. Each
+2 KiB block is independent, and incompressible blocks, unsupported receivers,
+or insufficient encoder memory fall back to uncompressed transfer. Only the
+application image through its EndF trailer is shared, not unused partition
+space. This remains a full image, not a device-generated delta.
+
+The radio does not run the computer packager's Zopfli encoder. Host-generated
+packages retain their stronger precompressed-block path. Allow a maintenance
+window long enough for the full image. ESP32 caches successfully read running-image metadata
+for the current boot and partition geometry, so repeated `ota status` requests
+do not rescan the application and interrupt radio servicing.
+
+For an exact delta base from an internal-only nRF52, the existing diagnostic
+`ota dev serve self` export, followed by `ota announce`, remains available during
+TempRadio for capture onto a computer; it does not make that node capable of
+receiving a full image.
+
 ---
 
 ## Where firmware files come from
@@ -603,6 +662,8 @@ that only contains what changed). You get them by:
 | Trust a signer | `ota key add <hex>` |
 | Relay a folder (gateway) | `ota folder on` + the seeder daemon |
 | List what I'm offering | `ota folder` |
+| Check whether I'm sharing my running firmware | `ota serve status` |
+| Share my running firmware (ESP32 / external nRF52) | `ota serve self` |
 
 (Older names still work too: `neighbors`/`updates` = `ls`, `pull` = `get`, `applydelta`/`apply` = `install`, `drop`/`stop` = `cancel`.)
 

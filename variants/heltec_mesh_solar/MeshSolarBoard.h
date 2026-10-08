@@ -29,6 +29,12 @@ public:
     return meshSolarGetBattVoltage();
   }
 
+  const char* getBatteryChargeTargetUnsupportedReason() const override {
+    // The I/F hardware versions use different CN3795 charger voltages. BQ4050
+    // charge-algorithm requests and protection thresholds do not set that CV.
+    return "Mesh Solar CN3795 charge voltage is hardware-set; BQ4050 settings do not change charger voltage";
+  }
+
   const char* getManufacturerName() const override {
     return "Heltec Mesh Solar";
   }

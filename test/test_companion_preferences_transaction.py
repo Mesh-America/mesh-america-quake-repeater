@@ -1,5 +1,6 @@
 """Exercise real Companion preferences saves and startup recovery with I/O faults."""
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ HARNESS = r'''
 #include <helpers/AtomicFileWriter.h>
 #endif
 #include "examples/companion_radio/NodePrefs.h"
+#include "examples/companion_radio/PrefsStorageLayout.h"
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 struct DataStore {
  MemoryFS fs;
@@ -54,6 +56,8 @@ int main(int argc,char** argv){
  original.flood_retry_attempts=4;original.flood_retry_max_path=3;
  original.flood_retry_group_max_path=2;original.flood_retry_advert_enabled=0;
  original.one_key_dm_enabled=1;
+ original.gps_sync_interval_hours=336;
+ original.usb_debug_enabled=1;
 #ifdef TBEAM_1W
  strcpy(original.fan_mode,"on");original.fan_lo=33;original.fan_hi=42;
 #endif
@@ -90,6 +94,8 @@ int main(int argc,char** argv){
    assert(loaded.flood_retry_attempts==4&&loaded.flood_retry_max_path==3);
    assert(loaded.flood_retry_group_max_path==2&&loaded.flood_retry_advert_enabled==0);
    assert(loaded.one_key_dm_enabled==1);
+   assert(loaded.gps_sync_interval_hours==336);
+   assert(loaded.usb_debug_enabled==1);
 #ifdef TBEAM_1W
    assert(!strcmp(loaded.fan_mode,"on")&&loaded.fan_lo==33&&loaded.fan_hi==42);
 #endif
@@ -194,11 +200,38 @@ int main(int argc,char** argv){
  } else if(scenario==7){
    // Pre-consent image: all earlier settings survive with default-off consent.
    DataStore legacy;legacy.fs.files["/new_prefs"]=disk;
-   legacy.fs.files["/new_prefs"].resize(disk.size()-1);
+   legacy.fs.files["/new_prefs"].resize(disk.size()-5);
    CompanionNodePrefs loaded;double lat=0,lon=0;
    assert(legacy.loadPrefs(loaded,lat,lon));
    assert(loaded.flood_retry_advert_enabled==0);
    assert(loaded.one_key_dm_enabled==0);
+ } else if(scenario==9){
+   // The previous complete image loads with the board policy even when the
+   // receiving prefs object previously held an explicit configured interval.
+   DataStore legacy;legacy.fs.files["/new_prefs"]=disk;
+   legacy.fs.files["/new_prefs"].resize(disk.size()-3);
+   CompanionNodePrefs loaded;loaded.gps_sync_interval_hours=24;loaded.usb_debug_enabled=1;
+   double lat=0,lon=0;
+   assert(legacy.loadPrefs(loaded,lat,lon));
+   assert(loaded.gps_sync_interval_hours==0 && loaded.one_key_dm_enabled==1);
+   assert(loaded.usb_debug_enabled==0);
+   // Half of the two-byte append is never accepted as a complete image.
+   DataStore torn;torn.fs.files["/new_prefs"]=disk;
+   torn.fs.files["/new_prefs"].resize(disk.size()-2);
+   assert(!torn.loadPrefsInt("/new_prefs",loaded,lat,lon));
+   // The complete published GPS image is accepted without borrowing either
+   // GPS byte as the new debug preference.
+   DataStore gps_image;gps_image.fs.files["/new_prefs"]=disk;
+   gps_image.fs.files["/new_prefs"].resize(disk.size()-1);
+   loaded.usb_debug_enabled=1;
+   assert(gps_image.loadPrefsInt("/new_prefs",loaded,lat,lon));
+   assert(loaded.gps_sync_interval_hours==336&&loaded.usb_debug_enabled==0);
+   // The compact known-size table must never narrow the actual file length.
+   // A large unknown image sharing a recognized low 16 bits remains invalid.
+   DataStore oversized;oversized.fs.files["/new_prefs"]=disk;
+   oversized.fs.files["/new_prefs"].resize(disk.size()+65536);
+   assert(!oversized.loadPrefsInt("/new_prefs",loaded,lat,lon));
+   assert(loaded.gps_sync_interval_hours==336&&loaded.usb_debug_enabled==0);
  } else if(scenario==8){
    for(uint8_t enabled : {0,1}){
      CompanionNodePrefs saved=original;saved.wifi_enabled=enabled;
@@ -288,10 +321,12 @@ inline char* utoa(unsigned int value,char* output,int base){
                              'ESP32_PLATFORM,TBEAM_1W', 'RP2040_PLATFORM,ENABLE_WIFI_INTERFACE'):
                 with self.subTest(platform=platform):
                     binary = work / 'test'
+                    sanitizer_flags = [] if os.name == 'nt' else [
+                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                        '-fno-pie', '-no-pie']
                     build = subprocess.run(['g++', '-std=c++17',
                         *['-D'+flag+'=1' for flag in platform.split(',')],
-                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
-                        '-fno-pie', '-no-pie', '-include', str(work / 'platform_shim.h'),
+                        *sanitizer_flags, '-include', str(work / 'platform_shim.h'),
                         '-I', str(work),
                         '-I', str(ROOT / 'test/fixtures/radio_profiles/mocks'),
                         '-I', str(ROOT / 'test/mocks'), '-I', str(ROOT / 'src'),
@@ -303,7 +338,7 @@ inline char* utoa(unsigned int value,char* output,int base){
                         str(ROOT / 'src/helpers/TxtDataHelpers.cpp'),
                         '-o', str(binary)], capture_output=True, text=True)
                     self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
-                    for scenario in range(9):
+                    for scenario in range(10):
                         with self.subTest(scenario=scenario):
                             run = subprocess.run([str(binary), str(scenario)], capture_output=True, text=True)
                             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

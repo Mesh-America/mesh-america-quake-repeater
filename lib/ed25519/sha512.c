@@ -90,7 +90,7 @@ static const uint64_t K[80] = {
 /* compress 1024-bits */
 static int sha512_compress(sha512_context *md, unsigned char *buf)
 {
-    uint64_t S[8], W[80], t0, t1;
+    uint64_t S[8], W[16], t0, t1;
     int i;
 
     /* copy state into S */
@@ -103,17 +103,25 @@ static int sha512_compress(sha512_context *md, unsigned char *buf)
         LOAD64H(W[i], buf + (8*i));
     }
 
-    /* fill W[16..79] */
-    for (i = 16; i < 80; i++) {
-        W[i] = Gamma1(W[i - 2]) + W[i - 7] + Gamma0(W[i - 15]) + W[i - 16];
-    }        
-
 /* Compress */
+    /* Each schedule word only needs the previous sixteen. Expand it before
+       its round, replacing W[i - 16] after reading all dependencies.
+       The schedule remains local and every index depends only on the fixed
+       round number. This saves 512 bytes of stack in both round paths. */
+    #define SCHEDULE(i) \
+    do { \
+        const int round = (i); \
+        W[round & 15] = Gamma1(W[(round - 2) & 15]) \
+            + W[(round - 7) & 15] + Gamma0(W[(round - 15) & 15]) \
+            + W[round & 15]; \
+    } while (0)
     #define RND(a,b,c,d,e,f,g,h,i) \
-    t0 = h + Sigma1(e) + Ch(e, f, g) + K[i] + W[i]; \
-    t1 = Sigma0(a) + Maj(a, b, c);\
-    d += t0; \
-    h  = t0 + t1;
+    do { \
+        t0 = h + Sigma1(e) + Ch(e, f, g) + K[(i)] + W[(i) & 15]; \
+        t1 = Sigma0(a) + Maj(a, b, c); \
+        d += t0; \
+        h = t0 + t1; \
+    } while (0)
 
 #if defined(ED25519_COMPACT_SHA512)
     /* Same 80 rounds, with a fixed state rotation instead of eight copies of
@@ -122,6 +130,7 @@ static int sha512_compress(sha512_context *md, unsigned char *buf)
     for (i = 0; i < 80; ++i) {
        int j;
        uint64_t next;
+       if (i >= 16) SCHEDULE(i);
        RND(S[0],S[1],S[2],S[3],S[4],S[5],S[6],S[7],i);
        next = S[7];
        for (j = 7; j > 0; --j) S[j] = S[j - 1];
@@ -129,6 +138,12 @@ static int sha512_compress(sha512_context *md, unsigned char *buf)
     }
 #else
     for (i = 0; i < 80; i += 8) {
+       /* Expand this block in order before the eight unrolled rounds. None
+          of their schedule slots is overwritten by another word in the block. */
+       if (i >= 16) {
+           int j;
+           for (j = 0; j < 8; ++j) SCHEDULE(i + j);
+       }
        RND(S[0],S[1],S[2],S[3],S[4],S[5],S[6],S[7],i+0);
        RND(S[7],S[0],S[1],S[2],S[3],S[4],S[5],S[6],i+1);
        RND(S[6],S[7],S[0],S[1],S[2],S[3],S[4],S[5],i+2);
@@ -141,6 +156,7 @@ static int sha512_compress(sha512_context *md, unsigned char *buf)
 #endif
 
    #undef RND
+   #undef SCHEDULE
 
 
 

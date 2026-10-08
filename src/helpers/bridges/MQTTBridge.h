@@ -36,8 +36,8 @@ class MeshSNMPAgent;  // Forward declaration
   // USB CDC-aware debug macros: only print if Serial is ready (non-blocking check)
   // Serial.availableForWrite() returns bytes available in write buffer (>0 means ready)
   // This prevents hangs when USB CDC isn't ready yet (e.g., ESP32-S3 native USB)
-  #define MQTT_DEBUG_PRINT(F, ...) do { if (mesh::isUsbLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("MQTT: " F, ##__VA_ARGS__); } } while(0)
-  #define MQTT_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("MQTT: " F "\n", ##__VA_ARGS__); } } while(0)
+  #define MQTT_DEBUG_PRINT(F, ...) do { if (mesh::isUsbDebugLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("MQTT: " F, ##__VA_ARGS__); } } while(0)
+  #define MQTT_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbDebugLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("MQTT: " F "\n", ##__VA_ARGS__); } } while(0)
 #else
   #define MQTT_DEBUG_PRINT(...) {}
   #define MQTT_DEBUG_PRINTLN(...) {}
@@ -56,6 +56,8 @@ struct MQTTNodeInfo {
   const uint8_t* cr = nullptr;
   const uint8_t* repeat_flag = nullptr;
   bool repeat_when_nonzero = true;
+  // ESP32 infrastructure only; Companion and Pico retain their existing owner.
+  bool canonical_wifi = false;
 };
 
 // Periodic neighbors publication keys off the mesh neighbor cache (sized by
@@ -300,12 +302,11 @@ private:
   // Cooperative-shutdown handshake (Phase 5). The loop task (Core 1) raises
   // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
   // sees it, tears down its own clients on Core 0 (where the mbedTLS contexts
-  // live), sets _stop_acked LAST, and self-terminates. end() waits for the ack
-  // before freeing the queue/buffers. Plain volatile matches the existing
-  // NTP/reconfigure handshake idiom above; replacing all of these with a command
-  // channel / task notifications is explicitly deferred (see MQTT_OWNERSHIP.md).
-  volatile bool _stop_requested = false;
-  volatile bool _stop_acked = false;
+  // live), sets _stop_acked LAST, and self-terminates. end() waits for the ack;
+  // loop() can instead reap it without blocking. Atomic release/acquire ordering
+  // makes client teardown visible before Core 1 frees the queue/buffers.
+  std::atomic<bool> _stop_requested{false};
+  std::atomic<bool> _stop_acked{false};
 
   // Timezone handling.
   // _timezone_storage is inline class storage (zero heap) that is reconfigured
@@ -515,7 +516,8 @@ private:
   #ifdef ESP_PLATFORM
   static void mqttTask(void* parameter);
   void mqttTaskLoop();  // Main loop for MQTT task
-  void initializeWiFiInTask();  // WiFi initialization moved to task
+  bool waitUnlessStopping(uint32_t delay_ms);
+  bool initializeWiFiInTask();  // False while an AP owns the shared driver.
   #endif
   bool publishPacket(mesh::Packet* packet, bool is_tx, bool& has_eligible_target,
                      const uint8_t* raw_data = nullptr, int raw_len = 0,
@@ -551,13 +553,14 @@ private:
   // of making the bridge unusable.
   void allocateRuntimeBuffers();
   void releaseRuntimeBuffers();
+  void finishStopped();  // Core 1 only, after lifecycle resource release
 
   // --- Cooperative lifecycle (Phase 5) ---------------------------------------
   // The pure state machine, bounded stop timeout, and OTA barrier live in
   // src/helpers/MQTTLifecycle.h and are host-tested by test/test_mqtt_lifecycle/.
   // This nested Ops binds that spec to FreeRTOS/PsychicMqttClient. The
   // Coordinator is owned and driven ONLY by the loop task (Core 1) from
-  // begin()/end(); the MQTT task (Core 0) communicates solely through the
+  // begin()/requestStop()/end()/loop(); the MQTT task (Core 0) communicates solely through the
   // _stop_requested/_stop_acked flags above. Methods are defined in the .cpp.
   class LifecycleOps : public MQTTLifecycle::Ops {
    public:
@@ -577,6 +580,15 @@ private:
   MQTTPrefs* _obs = nullptr;
   MQTTNodeInfo _node_info;
   bool _manage_wifi;
+#ifdef ESP_PLATFORM
+  // Frozen before Core 0 starts; changed only after its stop barrier.
+  char _wifi_ssid[32] = {};
+  char _wifi_password[65] = {};
+  uint8_t _wifi_power_save = 0;
+  bool _wifi_configured = false;
+  bool prepareWiFiCredentials();
+  void beginWiFiStation();
+#endif
 
   const char* repeatStatus() const;
 
@@ -587,6 +599,10 @@ public:
 
   void begin() override;
   void end() override;
+  // Core 1: request cooperative teardown without waiting or freeing resources.
+  // Call loop() to reap the acknowledgment; end() remains the OTA stop barrier.
+  void requestStop();
+  bool isStopping() const { return _lifecycle.isStopInProgress(); }
   bool isRunning() const override { return _initialized; }
   void loop() override;
   void onPacketReceived(mesh::Packet *packet) override;
@@ -681,8 +697,8 @@ public:
   int getConnectedBrokers() const;
   int getQueueSize() const;
   bool isReady() const;
-  /** True only after a CLEAN cooperative stop -- end() received the MQTT task's
-   *  acknowledgment within the timeout. A timed-out/forced stop returns false so
+  /** True only after a CLEAN cooperative stop -- the MQTT task acknowledged
+   *  its teardown before resources were released. A timed-out/forced stop returns false so
    *  OTA flashing is withheld until a clean start/stop cycle. Mirrors
    *  MQTTLifecycle::mayBeginFlash(); read on the loop task (Core 1). */
   bool canFlashAfterStop() const { return _lifecycle.mayBeginFlash(); }
@@ -774,7 +790,7 @@ public:
   };
   static bool getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out);
   /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */
-  static bool isConfigValid(const MQTTPrefs* obs);
+  static bool isConfigValid(const MQTTPrefs* obs, bool canonical_wifi = false);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
   static uint8_t getLastWifiDisconnectReason();
   static unsigned long getLastWifiDisconnectTime();

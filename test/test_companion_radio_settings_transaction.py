@@ -233,10 +233,14 @@ SLEEP_HARNESS = r'''
 #include <cassert>
 #include <cstdint>
 #include <cstddef>
+#include <helpers/CompanionDelayedReplies.h>
 static uint32_t now_ms=100;
 struct Serial {
   bool hasPendingIO() const { return false; }
   bool isConnected() const { return false; }
+  bool isReplyRouteAvailable(const Serial* route) const {
+    return route==this&&isConnected();
+  }
 };
 struct {
   bool isWatchdogObserving() const { return false; }
@@ -244,13 +248,15 @@ struct {
 } radio_driver;
 struct MyMesh {
   bool _radio_available=true, _iter_started=false, command_radio_apply_pending=false;
-  bool binary_trace_pending=false, saved_radio_apply_pending=false;
+  bool saved_radio_apply_pending=false, _terminal_trace_pending=false;
   uint32_t radio_apply_retry_at=0, _scheduled_reboot_at=0;
   uint32_t emergency_client_repeat_send_at=0, dirty_contacts_expiry=0;
   uint8_t dirty_contacts_failures=0;
-  const void *pending_serial_reply_route=nullptr, *sign_data=nullptr;
+  mesh::CompanionDelayedReplies _delayed_replies;
+  const void *sign_data=nullptr;
   const void *emergency_client_repeat_packet=nullptr;
   Serial* _serial=nullptr;
+  Serial* _iter_reply_route=nullptr;
 #if COMPANION_FEATURE_TEMP_RADIO
   bool _temp_radio_applied=false;
   uint32_t _temp_radio_set_at=0, _temp_radio_revert_at=0, _temp_radio_retry_at=0;
@@ -259,6 +265,7 @@ struct MyMesh {
   bool isDualRadioActive() const { return false; }
   bool isContactWriteDue() const { return false; }
   bool hasPendingOtaApply() const { return false; }
+  bool hasPendingReqs() const { return _delayed_replies.hasRequest(); }
   bool hasQueuedWorkDue() const { return false; }
   bool hasRetryWorkDue() const { return false; }
   bool hasPendingWork() const;
@@ -296,6 +303,12 @@ int main() {
 #endif
   m.saved_radio_apply_pending=false;
   assert(!m.hasPendingWork());
+  // Terminal TRACE has no binary slot but must keep event-driven nodes awake
+  // until its independent timeout releases the reserved history entry.
+  m._terminal_trace_pending=true;
+  assert(m.hasPendingWork()==bool(COMPANION_FEATURE_TEXT_TERMINAL));
+  m._terminal_trace_pending=false;
+  assert(!m.hasPendingWork());
 }
 '''
 
@@ -312,11 +325,17 @@ class CompanionRadioSettingsTransactionTests(unittest.TestCase):
             for macros in (['-DCOMPANION_FEATURE_TEMP_RADIO=0'],
                            ['-DCOMPANION_FEATURE_TEMP_RADIO=1'],
                            ['-DCOMPANION_FEATURE_TEMP_RADIO=1', '-DNRF52_PLATFORM=1']):
-                with self.subTest(macros=macros):
-                    subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17',
-                                    '-Wall', '-Wextra', '-Werror', *macros,
-                                    str(cpp), '-o', str(binary)], check=True)
-                    subprocess.run([str(binary)], check=True)
+                for terminal in (0, 1):
+                    with self.subTest(macros=macros, terminal=terminal):
+                        subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17',
+                                        '-Wall', '-Wextra', '-Werror', *macros,
+                                        '-DCOMPANION_FEATURE_TEXT_TERMINAL=' + str(terminal),
+                                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                                        '-fno-pie', '-no-pie',
+                                        '-isystem', str(ROOT / "test/mocks"), f'-I{ROOT / "src"}',
+                                        str(cpp), str(ROOT / 'src/helpers/CompanionDelayedReplies.cpp'),
+                                        '-o', str(binary)], check=True)
+                        subprocess.run([str(binary)], check=True)
 
     def test_production_commands_commit_and_restore(self):
         text = SOURCE.read_text(encoding='utf-8')

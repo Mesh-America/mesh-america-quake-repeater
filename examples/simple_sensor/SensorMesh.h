@@ -58,6 +58,11 @@ public:
   SensorMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
   void begin(FILESYSTEM* fs);
   void loop();
+  bool canRecoverUsbLogging() const {
+    return dirty_contacts_expiry == 0 && !hasOutbound() && !isAnyTempRadioActive()
+        && !hasPendingOtaApply() && !saved_radio_apply_pending
+        && set_radio_at == 0;
+  }
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply,
                      int gpio_client_index = -1,
                      uint8_t gpio_path_hash_size = 1);
@@ -116,8 +121,8 @@ public:
 
   float getTelemValue(uint8_t channel, uint8_t type);
 
-  void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size);
-  void sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
+  bool sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size);
+  bool sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
 protected:
   bool isTempRadioActive() const override {
@@ -236,9 +241,11 @@ private:
   bool region_load_active;
 
   bool telemHasChanged(ClientInfo* c);
+  void snapshotTelemetry(ClientInfo* c);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
   uint8_t handleRequest(ClientInfo* from, uint32_t sender_timestamp,
-                        uint8_t req_type, uint8_t* payload, size_t payload_len);
+                        uint8_t req_type, uint8_t* payload, size_t payload_len,
+                        size_t reply_capacity = MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1));
   bool hasLocationTelemetryClient();
   void updateGpsTelemetryPolicy();
   mesh::Packet* createSelfAdvert();
@@ -252,6 +259,7 @@ private:
     char interval_str[12];
     sprintf(interval_str, "%u", _prefs.gps_interval);
     sensors.setSettingValue("gps_interval", interval_str);
+    sensors.applyGpsTimeSyncInterval(_prefs.gps_sync_interval_hours);
   }
 #endif
 };

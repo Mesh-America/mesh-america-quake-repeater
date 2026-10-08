@@ -171,41 +171,74 @@ TEST(ManagementRouting, GroupDataForBothRoutesKeepsPublicHeaderAndLegacyLength) 
   TraceTestRadio radio; TraceTestClock clock; TraceTestRNG rng; TraceTestRTC rtc;
   TraceTestTables tables; StaticPoolPacketManager pool(8);
   TraceTestMesh mesh(radio, clock, rng, rtc, pool, tables);
-  uint8_t raw[mesh::management::HEADER + mesh::management::TAG] = {};
-  memcpy(raw, "MGR1", 4); raw[79] = 1;
+  uint8_t raw[mesh::management::CURRENT_HEADER + mesh::management::TAG] = {};
   const uint8_t path[] = {0x12, 0xab};
   uint8_t scope_key[16]; memset(scope_key, 0x42, sizeof(scope_key));
-  for (bool flood : {false, true}) {
-    auto* p = mesh.createRawData(raw, sizeof(raw)); ASSERT_NE(nullptr, p);
-    ASSERT_TRUE(mesh.sendManagementData(p, flood, path, 2, 2,
-                                        flood ? scope_key : nullptr));
-    EXPECT_EQ(PAYLOAD_TYPE_GRP_DATA, p->getPayloadType());
-    EXPECT_EQ(flood, p->isRouteFlood());
-    EXPECT_EQ(0, memcmp(p->payload, raw, sizeof(raw)));
-    EXPECT_EQ(0u, (p->payload_len - 3u) % 16u);
-    EXPECT_TRUE(mesh::management::validPage(p->payload, p->payload_len, true));
-    EXPECT_EQ(flood ? 0 : 2, p->getPathHashCount());
-    if (!flood) EXPECT_EQ(0, memcmp(p->path, path, 2));
+  for (const char* magic : {"MGR1", "MGR2"}) {
+    memset(raw, 0, sizeof(raw));
+    memcpy(raw, magic, 4); raw[79] = 1;
+    const size_t size = mesh::management::headerSize(raw) + mesh::management::TAG;
+    for (bool flood : {false, true}) {
+      auto* p = mesh.createRawData(raw, size); ASSERT_NE(nullptr, p);
+      ASSERT_TRUE(mesh.sendManagementData(p, flood, path, 2, 2,
+                                          flood ? scope_key : nullptr));
+      EXPECT_EQ(PAYLOAD_TYPE_GRP_DATA, p->getPayloadType());
+      EXPECT_EQ(flood, p->isRouteFlood());
+      EXPECT_EQ(0, memcmp(p->payload, raw, size));
+      EXPECT_EQ(0u, (p->payload_len - 3u) % 16u);
+      EXPECT_TRUE(mesh::management::validPage(p->payload, p->payload_len, true));
+      EXPECT_EQ(flood ? 0 : 2, p->getPathHashCount());
+      if (!flood) EXPECT_EQ(0, memcmp(p->path, path, 2));
+    }
   }
 }
 
 TEST(ManagementRouting, FloodForwardingDoesNotNeedAKeyAndStillHonorsFilters) {
+  for (const char* magic : {"MGR1", "MGR2"}) {
+    TraceTestRadio radio; TraceTestClock clock; TraceTestRNG rng; TraceTestRTC rtc;
+    TraceTestTables tables; StaticPoolPacketManager pool(8);
+    TraceTestMesh mesh(radio, clock, rng, rtc, pool, tables);
+    mesh.forwardFloods = true;
+    mesh::Packet p;
+    p.header = (PAYLOAD_TYPE_GRP_DATA << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
+    p.setPathHashSizeAndCount(1, 0);
+    memset(p.payload, 0, sizeof(p.payload));
+    memcpy(p.payload, magic, 4);
+    p.payload_len = mesh::management::floodSize(
+        mesh::management::headerSize(p.payload) + mesh::management::TAG);
+    memset(p.payload + 4, 0, p.payload_len - 4);
+    p.payload[79] = 1; // one page containing zero ACL entries
+    ASSERT_TRUE(mesh::management::validPage(p.payload, p.payload_len, true));
+    EXPECT_NE(ACTION_RELEASE, mesh.receivePacket(&p));
+    EXPECT_FALSE(mesh.groupPacketObserved); // never delivered as decrypted channel data
+    mesh.rejectFloods = true;
+    EXPECT_EQ(ACTION_RELEASE, mesh.receivePacket(&p));
+  }
+}
+
+TEST(ManagementRouting, RetiredPrototypeLayoutsCannotBeSentAndReleaseTheirPacket) {
   TraceTestRadio radio; TraceTestClock clock; TraceTestRNG rng; TraceTestRTC rtc;
   TraceTestTables tables; StaticPoolPacketManager pool(8);
   TraceTestMesh mesh(radio, clock, rng, rtc, pool, tables);
-  mesh.forwardFloods = true;
-  mesh::Packet p;
-  p.header = (PAYLOAD_TYPE_GRP_DATA << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
-  p.setPathHashSizeAndCount(1, 0);
-  p.payload_len = mesh::management::floodSize(mesh::management::HEADER + mesh::management::TAG);
-  memset(p.payload, 0, p.payload_len);
-  memcpy(p.payload, "MGR1", 4);
-  p.payload[79] = 1; // one page containing zero ACL entries
-  ASSERT_TRUE(mesh::management::validPage(p.payload, p.payload_len, true));
-  EXPECT_NE(ACTION_RELEASE, mesh.receivePacket(&p));
-  EXPECT_FALSE(mesh.groupPacketObserved); // never delivered as decrypted channel data
-  mesh.rejectFloods = true;
-  EXPECT_EQ(ACTION_RELEASE, mesh.receivePacket(&p));
+  uint8_t scope_key[16]; memset(scope_key, 0x42, sizeof(scope_key));
+  const uint8_t path[] = {0x12};
+  for (unsigned layout = 0; layout < 3; ++layout) {
+    uint8_t raw[mesh::management::MAX_PAYLOAD] = {};
+    memcpy(raw, layout == 0 ? "MGR3" : "MGR2", 4); raw[79] = 1;
+    size_t size = layout == 0 ? mesh::management::CURRENT_HEADER + mesh::management::TAG
+                            : 98 + mesh::management::TAG;
+    if (layout == 2) {
+      raw[80] = raw[82] = 5;
+      size += 5 * mesh::management::ENTRY;
+    }
+    for (bool flood : {false, true}) {
+      auto* packet = mesh.createRawData(raw, size); ASSERT_NE(nullptr, packet);
+      EXPECT_FALSE(mesh.sendManagementData(packet, flood, path, 1, 1,
+                                           flood ? scope_key : nullptr));
+      EXPECT_EQ(0, pool.getOutboundTotal());
+      EXPECT_EQ(8, pool.getFreeCount());
+    }
+  }
 }
 
 class RetryCodingRateRadio : public TraceTestRadio {
@@ -826,6 +859,160 @@ TEST(MeshReceiveHooks, FloodTraceAndControlAreNeverForwarded) {
       EXPECT_EQ(0, tables.mark_seen_calls);
     }
   }
+}
+
+// Admission/egress boundary controls deliberately do not reproduce the role
+// predicate. The Python extraction suite executes the actual repeater methods;
+// these tests exercise the real Mesh/Dispatcher validation and queue ownership.
+class TraceForwardingPolicyMesh : public TraceTestMesh {
+public:
+  using TraceTestMesh::TraceTestMesh;
+  const mesh::Packet* denied = nullptr;
+  unsigned forwarding_checks = 0;
+  bool allowPacketForward(const mesh::Packet*) override {
+    ++forwarding_checks;
+    return forwardFloods;
+  }
+  bool allowPacketTransmit(const mesh::Packet* packet) const override {
+    return packet != denied && mesh::Mesh::allowPacketTransmit(packet);
+  }
+};
+
+static mesh::Packet makeIncomingTrace(const TraceTestMesh& node, uint8_t route,
+                                      uint8_t flags = 0, uint8_t hash_size = 1) {
+  mesh::Packet packet;
+  packet.header = route | (PAYLOAD_TYPE_TRACE << PH_TYPE_SHIFT);
+  packet.path_len = 0;
+  packet.payload_len = 9 + 2 * hash_size;
+  memset(packet.payload, 0, packet.payload_len);
+  packet.payload[8] = flags;
+  memcpy(packet.payload + 9, node.self_id.pub_key, hash_size);
+  memset(packet.payload + 9 + hash_size, 0x98, hash_size);
+  packet._snr = 17;
+  return packet;
+}
+
+TEST(TraceForwardingSafety, MatchingDirectHashesAppendOneSnrAndDuplicateIsRejected) {
+  for (uint8_t route : {ROUTE_TYPE_DIRECT, ROUTE_TYPE_TRANSPORT_DIRECT}) {
+    for (uint8_t code = 0; code < 4; ++code) {
+      TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+      ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+      TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+      node.forwardFloods = true;
+      memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+      mesh::Packet packet = makeIncomingTrace(node, route, code, 1U << code);
+      mesh::Packet duplicate = packet;
+      EXPECT_NE(ACTION_RELEASE, node.receivePacket(&packet));
+      EXPECT_EQ(1, packet.path_len);
+      EXPECT_EQ(17, packet.path[0]);
+      EXPECT_EQ(1, tables.mark_seen_calls);
+      EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&duplicate));
+      EXPECT_EQ(0, duplicate.path_len);
+      EXPECT_EQ(1, tables.mark_seen_calls);
+    }
+  }
+}
+
+TEST(TraceForwardingSafety, MalformedWrongHashAndFullSnrPathNeverReachForwardingGate) {
+  TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+  ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+  TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+  node.forwardFloods = true;
+  memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+  const mesh::Packet valid = makeIncomingTrace(node, ROUTE_TYPE_DIRECT);
+  for (uint8_t length = 0; length < 9; ++length) {
+    mesh::Packet packet = valid;
+    packet.payload_len = length;
+    EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&packet));
+  }
+  mesh::Packet wrong = valid;
+  wrong.payload[9] ^= 0xff;
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&wrong));
+  mesh::Packet truncated = valid;
+  truncated.payload[8] = 3;
+  truncated.payload_len = 10; // neither an eight-byte nor four-byte hash fits
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&truncated));
+  mesh::Packet full = valid;
+  full.path_len = MAX_PATH_SIZE;
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&full));
+  mesh::Packet long_offset = valid;
+  long_offset.path_len = 33;
+  long_offset.payload[8] = 3;
+  long_offset.payload_len = 9 + 160;
+  memset(long_offset.payload + 9, 0x42, 160);
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&long_offset)); // 33*8 must not wrap
+  EXPECT_EQ(0u, node.forwarding_checks);
+  EXPECT_EQ(0, tables.mark_seen_calls);
+}
+
+TEST(TraceForwardingSafety, FinalSnrSlotIsSafeAndDeniedAdmissionDoesNotMarkSeen) {
+  TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+  ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+  TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+  memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+  mesh::Packet blocked = makeIncomingTrace(node, ROUTE_TYPE_DIRECT);
+  EXPECT_EQ(ACTION_RELEASE, node.receivePacket(&blocked));
+  EXPECT_EQ(0, blocked.path_len);
+  EXPECT_EQ(0, tables.mark_seen_calls);
+  node.forwardFloods = true;
+  mesh::Packet last = blocked;
+  last.path_len = MAX_PATH_SIZE - 1;
+  last.payload_len = 9 + MAX_PATH_SIZE;
+  memset(last.payload + 9, 0x42, MAX_PATH_SIZE);
+  EXPECT_NE(ACTION_RELEASE, node.receivePacket(&last));
+  EXPECT_EQ(MAX_PATH_SIZE, last.path_len);
+  EXPECT_EQ(17, last.path[MAX_PATH_SIZE - 1]);
+  EXPECT_EQ(1, tables.mark_seen_calls);
+}
+
+TEST(TraceForwardingSafety, EgressVetoRetiresQueuedRelayAndItsRetryOwner) {
+  TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+  ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+  TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+  node.begin();
+  node.forwardFloods = true;
+  memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+  auto* relay = manager.allocNew(); ASSERT_NE(nullptr, relay);
+  *relay = makeIncomingTrace(node, ROUTE_TYPE_DIRECT);
+  ASSERT_NE(ACTION_RELEASE, node.receivePacket(relay));
+  ASSERT_TRUE(node.sendPacket(relay, 1));
+  node.denied = relay;
+  clock.now = 1000; node.loop();
+  EXPECT_FALSE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  node.denied = nullptr;
+  clock.now = 10000; node.loop();
+  EXPECT_FALSE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  EXPECT_EQ(12, manager.getFreeCount());
+}
+
+TEST(TraceForwardingSafety, AirtimeAlreadyStartedFinishesButQueuedRetryIsRetired) {
+  TraceTestClock clock; TraceTestRTC rtc; TraceTestRNG rng; TraceTestRadio radio;
+  ForwardingTestTables tables; StaticPoolPacketManager manager(12);
+  TraceForwardingPolicyMesh node(radio, clock, rng, rtc, manager, tables);
+  node.begin();
+  node.forwardFloods = true;
+  memset(node.self_id.pub_key, 0x42, PUB_KEY_SIZE);
+  auto* relay = manager.allocNew(); ASSERT_NE(nullptr, relay);
+  *relay = makeIncomingTrace(node, ROUTE_TYPE_DIRECT);
+  ASSERT_NE(ACTION_RELEASE, node.receivePacket(relay));
+  ASSERT_TRUE(node.sendPacket(relay, 1));
+  clock.now = 1; node.loop(); ASSERT_TRUE(radio.sending);
+  node.denied = relay;
+  clock.now = 2; node.loop(); EXPECT_TRUE(radio.sending);
+  radio.complete = true;
+  clock.now = 3; node.loop(); EXPECT_FALSE(radio.sending);
+  ASSERT_EQ(1, manager.getOutboundTotal());
+  node.denied = manager.getOutboundByIdx(0);
+  clock.now = 1000; node.loop();
+  EXPECT_FALSE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  node.denied = nullptr;
+  clock.now = 10000; node.loop();
+  EXPECT_FALSE(radio.sending);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+  EXPECT_EQ(12, manager.getFreeCount());
 }
 
 static mesh::Packet* makeTrace(TraceTestMesh& node, uint32_t tag, uint32_t auth,

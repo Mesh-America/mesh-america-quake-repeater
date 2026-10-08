@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/sf6_125_settling_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SF6/125 four-channel post-switch settling sweep
 
 Measured 2026-09-14. **No setting from +0.0 through +1.0 ms passed 400/400.**

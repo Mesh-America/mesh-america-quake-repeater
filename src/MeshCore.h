@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <math.h>
 #include "helpers/UsbLogging.h"
+#include "helpers/BatteryChargeSupport.h"
 
 #define MAX_HASH_SIZE        8
 #define PUB_KEY_SIZE        32
@@ -46,7 +47,7 @@ namespace mesh {
 // overlapping debug formatter calls. The historical helper name
 // is retained for callers; ESP32 TinyUSB uses the same bounded formatter.
 inline size_t nrf52DebugPrintf(const char* format, ...) {
-  if (format == nullptr || !isUsbLoggingEnabled()) return 0;
+  if (format == nullptr || !isUsbDebugLoggingEnabled()) return 0;
 
   static std::atomic_flag writer_busy = ATOMIC_FLAG_INIT;
   if (writer_busy.test_and_set(std::memory_order_acquire)) return 0;
@@ -90,8 +91,8 @@ inline size_t nrf52DebugPrintf(const char* format, ...) {
     #define MESH_DEBUG_PRINT(F, ...) do { mesh::nrf52DebugPrintf("DEBUG: " F, ##__VA_ARGS__); } while(0)
     #define MESH_DEBUG_PRINTLN(F, ...) do { mesh::nrf52DebugPrintf("DEBUG: " F "\n", ##__VA_ARGS__); } while(0)
   #else
-    #define MESH_DEBUG_PRINT(F, ...) do { if (mesh::isUsbLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("DEBUG: " F, ##__VA_ARGS__); } } while(0)
-    #define MESH_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("DEBUG: " F "\n", ##__VA_ARGS__); } } while(0)
+    #define MESH_DEBUG_PRINT(F, ...) do { if (mesh::isUsbDebugLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("DEBUG: " F, ##__VA_ARGS__); } } while(0)
+    #define MESH_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbDebugLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("DEBUG: " F "\n", ##__VA_ARGS__); } } while(0)
   #endif
 #else
   #define MESH_DEBUG_PRINT(...) {}
@@ -102,7 +103,7 @@ inline size_t nrf52DebugPrintf(const char* format, ...) {
   #if defined(NRF52_PLATFORM) || MESH_ESP32_USB_CONSOLE_COOPERATIVE
     #define BRIDGE_DEBUG_PRINTLN(F, ...) do { mesh::nrf52DebugPrintf("%s BRIDGE: " F, getLogDateTime(), ##__VA_ARGS__); } while(0)
   #else
-    #define BRIDGE_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("%s BRIDGE: " F, getLogDateTime(), ##__VA_ARGS__); } } while(0)
+    #define BRIDGE_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbDebugLoggingEnabled() && mesh::usbLoggingPort().availableForWrite() > 0) { mesh::usbLoggingPort().printf("%s BRIDGE: " F, getLogDateTime(), ##__VA_ARGS__); } } while(0)
   #endif
 #else
   #define BRIDGE_DEBUG_PRINTLN(...) {}
@@ -114,8 +115,8 @@ inline size_t nrf52DebugPrintf(const char* format, ...) {
     #define POWERSAVING_DEBUG_PRINT(F, ...) do { mesh::nrf52DebugPrintf("POWERSAVING: " F, ##__VA_ARGS__); } while(0)
     #define POWERSAVING_DEBUG_PRINTLN(F, ...) do { mesh::nrf52DebugPrintf("POWERSAVING: " F "\n", ##__VA_ARGS__); } while(0)
   #else
-    #define POWERSAVING_DEBUG_PRINT(F, ...) do { if (mesh::isUsbLoggingEnabled()) { mesh::usbLoggingPort().printf("POWERSAVING: " F, ##__VA_ARGS__); } } while(0)
-    #define POWERSAVING_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbLoggingEnabled()) { mesh::usbLoggingPort().printf("POWERSAVING: " F "\n", ##__VA_ARGS__); } } while(0)
+    #define POWERSAVING_DEBUG_PRINT(F, ...) do { if (mesh::isUsbDebugLoggingEnabled()) { mesh::usbLoggingPort().printf("POWERSAVING: " F, ##__VA_ARGS__); } } while(0)
+    #define POWERSAVING_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbDebugLoggingEnabled()) { mesh::usbLoggingPort().printf("POWERSAVING: " F "\n", ##__VA_ARGS__); } } while(0)
   #endif
 #else
   #define POWERSAVING_DEBUG_PRINT(...) {}
@@ -179,7 +180,7 @@ public:
   // Pull-based OTA: fetch the firmware build for this variant from a baked-in manifest and flash it.
   // current_ver is the running firmware version string (used to skip if already up to date); when
   // dry_run is true the build is only reported, not flashed. Observer (ESP32+WiFi) builds only.
-  virtual bool otaFromManifest(const char* current_ver, bool dry_run, char reply[]) { return false; }
+  virtual bool otaFromManifest(const char* manifest_base, const char* current_ver, bool dry_run, char reply[]) { return false; }
 
   // LoRa front-end-module LNA (RX gain) control. Only FEM-equipped boards override
   // these; others report they can't control it. Driven by NodePrefs.radio_fem_rxgain.
@@ -238,6 +239,20 @@ public:
   virtual bool isUsbHostConnected() { return isUsbDataConnected(); }
   // True while a board can identify an active battery-charging source.
   virtual bool isChargerActive() { return false; }
+
+#if MESH_BATTERY_CHARGE_CONTROL
+  // Actual charger voltage, in millivolts. Battery reporting and protection
+  // thresholds are separate capabilities. A successful setter must verify
+  // hardware readback and persist the setting for the next boot.
+  virtual bool getBatteryChargeTarget(uint16_t& millivolts) { return false; }
+  virtual bool supportsBatteryChargeTarget(uint16_t millivolts) { return false; }
+  virtual bool setBatteryChargeTarget(uint16_t millivolts) { return false; }
+  virtual const char* getBatteryChargeTargetOptions() const { return nullptr; }
+  virtual bool batteryChargeTargetRestoreFailed() const { return false; }
+  virtual const char* getBatteryChargeTargetUnsupportedReason() const {
+    return "charge.voltage is not supported on this board";
+  }
+#endif
 
   // Optional, source-specific power detection. Boards that can distinguish a USB
   // supply from a solar charger override these; defaults keep every other board

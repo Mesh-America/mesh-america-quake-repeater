@@ -1,8 +1,12 @@
 #include <Arduino.h>
 #include "CommonCLI.h"
 #include "PrefsSaveReplyGuard.h"
+#include "UsbLoggingWatchdog.h"
+#include "HilStartupTrace.h"
 #include <helpers/ui/DisplayPowerSettings.h>
+#include <helpers/BatteryChargeCLI.h>
 #include "CLICommandUtils.h"
+#include "GpsPowerPolicy.h"
 #include "FloodAdvertCLI.h"
 #include "StorageLayout.h"
 #include "radiolib/RadioPowerLimits.h"
@@ -743,15 +747,23 @@ static void formatSnrDbX4Short(char* dest, size_t dest_len, int16_t snr_x4) {
 }
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
+  mesh::hilStartupTrace("prefs_profiles_begin");
   _radio_profiles.begin(fs, _callbacks->getProfileRadio(), _rtc, true);
+  mesh::hilStartupTrace("prefs_profiles_ready");
   _prefs->primary_radio_preamble = _radio_profiles.primaryPreamble();
 #if !defined(WITH_MQTT_BRIDGE) && (defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM))
+  mesh::hilStartupTrace("prefs_recovery_begin");
   mesh::ContactFileTransaction::recover(fs, "/com_prefs");
+  mesh::hilStartupTrace("prefs_recovery_ready");
 #endif
 #if defined(ENABLE_OTA)
+  mesh::hilStartupTrace("prefs_ota_speed_begin");
   mesh::ota::beginSpeedConfig(fs);
+  mesh::hilStartupTrace("prefs_ota_speed_ready");
 #endif
+  mesh::hilStartupTrace("prefs_display_begin");
   const bool display_settings_loaded = mesh::ui::loadDisplayPowerSettings(fs, false);
+  mesh::hilStartupTrace("prefs_display_ready");
   (void)display_settings_loaded;
   bool is_fresh_install = false;
   bool is_upgrade = false;
@@ -761,21 +773,35 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   // contain its appended byte, so they safely inherit the enabled default.
   _prefs->system_watchdog_enabled = 1;
   memset(_prefs->extra_sf, 0, sizeof(_prefs->extra_sf));
+#if defined(ESP32_PLATFORM) && defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
+  // Full carries diagnostics as an optional runtime service. Merely adding
+  // that capability must not hold an otherwise idle battery node awake.
+  // A saved logging preference below still takes precedence.
+  _prefs->usb_logging_enabled = 0;
+#else
   _prefs->usb_logging_enabled = 1;
+#endif
+  _prefs->usb_debug_enabled = 0;
+  _prefs->trace_when_repeat_off = 0;
+  _prefs->ota_channel = 0;
 #ifdef WITH_RS232_BRIDGE
   _prefs->bridge_uart = WITH_RS232_BRIDGE_UART;
 #else
   _prefs->bridge_uart = 0;
 #endif
   _prefs->bridge_format = mesh::bridge::ESPNOW_FORMAT_WRAPPED;
+  _prefs->gps_sync_interval_hours = 0;
 
 #ifdef WITH_MQTT_BRIDGE
   bool node_prefs_needs_migration = false;
+  mesh::hilStartupTrace("prefs_recovery_begin");
   if (!recoverCommonPrefsFiles(fs)) {
     MESH_DEBUG_PRINTLN("Prefs: common preference recovery is incomplete");
   }
+  mesh::hilStartupTrace("prefs_recovery_ready");
 #endif
 
+  mesh::hilStartupTrace("prefs_common_begin");
   if (fs->exists("/com_prefs")) {
     loadPrefsInt(fs, "/com_prefs"); loaded = true;   // new filename
   } else if (fs->exists("/node_prefs")) {
@@ -807,13 +833,70 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #else
     File legacy = fs->open("/prefs.json", "r");
 #endif
+#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
+    && !defined(RS232_BRIDGE_DEFAULT_ON)
+    const uint8_t previous_bridge_uart = _prefs->bridge_uart;
+    const uint8_t previous_bridge_enabled = _prefs->bridge_enabled;
+    // JSON profiles can contain the unused enabled flag without any UART.
+    // Require an explicit nonzero UART before treating it as bridge intent.
+    _prefs->bridge_uart = 0;
+#endif
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+    const uint8_t previous_espnow_enabled = _prefs->espnow_bridge_enabled;
+#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+    const uint8_t previous_bridge_enabled = _prefs->bridge_enabled;
+#endif
+#endif
     if (legacy && _prefs->loadSerial(legacy)) {
       loaded = true;
       is_upgrade = true;
+#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
+    && !defined(RS232_BRIDGE_DEFAULT_ON)
+#ifdef WITH_MQTT_BRIDGE
+      _prefs->rs232_bridge_enabled = 0;
+#else
+      if (_prefs->bridge_uart != WITH_RS232_BRIDGE_UART
+#ifdef WITH_RS232_BRIDGE_ALT
+          && _prefs->bridge_uart != WITH_RS232_BRIDGE_ALT_UART
+#endif
+      ) _prefs->bridge_enabled = 0;
+#endif
+      if (_prefs->bridge_uart != WITH_RS232_BRIDGE_UART
+#ifdef WITH_RS232_BRIDGE_ALT
+          && _prefs->bridge_uart != WITH_RS232_BRIDGE_ALT_UART
+#endif
+      ) {
+        _prefs->bridge_uart = WITH_RS232_BRIDGE_UART;
+      }
+#endif
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+      // The legacy JSON schema has no independent ESP-NOW intent marker.
+      _prefs->espnow_bridge_enabled = 0;
+#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+      _prefs->bridge_enabled = 0;
+#endif
+#elif defined(WITH_ESPNOW_BRIDGE) && defined(ESPNOW_BRIDGE_MERGED) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+      // An explicitly default-on compatibility profile imports its legacy
+      // single-bridge intent into the new independent ESP-NOW setting.
+      _prefs->espnow_bridge_enabled = _prefs->bridge_enabled;
+#endif
 #ifdef WITH_MQTT_BRIDGE
       node_prefs_needs_migration = true;
 #else
       savePrefs(fs);
+#endif
+    } else {
+#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
+    && !defined(RS232_BRIDGE_DEFAULT_ON)
+      _prefs->bridge_uart = previous_bridge_uart;
+      _prefs->bridge_enabled = previous_bridge_enabled;
+#endif
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+      _prefs->espnow_bridge_enabled = previous_espnow_enabled;
+#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+      _prefs->bridge_enabled = previous_bridge_enabled;
+#endif
 #endif
     }
     if (legacy) legacy.close();
@@ -829,13 +912,16 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
     _prefs->powersaving_enabled = DEFAULT_POWERSAVING_ENABLED && !dual_radio_active ? 1 : 0;
     _prefs->bridge_pkt_src = 1;  // Default to RX (logRx) for new installs
   }
+  mesh::hilStartupTrace("prefs_common_ready");
 #ifdef WITH_MQTT_BRIDGE
   // Load observer preferences (MQTT/WiFi/timezone/SNMP/alert) from /mqtt_prefs.
   // Readers (MQTTBridge, AlertReporter, observer CLI) use _mqtt_prefs directly -
   // these fields no longer exist in NodePrefs, so there is nothing to sync.
   MQTTPrefsAtomicStore::LegacyUpgradeGate legacy_upgrade(
       _com_prefs_needs_upgrade || node_prefs_needs_migration);
+  mesh::hilStartupTrace("prefs_mqtt_begin");
   loadMQTTPrefs(fs, &legacy_upgrade);
+  mesh::hilStartupTrace("prefs_mqtt_ready");
   if (!display_settings_loaded && _mqtt_prefs.display_timeout_secs != DISPLAY_TIMEOUT_DEFAULT_SECS)
     mesh::ui::migrateLegacyDisplayTimeout(_mqtt_prefs.display_timeout_secs);
   if (_mqtt_prefs_hold) legacy_upgrade.holdMqttSource();
@@ -862,6 +948,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   // set by setMQTTPrefsDefaults(). No explicit migration needed.
 #endif
 
+  mesh::hilStartupTrace("prefs_migration_begin");
 #ifdef WITH_MQTT_BRIDGE
   if (node_prefs_needs_migration) {
     if (legacy_upgrade.mayRewriteComPrefs()) {
@@ -899,14 +986,18 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
     _com_prefs_needs_upgrade = false;
   }
 #endif
+  mesh::hilStartupTrace("prefs_migration_ready");
 #if defined(ENABLE_OTA)
   if (loaded) syncOtaConfigFromPrefs();   // persisted OTA policy/keys -> OtaContext (else keep safe defaults)
 #endif
+  mesh::hilStartupTrace("prefs_apply_begin");
 #if MESH_USB_LOGGING_AVAILABLE
+  mesh::setUsbDebugEnabled(_prefs->usb_debug_enabled != 0);
   mesh::setUsbLoggingEnabled(_prefs->usb_logging_enabled != 0);
 #endif
   _radio_profiles.adoptPrimaryPreamble(_prefs->primary_radio_preamble);
   _radio_profiles.stagePrimary(_prefs->primary_radio_preamble, false);
+  mesh::hilStartupTrace("prefs_apply_ready");
 }
 
 #if defined(ENABLE_OTA)
@@ -932,15 +1023,30 @@ void CommonCLI::syncOtaConfigFromPrefs() {
 #endif
 
 void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
+  mesh::hilStartupTrace("prefs_image_open_begin");
+  // Older or truncated preference images must never inherit these opt-ins
+  // from a previous load of a newer image.
+  _prefs->usb_debug_enabled = 0;
+  _prefs->trace_when_repeat_off = 0;
+  _prefs->gps_sync_interval_hours = 0;
+  _prefs->ota_channel = 0;
+  _prefs->rs232_bridge_enabled = 0;
 #if defined(RP2040_PLATFORM)
   File file = fs->open(filename, "r");
 #else
   File file = fs->open(filename);
 #endif
+  mesh::hilStartupTrace("prefs_image_open_ready");
   if (file) {
-#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
-    && !defined(RS232_BRIDGE_DEFAULT_ON)
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+    bool has_runtime_espnow_intent = false;
+#endif
+#ifdef WITH_RS232_BRIDGE
+    bool has_runtime_rs232_intent = false;
+#ifndef WITH_MQTT_BRIDGE
     bool has_runtime_bridge_uart = false;
+    bool has_rs232_intent_tail = false;
+#endif
 #endif
     // Every supported layout contains the fixed 290-byte common core. Reject
     // a truncated in-place write before it can leave strings unterminated or
@@ -954,6 +1060,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     }
     uint8_t pad[8];
 
+    mesh::hilStartupTrace("prefs_image_core_begin");
     file.read((uint8_t *)&_prefs->airtime_factor, sizeof(_prefs->airtime_factor));    // 0
     file.read((uint8_t *)&_prefs->node_name, sizeof(_prefs->node_name));              // 4
     file.read(pad, 4);                                                                // 36
@@ -964,7 +1071,15 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->tx_power_dbm, sizeof(_prefs->tx_power_dbm));        // 76
     file.read((uint8_t *)&_prefs->disable_fwd, sizeof(_prefs->disable_fwd));          // 77
     file.read((uint8_t *)&_prefs->advert_interval, sizeof(_prefs->advert_interval));  // 78
-    file.read(pad, 1);                                                                // 79 : 1 byte unused (was rx_boosted_gain in v1.14.1, moved to end for upgrade compat)
+    uint8_t legacy_rx_boosted_gain = 0xFF;
+    file.read(&legacy_rx_boosted_gain, 1);                                             // 79 : rx_boosted_gain in v1.14.1
+    // v1.14.1 saved gain here in its 290-byte image. Earlier images of the
+    // same size wrote zero padding, so zero cannot safely override a board
+    // default. Only recover an unambiguous enabled value from that layout;
+    // longer images use their existing appended gain field below.
+    if (file.size() == 290 && legacy_rx_boosted_gain == 1) {
+      _prefs->rx_boosted_gain = 1;
+    }
     file.read((uint8_t *)&_prefs->rx_delay_base, sizeof(_prefs->rx_delay_base));      // 80
     file.read((uint8_t *)&_prefs->tx_delay_factor, sizeof(_prefs->tx_delay_factor));  // 84
     file.read((uint8_t *)&_prefs->guest_password[0], sizeof(_prefs->guest_password)); // 88
@@ -997,6 +1112,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162
     file.read((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
     file.read((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
+    mesh::hilStartupTrace("prefs_image_core_ready");
     _prefs->node_name[sizeof(_prefs->node_name) - 1] = '\0';
     _prefs->password[sizeof(_prefs->password) - 1] = '\0';
     _prefs->guest_password[sizeof(_prefs->guest_password) - 1] = '\0';
@@ -1304,8 +1420,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
           if (file.available() >= (int)sizeof(_prefs->bridge_uart)) {
             file.read((uint8_t *)&_prefs->bridge_uart,
                       sizeof(_prefs->bridge_uart));
-#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
-    && !defined(RS232_BRIDGE_DEFAULT_ON)
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
             has_runtime_bridge_uart = true;
 #endif
             if (file.available() >= (int)sizeof(_prefs->bridge_format)) {
@@ -1321,6 +1436,46 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
                 if (file.available() >= (int)sizeof(_prefs->espnow_bridge_enabled)) {
                   file.read((uint8_t *)&_prefs->espnow_bridge_enabled,
                             sizeof(_prefs->espnow_bridge_enabled));
+                  if (file.available() >= (int)sizeof(_prefs->gps_sync_interval_hours)) {
+                    uint16_t hours = 0;
+                    if (file.read((uint8_t *)&hours, sizeof(hours)) == sizeof(hours)) {
+                      _prefs->gps_sync_interval_hours = hours;
+                      if (file.available() >= (int)sizeof(_prefs->usb_debug_enabled)) {
+                        file.read((uint8_t *)&_prefs->usb_debug_enabled,
+                                  sizeof(_prefs->usb_debug_enabled));
+                        if (file.available() >= (int)sizeof(_prefs->trace_when_repeat_off)) {
+                          file.read((uint8_t *)&_prefs->trace_when_repeat_off,
+                                    sizeof(_prefs->trace_when_repeat_off));
+                          if (file.available() >= (int)sizeof(_prefs->ota_channel)) {
+                            file.read((uint8_t *)&_prefs->ota_channel,
+                                      sizeof(_prefs->ota_channel));
+                            // Reserve the profile byte in every current writer so
+                            // the appended UART intent never depends on build flags.
+                            uint8_t bridge_profile = 0;
+                            if (file.read(&bridge_profile, sizeof(bridge_profile)) == sizeof(bridge_profile)) {
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+                              has_runtime_espnow_intent = bridge_profile == 0xA1;
+#endif
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+                              has_rs232_intent_tail = file.available() > 0;
+#endif
+                              if (file.available() >= 2) {
+                                uint8_t rs232_intent = 0;
+                                uint8_t rs232_profile = 0;
+                                file.read(&rs232_intent, sizeof(rs232_intent));
+                                file.read(&rs232_profile, sizeof(rs232_profile));
+                                _prefs->rs232_bridge_enabled = rs232_intent;
+#ifdef WITH_RS232_BRIDGE
+                                has_runtime_rs232_intent = rs232_profile == 0xB1
+                                    && rs232_intent <= 1;
+#endif
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -1384,18 +1539,65 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->loop_detect = constrain(_prefs->loop_detect, 0, 3);          // LOOP_DETECT_OFF..LOOP_DETECT_STRICT
 
     // sanitise bad bridge pref values
-#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
-    && !defined(RS232_BRIDGE_DEFAULT_ON)
-    if (!has_runtime_bridge_uart) {
-      // Pre-merge normal repeaters persisted bridge_enabled=1 even though no
-      // bridge was compiled. Fail safe on the first merged boot instead of
-      // unexpectedly claiming a UART; the user can explicitly enable it.
-      _prefs->bridge_enabled = 0;
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+    if (!has_runtime_espnow_intent) {
+      // Older profiles saved an unused ESP-NOW flag as on. Only the appended
+      // combined-profile marker proves that this was an explicit setting.
+      _prefs->espnow_bridge_enabled = 0;
       _com_prefs_needs_upgrade = true;
     }
 #endif
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+    const bool legacy_uart_intent = has_runtime_bridge_uart
+        && (_prefs->bridge_uart == WITH_RS232_BRIDGE_UART
+#ifdef WITH_RS232_BRIDGE_ALT
+            || _prefs->bridge_uart == WITH_RS232_BRIDGE_ALT_UART
+#endif
+        );
+#endif
+#ifdef WITH_RS232_BRIDGE
+    if (!has_runtime_rs232_intent) {
+      // Old MQTT/normal images had no UART or stored the no-bridge zero
+      // sentinel. A standalone UART profile can retain supported legacy
+      // intent; a torn/corrupt new intent never takes that fallback path.
+#ifdef WITH_MQTT_BRIDGE
+      // A nonzero old UART byte alone cannot identify the previous role.
+      // Preserve MQTT's primary intent and require the independent marker.
+      _prefs->rs232_bridge_enabled = 0;
+#else
+      _prefs->rs232_bridge_enabled = !has_rs232_intent_tail && legacy_uart_intent
+          ? (_prefs->bridge_enabled == 1 ? 1 : 0) : 0;
+      if (has_rs232_intent_tail) {
+        // A partial/corrupt new UART tail cannot inherit another profile's
+        // primary MQTT flag, including in dedicated/default-on UART images.
+        _prefs->bridge_enabled = 0;
+      }
+#if defined(RS232_BRIDGE_MERGED) && !defined(RS232_BRIDGE_DEFAULT_ON)
+      _prefs->bridge_enabled = _prefs->rs232_bridge_enabled;
+#endif
+#endif
+      _com_prefs_needs_upgrade = true;
+    }
+#ifndef WITH_MQTT_BRIDGE
+    // A current combined-profile file may carry MQTT on and UART off. Its
+    // validated UART byte must win before restoring the legacy primary alias.
+    if (has_runtime_rs232_intent) {
+      _prefs->bridge_enabled = _prefs->rs232_bridge_enabled;
+    }
+    _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
+#endif
+#else
+    _prefs->rs232_bridge_enabled = 0;
+#endif
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
     _prefs->espnow_bridge_enabled = constrain(_prefs->espnow_bridge_enabled, 0, 1);
+    _prefs->rs232_bridge_enabled = constrain(_prefs->rs232_bridge_enabled, 0, 1);
+#if defined(WITH_ESPNOW_BRIDGE) && defined(ESPNOW_BRIDGE_MERGED) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+    // An unrelated legacy primary bridge flag cannot enable this new mode.
+    // Only the separately persisted and marker-validated ESP-NOW intent wins.
+    _prefs->bridge_enabled = _prefs->espnow_bridge_enabled;
+#endif
     _prefs->bridge_delay = constrain(_prefs->bridge_delay, 0, 10000);
     _prefs->bridge_pkt_src = constrain(_prefs->bridge_pkt_src, 0, 1);
     _prefs->bridge_baud = constrain(_prefs->bridge_baud, 9600, BRIDGE_MAX_BAUD);
@@ -1427,12 +1629,18 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->reboot_interval = constrain(_prefs->reboot_interval, 0, 255);
 
     _prefs->gps_enabled = constrain(_prefs->gps_enabled, 0, 1);
+    _prefs->gps_sync_interval_hours = constrain(_prefs->gps_sync_interval_hours,
+                                               0, mesh::gps::MAX_SYNC_INTERVAL_HOURS);
     _prefs->advert_loc_policy = constrain(_prefs->advert_loc_policy, 0, 2);
 
     _prefs->rx_boosted_gain = constrain(_prefs->rx_boosted_gain, 0, 1); // boolean
     _prefs->radio_fem_rxgain = constrain(_prefs->radio_fem_rxgain, 0, 1); // boolean
     _prefs->radio_fem_txgain = constrain(_prefs->radio_fem_txgain, 0, 1); // boolean
     _prefs->usb_logging_enabled = constrain(_prefs->usb_logging_enabled, 0, 1); // boolean
+    // Only a deliberately saved 1 enables diagnostics; corrupted bytes are OFF.
+    _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
+    // Corrupt or unknown values must not enable a repeat-off exception.
+    _prefs->trace_when_repeat_off = _prefs->trace_when_repeat_off == 1 ? 1 : 0;
     _prefs->cad_enabled = constrain(_prefs->cad_enabled, 0, 1); // boolean
     if (!directRetryPrefsValid(_prefs)) {
       setDefaultDirectRetryPrefs(_prefs);
@@ -1469,6 +1677,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->direct_retry_recent_enabled = constrain(_prefs->direct_retry_recent_enabled, 0, 1);
     _prefs->flood_channel_data_enabled = constrain(_prefs->flood_channel_data_enabled, 0, 1);
     _prefs->telemetry_access = constrain(_prefs->telemetry_access, 0, 1);
+    if (_prefs->ota_channel > 2) _prefs->ota_channel = 0;
     if (_prefs->legacy_flood_channel_block_max_hops != FLOOD_CHANNEL_HOPS_ALL
         && (_prefs->legacy_flood_channel_block_max_hops < 1
             || _prefs->legacy_flood_channel_block_max_hops > 7)) {
@@ -1645,6 +1854,23 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   WRITE_COMMON_PREFS(&prefs->bridge_format);                   // 863
   WRITE_COMMON_PREFS(&prefs->primary_radio_preamble);          // appended primary tuple field
   WRITE_COMMON_PREFS(&prefs->espnow_bridge_enabled);           // appended Full ESP-NOW intent
+  WRITE_COMMON_PREFS(&prefs->gps_sync_interval_hours);          // published GPS sync cadence
+  WRITE_COMMON_PREFS(&prefs->usb_debug_enabled);               // appended USB debug intent
+  WRITE_COMMON_PREFS(&prefs->trace_when_repeat_off);            // appended repeater trace exception
+  WRITE_COMMON_PREFS(&prefs->ota_channel);                     // appended WiFi OTA channel; never shift older fields
+#ifdef ESPNOW_BRIDGE_MERGED
+  const uint8_t bridge_profile = 0xA1;
+#else
+  const uint8_t bridge_profile = 0;
+#endif
+  WRITE_COMMON_PREFS(&bridge_profile);                         // ESP-NOW profile marker/reserved byte
+  WRITE_COMMON_PREFS(&prefs->rs232_bridge_enabled);             // independent UART intent
+#ifdef WITH_RS232_BRIDGE
+  const uint8_t rs232_profile = 0xB1;
+#else
+  const uint8_t rs232_profile = 0;
+#endif
+  WRITE_COMMON_PREFS(&rs232_profile);                          // UART intent belongs to this profile
 
 #undef WRITE_COMMON_PREFS_BYTES
 #undef WRITE_COMMON_PREFS
@@ -1657,6 +1883,13 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
   if (plan.common) {
     _common_save_result_known = true;
     _common_save_succeeded = false;
+    _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
+    _prefs->trace_when_repeat_off = _prefs->trace_when_repeat_off == 1 ? 1 : 0;
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+    _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
+#elif !defined(WITH_RS232_BRIDGE)
+    _prefs->rs232_bridge_enabled = 0;
+#endif
   }
 #ifdef WITH_MQTT_BRIDGE
   // Observer builds use a verified temp/backup transaction for common prefs.
@@ -1666,7 +1899,6 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     _observer_save_result_known = true;
     _observer_save_succeeded = saveMQTTPrefs(fs);
   }
-  return;
 #else
   // Observer-only saves are a no-op on roles with no observer preference image.
   if (!plan.common) return;
@@ -1803,11 +2035,36 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->bridge_format, sizeof(_prefs->bridge_format));                   // 863
     file.write((uint8_t *)&_prefs->primary_radio_preamble, sizeof(_prefs->primary_radio_preamble)); // appended
     file.write((uint8_t *)&_prefs->espnow_bridge_enabled, sizeof(_prefs->espnow_bridge_enabled));   // appended
+    file.write((uint8_t *)&_prefs->gps_sync_interval_hours, sizeof(_prefs->gps_sync_interval_hours)); // published GPS sync cadence
+    file.write((uint8_t *)&_prefs->usb_debug_enabled, sizeof(_prefs->usb_debug_enabled));           // appended
+    file.write((uint8_t *)&_prefs->trace_when_repeat_off, sizeof(_prefs->trace_when_repeat_off));   // appended
+    file.write((uint8_t *)&_prefs->ota_channel, sizeof(_prefs->ota_channel));                       // appended WiFi OTA channel
+#ifdef ESPNOW_BRIDGE_MERGED
+    const uint8_t bridge_profile = 0xA1;
+#else
+    const uint8_t bridge_profile = 0;
+#endif
+    file.write(&bridge_profile, sizeof(bridge_profile));         // ESP-NOW profile marker/reserved byte
+    file.write((uint8_t *)&_prefs->rs232_bridge_enabled, sizeof(_prefs->rs232_bridge_enabled));
+#ifdef WITH_RS232_BRIDGE
+    const uint8_t rs232_profile = 0xB1;
+#else
+    const uint8_t rs232_profile = 0;
+#endif
+    file.write(&rs232_profile, sizeof(rs232_profile));           // UART intent belongs to this profile
 
     _common_save_succeeded = file.commit();
     if (!_common_save_succeeded) {
       MESH_DEBUG_PRINTLN("ERROR: savePrefs atomic commit failed");
     }
+  }
+#endif
+#if MESH_USB_LOGGING_AVAILABLE
+  if (plan.common && _common_save_succeeded) {
+    // Dynamic config imports use this path too. Do not enable diagnostics
+    // until the corresponding common preference image is committed.
+    mesh::setUsbDebugEnabled(_prefs->usb_debug_enabled != 0);
+    mesh::setUsbLoggingEnabled(_prefs->usb_logging_enabled != 0);
   }
 #endif
 }
@@ -2599,6 +2856,10 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     PrefsSaveReplyGuard save_reply(_prefs_save_failures, reply);
     mesh::cli::normalizeCommandVerb(command);
+#if MESH_BATTERY_CHARGE_CONTROL
+    if (mesh::power::handleBatteryChargeCommand(*_board, command, reply, 160)) return;
+#endif
+    if (mesh::handleUsbLoggingWatchdogCommand(command, reply, 160)) return;
     if (handleManagementCommand(command, reply)) return;
     if (mesh::wireless::control().handle(command, reply, 160, millis(),
                                        _callbacks->wirelessCommandSource(sender_timestamp))) return;
@@ -2693,28 +2954,100 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       const bool force_ap = command[9] == ' ' && strcmp(&command[10], "ap") == 0;
       if (command[9] == ' ' && !force_ap) {
         strcpy(reply, "ERR: usage start ota [ap]");
-      } else
+        return;
+      }
+#if defined(WITH_ESPNOW_BRIDGE)
+      const bool ota_was_running = _board->isOTAUpdateRunning();
+      // Keep an outstanding pause if an earlier resume failed. Only a
+      // successful resume or an explicitly disabled saved intent clears it.
+#endif
+      bool webconfig_stopped = false;
 #if defined(ESP_PLATFORM) && defined(ADMIN_PASSWORD) && !defined(WEBCONFIG_DISABLED)
       if (_callbacks->isWebConfigActive()) {
-        strcpy(reply, "ERR: stop webconfig first");
-      } else
+        if (!_callbacks->stopWebConfigForOTA(reply)) {
+          if (!reply[0]) strcpy(reply, "ERR: could not stop WebConfig for OTA");
+          return;
+        }
+        webconfig_stopped = true;
+      }
 #endif
+#if defined(WITH_ESPNOW_BRIDGE)
+      // Browser OTA owns the shared WiFi driver. An independent UART bridge
+      // can keep running throughout the upload.
+      const bool espnow_paused = _callbacks->isEspNowBridgeRunning();
+      if (espnow_paused && !_callbacks->setEspNowBridgeState(false)) {
+        strcpy(reply, "ERR: could not pause ESP-NOW for OTA");
+        return;
+      }
+      _wifi_ota_resume_espnow = _wifi_ota_resume_espnow || espnow_paused;
+#endif
+      reply[0] = 0;
       if (!_board->startOTAUpdate(_prefs->node_name, reply, force_ap)) {
-        strcpy(reply, "Error");
+        if (!reply[0]) strcpy(reply, "Error");
+#if defined(WITH_ESPNOW_BRIDGE)
+        if (espnow_paused && !ota_was_running) {
+          if (_callbacks->setEspNowBridgeState(true)) {
+            _wifi_ota_resume_espnow = false;
+          } else {
+            const size_t used = strlen(reply);
+            snprintf(reply + used, 160 - used, "; ESP-NOW resume failed");
+          }
+        }
+#endif
       }
 #if defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA)
       else {
         // Keep WiFi up, but release MQTT/TLS heap while the browser uploader runs.
-        _callbacks->setBridgeState(false);
+        const bool mqtt_paused = _callbacks->isMqttBridgeRunning();
+        _wifi_ota_resume_mqtt = _wifi_ota_resume_mqtt || mqtt_paused;
+        if (mqtt_paused) _callbacks->setMqttBridgeState(false);
       }
 #endif
+#if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+      else if (espnow_paused) {
+        const size_t used = strlen(reply);
+        snprintf(reply + used, 160 - used, "; ESP-NOW paused");
+      }
+#endif
+      if (webconfig_stopped) {
+        const size_t used = strlen(reply);
+        snprintf(reply + used, 160 - used, "; WebConfig stopped");
+      }
     } else if (memcmp(command, "stop ota", 8) == 0 && (command[8] == 0 || command[8] == ' ')) {
-      if (!_board->stopOTAUpdate(reply)) {
-        strcpy(reply, "Error");
+      const bool ota_stopped = _board->stopOTAUpdate(reply);
+      if (!ota_stopped) {
+        if (!reply[0]) strcpy(reply, "Error");
       }
 #if defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA)
-      else if (_prefs->bridge_enabled) {
-        _callbacks->setBridgeState(true);
+      else {
+        if (_wifi_ota_resume_mqtt) {
+          if (!_prefs->bridge_enabled || _callbacks->setMqttBridgeState(true)) {
+            _wifi_ota_resume_mqtt = false;
+          } else {
+            const size_t used = strlen(reply);
+            snprintf(reply + used, 160 - used, "; MQTT resume failed");
+          }
+        }
+      }
+#endif
+#if defined(WITH_ESPNOW_BRIDGE)
+      if (ota_stopped && !_board->isOTAUpdateRunning() && _wifi_ota_resume_espnow) {
+        const bool still_enabled =
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(ESPNOW_BRIDGE_MERGED)
+          _prefs->espnow_bridge_enabled
+#else
+          _prefs->bridge_enabled
+#endif
+          != 0;
+        if (!still_enabled) {
+          _wifi_ota_resume_espnow = false;
+        } else {
+          const bool resumed = _callbacks->setEspNowBridgeState(true);
+          if (resumed) _wifi_ota_resume_espnow = false;
+          const size_t used = strlen(reply);
+          snprintf(reply + used, 160 - used, resumed
+              ? "; ESP-NOW resumed" : "; ESP-NOW resume failed");
+        }
       }
 #endif
     } else if (memcmp(command, "clock", 5) == 0) {
@@ -2916,7 +3249,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         }
 #ifdef WITH_RS232_BRIDGE
         if (is_gps_toggle && strcmp(value, "1") == 0
-            && _callbacks->isBridgeRunning()
+            && _callbacks->isRs232BridgeRunning()
             && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)) {
           strcpy(reply, "saved; UART GPS paused while bridge is enabled");
         } else
@@ -2960,11 +3293,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         _prefs->gps_enabled = 1;
         savePrefs();
 
-        if (_callbacks->isBridgeRunning()
+        if (
 #ifdef WITH_RS232_BRIDGE
+            _callbacks->isRs232BridgeRunning()
             && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)
 #else
-            && false
+            false
 #endif
         ) {
           strcpy(reply, "saved; UART GPS paused while bridge is enabled");
@@ -2989,7 +3323,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       if (!_prefs->gps_enabled) {
         strcpy(reply, "gps is off");
 #ifdef WITH_RS232_BRIDGE
-      } else if (_callbacks->isBridgeRunning()
+      } else if (_callbacks->isRs232BridgeRunning()
                  && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)) {
         strcpy(reply, "gps paused by RS232 bridge");
 #endif
@@ -3200,6 +3534,17 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
     strcpy(reply, "Error: OTA apply is pending");
     return true;
   }
+#if defined(OTA_TOWER_AUTO_STORE)
+  // Card maintenance must never abandon a fallback update stored internally.
+  if (context.fetch_store.usesInternal() &&
+      (context.manager.fetchState() != mesh::ota::OtaManager::IDLE ||
+       context.fetch_store.staged_size() != 0)) {
+    strcpy(reply, "Error: internal OTA slot is occupied; use ota cancel first");
+    return true;
+  }
+#endif
+
+  mesh::ota::OtaStoreSdNrf52& card = context.sdStagingStore();
 
   // A card-wide destructive operation invalidates any staged fetch. First let
   // an archive capture checkpoint and close its shared card handles.
@@ -3211,9 +3556,9 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
   context.prev_fstate = mesh::ota::OtaManager::IDLE;
 
   if (is_format) {
-    if (!context.fetch_store.formatCard(*_board)) {
+    if (!card.formatCard(*_board)) {
       char error[80];
-      strncpy(error, context.fetch_store.last_error(), sizeof(error) - 1);
+      strncpy(error, card.last_error(), sizeof(error) - 1);
       error[sizeof(error) - 1] = 0;
       context.finishSdCardReset(millis());
       snprintf(reply, 160, "Error: SD card format failed: %s",
@@ -3227,9 +3572,9 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
     return true;
   }
 
-  if (!context.fetch_store.eraseCard(*_board)) {
+  if (!card.eraseCard(*_board)) {
     char error[80];
-    strncpy(error, context.fetch_store.last_error(), sizeof(error) - 1);
+    strncpy(error, card.last_error(), sizeof(error) - 1);
     error[sizeof(error) - 1] = 0;
     context.finishSdCardReset(millis());
     snprintf(reply, 160, "Error: SD card erase failed: %s",
@@ -3239,9 +3584,9 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
   _sdcard_erase_recorded = true;
   _sdcard_erase_at = millis();
 
-  if (!context.fetch_store.formatCard(*_board)) {
+  if (!card.formatCard(*_board)) {
     char error[80];
-    strncpy(error, context.fetch_store.last_error(), sizeof(error) - 1);
+    strncpy(error, card.last_error(), sizeof(error) - 1);
     error[sizeof(error) - 1] = 0;
     context.finishSdCardReset(millis());
     snprintf(reply, 160, "Error: SD card erased but format failed: %s",
@@ -3284,7 +3629,7 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
   } else if (strcmp(query, "free") == 0) {
     uint64_t used_bytes = 0;
     uint64_t free_bytes = 0;
-    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().fetch_store;
+    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().sdStagingStore();
     if (!store.getSpace(*_board, used_bytes, free_bytes)) {
       snprintf(reply, 160, "Error: SD card space query failed: %s",
                store.last_error());
@@ -3313,7 +3658,7 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
       }
       page = parsed;
     }
-    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().fetch_store;
+    mesh::ota::OtaStoreSdNrf52& store = mesh::ota::ota_ctx().sdStagingStore();
     if (!store.listFiles(*_board, (uint16_t)page, reply, 160)) {
       snprintf(reply, 160, "Error: SD card list failed: %s", store.last_error());
     }
@@ -3326,6 +3671,29 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
 
 void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+  if (strncmp(config, "repeat.trace", 12) == 0
+      && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
+    if (strcmp(_callbacks->getRole(), "repeater") != 0) {
+      strcpy(reply, "Error: repeat.trace is only supported by repeaters");
+      return;
+    }
+    const char* value = config + 12;
+    while (*value == ' ' || *value == '\t') ++value;
+    if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+      strcpy(reply, "Error: usage set repeat.trace on|off");
+      return;
+    }
+    const uint8_t previous = _prefs->trace_when_repeat_off;
+    _prefs->trace_when_repeat_off = strcmp(value, "on") == 0 ? 1 : 0;
+    if (!trySavePrefs()) {
+      _prefs->trace_when_repeat_off = previous;
+      strcpy(reply, "Error: Repeat trace not saved; unchanged");
+      return;
+    }
+    _callbacks->onRetryConfigChanged();
+    snprintf(reply, 160, "OK - repeat.trace %s (saved)", value);
+    return;
+  }
 #if defined(NRF52_POWER_MANAGEMENT)
   if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
 #endif
@@ -3343,6 +3711,28 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     return;
   }
 #if ENV_INCLUDE_GPS == 1
+  if (strncmp(config, "gps.sync.interval", 17) == 0
+      && (config[17] == 0 || config[17] == ' ' || config[17] == '\t')) {
+    const char* value = config + 17;
+    while (*value == ' ' || *value == '\t') ++value;
+    uint16_t hours = 0;
+    if (!mesh::gps::parseSyncIntervalHours(value, hours)) {
+      strcpy(reply, "Error: GPS sync interval must be 1..336 hours");
+    } else if (_sensors->getLocationProvider() == nullptr) {
+      strcpy(reply, "Error: GPS unavailable");
+    } else {
+      const uint16_t previous = _prefs->gps_sync_interval_hours;
+      _prefs->gps_sync_interval_hours = hours;
+      if (!trySavePrefs()) {
+        _prefs->gps_sync_interval_hours = previous;
+        strcpy(reply, "Error: GPS sync interval could not be saved");
+      } else {
+        _sensors->applyGpsTimeSyncInterval(hours);
+        snprintf(reply, 160, "OK - GPS sync interval %u hours (saved)", (unsigned)hours);
+      }
+    }
+    return;
+  }
   if (strncmp(config, "gps ", 4) == 0) {
     if (strcmp(config + 4, "on") != 0 && strcmp(config + 4, "off") != 0) {
       strcpy(reply, "Error: use set gps on|off");
@@ -3389,12 +3779,39 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     while (*value == ' ' || *value == '\t') value++;
     bool enabled = false, reboot_if_needed = false;
     if (mesh::cli::parseLoggingToggle(value, enabled, reboot_if_needed)) {
+      const uint8_t previous = _prefs->usb_logging_enabled;
       _prefs->usb_logging_enabled = enabled ? 1 : 0;
+      if (!trySavePrefs()) {
+        _prefs->usb_logging_enabled = previous;
+        strcpy(reply, "Error: USB logging not saved; unchanged");
+        return;
+      }
+      // Commit before changing the stream's live protocol ownership.
       mesh::setUsbLoggingEnabled(enabled);
-      savePrefs();
       snprintf(reply, 160, "OK - USB logging %s (saved)", enabled ? "on" : "off");
     } else {
       strcpy(reply, "Error: usage set usb.logging on|off");
+    }
+    return;
+  }
+  if (strncmp(config, "usb.debug", 9) == 0
+      && (config[9] == 0 || config[9] == ' ' || config[9] == '\t')) {
+    const char* value = &config[9];
+    while (*value == ' ' || *value == '\t') value++;
+    bool enabled = false, reboot_if_needed = false;
+    if (mesh::cli::parseLoggingToggle(value, enabled, reboot_if_needed)
+        && !reboot_if_needed) {
+      const uint8_t previous = _prefs->usb_debug_enabled;
+      _prefs->usb_debug_enabled = enabled ? 1 : 0;
+      if (!trySavePrefs()) {
+        _prefs->usb_debug_enabled = previous;
+        strcpy(reply, "Error: USB debug not saved; unchanged");
+        return;
+      }
+      mesh::setUsbDebugEnabled(enabled);
+      snprintf(reply, 160, "OK - USB debug %s (saved)", enabled ? "on" : "off");
+    } else {
+      strcpy(reply, "Error: usage set usb.debug on|off");
     }
     return;
   }
@@ -3410,11 +3827,27 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: usage set logging.output off|usb|wifi|both");
       return;
     }
+    if (wifi_enabled && _callbacks->isMqttBridgeStopping()) {
+      strcpy(reply, "Error: MQTT is stopping; retry when mqtt.stopping is off");
+      return;
+    }
+    const uint8_t previous_usb = _prefs->usb_logging_enabled;
+    const uint8_t previous_bridge = _prefs->bridge_enabled;
     _prefs->usb_logging_enabled = usb_enabled ? 1 : 0;
     _prefs->bridge_enabled = wifi_enabled ? 1 : 0;
+    if (!trySavePrefs()) {
+      _prefs->usb_logging_enabled = previous_usb;
+      _prefs->bridge_enabled = previous_bridge;
+      strcpy(reply, "Error: logging output not saved; unchanged");
+      return;
+    }
     mesh::setUsbLoggingEnabled(usb_enabled);
-    _callbacks->setMqttBridgeState(wifi_enabled);
-    savePrefs();
+    const bool applied = wifi_enabled ? _callbacks->setMqttBridgeState(true)
+                                      : _callbacks->requestMqttBridgeStop();
+    if (!applied) {
+      strcpy(reply, "Error: logging output saved, but MQTT runtime change failed");
+      return;
+    }
     snprintf(reply, 160, "OK - logging.output %s (saved)", value);
     return;
   }
@@ -3470,26 +3903,86 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: use set mqtt.enabled on|off");
     } else {
       const bool enable = strcmp(value, "on") == 0;
+      if (enable && _callbacks->isMqttBridgeStopping()) {
+        strcpy(reply, "Error: MQTT is stopping; retry when mqtt.stopping is off");
+        return;
+      }
+      const uint8_t previous = _prefs->bridge_enabled;
       _prefs->bridge_enabled = enable ? 1 : 0;
-      const bool applied = _callbacks->setMqttBridgeState(enable);
-      savePrefs();
+      // A cooperative stop cannot be cancelled safely once signalled. Save
+      // intent first so a failed write leaves the running service unchanged.
+      if (!trySavePrefs()) {
+        _prefs->bridge_enabled = previous;
+        strcpy(reply, "Error: MQTT setting not saved; unchanged");
+        return;
+      }
+      const bool applied = enable ? _callbacks->setMqttBridgeState(true)
+                                  : _callbacks->requestMqttBridgeStop();
       strcpy(reply, applied ? "OK"
                             : "Error: MQTT runtime change failed; setting saved");
     }
     return;
   }
 #endif
+#ifdef WITH_RS232_BRIDGE
+  if (strncmp(config, "rs232.enabled ", 14) == 0) {
+    bool enable = false;
+    if (!parseOnOffStrict(config + 14, enable)) {
+      strcpy(reply, "Error: use set rs232.enabled on|off");
+      return;
+    }
+    if (enable && _sensors->gpsSerialTransportMayConflict(_prefs->bridge_uart)
+        && (!_sensors->gpsUsesSerialUart(_prefs->bridge_uart)
+            || !_sensors->gpsSerialTransportCanYield(_prefs->bridge_uart))) {
+      strcpy(reply, "Error: UART may be driven by GPS; use UART 2 or a no-GPS build");
+      return;
+    }
+#ifdef WITH_MQTT_BRIDGE
+    uint8_t& intent = _prefs->rs232_bridge_enabled;
+#else
+    uint8_t& intent = _prefs->bridge_enabled;
+#endif
+    const uint8_t previous_enabled = intent;
+    const bool previous_running = _callbacks->isRs232BridgeRunning();
+    intent = enable ? 1 : 0;
+    const bool applied = _callbacks->setRs232BridgeState(enable);
+    const bool saved = applied && trySavePrefs();
+    if (!saved) {
+      intent = previous_enabled;
+#ifndef WITH_MQTT_BRIDGE
+      _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
+#endif
+      const bool restored = _callbacks->setRs232BridgeState(previous_running);
+      strcpy(reply, restored
+          ? "Error: RS232 change failed; setting unchanged"
+          : "Error: RS232 change failed; previous runtime could not be restored");
+    } else {
+      strcpy(reply, enable && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)
+          ? "OK - UART GPS paused" : "OK");
+    }
+    return;
+  }
+#endif
   // Observer/MQTT/WiFi/timezone/alert/SNMP commands live in CommonCLI_Observer.cpp.
   if (handleObserverSetCmd(sender_timestamp, config, reply)) return;
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE)
   if (memcmp(config, "espnow.enabled ", 15) == 0) {
     const char* value = config + 15;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
       strcpy(reply, "Error: use set espnow.enabled on|off");
     } else {
-      char canonical[28];
-      snprintf(canonical, sizeof(canonical), "set bridge.enabled %s", value);
-      handleSetCmd(sender_timestamp, canonical, reply);
+      const bool enable = strcmp(value, "on") == 0;
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) \
+    || defined(ESPNOW_BRIDGE_MERGED)
+      _prefs->espnow_bridge_enabled = enable;
+#endif
+#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+      _prefs->bridge_enabled = enable;
+#endif
+      const bool applied = _callbacks->setEspNowBridgeState(enable);
+      savePrefs();
+      strcpy(reply, applied ? "OK"
+                            : "Error: ESP-NOW runtime change failed; setting saved");
     }
     return;
   }
@@ -4348,16 +4841,21 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (!parseOnOffStrict(&config[15], enable)) {
       strcpy(reply, "Error: usage set bridge.enabled on|off");
     } else {
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
-      // In a combined Full image bridge.enabled retains its ESP-NOW meaning;
-      // mqtt.enabled is the independent MQTT switch.
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) \
+        || (defined(ESPNOW_BRIDGE_MERGED) && !defined(WITH_RS232_BRIDGE)))
+      // bridge.enabled retains its ESP-NOW meaning; mqtt.enabled is the
+      // independent MQTT switch when the profile also has that transport.
       _prefs->espnow_bridge_enabled = enable;
+#if !defined(WITH_MQTT_BRIDGE)
+      _prefs->bridge_enabled = enable;
+#endif
       const bool applied = _callbacks->setEspNowBridgeState(enable);
       savePrefs();
       strcpy(reply, applied ? "OK"
                             : "Error: ESP-NOW runtime change failed; setting saved");
 #else
-      #ifdef WITH_RS232_BRIDGE
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
       if (enable
           && _sensors->gpsSerialTransportMayConflict(_prefs->bridge_uart)
           && (!_sensors->gpsUsesSerialUart(_prefs->bridge_uart)
@@ -4366,11 +4864,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         return;
       }
       const uint8_t previous_enabled = _prefs->bridge_enabled;
-      const bool previous_running = _callbacks->isBridgeRunning();
+      const bool previous_running = _callbacks->isRs232BridgeRunning();
       _prefs->bridge_enabled = enable;
-      const bool applied = _callbacks->setBridgeState(enable);
-      if (applied) {
-        savePrefs();
+      const bool applied = _callbacks->setRs232BridgeState(enable);
+      if (applied && trySavePrefs()) {
 #ifdef WITH_RS232_BRIDGE
         if (enable && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)) {
           strcpy(reply, "OK - UART GPS paused");
@@ -4381,12 +4878,13 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         }
       } else {
         _prefs->bridge_enabled = previous_enabled;
+        _prefs->rs232_bridge_enabled = previous_enabled == 1 ? 1 : 0;
         bool restored = true;
-        if (_callbacks->isBridgeRunning() != previous_running
+        if (_callbacks->isRs232BridgeRunning() != previous_running
             || !previous_running) {
           // The false/false case still calls disable to delete a failed,
           // non-running heap-backed bridge instance.
-          restored = _callbacks->setBridgeState(previous_running);
+          restored = _callbacks->setRs232BridgeState(previous_running);
         }
         strcpy(reply, restored
             ? "Error: bridge state change failed; setting unchanged"
@@ -4441,22 +4939,21 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (mesh::cli::parseUnsignedIntegerStrict(&config[12], baud)
         && baud >= 9600 && baud <= BRIDGE_MAX_BAUD) {
       const uint32_t previous_baud = _prefs->bridge_baud;
-      const bool previous_running = _callbacks->isBridgeRunning();
+      const bool previous_running = _callbacks->isRs232BridgeRunning();
       _prefs->bridge_baud = baud;
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
-          !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
+#ifdef WITH_MQTT_BRIDGE
+          !_prefs->rs232_bridge_enabled || _callbacks->restartRs232Bridge();
 #else
-          !_prefs->bridge_enabled || _callbacks->restartBridge();
+          !_prefs->bridge_enabled || _callbacks->restartRs232Bridge();
 #endif
-      if (applied) {
-        savePrefs();
+      if (applied && trySavePrefs()) {
         strcpy(reply, "OK");
       } else {
         _prefs->bridge_baud = previous_baud;
         const bool restored = previous_running
-            ? _callbacks->restartBridge()
-            : _callbacks->setBridgeState(false);
+            ? _callbacks->restartRs232Bridge()
+            : _callbacks->setRs232BridgeState(false);
         strcpy(reply, restored
             ? "Error: bridge failed to restart; baud unchanged"
             : "Error: bridge failed to restart; previous baud could not be restored");
@@ -4481,7 +4978,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #endif
     }
     else {
-      if (_prefs->bridge_enabled
+      if (
+#ifdef WITH_MQTT_BRIDGE
+          _prefs->rs232_bridge_enabled
+#else
+          _prefs->bridge_enabled
+#endif
           && _sensors->gpsSerialTransportMayConflict((uint8_t)uart)
           && (!_sensors->gpsUsesSerialUart((uint8_t)uart)
               || !_sensors->gpsSerialTransportCanYield((uint8_t)uart))) {
@@ -4489,28 +4991,31 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         return;
       }
       const uint8_t previous_uart = _prefs->bridge_uart;
-      const bool previous_running = _callbacks->isBridgeRunning();
+      const bool previous_running = _callbacks->isRs232BridgeRunning();
       _prefs->bridge_uart = (uint8_t)uart;
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
-          !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
+#ifdef WITH_MQTT_BRIDGE
+          !_prefs->rs232_bridge_enabled || _callbacks->restartRs232Bridge();
 #else
-          !_prefs->bridge_enabled || _callbacks->restartBridge();
+          !_prefs->bridge_enabled || _callbacks->restartRs232Bridge();
 #endif
-      if (!applied) {
+      if (!applied || !trySavePrefs()) {
         _prefs->bridge_uart = previous_uart;
         const bool restored = previous_running
-            ? _callbacks->restartBridge()
-            : _callbacks->setBridgeState(false);
+            ? _callbacks->restartRs232Bridge()
+            : _callbacks->setRs232BridgeState(false);
         strcpy(reply, restored
             ? "Error: bridge failed to restart; UART unchanged"
             : "Error: bridge failed to restart; previous UART could not be restored");
-      } else if (_prefs->bridge_enabled
+      } else if (
+#ifdef WITH_MQTT_BRIDGE
+                 _prefs->rs232_bridge_enabled
+#else
+                 _prefs->bridge_enabled
+#endif
                  && _sensors->gpsUsesSerialUart(_prefs->bridge_uart)) {
-        savePrefs();
         strcpy(reply, "OK - UART GPS paused");
       } else {
-        savePrefs();
         strcpy(reply, "OK");
       }
     }
@@ -4524,7 +5029,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
             &config[15], _prefs->bridge_format, channel)) {
       _prefs->bridge_channel = channel;
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
           !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
 #else
           !_prefs->bridge_enabled || _callbacks->restartBridge();
@@ -4544,7 +5049,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       StrHelper::strncpy(_prefs->bridge_secret, secret, sizeof(_prefs->bridge_secret));
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
           !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
 #else
           !_prefs->bridge_enabled || _callbacks->restartBridge();
@@ -4563,7 +5068,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       _prefs->bridge_format = format;
       const bool applied =
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
           !_prefs->espnow_bridge_enabled || _callbacks->restartEspNowBridge();
 #else
           !_prefs->bridge_enabled || _callbacks->restartBridge();
@@ -4635,6 +5140,17 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 
 void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+  if (strncmp(config, "repeat.trace", 12) == 0
+      && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
+    if (strcmp(_callbacks->getRole(), "repeater") != 0) {
+      strcpy(reply, "Error: repeat.trace is only supported by repeaters");
+    } else if (strcmp(config, "repeat.trace") != 0) {
+      strcpy(reply, "Error: usage get repeat.trace");
+    } else {
+      snprintf(reply, 160, "> %s", _prefs->trace_when_repeat_off == 1 ? "on" : "off");
+    }
+    return;
+  }
 #if defined(NRF52_POWER_MANAGEMENT)
   if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
 #endif
@@ -4661,6 +5177,17 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     return;
   }
 #if ENV_INCLUDE_GPS == 1
+  if (strcmp(config, "gps.sync.interval") == 0) {
+    auto* provider = _sensors->getLocationProvider();
+    if (provider == nullptr) {
+      strcpy(reply, "Error: GPS unavailable");
+    } else {
+      const uint16_t hours = provider->getTimeSyncIntervalHours();
+      if (hours == 0) strcpy(reply, "> default (board GPS sync policy)");
+      else snprintf(reply, 160, "> %u hours", (unsigned)hours);
+    }
+    return;
+  }
   if (strcmp(config, "gps") == 0) {
     char gps_command[] = "gps";
     handleCommand(sender_timestamp, gps_command, reply);
@@ -4684,6 +5211,11 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strcmp(config, "usb.logging") == 0) {
     snprintf(reply, 160, "> %s",
              mesh::isUsbLoggingEnabled() ? "on" : "off");
+    return;
+  }
+  if (strcmp(config, "usb.debug") == 0) {
+    snprintf(reply, 160, "> %s",
+             mesh::isUsbDebugEnabled() ? "on" : "off");
     return;
   }
 #endif
@@ -4979,8 +5511,14 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _callbacks->getRole());
   } else if (configKeyEquals(config, "bridge.type")) {
     sprintf(reply, "> %s",
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+            "mqtt+rs232+espnow"
+#elif defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+            "mqtt+rs232"
+#elif defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
             "mqtt+espnow"
+#elif defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+            "rs232+espnow"
 #elif defined(WITH_RS232_BRIDGE)
             "rs232"
 #elif WITH_ESPNOW_BRIDGE
@@ -5006,9 +5544,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #else
             _callbacks->isBridgeRunning() ? "on" : "off");
 #endif
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE)
   } else if (configKeyEquals(config, "espnow.enabled")) {
-    sprintf(reply, "> %s", _prefs->espnow_bridge_enabled ? "on" : "off");
+    sprintf(reply, "> %s",
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) \
+    || defined(ESPNOW_BRIDGE_MERGED)
+            _prefs->espnow_bridge_enabled ? "on" : "off");
+#else
+            _prefs->bridge_enabled ? "on" : "off");
+#endif
   } else if (configKeyEquals(config, "espnow.running")) {
     sprintf(reply, "> %s", _callbacks->isEspNowBridgeRunning() ? "on" : "off");
 #endif
@@ -5018,6 +5562,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "rx" : "tx");
 #endif
 #ifdef WITH_RS232_BRIDGE
+  } else if (configKeyEquals(config, "rs232.enabled")) {
+    sprintf(reply, "> %s",
+#ifdef WITH_MQTT_BRIDGE
+            _prefs->rs232_bridge_enabled ? "on" : "off");
+#else
+            _prefs->bridge_enabled ? "on" : "off");
+#endif
+  } else if (configKeyEquals(config, "rs232.running")) {
+    sprintf(reply, "> %s", _callbacks->isRs232BridgeRunning() ? "on" : "off");
   } else if (configKeyEquals(config, "bridge.baud")) {
     sprintf(reply, "> %d", (uint32_t)_prefs->bridge_baud);
   } else if (configKeyEquals(config, "bridge.uart")) {

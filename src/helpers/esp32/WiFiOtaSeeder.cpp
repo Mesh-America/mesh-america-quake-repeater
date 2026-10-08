@@ -115,6 +115,7 @@ void WiFiOtaSeeder::loop() {
   }
 
   seeder_client = incoming;
+  seeder_source.resetSessionState();  // The old socket cannot supply this session's reply.
   if (!context.attach_folder_source(&seeder_source, OtaContext::FOLDER_LINK_TCP,
                                     "tcp", attach_reply, sizeof(attach_reply))) {
     seeder_client.stop();

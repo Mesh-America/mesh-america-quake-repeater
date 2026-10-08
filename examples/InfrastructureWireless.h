@@ -22,6 +22,9 @@ public:
   }
   uint8_t enabled() const override {
     uint8_t mask = 0;
+#ifdef ESP32
+    if (board.isOTAUpdateRunning()) mask |= mesh::wireless::WiFi;
+#endif
 #ifdef WITH_WEBCONFIG
     if (the_mesh.isWebConfigActive()) mask |= mesh::wireless::WiFi;
 #endif
@@ -56,6 +59,10 @@ public:
 #if defined(ESP32) && (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE))
     if (service == mesh::wireless::WiFi) {
       if (!on) {
+        if (board.isOTAUpdateRunning()) {
+          char reply[160];
+          if (!board.stopOTAUpdate(reply)) return Result::Failed;
+        }
         if (!wifi_saved_) {
 #ifdef WITH_WEBCONFIG
           resume_web_ = the_mesh.isWebConfigActive();

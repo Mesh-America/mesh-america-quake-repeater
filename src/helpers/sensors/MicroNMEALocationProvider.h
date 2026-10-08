@@ -55,7 +55,6 @@ class MicroNMEALocationProvider : public LocationProvider {
     unsigned long next_check = 0;
     long time_valid = 0;
     unsigned long _last_time_sync = 0;
-    static const unsigned long TIME_SYNC_INTERVAL = 1800000; // Re-sync every 30 minutes
 
 #ifdef GPS_L76K
     void configureL76K() {
@@ -213,7 +212,7 @@ public :
             if (_gps_serial->available()) {
                 char c = _gps_serial->read();
                 #ifdef GPS_NMEA_DEBUG
-                if (mesh::isUsbLoggingEnabled()) mesh::usbLoggingPort().print(c);
+                if (mesh::isUsbDebugLoggingEnabled()) mesh::usbLoggingPort().print(c);
                 #endif
                 // MicroNMEA also returns true for a complete sentence with a
                 // bad checksum. A damaged ACK must not confirm GPS sleep.
@@ -235,7 +234,7 @@ public :
             _last_uart_ms = millis();
             _uart_seen = true;
             #ifdef GPS_NMEA_DEBUG
-            if (mesh::isUsbLoggingEnabled()) mesh::usbLoggingPort().print(c);
+            if (mesh::isUsbDebugLoggingEnabled()) mesh::usbLoggingPort().print(c);
             #endif
             bool parsed = nmea.process(c);
             processed++;
@@ -269,7 +268,9 @@ public :
         if ((long)(millis() - next_check) > 0) {
             next_check = millis() + 1000;
             // Re-enable time sync periodically when GPS has valid fix
-            if (!_time_sync_needed && _clock != NULL && (millis() - _last_time_sync) > TIME_SYNC_INTERVAL) {
+            if (!_time_sync_needed && _clock != NULL
+                && static_cast<uint32_t>(millis() - _last_time_sync)
+                    >= periodicTimeSyncIntervalMillis()) {
                 _time_sync_needed = true;
             }
             const long timestamp = getTimestamp();

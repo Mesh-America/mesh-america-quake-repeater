@@ -89,8 +89,8 @@ public:
 
 #if WIFI_DEBUG_LOGGING && ARDUINO
   #include <Arduino.h>
-  #define WIFI_DEBUG_PRINT(F, ...) do { if (mesh::isUsbLoggingEnabled()) { mesh::usbLoggingPort().printf("WiFi: " F, ##__VA_ARGS__); } } while(0)
-  #define WIFI_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbLoggingEnabled()) { mesh::usbLoggingPort().printf("WiFi: " F "\n", ##__VA_ARGS__); } } while(0)
+  #define WIFI_DEBUG_PRINT(F, ...) do { if (mesh::isUsbDebugLoggingEnabled()) { mesh::usbLoggingPort().printf("WiFi: " F, ##__VA_ARGS__); } } while(0)
+  #define WIFI_DEBUG_PRINTLN(F, ...) do { if (mesh::isUsbDebugLoggingEnabled()) { mesh::usbLoggingPort().printf("WiFi: " F "\n", ##__VA_ARGS__); } } while(0)
 #else
   #define WIFI_DEBUG_PRINT(...) {}
   #define WIFI_DEBUG_PRINTLN(...) {}

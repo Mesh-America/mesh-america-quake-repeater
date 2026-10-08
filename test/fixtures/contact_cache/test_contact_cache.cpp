@@ -1,117 +1,4 @@
-#include <algorithm>
-#include <array>
-#include <cassert>
-#include <cstdint>
-#include <cstring>
-#include <limits>
-#include <map>
-#include <string>
-#include <vector>
-#include <Arduino.h>
-enum { FILE_O_READ = 0, FILE_O_WRITE = 1 };
-
-class FakeFilesystem;
-class File {
-  FakeFilesystem* _fs = nullptr;
-  std::string _path;
-  size_t _position = 0;
-  bool _write = false;
-public:
-  File() = default;
-  explicit File(FakeFilesystem& fs) : _fs(&fs) {}
-  File(FakeFilesystem* fs, const char* path, bool write);
-  bool open(const char* path, uint8_t mode);
-  explicit operator bool() const { return _fs != nullptr; }
-  size_t read(uint8_t* bytes, size_t length);
-  size_t write(const uint8_t* bytes, size_t length);
-  size_t size() const;
-  bool seek(size_t position);
-  void flush() {}
-  void close() { _fs = nullptr; }
-};
-
-class FakeFilesystem {
-  struct Config { uint32_t block_count = 256, block_size = 4096; } _config;
-  struct Lfs { const Config* cfg; } _lfs{&_config};
-public:
-  using Files = std::map<std::string, std::vector<uint8_t>>;
-  Files files;
-  size_t capacity = 1024 * 1024;
-  size_t max_write = std::numeric_limits<size_t>::max();
-  std::string fail_read;
-  unsigned fail_rename = 0, renames = 0, writes = 0, reads = 0, opens = 0;
-  std::vector<Files> rename_snapshots;
-  bool exists(const char* path) const { return files.count(path) != 0; }
-  bool mkdir(const char*) { return true; }
-  bool remove(const char* path) { return files.erase(path) != 0; }
-  File open(const char* path, const char* mode = "r", bool = false) {
-    ++opens;
-    if (*mode != 'r') {
-      files[path].clear();
-      return File(this, path, true);
-    }
-    if (fail_read == path || !exists(path)) return File();
-    return File(this, path, false);
-  }
-  bool rename(const char* from, const char* to) {
-    ++renames;
-    if (renames == fail_rename || !exists(from)) return false;
-#if defined(ESP32_PLATFORM)
-    if (exists(to)) return false;
-#endif
-    files[to] = files.at(from);
-    files.erase(from);
-    rename_snapshots.push_back(files);
-    return true;
-  }
-  size_t totalBytes() const { return capacity; }
-  void setBlockCount(uint32_t count) { _config.block_count = count; }
-  Lfs* _getFS() { _lfs.cfg = &_config; return &_lfs; }
-  size_t usedBytes() const {
-    size_t total = 0;
-    for (const auto& f : files) total += f.second.size();
-    return total;
-  }
-} SPIFFS;
-
-int _getLfsUsedBlockCount(FakeFilesystem* fs) {
-  unsigned used = 2; // directory metadata pair
-  for (const auto& file : fs->files) used += (file.second.size() + 4095) / 4096;
-  return used;
-}
-
-File::File(FakeFilesystem* fs, const char* path, bool write)
-    : _fs(fs), _path(path), _write(write) {}
-bool File::open(const char* path, uint8_t mode) {
-  if (!_fs) return false;
-  *this = _fs->open(path, mode == FILE_O_WRITE ? "w" : "r");
-  return static_cast<bool>(*this);
-}
-size_t File::read(uint8_t* bytes, size_t length) {
-  if (!_fs || _write || _fs->fail_read == _path) return 0;
-  ++_fs->reads;
-  auto& data = _fs->files[_path];
-  const size_t count = std::min(length, data.size() - std::min(data.size(), _position));
-  if (count) memcpy(bytes, data.data() + _position, count);
-  _position += count;
-  return count;
-}
-size_t File::write(const uint8_t* bytes, size_t length) {
-  if (!_fs || !_write) return 0;
-  ++_fs->writes;
-  const size_t count = std::min(length, _fs->max_write);
-  auto& data = _fs->files[_path];
-  data.resize(_position + count);
-  memcpy(data.data() + _position, bytes, count);
-  _position += count;
-  return count;
-}
-size_t File::size() const { return _fs ? _fs->files.at(_path).size() : 0; }
-bool File::seek(size_t pos) {
-  if (!_fs || pos > size()) return false;
-  _position = pos;
-  return true;
-}
+#include "FakeFilesystem.h"
 
 #define FILESYSTEM FakeFilesystem
 #include <helpers/ContactInfo.h>
@@ -160,7 +47,13 @@ class DataStore : public mesh::ContactPathBackend, public mesh::ContactSecretBac
   DataStoreHost* _cache_host;
   bool _cache_load_incomplete = false;
 #if defined(ESP32_PLATFORM)
+  // Advert queue lifecycle has a dedicated production fixture. The contact
+  // reinitialization test needs only this unrelated hardware lifecycle seam.
+  struct { void clear() {} } _advert_write;
   File _contact_path_reader;
+#include "contact_write_state_under_test.h"
+  FakeFilesystem* _fs = &SPIFFS;
+  FakeFilesystem* _fsExtra = nullptr;
 #endif
   uint32_t _secret_retry_at = 0;
 #if defined(NRF52_PLATFORM)
@@ -178,7 +71,14 @@ public:
   explicit DataStore(Host& host) : _cache_host(&host) {
     mesh::contactPathStorage().attach(this);
   }
-  FakeFilesystem* _getContactsChannelsFS() const { return &SPIFFS; }
+  ~DataStore();
+  FakeFilesystem* _getContactsChannelsFS() const {
+#if defined(ESP32_PLATFORM)
+    return _fsExtra != nullptr ? _fsExtra : _fs;
+#else
+    return &SPIFFS;
+#endif
+  }
   File openRead(FakeFilesystem* fs, const char* path) { return fs->open(path); }
   bool hasIncompleteContactLoad() const {
     return _cache_load_incomplete
@@ -192,9 +92,29 @@ public:
   bool flushContactWrites(DataStoreHost*, bool (*filter)(const ContactInfo&));
   bool readStoredPath(uint16_t, uint8_t[64]) override;
   bool flushCachedPaths() override;
+#if defined(ESP32_PLATFORM)
+  void begin();
+  void disableSecondaryFS(bool);
+  void useSecondary(FakeFilesystem* fs) { _fsExtra = fs; }
+  bool cancelCooperativeWrite() override;
+#endif
   uint16_t secretSlot(const uint8_t[32]) const;
   bool readSavedSecret(const uint8_t[32], const uint8_t[32], uint8_t[32]) override;
   bool saveSecret(const uint8_t[32], const uint8_t[32], const uint8_t[32]) override;
+#if defined(ESP32_PLATFORM)
+  bool markContactDirty(const ContactInfo&);
+  bool releaseContact(const ContactInfo&);
+  bool hasPendingContactWrites() const;
+  bool serviceContactWrites(DataStoreHost*, bool (*filter)(const ContactInfo&));
+  bool starting() const {
+    return _contact_write != nullptr && !static_cast<bool>(*_contact_write);
+  }
+  bool activeJob() const { return _contact_write != nullptr; }
+  bool verifying() const { return _contact_write_verifying; }
+  bool readyToPublish() const {
+    return _contact_write && _contact_write->readyToPublish();
+  }
+#endif
 #if defined(NRF52_PLATFORM)
   bool loadContactPages(DataStoreHost*, uint16_t, uint32_t);
   bool writeContactPage(DataStoreHost*, uint8_t, bool (*filter)(const ContactInfo&));
@@ -272,6 +192,8 @@ class BaseChatMesh : public mesh::Mesh {
 public:
   int sendLogin(const ContactInfo&, const char*, uint32_t&);
   int sendAnonReq(const ContactInfo&, const uint8_t*, uint8_t, uint32_t&, uint32_t&);
+  virtual bool allowRequestTag(uint32_t) { return true; }
+  virtual bool allocateRequestTag(uint32_t&);
   int sendRequest(const ContactInfo&, const uint8_t*, uint8_t, uint32_t&, uint32_t&);
   int sendRequest(const ContactInfo&, uint8_t, uint32_t&, uint32_t&);
 };
@@ -504,6 +426,240 @@ static void contact_reload_preserves_disk_on_cache_exhaustion() {
 }
 
 #if defined(ESP32_PLATFORM)
+static unsigned drain_cooperative_save(Fixture& f) {
+  unsigned serviced_commands = 0;
+  while (f.store.hasPendingContactWrites()) {
+    const unsigned before_writes = SPIFFS.writes;
+    const unsigned before_reads = SPIFFS.reads;
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+    // Returning from every bounded store pass lets the production mesh loop
+    // poll transports. No pass serializes the whole table or verifies it all.
+    assert(SPIFFS.writes - before_writes <= 1);
+    assert(SPIFFS.reads - before_reads <= 16); // retained path snapshots
+    ++serviced_commands;
+    assert(serviced_commands < 3000);
+    assert(SPIFFS.exists("/contacts3")); // no observable rename gap
+    for (unsigned i = 0; i < f.host.contacts.size(); i += 47) {
+      Path path;
+      assert(f.host.contacts[i].copyPathTo(path.data()));
+    }
+  }
+  return serviced_commands;
+}
+
+static void cooperative_save_services_commands_and_preserves_snapshots() {
+  Fixture f;
+  const ContactInfo snapshot = f.host.contacts[349];
+  const auto old = SPIFFS.files.at("/contacts3");
+  assert(f.host.contacts[349].setRawPath(route(980).data()));
+  assert(f.store.markContactDirty(f.host.contacts[349]));
+  assert(f.store.hasPendingContactWrites());
+  assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+  assert(f.store.hasPendingContactWrites() && SPIFFS.files.at("/contacts3") == old);
+  const unsigned polled = drain_cooperative_save(f);
+  assert(polled > 350); // record writes and CRC readback both yield
+  assert(SPIFFS.files.at("/contacts3") != old);
+  f.check(349, route(980));
+  Path path;
+  assert(snapshot.copyPathTo(path.data()) && path == route(349));
+  for (const auto& files : SPIFFS.rename_snapshots) {
+    FakeFilesystem rebooted;
+    rebooted.files = files;
+    assert(mesh::ContactFileTransaction::recover(&rebooted, "/contacts3"));
+    assert(rebooted.files.at("/contacts3") == old
+        || rebooted.files.at("/contacts3") == SPIFFS.files.at("/contacts3"));
+  }
+}
+
+static void background_crc_verification_uses_bounded_batches() {
+  Fixture f(347);
+  SPIFFS.emulate_stdio = true;
+  snprintf(f.host.contacts[0].name, sizeof(f.host.contacts[0].name), "CRC cadence");
+  assert(f.store.markContactDirty(f.host.contacts[0]));
+  unsigned crc_read_passes = 0, total_crc_reads = 0;
+  unsigned max_reads = 0, max_backend_reads = 0, passes = 0;
+  while (f.store.hasPendingContactWrites()) {
+    const bool verifying = f.store.verifying() && !f.store.readyToPublish();
+    const unsigned reads = SPIFFS.reads, backend_reads = SPIFFS.backend_reads;
+    assert(++passes < 2000);
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+    if (!verifying) continue; // serialization also reads cold cached paths
+    const unsigned read_count = SPIFFS.reads - reads;
+    const unsigned backend_count = SPIFFS.backend_reads - backend_reads;
+    if (read_count != 0) ++crc_read_passes;
+    total_crc_reads += read_count;
+    max_reads = std::max(max_reads, read_count);
+    max_backend_reads = std::max(max_backend_reads, backend_count);
+    assert(read_count <= 8 && backend_count <= 1);
+  }
+  assert(total_crc_reads == 825);
+  assert(crc_read_passes == 104);
+  assert(max_reads == 8 && max_backend_reads == 1);
+  assert(!SPIFFS.exists("/contacts3.tmp"));
+  f.host.contacts.clear();
+  f.store.loadContacts(&f.host);
+  assert(!f.store.hasIncompleteContactLoad() && f.host.contacts.size() == 347);
+  assert(strcmp(f.host.contacts[0].name, "CRC cadence") == 0);
+  for (unsigned i = 0; i < 347; ++i) f.check(i, route(i));
+}
+
+static void cooperative_mutations_never_publish_obsolete_indices() {
+  for (unsigned mutation_step : {4u, 46u, 110u, 0u}) {
+    Fixture f(40);
+    const auto old = SPIFFS.files.at("/contacts3");
+    assert(f.store.markContactDirty(f.host.contacts[0]));
+    unsigned step = 0;
+    while (mutation_step == 0 ? !f.store.readyToPublish() : step < mutation_step) {
+      assert(++step < 1000);
+      assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+      assert(SPIFFS.files.at("/contacts3") == old);
+    }
+    const ContactInfo snapshot = f.host.contacts[3]; // created during save
+    assert(f.store.releaseContact(f.host.contacts[3]));
+    f.host.contacts.erase(f.host.contacts.begin() + 3); // shifts all later indices
+    assert(f.host.contacts[1].setRawPath(route(991).data()));
+    snprintf(f.host.contacts[1].name, sizeof(f.host.contacts[1].name), "new revision");
+    assert(f.store.markContactDirty(f.host.contacts[1]));
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+    assert(f.store.hasPendingContactWrites()); // abort is not durable success
+    assert(SPIFFS.files.at("/contacts3") == old);
+    drain_cooperative_save(f);
+    const auto& bytes = SPIFFS.files.at("/contacts3");
+    assert(bytes.size() == 39 * 152);
+    for (unsigned i = 0; i < 39; ++i) {
+      assert(memcmp(bytes.data() + i * 152, f.host.contacts[i].id.pub_key, 32) == 0);
+      Path path;
+      assert(f.host.contacts[i].copyPathTo(path.data()));
+      const Path expected = route(i == 1 ? 991 : i >= 3 ? i + 1 : i);
+      assert(path == expected);
+    }
+    Path path;
+    assert(snapshot.copyPathTo(path.data()) && path == route(3));
+  }
+}
+
+static void cooperative_failures_keep_the_old_file_and_pending_mutations() {
+  for (unsigned fault = 0; fault < 4; ++fault) {
+    Fixture f(30);
+    const auto old = SPIFFS.files.at("/contacts3");
+    assert(f.host.contacts[0].setRawPath(route(993).data()));
+    assert(f.store.markContactDirty(f.host.contacts[0]));
+    if (fault == 0) SPIFFS.max_write = 17;
+    if (fault == 1) SPIFFS.fail_read = "/contacts3.tmp";
+    if (fault == 2) SPIFFS.fail_rename = SPIFFS.renames + 2;
+    bool failed = false;
+    for (unsigned step = 0; step < 1000 && !failed; ++step) {
+      if (fault == 3 && step == 35) SPIFFS.files.at("/contacts3.tmp")[100] ^= 1;
+      failed = !f.store.serviceContactWrites(&f.host, cachedContactFilter);
+    }
+    assert(failed && f.store.hasPendingContactWrites());
+    assert(!f.store.activeJob());
+    assert(SPIFFS.files.at("/contacts3") == old);
+    assert(!SPIFFS.exists("/contacts3.tmp"));
+    f.check(0, route(993));
+    SPIFFS.max_write = std::numeric_limits<size_t>::max();
+    SPIFFS.fail_read.clear(); SPIFFS.fail_rename = 0;
+    drain_cooperative_save(f);
+    assert(SPIFFS.files.at("/contacts3") != old);
+    f.check(0, route(993));
+  }
+}
+
+static void synchronous_flush_cancels_pending_jobs_and_stays_durable() {
+  Fixture f(40);
+  const ContactInfo snapshot = f.host.contacts[0];
+  assert(f.host.contacts[0].setRawPath(route(994).data()));
+  assert(f.store.markContactDirty(f.host.contacts[0]));
+  for (unsigned i = 0; i < 8; ++i)
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+  // Update, reorder, then force explicit durability instead of draining a
+  // snapshot from an earlier revision. The rename callback sees a full file.
+  std::swap(f.host.contacts[0], f.host.contacts[3]);
+  assert(f.store.markContactDirty(f.host.contacts[0]));
+  assert(f.store.flushContactWrites(&f.host, cachedContactFilter));
+  assert(!f.store.hasPendingContactWrites() && !SPIFFS.exists("/contacts3.tmp"));
+  assert(memcmp(SPIFFS.files.at("/contacts3").data(), f.host.contacts[0].id.pub_key, 32) == 0);
+  f.check(3, route(994));
+  Path path;
+  assert(snapshot.copyPathTo(path.data()) && path == route(0));
+}
+
+static void interleaved_path_pressure_preserves_guarded_eviction() {
+  Fixture f(40);
+  for (unsigned i = 0; i < 26; ++i) {
+    // Keep a real lazy job open while more than all16 resident path slots are
+    // replaced by app updates. makeRoom must abandon only that cooperative
+    // job before the pre-existing synchronous eviction flush obtains room.
+    if (!f.store.hasPendingContactWrites())
+      assert(f.store.markContactDirty(f.host.contacts[0]));
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+    assert(f.host.contacts[i].setRawPath(route(1200 + i).data()));
+    assert(f.store.markContactDirty(f.host.contacts[i]));
+  }
+  assert(f.host.cache_flushes > 0); // actual cache exhaustion, no mocked bypass
+  drain_cooperative_save(f);
+  for (unsigned i = 0; i < 40; ++i)
+    f.check(i, route(i < 26 ? 1200 + i : i));
+}
+
+static void pending_startup_pressure_preserves_guarded_eviction() {
+  for (unsigned completed : {0u, 3u, 6u}) {
+    Fixture f(40);
+    for (unsigned i = 0; i < 16; ++i) {
+      assert(f.host.contacts[i].setRawPath(route(1600 + i).data()));
+      assert(f.store.markContactDirty(f.host.contacts[i]));
+    }
+    assert(f.host.cache_flushes == 0);
+    SPIFFS.files["/contacts3.tmp"] = {8, 9};
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter)); // allocate
+    for (unsigned pass = 0; pass < completed; ++pass)
+      assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+    assert(f.store.starting());
+    // The seventeenth resident update must cancel a pending begin, release
+    // _committing, then run the existing guarded synchronous eviction flush.
+    assert(f.host.contacts[16].setRawPath(route(1616).data()));
+    assert(f.host.cache_flushes == 1);
+    assert(!f.store.activeJob());
+    assert(f.store.markContactDirty(f.host.contacts[16]));
+    drain_cooperative_save(f);
+    for (unsigned i = 0; i < 40; ++i)
+      f.check(i, route(i < 17 ? 1600 + i : i));
+  }
+}
+
+static void lifecycle_cancels_jobs_and_closes_prior_filesystem_readers() {
+  {
+    Fixture f(30);
+    assert(f.store.markContactDirty(f.host.contacts[0]));
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+    f.check(29, route(29)); // opens the original cold-path reader
+    f.store.begin();
+    assert(f.store.hasPendingContactWrites());
+    assert(!SPIFFS.exists("/contacts3.tmp"));
+    const unsigned opens = SPIFFS.opens;
+    f.check(28, route(28));
+    assert(SPIFFS.opens == opens + 1); // reinitialization reopened its reader
+    drain_cooperative_save(f);
+  }
+  {
+    Fixture f(30);
+    FakeFilesystem alternate;
+    alternate.files = SPIFFS.files;
+    f.store.useSecondary(&alternate);
+    assert(f.store.markContactDirty(f.host.contacts[0]));
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+    f.check(29, route(29));
+    const unsigned opens = SPIFFS.opens;
+    f.store.disableSecondaryFS(false);
+    assert(f.store.hasPendingContactWrites());
+    assert(!alternate.exists("/contacts3.tmp"));
+    f.check(28, route(28));
+    assert(SPIFFS.opens == opens + 1); // reads follow the primary route
+    drain_cooperative_save(f);
+    // No lazy job remains tied to alternate's shorter lifetime.
+  }
+}
+
 static void partial_loads_cannot_replace_the_complete_file() {
   for (bool capacity_failure : {false, true}) {
     Fixture f(40);
@@ -663,9 +819,38 @@ static void contact_tx_policy_round_trips_without_growing_records() {
   }
 }
 
+
+#if defined(ESP32_PLATFORM)
+static void deferred_cleanup_publishes_actual_cached_handles() {
+  Fixture f(40);
+  const auto old = SPIFFS.files.at("/contacts3");
+  SPIFFS.files["/contacts3.bak"] = {9, 8, 7};
+  assert(f.host.contacts[0].setRawPath(route(2100).data()));
+  assert(f.store.markContactDirty(f.host.contacts[0]));
+  for (unsigned step = 0; step < 4; ++step)
+    assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+  assert(SPIFFS.files.at("/contacts3.bak") == std::vector<uint8_t>({9, 8, 7}));
+  assert(f.store.serviceContactWrites(&f.host, cachedContactFilter));
+  assert(!SPIFFS.exists("/contacts3.bak") && SPIFFS.files.at("/contacts3") == old);
+  drain_cooperative_save(f);
+  assert(!f.store.hasPendingContactWrites() && SPIFFS.files.at("/contacts3.bak") == old);
+  f.check(0, route(2100));
+  for (unsigned i = 1; i < 40; ++i) f.check(i, route(i));
+}
+#endif
+
 int main() {
   contact_tx_policy_round_trips_without_growing_records();
 #if defined(ESP32_PLATFORM)
+  deferred_cleanup_publishes_actual_cached_handles();
+  cooperative_save_services_commands_and_preserves_snapshots();
+  background_crc_verification_uses_bounded_batches();
+  cooperative_mutations_never_publish_obsolete_indices();
+  cooperative_failures_keep_the_old_file_and_pending_mutations();
+  synchronous_flush_cancels_pending_jobs_and_stays_durable();
+  interleaved_path_pressure_preserves_guarded_eviction();
+  pending_startup_pressure_preserves_guarded_eviction();
+  lifecycle_cancels_jobs_and_closes_prior_filesystem_readers();
   routes_survive_eviction_and_full_sync();
   snapshot_rollback_and_dirty_eviction();
   storage_failures_preserve_routes();

@@ -30,18 +30,16 @@ class ContactStreamContractTests(unittest.TestCase):
     def test_contact_frame_write_result_is_observable(self):
         header = source("examples/companion_radio/MyMesh.h")
         impl = source("examples/companion_radio/MyMesh.cpp")
-        self.assertIn(
-            "bool writeContactRespFrame(uint8_t code, const ContactInfo &contact);",
-            header,
-        )
+        self.assertRegex(header, r"bool writeContactRespFrame\(uint8_t code,\s*"
+                         r"const ContactInfo &contact,\s*"
+                         r"BaseSerialInterface\* route = NULL\);")
         body = function_body(
             impl,
-            "bool MyMesh::writeContactRespFrame(uint8_t code, const ContactInfo &contact)",
+            "bool MyMesh::writeContactRespFrame(",
         )
-        self.assertRegex(
-            body,
-            r"return\s+_serial->writeFrame\(out_frame,\s*i\)\s*==\s*\(size_t\)i\s*;",
-        )
+        self.assertIn("_serial->writeFrameToRoute(route, out_frame, i)", body)
+        self.assertIn("_serial->writeFrame(out_frame, i)", body)
+        self.assertRegex(body, r"\)\s*==\s*\(size_t\)i\s*;")
 
     def test_iterator_retries_start_contact_and_end_frames(self):
         impl = source("examples/companion_radio/MyMesh.cpp")
@@ -52,17 +50,18 @@ class ContactStreamContractTests(unittest.TestCase):
         self.assertRegex(
             body,
             r"if\s*\(writeContactRespFrame\(RESP_CODE_CONTACT,\s*"
-            r"_iter_pending_contact\)\)",
+            r"_iter_pending_contact,\s*_iter_reply_route\)\)",
         )
         self.assertRegex(
             body,
-            r"if\s*\(_serial->writeFrame\(out_frame,\s*5\)\s*==\s*5\)\s*\{\s*"
+            r"if\s*\(_serial->writeFrameToRoute\(_iter_reply_route,\s*"
+            r"out_frame,\s*5\)\s*==\s*5\)\s*\{\s*"
             r"stopContactsIterator\(\)\s*;",
         )
 
         # The cached contact is cleared only inside the successful-write arm.
         success = body.index(
-            "if (writeContactRespFrame(RESP_CODE_CONTACT, _iter_pending_contact))"
+            "if (writeContactRespFrame(RESP_CODE_CONTACT, _iter_pending_contact,"
         )
         clear = body.index("_iter_contact_pending = false;", success)
         self.assertGreater(clear, success)
