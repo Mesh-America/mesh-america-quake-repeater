@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/cad_scan_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SX1262 channel-scanning hardware results
 
 Hardware test on September 12, 2026 (America/Los_Angeles). Heltec V4 transmitter; XIAO ESP32-S3 with Wio SX1262 receiver. Both used standalone diagnostic firmware.

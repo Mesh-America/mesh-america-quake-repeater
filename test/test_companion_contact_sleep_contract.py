@@ -52,7 +52,12 @@ class CompanionContactSleepContractTest(unittest.TestCase):
 
     def test_contact_write_is_serviced_only_after_its_deadline(self):
         mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
-        body = function_body(mesh, "void MyMesh::loop()")
+        loop = function_body(mesh, "void MyMesh::loop()")
+        self.assertIn("servicePersistence();", loop)
+        self.assertLess(loop.index("checkSerialInterface();"), loop.index("servicePersistence();"))
+        self.assertIn("#if defined(ESP32_PLATFORM)\n  servicePersistence();\n#else", loop)
+        self.assertIn("_store->serviceContactWrites(this, save_filter)", loop)
+        body = function_body(mesh, "void MyMesh::servicePersistence()")
 
         self.assertIn("if (isContactWriteDue())", body)
         self.assertIn("_store->serviceContactWrites(this, save_filter)", body)
@@ -82,7 +87,7 @@ class CompanionContactSleepContractTest(unittest.TestCase):
         mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
         begin = function_body(mesh, "void MyMesh::begin(")
         save = function_body(mesh, "void MyMesh::saveContacts()")
-        loop = function_body(mesh, "void MyMesh::loop()")
+        loop = function_body(mesh, "void MyMesh::servicePersistence()")
 
         for body in (begin, save, loop):
             self.assertIn("mesh::nonzeroLazyPersistenceDeadline(", body)
@@ -93,7 +98,7 @@ class CompanionContactSleepContractTest(unittest.TestCase):
         mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
         header = (ROOT / "examples/companion_radio/MyMesh.h").read_text()
         save = function_body(mesh, "void MyMesh::saveContacts()")
-        loop = function_body(mesh, "void MyMesh::loop()")
+        loop = function_body(mesh, "void MyMesh::servicePersistence()")
         retry = function_body(mesh, "void MyMesh::scheduleContactWriteRetry()")
 
         self.assertIn("uint8_t dirty_contacts_failures;", header)

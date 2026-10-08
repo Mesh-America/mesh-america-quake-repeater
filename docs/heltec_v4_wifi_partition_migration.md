@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/heltec_v4_wifi_partition_migration/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Heltec V4 legacy-partition migration over Wi-Fi
 
 Heltec V4/V4.3 OLED repeaters with their normal 16 MiB flash use the shared

@@ -7,6 +7,8 @@ class CommonCLI {
 public:
   uint8_t path_len = 0;
   bool scope_available = true;
+  bool adoption_succeeds = true, route_persisted = false;
+  unsigned adoption_calls = 0;
   bool getDataTxPath(const uint8_t*& out, uint8_t& len) const {
     out = path; len = path_len;
     return path_len != 0xff && mesh::Packet::isValidPathLen(path_len);
@@ -16,7 +18,14 @@ public:
     if (ambiguous) *ambiguous = false;
     scope = TransportKey(); return scope_available;
   }
-  bool adoptLegacyDataTxPath(const uint8_t*, uint8_t) { return true; }
+  bool adoptLegacyDataTxPath(const uint8_t* legacy_path, uint8_t legacy_len) {
+    ++adoption_calls;
+    if (route_persisted) return true; // the explicitly saved shared route wins
+    if (!adoption_succeeds) return false;
+    path_len = mesh::Packet::copyPath(path, legacy_path, legacy_len);
+    route_persisted = true;
+    return true;
+  }
 };
 class CommonCLICallbacks {
 public:

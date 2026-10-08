@@ -28,7 +28,7 @@ struct OtaBlCaps {
   uint16_t apply_abi = 0;    // max .mota format_ver the bootloader can apply
   uint16_t codec_mask = 0;   // bit i set => can apply codec_id i (in-place delta = bit 2)
   uint8_t  storage_flags = 0; // OTA_BL_STORAGE_* capability bits
-  uint8_t  optional_app_storage = 0; // separate MOTASTOR record, never a boot-update backend
+  uint8_t  optional_app_storage = 0; // separate MOTASTOR record, scoped to its qualified primary profile
 };
 
 // Independent marker for the reset-retained hybrid source. Keep this separate
@@ -217,10 +217,10 @@ inline OtaBlCaps ota_bl_legacy_app_caps_scan_halfword(const uint8_t* bytes,
   return c;
 }
 
-// Unified RAK loaders preserve the deployed board's privileged MOTABLDR=0x0A
-// contract. A separate record advertises optional APPLICATION storage. It is
-// adjacent to the unchanged, unique 64 KiB RAM marker and grants no new
-// bootloader staging backend.
+// Unified loaders preserve the deployed primary MOTABLDR contract: 0x0A for
+// RAK internal storage and 0x09 for Tower SD. A separate record advertises
+// optional application storage, adjacent to the unchanged, unique RAM marker.
+// Never infer optional storage from the primary profile alone.
 inline uint8_t ota_bl_optional_app_storage(const uint8_t* bytes, size_t len) {
   static const uint8_t record[32] = {
     'M', 'O', 'T', 'A', 'R', 'A', 'M', 'A', 1, 0, 72, 0, 0, 0, 1, 0,
@@ -228,17 +228,39 @@ inline uint8_t ota_bl_optional_app_storage(const uint8_t* bytes, size_t len) {
   };
   if (!bytes || !ota_bootloader_supports_hybrid(ota_ram_caps_scan_aligned(bytes, len))) return 0;
   unsigned matches = 0;
-  for (size_t off = 0; off + sizeof(record) <= len; off += 4) {
-    if (memcmp(bytes + off, record, sizeof(record)) == 0 && ++matches > 1) return 0;
+  uint8_t result = 0;
+  for (size_t off = 0; off + 8u <= len; off += 4u) {
+    if (memcmp(bytes + off, record + 16u, 8u) != 0) continue;
+    // One aligned STOR record must immediately follow the one valid RAM
+    // record. A stray, malformed, truncated or duplicate declaration fails
+    // closed instead of allowing another valid record to hide it.
+    if (++matches != 1u || off < 16u || off + 16u > len ||
+        memcmp(bytes + off - 16u, record, 28u) != 0 ||
+        bytes[off + 13u] || bytes[off + 14u] || bytes[off + 15u]) return 0;
+    const uint8_t flags = bytes[off + 12u];
+    if (flags != (OTA_BL_STORAGE_QSPI | OTA_BL_STORAGE_HEADER_W25) &&
+        flags != OTA_BL_STORAGE_STAGE_CEILING) return 0;
+    result = flags;
   }
-  return matches == 1 ? OTA_BL_STORAGE_QSPI | OTA_BL_STORAGE_HEADER_W25 : 0;
+  return matches == 1u ? result : 0;
+}
+
+inline uint8_t ota_bl_profile_optional_app_storage(const uint8_t* bytes,
+                                                  size_t len,
+                                                  uint8_t primary_storage) {
+  const uint8_t optional = ota_bl_optional_app_storage(bytes, len);
+  if (primary_storage == OTA_BL_PROFILE_INTERNAL_BOOT_UPDATE &&
+      optional == (OTA_BL_STORAGE_QSPI | OTA_BL_STORAGE_HEADER_W25)) return optional;
+  if (primary_storage == OTA_BL_PROFILE_SD_BOOT_UPDATE &&
+      optional == OTA_BL_STORAGE_STAGE_CEILING) return optional;
+  return 0;
 }
 
 inline OtaBlCaps ota_bl_app_caps_scan(const uint8_t* bytes, size_t len) {
   OtaBlCaps aligned = ota_bl_caps_scan_aligned(bytes, len, false);
-  if (aligned.present && aligned.apply_abi >= 3 &&
-      aligned.storage_flags == OTA_BL_PROFILE_INTERNAL_BOOT_UPDATE) {
-    aligned.optional_app_storage = ota_bl_optional_app_storage(bytes, len);
+  if (aligned.present && aligned.apply_abi >= 3) {
+    aligned.optional_app_storage = ota_bl_profile_optional_app_storage(
+        bytes, len, aligned.storage_flags);
     aligned.storage_flags |= aligned.optional_app_storage;
   }
   if (aligned.present) return aligned;
@@ -248,7 +270,14 @@ inline OtaBlCaps ota_bl_app_caps_scan(const uint8_t* bytes, size_t len) {
 inline OtaBlCaps ota_bl_update_caps_scan_aligned(const uint8_t* bytes, size_t len,
                                                   uint8_t exact_storage_flags) {
   if (exact_storage_flags == 0) return OtaBlCaps();
-  return ota_bl_caps_scan_aligned(bytes, len, true, exact_storage_flags);
+  OtaBlCaps caps = ota_bl_caps_scan_aligned(bytes, len, true, exact_storage_flags);
+  if (caps.present) {
+    // Preserve the exact privileged storage byte; callers may independently
+    // require an existing optional application capability in a successor.
+    caps.optional_app_storage = ota_bl_profile_optional_app_storage(
+        bytes, len, caps.storage_flags);
+  }
+  return caps;
 }
 
 // Scan the bootloader flash region for ordinary application-update capabilities.

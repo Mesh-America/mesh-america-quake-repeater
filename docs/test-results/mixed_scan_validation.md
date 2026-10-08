@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/mixed_scan_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Mixed-bandwidth two-channel reception test
 
 V4 transmitter on MercerWoodMesh; XIAO ESP32-S3/Wio SX1262 receiver. Channel 0: 909.5 MHz, SF7/62.5 kHz, preamble 32. Channel 1: 910.5 MHz, 500 kHz, SF and preamble below. Both use CR4/5, explicit header, CRC and 64-byte test payloads. Fast RX-preamble scanning uses four symbols of the active profile per visit, not four simultaneous channels or hardware CAD.

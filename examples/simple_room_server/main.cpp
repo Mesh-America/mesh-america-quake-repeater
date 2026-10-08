@@ -3,6 +3,8 @@
 #include <helpers/IdentityGeneration.h>
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#include <helpers/UsbLoggingWatchdog.h>
+#include <helpers/UsbLoggingClientActivity.h>
 #if MESH_PACKET_LOGGING
   #include <helpers/SerialPacketLog.h>
 #endif
@@ -11,6 +13,7 @@
 
 #if defined(ESP32_PLATFORM)
   #include <helpers/ESP32TrueRandom.h>
+  #include <helpers/esp32/BootFileSystem.h>
 #endif
 #if defined(NRF52_PLATFORM)
   #include <helpers/nrf52/InternalPrimaryFsBoot.h>
@@ -53,7 +56,7 @@ void setup() {
   mesh::wireless::control().begin(infrastructure_wireless);
   mesh::prepareUsbLoggingPort();
   Serial.begin(115200);
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::beginUsbLoggingPort();
 #endif
 #if MESH_PACKET_LOGGING
@@ -171,6 +174,13 @@ void setup() {
     return;
   }
 
+#if defined(ESP32_PLATFORM)
+  // Identity writes have finished; this FS view remains alive after setup.
+  static mesh::Esp32BootFileSystem boot_fs(*fs);
+  fs = &boot_fs;
+  boot_fs.beginInventory();
+#endif
+
   Stream& console = mesh::usbConsolePort();
   console.print("Room ID: ");
   mesh::Utils::printHex(console, the_mesh.self_id.pub_key, PUB_KEY_SIZE); console.println();
@@ -183,6 +193,14 @@ void setup() {
   sensors.begin();
 
   the_mesh.begin(fs);
+
+#if defined(NRF52_PLATFORM)
+  mesh::loadUsbLoggingWatchdog(fs, !volatile_primary_fs,
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#else
+  mesh::loadUsbLoggingWatchdog(fs, true,
+      []() -> uint32_t { return rtc_clock.getCurrentTime(); });
+#endif
 
 #if defined(NRF52_PLATFORM)
   if (volatile_primary_fs) {
@@ -215,16 +233,33 @@ void setup() {
   the_mesh.sendSelfAdvertisement(16000, false);
 #endif
 
+#if defined(ESP32_PLATFORM)
+  mesh::endEsp32BootFileInventory();
+#endif
   board.onBootComplete();
 }
 
+static bool usbLoggingRecoverySafe(void*) {
+  if (board.isOTAUpdateRunning() || board.isRadioTestActive()
+      || radio_driver.isWatchdogObserving() || radio_driver.isCalibratingNoiseFloor()
+      || !the_mesh.canRecoverUsbLogging()) return false;
+  const auto usb = mesh::usbLoggingStatus();
+  return !usb.reader_connected || usb.stalled
+      || (!command[0]
+#if MESH_USB_CONSOLE_COOPERATIVE
+          && !the_mesh.hasPendingSerialOutput()
+#endif
+      );
+}
+
 void loop() {
+  mesh::serviceUsbLoggingPort();
   mesh::wireless::control().service(millis());
 #if defined(NRF52_PLATFORM)
   board.feedWatchdog(the_mesh.getNodePrefs()->system_watchdog_enabled != 0);
 #endif
   bool usb_ready = true;
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::serviceUsbLoggingPort();
   mesh::serviceUsbTerminalPort();
   if (mesh::takeUsbTerminalSessionReset()) {
@@ -261,6 +296,9 @@ void loop() {
     command[len - 1] = 0;  // replace newline with C string null terminator
     char reply[160];
     reply[0] = 0;
+    if (len < static_cast<int>(sizeof(command) - 1)
+        && strlen(command) == static_cast<size_t>(len - 1))
+      mesh::noteUsbLoggingStatsCommand(command);
 #ifdef ETHERNET_ENABLED
     if (!ethernet_handle_command(command, reply)) {
       the_mesh.handleUsbCommand(command, reply);
@@ -299,7 +337,8 @@ void loop() {
 #endif
   rtc_clock.tick();
   board.loop();
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+  if (mesh::serviceUsbLoggingWatchdog(usbLoggingRecoverySafe)) board.reboot();
+#if MESH_USB_CONSOLE_COOPERATIVE
   mesh::serviceUsbTerminalPort();
 #endif
 #ifdef TBEAM_1W
@@ -310,6 +349,7 @@ void loop() {
 #endif
   bool can_power_save = the_mesh.getNodePrefs()->powersaving_enabled
       && !board.isUsbDataConnected()
+      && !mesh::isUsbLoggingWatchdogArmed()
       && !mesh::wireless::control().pending();
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP \

@@ -14,7 +14,7 @@ import time
 import serial
 from serial.tools import list_ports
 from profile_four_tx_fixture import TXS,RX,resolve
-from profile_switch import configure_session,exchange,read_packet_response
+from profile_switch import open_session,exchange,read_packet_response
 
 TARGETS=(TXS[0],TXS[3])
 PLAN=({'sf':7,'bw_khz':62.5,'freq_khz':909500},
@@ -28,7 +28,7 @@ def require(row,expected,label):
 
 def open_radio(target,pair=True):
     port=serial.Serial();port.port=resolve(target);port.baudrate=115200
-    port.timeout=.2;port.write_timeout=2;configure_session(port);port.open()
+    port.timeout=.2;port.write_timeout=2;open_session(port)
     try:
         port.reset_input_buffer()
         info=exchange(port,'info','board',5)

@@ -5,6 +5,7 @@ is the reviewed collector; dependencies and image provenance are hash-checked
 against the previous bench bundle. No flashing or hub reset is performed.
 """
 import base64
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -24,6 +25,11 @@ if subprocess.run(['systemctl','is-active','--quiet','meshcore-memory-soak.servi
     raise RuntimeError('V4 soak active; do not interrupt another test')
 dependencies=('profile_four_tx_fixture.py','profile_switch.py','profile_switch_channels.py',
               'profile_switch_packets.py','profile_switch_sweep.py')
+# Copy the exact dependency closure of the immutable previous snapshot.
+if any((isinstance(node,ast.ImportFrom) and node.module=='serial_session')
+       or (isinstance(node,ast.Import) and any(alias.name=='serial_session' for alias in node.names))
+       for node in ast.walk(ast.parse((previous/'profile_switch.py').read_bytes()))):
+    dependencies+=('serial_session.py',)
 files={name:(previous/name).read_bytes() for name in dependencies}
 for name,data in files.items():
     if hashlib.sha256(data).hexdigest()!=manifest['files'][name]['sha256']:

@@ -14,21 +14,39 @@ def fixture_prefix():
     return text[:text.index('struct Host {')]
 
 
-def compile_run(program, platform):
+def compile_run(program, platform, actual_node_prefs=False):
     with tempfile.TemporaryDirectory(prefix='mesh-storage-recovery-') as directory:
         directory = Path(directory)
         (directory / 'FS.h').write_text('#pragma once\nnamespace fs { using FS = FakeFilesystem; }\n')
         (directory / 'Adafruit_LittleFS.h').write_text(
             '#pragma once\nusing Adafruit_LittleFS = FakeFilesystem;\n'
             'namespace Adafruit_LittleFS_Namespace {}\n')
+        helper_sources = []
+        if actual_node_prefs:
+            # Keep the actual owner-bearing adapters in the preferences
+            # recovery test, rather than replacing the new snapshot API.
+            (directory / 'Arduino.h').write_text(
+                '#include "' + str(ROOT / 'test/mocks/Arduino.h') + '"\n')
+            utils = (ROOT / 'test/fixtures/contact_cache/mocks/Utils.h').read_text()
+            utils = utils.replace('public:', '''public:
+  static void printHex(Stream&, const uint8_t*, size_t) { assert(false); }
+  static void fromHex(uint8_t*, size_t, const char*) { assert(false); }
+''', 1)
+            (directory / 'Utils.h').write_text('#include <cassert>\n' + utils)
+            helper_sources = [str(ROOT / 'src/helpers' / name) for name in (
+                'ConfigSerializer.cpp', 'DynamicConfigSerializer.cpp',
+                'CommonRadioPrefs.cpp', 'TxtDataHelpers.cpp')]
         cpp, exe = directory / 'test.cpp', directory / 'test'
         cpp.write_text(program)
         compiled = subprocess.run([
             'c++', '-std=c++17', '-O1', '-g', '-fsanitize=address,undefined',
-            '-fno-pie', '-no-pie', '-DMESH_CONTACT_CACHE=0', '-D' + platform + '=1',
+            '-fno-sanitize-recover=all', '-fno-pie', '-no-pie',
+            '-DMESH_CONTACT_CACHE=0', '-D' + platform + '=1',
             '-I', str(directory), '-I', str(ROOT / 'test/fixtures/contact_cache/mocks'),
+            '-I', str(ROOT / 'test/mocks'),
             '-I', str(ROOT / 'src'), '-I', str(ROOT / 'lib/ed25519'),
-            '-I', str(ROOT / 'examples/companion_radio'), str(cpp), '-o', str(exe),
+            '-I', str(ROOT / 'examples/companion_radio'), str(cpp), *helper_sources,
+            '-o', str(exe),
         ], capture_output=True, text=True, timeout=60)
         if compiled.returncode:
             raise AssertionError(compiled.stdout + compiled.stderr)
@@ -51,6 +69,10 @@ class IdentityAndSettingsRecovery(unittest.TestCase):
         source = (ROOT / 'src/helpers/IdentityStore.cpp').read_text()
         presence = (ROOT / 'src/helpers/FilePresence.h').read_text()
         program = fixture_prefix() + '\n#include <helpers/IdentityStore.h>\n'
+        if platform == 'ESP32_PLATFORM':
+            # Identity startup precedes the inventory. Include its real owner
+            # registry so the extracted metadata probe takes the normal path.
+            program += '#include <helpers/esp32/BootFilePresence.h>\n'
         if platform == 'ESP32_PLATFORM':
             program += r'''
 struct MigrationNvs {
@@ -233,12 +255,8 @@ int main() {
 
     def test_esp32_preferences_and_channels_recover_or_reset(self):
         store = (ROOT / 'examples/companion_radio/DataStore.cpp').read_text()
-        prefs = (ROOT / 'examples/companion_radio/NodePrefs.h').read_text()
-        fields = prefs[prefs.index('class CompanionNodePrefs {'):prefs.index('\nprivate:')]
         program = fixture_prefix() + r'''
-#include <helpers/BluetoothMac.h>
-#include "BluetoothName.h"
-''' + fields + '\n};\n' + r'''
+#include "NodePrefs.h"
 struct ChannelDetails { struct { uint8_t secret[32] = {}; uint8_t tx_radio = 0; } channel; char name[32] = {}; };
 #define MAX_GROUP_CHANNELS 40
 struct DataStoreHost {
@@ -330,7 +348,7 @@ int main() {
   }
 }
 '''
-        compile_run(program, 'ESP32_PLATFORM')
+        compile_run(program, 'ESP32_PLATFORM', actual_node_prefs=True)
 
 
 if __name__ == '__main__':

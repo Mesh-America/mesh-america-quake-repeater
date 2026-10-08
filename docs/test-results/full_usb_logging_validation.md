@@ -1,6 +1,19 @@
-# Full USB logging repair — 1.17.1.6
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/full_usb_logging_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
+# Full USB logging repair - 1.17.1.6
 
 Audit date: 2026-09-13. Release firmware source: `306feebe6d648a247f925894f876be9d747fc8d2`.
+
+This is historical qualification of the 1.17.1.6 images, not an all-board
+runtime test of later firmware. Current source separates the saved USB output
+master (`usb.logging`) from opt-in diagnostic verbosity (`usb.debug`, default
+off), and adds full ASCII RAW records to Full Companion. See
+[current USB logging controls](../cli_commands.md#control-live-usb-logging)
+for defaults, legacy preference handling, capture-loss behavior and dedicated
+CDC/control-port restrictions. These source changes do not imply new hardware
+validation of the published images listed below.
 
 The original Station G2 Full Repeater and Full Room Server images omitted USB
 packet logging. Both inherited `-UMESH_PACKET_LOGGING` from their ordinary MQTT

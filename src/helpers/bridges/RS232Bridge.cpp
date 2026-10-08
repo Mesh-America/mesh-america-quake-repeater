@@ -5,6 +5,12 @@
 
 #ifdef WITH_RS232_BRIDGE
 
+#ifdef ESP32
+// check_firmware_ram.py reserves this object plus the UART driver's runtime
+// allocation even when a combined Full image starts with the UART disabled.
+static_assert(sizeof(RS232Bridge) <= 4096, "Update the ESP32 UART heap budget");
+#endif
+
 RS232Bridge::RS232Bridge(NodePrefs *prefs, Stream &serial, int16_t rx_pin,
                          int16_t tx_pin, mesh::PacketManager *mgr,
                          mesh::RTCClock *rtc)
@@ -12,9 +18,10 @@ RS232Bridge::RS232Bridge(NodePrefs *prefs, Stream &serial, int16_t rx_pin,
       _tx_pin(tx_pin) {}
 
 void RS232Bridge::begin() {
+  _initialized = false;
   BRIDGE_DEBUG_PRINTLN("Initializing at %d baud...\n", _prefs->bridge_baud);
 #if defined(ESP32)
-  ((HardwareSerial *)_serial)->setPins(_rx_pin, _tx_pin);
+  if (!((HardwareSerial *)_serial)->setPins(_rx_pin, _tx_pin)) return;
 #elif defined(NRF52_PLATFORM)
   // Tested with RAK_4631 and T114
   // The Adafruit Uart object may already be active on its variant defaults.
@@ -33,7 +40,11 @@ void RS232Bridge::begin() {
   ((HardwareSerial *)_serial)->begin(_prefs->bridge_baud);
 
   // Update bridge state
+#if defined(ESP32)
+  _initialized = static_cast<bool>(*static_cast<HardwareSerial *>(_serial));
+#else
   _initialized = true;
+#endif
 }
 
 void RS232Bridge::end() {

@@ -3,16 +3,22 @@
 #include "FirmwareInfo.h"
 
 // Device-side accessor for the running firmware's own image (to read its EndF trailer).
-// Per-platform: ESP32 memory-maps the running app partition; other platforms TBD (nRF52 uses the
-// bootloader-apply path, so its app-region wiring lands with that work). Not compiled on the native
-// host - the portable scan logic in FirmwareInfo.{h,cpp} is what gets unit-tested there.
+// ESP32 reads the running A/B app partition; nRF52 reads its memory-mapped app
+// region. The portable scan logic in FirmwareInfo.{h,cpp} is host-testable.
 
 namespace mesh {
 namespace ota {
 
 // Locate this firmware's EndF trailer in its own flash image. Returns false if unsupported on this
 // platform or no valid EndF is present (e.g. firmware built without the EndF build hook).
+// ESP32 caches successful metadata for this boot while the running partition address/size match;
+// missing partitions, changed geometry and read failures are never cached. OTA writes inactive flash.
 bool ota_self_firmware(SelfFwInfo& out);
+
+// Display-only snapshot for status/stats polling. nRF52 caches successful, body-verified metadata
+// for this boot while the app base and staging ceiling match; invalid geometry or failed scans are
+// never cached. Use ota_self_firmware(), not this accessor, for explicit verification or OTA safety.
+bool ota_self_firmware_for_display(SelfFwInfo& out);
 
 // Read `len` bytes of the running firmware image at offset `off` (ESP32: running partition via
 // esp_partition_read; nRF52: memory-mapped app region). false on unsupported platforms.

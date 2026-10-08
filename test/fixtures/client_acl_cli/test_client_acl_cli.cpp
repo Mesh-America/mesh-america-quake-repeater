@@ -2,6 +2,7 @@
 #include <helpers/ClientACLCLI.h>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/LazyPersistence.h>
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -220,12 +221,38 @@ static void actual_role_dispatch_handles_radio_and_local() {
     CHECK(reply[0] == 0);
     CHECK(mesh::console.output.find("ACL:") == 0);
     CHECK(mesh::console.output.find(row(admin)) != std::string::npos);
+    std::string local_output = mesh::console.output;
+    local_output.erase(std::remove(local_output.begin(), local_output.end(), '\r'),
+                       local_output.end());
+    CHECK(local_output == "ACL:\n" + row(admin) + "\n"
+        + row(acl.getClientByIdx(1)) + "\n");
     strcpy(command, "get acl");
     char paged[] = "get acl 1";
     mesh::console.output.clear();
     handler(acl, nullptr, 0, paged, reply);
     CHECK(mesh::console.output.empty());
     CHECK(reply == expected);
+  }
+
+  // Also exercise every role's local full-table listing, not just remote pages.
+  // The real extracted helper must emit every active key, skip deleted entries,
+  // and never include the secret fields stored alongside ACL public identities.
+  ClientACL full;
+  full.load(&fs, self);
+  std::string expected_local = "ACL:\n";
+  for (unsigned i = 0; i < MAX_CLIENTS; ++i) {
+    auto* client = add(full, i, i % 7 == 0 ? 0 : PERM_ACL_ADMIN);
+    if (client->permissions) expected_local += row(client) + "\n";
+  }
+  for (auto handler : {repeaterCommand, roomCommand, sensorCommand}) {
+    char command[] = "get acl", reply[160] = {};
+    mesh::console.output.clear();
+    handler(full, nullptr, 0, command, reply);
+    CHECK(reply[0] == 0);
+    std::string local_output = mesh::console.output;
+    local_output.erase(std::remove(local_output.begin(), local_output.end(), '\r'),
+                       local_output.end());
+    CHECK(local_output == expected_local);
   }
 }
 

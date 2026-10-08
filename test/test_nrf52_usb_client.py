@@ -31,6 +31,14 @@ HARNESS = r'''
 static bool mounted = true, dtr[2] = {false, false}, dfu = false;
 static uint32_t now_ms = 100, rx_count = 0, tx_count = 0;
 static unsigned rx_flushes = 0, tx_clears = 0, log_edges = 0;
+// Model the endpoint separately from the software FIFO. A FIFO clear must
+// leave an armed packet intact; only a real detach + enumeration retires it.
+static bool armed_in[2] = {false, false}, attached = true;
+static unsigned detaches = 0, attaches = 0;
+struct Registers { unsigned USBPULLUP = 1; } registers;
+#define NRF_USBD (&registers)
+static void __ISB() {}
+static void __DSB() {}
 static bool close_during_rx_sample = false;
 static uint32_t millis() { return now_ms; }
 static bool tud_mounted() { return mounted; }
@@ -46,6 +54,11 @@ static uint32_t tud_cdc_n_available(uint8_t) {
 }
 static void tud_cdc_n_read_flush(uint8_t) { ++rx_flushes; rx_count = 0; }
 static uint32_t tud_cdc_n_write_clear(uint8_t) { ++tx_clears; tx_count = 0; return 0; }
+static bool mesh_tud_cdc_n_tx_pending(uint8_t n) { return armed_in[n]; }
+struct UsbDevice {
+  void detach() { ++detaches; attached = false; registers.USBPULLUP = 0; }
+  void attach() { ++attaches; attached = true; registers.USBPULLUP = 1; }
+} TinyUSBDevice;
 static uint32_t tud_cdc_n_write_available(uint8_t) { return 64 - tx_count; }
 static uint32_t tud_cdc_n_write(uint8_t, const void*, uint32_t size) {
   const auto count = std::min(size, 64 - tx_count); tx_count += count; return count;
@@ -55,6 +68,16 @@ static uint32_t baud = 115200;
 static void tud_cdc_get_line_coding(cdc_line_coding_t* coding) { coding->bit_rate = baud; }
 static void TinyUSB_Port_EnterDFU() { dfu = true; }
 namespace mesh {
+static std::atomic<bool> usb_logging_tx_waiting{false};
+#if defined(USE_TINYUSB)
+static bool usb_logging_watchdog_detached = false;
+static uint32_t usb_logging_watchdog_attach_at = 0;
+#endif
+static bool isUsbLoggingEnabled() { return true; }
+static bool isUsbLoggingPacketStream() { return false; }
+@DEDICATED@
+static void clearUsbLoggingClientActivity() {}
+@ATTEMPT@
 @GATES@
 static uint32_t primary_usb_terminal_taken_reset_generation = 0;
 @WRITE@
@@ -144,6 +167,35 @@ int main() {
   // No write waits when the FIFO is full, including with DTR low.
   tx_count = 64;
   assert(mesh::writeTinyUsbCdcOnce(nullptr, bytes, 4) == 0);
+  // A previously submitted IN packet survives FIFO clearing. Quarantine the
+  // entire device immediately, but never wait on the unread endpoint.
+  tx_count = 4; armed_in[0] = true;
+  rx_count = 4;
+  assert(mesh::isUsbCompanionClientConnected());
+  line(false);
+  assert(tx_count == 0 && armed_in[0] && registers.USBPULLUP == 0);
+  assert(attached && detaches == 0); // callback cannot enqueue a stack event
+  assert(!mesh::isUsbCompanionClientConnected());
+  assert(mesh::writeTinyUsbCdcOnce(nullptr, bytes, 4) == 0);
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(!attached && detaches == 1); // application loop performs stack detach
+  // Repeated control callbacks cannot cause a detach/attach storm.
+  meshTinyUsbCdcLineCodingChanged(0);
+  line(false);
+  assert(detaches == 1);
+  now_ms += 100;
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(attaches == 0); // owner has not consumed unplug yet
+  mounted = false; armed_in[0] = false; dtr[0] = false;
+  meshTinyUsbDeviceSessionBoundary();
+  mesh::serviceNrf52UsbSessionReenumeration();
+  assert(attaches == 1 && attached);
+  mounted = true;
+  meshTinyUsbDeviceSessionBoundary();
+  settle();
+  rx_count = 4;
+  assert(mesh::isUsbCompanionClientConnected());
+  rx_count = 0;
   baud = 1200;
   line(false);
   assert(dfu);
@@ -152,6 +204,7 @@ int main() {
 
 
 class Nrf52UsbClientTest(unittest.TestCase):
+
     def test_stop_token_reports_shared_logging_conflict(self):
         main = (ROOT / 'examples/companion_radio/main.cpp').read_text()
         stop = function(main, 'if (strcmp(usb_terminal_line, USB_TERMINAL_STOP_TOKEN) == 0)')
@@ -294,8 +347,11 @@ int main() {
 
     def test_real_usb_callbacks_and_transport_with_both_client_styles(self):
         start = USB.index('static std::atomic<uint32_t> primary_usb_reset_generation')
-        gates = USB[start:USB.index('\n#endif', start)]
+        end_start = USB.index('static void endPrimaryUsbHostSession(', start)
+        gates = USB[start:end_start] + function(USB, 'static void endPrimaryUsbHostSession(')
         source = HARNESS.replace('@GATES@', gates)
+        source = source.replace('@DEDICATED@', function(USB, 'bool hasDedicatedUsbLoggingPort('))
+        source = source.replace('@ATTEMPT@', function(USB, 'static void noteUsbLoggingTxAttempt('))
         for marker, signature in (
             ('@WRITE@', 'static size_t writeTinyUsbCdcOnce('),
             ('@COMPLETE@', 'static void completePrimaryUsbSessionReset('),
@@ -308,10 +364,15 @@ int main() {
         with tempfile.TemporaryDirectory() as directory:
             cpp = Path(directory) / 'usb-client.cpp'
             cpp.write_text(source)
-            for dual in (False, True):
-                with self.subTest(dedicated_logging=dual):
+            for dual, ordinary in ((False, False), (True, False), (False, True)):
+                with self.subTest(dedicated_logging=dual, ordinary_role=ordinary):
                     binary = Path(directory) / ('usb-client-' + str(dual))
                     flags = ['-DMESH_DUAL_CDC_LOGGING=1'] if dual else []
+                    tested_source = source
+                    if ordinary:
+                        flags += ['-DUSE_TINYUSB=1']
+                        tested_source = source.replace('#define ENABLE_USB_INTERFACE 1\n', '')
+                    cpp.write_text(tested_source)
                     subprocess.run(['g++', '-std=c++17', *flags, str(cpp), '-o', str(binary)], check=True)
                     subprocess.run([str(binary)], check=True)
 

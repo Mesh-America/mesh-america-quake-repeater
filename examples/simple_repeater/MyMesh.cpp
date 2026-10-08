@@ -1,6 +1,23 @@
 #include "MyMesh.h"
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/BootFileSystem.h>
+#if defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+    || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))
+#include <WiFi.h>
+#include <esp_wifi.h>
+#endif
+#endif
 #include <helpers/UsbLogging.h>
+#include <helpers/HilStartupTrace.h>
 #include <helpers/FileRead.h>
+#if MESH_ENABLE_TELEMETRY_HISTORY
+#include <helpers/FilePresence.h>
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+#include <helpers/AtomicFileWriter.h>
+#else
+#include <helpers/ContactFileTransaction.h>
+#endif
+#endif
 #include <helpers/radiolib/RadioPowerLimits.h>
 #include <helpers/radiolib/RxBoostedGainDefaults.h>
 #include <algorithm>
@@ -11,6 +28,7 @@
 #include <helpers/NRF52VoltagePolicy.h>
 #endif
 #include <helpers/ClientACLCLI.h>
+#include <helpers/ClientACLResponse.h>
 #include <helpers/ClockSyncUtils.h>
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/ClientPathObservation.h>
@@ -31,6 +49,7 @@
 #ifdef WITH_WEBCONFIG
 #include <WiFi.h>
 #endif
+#include <helpers/OtaChannel.h>
 #if MESH_ENABLE_TELEMETRY_HISTORY && defined(STM32_PLATFORM)
 #include <sys/types.h>
 extern "C" caddr_t _sbrk(int increment);
@@ -707,7 +726,10 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
     memcpy(&reply_data[4], &now, 4);     // include our clock (for easy clock sync, and packet hash uniqueness)
     reply_data[8] = 0;  // features
 #ifdef WITH_RS232_BRIDGE
-    if (isBridgeRunning()) reply_data[8] |= 0x01;  // is bridge, type UART
+    if (isRs232BridgeRunning()) reply_data[8] |= 0x01;  // is bridge, type UART
+#ifdef WITH_ESPNOW_BRIDGE
+    if (isEspNowBridgeRunning()) reply_data[8] |= 0x03;  // ESP-NOW may run alongside UART
+#endif
 #elif WITH_ESPNOW_BRIDGE
     if (isBridgeRunning()) reply_data[8] |= 0x03;  // is bridge, type ESP-NOW
 #endif
@@ -720,7 +742,12 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
   return 0;
 }
 
-int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload, size_t payload_len) {
+int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload, size_t payload_len,
+                          size_t reply_capacity) {
+  if (sender == NULL || payload_len == 0 || reply_capacity < 4) return 0;
+  if (reply_capacity > mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY) {
+    reply_capacity = mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY;
+  }
   // uint32_t now = getRTCClock()->getCurrentTimeUnique();
   // memcpy(reply_data, &now, 4);   // response packets always prefixed with timestamp
   memcpy(reply_data, &sender_timestamp, 4); // reflect sender_timestamp back in response packet (kind of like a 'tag')
@@ -771,12 +798,15 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     memcpy(&reply_data[4], telemetry.getBuffer(), tlen);
     return 4 + tlen; // reply_len
   }
-  if (payload[0] == REQ_TYPE_GET_ACCESS_LIST && sender->isAdmin()) {
+  if (payload[0] == REQ_TYPE_GET_ACCESS_LIST) {
+    if (!sender->isAdmin() || payload_len < 3) return 0;
     uint8_t res1 = payload[1];   // reserved for future  (extra query params)
     uint8_t res2 = payload[2];
     if (res1 == 0 && res2 == 0) {
-      uint8_t ofs = 4;
-      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= sizeof(reply_data) - 4; i++) {
+      size_t ofs = 4;
+      // Legacy ACL replies contain no pagination or total-count field. Keep
+      // the same bounded prefix, but fit the actual encrypted reply route.
+      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= reply_capacity; i++) {
         auto c = acl.getClientByIdx(i);
         if (c->permissions == 0) continue;  // skip deleted entries
         memcpy(&reply_data[ofs], c->id.pub_key, 6); ofs += 6;  // just 6-byte pub_key prefix
@@ -961,15 +991,15 @@ static bool directPathsEqual(const uint8_t* a_path, uint8_t a_len, const uint8_t
   return byte_len == 0 || memcmp(a_path, b_path, byte_len) == 0;
 }
 
-void MyMesh::sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size) {
+bool MyMesh::sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size) {
   TransportKey fallback_scope;
   const TransportKey* fallback_scope_ptr = NULL;
   if (recv_pkt_region != NULL && !recv_pkt_region->isWildcard()
       && region_map.getTransportKeysFor(*recv_pkt_region, &fallback_scope, 1) > 0) {
     fallback_scope_ptr = &fallback_scope;
   }
-  sendClientReplyWithFallbackScope(client, packet, delay_millis, path_hash_size,
-                                   fallback_scope_ptr);
+  return sendClientReplyWithFallbackScope(client, packet, delay_millis, path_hash_size,
+                                          fallback_scope_ptr);
 }
 
 bool MyMesh::sendClientReplyWithFallbackScope(ClientInfo* client, mesh::Packet* packet,
@@ -1027,7 +1057,8 @@ bool MyMesh::floodChannelDataHopApplies(const mesh::Packet* packet) const {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
-  if (_prefs.disable_fwd) return false;
+  if (_prefs.disable_fwd && !(_prefs.trace_when_repeat_off == 1 && packet
+      && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE)) return false;
   if (packet->isRouteFlood()) {
     if (mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max,
                                       _prefs.flood_max_unscoped,
@@ -1089,6 +1120,16 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 #endif
 #endif
   return true;
+}
+
+bool MyMesh::allowPacketTransmit(const mesh::Packet* packet) const {
+  // Forwarded traces have already appended this node's SNR. A locally
+  // originated trace starts with an empty SNR path and is not a relay.
+  // Recheck at egress so a queued relay/retry cannot outlive this opt-in.
+  if (_prefs.disable_fwd && _prefs.trace_when_repeat_off != 1 && packet
+      && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE
+      && packet->path_len > 0) return false;
+  return mesh::Mesh::allowPacketTransmit(packet);
 }
 
 const char *MyMesh::getLogDateTime() {
@@ -1159,19 +1200,25 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_MQTT_BRIDGE
   // MQTT bridge: always feed RX packets - bridge decides based on mqtt.rx setting
   if (mqtt_bridge && mqtt_bridge->isRunning()) mqtt_bridge->onPacketReceived(pkt);
-  #ifdef WITH_ESPNOW_BRIDGE
-  // ESP-NOW follows bridge.source, independently of MQTT's mqtt.rx policy.
-  ESPNowBridge* espnow = &espnow_bridge;
-  if (_prefs.bridge_pkt_src == 1 && espnow && espnow->isRunning()) {
-    espnow->sendPacket(pkt);
-  }
-  #endif
 #elif defined(WITH_BRIDGE)
   // Non-MQTT bridge: use bridge.source setting
   AbstractBridge* active_bridge = activeBridge();
   if (_prefs.bridge_pkt_src == 1 && active_bridge
       && active_bridge->isRunning()) {
     active_bridge->sendPacket(pkt);
+  }
+#endif
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+  // UART output remains independent of MQTT's RX/TX and enabled settings.
+  if (_prefs.bridge_pkt_src == 1 && isRs232BridgeRunning()) {
+    bridge->sendPacket(pkt);
+  }
+#endif
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
+  // ESP-NOW follows bridge.source independently of the other transport's state.
+  if (_prefs.bridge_pkt_src == 1 && espnow_bridge.isRunning()) {
+    espnow_bridge.sendPacket(pkt);
   }
 #endif
 
@@ -1211,18 +1258,23 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #ifdef WITH_MQTT_BRIDGE
   // MQTT bridge: always feed TX packets - bridge decides based on mqtt.tx setting
   if (mqtt_bridge && mqtt_bridge->isRunning()) mqtt_bridge->sendPacket(pkt);
-  #ifdef WITH_ESPNOW_BRIDGE
-  ESPNowBridge* espnow = &espnow_bridge;
-  if (_prefs.bridge_pkt_src == 0 && espnow && espnow->isRunning()) {
-    espnow->sendPacket(pkt);
-  }
-  #endif
 #elif defined(WITH_BRIDGE)
   // Non-MQTT bridge: use bridge.source setting
   AbstractBridge* active_bridge = activeBridge();
   if (_prefs.bridge_pkt_src == 0 && active_bridge
       && active_bridge->isRunning()) {
     active_bridge->sendPacket(pkt);
+  }
+#endif
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+  if (_prefs.bridge_pkt_src == 0 && isRs232BridgeRunning()) {
+    bridge->sendPacket(pkt);
+  }
+#endif
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
+  if (_prefs.bridge_pkt_src == 0 && espnow_bridge.isRunning()) {
+    espnow_bridge.sendPacket(pkt);
   }
 #endif
 
@@ -1467,7 +1519,9 @@ uint32_t MyMesh::getDirectRetryAttemptStepMillis() const {
 }
 
 bool MyMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash, uint8_t next_hop_hash_len) const {
-  (void)packet;
+  if (_prefs.disable_fwd && _prefs.trace_when_repeat_off != 1 && packet
+      && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE
+      && packet->path_len > 0) return false;
   if (!_prefs.direct_retry_enabled) {
     return false;
   }
@@ -2470,7 +2524,7 @@ void MyMesh::printRecentRepeatersSerial() {
     return;
   }
 
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   if (hasPendingSerialOutput()) {
     mesh::usbConsolePort().printf("Err - USB output busy\r\n");
     return;
@@ -2809,25 +2863,30 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
 #endif
 
   if (type == PAYLOAD_TYPE_REQ) { // request (from a Known admin client!)
+    if (len < 5) return; // timestamp plus request type must be present
     uint32_t timestamp;
     memcpy(&timestamp, data, 4);
 
     if (timestamp > client->last_timestamp) { // prevent replay attacks
-      int reply_len = handleRequest(client, timestamp, &data[4], len - 4);
+      const size_t reply_capacity =
+          mesh::clientACLReplyCapacity(packet->isRouteFlood(), packet->path_len);
+      int reply_len = handleRequest(client, timestamp, &data[4], len - 4, reply_capacity);
       if (reply_len == 0) return; // invalid command
 
-      client->last_timestamp = timestamp;
-      client->last_activity = getRTCClock()->getCurrentTime();
-
+      bool reply_queued = false;
       if (packet->isRouteFlood()) {
         // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
         mesh::Packet *path = createPathReturn(client->id, secret, packet->path, packet->path_len,
                                               PAYLOAD_TYPE_RESPONSE, reply_data, reply_len);
-        if (path) sendFloodReply(path, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+        if (path) reply_queued = sendFloodReply(path, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
       } else {
         mesh::Packet *reply =
             createDatagram(PAYLOAD_TYPE_RESPONSE, client->id, secret, reply_data, reply_len);
-        sendClientReply(client, reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+        reply_queued = sendClientReply(client, reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+      }
+      if (reply_queued) {
+        client->last_timestamp = timestamp;
+        client->last_activity = getRTCClock()->getCurrentTime();
       }
     } else {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");
@@ -3343,7 +3402,10 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
 
 void MyMesh::onControlDataRecv(mesh::Packet* packet) {
   uint8_t type = packet->payload[0] & 0xF0;    // just test upper 4 bits
-  if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6 && discover_limiter.allow(rtc_clock.getCurrentTime())) {
+  if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6
+      && discover_limiter.allow(rtc_clock.getCurrentTime())
+      && !isHiddenNode()   // this node wishes to NOT be discoverable
+  ) {
     int i = 1;
     uint8_t  filter = packet->payload[i++];
     uint32_t tag;
@@ -3426,10 +3488,16 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
       , espnow_bridge(&_prefs, _mgr, &rtc)
       , shared_espnow_retry_at(0)
   #endif
-#elif defined(WITH_RS232_BRIDGE)
+#endif
+#if defined(WITH_RS232_BRIDGE)
       , bridge(nullptr)
-#elif defined(WITH_ESPNOW_BRIDGE)
+  #if defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+      , espnow_bridge(&_prefs, _mgr, &rtc)
+      , shared_espnow_retry_at(0)
+  #endif
+#elif defined(WITH_ESPNOW_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
       , bridge(&_prefs, _mgr, &rtc)
+      , shared_espnow_retry_at(0)
 #endif
 {
   // Global constructors run before setup(), while the heap is still
@@ -3505,6 +3573,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #endif
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
   flood_policy_has_embedded_sections = false;
+  flood_policy_capacity_limited = false;
   flood_channel_data_rule_slot = 0xFF;
   flood_channel_data_rule_max_hops = FLOOD_CHANNEL_HOPS_ALL;
 #endif
@@ -3529,6 +3598,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   clock_sync_next_attempt_uptime = CLOCK_SYNC_STARTUP_DELAY_MILLIS;
 
 #if MESH_ENABLE_TELEMETRY_HISTORY
+  telemetry_history_tx_prefs_healthy = false;
   telemetry_history_tx_enabled = false;
   telemetry_history_tx_interval_days = TELEMETRY_HISTORY_TX_DEFAULT_DAYS;
   telemetry_history_tx_pending = 0;
@@ -3610,12 +3680,28 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   // bridge defaults
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
-    && !defined(RS232_BRIDGE_DEFAULT_ON)
+    && !defined(RS232_BRIDGE_DEFAULT_ON) && !defined(WITH_MQTT_BRIDGE)
   _prefs.bridge_enabled = 0;    // normal repeater until explicitly enabled
 #else
   _prefs.bridge_enabled = 1;    // enabled
 #endif
+#if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
+    && !defined(RS232_BRIDGE_DEFAULT_ON)
+  _prefs.rs232_bridge_enabled = 0;
+#elif defined(WITH_RS232_BRIDGE)
+  _prefs.rs232_bridge_enabled = 1;
+#endif
+#if defined(ESPNOW_BRIDGE_MERGED) && !defined(ESPNOW_BRIDGE_DEFAULT_ON)
+  _prefs.espnow_bridge_enabled = 0;  // merged normal repeater until explicitly enabled
+#else
   _prefs.espnow_bridge_enabled = 1;  // preserves the Full image's former combined default
+#endif
+#if defined(WITH_ESPNOW_BRIDGE) && defined(ESPNOW_BRIDGE_MERGED) \
+    && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+  // The sole transport keeps its legacy primary lifecycle, while merged
+  // profiles persist the same explicit ESP-NOW intent as combined profiles.
+  _prefs.bridge_enabled = _prefs.espnow_bridge_enabled;
+#endif
   _prefs.bridge_delay   = 500;  // milliseconds
   _prefs.bridge_pkt_src = 1;    // logRx (RX packets)
   _prefs.bridge_baud = 115200;  // baud rate
@@ -3673,13 +3759,18 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 // OTA mesh-integration (receive/begin/loop) is centralized in mesh::Mesh - no per-example wiring.
 
 void MyMesh::begin(FILESYSTEM *fs) {
+  mesh::hilStartupTrace("mesh_dispatcher_begin");
   mesh::Mesh::begin();   // also starts OTA (ota_ctx().begin) for all roles
+  mesh::hilStartupTrace("mesh_dispatcher_ready");
   _fs = fs;
 #if ENV_INCLUDE_D7S
   restoreClockFloor();  // before anything reads the time
 #endif
   // load persisted prefs
+  mesh::hilStartupTrace("mesh_prefs_begin");
   _cli.loadPrefs(_fs);
+  mesh::hilStartupTrace("mesh_prefs_ready");
+  mesh::hilStartupTrace("mesh_management_begin");
   _cli.beginManagement(*this, _fs);
 #if ENV_INCLUDE_D7S
   loadQuakePrefs();
@@ -3687,6 +3778,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if MESH_ENABLE_TELEMETRY_HISTORY
   loadTelemetryHistoryTxPrefs();
 #endif
+  mesh::hilStartupTrace("mesh_management_ready");
 
 #if defined(SIM_WIFI_SSID) && defined(WITH_MQTT_BRIDGE)
   // Emulator builds (Wokwi) boot with fresh NVS every run. Seed WiFi so the
@@ -3707,9 +3799,12 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
 #endif
 
+  mesh::hilStartupTrace("mesh_acl_begin");
   acl.load(_fs, self_id);
+  mesh::hilStartupTrace("mesh_acl_ready");
   // TODO: key_store.begin();
   region_map.load(_fs);
+  mesh::hilStartupTrace("mesh_regions_ready");
 #if !defined(PORTABLE_MQTT_OBSERVER)
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
   bool flood_filters_loaded = loadFloodPacketFilters();
@@ -3728,6 +3823,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   loadClockSyncPrefs();
 #endif
 #endif
+  mesh::hilStartupTrace("mesh_filters_ready");
 
   // establish default-scope
   {
@@ -3749,6 +3845,11 @@ void MyMesh::begin(FILESYSTEM *fs) {
     }
   }
 
+#if defined(ESP32_PLATFORM)
+  // Bridge/WebConfig startup can create tasks that read or write this FS.
+  mesh::endEsp32BootFileInventory();
+#endif
+  mesh::hilStartupTrace("mesh_bridge_begin");
 #if defined(WITH_BRIDGE)
   if (_prefs.bridge_enabled) {
 #ifdef WITH_MQTT_BRIDGE
@@ -3761,10 +3862,13 @@ void MyMesh::begin(FILESYSTEM *fs) {
     node_info.cr = &_prefs.cr;
     node_info.repeat_flag = &_prefs.disable_fwd;
     node_info.repeat_when_nonzero = false;
+#ifdef WITH_WEBCONFIG
+    node_info.canonical_wifi = true;
+#endif
     mqtt_bridge = new MQTTBridge(node_info, _cli.getObserverPrefs(),
                                  getRTCClock(), &self_id);
 #endif
-#ifdef WITH_RS232_BRIDGE
+#if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
     if (!bridge) {
       bridge = createRS232Bridge();
     }
@@ -3773,7 +3877,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
       // partial object/GPS ownership. Advertisements and bridge.running report
       // the actual stopped state rather than the saved preference.
       MESH_DEBUG_PRINTLN("RS232 bridge configured on but failed to start");
-      if (!setBridgeState(false)) {
+      if (!setRs232BridgeState(false)) {
         MESH_DEBUG_PRINTLN(
             "RS232 bridge cleanup failed; UART/GPS ownership remains tracked");
       }
@@ -3819,9 +3923,19 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
 #endif
 
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+  if (rs232BridgeEnabled() && !setRs232BridgeState(true)) {
+    MESH_DEBUG_PRINTLN("RS232 bridge configured on but failed to start");
+    if (!setRs232BridgeState(false)) {
+      MESH_DEBUG_PRINTLN("RS232 bridge cleanup failed; UART/GPS ownership remains tracked");
+    }
+  }
+#endif
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   if (_prefs.espnow_bridge_enabled) setEspNowBridgeState(true);
 #endif
+  mesh::hilStartupTrace("mesh_bridge_ready");
 
   // Wire fault-alert reporter. begin() is safe regardless of bridge state.
   // Passing `this` as the callbacks lets the reporter resolve a TransportKey
@@ -3832,14 +3946,15 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _alerter.setBridge(mqtt_bridge);
 #endif
 
+  mesh::hilStartupTrace("mesh_webconfig_begin");
 #if defined(WITH_WEBCONFIG) && !defined(WEBCONFIG_NO_AUTO_AP)
   bool start_webui = WebConfigServer::loadEnabled(false);
 #ifdef WITH_MQTT_BRIDGE
   // Preserve the MQTT observer's first-boot setup experience even though the
   // persistent WebUI master switch defaults off on infrastructure roles.
   start_webui = start_webui || (_prefs.bridge_enabled
-      && _cli.getObserverPrefs()->wifi_ssid[0] == 0);
-  if (start_webui && _cli.getObserverPrefs()->wifi_ssid[0] == 0) {
+      && !WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs()));
+  if (start_webui && !WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs())) {
   #if defined(WITH_ESPNOW_BRIDGE)
     if (espnow_bridge.isRunning()) espnow_bridge.end();
   #endif
@@ -3848,11 +3963,13 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #endif
   if (start_webui) {
     char wc_reply[160];
-    startWebConfig(false, wc_reply);
+    startWebConfigImpl(false, wc_reply, true);
     mesh::usbConsolePort().printf("%s\r\n", wc_reply);
   }
 #endif
 
+  mesh::hilStartupTrace("mesh_webconfig_ready");
+  mesh::hilStartupTrace("mesh_radio_begin");
   saved_radio_apply_pending = !applySavedRadioParams();
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
@@ -3863,6 +3980,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
   board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
   setRxPowerSaving(_prefs.rx_powersaving_enabled, _prefs.rx_ps_rx_us, _prefs.rx_ps_sleep_us);
+  mesh::hilStartupTrace("mesh_radio_ready");
 
   board.attachDynamicPrefs(_prefs.getCustom());
 
@@ -3871,6 +3989,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   next_recent_repeater_sweep = futureMillis(RECENT_REPEATER_SWEEP_INTERVAL_MILLIS);
 
 #if ENV_INCLUDE_GPS == 1
+  mesh::hilStartupTrace("mesh_gps_begin");
   applyGpsPrefs();
 #if MESH_ENABLE_TELEMETRY_HISTORY
   if (sensors.getLocationProvider() != NULL) {
@@ -3878,6 +3997,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
     MESH_DEBUG_PRINTLN("Telemetry GPS retention: %u days", (unsigned)gps_days);
   }
 #endif
+  mesh::hilStartupTrace("mesh_gps_ready");
 #endif
 
 #if MESH_ENABLE_TELEMETRY_HISTORY
@@ -3893,6 +4013,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
                        (unsigned)external_voltage_history.storageBytes());
   }
 #endif
+  mesh::hilStartupTrace("mesh_history_ready");
 }
 
 bool MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size) {
@@ -5086,7 +5207,7 @@ void MyMesh::dumpLogFile() {
     return;
   }
 #endif
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   if (hasPendingSerialOutput()) {
     mesh::usbConsolePort().printf("Err - USB output busy\r\n");
     return;
@@ -5110,9 +5231,34 @@ void MyMesh::dumpLogFile() {
 #endif
 }
 
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+void MyMesh::printAclSerial() {
+#if MESH_USB_CONSOLE_COOPERATIVE
+  if (hasPendingSerialOutput()) {
+    mesh::usbConsolePort().printf("Err - USB output busy\r\n");
+    return;
+  }
+  // Reuse the bounded file-output buffer. Command admission prevents overlapping
+  // USB jobs, and session reset cancels the retained row before a new host reads.
+  serial_acl_next = 0;
+  serial_acl_count = acl.getNumClients();
+  serial_acl_header = true;
+  serial_log_pending_size = 0;
+#else
+  mesh::usbConsolePort().printf("ACL:\r\n");
+  for (int i = 0; i < acl.getNumClients(); i++) {
+    auto c = acl.getClientByIdx(i);
+    if (c->permissions == 0) continue;
+    char public_key[PUB_KEY_SIZE * 2 + 1];
+    mesh::Utils::toHex(public_key, c->id.pub_key, PUB_KEY_SIZE);
+    mesh::usbConsolePort().printf("%02X %s\n", c->permissions, public_key);
+  }
+#endif
+}
+
+#if MESH_USB_CONSOLE_COOPERATIVE
 bool MyMesh::hasPendingSerialOutput() const {
-  return serial_log_active || serial_log_eof_pending || serial_recent_next >= 0;
+  return serial_log_active || serial_log_eof_pending || serial_recent_next >= 0
+      || serial_acl_next >= 0;
 }
 
 void MyMesh::cancelPendingSerialOutput() {
@@ -5122,6 +5268,9 @@ void MyMesh::cancelPendingSerialOutput() {
   serial_log_skip_line = false;
   serial_log_remaining = 0;
   serial_log_pending_size = 0;
+  serial_acl_next = -1;
+  serial_acl_count = 0;
+  serial_acl_header = false;
   serial_recent_next = -1;
   serial_recent_count = 0;
   serial_recent_header = false;
@@ -5131,53 +5280,100 @@ void MyMesh::cancelPendingSerialOutput() {
 
 void MyMesh::servicePendingSerialOutput() {
   Stream& console = mesh::usbConsolePort();
+  const auto write_pending = [&]() {
+    const int available = console.availableForWrite();
+    if (available <= 0 || serial_log_pending_size == 0) return;
+    // A low-memory HWCDC setup can have a 256/512-byte ring. Never require a
+    // whole 640-byte stored line to fit that ring: retain and retry its suffix.
+    const size_t attempt = serial_log_pending_size < static_cast<size_t>(available)
+        ? serial_log_pending_size : static_cast<size_t>(available);
+    size_t written = console.write(
+        reinterpret_cast<const uint8_t*>(serial_log_pending), attempt);
+    if (written > attempt) written = attempt;
+    serial_log_pending_size -= written;
+    if (written > 0 && serial_log_pending_size > 0) {
+      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
+    }
+  };
+
+  if (serial_acl_next >= 0) {
+    if (serial_log_pending_size == 0) {
+      if (serial_acl_header) {
+        static const char header[] = "ACL:\r\n";
+        memcpy(serial_log_pending, header, sizeof(header) - 1);
+        serial_log_pending_size = sizeof(header) - 1;
+        serial_acl_header = false;
+      } else {
+        // At most one row per pass; deleted entries can be skipped without
+        // allocating a table-sized response or waiting for USB FIFO space.
+        while (serial_acl_next < serial_acl_count
+            && serial_acl_next < acl.getNumClients()) {
+          auto* client = acl.getClientByIdx(serial_acl_next++);
+          if (!client->permissions) continue;
+          char key[PUB_KEY_SIZE * 2 + 1];
+          mesh::Utils::toHex(key, client->id.pub_key, PUB_KEY_SIZE);
+          serial_log_pending_size = snprintf(serial_log_pending,
+              sizeof(serial_log_pending), "%02X %s\n", client->permissions, key);
+          break;
+        }
+        if (serial_log_pending_size == 0) {
+          serial_acl_next = -1;
+          return;
+        }
+      }
+    }
+    write_pending();
+    return;
+  }
 
   if (serial_recent_next >= 0) {
-    char record[64];
-    int length = 0;
-    const SimpleMeshTables::RecentRepeaterInfo* next_info = nullptr;
-    int next_index = -1;
-    if (serial_recent_header) {
-      length = snprintf(record, sizeof(record), "Recent repeaters (%d):\n",
-                        serial_recent_count);
-    } else if (serial_recent_count == 0) {
-      length = snprintf(record, sizeof(record), "-none-\r\n");
-    } else if (serial_recent_next < serial_recent_count) {
-      const auto* tables = static_cast<const SimpleMeshTables*>(getTables());
-      const auto* info = tables ? tables->getNextRecentRepeaterBySortKey(
-          serial_recent_has_cursor ? &serial_recent_cursor : nullptr,
-          serial_recent_cursor_index, next_index) : nullptr;
-      if (info == nullptr) {
+    if (serial_log_pending_size == 0) {
+      char record[64];
+      int length = 0;
+      int next_index = -1;
+      if (serial_recent_header) {
+        length = snprintf(record, sizeof(record), "Recent repeaters (%d):\n",
+                          serial_recent_count);
+      } else if (serial_recent_count == 0) {
+        length = snprintf(record, sizeof(record), "-none-\r\n");
+      } else if (serial_recent_next < serial_recent_count) {
+        const auto* tables = static_cast<const SimpleMeshTables*>(getTables());
+        const auto* info = tables ? tables->getNextRecentRepeaterBySortKey(
+            serial_recent_has_cursor ? &serial_recent_cursor : nullptr,
+            serial_recent_cursor_index, next_index) : nullptr;
+        if (info == nullptr) {
+          serial_recent_next = -1;
+          return;
+        }
+        char prefix[MAX_ROUTE_HASH_BYTES * 2 + 1];
+        char snr[12];
+        mesh::Utils::toHex(prefix, info->prefix, info->prefix_len);
+        formatLocalSnrX4(snr, sizeof(snr), info->snr_x4);
+        length = snprintf(record, sizeof(record), "%s,%s%s\n", prefix,
+                          snr[0] == '-' ? "" : " ", snr);
+        // Snapshot the row before a short write. Its next pass must retry only
+        // the retained suffix, even if the live recent-repeater table changes.
+        serial_recent_cursor = *info;
+        serial_recent_cursor_index = next_index;
+        serial_recent_has_cursor = true;
+      } else {
         serial_recent_next = -1;
         return;
       }
-      next_info = info;
-      char prefix[MAX_ROUTE_HASH_BYTES * 2 + 1];
-      char snr[12];
-      mesh::Utils::toHex(prefix, info->prefix, info->prefix_len);
-      formatLocalSnrX4(snr, sizeof(snr), info->snr_x4);
-      length = snprintf(record, sizeof(record), "%s,%s%s\n", prefix,
-                        snr[0] == '-' ? "" : " ", snr);
-    } else {
-      serial_recent_next = -1;
-      return;
+      // One bounded row per pass. HWCDC can return a short write even after a
+      // capacity preflight because another diagnostic task shares its TX ring.
+      if (length <= 0 || static_cast<size_t>(length) >= sizeof(record)) {
+        serial_recent_next = -1;
+        return;
+      }
+      memcpy(serial_log_pending, record, length);
+      serial_log_pending_size = static_cast<size_t>(length);
     }
-    // One complete row per pass, admitted atomically only when it fits.
-    if (length <= 0 || static_cast<size_t>(length) >= sizeof(record)) {
-      serial_recent_next = -1;
-      return;
-    }
-    if (console.availableForWrite() < length
-        || console.write(reinterpret_cast<const uint8_t*>(record), length)
-            != static_cast<size_t>(length)) return;
+    write_pending();
+    if (serial_log_pending_size != 0) return;
     if (serial_recent_header) {
       serial_recent_header = false;
     } else {
-      if (next_info != nullptr) {
-        serial_recent_cursor = *next_info;
-        serial_recent_cursor_index = next_index;
-        serial_recent_has_cursor = true;
-      }
       if (serial_recent_count == 0 || ++serial_recent_next >= serial_recent_count) {
         serial_recent_next = -1;
       }
@@ -5187,11 +5383,13 @@ void MyMesh::servicePendingSerialOutput() {
   if (!serial_log_active) {
     // CommonCLI's synchronous EOF is suppressed until the queued dump ends.
     static const char eof[] = "  ->    EOF\r\n";
-    if (serial_log_eof_pending
-        && console.availableForWrite() >= static_cast<int>(sizeof(eof) - 1)
-        && console.write(reinterpret_cast<const uint8_t*>(eof), sizeof(eof) - 1)
-            == sizeof(eof) - 1) {
-      serial_log_eof_pending = false;
+    if (serial_log_eof_pending) {
+      if (serial_log_pending_size == 0) {
+        memcpy(serial_log_pending, eof, sizeof(eof) - 1);
+        serial_log_pending_size = sizeof(eof) - 1;
+      }
+      write_pending();
+      if (serial_log_pending_size == 0) serial_log_eof_pending = false;
     }
     return;
   }
@@ -5243,16 +5441,7 @@ void MyMesh::servicePendingSerialOutput() {
       serial_log_pending[serial_log_pending_size++] = '\n';
     }
   }
-  if (serial_log_pending_size > 0
-      && console.availableForWrite() >= static_cast<int>(serial_log_pending_size)) {
-    size_t written = console.write(
-        reinterpret_cast<const uint8_t*>(serial_log_pending), serial_log_pending_size);
-    if (written > serial_log_pending_size) written = serial_log_pending_size;
-    serial_log_pending_size -= written;
-    if (written > 0 && serial_log_pending_size > 0) {
-      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
-    }
-  }
+  write_pending();
   if (serial_log_remaining == 0 && serial_log_pending_size == 0) {
     serial_log_dump.close();
     serial_log_active = false;
@@ -5935,12 +6124,13 @@ static_assert(PUB_KEY_SIZE == FloodFilterPolicy::CHANNEL_KEY_256_LEN,
 
 bool MyMesh::loadFloodPacketFilters() {
   if (flood_packet_filter_slots == 0) return false;
+  flood_policy_capacity_limited = false;
   if (_fs == NULL) {
     seedDefaultFloodPacketFilters();
     return true;
   }
 
-  enum class FileState : uint8_t { Missing, Valid, Invalid, Unreadable };
+  enum class FileState : uint8_t { Missing, Valid, Invalid, Unreadable, CapacityExceeded };
   auto loadFile = [this](const char* filename) -> FileState {
     if (flood_packet_filters) memset(flood_packet_filters, 0, sizeof(FloodPacketFilterEntry) * flood_packet_filter_slots);
     flood_channel_data_rule_slot = 0xFF;
@@ -5964,11 +6154,22 @@ bool MyMesh::loadFloodPacketFilters() {
   bool version_6 = success && memcmp(magic, "FPF6", sizeof(magic)) == 0;
   bool version_7 = success && memcmp(magic, "FPF7", sizeof(magic)) == 0;
   success = (version_6 || version_7)
-      && file.read(&count, sizeof(count)) == sizeof(count)
-      && FloodFilterPolicy::forwardPersistenceCountSupported(
-          count, flood_packet_filter_slots);
+      && file.read(&count, sizeof(count)) == sizeof(count);
+  // A wider firmware image can write inactive trailing slots. Decode them
+  // through one bounded scratch entry so harmless padding remains compatible.
+  // Counts beyond the rule engine's mask may belong to newer firmware; retain
+  // that file instead of treating an unsupported capacity as corrupt bytes.
+  if (success && !FloodFilterPolicy::forwardPersistenceCountSupported(count, 64)) {
+    file.close();
+    flood_policy_capacity_limited = true;
+    return FileState::CapacityExceeded;
+  }
+  FloodPacketFilterEntry overflow_entry;
+  bool active_overflow = false;
 
   for (int i = 0; success && i < count; i++) {
+    auto& entry = i < flood_packet_filter_slots ? loaded[i] : overflow_entry;
+    if (i >= flood_packet_filter_slots) memset(&entry, 0, sizeof(entry));
     uint8_t active = 0;
     uint8_t suspend_on_temp_radio = 0;
     uint8_t match_blacklisted_path = 0;
@@ -5979,17 +6180,17 @@ bool MyMesh::loadFloodPacketFilters() {
     uint8_t stop_on_match = 0;
     uint8_t stored_rule_channel = 0;
     success = file.read(&active, sizeof(active)) == sizeof(active);
-    success = success && file.read(&loaded[i].payload_type, sizeof(loaded[i].payload_type)) == sizeof(loaded[i].payload_type);
-    success = success && file.read(&loaded[i].min_hops, sizeof(loaded[i].min_hops)) == sizeof(loaded[i].min_hops);
-    success = success && file.read(&loaded[i].max_hops, sizeof(loaded[i].max_hops)) == sizeof(loaded[i].max_hops);
+    success = success && file.read(&entry.payload_type, sizeof(entry.payload_type)) == sizeof(entry.payload_type);
+    success = success && file.read(&entry.min_hops, sizeof(entry.min_hops)) == sizeof(entry.min_hops);
+    success = success && file.read(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops);
     success = success && file.read(&suspend_on_temp_radio,
                                     sizeof(suspend_on_temp_radio))
         == sizeof(suspend_on_temp_radio);
-    success = success && file.read((uint8_t*)loaded[i].scope_name,
-                                    sizeof(loaded[i].scope_name))
-        == sizeof(loaded[i].scope_name);
+    success = success && file.read((uint8_t*)entry.scope_name,
+                                    sizeof(entry.scope_name))
+        == sizeof(entry.scope_name);
     success = success
-        && memchr(loaded[i].scope_name, 0, sizeof(loaded[i].scope_name)) != NULL;
+        && memchr(entry.scope_name, 0, sizeof(entry.scope_name)) != NULL;
     success = success && file.read(&match_blacklisted_path,
                                     sizeof(match_blacklisted_path))
         == sizeof(match_blacklisted_path);
@@ -6000,36 +6201,36 @@ bool MyMesh::loadFloodPacketFilters() {
                                     sizeof(scope_uses_slow_timing))
         == sizeof(scope_uses_slow_timing);
     if (success && version_7) {
-      success = file.read(&loaded[i].incoming_scope_kind,
-                          sizeof(loaded[i].incoming_scope_kind))
-          == sizeof(loaded[i].incoming_scope_kind);
+      success = file.read(&entry.incoming_scope_kind,
+                          sizeof(entry.incoming_scope_kind))
+          == sizeof(entry.incoming_scope_kind);
       success = success
-          && file.read((uint8_t*)loaded[i].incoming_scope_name,
-                       sizeof(loaded[i].incoming_scope_name))
-              == sizeof(loaded[i].incoming_scope_name);
+          && file.read((uint8_t*)entry.incoming_scope_name,
+                       sizeof(entry.incoming_scope_name))
+              == sizeof(entry.incoming_scope_name);
       success = success
           && file.read(&stored_rule_channel,
                        sizeof(stored_rule_channel))
               == sizeof(stored_rule_channel);
       success = success
-          && file.read(loaded[i].channel_secret,
-                       sizeof(loaded[i].channel_secret))
-              == sizeof(loaded[i].channel_secret);
+          && file.read(entry.channel_secret,
+                       sizeof(entry.channel_secret))
+              == sizeof(entry.channel_secret);
       success = success
-          && file.read((uint8_t*)loaded[i].channel_name,
-                       sizeof(loaded[i].channel_name))
-              == sizeof(loaded[i].channel_name);
+          && file.read((uint8_t*)entry.channel_name,
+                       sizeof(entry.channel_name))
+              == sizeof(entry.channel_name);
       success = success
-          && file.read(&loaded[i].path_hash_size,
-                       sizeof(loaded[i].path_hash_size))
-              == sizeof(loaded[i].path_hash_size);
+          && file.read(&entry.path_hash_size,
+                       sizeof(entry.path_hash_size))
+              == sizeof(entry.path_hash_size);
       success = success
-          && file.read(&loaded[i].path_hops,
-                       sizeof(loaded[i].path_hops))
-              == sizeof(loaded[i].path_hops);
+          && file.read(&entry.path_hops,
+                       sizeof(entry.path_hops))
+              == sizeof(entry.path_hops);
       success = success
-          && file.read(loaded[i].path, sizeof(loaded[i].path))
-              == sizeof(loaded[i].path);
+          && file.read(entry.path, sizeof(entry.path))
+              == sizeof(entry.path);
       success = success
           && file.read(&drop_on_match, sizeof(drop_on_match))
               == sizeof(drop_on_match);
@@ -6037,45 +6238,45 @@ bool MyMesh::loadFloodPacketFilters() {
           && file.read(&rate_limit_enabled, sizeof(rate_limit_enabled))
               == sizeof(rate_limit_enabled);
       success = success
-          && file.read((uint8_t*)&loaded[i].rate_per_minute,
-                       sizeof(loaded[i].rate_per_minute))
-              == sizeof(loaded[i].rate_per_minute);
+          && file.read((uint8_t*)&entry.rate_per_minute,
+                       sizeof(entry.rate_per_minute))
+              == sizeof(entry.rate_per_minute);
       success = success
-          && file.read((uint8_t*)loaded[i].target_region_name,
-                       sizeof(loaded[i].target_region_name))
-              == sizeof(loaded[i].target_region_name);
+          && file.read((uint8_t*)entry.target_region_name,
+                       sizeof(entry.target_region_name))
+              == sizeof(entry.target_region_name);
       success = success
-          && file.read(&loaded[i].priority, sizeof(loaded[i].priority))
-              == sizeof(loaded[i].priority);
+          && file.read(&entry.priority, sizeof(entry.priority))
+              == sizeof(entry.priority);
       success = success
           && file.read(&stop_on_match, sizeof(stop_on_match))
               == sizeof(stop_on_match);
     } else {
-      loaded[i].incoming_scope_kind = scope_requires_region_match
+      entry.incoming_scope_kind = scope_requires_region_match
           ? FloodFilterPolicy::RULE_IN_ALLOWED
           : FloodFilterPolicy::RULE_IN_ANY;
-      drop_on_match = loaded[i].scope_name[0] == 0 ? 1 : 0;
+      drop_on_match = entry.scope_name[0] == 0 ? 1 : 0;
     }
     if (success && version_7) {
       success = FloodFilterPolicy::decodeStoredRuleChannel(
-          stored_rule_channel, loaded[i].channel_key_len,
-          loaded[i].retry_on_match);
+          stored_rule_channel, entry.channel_key_len,
+          entry.retry_on_match);
     } else {
-      loaded[i].retry_on_match = false;
+      entry.retry_on_match = false;
     }
     if (version_7) {
       success = success && FloodFilterPolicy::decodeStoredRuleActive(
-          active, loaded[i].active, loaded[i].transport_modes);
+          active, entry.active, entry.transport_modes);
     } else {
-      loaded[i].active = active != 0;
+      entry.active = active != 0;
       success = success && active <= 1;
     }
-    loaded[i].suspend_on_temp_radio = suspend_on_temp_radio != 0;
-    loaded[i].match_blacklisted_path = match_blacklisted_path != 0;
-    loaded[i].scope_uses_slow_timing = scope_uses_slow_timing != 0;
-    loaded[i].drop_on_match = drop_on_match != 0;
-    loaded[i].rate_limit_enabled = rate_limit_enabled != 0;
-    loaded[i].stop_on_match = stop_on_match != 0;
+    entry.suspend_on_temp_radio = suspend_on_temp_radio != 0;
+    entry.match_blacklisted_path = match_blacklisted_path != 0;
+    entry.scope_uses_slow_timing = scope_uses_slow_timing != 0;
+    entry.drop_on_match = drop_on_match != 0;
+    entry.rate_limit_enabled = rate_limit_enabled != 0;
+    entry.stop_on_match = stop_on_match != 0;
     if (success && (suspend_on_temp_radio > 1
         || match_blacklisted_path > 1 || scope_requires_region_match > 1
         || scope_uses_slow_timing > 1 || drop_on_match > 1
@@ -6083,105 +6284,116 @@ bool MyMesh::loadFloodPacketFilters() {
       success = false;
     }
     success = success && FloodFilterPolicy::transportActionsSupported(
-        loaded[i].transport_modes, loaded[i].scope_name[0] != 0
-            || loaded[i].target_region_name[0] != 0,
-        loaded[i].retry_on_match, loaded[i].scope_uses_slow_timing);
+        entry.transport_modes, entry.scope_name[0] != 0
+            || entry.target_region_name[0] != 0,
+        entry.retry_on_match, entry.scope_uses_slow_timing);
     if (!success) break;
-    if (!loaded[i].active) {
-      memset(&loaded[i], 0, sizeof(loaded[i]));
+    if (!entry.active) {
+      memset(&entry, 0, sizeof(entry));
       continue;
     }
 
-    bool direct_target = loaded[i].scope_name[0] != 0;
+    bool direct_target = entry.scope_name[0] != 0;
     bool target_name_terminated = memchr(
-        loaded[i].target_region_name, 0,
-        sizeof(loaded[i].target_region_name)) != NULL;
+        entry.target_region_name, 0,
+        sizeof(entry.target_region_name)) != NULL;
     bool region_target = target_name_terminated
-        && loaded[i].target_region_name[0] != 0;
+        && entry.target_region_name[0] != 0;
     bool input_name_terminated = memchr(
-        loaded[i].incoming_scope_name, 0,
-        sizeof(loaded[i].incoming_scope_name)) != NULL;
+        entry.incoming_scope_name, 0,
+        sizeof(entry.incoming_scope_name)) != NULL;
     bool channel_name_terminated = memchr(
-        loaded[i].channel_name, 0, sizeof(loaded[i].channel_name)) != NULL;
-    bool incoming_valid = loaded[i].incoming_scope_kind
+        entry.channel_name, 0, sizeof(entry.channel_name)) != NULL;
+    bool incoming_valid = entry.incoming_scope_kind
         <= FloodFilterPolicy::RULE_IN_REGION;
     if (incoming_valid
-        && loaded[i].incoming_scope_kind == FloodFilterPolicy::RULE_IN_SCOPE) {
+        && entry.incoming_scope_kind == FloodFilterPolicy::RULE_IN_SCOPE) {
       incoming_valid = input_name_terminated
           && isValidStoredFloodFilterScopeName(
-              loaded[i].incoming_scope_name);
+              entry.incoming_scope_name);
     } else if (incoming_valid
-        && loaded[i].incoming_scope_kind == FloodFilterPolicy::RULE_IN_REGION) {
+        && entry.incoming_scope_kind == FloodFilterPolicy::RULE_IN_REGION) {
       incoming_valid = input_name_terminated
           && isValidStoredFloodRuleRegionName(
-              loaded[i].incoming_scope_name);
+              entry.incoming_scope_name);
     } else if (incoming_valid) {
       incoming_valid = input_name_terminated
-          && loaded[i].incoming_scope_name[0] == 0;
+          && entry.incoming_scope_name[0] == 0;
     }
 
     bool channel_valid = FloodFilterPolicy::channelKeyLengthSupported(
-        loaded[i].channel_key_len);
-    if (channel_valid && loaded[i].channel_key_len == 0) {
+        entry.channel_key_len);
+    if (channel_valid && entry.channel_key_len == 0) {
       channel_valid = channel_name_terminated
-          && loaded[i].channel_name[0] == 0;
+          && entry.channel_name[0] == 0;
     } else if (channel_valid
         && FloodFilterPolicy::channelHashOnly(
-            loaded[i].channel_key_len)) {
+            entry.channel_key_len)) {
       channel_valid = channel_name_terminated;
       if (channel_valid) {
-        loaded[i].channel_hash = loaded[i].channel_secret[0];
-        memset(&loaded[i].channel_secret[1], 0,
-               sizeof(loaded[i].channel_secret) - 1);
-        snprintf(loaded[i].channel_name,
-                 sizeof(loaded[i].channel_name), "hash:%02X",
-                 loaded[i].channel_hash);
+        entry.channel_hash = entry.channel_secret[0];
+        memset(&entry.channel_secret[1], 0,
+               sizeof(entry.channel_secret) - 1);
+        snprintf(entry.channel_name,
+                 sizeof(entry.channel_name), "hash:%02X",
+                 entry.channel_hash);
       }
     } else if (channel_valid) {
       channel_valid = channel_name_terminated
-          && loaded[i].channel_name[0] != 0;
+          && entry.channel_name[0] != 0;
       if (channel_valid) {
-        mesh::Utils::sha256(&loaded[i].channel_hash,
-                            sizeof(loaded[i].channel_hash),
-                            loaded[i].channel_secret,
-                            loaded[i].channel_key_len);
+        mesh::Utils::sha256(&entry.channel_hash,
+                            sizeof(entry.channel_hash),
+                            entry.channel_secret,
+                            entry.channel_key_len);
       }
     }
-    if (channel_valid && loaded[i].channel_key_len != 0) {
-      channel_valid = loaded[i].payload_type == FLOOD_PACKET_FILTER_ANY_TYPE
-          || loaded[i].payload_type == PAYLOAD_TYPE_GRP_TXT
-          || loaded[i].payload_type == PAYLOAD_TYPE_GRP_DATA;
+    if (channel_valid && entry.channel_key_len != 0) {
+      channel_valid = entry.payload_type == FLOOD_PACKET_FILTER_ANY_TYPE
+          || entry.payload_type == PAYLOAD_TYPE_GRP_TXT
+          || entry.payload_type == PAYLOAD_TYPE_GRP_DATA;
     }
 
     bool path_valid = FloodFilterPolicy::pathMatcherValid(
-        loaded[i].path_hash_size, loaded[i].path_hops,
-        loaded[i].match_blacklisted_path);
-    bool action_valid = loaded[i].drop_on_match || direct_target
-        || region_target || loaded[i].rate_limit_enabled
-        || loaded[i].stop_on_match || loaded[i].retry_on_match;
-    if (!((loaded[i].payload_type <= PH_TYPE_MASK
-              || loaded[i].payload_type == FLOOD_PACKET_FILTER_ANY_TYPE)
-          && loaded[i].min_hops <= loaded[i].max_hops
-          && loaded[i].max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS
+        entry.path_hash_size, entry.path_hops,
+        entry.match_blacklisted_path);
+    bool action_valid = entry.drop_on_match || direct_target
+        || region_target || entry.rate_limit_enabled
+        || entry.stop_on_match || entry.retry_on_match;
+    if (!((entry.payload_type <= PH_TYPE_MASK
+              || entry.payload_type == FLOOD_PACKET_FILTER_ANY_TYPE)
+          && entry.min_hops <= entry.max_hops
+          && entry.max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS
           && (!direct_target
-              || isValidStoredFloodFilterScopeName(loaded[i].scope_name))
+              || isValidStoredFloodFilterScopeName(entry.scope_name))
           && target_name_terminated
           && (!region_target
               || isValidStoredFloodRuleRegionName(
-                  loaded[i].target_region_name))
+                  entry.target_region_name))
           && !(direct_target && region_target)
-          && !(loaded[i].drop_on_match && (direct_target || region_target))
-          && !(loaded[i].drop_on_match && loaded[i].rate_limit_enabled)
-          && !(loaded[i].drop_on_match && loaded[i].retry_on_match)
-          && (!loaded[i].rate_limit_enabled
-              || loaded[i].rate_per_minute
+          && !(entry.drop_on_match && (direct_target || region_target))
+          && !(entry.drop_on_match && entry.rate_limit_enabled)
+          && !(entry.drop_on_match && entry.retry_on_match)
+          && (!entry.rate_limit_enabled
+              || entry.rate_per_minute
                   < FLOOD_GROUP_MODERATION_RATE_UNLIMITED)
-          && (!loaded[i].scope_uses_slow_timing
+          && (!entry.scope_uses_slow_timing
               || direct_target || region_target)
           && incoming_valid && channel_valid && path_valid
           && action_valid)) {
       success = false;
     }
+    if (success && i >= flood_packet_filter_slots) active_overflow = true;
+  }
+
+  if (success && active_overflow) {
+    // Do not activate only part of an operator's policy or discard the stored
+    // transaction. A larger-capacity image can read it without data loss.
+    memset(flood_packet_filters, 0,
+           sizeof(FloodPacketFilterEntry) * flood_packet_filter_slots);
+    file.close();
+    flood_policy_capacity_limited = true;
+    return FileState::CapacityExceeded;
   }
 
   // FPF7 keeps the forwarding rows byte-compatible with the room-server
@@ -6292,6 +6504,7 @@ bool MyMesh::loadFloodPacketFilters() {
     if (success && file.available() != 0) success = false;
     if (success && compatibility_slot != 0xFF) {
       success = compatibility_slot < count
+          && compatibility_slot < flood_packet_filter_slots
           && isFloodChannelDataRule(loaded[compatibility_slot])
           && loaded[compatibility_slot].min_hops
               == (compatibility_max_hops == FLOOD_CHANNEL_HOPS_ALL
@@ -6321,6 +6534,7 @@ bool MyMesh::loadFloodPacketFilters() {
   };
 
   FileState primary = loadFile(FLOOD_PACKET_FILTER_FILE);
+  if (primary == FileState::CapacityExceeded) return false;
   if (primary == FileState::Valid) {
     // A valid primary is already committed. Transaction remnants are stale.
     if (_fs->exists(FLOOD_PACKET_FILTER_TEMP_FILE))
@@ -6336,6 +6550,7 @@ bool MyMesh::loadFloodPacketFilters() {
   }
 
   FileState temp = loadFile(FLOOD_PACKET_FILTER_TEMP_FILE);
+  if (temp == FileState::CapacityExceeded) return false;
   if (temp == FileState::Valid) {
     // A complete temp is the newest transaction image. Never destroy an
     // unreadable primary, but still use the verified temp in RAM this boot.
@@ -6353,6 +6568,7 @@ bool MyMesh::loadFloodPacketFilters() {
   }
 
   FileState backup = loadFile(FLOOD_PACKET_FILTER_BACKUP_FILE);
+  if (backup == FileState::CapacityExceeded) return false;
   if (backup == FileState::Valid) {
     if (primary != FileState::Unreadable) {
       if (primary == FileState::Invalid)
@@ -6734,6 +6950,7 @@ bool MyMesh::migrateLegacyFloodChannelBlocks() {
 bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
                                     bool empty_forward_phase) {
   if (_fs == NULL) return false;
+  if (flood_policy_capacity_limited) return false;
   // Without a rule table there is nothing to persist. Writing the file anyway
   // would replace the operator's stored ruleset with an empty one.
   if (flood_packet_filter_slots == 0) return false;
@@ -7522,6 +7739,12 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
 }
 
 void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compact) const {
+  if (flood_policy_capacity_limited) {
+    snprintf(reply, 160,
+             "Err - saved rules exceed this image's %u slots; install an image with more rule slots",
+             (unsigned)flood_packet_filter_slots);
+    return;
+  }
   const char* selector = skipFloodFilterSpaces(args);
   if (*selector == '.') selector = skipFloodFilterSpaces(selector + 1);
   if (*selector != 0) {
@@ -10726,7 +10949,34 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   }
 }
 
+void MyMesh::suspendUnconfiguredSetupBridges() {
+#if defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
+#ifdef WITH_MQTT_BRIDGE
+  if (WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs())) return;
+#else
+  char ssid[33] = {};
+  WebConfigServer::loadStandaloneWiFi(ssid, sizeof(ssid), nullptr, 0);
+  if (ssid[0]) return;
+#endif
+  _unconfigured_setup_espnow_suspended = true;
+#ifdef WITH_ESPNOW_BRIDGE
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+  if (espnow_bridge.isRunning()) espnow_bridge.end();
+#else
+  if (bridge.isRunning()) bridge.end();
+#endif
+#endif
+#ifdef WITH_MQTT_BRIDGE
+  if (mqtt_bridge && mqtt_bridge->isRunning()) mqtt_bridge->end();
+#endif
+#endif
+}
+
 bool MyMesh::startWebConfig(bool force_ap, char* reply) {
+  return startWebConfigImpl(force_ap, reply, false);
+}
+
+bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup) {
   if (_cli.getBoard()->isOTAUpdateRunning()) {
     strcpy(reply, "Err: OTA server is running - 'stop ota' first");
     return true;
@@ -10736,32 +10986,74 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
                                            : "Err: webconfig already running");
     return true;
   }
+  if (mesh::wireless::control().blocked(mesh::wireless::WiFi)) {
+    strcpy(reply, "Error: WiFi disabled; use set wifi on or set 2.4ghz on");
+    return true;
+  }
+#ifdef WITH_MQTT_BRIDGE
+  // A live MQTT worker cannot be rolled back immediately if its stop times
+  // out. Require an explicit stop before a portal that would take its radio.
+  if ((isMqttBridgeRunning() || isMqttBridgeStopping()) && (force_ap
+#if defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
+      || !WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs())
+#endif
+     )) {
+    strcpy(reply, isMqttBridgeStopping() ? "Err: MQTT bridge is stopping - retry shortly"
+        : "Err: MQTT bridge is running - 'set bridge off' first");
+    return true;
+  }
+#endif
   if (!_webconfig) {
     void* mqtt_prefs = nullptr;
     bool owns_wifi = true;
 #ifdef WITH_MQTT_BRIDGE
     mqtt_prefs = _cli.getObserverPrefs();
-    owns_wifi = false;
+    owns_wifi = !mqtt_bridge
+        || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping());
 #endif
     _webconfig = new WebConfigServer(this, mqtt_prefs, owns_wifi,
                                      self_id.pub_key, getFirmwareVer(), getBuildDate(), getRole(),
-                                     _cli.getBoard()->getManufacturerName());
+                                     _cli.getBoard()->getManufacturerName(), true);
     if (!_webconfig) {
       strcpy(reply, "Err: not enough memory for webconfig");
       return true;
     }
   }
 
-  if (force_ap) {
+  const bool setup_was_suspended = _unconfigured_setup_espnow_suspended;
+#ifdef WITH_ESPNOW_BRIDGE
+  const bool espnow_was_running = isEspNowBridgeRunning();
+#endif
+  // Only automatic first-boot setup parks the saved default bridges. A manual
+  // WiFi start (including master-radio restoration) must retain explicit ESP-NOW.
+  if (automatic_setup) suspendUnconfiguredSetupBridges();
+
 #ifdef WITH_MQTT_BRIDGE
-    if (mqtt_bridge && mqtt_bridge->isRunning()) {
-      strcpy(reply, "Err: MQTT bridge is running - 'set bridge off' first");
-      return true;
+  _webconfig->updateWiFiOwnership(!mqtt_bridge
+      || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping()));
+#endif
+
+  bool started;
+  if (force_ap) {
+    started = _webconfig->startSetupMode(reply);
+  } else {
+    started = _webconfig->startAutoMode(reply);
+  }
+  if (!started) {
+    // A failed portal must not consume a live operator-started transport.
+    // Restore actual pre-start state, never the saved first-boot defaults.
+    _unconfigured_setup_espnow_suspended = setup_was_suspended;
+    bool restored = true;
+#ifdef WITH_ESPNOW_BRIDGE
+    if (espnow_was_running && !isEspNowBridgeRunning()) {
+      restored = setEspNowBridgeState(true) && restored;
     }
 #endif
-    _webconfig->startSetupMode(reply);
-  } else {
-    _webconfig->startAutoMode(reply);
+    _unconfigured_setup_espnow_suspended = setup_was_suspended;
+    if (!restored) {
+      const size_t used = strlen(reply);
+      snprintf(reply + used, 160 - used, "; bridge resume failed");
+    }
   }
   return true;
 }
@@ -10817,15 +11109,15 @@ bool MyMesh::getWebUIStatus(char* reply) const {
 }
 
 bool MyMesh::getWiFiSSID(char* reply) const {
-  return WebConfigServer::formatWiFiSSID(reply, 160);
+  return WebConfigServer::formatWiFiSSID(reply, 160, canonicalWiFiLegacyPrefs());
 }
 
 bool MyMesh::getWiFiStatus(char* reply) const {
-  return WebConfigServer::formatWiFiStatus(reply, 160);
+  return WebConfigServer::formatWiFiStatus(reply, 160, nullptr, canonicalWiFiLegacyPrefs());
 }
 
 bool MyMesh::getWiFiPowerSave(char* reply) const {
-  return WebConfigServer::formatWiFiPowerSave(reply, 160);
+  return WebConfigServer::formatWiFiPowerSave(reply, 160, canonicalWiFiLegacyPrefs());
 }
 
 bool MyMesh::getWiFiCLI(char* reply) const {
@@ -10833,7 +11125,7 @@ bool MyMesh::getWiFiCLI(char* reply) const {
 }
 
 bool MyMesh::setWiFiSSID(const char* value, char* reply) {
-  if (WebConfigServer::setStandaloneWiFiSSID(value, reply, 160)) {
+  if (WebConfigServer::setStandaloneWiFiSSID(value, reply, 160, canonicalWiFiLegacyPrefs())) {
     const bool was_running = _webconfig && _webconfig->isRunning();
     if (was_running) _webconfig->requestStop();
     if (_webconfig) _webconfig->reloadStandaloneWiFi();
@@ -10845,7 +11137,7 @@ bool MyMesh::setWiFiSSID(const char* value, char* reply) {
 }
 
 bool MyMesh::setWiFiPassword(const char* value, char* reply) {
-  if (WebConfigServer::setStandaloneWiFiPassword(value, reply, 160)) {
+  if (WebConfigServer::setStandaloneWiFiPassword(value, reply, 160, canonicalWiFiLegacyPrefs())) {
     const bool was_running = _webconfig && _webconfig->isRunning();
     if (was_running) _webconfig->requestStop();
     if (_webconfig) _webconfig->reloadStandaloneWiFi();
@@ -10857,7 +11149,7 @@ bool MyMesh::setWiFiPassword(const char* value, char* reply) {
 }
 
 bool MyMesh::setWiFiPowerSave(const char* value, char* reply) {
-  if (WebConfigServer::setStandaloneWiFiPowerSave(value, reply, 160)
+  if (WebConfigServer::setStandaloneWiFiPowerSave(value, reply, 160, canonicalWiFiLegacyPrefs())
       && _webconfig) {
     _webconfig->reloadStandaloneWiFi();
   }
@@ -11514,6 +11806,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       strcpy(reply, "Err - not permitted");
       return;
     }
+    if (!telemetry_history_tx_prefs_healthy) {
+      strcpy(reply, "Err - telemetry.tx prefs unavailable");
+      return;
+    }
     const uint8_t* data_path = NULL;
     uint8_t data_path_len = OUT_PATH_UNKNOWN;
     if (!_cli.getDataTxPath(data_path, data_path_len)) {
@@ -11579,6 +11875,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     if (strcmp(spec, "off") == 0) {
       enable = false;
     } else {
+      // strtoul accepts a minus sign and negates modulo unsigned-long width;
+      // a large negative input can otherwise wrap into a valid day count.
+      if (*spec < '0' || *spec > '9') {
+        strcpy(reply, "Err - use: set telemetry.tx schedule <off|1-30d>");
+        return;
+      }
       char* end = NULL;
       days = strtoul(spec, &end, 10);
       if (end == spec) days = 0;
@@ -11804,7 +12106,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
   if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
 #endif
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   if (sender_timestamp == 0 && serial_log_eof_pending
       && strcmp(reply, "   EOF") == 0) reply[0] = 0;
 #endif
@@ -12111,17 +12413,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       return;
     }
 #endif
-    mesh::usbConsolePort().printf("ACL:\r\n");
-    for (int i = 0; i < acl.getNumClients(); i++) {
-      auto c = acl.getClientByIdx(i);
-      if (c->permissions == 0) continue;  // skip deleted (or guest) entries
-
-      // Admit each line together so concurrent USB diagnostics cannot split
-      // a public key or insert text between its permission prefix and value.
-      char public_key[PUB_KEY_SIZE * 2 + 1];
-      mesh::Utils::toHex(public_key, c->id.pub_key, PUB_KEY_SIZE);
-      mesh::usbConsolePort().printf("%02X %s\n", c->permissions, public_key);
-    }
+    printAclSerial();
     reply[0] = 0;
   } else if (handleClientPathCommand(sender, command, reply)) {
     return;
@@ -12286,7 +12578,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
     if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
 #endif
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
     if (sender_timestamp == 0 && serial_log_eof_pending
         && strcmp(reply, "   EOF") == 0) reply[0] = 0;
 #endif
@@ -12303,7 +12595,7 @@ void MyMesh::loop() {
   // Check radio FIRST to ensure we don't miss incoming packets
   // MQTT processing runs in a separate FreeRTOS task on Core 0, so we don't call bridge.loop() here
   mesh::Mesh::loop();
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   servicePendingSerialOutput();
 #endif
   _cli.loop();
@@ -12349,7 +12641,36 @@ uint8_t MyMesh::resizeTelemetryGpsDays(uint8_t requested_days) {
 }
 #endif
 
+static bool recoverTelemetryHistoryTxPrefs(FILESYSTEM* fs) {
+  if (fs == NULL) return false;
+#if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
+  return mesh::ContactFileTransaction::recover(
+      fs, TELEMETRY_HISTORY_TX_PREFS_FILE, mesh::filePresence<FILESYSTEM>);
+#else
+  return true;
+#endif
+}
+
+static bool readTelemetryHistoryTxPrefsImage(FILESYSTEM* fs,
+                                            uint8_t image[7 + MAX_PATH_SIZE],
+                                            size_t& size) {
+  File file = openFloodSettingsRead(fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
+  if (!file) return false;
+  size = file.size();
+  const bool complete = (size == 6 || size == 7 + MAX_PATH_SIZE)
+      && file.read(image, size) == size;
+  file.close();
+  if (!complete) return false;
+  const bool legacy = size == 7 + MAX_PATH_SIZE;
+  if (memcmp(image, legacy ? "THT2" : "THT3", 4) || image[4] > 1) return false;
+  const uint8_t days = image[legacy ? 6 : 5];
+  if (days < 1 || days > TELEMETRY_HISTORY_TX_MAX_DAYS) return false;
+  return !legacy || (image[5] == OUT_PATH_UNKNOWN ? image[4] == 0
+      : image[5] != OUT_PATH_FORCE_FLOOD && mesh::Packet::isValidPathLen(image[5]));
+}
+
 void MyMesh::loadTelemetryHistoryTxPrefs() {
+  telemetry_history_tx_prefs_healthy = false;
   telemetry_history_tx_enabled = false;
   telemetry_history_tx_interval_days = TELEMETRY_HISTORY_TX_DEFAULT_DAYS;
   telemetry_history_tx_pending = 0;
@@ -12359,60 +12680,59 @@ void MyMesh::loadTelemetryHistoryTxPrefs() {
   telemetry_history_next_tx_uptime = 0;
   telemetry_history_tx_resume_uptime = 0;
 
-  if (_fs == NULL || !_fs->exists(TELEMETRY_HISTORY_TX_PREFS_FILE)) return;
-  File file = openFloodSettingsRead(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
-  if (!file) return;
-
-  uint8_t magic[4] = {};
-  uint8_t enabled = 0;
-  uint8_t path_len = OUT_PATH_UNKNOWN;
-  uint8_t interval_days = TELEMETRY_HISTORY_TX_DEFAULT_DAYS;
-  uint8_t path[MAX_PATH_SIZE] = {};
-  bool valid = file.read(magic, sizeof(magic)) == sizeof(magic);
-  const bool legacy = valid && memcmp(magic, "THT2", sizeof(magic)) == 0;
-  if (legacy) {
-    valid = file.read(&enabled, sizeof(enabled)) == sizeof(enabled)
-        && file.read(&path_len, sizeof(path_len)) == sizeof(path_len)
-        && file.read(&interval_days, sizeof(interval_days)) == sizeof(interval_days)
-        && file.read(path, sizeof(path)) == sizeof(path);
-  } else if (valid && memcmp(magic, "THT3", sizeof(magic)) == 0) {
-    valid = file.read(&enabled, sizeof(enabled)) == sizeof(enabled)
-        && file.read(&interval_days, sizeof(interval_days)) == sizeof(interval_days);
-  } else {
-    valid = false;
-  }
-  file.close();
-
-  valid = valid && enabled <= 1 && interval_days >= 1
-      && interval_days <= TELEMETRY_HISTORY_TX_MAX_DAYS;
-  if (legacy && enabled != 0) {
-    valid = valid && path_len != OUT_PATH_UNKNOWN
-        && path_len != OUT_PATH_FORCE_FLOOD
-        && mesh::Packet::isValidPathLen(path_len);
-  }
-  if (!valid) return;
-
-  telemetry_history_tx_enabled = enabled != 0;
-  telemetry_history_tx_interval_days = interval_days;
-  if (legacy && path_len != OUT_PATH_UNKNOWN
-      && mesh::Packet::isValidPathLen(path_len)) {
-    _cli.adoptLegacyDataTxPath(path, path_len);
-  }
+  if (!recoverTelemetryHistoryTxPrefs(_fs)) return;
+  bool present = false;
+  if (!mesh::filePresence(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE, present)) return;
+  if (!present) { telemetry_history_tx_prefs_healthy = true; return; }
+  uint8_t image[7 + MAX_PATH_SIZE]; size_t size = 0;
+  if (!readTelemetryHistoryTxPrefsImage(_fs, image, size)) return;
+  const bool legacy = size == sizeof(image);
+  // Preserve the only durable old route until shared-route adoption succeeds.
+  // Otherwise an enabled legacy producer would silently use fresh zero-hop.
+  if (legacy && image[5] != OUT_PATH_UNKNOWN
+      && !_cli.adoptLegacyDataTxPath(image + 7, image[5])) return;
+  telemetry_history_tx_enabled = image[4] != 0;
+  telemetry_history_tx_interval_days = image[legacy ? 6 : 5];
+  telemetry_history_tx_prefs_healthy = true;
 }
 
 bool MyMesh::saveTelemetryHistoryTxPrefs() {
-  if (_fs == NULL) return false;
-  File file = openFloodSettingsWrite(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
-  if (!file) return false;
-
-  const uint8_t magic[4] = {'T', 'H', 'T', '3'};
-  const uint8_t enabled = telemetry_history_tx_enabled ? 1 : 0;
-  bool success = file.write(magic, sizeof(magic)) == sizeof(magic)
-      && file.write(&enabled, sizeof(enabled)) == sizeof(enabled)
-      && file.write(&telemetry_history_tx_interval_days,
-                    sizeof(telemetry_history_tx_interval_days))
-             == sizeof(telemetry_history_tx_interval_days);
-  file.close();
+  if (!telemetry_history_tx_prefs_healthy) return false;
+  bool previous_present = false;
+  uint8_t previous[7 + MAX_PATH_SIZE]; size_t previous_size = 0;
+  if (!recoverTelemetryHistoryTxPrefs(_fs)
+      || !mesh::filePresence(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE, previous_present)
+      || (previous_present && !readTelemetryHistoryTxPrefsImage(_fs, previous, previous_size))) {
+    telemetry_history_tx_prefs_healthy = false; return false;
+  }
+  const uint8_t image[] = {'T', 'H', 'T', '3', uint8_t(telemetry_history_tx_enabled),
+                           telemetry_history_tx_interval_days};
+  bool success;
+  {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+    mesh::AtomicFileWriter writer(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
+#else
+    mesh::ContactFileTransaction writer(
+        _fs, TELEMETRY_HISTORY_TX_PREFS_FILE, mesh::filePresence<FILESYSTEM>);
+#endif
+    success = writer && writer.write(image, sizeof(image)) == sizeof(image) && writer.commit();
+  }
+  uint8_t verify[7 + MAX_PATH_SIZE]; size_t verify_size = 0;
+  if (success) {
+    success = readTelemetryHistoryTxPrefsImage(_fs, verify, verify_size)
+        && verify_size == sizeof(image) && !memcmp(verify, image, sizeof(image));
+    telemetry_history_tx_prefs_healthy = success;
+  } else {
+    // Permit an administrator retry only when the old durable state is
+    // demonstrably intact/recoverable. An ambiguous publish/readback must not
+    // keep a producer running or overwrite an unmigrated/corrupt statefile.
+    bool present = false;
+    telemetry_history_tx_prefs_healthy = recoverTelemetryHistoryTxPrefs(_fs)
+        && mesh::filePresence(_fs, TELEMETRY_HISTORY_TX_PREFS_FILE, present)
+        && present == previous_present
+        && (!present || (readTelemetryHistoryTxPrefsImage(_fs, verify, verify_size)
+            && verify_size == previous_size && !memcmp(verify, previous, previous_size)));
+  }
   return success;
 }
 
@@ -12427,11 +12747,12 @@ void MyMesh::formatTelemetryHistoryTxStatus(char* reply,
   char path_reply[132];
   formatPathReply(data_path, have_path ? data_path_len : OUT_PATH_UNKNOWN,
                   path_reply, sizeof(path_reply));
-  snprintf(reply, reply_size, "> %s%ud id=%s i2c=%u p=%s",
+  snprintf(reply, reply_size, "> %s%ud id=%s i2c=%u%s p=%s",
            telemetry_history_tx_enabled ? "on " : "off ",
            (unsigned)telemetry_history_tx_interval_days,
            source_id,
            (unsigned)external_voltage_history.populatedChannelCount(),
+           telemetry_history_tx_prefs_healthy ? "" : " fault=prefs",
            path_reply[0] == '>' && path_reply[1] == ' '
                ? path_reply + 2 : path_reply);
 }
@@ -12476,6 +12797,7 @@ bool MyMesh::sendExternalVoltageHistorySnapshot(uint8_t channel_index,
 }
 
 void MyMesh::serviceTelemetryHistoryTx() {
+  if (!telemetry_history_tx_prefs_healthy) return;
   const uint64_t current_uptime_millis =
       uptime_millis + (uint32_t)(millis() - last_millis);
   if (telemetry_history_next_tx_uptime != 0
@@ -12644,16 +12966,25 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   expireRecentRepeatersIfDue();
 #endif
 
+#if defined(WITH_MQTT_BRIDGE)
+  // MQTT owns TLS on Core 0; the radio loop only reaps an acknowledged stop.
+  if (mqtt_bridge && mqtt_bridge->isRunning()) mqtt_bridge->loop();
+#endif
 #if defined(WITH_ESPNOW_BRIDGE)
-  // MQTT runs on Core 0. ESP-NOW remains cooperative, including in the
+  // ESP-NOW remains cooperative, including in the
   // combined Full image where both transports share the WiFi station radio.
-  #if defined(WITH_MQTT_BRIDGE)
+  #if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
   if (espnow_bridge.isRunning()) espnow_bridge.loop();
   else startSharedEspNowBridgeIfReady();
   #else
   if (bridge.isRunning()) bridge.loop();
+  else startSharedEspNowBridgeIfReady();
   #endif
-#elif defined(WITH_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
+#endif
+#if defined(WITH_RS232_BRIDGE)
+  if (isRs232BridgeRunning()) bridge->loop();
+#elif defined(WITH_BRIDGE) && !defined(WITH_MQTT_BRIDGE) \
+        && !defined(WITH_ESPNOW_BRIDGE)
   AbstractBridge* active_bridge = activeBridge();
   if (active_bridge && active_bridge->isRunning()) active_bridge->loop();
 #endif
@@ -12687,6 +13018,16 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
     // the loop until reboot - otherwise a packet still queued here (busy /
     // duty-limited channel) is lost when the flash spins the loop and reboots.
     drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
+    const bool mqtt_was_running = mqtt_bridge && mqtt_bridge->isRunning();
+#ifdef WITH_ESPNOW_BRIDGE
+    const bool espnow_was_running = espnow_bridge.isRunning();
+#endif
+    auto resume_paused_bridges = [&]() {
+      if (mqtt_was_running) setMqttBridgeState(true);
+#ifdef WITH_ESPNOW_BRIDGE
+      if (espnow_was_running) setEspNowBridgeState(true);
+#endif
+    };
     setBridgeState(false);
     // TODO: Replace this timed settle with a task-exit/join barrier once MQTT
     // teardown can prove that the idle task has reclaimed the worker resources.
@@ -12699,13 +13040,13 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
     if (mqtt_bridge && !mqtt_bridge->canFlashAfterStop()) {
       mesh::usbConsolePort().printf("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge\r\n");
       otaAlert("OTA aborted: MQTT stop unclean, bridge resumed");
-      setBridgeState(true);
-    } else if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+      resume_paused_bridges();
+    } else if (!_cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, ota_reply)) {
       mesh::usbConsolePort().printf("OTA: aborted, resuming bridge - %s\r\n", ota_reply);
       char ota_alert_msg[160];
       snprintf(ota_alert_msg, sizeof(ota_alert_msg), "OTA aborted: %s", ota_reply);
       otaAlert(ota_alert_msg);
-      setBridgeState(true);
+      resume_paused_bridges();
     }
     // Success path: otaFromManifest() flashes and reboots into the new image
     // (never returns), so there is no in-boot "success" alert - the START alert
@@ -12720,6 +13061,10 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
     mesh::usbConsolePort().printf("%s\r\n", wc_reply);
   }
   if (_webconfig) {
+#ifdef WITH_MQTT_BRIDGE
+    _webconfig->updateWiFiOwnership(!mqtt_bridge
+        || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping()));
+#endif
     _webconfig->tick(millis());
     if (!_webconfig->isRunning() && !_webconfig->isStopping()) {
       delete _webconfig;
@@ -12729,6 +13074,9 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
 #endif
 
   // is pending dirty contacts write needed?
+#if defined(ESP32_PLATFORM)
+  serviceIdleWiFi();
+#endif
   if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
     const bool saved = acl.save(_fs);
     if (saved) {
@@ -13311,9 +13659,59 @@ bool MyMesh::startNeighborDiscover(char* reply) {
 #endif // WITH_MQTT_NEIGHBORS
 
 // To check if there is pending work
+#if defined(ESP32_PLATFORM)
+void MyMesh::serviceIdleWiFi() {
+#if (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+    || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
+    && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
+    && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
+  if (_cli.getBoard()->isOTAUpdateRunning()) return;
+#ifdef WITH_WEBCONFIG
+  if (isWebConfigActive()) return;
+#endif
+#ifdef WITH_MQTT_BRIDGE
+  if (_ota_update_at) return;
+  if (mqtt_bridge && (mqtt_bridge->isRunning() || mqtt_bridge->isStopping())) return;
+#endif
+#ifdef WITH_ESPNOW_BRIDGE
+  if (isEspNowBridgeRunning()) return;
+#endif
+  // MQTT shutdown and WebConfig-to-OTA handoff retain STA intentionally.
+  // Reclaim it only after the last live owner is gone, using Arduino first
+  // so its private initialized/started cache agrees with the SDK driver.
+  if (WiFi.getMode() == WIFI_OFF && WiFi.channel() > 0
+      && !WiFi.mode(WIFI_STA)) return;
+  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+  if (WiFi.getMode() == WIFI_OFF && esp_wifi_get_mode(&sdk_mode) != ESP_OK) return;
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(false, false);
+  if (!WiFi.mode(WIFI_OFF)) return;
+  // A pure IDF ESP-NOW owner never created an Arduino facade, making OFF a
+  // no-op there. The ownership checks above also protect that startup path.
+  if (esp_wifi_get_mode(&sdk_mode) == ESP_OK) {
+    esp_wifi_stop();
+    esp_wifi_deinit();
+  }
+#endif
+}
+#endif
+
 bool MyMesh::hasPendingWork() const {
   if (isDualRadioActive()) return true;
   if (hasPendingOtaApply()) return true;
+#ifdef WITH_WEBCONFIG
+  if (isWebConfigActive()) return true;
+#endif
+#if defined(ESP32_PLATFORM) \
+    && (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+        || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
+    && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
+    && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
+  // Cleanup may fail while the Arduino facade already reports OFF. Require
+  // the live SDK driver to be gone before permitting manual light sleep.
+  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&sdk_mode) != ESP_ERR_WIFI_NOT_INIT) return true;
+#endif
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
   if (_local_cli_output.busy()) return true;
 #endif
@@ -13321,7 +13719,14 @@ bool MyMesh::hasPendingWork() const {
 #if defined(WITH_BRIDGE)
   const AbstractBridge* active_bridge = activeBridge();
   if (active_bridge && active_bridge->isRunning()) return true;
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#ifdef WITH_MQTT_BRIDGE
+  if (mqtt_bridge && mqtt_bridge->isStopping()) return true;
+#endif
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
+  if (isRs232BridgeRunning()) return true;
+#endif
+#if defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   if (espnow_bridge.isRunning()) return true;
 #endif
 #endif

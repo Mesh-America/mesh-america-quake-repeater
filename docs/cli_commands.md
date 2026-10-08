@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/cli_commands/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # CLI Commands
 
 See [two LoRa profiles](radio_profiles.md) for `radio2`, `tempradio2`, scheduling,
@@ -223,13 +227,18 @@ See the [OTA guide](ota_user_guide.md#adjust-lora-ota-speed).
 On nRF52, `start ota` invokes Bluetooth DFU with the matching bootloader and
 application DFU ZIP. The WiFi/AP instructions below apply to ESP32.
 
-On ESP32, `start ota` serves the web upload page on the station IP when connected to WiFi;
-otherwise it raises the `MeshCore-OTA` access point. `start ota ap` always raises
-the access point, which is useful when the normal network uses client isolation.
+On ESP32, `start ota` enables WiFi as needed and serves the web upload page on
+the station IP when connected to WiFi; otherwise it raises the `MeshCore-OTA`
+access point. The reply gives the URL to open and tells you which network to
+use. `start ota ap` always selects the access point, including when OTA is
+already running on a LAN address. This is useful with client-isolated networks.
 
-On an ESP32 build with WebConfig, the manual OTA uploader and WebConfig both use HTTP
-port 80 and cannot run together. Stop WebConfig before `start ota`, or stop OTA
-before `start webconfig`.
+Starting OTA automatically stops WebConfig and reports `WebConfig stopped` in
+the reply. The existing LAN connection stays up; a setup hotspot is replaced
+by `MeshCore-OTA`. WebConfig's delayed HTTP cleanup cannot stop OTA's WiFi.
+Use the USB/Bluetooth or LoRa command line to start the uploader; WebConfig's
+own terminal cannot deliver the handoff reply after shutting itself down.
+Stop OTA before starting WebConfig again.
 
 FULL ESP32 builds also expose the `.mota` folder seeder on TCP port 5001
 whenever WiFi is usable. This listener is independent of port 80, so a host can
@@ -290,6 +299,15 @@ a new automatic window. An administrator can explicitly run `start webconfig`
 again without rebooting. Once an SSID is saved, the cutoff no longer applies
 and the selected WiFi/MQTT mode keeps reconnecting. Other setup sessions retain
 their profile's idle timeout.
+
+Full Repeater and Room Server suspend unconfigured network bridges during
+automatic first-boot setup. Automatic ESP-NOW retries remain suspended after the AP
+closes, so they cannot keep an unused WiFi driver running. Saved bridge choices
+remain intact; explicitly enabling the bridge resumes it for this boot.
+Manual WebConfig/WiFi starts preserve an explicitly enabled ESP-NOW bridge,
+including when `set 2.4ghz on` restores the previously selected services.
+Stopping a browser OTA session restores only bridges that session actually
+paused, rather than starting services from saved intent alone.
 
 Every ESP32 build with WebConfig supports the browser command terminal,
 including WiFi Companion and Full Companion. Companions use their complete
@@ -428,6 +446,24 @@ The browser portal is not compiled into the two 4 MB
 retaining the two app slots required for LoRa OTA. Their normal CLI settings
 remain available.
 
+### Switch the OTA release channel (observer builds)
+
+- `ota branch` - shows the selected channel, the channel this build was made for, and the manifest base `ota check`/`ota update` will use.
+- `ota branch prod` (alias `stable`) / `ota branch beta` (alias `dev`) - pull future `ota update`s from that channel. The selection is saved; run `ota update` to switch.
+- `ota branch default` - follow the channel this build was made for.
+
+The selector is saved only after the preferences transaction succeeds. A queued
+`ota update` keeps the channel it checked, even if `ota branch` is changed before
+the download starts. Switching channels offers the target image even when its
+commit matches the running image; build numbers are not comparable across channels.
+
+Before an image is made bootable, its compatibility tag must confirm support for
+this fork's saved-settings format and required transports. Upstream observer
+images without the `keymind1` capability are refused, including images that use
+the different `/mqtt.json` format. A refusal leaves the current image running;
+select a compatible channel to continue OTA. Production and beta URLs are supplied
+by the build recipe, not accepted as arbitrary CLI URLs.
+
 ---
 
 ### Erase/Factory Reset
@@ -462,7 +498,7 @@ command `0x42` where the role supports the command; unavailable over LoRa.
 ### Remove a neighbor
 **Usage:** 
 - `neighbor.remove <pubkey_prefix>`
-- `neighbor.remove` — remove all neighbors
+- `neighbor.remove` - remove all neighbors
 
 **Parameters:** 
 - `pubkey_prefix`: An even-length hexadecimal prefix (up to the full 64-character
@@ -914,7 +950,18 @@ All display-equipped Companion builds show the screen at boot in the default
 selected profile's timeout (15 seconds by default); button input restarts that
 timer. This also applies to previously saved button modes. Saved `off` and
 pairing-only modes still suppress the boot screen. Repeaters, room servers,
-and sensors do not gain this Companion-only boot wake.
+and sensors do not gain this Companion-only normal-UI boot wake.
+
+On display-equipped Companions, repeaters, room servers, and sensors, a small
+`Starting...` screen appears as soon as the board, primary filesystem, and
+display are initialized, before radio initialization and serial-settle delays.
+If a new identity is needed, it changes to `Generating key` with an animated
+spinner during radio entropy collection. OLED/TFT updates are paced at 150 ms;
+e-paper uses a slower one-second cadence. Saved `off` and pairing-only modes
+still suppress this startup screen. The normal UI's boot timeout starts only
+when that UI is ready, so key generation does not consume it. Filesystem
+recovery and the display driver's own initialization can still delay the first
+visible frame; the firmware cannot draw before those operations finish.
 
 Startup shows `Loading identity` while reading a saved identity. `Generating key`
 and its spinner are used only when creating a replacement/new identity;
@@ -1029,17 +1076,27 @@ flip state on display-enabled observer builds.
 
 ## Logging
 
-Builds compiled with `MESH_PACKET_LOGGING` emit one `RAW:` line for every
-received radio frame. Serial output uses backpressure: if a connected host
-temporarily stops reading, packet processing waits for USB transmit space
-instead of silently omitting the record. A disconnected host cannot retain an
-unbounded capture, so logging deployments should keep the reader attached and
-draining the serial port.
+Non-compact builds compiled with `MESH_PACKET_LOGGING` emit a `RAW:` line
+for received radio frames that reach the raw capture hook while `usb.logging`
+is on, including Full Companion. Frames rejected by the early route policy
+are not exposed to raw capture.
+`RAW:` contains the complete received frame as uppercase hexadecimal, not only
+its decoded payload. Packet records do not require verbose USB debug output.
+Keep the host reader attached and draining the serial port: capture is best
+effort, not durable storage. Native-USB transports use bounded queues and drop
+records rather than block radio processing when the host stops reading;
+`DROP:<count>` markers report capture loss when output capacity returns.
 
-Every valid received frame also emits the decoded RX summary, including signal,
+Successfully parsed received frames also emit the decoded RX summary, including signal,
 timing, hash, type, route, and payload information. Frames that cannot be
-decoded still emit their `RAW:` line. Transmitted packets emit the decoded TX
-summary.
+decoded, or cannot obtain a packet-pool slot, can still emit their `RAW:` line.
+Transmitted packets emit the decoded TX
+summary. RAW and RX summary are separate records, not an atomic pair; a queue
+drop or disconnect can leave a summary without its RAW bytes. USB log consumers
+must not associate a stale RAW record with the next unrelated summary.
+Size-constrained `MESH_PACKET_LOGGING_COMPACT` images instead use `R<hex>` and
+`T<hex>` records; that compact stream is not the full ASCII RAW/summary format
+expected by ordinary USB-to-MQTT parsers.
 
 Ordinary non-OTA artifacts compile packet logging into the canonical image and
 control its live USB output at runtime; no separate `-logging-` artifact is
@@ -1061,7 +1118,26 @@ set usb.logging on
 set usb.logging off
 set usb.logging on reboot
 set usb.logging off reboot
+get usb.debug
+set usb.debug on
+set usb.debug off
 ```
+
+Current source also provides `get usb.watchdog` and saved
+`set usb.watchdog off|on|auto`. Missing watchdog state defaults to Auto, which
+requires 14 continuous healthy logging-client days before saving On. Existing
+five-minute USB stats polls confirm recent logging-client activity; a plugged
+cable/open TTY alone does not. See the [USB logging watchdog](usb_logging_watchdog.md) for staged
+five-minute USB recovery, physical-fault-only MCU resets, persisted backoff,
+status fields, and safe shutdown deferrals. Older release binaries need an
+upgrade before these commands exist.
+
+`get usb.watchdog.last` shows the latest USB watchdog event: recovery action,
+fault-reason bitmask, advisory node-clock epoch, uptime at the event, sequence,
+and whether the record passed durable readback. It survives reboot on durable
+storage. `reboot-requested` records intent, not proof that a physical reset
+occurred; a later safety veto records `reboot-cancelled`. See the watchdog
+documentation for storage and timestamp limitations.
 
 **ESP32 1.17.1.5 USB logging procedure:** disable device sleep before enabling
 the log stream, using separate text commands:
@@ -1077,16 +1153,44 @@ saving. This works around the [released USB sleep bug](old-releases/1.17.1.5.md#
 nRF52 does not need this ESP32 workaround.
 
 These commands are compiled into ordinary USB-loggable artifacts and every
-Full Companion. They control live USB debug and packet output. CommonCLI roles
-save the setting in `/com_prefs`, so it survives reboot; their first boot
-defaults to on. Full Companion and ordinary USB Companion start off on a fresh
-installation so diagnostics cannot corrupt framed traffic.
+Full Companion. `usb.logging` is the saved USB output master and packet-log
+gate. `usb.debug` is a separate saved preference for verbose diagnostics;
+effective USB debug output requires both switches to be on. Packet RAW and
+RX/TX summaries require only the master switch. `get usb.debug` reports saved
+intent even when the master is off. Turning `usb.logging` off does not erase
+that intent; turning it back on restores debug output if `usb.debug` is on.
+
+CommonCLI roles save these settings in `/com_prefs`; their fresh USB logging
+default is on. Full Companion and ordinary USB Companion start with the
+master off on a fresh installation so diagnostics cannot corrupt framed
+traffic. Verbose USB debug defaults to off for every role, including when
+loading older preferences without a debug field. Updates retain an existing
+saved `usb.logging` choice. Older binaries without the new `usb.debug`
+command retain their previous behavior until upgraded.
+
+For packet-only capture, use these separate text commands:
+
+```text
+set usb.debug off
+set usb.logging on
+```
+
+Use `set usb.debug on` temporarily when troubleshooting, then turn it off
+again to reduce USB traffic. This setting applies immediately and needs no
+USB-interface reboot. It does not select a firmware variant or enable code
+omitted from the image: verbose output still requires compiled `MESH_DEBUG`
+or other relevant diagnostic support. A packet-only build can retain the
+preference without gaining missing debug messages.
+
+Debug off suppresses verbose diagnostic chatter, not functional CLI replies,
+USB port identity/drop markers, or retained operational warnings. Readers
+must still filter non-packet lines instead of treating every line as a packet.
 
 On Full Companion these lines belong to its text terminal, not `meshcli`'s
 Binary `get/set` parameter namespace. Open interface `00`, send
 `+++MESHCORE-TERM-START`, and then issue the command. Running
-`meshcli ... get usb.logging` directly can instead return
-`Unknown var usb.logging` because that is a different protocol operation.
+`meshcli ... get usb.logging` or `get usb.debug` directly can instead return
+`Unknown var ...` because that is a different protocol operation.
 
 nRF52 Full Companion defaults logging to off and enumerates only USB interface
 `00`, which carries Companion, terminal, and serial mOTA traffic. Enabling
@@ -1096,6 +1200,8 @@ the optional `reboot` argument saves the choice and reports that a reboot is
 required when the USB interface count must change. The exact
 `set usb.logging on reboot` and `set usb.logging off reboot` forms save the
 choice, send their reply, and reboot one second later only when needed.
+Interface `02` is logging-only, not an input-capable CLI. Send logging/debug
+commands to interface `00`; USB debug uses the same log endpoint as packets.
 
 On every ESP32 Full Companion, enter the USB text terminal and use
 `set usb.logging on` (preceded by `set powersaving off` on 1.17.1.5) to turn that TTY into a logging-repeater-style plaintext
@@ -1111,6 +1217,20 @@ Turning USB logging off does not disable CLI replies. nRF52 keeps Companion
 frames active on interface `00`; ESP32 resumes the ordinary ASCII/Binary
 switcher after the logging terminal turns logging off. This setting does not
 change the node-storage capture controlled by `log start` and `log stop`.
+
+For a USB-to-MQTT bridge, enable packet logging but leave `usb.debug` off.
+Full Companion now supplies the ASCII RAW/RX/TX packet stream needed by such
+consumers; it does not provide durable or lossless capture. A compatible host
+must also support the role's identity/control commands and replies: packet
+records alone do not make an existing bridge compatible. Companion now answers
+`get public.key` with its node public key. ESP32 Full's logging TTY remains
+input-capable and accepts that query. nRF52 Full's dedicated logging CDC is
+not a command/reply console (its bounded stats-poll input only renews the
+watchdog client lease):
+a host integration must use interface `00` for commands and identity and
+interface `02` for logs.
+Existing single-port bridges that require CLI replies cannot simply point at
+the dedicated log endpoint. This change does not add a two-port bridge driver.
 
 Companion, Repeater, Room Server, and Sensor builds with both MQTT and USB
 logging provide the same saved selector for both output paths:
@@ -1132,6 +1252,8 @@ in `both` mode; Full Companion starts with USB logging off. To change only
 MQTT, use `set mqtt.enabled on|off`; `get mqtt.enabled` checks the saved
 switch and `get mqtt.running` checks whether the MQTT service is running.
 Turning MQTT off preserves all broker slots and credentials.
+The output selector changes the USB master, not saved `usb.debug` intent;
+WiFi MQTT logging is independent of the USB debug preference.
 
 On **1.17.1.5 ESP32**, run `set powersaving off` before selecting
 `set logging.output usb` or `set logging.output both`, since those modes
@@ -1619,7 +1741,17 @@ set bluetooth on
 
 `get ble` and `set ble ...` are aliases. This controls the running Bluetooth
 service on ESP32 and nRF52 Companions: `off` stops advertising and disconnects
-Bluetooth clients; `on` enables it again. The change lasts until reboot.
+Bluetooth clients; `on` enables it again. Both choices are saved and survive
+reboots. USB remains available when Bluetooth is off. Older saved preferences
+without this setting retain the previous default of Bluetooth on.
+
+Successful local commands report `(saved)`. If saving fails, the command reports
+an error and leaves Bluetooth unchanged. When requested over Bluetooth, `off`
+first reports `(save pending)` so its reply can drain; the firmware rechecks the
+alternate connection and saves the preference before disconnecting. If that
+connection disappears or the save fails, shutdown is cancelled. `get bluetooth`
+reports the current runtime state. Broad `2.4ghz` controls still apply to the
+current boot only and do not change this saved Bluetooth preference.
 
 Plain `off` requires another active management connection. A connected USB
 terminal or binary client, TCP client, or browser terminal can provide that
@@ -1629,7 +1761,8 @@ bridge), issue the command through that USB client so the request itself proves
 it is active.
 
 Append `force` to `off` to permit disconnecting the only active connection.
-Use USB, another management transport, or reboot to regain access afterward.
+Use USB or another management transport and `set bluetooth on` to regain
+access afterward. Reboot alone will not re-enable saved-off Bluetooth.
 `force` is accepted only as the final argument to `off`.
 
 Commands sent through Bluetooth allow its reply to drain before shutdown
@@ -1657,6 +1790,37 @@ A binary Companion client should carry the same text in command `0x42`
 (`CMD_RUN_CLI_COMMAND`), which works over USB, BLE, or TCP without entering USB
 terminal mode. See [Companion radio binary protocol](companion_protocol.md) for
 the frame and reply format.
+
+---
+
+#### Set the Bluetooth pairing PIN (Companion)
+
+**Usage:**
+
+- `set pin <0-999999>`
+
+Choose a six-digit code for a fixed Bluetooth pairing PIN. For example:
+
+```text
+set pin 654321
+reboot
+```
+
+The command saves the PIN across reboots and replies `> pin is now 654321`.
+Reboot to activate the new code; the current Bluetooth session keeps its
+existing PIN until then. A failed save reports an error and retains the
+previous saved setting.
+
+`set pin 0` clears the saved override, rather than setting the pairing code to
+`000000` or disabling Bluetooth. After reboot, the build's default policy
+applies: normally `123456` without a display, or a generated PIN on eligible
+display-equipped builds.
+
+This command is available in the Companion text terminal, binary command
+`0x42` (`CMD_RUN_CLI_COMMAND`), and authorized LoRa CLI; a Bluetooth-capable build
+is needed to use the PIN. Existing bonded clients may reconnect without being
+asked for a PIN.
+Forget the device on the phone and pair again if you need to enter the new code.
 
 ---
 
@@ -1873,7 +2037,7 @@ through binary command `0x42`; this command does not report the Bluetooth PIN.
 **Note:** On nRF52 boards with power management and a boot-voltage setting,
 this is a saved *relative* calibration: `1.000` keeps the board conversion,
 `1.050` raises all reported battery millivolts by 5%, and `0` resets to
-`1.000`. The allowed range is `0.500`–`1.500`. This affects boot protection,
+`1.000`. The allowed range is `0.500`-`1.500`. This affects boot protection,
 running cutoff, telemetry, battery alerts, and percentage. Calibrate against a
 voltmeter before enabling a low cutoff. Other boards retain their existing
 board-specific multiplier behavior, or return unsupported.
@@ -2145,6 +2309,13 @@ get clock.sync.status
 #### View this node's public key
 **Usage:** `get public.key`
 
+Returns this node's identity public key without changing it or exposing its
+private key. Companion supports the query through its text terminal and
+framed CLI command `0x42` (`CMD_RUN_CLI_COMMAND`); its reply is `> ` followed
+by exactly 64 uppercase hexadecimal characters. Private-key export support
+is not required. On nRF52 Full Companion, send the query to control interface
+`00`, not the output-only logging interface `02`.
+
 ---
 
 #### View this node's firmware version
@@ -2177,6 +2348,21 @@ are shared by Companion and infrastructure. The saved preference controls
 whether power saving is allowed; active USB, logging and network services may
 keep the hardware awake. Actual sleep depends on the board.
 
+On ESP32 infrastructure boards using an external USB-to-UART chip, such as the
+Heltec V3's CP2102, the native USB host guard cannot detect an attached computer.
+Current source blocks MCU light sleep while the raw UART console driver is
+enabled, preserving the first web-console command after idle even with all
+bridges and USB logging stopped. This guard has no idle timeout and also covers
+a computer's first connection after boot. These builds enable that console at
+startup, so MCU light sleep is unavailable while it remains enabled, including
+on battery. `set powersaving on` still enables sensor/GPS power-saving policies;
+the CPU continues normal idle yielding while keeping the console available.
+A running MQTT, RS232 or ESP-NOW bridge keeps infrastructure awake even when
+`get powersaving` reports `on`; that readback alone does not prove MCU sleep.
+Adding UART wake alone would still discard the characters that trigger wake,
+so it cannot preserve an unmodified web console's first command. See the
+[ESP-IDF UART wake documentation](https://docs.espressif.com/projects/esp-idf/en/v4.4.7/esp32s3/api-reference/system/sleep_modes.html#uart-wakeup-light-sleep-only).
+
 For the **1.17.1.5 G3 USB-disconnect report**, use `set powersaving off` as the
 workaround. The released ESP32 sleep code can lose native USB after two
 minutes when the terminal is closed, even with a computer attached. The
@@ -2188,6 +2374,12 @@ for verification steps and the distinction between the fix and the published
 binaries.
 
 Companion firmware defaults this setting to `on`. Full Companion accepts the command from its local USB terminal and exposes the same setting in WebConfig. On ESP32, it lowers the CPU clock to 80 MHz, enables idle yielding, and enables the configured GPS duty cycle. USB and each active wireless transport remain available; SenseCAP Indicator Full keeps only its selected BLE or infrastructure-WiFi secondary transport active. `set powersaving off` restores the board's normal CPU clock and disables the GPS duty cycle. This device setting is separate from LoRa RXPS (`radio.rxps`) and WiFi modem power save (`wifi.powersave`). Infrastructure uses the same commands; its hardware and active-service sleep guards determine when the node can sleep.
+
+Native USB ESP32 Full Companions can also use short light-sleep intervals when
+the BLE/WiFi drivers, ESP-NOW, GPS UART, logging, and USB host sessions are
+inactive and no work is pending. Compiling those transports into Full does not
+itself prevent sleep. Turning off BLE advertising alone leaves its controller
+running and therefore retains idle behavior rather than manual light sleep.
 
 ---
 
@@ -2278,7 +2470,48 @@ The pin number is the Arduino pin number used by that target (the normal GPIO nu
 **Parameters:**
   - `state`: `on`|`off`
 
-**Default:** `flood.channel.data on`; `flood.channel.data.hops h=all`
+**Default:** `repeat on`.
+
+`repeat off` disables relay forwarding, not locally generated traffic or
+configuration replies. Repeaters can separately opt in to the routed-trace
+exception below.
+
+#### Allow routed traces while repeating is disabled (repeater only)
+
+```text
+get repeat.trace
+set repeat.trace on
+set repeat.trace off
+```
+
+Default: `off`, including upgrades from older preference files. The setting is
+saved and takes effect without reboot. Failed saves leave the active choice
+unchanged. Room Server, Sensor, and Companion do not gain this exception.
+
+To keep ordinary forwarding disabled while allowing routed trace diagnostics:
+
+```text
+set repeat off
+set repeat.trace on
+```
+
+Only direct TRACE packets with a matching next hop may be relayed. Ordinary
+messages, adverts, group data, ACKs, and control packets remain subject to
+`repeat off`; flood traces remain invalid. Existing trace length, path-capacity,
+duplicate, radio-profile, and channel/duty-cycle checks still apply. This is
+a diagnostics opt-in, not authenticated-admin-only forwarding: trace packets
+retain the protocol's existing authentication behavior.
+
+`get repeat` and the disabled status bit continue to report repeating off.
+With `repeat on`, traces use the ordinary forwarding policy regardless of
+`repeat.trace`. Changing the exception to off while repeating is off blocks
+subsequent relayed trace transmissions, including queued copies and retries;
+a trace already on air is allowed to finish. Locally initiated traffic and
+management replies are not cancelled.
+
+The dynamic configuration field is `repeat.trace_off` (`0` or `1`). It is
+appended to `/com_prefs`; all field offsets in the published upstream layout
+stay unchanged.
 
 ---
 
@@ -4417,6 +4650,43 @@ On repeaters with device power saving enabled, the automatic GPS cycle wakes
 for up to 10 minutes and repeats seven days after GPS sleeps. A valid GPS time
 can correct the RTC either forward or backward. With device power saving off,
 an enabled GPS refreshes the RTC every 30 minutes.
+These are the legacy defaults; `gps.sync.interval` below overrides them.
+
+---
+
+#### Set the automatic GPS clock-sync interval
+
+```text
+get gps.sync.interval
+set gps.sync.interval 1
+set gps.sync.interval 24
+set gps.sync.interval 336
+```
+
+The interval is a whole number of **hours**, from **1 to 336** (two weeks).
+Larger numbers are capped, not rejected. For example:
+
+```text
+set gps.sync.interval 999
+OK - GPS sync interval 336 hours (saved)
+```
+
+Zero, negative numbers, fractional hours, and nonnumeric values are rejected.
+The setting is saved across reboots and supported by GPS-equipped repeater,
+room-server, sensor, and Companion builds. Until it is explicitly configured,
+the getter reports `default (board GPS sync policy)` and existing board timings
+are retained.
+
+The selected interval controls periodic clock acquisitions both with GPS power
+saving and with a continuously powered receiver. Changing it reschedules a
+sleeping receiver without immediately powering it on. A GPS fix can take time;
+an unsuccessful acquisition retains the existing bounded awake window, then
+backs off before trying again. Device GPS/power switches still apply.
+
+This does not change position-update `gps_interval`, location telemetry/cache
+timings, or mesh/NTP time synchronization. Location requests can still power GPS
+for a fix, but do not bypass the configured clock-sync interval. Explicit
+`gps sync` remains an immediate acquisition request where that command exists.
 
 ---
 
@@ -4509,6 +4779,15 @@ bridge actually started in this boot; they can differ after a hardware conflict,
 missing credentials, or a transient initialization failure. Normal merged
 repeater images default to `off`; dedicated bridge images may default to `on`.
 
+Full MQTT repeaters with RS-232 expose three independent transports. Use
+`set rs232.enabled on|off` and `get rs232.enabled` for saved UART intent;
+`get rs232.running` reports the actual UART state. `mqtt.enabled` and
+`espnow.enabled` select the other two transports. In MQTT images the historical
+`bridge.enabled` alias controls ESP-NOW; in non-MQTT UART images it controls
+RS-232. `bridge.baud` and `bridge.uart` change only UART configuration, without
+restarting MQTT or ESP-NOW. The new UART mode starts off when upgrading old
+MQTT preferences and retains explicit settings across reboots.
+
 ---
 
 #### Add a delay to packets routed through this bridge
@@ -4549,6 +4828,7 @@ repeater images default to `off`; dedicated bridge images may default to `on`.
 - `set mqtt.enabled on`
 - `set mqtt.enabled off`
 - `get mqtt.running`
+- `get mqtt.stopping`
 - `get mqtt.status`
 
 These commands are the same on MQTT-capable Companion, Repeater, Room Server,
@@ -4557,6 +4837,14 @@ MQTT while keeping broker presets and credentials. Turning it on allows those
 brokers to reconnect. `get mqtt.running` checks the service's runtime state;
 `get mqtt.status` reports individual broker connections. Enabling MQTT does
 not imply that a broker is connected.
+
+On ESP32 Repeater and Room Server images, `set mqtt.enabled off` acknowledges
+the stop request while the MQTT task disconnects and destroys its clients.
+`get mqtt.stopping` stays `on` until that cleanup completes; `mqtt.running`
+also stays `on` while those resources are still owned. Wait for
+`mqtt.stopping` to become `off` before enabling MQTT again. UART, ESP-NOW,
+and the radio continue running during this cleanup. OTA still waits for a
+completed MQTT shutdown before it can write firmware.
 
 USB logging remains independent. On images with both outputs,
 `set logging.output off|usb|wifi|both` selects USB and MQTT together.
@@ -4672,7 +4960,9 @@ Requires WiFi connected and the MQTT bridge running.
 **Parameters:**
 - `rate`: Integer baud rate from `9600` through the board's compiled
   `BRIDGE_MAX_BAUD` (commonly `500000`); for example `115200`. Stop the bridge
-  with `set bridge.enabled off` before changing it, then enable it again.
+  with `set rs232.enabled off` in a combined MQTT image, or
+  `set bridge.enabled off` in a non-MQTT UART image, before changing it.
+  Enable the UART again with the matching switch.
 
 **Default:** `115200`
 
@@ -4692,7 +4982,8 @@ Requires WiFi connected and the MQTT bridge running.
 
 The setting is persistent and restarts an enabled bridge immediately. Normal
 repeater artifacts start with `bridge.enabled off`; configure the UART and baud
-rate before running `set bridge.enabled on`. On the canonical RAK4631 runtime
+rate before running `set bridge.enabled on`. Combined MQTT images use
+`rs232.enabled` for that independent UART setting. On the canonical RAK4631 runtime
 image, UART 1 is reserved even if the bounded boot probe hears no RAK12501.
 Silence cannot prove that a cold L76K is physically absent, and that module
 remains powered by the shared WB_IO2/3V3_S rail. Use UART 2. UART 1 requires an
@@ -4839,6 +5130,22 @@ manufacturer images and the boards still requiring untouched factory dumps.
 
 ---
 
+#### Configure battery charge voltage
+
+T-Beam SX1262/SX1276 and T-Beam S3 Supreme support persistent charger-voltage
+selection through the fitted AXP192 or AXP2101 PMU:
+
+```text
+get charge.voltage.options
+get charge.voltage
+set charge.voltage 4.1
+```
+
+Values are exact supported targets in volts. Neither T-Beam PMU supports 3.65 V.
+Heltec Mesh Solar's CN3795 charge voltage is set by its Li-ion or LiFePO4 hardware
+version, so these commands report that limitation without changing BMS settings.
+See [charge-voltage behavior and supported targets](charge_voltage.md).
+
 #### Configure nRF52 battery protection
 **Usage:** `get pwrmgt.bootlock`, `set pwrmgt.bootlock <2500-4200>`
 
@@ -4887,12 +5194,12 @@ get adc.multiplier
 set adc.multiplier 1.050
 ```
 
-The custom empty/full endpoints may be 2000–4200 mV and must be at least 100 mV
+The custom empty/full endpoints may be 2000-4200 mV and must be at least 100 mV
 apart. Setting either endpoint automatically selects `custom`; boot lock and
 cutoff remain separately adjustable. `get pwrmgt.bootlock` and
 `get pwrmgt.cutoff` show the values in force after selecting a profile.
 
-For a RAK3401/RAK13302 LiFePO₄ cell:
+For a RAK3401/RAK13302 LiFePO4 cell:
 
 ```text
 set battery.profile lifepo4

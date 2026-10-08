@@ -1,0 +1,2 @@
+# Preserve the byte-exact upstream source, including its original whitespace.
+WiFiScan.cpp -whitespace

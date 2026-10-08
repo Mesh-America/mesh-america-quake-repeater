@@ -177,14 +177,21 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
   Stream* _web_terminal = nullptr;
 #endif
 
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
+#if defined(NRF52_PLATFORM)
+  File serial_log_dump{InternalFS};
+#else
   File serial_log_dump;
+#endif
   size_t serial_log_remaining = 0;
   size_t serial_log_pending_size = 0;
   char serial_log_pending[640];
   bool serial_log_active = false;
   bool serial_log_eof_pending = false;
   bool serial_log_skip_line = false;
+  int serial_acl_next = -1;
+  int serial_acl_count = 0;
+  bool serial_acl_header = false;
 #endif
   uint32_t last_millis;
   uint64_t uptime_millis;
@@ -228,6 +235,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
   TransportKey default_scope;
   unsigned long set_radio_at, revert_radio_at;
   unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
+  uint8_t _ota_update_channel = 0;   // channel `ota update` checked; a later `ota branch` cannot retarget it
   float pending_freq;
   float pending_bw;
   uint8_t pending_sf;
@@ -312,9 +320,15 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
 #endif
 #ifdef WITH_WEBCONFIG
   WebConfigServer* _webconfig = nullptr;
+  bool _unconfigured_setup_espnow_suspended = false;
+  void suspendUnconfiguredSetupBridges();
+  bool startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup);
   bool _wc_batch_active = false;
   bool _wc_restart_pending = false;
   uint8_t _wc_slot_restart_mask = 0;
+#endif
+#if defined(ESP32_PLATFORM)
+  void serviceIdleWiFi();
 #endif
 
   void addPost(ClientInfo* client, const char* postData);
@@ -325,7 +339,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
   bool processAck(const uint8_t *data);
   mesh::Packet* createSelfAdvert();
   File openAppend(const char* fname);
-  int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
+  int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len,
+                    size_t reply_capacity = MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1));
 #if MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE
   bool evaluateFloodRuleTiming(const mesh::Packet* packet,
                                bool& fast_track);
@@ -405,6 +420,7 @@ protected:
     char interval_str[12];
     sprintf(interval_str, "%u", _prefs.gps_interval);
     sensors.setSettingValue("gps_interval", interval_str);
+    sensors.applyGpsTimeSyncInterval(_prefs.gps_sync_interval_hours);
   }
 #endif
 
@@ -488,7 +504,8 @@ public:
   }
 
   void dumpLogFile() override;
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+  void printAclSerial();
+#if MESH_USB_CONSOLE_COOPERATIVE
   // Large local-only replies advance between radio service passes.
   bool hasPendingSerialOutput() const;
   void servicePendingSerialOutput();
@@ -550,6 +567,11 @@ public:
     return mesh::wireless::WiFi;
   }
   void loop();
+  bool canRecoverUsbLogging() const {
+    return dirty_contacts_expiry == 0 && !hasOutbound() && !isAnyTempRadioActive()
+        && !hasPendingOtaApply() && !saved_radio_apply_pending
+        && set_radio_at == 0 && _ota_update_at == 0;
+  }
 #if MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE
   bool allowTransportPacket(const mesh::Packet* packet, uint8_t context);
   bool allowRadioProfileCross(const mesh::Packet* packet) override {
@@ -563,8 +585,13 @@ public:
   // MQTT's WiFi task associates asynchronously. ESP-NOW must wait for that
   // station interface so it can share the AP-selected channel safely.
   bool startSharedEspNowBridgeIfReady() {
+#ifdef WITH_WEBCONFIG
+    if (_unconfigured_setup_espnow_suspended) return false;
+#endif
     if (espnow_bridge.isRunning()) return true;
     if (!_prefs.espnow_bridge_enabled) return false;
+    // Keep the browser uploader's bridge pause in effect until OTA stops.
+    if (_cli.getBoard()->isOTAUpdateRunning()) return false;
     if (bridge && bridge->isRunning() && !WiFi.isConnected()) return false;
     if (!millisHasNowPassed(shared_espnow_retry_at)) return false;
     shared_espnow_retry_at = millis() + 5000;
@@ -593,6 +620,7 @@ public:
       _alerter.setBridge(nullptr);
       return !bridge || !bridge->isRunning();
     }
+    if (bridge && bridge->isStopping()) return false;
     // Give the WiFi station to MQTT while it associates. ESP-NOW is restarted
     // after the AP channel is known, which avoids a raw ESP-NOW-only session
     // pinning the station to a different channel.
@@ -607,6 +635,9 @@ public:
       node_info.cr = &_prefs.cr;
       node_info.repeat_flag = &_prefs.disable_fwd;
       node_info.repeat_when_nonzero = false;
+#ifdef WITH_WEBCONFIG
+      node_info.canonical_wifi = true;
+#endif
       bridge = new MQTTBridge(node_info, _cli.getObserverPrefs(),
                               getRTCClock(), &self_id);
       if (!bridge) return false;
@@ -642,6 +673,10 @@ public:
       return !espnow_bridge.isRunning();
     }
     if (espnow_bridge.isRunning()) return true;
+    if (_cli.getBoard()->isOTAUpdateRunning()) return false;
+#ifdef WITH_WEBCONFIG
+    _unconfigured_setup_espnow_suspended = false;
+#endif
     shared_espnow_retry_at = 0;
     if (bridge && bridge->isRunning()) {
       startSharedEspNowBridgeIfReady();
@@ -685,6 +720,9 @@ public:
   }
 
   bool setBridgeState(bool enable) override {
+#ifdef WITH_MQTT_BRIDGE
+    if (enable && bridge && bridge->isStopping()) return false;
+#endif
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
     if (!enable) return setEspNowBridgeState(false) && setMqttBridgeState(false);
     const bool mqtt_ok = _prefs.bridge_enabled
@@ -706,6 +744,9 @@ public:
       node_info.cr = &_prefs.cr;
       node_info.repeat_flag = &_prefs.disable_fwd;
       node_info.repeat_when_nonzero = false;
+#ifdef WITH_WEBCONFIG
+      node_info.canonical_wifi = true;
+#endif
       bridge = new MQTTBridge(node_info, _cli.getObserverPrefs(),
                               getRTCClock(), &self_id);
 #endif
@@ -817,6 +858,7 @@ public:
   bool beginDeferredOtaUpdate() override {
     _ota_update_at = millis() + 2500;
     if (_ota_update_at == 0) _ota_update_at = 1;  // 0 means "none"
+    _ota_update_channel = _prefs.ota_channel;
     return true;
   }
 
@@ -826,6 +868,16 @@ public:
 
   bool isMqttBridgeRunning() override {
     return bridge && bridge->isRunning();
+  }
+
+  bool requestMqttBridgeStop() override {
+    _alerter.setBridge(nullptr);
+    if (bridge) bridge->requestStop();
+    return true;
+  }
+
+  bool isMqttBridgeStopping() override {
+    return bridge && bridge->isStopping();
   }
 
   bool syncMqttNtp() override {
@@ -848,11 +900,22 @@ public:
   bool isWebConfigStopping() const { return _webconfig && _webconfig->isStopping(); }
   bool hasWirelessNetworkClient() const { return _web_terminal != nullptr; }
   bool stopWebConfig(char* reply) override;
+  bool stopWebConfigForOTA(char* reply) override {
+    return !_webconfig || _webconfig->stopForOTA(reply);
+  }
   bool setWebUIEnabled(bool enabled, char* reply) override;
   bool getWebUIStatus(char* reply) const override;
+  bool usesCanonicalWiFi() const override { return true; }
+  const void* canonicalWiFiLegacyPrefs() const {
+#ifdef WITH_MQTT_BRIDGE
+    return _cli.getObserverPrefs();
+#else
+    return nullptr;
+#endif
+  }
   bool getWiFiSSID(char* reply) const override;
   bool getWiFiPassword(char* reply) const override {
-    return WebConfigServer::formatWiFiPassword(reply, 160);
+    return WebConfigServer::formatWiFiPassword(reply, 160, canonicalWiFiLegacyPrefs());
   }
   bool getWiFiStatus(char* reply) const override;
   bool getWiFiPowerSave(char* reply) const override;

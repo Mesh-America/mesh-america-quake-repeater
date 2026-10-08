@@ -19,6 +19,8 @@ import struct
 import time
 
 import serial
+from serial_session import open_configured_session
+from profile_switch import configure_session
 
 from esp32_companion_serial_stress import (
     DeviceFrameReader,
@@ -43,12 +45,10 @@ def secret_counters(reply):
 
 def run(args):
     port = serial.Serial(None, 115200, timeout=0.05, write_timeout=10)
-    port.dtr = False
-    port.rts = False
     port.port = args.port
-    port.open()
+    configure_session(port)
+    open_configured_session(port)
     try:
-        port.dtr = True
         time.sleep(4)
         reader = DeviceFrameReader(TransportCounters())
 

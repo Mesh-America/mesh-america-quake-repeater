@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/cli_build_matrix/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # CLI Availability by Firmware Build
 
 MeshCore command availability is determined in three layers:
@@ -49,24 +53,33 @@ The direct observer and Full-matrix paths use the same `full-usb-wifi-ota`
 artifact and runtime output controls. The ordinary bulk release publishes one
 Full OTA identity per exact ESP32 board and role. Audited plain targets keep
 their identity while compiling the combined observer/ESP-NOW sources; G2 keeps
-its deployed observer identity. T-Beam SX1262/SX1276 and TLora V2 choose the
-observer in the ordinary release. Their plain Full recipes remain available
+its deployed observer identity. T-Beam SX1262/SX1276 choose the observer in
+the ordinary release. TLora V2 retains two Full images because UART, MQTT
+and ESP-NOW together exceed its internal RAM budget: the normal repeater
+provides UART plus ESP-NOW, and the observer provides MQTT plus ESP-NOW.
+T-Beam plain Full recipes remain available
 as explicit alternatives with different routing capacities. Build one with
 `bash build.sh build-firmware <target> --full-exact`, then deliberately install
 it over LoRa with `ota pull <MID8> flash` and `ota install` on compatible
 hardware and partition layouts.
 
-Standard and reduced OTA images, including images that fit the 1.25 MiB
-portable application slot, remain available and remain in the standard matrix
-pass. Select `--build-profile standard` to retain the original target and
-partition contract. Moving from a plain target to its MQTT sibling changes the
-LoRa OTA target identity; a partition layout change needs its matching
-migration step.
-For the normal-role partition migrations, the matrix also publishes a
-canonical Full image under the normal target identity. Install its matching
-merged image over USB once; mOTA rejects the incompatible partition signature
-until that migration is complete, then later Full updates use the normal
-target ID. The portable image remains available while deployed nodes move.
+The ordinary ESP32 release publishes Full images. Standard and reduced OTA
+recipes, including those that fit a 1.25 MiB portable application slot, remain
+available through explicit builds for recovery and migration. Select
+`--build-profile standard` to retain an exact target's original partition
+contract. They are omitted from the ordinary release and interactive board
+menu. That menu also omits transport/default aliases covered by Full and
+development utilities; it retains distinct hardware, roles, storage, and
+measured capacity exceptions. Exact legacy names remain accepted by
+`build-firmware` and `build-matching-firmwares`.
+
+For the normal-role partition migrations, the release publishes a canonical
+Full image under the normal target identity. Use its qualified wireless
+expansion package when one exists, or install its matching merged image over
+USB. mOTA rejects an incompatible partition signature until that migration
+is complete, then later Full updates use the normal target ID. Moving from a
+plain target to a differently named sibling can also change the LoRa OTA
+identity; partition expansion does not by itself authorize that transition.
 
 Legacy supported ESP32 Wi-Fi repeaters can use the
 [Wi-Fi partition migration](esp32_wifi_partition_migration.md) bridge to
@@ -104,15 +117,15 @@ getters; relaying a command over LoRa keeps its remote restrictions.
 
 | Build/profile | Command availability |
 |---|---|
-| Standard non-MQTT repeater or room server | Keeps the normal role CLI and, where USB is a safe plaintext console, embeds debug/packet logging behind persistent `get/set usb.logging`. The explicitly selected portable policy can omit WebConfig and browser WiFi OTA, so those commands are unavailable and the omission is recorded in the capability manifest. |
+| Standard non-MQTT repeater or room server | Keeps the normal role CLI and, where USB is a safe plaintext console, embeds packet logging behind persistent `get/set usb.logging` and separately saved `get/set usb.debug` verbosity. USB debug defaults off and requires compiled diagnostic support. The explicitly selected portable policy can omit WebConfig and browser WiFi OTA, so those commands are unavailable and the omission is recorded in the capability manifest. |
 | Legacy standard logging | No longer emitted separately. Its behavior is compiled into the ordinary artifact. Size-constrained STM32 targets embed packet logging without verbose `MESH_DEBUG`. |
 | LoRa-OTA (`-ota-`) | LoRa OTA adds the `ota ...` commands; it does not otherwise reduce the role CLI. ESP32 `no_external_sensors` artifacts retain the compact browser WiFi uploader, the complete CLI, and up to 254 neighbors, subject to recorded internal-DRAM reductions. |
 | nRF52 repeater/room-server/sensor release pair | `full-ota` retains the complete supported sensor recipe; `reduced-ota` omits declared optional sensor drivers. Both include verified LoRa OTA, use the same logical target identity and exact storage/layout contract within the pair, and retain the role's normal commands. Repeaters/room servers also verify `retry.preset`. RAK3401 and RAK4631 reduced builds retain GPS where compatible and INA219/INA226/INA260/INA3221 I2C voltage/current monitors. External QSPI/SD targets also publish both choices. Companion/Terminal Chat and KISS roles do not enter this policy. |
 | ESP32 MQTT observer or ESP-NOW bridge | Always uses the expanded FULL partition profile. The build never substitutes a reduced CLI to fit the legacy application slot. |
-| FULL ESP32 USB + WiFi | Uses the matching MQTT target with packet logging on, verbose debug off, and the complete command surface supported by that role and hardware. `get/set logging.output off\|usb\|wifi\|both` selects and persists the active output paths. |
-| FULL ESP32 logging fallback | Uses the matching non-MQTT target only when no WiFi MQTT sibling exists, with debug and packet logging enabled and the complete command surface supported by that role and hardware. Its persistent USB gate also covers output-off operation, avoiding a second FULL ESP-NOW image. |
-| nRF52 dual-CDC Full Companion | Fresh installs expose only interface `00`; it starts as an ASCII terminal and automatically hands a complete `<` frame to framed Companion. The same interface also carries exclusive serial mOTA traffic. Enabling logging and rebooting adds interface `02` for plaintext logs. BLE and source-only LoRa OTA remain available. `get/set usb.logging` persistently controls whether the logging interface is present. |
-| ESP32 single-TTY Full Companion | Every ESP32 Full image starts with the ASCII terminal on its one USB TTY and automatically hands a complete `<` frame to framed Companion. On 1.17.1.5, run `set powersaving off` first. `set usb.logging on` switches that TTY to an input-capable plaintext logging terminal and makes framed Companion unavailable on USB; `set usb.logging off` stops logging but leaves the TTY in normal ASCII mode. The terminal stop token or a valid incoming framed probe then performs the ordinary switch to Binary Companion. A saved logging-on setting starts directly in that logging terminal and disables automatic frame detection. BLE, WiFi, and source-only LoRa OTA remain available. ESP32 Full uses Arduino-ESP32 2.x where supported; RC32 and ESP32-C6 keep their board-required Arduino 3.x platform but still expose only one TTY. |
+| FULL ESP32 USB + WiFi | Uses the matching MQTT target with packet logging, USB debug defaulting off, and the complete command surface supported by that role and hardware. Debug verbosity can be enabled only for diagnostics compiled into that image. `get/set logging.output off\|usb\|wifi\|both` selects and persists the active output paths; `get/set usb.debug` separately saves USB verbosity. |
+| FULL ESP32 logging fallback | Uses the matching non-MQTT target when no compatible MQTT sibling exists, preserving its hardware and role CLI. Full LoRa repeaters also include runtime ESP-NOW with `set espnow.enabled on\|off` and `get espnow.running`; newly combined modes default off. Dedicated images remain only for measured capacity exceptions. USB debug defaults off; `get/set usb.debug` selects verbose output independently of packet capture. |
+| nRF52 dual-CDC Full Companion | Fresh installs expose only interface `00`; it starts as an ASCII terminal and automatically hands a complete `<` frame to framed Companion. The same interface also carries exclusive serial mOTA traffic. `set usb.logging on reboot` adds output-only interface `02` for ASCII RAW/RX/TX records and optional debug. Alternatively, `set usb.logging stream reboot` keeps CLI replies and packet records on interface `00` for unmodified one-port serial bridges; Binary Companion and serial mOTA require logging off on that port. BLE and source-only LoRa OTA remain available. `get/set usb.logging` persistently controls whether the logging interface is present; `get/set usb.debug` changes verbosity without a reboot. Send CLI/control queries to interface `00`, not the log endpoint. |
+| ESP32 single-TTY Full Companion | Every ESP32 Full image starts with the ASCII terminal on its one USB TTY and automatically hands a complete `<` frame to framed Companion. On 1.17.1.5, run `set powersaving off` first. `set usb.logging on` switches that TTY to an input-capable plaintext RAW/RX/TX logging terminal and makes framed Companion unavailable on USB; `set usb.logging off` stops logging but leaves the TTY in normal ASCII mode. `get/set usb.debug` separately controls saved verbose diagnostics, defaulting off. The terminal stop token or a valid incoming framed probe then performs the ordinary switch to Binary Companion. A saved logging-on setting starts directly in that logging terminal and disables automatic frame detection. BLE, WiFi, and source-only LoRa OTA remain available. ESP32 Full uses Arduino-ESP32 2.x where supported; RC32 and ESP32-C6 keep their board-required Arduino 3.x platform but still expose only one TTY. |
 | `no_external_sensors` | Trims selected optional environmental/ranging drivers and their settings; it does not remove generic I2C, core repeater discovery, routing, or runtime RS-232 commands. RAK3401 and RAK4631 profiles retain the four common INA I2C voltage/current monitors. GPS-preserving RAK nRF52 OTA profiles retain their GPS commands and provider; RAK4631 defaults the bridge to UART 2 because RAK12501/L76K GPS uses UART 1. Legacy target suffixes remain stable for OTA identity compatibility. |
 
 The four retained INA drivers are entries in the optional environmental-sensor
@@ -129,6 +142,10 @@ both devices on one bus, leave RAK12500 at `0x42`, strap INA3221 A0 to SCL for
 `logging`, `OTA`, and `FULL` describe independent build features in historical
 filenames. Current standard artifacts use no `-logging-` infix because their
 USB logging is runtime controlled.
+USB packet capture and debug verbosity share the canonical artifact, not a new
+build/profile name. `usb.logging` remains the master; verbose diagnostics need
+both that switch and saved `usb.debug` on. Fresh and legacy preferences default
+debug to off. Setting debug on cannot restore code compiled out of an image.
 
 ## Canonical bulk-build policy
 
@@ -181,12 +198,70 @@ available from a canonical image:
   releases. Wio-E5 remains separate because its normal image has only 916
   bytes free, while the combined image exceeds the fixed 240 KiB application
   partition by 2,192 bytes.
+  `MKE_s3_repeater` includes the bridge on UART 2, with RX on GPIO16 and TX on
+  GPIO17. Fresh installs leave it disabled at 115200 baud; upgrades from normal
+  repeaters keep it disabled, while existing saved RS-232 settings are retained.
+  Use `set bridge.baud 115200` and `set bridge.enabled on` to enable it, or
+  `set bridge.enabled off` to stop it. `set bridge.uart 2` selects its fixed
+  UART; other UART numbers are rejected. Successful changes take effect
+  immediately and persist across reboots. The historical
+  `MKE_s3_repeater_bridge_rs232` name remains directly buildable with its
+  bridge-on default for compatibility but is omitted from bulk releases.
+  The same MKE image includes ESP-NOW, controlled independently with
+  `set espnow.enabled on|off` and `get espnow.running`. Both bridges can run
+  together and share `bridge.source` and `bridge.delay`; `bridge.channel`,
+  `bridge.secret`, and `bridge.format` apply only to ESP-NOW. Its first boot
+  after an upgrade leaves ESP-NOW off, including upgrades from the dedicated
+  ESP-NOW image: run `set espnow.enabled on` to enable it. Subsequent reboots
+  retain the saved setting. The historical `MKE_s3_repeater_bridge_espnow`
+  target remains directly buildable with its bridge-on default but is omitted
+  from bulk releases. Browser OTA pauses ESP-NOW while leaving RS-232 running;
+  `stop ota` restores ESP-NOW when its saved setting is on.
+- Full Heltec V3, Wireless Stick Lite V3 and RAK3112 MQTT repeaters retain
+  RS-232 alongside MQTT and ESP-NOW. They use UART2 with RX on GPIO5 and
+  TX on GPIO6. Use `set rs232.enabled on|off` and
+  `get rs232.running` independently of `mqtt.enabled` and `espnow.enabled`.
+  `bridge.baud` and `bridge.uart` configure the UART. Old MQTT preferences
+  do not enable this newly added UART; its saved intent needs a validated
+  UART profile marker. Historical `bridge.enabled` keeps its ESP-NOW meaning
+  in MQTT images and its UART meaning in non-MQTT images. Full qualification
+  verifies the linked UART driver even when compiling observer sources for a
+  normal repeater, and resumed release selection rejects Full images without
+  that proof.
+- LilyGo T-LoRa V2.1-1.6 retains a normal Full UART/ESP-NOW repeater and a
+  separate Full MQTT/ESP-NOW observer. Real triple-transport qualification
+  fell 6,496 bytes short of the required internal heap, including the UART
+  driver allowance. The normal UART remains on RX GPIO34 and TX GPIO25;
+  use `bridge.enabled` or `rs232.enabled` to control it. Both Full identities
+  remain in bulk releases instead of reducing routing capacity or RAM margins.
+- MeshTower V2 repeaters use
+  `Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors` as the one
+  canonical target. Its SD OTA target `0A9DBBF0`, hardware ID
+  `Heltec_tower_v2`, layout, and filenames stay unchanged, with separate
+  required Full and Reduced sensor profiles. Both
+  `Heltec_tower_v2_repeater` and
+  `Heltec_tower_v2_repeater_lora_ota_no_external_sensors` resolve to this primary
+  in `build-firmware` and matching builds. Old internal-only bootloader/OTA
+  identities require one local USB/BLE DFU or SWD migration; the build aliases
+  do not make the new image a same-target LoRa upgrade for those installed nodes.
+  Existing SD users need no configuration change. The application selects SD
+  first and falls back automatically for a missing or unmountable card only
+  when the matching published combined OTAFIX profile declares exact
+  privileged storage `09` and optional application storage `02` in its separate
+  `MOTASTOR` record. Internal fallback accepts flash-staged signed application
+  in-place deltas from trusted signers that fit its smaller workspace;
+  SD-generated large deltas may be rejected. Full images, bootloader updates,
+  and archive capture remain SD-only. Storage stays pinned through a transfer:
+  use `ota cancel` before
+  selecting a different backend. The application does not use an `APPHYBRID`
+  retained-RAM staging arena. See [MeshTower SD OTA](ota_meshtower_v2_sdcard.md).
 
 The old aliases still work with `build-firmware` and
 `build-matching-firmwares`. Dedicated LoRa OTA repeater images are not
-collapsed; they retain their exact storage, bootloader, role, and target
-identity contracts. Companion boards keep transport-specific canonical images
-only when no exact Full recipe has passed the combined flash/RAM qualification.
+collapsed outside the MeshTower consolidation above; they retain their exact
+storage, bootloader, role, and target identity contracts. Companion boards
+keep transport-specific canonical images only when no exact Full recipe has
+passed the combined flash/RAM qualification.
 ESP32 deliberately uses one TTY: Binary Companion and plaintext USB logging
 are mutually exclusive there. nRF52 retains its optional second CDC port.
 

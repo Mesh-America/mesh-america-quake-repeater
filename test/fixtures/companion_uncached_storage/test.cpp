@@ -28,6 +28,7 @@ public:
   size_t write(const uint8_t* bytes, size_t length);
   size_t size() const;
   int available() const { return static_cast<int>(size() - position); }
+  bool setBufferSize(size_t size) { return size != 0; }
   void flush() {}
   void close() { fs = nullptr; }
 };
@@ -160,6 +161,9 @@ class DataStore {
   bool _identity_creation_blocked = false;
   bool _channel_load_incomplete = false;
   bool _uncached_contact_load_incomplete = false;
+#if defined(ESP32_PLATFORM)
+#include "contact_write_state_under_test.h"
+#endif
   struct IdentityAdapter {
     bool recover(const char*) { return true; }
     bool load(const char*, mesh::LocalIdentity&) {
@@ -173,6 +177,14 @@ class DataStore {
     }
   } identity_store;
 public:
+#if defined(ESP32_PLATFORM)
+  ~DataStore();
+  bool markContactDirty(const ContactInfo&);
+  bool releaseContact(const ContactInfo&);
+  bool serviceContactWrites(DataStoreHost*, bool (*filter)(const ContactInfo&) = nullptr);
+  bool flushContactWrites(DataStoreHost*, bool (*filter)(const ContactInfo&) = nullptr);
+  bool hasPendingContactWrites() const;
+#endif
   FakeFilesystem* _getContactsChannelsFS() { return _fs; }
   File openRead(FakeFilesystem* fs, const char* path) { return fs->open(path); }
   bool loadMainIdentity(mesh::LocalIdentity&);

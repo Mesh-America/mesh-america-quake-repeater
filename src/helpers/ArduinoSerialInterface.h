@@ -7,6 +7,9 @@ class ArduinoSerialInterface : public BaseSerialInterface {
 public:
   // reports whether a client currently has this stream open (see setConnectedCheck)
   typedef bool (*ConnectedCheck)();
+  // Optional protocol-owner gate, checked before a completed frame is exposed
+  // or recorded as client activity. Other transports retain their old behavior.
+  typedef bool (*ReceiveFrameCheck)(uint32_t completed_at);
 
 private:
   static constexpr uint8_t TX_QUEUE_SIZE = 4;
@@ -23,10 +26,13 @@ private:
   bool _secondaryControlSequenceReceived;
   bool _flow_ctl;
   uint8_t _state;
-  size_t _controlSequencePos;
-  size_t _secondaryControlSequencePos;
-  bool _controlSequenceCandidate;
-  bool _secondaryControlSequenceCandidate;
+  uint8_t _tx_queue_len;
+  uint16_t _tx_offset;
+  // A null cursor excludes the current line; otherwise it points at the next
+  // token byte. This keeps arbitrary-length C-string tokens without separate
+  // candidate flags or a position limit.
+  const char* _controlSequenceCursor;
+  const char* _secondaryControlSequenceCursor;
   uint16_t _frame_len;
   uint16_t rx_len;
   uint32_t _last_frame_ms;
@@ -37,10 +43,9 @@ private:
   const char* _controlSequence;
   const char* _secondaryControlSequence;
   ConnectedCheck _conn_check;
+  ReceiveFrameCheck _receive_frame_check;
   uint8_t rx_buf[MAX_FRAME_SIZE];
   TxFrame _tx_queue[TX_QUEUE_SIZE];
-  uint8_t _tx_queue_len;
-  uint16_t _tx_offset;
 
   void resetControlSequenceState();
   bool checkControlLineByte(uint8_t c);
@@ -54,14 +59,14 @@ public:
   ArduinoSerialInterface()
       : _isEnabled(false), _passthroughMode(false),
         _controlSequenceReceived(false), _secondaryControlSequenceReceived(false),
-        _flow_ctl(false), _state(0), _controlSequencePos(0),
-        _secondaryControlSequencePos(0), _controlSequenceCandidate(false),
-        _secondaryControlSequenceCandidate(false), _frame_len(0), rx_len(0),
+        _flow_ctl(false), _state(0), _tx_queue_len(0), _tx_offset(0),
+        _controlSequenceCursor(nullptr), _secondaryControlSequenceCursor(nullptr),
+        _frame_len(0), rx_len(0),
         _last_frame_ms(0), _completed_frame_count(0), _last_rx_byte_ms(0),
         _has_received_frame(false),
         _serial(nullptr), _controlSequence(nullptr),
         _secondaryControlSequence(nullptr), _conn_check(nullptr),
-        _tx_queue_len(0), _tx_offset(0) {}
+        _receive_frame_check(nullptr) {}
 
   void begin(Stream& serial, const char* controlSequence = nullptr,
              const char* secondaryControlSequence = nullptr) {
@@ -94,6 +99,7 @@ public:
   // Optional: let the target report the real link state, e.g. USB-CDC DTR.
   // Without it isConnected() assumes true, as a plain UART has no way of knowing.
   void setConnectedCheck(ConnectedCheck fn) { _conn_check = fn; }
+  void setReceiveFrameCheck(ReceiveFrameCheck fn) { _receive_frame_check = fn; }
 
   // Clear all protocol state owned by one host session while retaining the
   // monotonic completed-frame counter used by startup handoff arbitration.

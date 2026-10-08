@@ -44,7 +44,10 @@ class ContactCacheTest(unittest.TestCase):
     def test_nrf52_paged_store_migration_and_snapshots(self):
         self.run_cache_test("NRF52_PLATFORM")
 
-    def run_cache_test(self, platform):
+    def test_esp32_default_crc_cadence_is_detected(self):
+        self.run_cache_test("ESP32_PLATFORM", disable_crc_batch=True)
+
+    def run_cache_test(self, platform, disable_crc_batch=False):
         with tempfile.TemporaryDirectory(prefix="mesh-contact-cache-") as temp:
             temp = Path(temp)
             store = (ROOT / "examples/companion_radio/DataStore.cpp").read_text()
@@ -63,12 +66,35 @@ class ContactCacheTest(unittest.TestCase):
             helper_start = store.index("namespace {\nbool cachedContactFilter")
             helper_end = store.index("bool DataStore::readStoredPath(", helper_start)
             implementation = store[helper_start:helper_end]
+            header = (ROOT / "examples/companion_radio/DataStore.h").read_text()
+            state_start = header.index("  mesh::ContactFileTransaction* _contact_write")
+            state_end = header.index("\n#endif", state_start)
+            (temp / "contact_write_state_under_test.h").write_text(
+                header[state_start:state_end])
+            functions.append("DataStore::~DataStore()")
+            if platform == "ESP32_PLATFORM":
+                functions.extend((
+                    "void DataStore::cancelContactWrite(",
+                    "bool DataStore::cancelCooperativeWrite(",
+                    "bool DataStore::serviceContactWrite(",
+                    "bool DataStore::markContactDirty(",
+                    "bool DataStore::releaseContact(",
+                    "bool DataStore::serviceContactWrites(",
+                    "bool DataStore::hasPendingContactWrites() const",
+                    "void DataStore::begin()",
+                    "void DataStore::disableSecondaryFS(",
+                ))
             if platform == "NRF52_PLATFORM":
                 implementation += method(store, "static void makeContactPagePath(") + "\n"
                 implementation += method(store, "static void discardInvalidContactPage(") + "\n"
                 functions.append("bool DataStore::writeContactPage(")
                 functions.append("bool DataStore::loadContactPages(")
             implementation += "\n".join(method(store, signature) for signature in functions)
+            if disable_crc_batch:
+                self.assertIn("_contact_write->serviceCommit(true, 8, true)", implementation)
+                implementation = implementation.replace(
+                    "_contact_write->serviceCommit(true, 8, true)",
+                    "_contact_write->serviceCommit(true, 1, true)")
             (temp / "store_under_test.h").write_text(implementation)
             packet = (ROOT / "src/Packet.cpp").read_text()
             (temp / "packet_under_test.h").write_text("namespace mesh {\n" + "\n".join(
@@ -82,6 +108,7 @@ class ContactCacheTest(unittest.TestCase):
                 "namespace mesh {\n" + method(mesh, "bool Mesh::sendDirect(") + "\n}\n"
                 + "\n".join(method(chat, signature) for signature in (
                     "int BaseChatMesh::sendLogin(", "int BaseChatMesh::sendAnonReq(",
+                    "bool BaseChatMesh::allocateRequestTag(",
                     "int  BaseChatMesh::sendRequest(const ContactInfo& recipient, const uint8_t*",
                     "int  BaseChatMesh::sendRequest(const ContactInfo& recipient, uint8_t"))
             )
@@ -101,7 +128,11 @@ class ContactCacheTest(unittest.TestCase):
             ], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            if disable_crc_batch:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("crc_read_passes == 104", result.stderr)
+            else:
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

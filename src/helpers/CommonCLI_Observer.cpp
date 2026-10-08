@@ -14,11 +14,13 @@
 #include <Arduino.h>
 #include "CommonCLI.h"
 #include "CLICommandUtils.h"
+#include "OtaChannel.h"
 #include "TxtDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch[Hex]()
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
 #include <Utils.h>
 #ifdef ESP_PLATFORM
+#include "NetworkLink.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <esp_wifi.h>
@@ -181,6 +183,14 @@ static void formatMQTTPresetListReply(char* reply, size_t reply_size, int start)
 
 bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
+  if (_callbacks->usesCanonicalWiFi()) {
+    const char* value = nullptr;
+    const auto key = mesh::cli::classifyStandaloneWiFiSet(config, &value);
+    if (key == mesh::cli::StandaloneWiFiKey::SSID) { _callbacks->setWiFiSSID(value, reply); return true; }
+    if (key == mesh::cli::StandaloneWiFiKey::Password) { _callbacks->setWiFiPassword(value, reply); return true; }
+    if (key == mesh::cli::StandaloneWiFiKey::PowerSave) { _callbacks->setWiFiPowerSave(value, reply); return true; }
+  }
+
   bool handled = true;
   const auto restart_observer_bridge = [this]() {
     return mesh::cli::restartBridgeIfEnabled(
@@ -870,6 +880,21 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 
 bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply) {
 #ifdef WITH_MQTT_BRIDGE
+  if (_callbacks->usesCanonicalWiFi()) {
+    if (strcmp(config, "wifi.pwd") == 0) {
+      _callbacks->getWiFiPassword(reply);
+      if (sender_timestamp) {
+        const bool has_password = strlen(reply) > 2;
+        strcpy(reply, has_password ? "> ******** (local connection only)" : "> (not set)");
+      }
+      return true;
+    }
+    const auto key = mesh::cli::classifyStandaloneWiFiGet(config);
+    if (key == mesh::cli::StandaloneWiFiKey::SSID) { _callbacks->getWiFiSSID(reply); return true; }
+    if (key == mesh::cli::StandaloneWiFiKey::Status) { _callbacks->getWiFiStatus(reply); return true; }
+    if (key == mesh::cli::StandaloneWiFiKey::PowerSave) { _callbacks->getWiFiPowerSave(reply); return true; }
+  }
+
   bool handled = true;
   if (strcmp(config, "mqtt.enabled") == 0) {
     snprintf(reply, 160, "> %s", _prefs->bridge_enabled ? "on" : "off");
@@ -877,6 +902,10 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
   }
   if (strcmp(config, "mqtt.running") == 0) {
     snprintf(reply, 160, "> %s", _callbacks->isMqttBridgeRunning() ? "on" : "off");
+    return true;
+  }
+  if (strcmp(config, "mqtt.stopping") == 0) {
+    snprintf(reply, 160, "> %s", _callbacks->isMqttBridgeStopping() ? "on" : "off");
     return true;
   }
   if (memcmp(config, "snmp.community", 14) == 0) {
@@ -1026,6 +1055,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     } else {
       strcpy(reply, _mqtt_prefs.wifi_password[0] ? "> ******** (local connection only)" : "> (not set)");
     }
+  } else if (strcmp(config, "link.dns") == 0) {
+    activeNetworkLink().formatDns(reply, 160);
   } else if (memcmp(config, "wifi.status", 11) == 0) {
     wl_status_t status = WiFi.status();
     const char* status_str;
@@ -1119,7 +1150,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       strcpy(reply, "> (not set)");
     }
   } else if (memcmp(config, "mqtt.config.valid", 17) == 0) {
-    bool valid = MQTTBridge::isConfigValid(&_mqtt_prefs);
+    bool valid = MQTTBridge::isConfigValid(&_mqtt_prefs, _callbacks->usesCanonicalWiFi());
     sprintf(reply, "> %s", valid ? "valid" : "invalid");
 #endif
   } else if (memcmp(config, "alert.hashtag", 13) == 0) {
@@ -1215,7 +1246,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // costs one plain-HTTP request (no cert-bundle allocation or large JSON
       // document). The later update path refetches it over verified HTTPS after
       // the bridge is down. No bridge bounce is needed for this advisory check.
-      _board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply);
+      _board->otaFromManifest(ota_resolve_base(_prefs->ota_channel), _callbacks->getFirmwareVer(), true, reply);
     } else {
       // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
       // schedule the real update - which tears the bridge down, flashes, and
@@ -1223,7 +1254,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // returns true iff so; otherwise it leaves the explanation (up to date /
       // cable flash / error) in reply, which we send without disturbing the
       // bridge or misleading the user with a "Beginning update..." that no-ops.
-      if (_board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply)) {
+      if (_board->otaFromManifest(ota_resolve_base(_prefs->ota_channel), _callbacks->getFirmwareVer(), true, reply)) {
         // reply now holds "update available: <cur> -> <target> (N behind|new base)",
         // where <target> is "vX.Y.Z.B (hash)". Pull <target> out for a friendlier
         // start message. The "-> " ... trailing " (" framing is produced by
@@ -1251,6 +1282,39 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
           }
         } else {
           strcpy(reply, "ERR: online OTA not available");
+        }
+      }
+    }
+#else
+    strcpy(reply, "ERR: online OTA not supported on this build");
+#endif
+    return true;
+  } else if (memcmp(command, "ota branch", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
+    // Switch (or report) the OTA release channel this device pulls from. The
+    // selection is persisted (NodePrefs::ota_channel) and resolved to a baked-in
+    // base URL by ota_resolve_base(); it changes only WHERE updates are fetched,
+    // never the running image's reported version. Reachable from any admin path,
+    // same as `ota update`.
+#if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
+    const char* arg = command + 10;
+    while (*arg == ' ') arg++;
+    if (*arg == 0) {
+      snprintf(reply, 160, "channel: %s (build: %s), base %s",
+               ota_channel_name(_prefs->ota_channel), ota_native_channel_name(),
+               ota_resolve_base(_prefs->ota_channel));
+    } else {
+      uint8_t ch;
+      if (!ota_parse_channel(arg, &ch)) {
+        strcpy(reply, "ERR: usage ota branch [prod|beta|default] (aliases: stable, dev)");
+      } else {
+        const uint8_t previous = _prefs->ota_channel;
+        _prefs->ota_channel = ch;
+        if (!saveCommonPrefs()) {
+          _prefs->ota_channel = previous;
+          strcpy(reply, "ERR: OTA channel save failed; setting unchanged");
+        } else {
+          snprintf(reply, 160, "channel set to %s, base %s; run ota update to switch",
+                   ota_channel_name(ch), ota_resolve_base(ch));
         }
       }
     }

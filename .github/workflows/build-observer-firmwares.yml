@@ -54,6 +54,10 @@ env:
   # same value the build was handed instead of a second hardcoded copy. Must match
   # build.sh's OTA_MANIFEST_BASE_URL default and the Pages path serving flasher/v.
   OTA_MANIFEST_BASE_URL: https://observer.gessaman.com/v
+  # Both channel bases are baked into every build so `ota branch prod|beta` can
+  # move a node between channels. Identical in both observer workflows.
+  OTA_MANIFEST_BASE_STABLE_URL: https://observer.gessaman.com/v
+  OTA_MANIFEST_BASE_DEV_URL: https://observer.gessaman.com/beta/v
 
 jobs:
 
@@ -144,21 +148,9 @@ jobs:
         run: /usr/bin/env bash build.sh build-firmware ${{ matrix.shard.envs }}
 
       - name: Verify production channel is baked in
-        shell: bash
-        run: |
-          # Mirror of the beta workflow's guard, which production lacked. Fail fast
-          # rather than publish firmware that would OTA itself onto the wrong
-          # channel: the manifest base is a compile-time -D, so a build that lost
-          # it (or picked up beta's) is invisible until a node tries `ota check`.
-          BIN=$(find .pio/build -name firmware.elf | head -1)
-          if [ -z "$BIN" ]; then echo "no ELF found to verify" >&2; exit 1; fi
-          if ! strings "$BIN" | grep -qF "$OTA_MANIFEST_BASE_URL"; then
-            echo "ERROR: production manifest base missing from $BIN" >&2; exit 1
-          fi
-          if strings "$BIN" | grep -qF 'https://observer.gessaman.com/beta/v'; then
-            echo "ERROR: beta manifest base present in a production build" >&2; exit 1
-          fi
-          echo "OK: $BIN carries $OTA_MANIFEST_BASE_URL"
+        # Fail fast rather than publish firmware that would OTA itself onto the
+        # wrong channel: checks every .bin the shard publishes.
+        run: python3 scripts/verify_ota_channel.py --expect prod --required-cap keymind1
 
       - name: Upload Shard Artifact
         uses: actions/upload-artifact@v4

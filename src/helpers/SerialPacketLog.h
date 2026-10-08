@@ -32,6 +32,17 @@ inline bool& serialLogPortSeen() {
 
 template <class T>
 bool serialLogEmit(T& out, const char* data, size_t len) {
+#if defined(ESP32_PLATFORM) && defined(ARDUINO_USB_CDC_ON_BOOT) && \
+    (ARDUINO_USB_CDC_ON_BOOT == 1) && defined(ARDUINO_USB_MODE) && \
+    (ARDUINO_USB_MODE == 1)
+  // The HWCDC logging view checks this complete record again under the shared
+  // producer guard. Never leave a line prefix behind when its host stalls.
+  const int space = out.availableForWrite();
+  if (space <= 0 || static_cast<size_t>(space) < len) return false;
+  if (out.write(reinterpret_cast<const uint8_t*>(data), len) != len) return false;
+  serialLogPortSeen() = true;
+  return true;
+#else
   if (out.availableForWrite() <= 0) return false;
 
   const uint32_t start = millis();
@@ -55,6 +66,7 @@ bool serialLogEmit(T& out, const char* data, size_t len) {
   }
   serialLogPortSeen() = true;
   return true;
+#endif
 }
 
 template <size_t CAP = SERIAL_LOG_LINE_MAX>
@@ -130,7 +142,14 @@ class SerialLogLine {
 inline void serialLogBegin() {
 #if defined(ESP32_PLATFORM) && defined(ARDUINO_USB_CDC_ON_BOOT) && \
     (ARDUINO_USB_CDC_ON_BOOT == 1)
+  #if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 1
+  // Arduino 2.0.17 HWCDC decrements an unsigned retry counter when its
+  // host stops reading. A zero timeout can underflow; retain the bounded
+  // timeout established by prepareUsbLoggingPort().
+  Serial.setTxTimeoutMs(5);
+  #else
   Serial.setTxTimeoutMs(0);
+  #endif
 #endif
 }
 

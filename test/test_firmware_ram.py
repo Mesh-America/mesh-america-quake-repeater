@@ -66,6 +66,52 @@ def esp_fixture(path, modern=False, fragmented=False):
 
 
 class FirmwareRamTest(unittest.TestCase):
+    def test_device_encoder_budget_matches_storage_and_role_gates(self):
+        matrix = [
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "v4_repeater", True),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "v4_room_server", True),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "v4_sensor", True),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "v4_companion_alias", True),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1}, "v4_repeater", False),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1}, "v4_companion_radio_usb", False),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "OTA_SEEDER_ONLY": 1}, "v4_repeater", False),
+            ("ESP32_PLATFORM", {"ENABLE_OTA": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 0}, "v4_repeater", False),
+            ("ESP32_PLATFORM", {}, "v4_repeater", False),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_FLASH_STORE": 1}, "rak3401_repeater", False),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_QSPI_STORE": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "xiao_repeater", True),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_SD_STORE": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "tower_room_server", True),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_RAK_AUTO_STORE": 1, "MESHCORE_OTA_DEVICE_DEFLATE": 1}, "rak4631_sensor", True),
+            ("NRF52_PLATFORM", {"ENABLE_OTA": 1, "OTA_QSPI_STORE": 1}, "xiao_companion_radio_full", False),
+            ("STM32_PLATFORM", {"ENABLE_OTA": 1, "OTA_SD_STORE": 1}, "wio_repeater", False),
+        ]
+        for platform, defines, target, enabled in matrix:
+            with self.subTest(platform=platform, defines=defines, target=target):
+                components = ram.requirements(platform, defines, target)["components"]
+                self.assertEqual("ota_encoder_workspace" in components, enabled)
+                if enabled:
+                    self.assertEqual(components["ota_encoder_workspace"], 1024 + 16)
+                self.assertEqual("ota_self_source_scratch" in components,
+                                 enabled and platform == "NRF52_PLATFORM")
+                if enabled and platform == "NRF52_PLATFORM":
+                    self.assertEqual(components["ota_self_source_scratch"], 4096 + 32)
+
+    def test_device_encoder_hash_override_is_budgeted_and_bounded(self):
+        for bits in (7, 8, 9, 10):
+            with self.subTest(bits=bits):
+                policy = ram.requirements("NRF52_PLATFORM", {
+                    "ENABLE_OTA": 1, "OTA_QSPI_STORE": 1,
+                    "MESHCORE_OTA_DEVICE_DEFLATE": 1,
+                    "MESHCORE_OTA_DEFLATE_HASH_BITS": bits,
+                }, "xiao_repeater")
+                self.assertEqual(policy["components"]["ota_encoder_workspace"],
+                                 (1 << bits) * 2 + 16)
+        for bits in (6, 11):
+            with self.subTest(bits=bits), self.assertRaisesRegex(ValueError, "DEFLATE hash"):
+                ram.requirements("ESP32_PLATFORM", {
+                    "ENABLE_OTA": 1, "MESHCORE_OTA_DEFLATE_HASH_BITS": bits,
+                    "MESHCORE_OTA_DEVICE_DEFLATE": 1,
+                }, "v4_repeater")
+
     def test_sh1107_framebuffer_is_budgeted(self):
         policy = ram.requirements("NRF52_PLATFORM", {
             "DISPLAY_CLASS": "SH1107Display",
@@ -126,6 +172,21 @@ class FirmwareRamTest(unittest.TestCase):
             "DISPLAY_CLASS": "SSD1306Display",
         }, "v4_companion")
         self.assertEqual(default, expanded)
+
+    def test_combined_uart_reserves_heap_beside_mqtt_before_enable(self):
+        defines = {"WITH_MQTT_BRIDGE": 1, "WIFI_OTA_SEEDER": 1}
+        mqtt = ram.requirements("ESP32_PLATFORM", defines, "v3_repeater")
+        combined = ram.requirements("ESP32_PLATFORM", {
+            **defines, "WITH_RS232_BRIDGE": "Serial2", "RS232_BRIDGE_MERGED": 1,
+        }, "v3_repeater")
+        self.assertEqual(combined["required_heap_bytes"] - mqtt["required_heap_bytes"], 8192)
+        self.assertEqual(combined["components"]["uart_bridge_and_driver"], 8192)
+        # A selectable alternate port does not create two UART owners.
+        alternate = ram.requirements("ESP32_PLATFORM", {
+            **defines, "WITH_RS232_BRIDGE": "Serial2", "RS232_BRIDGE_MERGED": 1,
+            "WITH_RS232_BRIDGE_ALT": "Serial1",
+        }, "v3_repeater")
+        self.assertEqual(alternate, combined)
 
     def test_published_image_tables_match_elf_and_use_its_own_reservations(self):
         with tempfile.TemporaryDirectory() as temp:

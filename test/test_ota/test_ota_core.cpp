@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstring>
 #include <type_traits>
+#include <utility>
 
 #include "helpers/ota/MotaContainer.h"
 #include "helpers/ota/MerkleTree.h"
@@ -12,6 +13,7 @@
 #include "helpers/ota/FirmwareInfo.h"
 #include "helpers/ota/MotaSeederProto.h"
 #include "helpers/ota/MotaSourceSerial.h"
+#include "helpers/BleMotaStream.h"
 #include "helpers/ota/FolderMotaStore.h"
 #include "helpers/ota/SignerAllowlist.h"
 #include "helpers/ota/OtaStore.h"
@@ -886,6 +888,10 @@ public:
     return -1;
   }
 
+  int available() override {
+    return static_cast<int>(response.size() - response_pos);
+  }
+
   void flush() override {
     ++flush_calls;
     if (flush_discards_receive) {
@@ -900,7 +906,7 @@ public:
   bool flush_discards_receive = false;
   size_t flush_calls = 0;
 
-private:
+protected:
   std::vector<uint8_t> response;
   size_t response_pos = 0;
 };
@@ -953,6 +959,10 @@ public:
     if (response_pos < response.size()) return response[response_pos++];
     ++g_mock_millis;
     return -1;
+  }
+
+  int available() override {
+    return static_cast<int>(response.size() - response_pos);
   }
 
   void flush() override { ++flush_calls; }
@@ -1063,6 +1073,403 @@ TEST(MotaSourceSerial, DeflateExtensionFailureLeavesRawFallbackAvailable) {
   EXPECT_EQ(encoded_len, 0u);
   EXPECT_EQ(stream.offsets, (std::vector<uint16_t>{0}));
   EXPECT_EQ(stream.lengths, (std::vector<uint16_t>{0}));
+}
+
+class TimedMotaSeederStream : public FakeMotaSeederStream {
+public:
+  std::vector<uint32_t> byte_at;
+  uint32_t started = 0;
+  uint32_t delay_per_byte = 0;
+  bool wrong_op = false, corrupt_checksum = false, error_status = false;
+  unsigned stale_remaining = 0, stale_refills = 0, stale_reads = 0;
+  unsigned stale_reads_at_request = 0;
+
+  size_t write(const uint8_t* request, size_t len) override {
+    stale_reads_at_request = stale_reads;
+    stale_remaining = stale_refills = 0;
+    started = millis();
+    const size_t written = FakeMotaSeederStream::write(request, len);
+    if (wrong_op) ++response[2];
+    if (error_status) {
+      response.resize(5);
+      response[3] = MS_STATUS_ERR;
+    }
+    uint8_t checksum = 0;
+    for (size_t i = 0; i + 1 < response.size(); ++i) checksum ^= response[i];
+    response.back() = checksum ^ (corrupt_checksum ? 1 : 0);
+    return written;
+  }
+
+  uint32_t byteTime(size_t index) const {
+    return index < byte_at.size() ? byte_at[index]
+                                  : uint32_t(index) * delay_per_byte;
+  }
+
+  int available() override {
+    if (stale_remaining) return static_cast<int>(stale_remaining);
+    const uint32_t elapsed = millis() - started;
+    size_t count = 0;
+    while (response_pos + count < response.size()
+           && byteTime(response_pos + count) <= elapsed) ++count;
+    return static_cast<int>(count);
+  }
+
+  int read() override {
+    if (stale_remaining) {
+      --stale_remaining;
+      ++stale_reads;
+      if (stale_refills) { --stale_refills; ++stale_remaining; }
+      return 'x';
+    }
+    if (response_pos >= response.size()
+        || uint32_t(millis() - started) < byteTime(response_pos)) return -1;
+    return FakeMotaSeederStream::read();
+  }
+
+  size_t unreadResponse() const { return response.size() - response_pos; }
+};
+
+TEST(MotaSourceSerial, SharedDeadlineBoundsTricklingPayload) {
+  resetArduinoMock();
+  TimedMotaSeederStream stream;
+  stream.byte_at.resize(MOTA_SEEDER_READ_MAX + 5);
+  for (size_t i = 4; i < stream.byte_at.size(); ++i) {
+    stream.byte_at[i] = uint32_t(i - 3) * 590;
+  }
+  SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 600);
+  std::array<uint8_t, MOTA_SEEDER_READ_MAX> data{};
+  EXPECT_FALSE(source.read(0, 0, data.data(), data.size()));
+  EXPECT_EQ(millis(), 600u);
+  EXPECT_EQ(data[0], 0u);
+  EXPECT_EQ(data[1], 0u);
+  EXPECT_GT(stream.unreadResponse(), 1u);
+}
+
+TEST(MotaSourceSerial, SyncHeaderPayloadAndChecksumShareOneDeadline) {
+  resetArduinoMock();
+  TimedMotaSeederStream stream;
+  stream.byte_at = {0, 300, 350, 450, 550, 575, 600};
+  SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 600);
+  uint8_t data[2] = {};
+  EXPECT_FALSE(source.read(0, 0, data, sizeof(data)));
+  EXPECT_EQ(millis(), 600u);
+  EXPECT_EQ(stream.unreadResponse(), 1u);
+}
+
+TEST(MotaSourceSerial, DeadlineIsStrictAndHandlesMillisRollover) {
+  for (uint32_t started : {0u, UINT32_MAX - 20}) {
+    for (uint32_t checksum_at : {599u, 600u}) {
+      SCOPED_TRACE(started);
+      SCOPED_TRACE(checksum_at);
+      resetArduinoMock();
+      g_mock_millis = started;
+      TimedMotaSeederStream stream;
+      stream.byte_at = {0, 0, 0, 0, 0, checksum_at};
+      SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 600);
+      uint8_t data = 0;
+      EXPECT_EQ(source.read(0, 0, &data, 1), checksum_at < 600);
+      EXPECT_EQ(uint32_t(millis() - started), checksum_at);
+      EXPECT_EQ(stream.unreadResponse(), checksum_at < 600 ? 0u : 1u);
+    }
+  }
+}
+
+TEST(MotaSourceSerial, ActualReadCompletionMustPrecedeDeadline) {
+  class AdvancingReadStream : public FakeMotaSeederStream {
+  public:
+    int read() override {
+      const int value = FakeMotaSeederStream::read();
+      if (value >= 0) ++g_mock_millis;
+      return value;
+    }
+  };
+  for (uint32_t start : {0u, UINT32_MAX - 3}) {
+    for (uint32_t timeout : {5u, 6u, 7u}) {
+      for (bool shared : {false, true}) {
+        SCOPED_TRACE(start);
+        SCOPED_TRACE(timeout);
+        SCOPED_TRACE(shared);
+        resetArduinoMock();
+        g_mock_millis = start;
+        AdvancingReadStream stream;
+        SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, timeout);
+        if (shared) source.enableSharedTextControl();
+        uint8_t data = 0;
+        EXPECT_EQ(source.read(0, 0, &data, 1), timeout > 6);
+        EXPECT_EQ(uint32_t(millis() - start), std::min(timeout, 6u));
+        EXPECT_EQ(source.hasPendingResponse(), shared && timeout < 6);
+      }
+    }
+  }
+}
+
+TEST(MotaSourceSerial, LargestRepliesFitExistingUsbUartAndWirelessDeadlines) {
+  for (const auto profile : {std::pair<uint32_t, uint32_t>{400, 2},
+                             std::pair<uint32_t, uint32_t>{600, 3},
+                             std::pair<uint32_t, uint32_t>{3000, 15}}) {
+    SCOPED_TRACE(profile.first);
+    resetArduinoMock();
+    TimedMotaSeederStream stream;
+    stream.delay_per_byte = profile.second;
+    SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, profile.first);
+    std::array<uint8_t, MOTA_SEEDER_READ_MAX> data{};
+    ASSERT_TRUE(source.read(0, 0x1000, data.data(), data.size()));
+    EXPECT_EQ(millis(), uint32_t(MOTA_SEEDER_READ_MAX + 4) * profile.second);
+    EXPECT_LT(millis(), profile.first);
+    for (size_t i = 0; i < data.size(); ++i) EXPECT_EQ(data[i], uint8_t(i));
+  }
+}
+
+TEST(MotaSourceSerial, StaleDrainDoesNotChaseNewlyArrivingInput) {
+  resetArduinoMock();
+  TimedMotaSeederStream stream;
+  stream.stale_remaining = 4;
+  stream.stale_refills = 512;
+  SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 600);
+  uint8_t data = 0;
+  ASSERT_TRUE(source.read(0, 0x5A, &data, 1));
+  EXPECT_EQ(stream.stale_reads_at_request, 4u);
+  EXPECT_EQ(data, 0x5A);
+}
+
+TEST(MotaSourceSerial, ErrorChecksumAndWrongOpStayFailClosedAndRetryResynchronizes) {
+  for (unsigned failure = 0; failure < 3; ++failure) {
+    SCOPED_TRACE(failure);
+    resetArduinoMock();
+    TimedMotaSeederStream stream;
+    stream.error_status = failure == 0;
+    stream.corrupt_checksum = failure == 1;
+    stream.wrong_op = failure == 2;
+    SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 600);
+    uint8_t data[8] = {};
+    EXPECT_FALSE(source.read(0, 0x20, data, sizeof(data)));
+    stream.error_status = stream.corrupt_checksum = stream.wrong_op = false;
+    ASSERT_TRUE(source.read(0, 0x30, data, sizeof(data)));
+    EXPECT_EQ(stream.unreadResponse(), 0u);
+    for (size_t i = 0; i < sizeof(data); ++i) EXPECT_EQ(data[i], uint8_t(0x30 + i));
+  }
+}
+
+class ManualMotaSeederStream : public Stream {
+public:
+  using Stream::write;
+  std::vector<std::vector<uint8_t>> replies;
+  std::vector<uint8_t> input;
+  size_t position = 0, writes = 0;
+  size_t write(const uint8_t*, size_t len) override {
+    if (writes < replies.size()) push(replies[writes]);
+    ++writes;
+    return len;
+  }
+  void push(const std::vector<uint8_t>& bytes) {
+    input.insert(input.end(), bytes.begin(), bytes.end());
+  }
+  int available() override { return static_cast<int>(input.size() - position); }
+  int read() override { return position < input.size() ? input[position++] : -1; }
+};
+
+static std::vector<uint8_t> serialResponse(uint8_t op,
+                                         const std::vector<uint8_t>& payload,
+                                         uint8_t status = MS_STATUS_OK) {
+  std::vector<uint8_t> response = {'m', 's', op, status};
+  response.insert(response.end(), payload.begin(), payload.end());
+  uint8_t checksum = 0;
+  for (uint8_t value : response) checksum ^= value;
+  response.push_back(checksum);
+  return response;
+}
+
+static std::vector<uint8_t> serialControlBytes(SerialMotaSource& source) {
+  std::vector<uint8_t> result;
+  int pending = source.availableControlBytes();
+  while (pending-- > 0) {
+    const int value = source.readControlByte();
+    if (value == -1) break;
+    if (value >= 0) result.push_back(static_cast<uint8_t>(value));
+  }
+  return result;
+}
+
+TEST(MotaSourceSerial, LateReplyBoundariesCoverAllSourceOperationsAndErrorStatus) {
+  const char stop[] = "ota folder off\r\n";
+  const std::vector<uint8_t> controls(stop, stop + sizeof(stop) - 1);
+  for (uint8_t op : {MS_OP_COUNT, MS_OP_DESCRIBE, MS_OP_READ, MS_OP_DEFLATE_BLOCK}) {
+    for (bool error : {false, true}) {
+      std::vector<uint8_t> payload;
+      if (!error) {
+        if (op == MS_OP_COUNT) payload = {1};
+        else if (op == MS_OP_DESCRIBE) payload.assign(MOTA_DESC_WIRE, 'x');
+        else if (op == MS_OP_DEFLATE_BLOCK) payload = {17, 0};
+        else {
+          const char body[] = "x\nota folder off\n";
+          payload.assign(body, body + sizeof(body) - 1);
+        }
+      }
+      const auto response = serialResponse(op, payload, error ? MS_STATUS_ERR : MS_STATUS_OK);
+      for (size_t prefix = 0; prefix < response.size(); ++prefix) {
+        SCOPED_TRACE(op);
+        SCOPED_TRACE(error);
+        SCOPED_TRACE(prefix);
+        resetArduinoMock();
+        ManualMotaSeederStream stream;
+        stream.replies.emplace_back(response.begin(), response.begin() + prefix);
+        SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 4);
+        source.enableSharedTextControl();
+        uint8_t data[64] = {};
+        uint16_t encoded_len = 123;
+        MotaDesc desc;
+        if (op == MS_OP_COUNT) EXPECT_EQ(source.count(), 0);
+        else if (op == MS_OP_DESCRIBE) EXPECT_FALSE(source.describe(0, desc));
+        else if (op == MS_OP_DEFLATE_BLOCK) {
+          EXPECT_FALSE(source.read_deflated_block(0, 0, data, sizeof(data), &encoded_len));
+          EXPECT_EQ(encoded_len, 0u);
+        } else EXPECT_FALSE(source.read(0, 0, data, payload.size() ? payload.size() : 17));
+        EXPECT_TRUE(source.hasPendingResponse());
+        for (unsigned retry = 0; retry < 3; ++retry) {
+          EXPECT_FALSE(source.read(0, 0, data, 7));
+          EXPECT_EQ(stream.writes, 1u);
+          EXPECT_TRUE(source.hasPendingResponse());
+        }
+        stream.push(std::vector<uint8_t>(response.begin() + prefix, response.end()));
+        stream.push(controls);
+        EXPECT_EQ(serialControlBytes(source), controls);
+        EXPECT_FALSE(source.hasPendingResponse());
+      }
+    }
+  }
+}
+
+TEST(MotaSourceSerial, StaleDrainRetainsOldBodyLengthAcrossDifferentSizeRetries) {
+  resetArduinoMock();
+  ManualMotaSeederStream stream;
+  const auto old_response = serialResponse(MS_OP_READ, {'x', '\n', 'o', 't', 'a', ' ', 'f', 'o',
+                                                      'l', 'd', 'e', 'r', ' ', 'o', 'f', 'f', '\n'});
+  stream.replies.emplace_back(old_response.begin(), old_response.begin() + 6);
+  stream.replies.push_back(serialResponse(MS_OP_READ, {42, 43}));
+  SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 4);
+  source.enableSharedTextControl();
+  uint8_t old_data[17] = {};
+  EXPECT_FALSE(source.read(0, 0, old_data, sizeof(old_data)));
+  uint8_t new_data[2] = {};
+  for (size_t index = 6; index + 1 < old_response.size(); ++index) {
+    stream.push({old_response[index]});
+    EXPECT_FALSE(source.read(0, 99, new_data, sizeof(new_data)));
+    EXPECT_EQ(stream.writes, 1u);
+    EXPECT_TRUE(source.hasPendingResponse());
+    EXPECT_TRUE(serialControlBytes(source).empty());
+  }
+  stream.push({old_response.back()});
+  const char stop[] = "ota folder off\r\n";
+  const std::vector<uint8_t> controls(stop, stop + sizeof(stop) - 1);
+  stream.push(controls);
+  EXPECT_TRUE(source.read(0, 99, new_data, sizeof(new_data)));
+  EXPECT_EQ(stream.writes, 2u);
+  EXPECT_EQ(new_data[0], 42u);
+  EXPECT_EQ(new_data[1], 43u);
+  EXPECT_EQ(serialControlBytes(source), controls);
+  EXPECT_FALSE(source.hasPendingResponse());
+}
+
+TEST(MotaSourceSerial, LateDeflateChunkLengthIncludesItsTwoByteSizePrefix) {
+  const char body[] = "x\nota folder off\n";
+  std::vector<uint8_t> payload = {sizeof(body) - 1, 0};
+  payload.insert(payload.end(), body, body + sizeof(body) - 1);
+  const auto delayed = serialResponse(MS_OP_DEFLATE_BLOCK, payload);
+  const char stop[] = "ota folder off\r\n";
+  const std::vector<uint8_t> controls(stop, stop + sizeof(stop) - 1);
+  for (size_t prefix = 0; prefix < delayed.size(); ++prefix) {
+    SCOPED_TRACE(prefix);
+    resetArduinoMock();
+    ManualMotaSeederStream stream;
+    stream.replies.push_back(serialResponse(MS_OP_DEFLATE_BLOCK, {sizeof(body) - 1, 0}));
+    stream.replies.emplace_back(delayed.begin(), delayed.begin() + prefix);
+    SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 4);
+    source.enableSharedTextControl();
+    uint8_t data[64] = {};
+    uint16_t encoded_len = 123;
+    EXPECT_FALSE(source.read_deflated_block(0, 0, data, sizeof(data), &encoded_len));
+    EXPECT_EQ(encoded_len, 0u);
+    EXPECT_EQ(stream.writes, 2u);
+    EXPECT_TRUE(source.hasPendingResponse());
+    stream.push(std::vector<uint8_t>(delayed.begin() + prefix, delayed.end()));
+    stream.push(controls);
+    EXPECT_EQ(serialControlBytes(source), controls);
+    EXPECT_FALSE(source.hasPendingResponse());
+  }
+}
+
+TEST(MotaSourceSerial, ControlQueueOverflowRejectsWholeLineAndResetClearsQuarantine) {
+  resetArduinoMock();
+  ManualMotaSeederStream stream;
+  std::vector<uint8_t> malformed(100, 'x');
+  const char suffix[] = "ota folder off\n";
+  malformed.insert(malformed.end(), suffix, suffix + sizeof(suffix) - 1);
+  stream.push(malformed);
+  SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 4);
+  source.enableSharedTextControl();
+  uint8_t data = 0;
+  EXPECT_FALSE(source.read(0, 0, &data, 1));
+  EXPECT_TRUE(source.hasPendingResponse());
+  EXPECT_EQ(serialControlBytes(source), (std::vector<uint8_t>{0, '\n'}));
+  source.resetSessionState();
+  EXPECT_FALSE(source.hasPendingResponse());
+  EXPECT_EQ(source.availableControlBytes(), 0);
+  stream.replies.resize(2);
+  stream.replies[1] = serialResponse(MS_OP_READ, {42});
+  EXPECT_TRUE(source.read(0, 0, &data, 1));
+  EXPECT_EQ(data, 42u);
+}
+
+TEST(MotaSourceSerial, DefaultBleRetryAndNewRingSessionPreserveLegacyBehavior) {
+  resetArduinoMock();
+  BleMotaStream stream;
+  struct Host {
+    BleMotaStream* stream;
+    unsigned requests = 0;
+    std::vector<uint8_t> reply;
+  } host{&stream, 0, {'m', 's', MS_OP_READ, MS_STATUS_OK, 'x'}};
+  stream.setSender([](void* context, const uint8_t*, size_t len) {
+    auto& host = *static_cast<Host*>(context);
+    ++host.requests;
+    if (!host.reply.empty()) EXPECT_TRUE(host.stream->pushRx(host.reply.data(), host.reply.size()));
+    return len;
+  }, &host);
+  stream.setActive(true);
+  SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 4);
+  uint8_t data[17] = {};
+  EXPECT_FALSE(source.read(0, 0, data, sizeof(data)));
+  EXPECT_FALSE(source.hasPendingResponse());
+  host.reply = serialResponse(MS_OP_COUNT, {1});
+  EXPECT_EQ(source.count(), 1);
+  EXPECT_EQ(host.requests, 2u); // Default non-text transports retain ordinary retries.
+  stream.setActive(false);
+  stream.setActive(true); // New generation drops the old ring contents/writers.
+  EXPECT_EQ(stream.available(), 0);
+  EXPECT_FALSE(source.hasPendingResponse());
+  source.resetSessionState(); // The production BLE start pairs these two resets.
+  host.reply = serialResponse(MS_OP_COUNT, {1});
+  EXPECT_EQ(source.count(), 1);
+  EXPECT_EQ(host.requests, 3u);
+  EXPECT_FALSE(source.hasPendingResponse());
+}
+
+TEST(MotaSourceSerial, DefaultRetryCanShareTcpWithLegacyFolderStoreReads) {
+  resetArduinoMock();
+  ManualMotaSeederStream stream;
+  stream.replies.push_back({'m', 's', MS_OP_COUNT, MS_STATUS_OK});
+  stream.replies.push_back(serialResponse(MS_OP_STAT, {1, 13, 0, 0, 0}));
+  stream.replies.push_back(serialResponse(MS_OP_COUNT, {1}));
+  SerialMotaSource source(stream, MotaStreamWritePolicy::NoFlush, 4);
+  FolderMotaStore store(stream, MotaStreamWritePolicy::NoFlush, 4);
+  EXPECT_EQ(source.count(), 0);
+  EXPECT_FALSE(source.hasPendingResponse());
+  const auto old_response = serialResponse(MS_OP_COUNT, {1});
+  stream.push(std::vector<uint8_t>(old_response.begin() + 4, old_response.end()));
+  EXPECT_TRUE(store.reopen()); // Its independent legacy drain consumes the old tail.
+  EXPECT_EQ(store.staged_size(), 13u);
+  EXPECT_EQ(source.count(), 1); // No USB-only retained state poisons this source.
+  EXPECT_EQ(stream.writes, 3u);
+  EXPECT_FALSE(source.hasPendingResponse());
 }
 
 class FakeFolderMotaSeederStream : public Stream {

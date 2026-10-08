@@ -2,17 +2,95 @@
 
 import re
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+
+from test_replay_reset_integration import extract_braced
+from test_esp32_hwcdc_recipes import (
+    ProjectConfig, USB_CDC, USB_MODE, flag_environment, usb_values,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+C6_USB_ENV = "env:M5Stack_Unit_C6L_companion_radio_usb"
 
 
 def source(path: str) -> str:
     return (ROOT / path).read_text()
 
 
+def c6_usb_config():
+    # Resolve tracked inheritance only; never load a developer's local config.
+    config = ProjectConfig(str(ROOT / "platformio.ini"), parse_extra=False)
+    config.read(str(ROOT / "variants/m5stack_unit_c6l/platformio.ini"), parse_extra=False)
+    return config
+
+
+def c6_usb_flags(config):
+    return flag_environment(
+        build_flags=config.get(C6_USB_ENV, "build_flags", []),
+        build_unflags=config.get(C6_USB_ENV, "build_unflags", []),
+    )
+
+
 class Esp32UsbSerialHygieneTest(unittest.TestCase):
+    def test_hwcdc_rx_allocation_failure_keeps_stream_quarantined(self):
+        logging = source("src/helpers/UsbLogging.cpp")
+        functions = "\n".join(extract_braced(logging, signature) for signature in (
+            "static bool canAccessEsp32Hwcdc(void*)",
+            "void prepareUsbLoggingPort()",
+        ))
+        harness = r'''
+#include <atomic>
+#include <cassert>
+#include <cstddef>
+#define MESH_ESP32_HWCDC_SESSION_GUARD 1
+#define MESH_ESP32_USB_RX_BUFFER_SIZE 1024
+#define MESH_ESP32_USB_TX_BUFFER_SIZE 4096
+static std::atomic<bool> esp32_hwcdc_rx_queue_ready{false};
+static std::atomic<unsigned> esp32_hwcdc_allowed_generation{0};
+static std::atomic<unsigned> esp32_hwcdc_access_generation{0};
+static size_t tx_capacity=0;
+static void setUsbCompanionTxBufferCapacity(size_t capacity) { tx_capacity=capacity; }
+struct SerialMock {
+  bool live=false, fail_rx=false;
+  size_t rx=0, rx_calls=0, tx=0, timeout=0;
+  size_t setRxBufferSize(size_t size) {
+    assert(!live); ++rx_calls; rx=fail_rx?0:size; return rx;
+  }
+  size_t setTxBufferSize(size_t size) { assert(!live); return tx=size; }
+  void setTxTimeoutMs(size_t value) { timeout=value; }
+} Serial;
+@FUNCTIONS@
+int main() {
+  assert(!canAccessEsp32Hwcdc(nullptr));
+  prepareUsbLoggingPort();
+  assert(Serial.rx==1024 && Serial.rx_calls==1 && Serial.tx==4096 && Serial.timeout==5);
+  assert(tx_capacity==4096 && canAccessEsp32Hwcdc(nullptr));
+  ++esp32_hwcdc_access_generation;
+  assert(!canAccessEsp32Hwcdc(nullptr));
+  ++esp32_hwcdc_allowed_generation;
+  assert(canAccessEsp32Hwcdc(nullptr));
+  // A separate failed boot must not let the SDK's later 256-byte fallback
+  // reopen the application parser after the requested RX allocation failed.
+  Serial=SerialMock(); Serial.fail_rx=true;
+  prepareUsbLoggingPort();
+  assert(!canAccessEsp32Hwcdc(nullptr) && Serial.rx_calls==1);
+  Serial.live=true; Serial.rx=256;
+  assert(!canAccessEsp32Hwcdc(nullptr));
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            cpp, binary = Path(directory) / "rx-init.cpp", Path(directory) / "rx-init"
+            cpp.write_text(harness.replace("@FUNCTIONS@", functions))
+            build = subprocess.run(["g++", "-std=c++17", "-fsanitize=address,undefined",
+                                    "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
+                                    str(cpp), "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+            run = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
     def test_operational_wifi_diagnostics_use_runtime_logging_port(self):
         for relative in (
             "src/helpers/ESP32Board.cpp",
@@ -30,7 +108,7 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
                 r"\bSerial\.(?:print|println|printf|write)\s*\(",
                 relative,
             )
-            self.assertIn("mesh::usbLoggingPort()", text, relative)
+            self.assertRegex(text, r"mesh::usb(?:Logging|Debug)Port\(\)", relative)
 
     def test_v4_companion_uses_usb_serial_jtag_mode(self):
         platformio = source("variants/heltec_v4/platformio.ini")
@@ -79,9 +157,15 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         mesh = source("examples/companion_radio/MyMesh.cpp")
         start = mesh.index("bool MyMesh::hasFiniteDelayedReplyForRoute(")
         body = mesh[start : mesh.index("void MyMesh::servicePendingSerialReply()", start)]
-        self.assertIn("pending_serial_reply_route == route", body)
+        self.assertIn("_delayed_replies.hasReplyForRoute(route, _ms->getMillis())", body)
         self.assertIn("command_radio_reply_route == route", body)
-        self.assertIn("binary_trace_reply_route == route", body)
+        delayed = source("src/helpers/CompanionDelayedReplies.cpp")
+        lease = delayed[delayed.index("bool CompanionDelayedReplies::hasReplyForRoute("):]
+        self.assertIn("{ &request, &trace }", lease)
+        self.assertIn("reply->route == route", lease)
+        self.assertIn("reply->phase >= AwaitRadio", lease)
+        self.assertIn("reply->delivery_deadline : reply->radio_deadline", lease)
+        self.assertIn("reply->sent_deadline", lease)
         self.assertIn("expected_ack_table[i].reply_route == route", body)
         self.assertNotIn("_iter_started", body)
         self.assertNotIn("lockReplyRoute", body)
@@ -134,7 +218,7 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         self.assertNotIn("Serial.setTxBufferSize(", helper)
         self.assertIn("while (Serial.read() >= 0)", helper)
         self.assertIn(
-            "setPlatformDebugOutputEnabled(isUsbLoggingEnabled());", purge
+            "setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());", purge
         )
         self.assertIn(
             "esp32_hwcdc_self_reset_guard.expectSelfResetBurst()", purge
@@ -157,6 +241,12 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
             "void beginUsbLoggingPort()", prepare_start
         )]
         self.assertIn("static const size_t usb_tx_sizes[]", prepare)
+        self.assertIn("Serial.setRxBufferSize(MESH_ESP32_USB_RX_BUFFER_SIZE)", prepare)
+        self.assertIn("MESH_ESP32_USB_RX_BUFFER_SIZE >= 1024", prepare)
+        self.assertLess(prepare.index("Serial.setRxBufferSize("),
+                        prepare.index("Serial.setTxBufferSize("))
+        header = source("src/helpers/UsbLogging.h")
+        self.assertRegex(header, r"#define MESH_ESP32_USB_RX_BUFFER_SIZE 1024\b")
         self.assertIn("Serial.setTxBufferSize(candidate)", prepare)
         self.assertIn("Serial.setTxTimeoutMs(5);", prepare)
         begin_start = logging.index("void beginUsbLoggingPort()")
@@ -164,6 +254,7 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
             "void serviceUsbLoggingPort()", begin_start
         )]
         self.assertIn("Serial.availableForWrite()", begin)
+        self.assertNotIn("Serial.setRxBufferSize(", begin)
         self.assertIn("setUsbCompanionTxBufferCapacity(", begin)
 
         debug_start = logging.index(
@@ -252,10 +343,32 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         self.assertNotIn("usb_serial_jtag_ll_pad_backup_and_disable()", reset)
         self.assertNotIn("usb_serial_jtag_ll_phy_enable_pad(", reset)
 
-        c6 = source("variants/m5stack_unit_c6l/platformio.ini")
-        usb = c6[c6.index("[env:M5Stack_Unit_C6L_companion_radio_usb]") :]
-        self.assertIn("-D ARDUINO_USB_MODE=1", usb)
-        self.assertIn("-D ENABLE_USB_INTERFACE", usb)
+        # The USB role inherits native console selectors from the C6L base.
+        # Check the effective recipe, including any child build_unflags.
+        usb = c6_usb_flags(c6_usb_config())
+        self.assertEqual(usb_values(usb), {USB_MODE: "1", USB_CDC: "1"})
+        self.assertIn("ENABLE_USB_INTERFACE", usb.get("CPPDEFINES", []))
+
+    def test_c6_usb_recipe_detects_missing_and_disabled_child_selectors(self):
+        cases = (
+            ("missing inheritance", ["-D ENABLE_USB_INTERFACE"], [],
+             {USB_MODE: "0", USB_CDC: "0"}),
+            ("removed selectors", ["${M5Stack_Unit_C6L.build_flags}",
+                                   "-D ENABLE_USB_INTERFACE"],
+             ["-DARDUINO_USB_MODE=1", "-DARDUINO_USB_CDC_ON_BOOT=1"],
+             {USB_MODE: "0", USB_CDC: "0"}),
+            ("disabled backend", ["${M5Stack_Unit_C6L.build_flags}",
+                                  "-D ARDUINO_USB_MODE=0", "-D ENABLE_USB_INTERFACE"],
+             ["-DARDUINO_USB_MODE=1"], {USB_MODE: "0", USB_CDC: "1"}),
+        )
+        for label, flags, unflags, expected in cases:
+            with self.subTest(recipe=label):
+                config = c6_usb_config()
+                config.set(C6_USB_ENV, "build_flags", flags)
+                config.set(C6_USB_ENV, "build_unflags", unflags)
+                usb = c6_usb_flags(config)
+                self.assertIn("ENABLE_USB_INTERFACE", usb.get("CPPDEFINES", []))
+                self.assertEqual(usb_values(usb), expected)
 
     def test_hwcdc_host_presence_uses_sof_signal(self):
         board = source("src/helpers/ESP32Board.h")
@@ -263,7 +376,9 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         host_check = board[start : board.index("void setInhibitSleep", start)]
 
         self.assertIn("ARDUINO_USB_MODE", host_check)
-        self.assertIn("return Serial.isPlugged();", host_check)
+        self.assertIn("host_connected = Serial.isPlugged();", host_check)
+        self.assertIn("usb_host_sleep_policy.observe(host_connected, millis());", host_check)
+        self.assertIn("return host_connected;", host_check)
 
     def test_hwcdc_retries_tx_kick_after_transient_sof_loss(self):
         logging = source("src/helpers/UsbLogging.cpp")
@@ -279,20 +394,32 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         self.assertIn(
             "esp32_hwcdc_tx_kick_pending.store(true", guarded_write
         )
-        self.assertIn("return Serial.write(data, size);", guarded_write)
+        self.assertIn("return Serial.write(data, attempt);", guarded_write)
+        capacity = guarded_write.index("const int available = Serial.availableForWrite();")
+        full = guarded_write.index("if (available <= 0) return 0;")
+        clamp = guarded_write.index("const size_t attempt = size <")
+        kick_pending = guarded_write.index("esp32_hwcdc_tx_kick_pending.store(true")
+        native_write = guarded_write.index("return Serial.write(data, attempt);")
+        self.assertLess(capacity, full)
+        self.assertLess(full, clamp)
+        self.assertLess(clamp, kick_pending)
+        self.assertLess(kick_pending, native_write)
 
-        kick_start = logging.index(
-            "static void serviceEsp32HwcdcTxKickExclusive"
-        )
-        kick_end = logging.index("#endif", kick_start)
-        kick = logging[kick_start:kick_end]
+        # Extract complete functions: their pinned-SDK/fallback branches now
+        # contain nested #endif directives inside the outer platform guard.
+        kick = "\n".join(extract_braced(logging, signature) for signature in (
+            "static void serviceEsp32HwcdcTxKickExclusive(void*)",
+            "static void serviceEsp32HwcdcTxKick()",
+        ))
         self.assertIn("Serial.availableForWrite()", kick)
         self.assertIn("esp32_hwcdc_tx_buffer_capacity.load(", kick)
+        self.assertIn("meshEsp32HwcdcTxPending()", kick)
         self.assertIn("canAccessEsp32Hwcdc(nullptr)", kick)
         self.assertIn("Serial.isPlugged()", kick)
         self.assertIn("usb_serial_jtag_ll_txfifo_flush();", kick)
         self.assertIn("USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY", kick)
         self.assertIn("portENTER_CRITICAL(&esp32_hwcdc_session_mux)", kick)
+        self.assertIn("meshEsp32HwcdcKickTx();", kick)
         self.assertIn("tryRunExclusive(", kick)
 
         event_start = logging.index("static void handleEsp32HwcdcEvent")
@@ -323,7 +450,7 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
         )
         self.assertIn("Stream& output = mesh::usbLoggingPort();", text)
 
-    def test_framework_diagnostics_follow_same_runtime_gate(self):
+    def test_framework_diagnostics_require_master_and_debug_gates(self):
         text = source("src/helpers/UsbLogging.cpp")
         self.assertIn("Serial.setDebugOutput(enabled);", text)
 
@@ -331,14 +458,14 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
             text.index("void setUsbLoggingEnabled(") :
             text.index("bool saveUsbLoggingBootPreference(")
         ]
-        self.assertIn("setPlatformDebugOutputEnabled(enabled);", setter)
+        self.assertIn("setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());", setter)
 
         begin = text[
             text.index("void beginUsbLoggingPort(") :
             text.index("void serviceUsbLoggingPort(")
         ]
         self.assertIn(
-            "setPlatformDebugOutputEnabled(isUsbLoggingEnabled());", begin
+            "setPlatformDebugOutputEnabled(isUsbDebugLoggingEnabled());", begin
         )
 
     def test_expected_fresh_nvs_state_is_silent(self):
@@ -354,15 +481,121 @@ class Esp32UsbSerialHygieneTest(unittest.TestCase):
             )
         self.assertNotIn("nvs.begin(NVS_NAMESPACE, true)", mqtt_setup)
 
-        for text in (wifi_setup, webconfig):
-            self.assertIn('isKey("ssid")', text)
-            self.assertIn('isKey("password")', text)
+        self.assertIn('isKey("ssid")', wifi_setup)
+        self.assertIn('isKey("password")', wifi_setup)
         self.assertIn('isKey("enabled")', webconfig)
         self.assertIn('isKey("cli")', webconfig)
-        self.assertIn('isKey("powersave")', webconfig)
         self.assertIn('isKey("espnow_ch")', radio_policy)
         self.assertIn("nvs.isKey(NVS_VERSION_KEY)", mqtt_setup)
         self.assertIn("nvs.isKey(NVS_PREFS_KEY)", mqtt_setup)
+
+        # WebConfig now delegates credential reads to the shared resolver.
+        # Exercise that production path instead of asserting which file owns
+        # its key guards. Arduino Preferences logs an absent read-only namespace
+        # and missing value reads; isKey/getType themselves are silent.
+        preferences = source("test/fixtures/wifi_credentials_preferences.h")
+        preferences = preferences.replace(
+            "bool begin(const char* name, bool) {",
+            "bool begin(const char* name, bool read_only) { assert(!read_only);",
+        ).replace(
+            "String getString(const char* key, const char* fallback) {",
+            "String getString(const char* key, const char* fallback) { assert(isKey(key));",
+        ).replace(
+            "uint8_t getUChar(const char* key, uint8_t fallback) {",
+            "uint8_t getUChar(const char* key, uint8_t fallback) { assert(isKey(key));",
+        )
+        functions = "\n".join(extract_braced(webconfig, signature) for signature in (
+            "mesh::wifi::CredentialState WebConfigServer::resolveWiFi(",
+            "bool WebConfigServer::hasConfiguredWiFi(",
+            "bool WebConfigServer::loadStandaloneWiFi(",
+        ))
+        harness = r'''
+#include <cstring>
+#include "helpers/esp32/WiFiCredentials.h"
+#include "helpers/MQTTPrefsStorage.h"
+uint8_t effectiveWiFiPowerSave(uint8_t value) { return value; }
+struct WebConfigServer {
+  static mesh::wifi::CredentialState resolveWiFi(mesh::wifi::Credentials&, const void* = nullptr);
+  static bool hasConfiguredWiFi(const void* = nullptr);
+  static bool loadStandaloneWiFi(char*, size_t, char*, size_t, uint8_t*, const void* = nullptr);
+};
+@FUNCTIONS@
+int main() {
+  using mesh::wifi::CredentialState;
+  using mesh::wifi::Credentials;
+  reset_nvs();
+  Credentials credentials;
+  assert(mesh::wifi::readCredentials(credentials) == CredentialState::Absent);
+  assert(!credentials.ssid[0] && !credentials.password[0]);
+  assert(credentials.power_save == mesh::wifi::kDefaultPowerSave);
+  char ssid[32] = "stale", password[65] = "stale";
+  uint8_t power_save = 255;
+  assert(!WebConfigServer::loadStandaloneWiFi(
+      ssid, sizeof(ssid), password, sizeof(password), &power_save));
+  assert(!ssid[0] && !password[0]);
+  assert(power_save == mesh::wifi::kDefaultPowerSave);
+  assert(!WebConfigServer::hasConfiguredWiFi());
+  assert(nvs_writes == 0 && nvs_values.empty());
+
+  // A fresh canonical store can use legacy observer settings without reading
+  // absent values or manufacturing a canonical credential save.
+  MQTTPrefs legacy{};
+  strcpy(legacy.wifi_ssid, "legacy");
+  strcpy(legacy.wifi_password, "password");
+  legacy.wifi_power_save = mesh::wifi::kPowerSaveMax;
+  assert(WebConfigServer::loadStandaloneWiFi(
+      ssid, sizeof(ssid), password, sizeof(password), &power_save, &legacy));
+  assert(!strcmp(ssid, "legacy") && !strcmp(password, "password"));
+  assert(power_save == mesh::wifi::kPowerSaveMax);
+  assert(nvs_writes == 0 && nvs_values.empty());
+
+  // Historical open networks have only an SSID key. Missing password and
+  // power-save reads must remain silent on this upgrade path too.
+  nvs_values["ssid"] = {PT_STR, "open-network", 0};
+  assert(WebConfigServer::loadStandaloneWiFi(
+      ssid, sizeof(ssid), password, sizeof(password), &power_save));
+  assert(!strcmp(ssid, "open-network") && !password[0]);
+  assert(nvs_writes == 0);
+}
+'''
+        header = source("src/helpers/esp32/WiFiCredentials.h")
+        unguarded = header.replace(
+            'ssid_present && valid ? nvs.getString("ssid", "") : String()',
+            'nvs.getString("ssid", "")',
+        )
+        read_only = header.replace('nvs.begin("mesh-wifi", false)',
+                                   'nvs.begin("mesh-wifi", true)')
+        self.assertNotEqual(header, unguarded)
+        self.assertNotEqual(header, read_only)
+        with tempfile.TemporaryDirectory(prefix="fresh-nvs-silence-") as directory:
+            path = Path(directory)
+            (path / "Preferences.h").write_text(preferences)
+            shared = path / "helpers/esp32/WiFiCredentials.h"
+            shared.parent.mkdir(parents=True)
+            cpp, binary = path / "fresh-nvs.cpp", path / "fresh-nvs"
+            cpp.write_text(harness.replace("@FUNCTIONS@", functions))
+            for name, implementation, should_pass in (
+                ("shared-reader", header, True),
+                ("missing-key-regression", unguarded, False),
+                ("read-only-regression", read_only, False),
+            ):
+                with self.subTest(name=name):
+                    shared.write_text(implementation)
+                    build = subprocess.run([
+                        "g++", "-std=c++17", "-fsanitize=address,undefined",
+                        "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
+                        "-DWITH_MQTT_BRIDGE=1", "-I", str(path),
+                        "-I", str(ROOT / "src"), str(cpp), "-o", str(binary),
+                    ], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+                    run = subprocess.run([str(binary)], capture_output=True,
+                                         text=True, timeout=15)
+                    if should_pass:
+                        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                        self.assertEqual(run.stdout + run.stderr, "")
+                    else:
+                        self.assertNotEqual(run.returncode, 0)
+                        self.assertIn("Assertion", run.stderr)
 
     def test_indicator_reports_specific_hardware(self):
         header = source("variants/sensecap_indicator-espnow/target.h")

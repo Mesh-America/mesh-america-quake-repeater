@@ -100,17 +100,28 @@ CAYENNE = r'''
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <helpers/sensors/LPPDataHelpers.h>
 class CayenneLPP {
  uint8_t data[64]={};
+ uint8_t size=0;
+ void addScalar(uint8_t channel,uint8_t type,float value){
+  data[size++]=channel;data[size++]=type;
+  size+=LPPData::putFloat(data+size,value,2,LPPData::getMultiplier(type),true);
+ }
 public:
  unsigned resets=0,gps_count=0;
  explicit CayenneLPP(size_t){}
- void reset(){++resets;}
- void addVoltage(uint8_t,float){}
- void addTemperature(uint8_t,float){}
- void addGPS(uint8_t,float,float,float){++gps_count;}
+ void reset(){++resets;size=0;}
+ void addVoltage(uint8_t channel,float value){addScalar(channel,LPP_VOLTAGE,value);}
+ void addTemperature(uint8_t channel,float value){addScalar(channel,LPP_TEMPERATURE,value);}
+ void addGPS(uint8_t channel,float latitude,float longitude,float altitude){
+  ++gps_count;data[size++]=channel;data[size++]=LPP_GPS;
+  size+=LPPData::putFloat(data+size,latitude,3,LPP_GPS_LAT_LON_MULT,true);
+  size+=LPPData::putFloat(data+size,longitude,3,LPP_GPS_LAT_LON_MULT,true);
+  size+=LPPData::putFloat(data+size,altitude,3,LPP_GPS_ALT_MULT,true);
+ }
  const uint8_t* getBuffer()const{return data;}
- uint8_t getSize()const{return 0;}
+ uint8_t getSize()const{return size;}
 };
 '''
 
@@ -119,6 +130,7 @@ QUERY = r'''
 #include <limits>
 #include <helpers/SensorManager.h>
 #include <helpers/sensors/MicroNMEALocationProvider.h>
+#include <helpers/sensors/LPPDataHelpers.h>
 void LocationProvider::sendSentence(const char*){}
 struct Uart:Stream {
  std::deque<char> incoming;
@@ -157,7 +169,8 @@ struct SensorRequestHarness {
  struct {int telemetry_access=0;} _prefs;
  uint8_t reply_data[128]={};
  explicit SensorRequestHarness(TestSensors& s):sensors(s){}
- uint8_t request(uint8_t perms,uint8_t mask=0,uint8_t length=1){
+ uint8_t request(uint8_t perms,uint8_t mask=0,uint8_t length=1,
+                 size_t reply_capacity=sizeof(reply_data)){
   uint8_t payload[1]={mask};
   size_t payload_len=length;
   const unsigned req_type=3;
@@ -235,6 +248,24 @@ int main(){
  now_ms=1000+static_cast<uint32_t>(GPS_READ_INTERVAL_SECS)*1000U-1;
  requests.request(TELEM_PERM_LOCATION);assert(MicroNMEA::clears==before+1);
  ++now_ms;requests.request(TELEM_PERM_LOCATION);assert(MicroNMEA::clears==before+2);
+
+ // The production request now bounds complete LPP records to the caller's
+ // reply capacity. Exercise real voltage/temperature bytes at both edges of
+ // each four-byte record; no partial entry or write beyond the budget is valid.
+ for(size_t capacity=4;capacity<=16;++capacity){
+  memset(requests.reply_data,0xA5,sizeof(requests.reply_data));
+  const uint8_t length=requests.request(TELEM_PERM_BASE,0,1,capacity);
+  const size_t payload_size=capacity>=12?8:capacity>=8?4:0;
+  const uint8_t* expected=requests.telemetry.getBuffer();
+  assert(requests.telemetry.getSize()==8);
+  assert(expected[0]==TELEM_CHANNEL_SELF&&expected[1]==LPP_VOLTAGE);
+  assert(expected[4]==TELEM_CHANNEL_SELF&&expected[5]==LPP_TEMPERATURE);
+  assert(length==4+payload_size&&length<=capacity);
+  assert(!memcmp(requests.reply_data+4,expected,payload_size));
+  for(size_t offset=length;offset<sizeof(requests.reply_data);++offset){
+   assert(requests.reply_data[offset]==0xA5);
+  }
+ }
 }
 '''
 
@@ -292,6 +323,73 @@ int main(){
  blocked.gps_serial_transport_blocked=true;delay_count=0;Serial1=SerialMock();
  blocked.initBasicGPS();assert(delay_count==0&&Serial1.begins==0&&Serial1.polls==0);
  assert(location.begins==0&&blocked.transport_resets==0);
+}
+'''
+
+RAK_UART_PROBE = r'''
+#include <cassert>
+#include <cstring>
+#include <string>
+#include <Arduino.h>
+#include <helpers/sensors/NmeaSentenceProbe.h>
+@TIMEOUT@
+@PROBE@
+struct Uart : Stream {
+ bool continuous_noise=false;
+ uint32_t noise_before=0, reads=0;
+ std::string bytes;
+ int available() override {
+   return continuous_noise || noise_before || !bytes.empty();
+ }
+ int read() override {
+   ++reads; ++now_ms;  // A real peripheral clock advances while bytes arrive.
+   if (continuous_noise) return '!';
+   if (noise_before) { --noise_before; return '!'; }
+   if (bytes.empty()) return -1;
+   const int value=bytes.front(); bytes.erase(0,1); return value;
+ }
+ void validSentence() {
+   const std::string body="GPRMC,123";
+   uint8_t checksum=0;
+   for(uint8_t byte:body) checksum^=byte;
+   char hex[3]; std::snprintf(hex,sizeof(hex),"%02X",checksum);
+   bytes="$"+body+"*"+hex;
+ }
+};
+int main(int argc,char** argv) {
+ assert(argc==2);
+ Uart uart;
+ bool expected=false;
+ if(!strcmp(argv[1],"noise")) uart.continuous_noise=true;
+ else if(!strcmp(argv[1],"wrap_noise")) {
+   now_ms=UINT32_MAX-400U; uart.continuous_noise=true;
+ } else if(!strcmp(argv[1],"valid")) {
+   uart.validSentence(); expected=true;
+ } else if(!strcmp(argv[1],"noisy_valid")) {
+   uart.noise_before=600; uart.validSentence(); expected=true;
+ } else if(!strcmp(argv[1],"wrap_valid")) {
+   now_ms=UINT32_MAX-400U; uart.noise_before=600;
+   uart.validSentence(); expected=true;
+ } else if(!strcmp(argv[1],"invalid_checksum")) {
+   uart.validSentence(); uart.bytes.back()='Z';
+ } else if(!strcmp(argv[1],"too_late")) {
+   uart.noise_before=RAK_UART_GPS_PROBE_TIMEOUT_MS-2; uart.validSentence();
+ } else if(!strcmp(argv[1],"truncated")) {
+   uart.bytes="$GPRMC,123*";
+ } else assert(!strcmp(argv[1],"empty"));
+ const uint32_t started=millis();
+ assert(serialHasValidGpsSentence(uart,RAK_UART_GPS_PROBE_TIMEOUT_MS)==expected);
+ const uint32_t elapsed=millis()-started;
+ if(expected) {
+   assert(elapsed<RAK_UART_GPS_PROBE_TIMEOUT_MS && delay_count==0);
+ } else {
+   assert(elapsed>=RAK_UART_GPS_PROBE_TIMEOUT_MS);
+   assert(elapsed<RAK_UART_GPS_PROBE_TIMEOUT_MS+5);
+ }
+ if(uart.continuous_noise) {
+   assert(elapsed==RAK_UART_GPS_PROBE_TIMEOUT_MS && delay_count==0);
+   assert(uart.reads==RAK_UART_GPS_PROBE_TIMEOUT_MS);
+ }
 }
 '''
 
@@ -356,6 +454,47 @@ int main(){SensorManager sensors;assert(!sensors.requestGpsTelemetryTimeSync(UIN
             with self.subTest(defines=defines):
                 self.compile_run(COLD.replace("@INIT@", init), defines)
 
+    def run_rak_uart_probe(self, *, negative=False):
+        source = (ROOT / "src/helpers/sensors/EnvironmentSensorManager.cpp").read_text()
+        timeout = re.search(r"#ifndef RAK_UART_GPS_PROBE_TIMEOUT_MS\s*[\s\S]*?#endif", source).group()
+        probe = extract_braced(source, "static bool serialHasValidGpsSentence(")
+        if negative:
+            # Reproduce the original continuously nonempty FIFO loop. The
+            # process watchdog below bounds this deliberately infinite host
+            # control; it does not change the production's existing deadline.
+            deadline = "      if (static_cast<uint32_t>(millis() - started) >= timeout_ms) return false;"
+            self.assertEqual(probe.count(deadline), 1)
+            probe = probe.replace(deadline, "")
+        with tempfile.TemporaryDirectory(prefix="meshcore-rak-uart-probe-") as directory:
+            work = Path(directory)
+            (work / "Arduino.h").write_text(ARDUINO, encoding="ascii")
+            cpp, binary = work / "probe.cpp", work / "probe"
+            cpp.write_text(RAK_UART_PROBE.replace("@TIMEOUT@", timeout).replace("@PROBE@", probe),
+                           encoding="ascii")
+            result = subprocess.run([self.compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                "-Wno-unused-parameter",
+                *(["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                   "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else []),
+                "-I", str(work), "-I", str(ROOT / "src"), str(cpp), "-o", str(binary)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            if negative:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    subprocess.run([str(binary), "noise"], capture_output=True, text=True, timeout=1)
+                return
+            for scenario in ("noise", "wrap_noise", "valid", "noisy_valid", "wrap_valid",
+                             "invalid_checksum", "too_late", "truncated", "empty"):
+                with self.subTest(scenario=scenario):
+                    result = subprocess.run([str(binary), scenario], capture_output=True,
+                                            text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_rak_uart_probe_deadline_survives_continuous_noise_and_rollover(self):
+        self.run_rak_uart_probe()
+
+    def test_rak_original_nonempty_fifo_loop_negative_control(self):
+        self.run_rak_uart_probe(negative=True)
+
     def test_ble_led_optout_preserves_default_and_begin_order(self):
         source = (ROOT / "src/helpers/nrf52/SerialBLEInterface.cpp").read_text()
         begin = extract_braced(source, "bool SerialBLEInterface::begin(")
@@ -392,9 +531,10 @@ int main(){
         rak_provider = rak[rak.index("class RAK12500LocationProvider"):rak.index("static RAK12500LocationProvider")]
         self.assertIn("markTimeSyncApplied();", rak_provider)
         self.assertIn("resetTimeSyncRequestState();", rak_provider)
-        # Preserve deliberate force-sync callers outside telemetry queries.
+        # Explicit CLI sync remains forced; scheduled power cycles honor the
+        # configured hourly cadence, with force-sync retained for legacy0.
         self.assertIn("void syncTime() override { nmea.clear(); LocationProvider::syncTime(); }", provider)
-        self.assertIn("_location->syncTime();", extract_braced(rak, "void EnvironmentSensorManager::armGpsPowerSavingCycle()"))
+        self.assertIn("_location->syncTimeForPowerSavingCycle();", extract_braced(rak, "void EnvironmentSensorManager::armGpsPowerSavingCycle()"))
 
 
 if __name__ == "__main__":

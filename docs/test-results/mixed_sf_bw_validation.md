@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/mixed_sf_bw_validation/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Equal-symbol-time mixed SF/BW, four-channel test
 
 2026-09-14. **Promising, but no strict 400/400 pass.** With no added settling,

@@ -28,7 +28,7 @@ mesh::LocalIdentity radio_new_identity() {
 
 void MeshTrackerX1SensorManager::armGpsPowerSavingCycle() {
   if (!powersaving_enabled || !_nmea->getGPSPowerSaving()) return;
-  _nmea->syncTime();
+  _nmea->syncTimeForPowerSavingCycle();
   _nmea->setNextGPSOn(0);
   _nmea->setNextSleep();
 }

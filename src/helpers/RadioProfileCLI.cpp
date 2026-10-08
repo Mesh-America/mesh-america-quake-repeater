@@ -1,6 +1,7 @@
 #include "RadioProfileCLI.h"
 #include "CarrierWaveCLI.h"
 #include "RadioProfileCommandUtils.h"
+#include "FilePresence.h"
 #include "radiolib/RXPowerSaving.h"
 #include <Arduino.h>
 #include <stdio.h>
@@ -59,6 +60,15 @@ uint32_t remainingMillis(uint32_t end, uint32_t now) {
 RadioProfileCLI::ImageReadResult RadioProfileCLI::readImage(
     const char* path, uint8_t* bytes, size_t size) {
   if (!fs_) return ImageReadResult::Unreadable;
+#if defined(ESP32_PLATFORM)
+  // SPIFFS may return a truthy directory when a missing path is opened for
+  // reading. Probe metadata first so a fresh store stays Missing, rather than
+  // being marked corrupt from that directory's zero-byte size. Metadata/open
+  // failures still protect an existing image from automatic replacement.
+  bool present = false;
+  if (!filePresence(fs_, path, present)) return ImageReadResult::Unreadable;
+  if (!present) return ImageReadResult::Missing;
+#endif
 #if defined(NRF52_PLATFORM)
   File file(*fs_);
   if (!file.open(path, FILE_O_READ)) {
@@ -71,8 +81,12 @@ RadioProfileCLI::ImageReadResult RadioProfileCLI::readImage(
   File file = fs_->open(path, "r");
 #endif
   if (!file) {
+#if defined(ESP32_PLATFORM)
+    return ImageReadResult::Unreadable;
+#else
     return fs_->exists(path) ? ImageReadResult::Unreadable
                              : ImageReadResult::Missing;
+#endif
   }
   const bool right_size = file.size() == size;
   const bool read_complete = right_size && file.read(bytes, size) == (int)size;

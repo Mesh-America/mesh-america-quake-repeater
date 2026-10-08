@@ -107,7 +107,7 @@ FALLBACK_VERSION_PREFIX="dev"
 FALLBACK_VERSION_DATE_FORMAT='+%Y-%m-%d-%H-%M'
 
 # External programs invoked by this script:
-#   bash, cat, cp, date, env, find, flock, git, grep, head, mkdir, mv, pgrep,
+#   bash, cat, cp, date, env, find, flock, git, grep, head, mkdir, mktemp, mv, pgrep,
 #   pio, python3, rm, sed, sleep, sort, systemctl, systemd-run, tee, wc
 # Keep this list in sync when adding or removing non-builtin command usage.
 
@@ -121,7 +121,7 @@ Commands:
   list|-l: List firmwares available to build.
   build-firmware <target>: Build the firmware for the given build target.
   build-firmwares: Build canonical firmwares for all targets. Runtime-setting aliases and Terminal Chat targets replaced by Full Companion remain available as explicit builds.
-  build-firmwares-logging-matrix: Build canonical standard artifacts with merged runtime USB logging plus unified FULL ESP32 USB+WiFi and FULL fallback profiles, logging each target under out/build-logs/ and continuing after failures. MQTT observers and ESP-NOW bridges always use FULL. KISS, BLE-only Companion, and constrained LoRa-OTA repeater/room-server contracts do not gain plaintext USB logging.
+  build-firmwares-logging-matrix: Build canonical Full ESP32 images plus other platforms' qualified profiles with runtime USB logging, logging each target under out/build-logs/ and continuing after failures. MQTT observers and ESP-NOW bridges always use FULL. KISS and other platforms' constrained transport contracts do not gain plaintext USB logging. ESP32 expansion/recovery tools are separate from ordinary firmware.
   build-companion-firmwares-logging-matrix: Build canonical Companion targets with merged runtime USB logging where the transport is safe, plus applicable MQTT and expanded FULL profiles. Full Companion replaces separate USB, BLE, WiFi, Terminal Chat, and USB-logging artifacts where an exact combined recipe exists.
   build-full-esp32-firmwares: Build feature-complete ESP32 profiles with up to 254 neighbors, USB packet logging, WiFi MQTT plus ESP-NOW where a matching MQTT recipe exists, LoRa OTA, and expanded dual-OTA partitions.
   build-full-esp32-logging-firmwares: Build only the FULL USB-logging fallback for targets without a matching WiFi MQTT environment.
@@ -140,7 +140,7 @@ Options:
   --firmware-version <version>: Firmware version to embed.
   --radio-preset <name|number>: Override the USA Cascadia radio default. Stable names are usa-cascadia and target; legacy menu numbers remain accepted.
   --profile <default|cascade>: Override runtime settings embedded in the firmware (not its feature set).
-  --build-profile <auto|standard|full>: Select feature/partition policy. Every non-Companion nRF52 repeater, room server and sensor builds both Full sensors + LoRa OTA and Reduced sensors + LoRa OTA, in its exact existing storage/layout contract. Both must pass qualification; an oversized full image is an error, not a successful reduced-only fallback. Other platforms retain their existing auto/standard/full policy.
+  --build-profile <auto|standard|full>: Select feature/partition policy. Every non-Companion nRF52 repeater, room server and sensor builds both Full sensors + LoRa OTA and Reduced sensors + LoRa OTA, in its exact existing storage/layout contract. Both must pass qualification; an oversized full image is an error, not a successful reduced-only fallback. ESP32 bulk releases use Full only; explicit direct standard builds remain recovery tools. Other platforms retain their existing auto/standard/full policy.
   --auto|--standard|--full: Short forms of --build-profile.
   --full-exact: Build one expanded ESP32 release image under the requested target's own LoRa OTA identity.
   --skip-kiss|--include-kiss: Exclude (default) or include KISS modem targets in bulk builds.
@@ -215,7 +215,9 @@ Environment Variables:
                            offered directly as the editable default.
                            A single custom version suffix found in existing OUTPUT_DIR
                            artifacts is carried forward after the new numeric version.
-  DISABLE_DEBUG=1: Disables all debug logging flags (MESH_DEBUG, MESH_PACKET_LOGGING, etc.)
+  DISABLE_DEBUG=1: Disables build-time debug logging. Full Companion retains its
+                   runtime-gated diagnostics; canonical XIAO QSPI repeaters retain
+                   runtime-gated USB packet logging while MESH_DEBUG stays disabled.
                    If not set, debug flags from variant platformio.ini files are used.
   RESUME_BUILD_OUTPUT=1: Preserves out/ and skips targets whose expected output
                          artifacts already exist. Option 3 resumes by default.
@@ -1471,15 +1473,11 @@ get_variants_for_board() {
   local board_family=$1
   local env
 
-  for env in "${SUPPORTED_PIO_ENVS[@]}"; do
-    if ! is_supported_build_env "$env"; then
-      continue
-    fi
-
+  while IFS= read -r env; do
     if [ "$(get_board_family_for_env "$env")" == "$board_family" ]; then
       echo "$env"
     fi
-  done | sort_lines_case_insensitive
+  done < <(get_interactive_build_targets) | sort_lines_case_insensitive
 }
 
 prompt_for_variant_for_board() {
@@ -1553,17 +1551,13 @@ prompt_for_board_target() {
     exit 1
   fi
 
-  for env in "${SUPPORTED_PIO_ENVS[@]}"; do
-    if ! is_supported_build_env "$env"; then
-      continue
-    fi
-
+  while IFS= read -r env; do
     board=$(get_board_family_for_env "$env")
     if [ -z "${seen_boards[$board]}" ]; then
       seen_boards["$board"]=1
       boards+=("$board")
     fi
-  done
+  done < <(get_interactive_build_targets)
 
   mapfile -t boards < <(printf '%s\n' "${boards[@]}" | sort_lines_case_insensitive)
 
@@ -1977,6 +1971,11 @@ print_release_firmware_targets() {
       ;;
     get-repeater-firmwares-to-build)
       get_pio_envs_ending_with_string "_repeater"
+      # MeshTower keeps its deployed SD target identity as the one canonical
+      # repeater recipe, including when SD staging falls back to internal staging.
+      if is_supported_build_env "Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"; then
+        printf '%s\n' "Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors"
+      fi
       # These full-sensor targets are distinct hardware/bootloader contracts,
       # not generated lean OTA aliases, so tagged repeater releases must ship
       # them explicitly alongside the canonical standard repeaters.
@@ -2453,8 +2452,8 @@ get_unified_full_infrastructure_target() {
 
   # These plain Full recipes retain more routing capacity than their MQTT
   # siblings (T-Beam flood rules / room neighbors, TLora repeater neighbors).
-  # Keep them available for an explicit exact-identity build; the ordinary
-  # release chooses the MQTT observer for these board/role groups.
+  # T-Beam keeps the observer as its ordinary release choice. TLora retains
+  # both identities: its UART cannot fit alongside MQTT and ESP-NOW.
   case "${mqtt_base,,}" in
     tbeam_sx1262_repeater|tbeam_sx1276_repeater|\
     tbeam_sx1262_room_server|tbeam_sx1276_room_server|\
@@ -2486,6 +2485,13 @@ get_unified_full_infrastructure_target() {
 get_exact_identity_full_pio_env() {
   local env_name=$1
   local candidate=""
+
+  # Many Full Companions are generated logical targets whose combined recipe
+  # compiles an exact USB/BLE/WiFi environment. Preserve that registered base.
+  if is_companion_radio_full_target "$env_name"; then
+    get_pio_build_env "$env_name"
+    return 0
+  fi
 
   is_esp32_canonical_full_release_target "$env_name" || {
     printf '%s\n' "$env_name"
@@ -2529,19 +2535,34 @@ get_exact_identity_full_migration_target() {
   printf '%s\n' "$successor"
 }
 
+# Full repeaters carry ESP-NOW as a runtime transport. Plain room servers and
+# companions use different bridge wiring; only their existing MQTT recipes
+# support this overlay. Capacity exceptions keep their dedicated bridge image.
+supports_esp32_full_shared_espnow() {
+  local env_name=$1
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$env_name]:-}" = "ESP32_PLATFORM" ] \
+    && supports_esp32_full_build "$env_name" \
+    && ! is_esp32_companion_build "$env_name" \
+    && { is_mqtt_bridge_target "$env_name" || is_repeater_role_target "$env_name"; } || return 1
+  # Primary ESP-NOW radios already own the SDK callbacks and packet transport.
+  # A second bridge instance would conflict with that radio, not add a mode.
+  ! pio_env_option_contains "$env_name" build_flags "MESH_PRIMARY_ESPNOW" \
+    && ! pio_env_option_contains "$env_name" build_flags "MESH_ESPNOW_RADIO"
+}
+
 apply_esp32_full_shared_bridge_profile() {
   local env_name=$1
 
-  # Full infrastructure images use the MQTT observer recipe for WiFi/TLS and
-  # add the cooperative ESP-NOW bridge. Companion Full is a different client
-  # transport role, not an infrastructure packet bridge.
-  if [ "$ESP32_FULL_BUILD" != "1" ] \
-      || [ "${PIO_ENV_PLATFORM_BY_NAME[$env_name]:-}" != "ESP32_PLATFORM" ] \
-      || is_esp32_companion_build "$env_name" \
-      || ! is_mqtt_bridge_target "$env_name"; then
-    return 0
-  fi
+  [ "$ESP32_FULL_BUILD" = "1" ] \
+    && supports_esp32_full_shared_espnow "$env_name" || return 0
 
+  # Keep historical dedicated bridge defaults and MQTT observer behavior.
+  # Newly combined ordinary repeaters start with ESP-NOW off, including when
+  # upgrading preferences written before an ESP-NOW runtime setting existed.
+  if ! is_mqtt_bridge_target "$env_name" \
+      && ! pio_env_option_contains "$env_name" build_flags "WITH_ESPNOW_BRIDGE"; then
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DESPNOW_BRIDGE_MERGED=1"
+  fi
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DWITH_ESPNOW_BRIDGE=1"
   append_platformio_build_src_filter "+<helpers/bridges/ESPNowBridge.cpp>"
   record_build_capability "bridge.espnow"
@@ -2632,6 +2653,47 @@ normalize_resolved_targets_for_mqtt() {
   fi
 }
 
+get_firmware_version_string() {
+  local env_name=$1
+  local version=$2
+  local commit_hash=$3
+  local kind=${4:-filename}
+  local build_suffix=""
+  local channel_tag=""
+
+  # Preserve the existing embedded counter hook on all targets. Observer CI
+  # also includes that counter and its channel marker in downloadable names.
+  if [ "$kind" = embedded ] && [ -n "${FIRMWARE_BUILD_NUMBER:-}" ]; then
+    build_suffix=".${FIRMWARE_BUILD_NUMBER}"
+  fi
+  case "$env_name" in
+    *observer*)
+      if [ -n "${FIRMWARE_BUILD_NUMBER:-}" ]; then
+        build_suffix=".${FIRMWARE_BUILD_NUMBER}"
+      fi
+      if [ "$kind" = embedded ]; then
+        channel_tag="-observer${OTA_CHANNEL_TAG:+-${OTA_CHANNEL_TAG}}"
+      else
+        channel_tag="${FILENAME_CHANNEL_TAG:-}"
+      fi
+      ;;
+  esac
+  printf '%s' "${version}${build_suffix}${channel_tag}-${commit_hash}"
+}
+
+apply_observer_ota_channel_flags() {
+  # Channel bases belong to observer pull-OTA. Keep other fork targets' update
+  # destinations and manually configured flags scoped to their own recipes.
+  case "${1:-}" in
+    *observer*) ;;
+    *) return 0 ;;
+  esac
+  local native_url="${OTA_MANIFEST_BASE_URL:-https://observer.gessaman.com/v}"
+  local stable_url="${OTA_MANIFEST_BASE_STABLE_URL:-https://observer.gessaman.com/v}"
+  local dev_url="${OTA_MANIFEST_BASE_DEV_URL:-https://observer.gessaman.com/beta/v}"
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS:-} -DOTA_MANIFEST_BASE='\"${native_url}\"' -DOTA_MANIFEST_BASE_STABLE='\"${stable_url}\"' -DOTA_MANIFEST_BASE_DEV='\"${dev_url}\"'"
+}
+
 disable_debug_flags() {
   local env_name=${1:-}
   local usb_logging_undefs="-UMESH_DEBUG -UMESH_PACKET_LOGGING"
@@ -2642,10 +2704,14 @@ disable_debug_flags() {
   # apparent order in PLATFORMIO_BUILD_FLAGS.
   if [ -n "$env_name" ] && is_companion_radio_full_target "$env_name"; then
     usb_logging_undefs=""
+  elif [ -n "$env_name" ] && is_xiao_qspi_canonical_repeater_build "$env_name"; then
+    # Its combined artifact promises runtime USB packet logging. Keep the
+    # logger linked without retaining optional MESH_DEBUG output.
+    usb_logging_undefs="-UMESH_DEBUG"
   fi
 
-  if [ "$DISABLE_DEBUG" == "1" ]; then
-    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} ${usb_logging_undefs} -UBLE_DEBUG_LOGGING -UWIFI_DEBUG_LOGGING -UBRIDGE_DEBUG -UGPS_NMEA_DEBUG -UCORE_DEBUG_LEVEL -UESPNOW_DEBUG_LOGGING -UDEBUG_RP2040_WIRE -UDEBUG_RP2040_SPI -UDEBUG_RP2040_CORE -UDEBUG_RP2040_PORT -URADIOLIB_DEBUG_SPI -DCFG_DEBUG=0 -URADIOLIB_DEBUG_BASIC -URADIOLIB_DEBUG_PROTOCOL"
+  if [ "${DISABLE_DEBUG:-0}" == "1" ]; then
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS:-} ${usb_logging_undefs} -UBLE_DEBUG_LOGGING -UWIFI_DEBUG_LOGGING -UBRIDGE_DEBUG -UGPS_NMEA_DEBUG -UCORE_DEBUG_LEVEL -UESPNOW_DEBUG_LOGGING -UDEBUG_RP2040_WIRE -UDEBUG_RP2040_SPI -UDEBUG_RP2040_CORE -UDEBUG_RP2040_PORT -URADIOLIB_DEBUG_SPI -DCFG_DEBUG=0 -URADIOLIB_DEBUG_BASIC -URADIOLIB_DEBUG_PROTOCOL"
   fi
 }
 
@@ -2673,9 +2739,13 @@ apply_mqtt_bridge_override() {
 apply_debug_overrides() {
   local env_name=${1:-}
   local preserve_full_companion_logging=0
+  local preserve_runtime_packet_logging=0
 
   if [ -n "$env_name" ] && is_companion_radio_full_target "$env_name"; then
     preserve_full_companion_logging=1
+    preserve_runtime_packet_logging=1
+  elif [ -n "$env_name" ] && is_xiao_qspi_canonical_repeater_build "$env_name"; then
+    preserve_runtime_packet_logging=1
   fi
 
   case "${MESHDEBUG_OVERRIDE,,}" in
@@ -2694,7 +2764,7 @@ apply_debug_overrides() {
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMESH_PACKET_LOGGING=1"
       ;;
     off)
-      if [ "$preserve_full_companion_logging" -eq 0 ]; then
+      if [ "$preserve_runtime_packet_logging" -eq 0 ]; then
         export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UMESH_PACKET_LOGGING"
       fi
       ;;
@@ -2747,13 +2817,22 @@ apply_merged_standard_usb_logging_profile() {
 
   uses_merged_standard_usb_logging "$env_name" || return 0
 
+  # Canonical XIAO QSPI repeaters include packet logging in the immutable
+  # combined artifact. The saved usb.logging switch controls its live stream.
+  local preserve_runtime_packet_logging=0
+  if is_xiao_qspi_canonical_repeater_build "$env_name"; then
+    preserve_runtime_packet_logging=1
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMESH_PACKET_LOGGING=1 -DMESH_USB_LOGGING_MERGED=1"
+  fi
+
   # Explicit diagnostic overrides retain their documented meaning. Canonical
   # builds otherwise compile packet/debug output into the ordinary artifact;
   # get/set usb.logging controls the live Serial stream at runtime.
   if [ "${DISABLE_DEBUG:-0}" = "1" ]; then
     return 0
   fi
-  if [ "${PACKET_LOGGING_OVERRIDE,,}" != "off" ]; then
+  if [ "$preserve_runtime_packet_logging" -eq 0 ] \
+      && [ "${PACKET_LOGGING_OVERRIDE,,}" != "off" ]; then
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMESH_PACKET_LOGGING=1 -DMESH_USB_LOGGING_MERGED=1"
   fi
   if [ "${MESHDEBUG_OVERRIDE,,}" != "off" ] \
@@ -3013,6 +3092,11 @@ is_nrf52_sensor_ota_pair_target() {
 get_nrf52_sensor_ota_pair_target() {
   local target=$1
   local candidate
+  # The former internal-only MeshTower names are build aliases for the SD
+  # primary. Their old OTA IDs are not compatible aliases on deployed nodes.
+  if candidate=$(get_unified_meshtower_repeater_replacement "$target"); then
+    target=$candidate
+  fi
   is_nrf52_sensor_ota_pair_target "$target" || return 1
   # Preserve an explicit/deployed OTA identity and every external-storage
   # contract. Ordinary internal targets keep the historical auto-build ID of
@@ -3033,6 +3117,14 @@ normalize_nrf52_sensor_ota_pair_targets() {
   local -a normalized=()
   local -A seen=()
   for target in "${RESOLVED_BUILD_TARGETS[@]}"; do
+    if candidate=$(get_unified_meshtower_repeater_replacement "$target"); then
+      if ! is_supported_build_env "$candidate"; then
+        echo "MeshTower V2 primary build target is unavailable: ${candidate}" >&2
+        return 1
+      fi
+      echo "MeshTower V2 build alias ${target} resolves to ${candidate}. Old internal-only bootloader/OTA identities require local USB/BLE DFU or SWD migration; this is not a same-target LoRa upgrade." >&2
+      target=$candidate
+    fi
     candidate=$(get_nrf52_sensor_ota_pair_target "$target") || candidate=$target
     if [ -z "${seen[$candidate]+x}" ]; then
       normalized+=("$candidate")
@@ -3160,6 +3252,16 @@ supports_esp32_full_build() {
     && ! is_lora_ota_only_target "$env_name"
 }
 
+# Ordinary ESP32 releases use the complete profile regardless of the old app
+# layout. Expansion/recovery utilities are packaged separately; an explicit
+# direct standard build remains available for those workflows. Keep the
+# older same-partition allowlist below separate: it also guards wire-compatible
+# observer-to-normal OTA identity transitions.
+is_esp32_full_release_build_target() {
+  [ "${PIO_ENV_PLATFORM_BY_NAME[$1]:-}" = "ESP32_PLATFORM" ] || return 1
+  is_companion_radio_full_target "$1" || supports_esp32_full_build "$1"
+}
+
 # These ESP32 targets keep their exact partition table when the FULL overlay is
 # applied. In bulk release builds the portable artifact is therefore redundant:
 # publish FULL under the same mOTA identity. This inventory is derived from the
@@ -3196,7 +3298,7 @@ is_esp32_full_only_bulk_target() {
     heltec_v4_expansionkit_repeater|heltec_v4_expansionkit_repeater_observer_mqtt|heltec_v4_expansionkit_room_server_observer_mqtt|\
     heltec_v4_tft_repeater|heltec_v4_tft_repeater_bridge_espnow|heltec_v4_tft_room_server|heltec_v4_tft_sensor|\
     lilygo_teth_elite_sx1262_repeater|lilygo_teth_elite_sx1262_room_server|lilygo_teth_elite_sx1262_repeater_observer_mqtt|lilygo_teth_elite_sx1262_room_server_observer_mqtt|\
-    station_g3_esp32_repeater|station_g3_esp32_logging_repeater|station_g3_esp32_room_server|station_g3_esp32_repeater_observer_mqtt|station_g3_esp32_room_server_observer_mqtt|\
+    station_g3_esp32_repeater|station_g3_esp32_logging_repeater|station_g3_esp32_room_server|station_g3_esp32_sensor|station_g3_esp32_r2_sensor|station_g3_esp32_repeater_observer_mqtt|station_g3_esp32_room_server_observer_mqtt|\
     rak_3112_repeater|rak_3112_repeater_bridge_rs232|rak_3112_repeater_bridge_espnow|rak_3112_repeater_observer_mqtt|rak_3112_room_server|rak_3112_room_server_observer_mqtt|rak_3112_sensor|\
     xiao_s3_wio_repeater|xiao_s3_wio_repeater_bridge_espnow|xiao_s3_wio_repeater_observer_mqtt|xiao_s3_wio_room_server|xiao_s3_wio_room_server_observer_mqtt|xiao_s3_wio_sensor|\
     lilygo_tdeck_repeater|\
@@ -3209,13 +3311,11 @@ is_esp32_full_only_bulk_target() {
   return 1
 }
 
-# These normal role identities still ship a portable legacy image for installed
-# nodes, but also need a canonical FULL artifact for the one-time layout
-# migration. They are deliberately separate from the FULL-only list above:
-# some deployed 0x140000 slots differ from the expanded table, so LoRa mOTA
-# must not try to cross this boundary. An exact-target Wi-Fi bridge and Full
-# application are packaged separately; after migration, later normal-target
-# FULL packages use the same logical mOTA identity.
+# These identities have historical installed layouts that require expansion
+# before their Full app can be installed. Retain this metadata separately from
+# same-partition identity transitions: mOTA must not cross a layout boundary.
+# Exact migration tools and Full applications are packaged separately from
+# ordinary releases; future Full updates retain the normal target identity.
 is_esp32_partition_migration_full_target() {
   local env_name=${1,,}
 
@@ -3241,7 +3341,7 @@ is_esp32_partition_migration_full_target() {
 }
 
 is_esp32_canonical_full_release_target() {
-  is_esp32_full_only_bulk_target "$1" \
+  is_esp32_full_release_build_target "$1" \
     || is_esp32_partition_migration_full_target "$1"
 }
 
@@ -3305,6 +3405,28 @@ declare_build_capability_contract() {
 
   declare_full_logging_application_contract "$env_name"
   record_build_capability "profile.${BUILD_PROFILE_FOR_TARGET}"
+  pio_env_name=$(get_pio_build_env "$env_name")
+  if [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
+      && is_esp32_canonical_full_release_target "$env_name"; then
+    pio_env_name=$(get_exact_identity_full_pio_env "$env_name")
+  fi
+  if is_repeater_role_target "$env_name" \
+      && { pio_env_option_contains "$env_name" build_flags "WITH_RS232_BRIDGE=" \
+           || pio_env_option_contains "$pio_env_name" build_flags "WITH_RS232_BRIDGE="; }; then
+    # A Full observer recipe must retain the UART from its normal repeater.
+    # Check both the logical and compiled recipes so substituting sources
+    # cannot silently remove RS-232 while its legacy image is retired.
+    record_build_expectation "bridge.rs232" "_ZN11RS232Bridge5beginEv"
+  fi
+  if [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
+      && supports_esp32_full_shared_espnow "$pio_env_name"; then
+    # A capability flag alone cannot retire a dedicated transport artifact.
+    # Verify that the actual ESP-NOW driver survived linking in every Full
+    # repeater/observer that claims it, including exact-identity source bases.
+    record_build_expectation "bridge.espnow" "_ZN12ESPNowBridge5beginEv"
+  elif [ "$env_name_lc" = mke_s3_repeater ]; then
+    record_build_expectation "bridge.espnow" "_ZN12ESPNowBridge5beginEv"
+  fi
   if is_nrf52_sensor_ota_pair_target "$env_name" \
       && [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; then
     record_build_capability "sensor.profile.${NRF52_OTA_SENSOR_PROFILE}"
@@ -3389,9 +3511,12 @@ declare_build_capability_contract() {
     record_build_expectation "sensor.ina3221" "INA3221"
   fi
 
+  # SensorMesh keeps CommonCLI's unsupported WebConfig callbacks. Its generic
+  # command text is linked even though only the board's browser OTA is usable.
   if [ "$env_platform" = "ESP32_PLATFORM" ] \
       && [ "$BUILD_PROFILE_FOR_TARGET" = "full" ] \
-      && ! is_esp32_companion_build "$env_name"; then
+      && ! is_esp32_companion_build "$env_name" \
+      && ! is_sensor_role_target "$env_name"; then
     pio_env_name=$(get_pio_build_env "$env_name")
     if pio_env_option_contains "$pio_env_name" build_flags "ADMIN_PASSWORD"; then
       record_build_expectation "web.webconfig" "start webconfig"
@@ -3516,6 +3641,14 @@ apply_esp32_lora_ota_size_profile() {
     fi
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_WIFI_OTA -DLIGHTWEIGHT_WIFI_OTA=1 -DMAX_NEIGHBOURS=${max_neighbours} -fno-exceptions"
     record_build_capability "web.lightweight_browser_ota"
+    if is_lora_ota_no_external_sensors_target "$env_name"; then
+      # Preserve both update paths and the complete CLI inside the portable
+      # slot. These existing compact implementations retain every OTA target
+      # name and the exact Ed25519 key/signature format; fixed-base signing
+      # trades more CPU time and stack for the 30 KiB precomputed flash table.
+      # Full and ordinary standard images retain their normal implementations.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DED25519_COMPACT_BASE=1 -DED25519_COMPACT_SHA512=1 -DOTA_TARGET_NAME_FRONT_CODED=1"
+    fi
   else
     append_platformio_build_unflags "-DLIGHTWEIGHT_WIFI_OTA=1"
     export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -ULIGHTWEIGHT_WIFI_OTA -DDISABLE_WIFI_OTA=1"
@@ -3716,16 +3849,27 @@ apply_nrf52_size_profile() {
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -Os"
 
   # These color-display repeaters reserve a 64 KiB reset-retained OTA arena
-  # plus a 25 KiB framebuffer. Keep their board-declared 50 neighbours and
-  # the complete flood-rule engine with a smaller table so runtime startup
-  # allocations also fit; do not lower the heap qualification requirement.
+  # plus a 25 KiB framebuffer. With the 8 KiB loop stack, the complete sensor
+  # profile is 1.5-1.9 KiB short of the runtime heap requirement at 16 rules.
+  # Keep their 50 neighbours, sensors, display, OTA and stack; bound the
+  # optional flood-rule table instead of lowering the qualification margin.
   case "${env_name,,}" in
     heltec_t096_repeater_lora_ota_no_external_sensors|\
     heltec_t1_repeater_lora_ota_no_external_sensors)
       append_platformio_build_unflags "-DFLOOD_PACKET_FILTER_SLOTS=63"
-      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_PACKET_FILTER_SLOTS=16"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_PACKET_FILTER_SLOTS=4"
       record_build_reduction \
-        "mesh.flood_rules limited to 16 by measured internal RAM; complete rule engine, color display, GPS, and OTA retained"
+        "mesh.flood_rules limited to 4 by measured internal RAM; complete rule engine, 8 KiB loop stack, 50 neighbors, color display, GPS, sensors, and OTA retained"
+      ;;
+    rak_3401_repeater_unified_lora_ota)
+      # Internal staging keeps a reset-retained 64 KiB arena even when the
+      # unified image can also select QSPI. Its complete sensor profile is
+      # 1,508 bytes short at 63 rules. Reserve 3,200 fewer rule-table bytes;
+      # keep the 8 KiB stack, 50 neighbors, all sensors and both OTA stores.
+      append_platformio_build_unflags "-DFLOOD_PACKET_FILTER_SLOTS=63"
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_PACKET_FILTER_SLOTS=47"
+      record_build_reduction \
+        "mesh.flood_rules limited to 47 by measured internal RAM; complete rule engine, 8 KiB loop stack, 50 neighbors, GPS, sensors, and unified internal/QSPI OTA retained"
       ;;
   esac
 }
@@ -3846,6 +3990,21 @@ append_platformio_extra_script() {
   export PLATFORMIO_EXTRA_SCRIPTS
 }
 
+ensure_esp32_wifi_scan_fix() {
+  local env_platform=$1
+  local pio_env_name=$2
+  local hook="pre:scripts/esp32_wifi_scan_fix.py"
+  local item
+  local -a hooks=()
+  [ "$env_platform" = "ESP32_PLATFORM" ] || return 0
+  pio_env_option_contains "$pio_env_name" extra_scripts "scripts/esp32_wifi_scan_fix.py" && return 0
+  read -r -a hooks <<< "${PLATFORMIO_EXTRA_SCRIPTS//$'\n'/ }"
+  for item in "${hooks[@]}"; do
+    [ "$item" = "$hook" ] && return 0
+  done
+  append_platformio_extra_script "$hook"
+}
+
 apply_lora_ota_flag_order_fix() {
   local env_name=$1
   local pio_env_name=$2
@@ -3934,8 +4093,14 @@ apply_lora_ota_override() {
       append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1 -DOTA_FLASH_STORE=1 -DOTA_SD_STORE=1"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -UOTA_FLASH_STORE -UOTA_SD_STORE -DOTA_QSPI_STORE=1 -DOTA_FOLDER_SERIAL"
     elif [ "${PIO_ENV_SD_OTA_BY_NAME[$env_name]:-0}" = "1" ]; then
-      append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1 -DOTA_FLASH_STORE=1"
-      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -UOTA_FLASH_STORE -DOTA_SD_STORE=1 -DOTA_FOLDER_SERIAL"
+      if [ "$env_name" = Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors ] \
+          && pio_env_option_contains "$env_name" build_flags "OTA_TOWER_AUTO_STORE=1"; then
+        append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1"
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -DOTA_FLASH_STORE=1 -DOTA_SD_STORE=1 -DOTA_TOWER_AUTO_STORE=1 -DOTA_FOLDER_SERIAL"
+      else
+        append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1 -DOTA_FLASH_STORE=1"
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -UOTA_FLASH_STORE -DOTA_SD_STORE=1 -DOTA_FOLDER_SERIAL"
+      fi
     else
       append_platformio_build_unflags "-UENABLE_OTA -DDISABLE_LORA_OTA=1"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UDISABLE_LORA_OTA -DENABLE_OTA=1 -DOTA_FLASH_STORE=1 -DOTA_FOLDER_SERIAL"
@@ -4139,6 +4304,9 @@ apply_companion_radio_full_profile() {
       record_build_reduction \
         "Wireless Paper Full: 350 contacts; 256 offline frames normally, 128 while mOTA borrows queue storage"
       ;;
+    # ESP-NOW Full also needs the C3 queue limit: 256 frames leave only
+    # 141376 internal heap bytes against the unchanged 142336-byte reserve.
+    generic_espnow_companion_radio_full|\
     heltec_ct62_companion_radio_full|\
     xiao_c3_companion_radio_full|\
     heltec_tracker_v2_companion_radio_full_*)
@@ -4147,7 +4315,6 @@ apply_companion_radio_full_profile() {
       record_build_reduction \
         "companion.capacity limited to 100 contacts for runtime RAM; 224 queued frames and all Full transports retained"
       ;;
-    generic_espnow_companion_radio_full|\
     heltec_v3_companion_radio_full)
       # The 1.17.1.8 matrix exceeds the runtime heap budget at 150 contacts
       # after adding alerts and held DMs. Preserve the 256-frame queue, Full
@@ -4332,7 +4499,10 @@ write_build_capability_manifest() {
     checker_args+=(--expect-application "$item")
   done
 
-  python3 scripts/check_firmware_capabilities.py "${checker_args[@]}"
+  python3 scripts/check_firmware_capabilities.py "${checker_args[@]}" || return $?
+  python3 scripts/firmware_build_recipe.py attach \
+    "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" \
+    "$BUILD_RECIPE_SHA256"
 }
 
 collect_esp32_artifacts() {
@@ -4412,6 +4582,26 @@ collect_rp2040_artifacts() {
 
 output_artifact_exists() {
   [ -s "${OUTPUT_DIR}/$1" ]
+}
+
+compute_build_recipe_digest() {
+  local env_name=$1 env_platform=$2 pio_env_name=$3 embedded_version=$4
+  local original_flags=$5 full_source_commit=$6 artifact_target checkout_dir
+  artifact_target=${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}
+  if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ] \
+      && is_nrf52_sensor_ota_pair_target "$env_name"; then
+    artifact_target+="-${NRF52_OTA_SENSOR_PROFILE}-ota"
+  fi
+  checkout_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+  MESHCORE_RECIPE_ORIGINAL_FLAGS="$original_flags" \
+    python3 "${checkout_dir}/scripts/firmware_build_recipe.py" digest \
+      --root "$checkout_dir" --output "$OUTPUT_DIR" \
+      --source-commit "$full_source_commit" \
+      --target "$env_name" --artifact-target "$artifact_target" \
+      --pio-env "$pio_env_name" --platform "$env_platform" \
+      --embedded-version "$embedded_version" --profile "$BUILD_PROFILE_FOR_TARGET" \
+      --sensor-profile "${NRF52_OTA_SENSOR_PROFILE:-}" \
+      --ota-policy "${REQUIRE_OTA_UPDATES:-}" <<<"$PIO_CONFIG_JSON"
 }
 
 nrf52_sensor_profile_manifest_matches() {
@@ -4676,6 +4866,7 @@ build_firmware_one_profile() {
   local pio_env_name
   local env_platform
   local commit_hash
+  local full_source_commit
   local firmware_build_date
   local firmware_build_epoch
   local firmware_version
@@ -4694,6 +4885,11 @@ build_firmware_one_profile() {
   local had_platformio_build_src_filter=0
   local had_platformio_extra_scripts=0
   local build_status
+  local BUILD_RECIPE_SHA256
+  local recipe_build_flags
+  local completed_recipe
+  local resume_recipe_status
+  local resume_artifact_status
   local platformio_package_lock_fd=""
   local -a pio_run_args=()
   local -a BUILD_CAPABILITIES=()
@@ -4727,15 +4923,16 @@ build_firmware_one_profile() {
     echo "Sensor OTA profile uses feature-rich base environment ${pio_env_name} with stable target identity ${env_name}."
   fi
 
-  # Canonical bulk releases omit the redundant portable image for targets
-  # whose exact environment identity has been approved for FULL-only output.
-  # Keep an explicit standard request untouched so maintainers retain a
-  # portable recovery build when diagnosing field devices.
+  # Every ordinary ESP32 bulk image uses Full. Changing an installed app
+  # layout still requires its reviewed expander/merged image first; it never
+  # authorizes app-only OTA across partition boundaries. Explicit direct
+  # standard requests remain installation/recovery developer tools.
   if [ "$ESP32_FULL_BUILD" != "1" ] \
       && [ "$BUILD_PROFILE_FOR_TARGET" = "standard" ] \
       && [ "${BATCH_BUILD_MODE:-0}" = "1" ] \
       && [ "${BUILD_PROFILE_EXPLICIT:-0}" != "1" ] \
-      && is_esp32_full_only_bulk_target "$env_name"; then
+      && ! is_companion_radio_full_target "$env_name" \
+      && is_esp32_full_release_build_target "$env_name"; then
     ESP32_FULL_BUILD=1
     if ! is_companion_radio_full_target "$env_name"; then
       MESHDEBUG_OVERRIDE="off"
@@ -4798,8 +4995,8 @@ build_firmware_one_profile() {
   # Publication tools bind artifacts to an explicit eight-character prefix
   # of the full source commit. Git's adaptive --short length can grow (or be
   # configured differently), which otherwise makes valid releases look stale.
-  commit_hash=$(git rev-parse HEAD)
-  commit_hash=${commit_hash:0:8}
+  full_source_commit=$(git rev-parse HEAD) || return 1
+  commit_hash=${full_source_commit:0:8}
   firmware_build_date=$(date -u '+%d-%b-%Y')
   firmware_build_epoch=$(date -u '+%s')
   firmware_version=${FIRMWARE_VERSION:-}
@@ -4813,7 +5010,8 @@ build_firmware_one_profile() {
     echo "FIRMWARE_VERSION not set, using derived default for ${env_name}: ${firmware_version}"
   fi
 
-  firmware_version_string="${firmware_version}-${commit_hash}"
+  firmware_version_string=$(get_firmware_version_string \
+    "$env_name" "$firmware_version" "$commit_hash")
   firmware_filename=$(get_firmware_filename \
     "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}" "$firmware_version_string")
 
@@ -4827,29 +5025,15 @@ build_firmware_one_profile() {
   fi
 
   # Fork CI hooks (consumed by .github/workflows/build-observer*-firmwares.yml).
-  # Tag the *embedded* version for observer builds (v1.0.0-observer-abcdef) so
-  # `ver`, the MQTT firmware_version, and SNMP identify the fork, and stamp the
-  # per-base published-build counter (FIRMWARE_BUILD_NUMBER) as a 4th version
-  # component so `ota check` can show how many builds behind a node is. The
-  # *filename* stays untagged/un-numbered so assets remain <env>-v<base>-<hash>.
+  # Tag the embedded version and observer filenames with the workflow's channel
+  # and published-build counter. Other target filenames retain their fork form.
   # OTA_VARIANT is the env name - it selects the slim per-variant manifest
   # (<OTA_MANIFEST_BASE>/<OTA_VARIANT>.json) that the observer pull-OTA fetches.
-  local embedded_variant_tag=""
-  case "$env_name" in
-    *observer*) embedded_variant_tag="-observer" ;;
-  esac
-  local embedded_build_suffix=""
-  if [ -n "${FIRMWARE_BUILD_NUMBER:-}" ]; then
-    embedded_build_suffix=".${FIRMWARE_BUILD_NUMBER}"
-  fi
-  local embedded_version_string="${firmware_version}${embedded_build_suffix}${embedded_variant_tag}-${commit_hash}"
+  local embedded_version_string
+  embedded_version_string=$(get_firmware_version_string \
+    "$env_name" "$firmware_version" "$commit_hash" embedded)
 
   declare_full_logging_application_contract "$env_name"
-  if [ "$RESUME_BUILD_OUTPUT" == "1" ] && build_artifacts_exist "$env_name" "$env_platform" "$firmware_filename"; then
-    echo "Skipping ${env_name}; existing artifacts found for ${firmware_filename}."
-    return 0
-  fi
-
   if [ "${PLATFORMIO_BUILD_FLAGS+x}" ]; then
     had_platformio_build_flags=1
     original_platformio_build_flags=$PLATFORMIO_BUILD_FLAGS
@@ -4875,7 +5059,24 @@ build_firmware_one_profile() {
     original_platformio_extra_scripts=""
   fi
 
-  export PLATFORMIO_BUILD_FLAGS="${original_platformio_build_flags} -DFIRMWARE_BUILD_DATE='\"${firmware_build_date}\"' -DFIRMWARE_BUILD_EPOCH=${firmware_build_epoch} -DFIRMWARE_VERSION='\"${embedded_version_string}\"' -DOTA_VARIANT='\"${env_name}\"'${mota_target_flag}${mota_migration_flag}"
+  # Scope the ambient values and their export attributes to this target. In
+  # particular, a resume skip/conflict must not leak its computed profile into
+  # the next target or convert an unset/unexported caller variable to exported.
+  local PLATFORMIO_BUILD_FLAGS="$original_platformio_build_flags"
+  local PLATFORMIO_BUILD_UNFLAGS="$original_platformio_build_unflags"
+  local PLATFORMIO_BUILD_SRC_FILTER="$original_platformio_build_src_filter"
+  local PLATFORMIO_EXTRA_SCRIPTS="$original_platformio_extra_scripts"
+  local MESHCORE_ESP32_FULL_BUILD="${MESHCORE_ESP32_FULL_BUILD-}"
+  local MESHCORE_REQUIRE_PACKET_LOGGING="${MESHCORE_REQUIRE_PACKET_LOGGING-}"
+  local MESHCORE_COMPANION_RADIO_FULL="${MESHCORE_COMPANION_RADIO_FULL-}"
+  local MESHCORE_ESP32_FULL_PARTITION_TABLE="${MESHCORE_ESP32_FULL_PARTITION_TABLE-}"
+  local MESHCORE_NRF52_INTERNAL_BOOTLOADER_UPDATE="${MESHCORE_NRF52_INTERNAL_BOOTLOADER_UPDATE-}"
+  local MESHCORE_FORCE_LORA_OTA="${MESHCORE_FORCE_LORA_OTA-}"
+
+  # Only builder-generated wall-clock stamps are excluded from the recipe.
+  # User-supplied flags remain verbatim, including any timestamp definitions.
+  export PLATFORMIO_BUILD_FLAGS="${original_platformio_build_flags} -DFIRMWARE_VERSION='\"${embedded_version_string}\"' -DOTA_VARIANT='\"${env_name}\"'${mota_target_flag}${mota_migration_flag}"
+  apply_observer_ota_channel_flags "$env_name"
   disable_debug_flags "$env_name"
   apply_debug_overrides "$env_name"
   apply_mqtt_bridge_override "$env_name"
@@ -4930,6 +5131,9 @@ build_firmware_one_profile() {
     unset MESHCORE_COMPANION_RADIO_FULL
   fi
 
+  # Keep the reviewed scan SDK fix when a target overrides extra_scripts.
+  ensure_esp32_wifi_scan_fix "$env_platform" "$pio_env_name"
+
   if [ "$env_platform" = "ESP32_PLATFORM" ] \
       && ! pio_env_option_contains "$pio_env_name" extra_scripts \
           "scripts/check_esp32_dram.py"; then
@@ -4943,6 +5147,42 @@ build_firmware_one_profile() {
     append_platformio_extra_script "post:scripts/check_firmware_ram.py"
   fi
 
+  recipe_build_flags=$PLATFORMIO_BUILD_FLAGS
+  BUILD_RECIPE_SHA256=$(compute_build_recipe_digest "$env_name" "$env_platform" \
+    "$pio_env_name" "$embedded_version_string" "$original_platformio_build_flags" \
+    "$full_source_commit") || return 1
+  if [ "$RESUME_BUILD_OUTPUT" == "1" ]; then
+    if python3 scripts/firmware_build_recipe.py occupied "${OUTPUT_DIR}/${firmware_filename}"; then
+      # Keep the recipe-first short circuit while distinguishing its failure
+      # from the packaged artifact/capability/RAM gate. Report only exit codes;
+      # build inputs and raw manifests can contain private settings.
+      resume_artifact_status=not-run
+      if python3 scripts/firmware_build_recipe.py matches \
+          "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" "$BUILD_RECIPE_SHA256" \
+          >/dev/null 2>&1; then
+        resume_recipe_status=0
+        if build_artifacts_exist "$env_name" "$env_platform" "$firmware_filename" \
+            >/dev/null 2>&1; then
+          echo "Skipping ${env_name}; matching recipe and qualified artifacts found for ${firmware_filename}."
+          return 0
+        else
+          resume_artifact_status=$?
+        fi
+      else
+        resume_recipe_status=$?
+      fi
+      printf 'Resume qualification gates: recipe_exit=%s; artifact_capability_ram_exit=%s.\n' \
+        "$resume_recipe_status" "$resume_artifact_status" >&2
+      echo "Cannot resume ${firmware_filename}: existing package has a missing/different recipe or failed qualification." >&2
+      echo "Existing files were preserved. Use a fresh OUTPUT_DIR or a different --firmware-version." >&2
+      return 1
+    elif [ "$?" -ne 1 ]; then
+      echo "Cannot inspect the existing package safely; refusing to build over OUTPUT_DIR." >&2
+      return 1
+    fi
+  fi
+
+  export PLATFORMIO_BUILD_FLAGS="${recipe_build_flags} -DFIRMWARE_BUILD_DATE='\"${firmware_build_date}\"' -DFIRMWARE_BUILD_EPOCH=${firmware_build_epoch}"
   print_build_flags "$pio_env_name" "$env_name"
   build_status=0
   if [ "$env_platform" = "ESP32_PLATFORM" ]; then
@@ -4977,6 +5217,16 @@ build_firmware_one_profile() {
   if [ "$build_status" -eq 0 ]; then
     run_pio_with_size_detection "${pio_run_args[@]}"
     build_status=$?
+  fi
+  if [ "$build_status" -eq 0 ]; then
+    completed_recipe=$(PLATFORMIO_BUILD_FLAGS="$recipe_build_flags" \
+      compute_build_recipe_digest "$env_name" "$env_platform" "$pio_env_name" \
+      "$embedded_version_string" "$original_platformio_build_flags" \
+      "$full_source_commit") || build_status=1
+    if [ "$build_status" -eq 0 ] && [ "$completed_recipe" != "$BUILD_RECIPE_SHA256" ]; then
+      echo "Source or build inputs changed during compilation; refusing to publish this package." >&2
+      build_status=1
+    fi
   fi
   if [ "$build_status" -eq 0 ]; then
     collect_build_artifacts "$env_name" "$env_platform" "$pio_env_name" "$firmware_filename"
@@ -5270,6 +5520,17 @@ get_combined_usb_ble_companion_replacement() {
   esac
 }
 
+get_unified_meshtower_repeater_replacement() {
+  case "${1,,}" in
+    heltec_tower_v2_repeater|heltec_tower_v2_repeater_lora_ota_no_external_sensors)
+      printf '%s\n' Heltec_tower_v2_sdcard_repeater_lora_ota_no_external_sensors
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 get_merged_rs232_repeater_replacement() {
   case "${1,,}" in
     heltec_t096_repeater_bridge_rs232)
@@ -5316,6 +5577,9 @@ get_merged_rs232_repeater_replacement() {
     heltec_wsl3_repeater_bridge_rs232)
       printf '%s\n' Heltec_WSL3_repeater
       ;;
+    mke_s3_repeater_bridge_rs232)
+      printf '%s\n' MKE_s3_repeater
+      ;;
     lilygo_tlora_v2_1_1_6_repeater_bridge_rs232)
       printf '%s\n' LilyGo_TLora_V2_1_1_6_repeater
       ;;
@@ -5329,10 +5593,32 @@ get_merged_rs232_repeater_replacement() {
 }
 
 is_firmware_role_replaced_by_canonical_artifact() {
-  get_full_companion_replacement "$1" >/dev/null 2>&1 \
+  get_unified_meshtower_repeater_replacement "$1" >/dev/null \
+    || get_full_companion_replacement "$1" >/dev/null 2>&1 \
     || get_terminal_chat_companion_replacement "$1" >/dev/null \
     || get_combined_usb_ble_companion_replacement "$1" >/dev/null \
-    || get_merged_rs232_repeater_replacement "$1" >/dev/null
+    || get_merged_rs232_repeater_replacement "$1" >/dev/null \
+    || get_merged_espnow_repeater_replacement "$1" >/dev/null
+}
+
+get_merged_espnow_repeater_replacement() {
+  local target=$1
+  local base=${target%_}
+  local candidate
+  [[ "${base,,}" == *_repeater_bridge_espnow ]] || return 1
+  base=${base%_bridge_espnow}
+  # Match resolved exact hardware, including older capitalized roles and
+  # trailing underscores. Do not fold different radios, displays or storage.
+  for candidate in "$base" "${base}_" "${!PIO_ENV_PLATFORM_BY_NAME[@]}"; do
+    [ "${candidate,,}" = "${base,,}" ] \
+      || [ "${candidate,,}" = "${base,,}_" ] || continue
+    supports_esp32_full_shared_espnow "$candidate" || continue
+    [ -n "${PIO_ENV_BOARD_BY_NAME[$target]:-}" ] \
+      && [ "${PIO_ENV_BOARD_BY_NAME[$target]}" = "${PIO_ENV_BOARD_BY_NAME[$candidate]:-}" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
 }
 
 is_runtime_setting_alias_target() {
@@ -5354,11 +5640,19 @@ is_redundant_bulk_build_target() {
   # Bench fixtures and migration utilities use their dedicated PlatformIO
   # recipes; they are not node firmware for the release/OTA packaging matrix.
   case "${1,,}" in
-    profile_switch_*|*partition_migrator*|*partition_expander*|*_partition_legacy_seed|\
+    profile_switch_*|profile_fixed_*|profile_four_tx_v4_rx|*partition_migrator*|*partition_expander*|*_partition_legacy_seed|\
     *_legacy_partition_test|*_sim)
       return 0
       ;;
   esac
+  # Expanded Full is the everyday ESP32 image. Keep compact OTA identities
+  # directly buildable for installation/recovery, but never publish them as a
+  # second ordinary firmware choice. Other platforms retain their capacity
+  # and deployed-target compatibility policies.
+  if [ "${PIO_ENV_PLATFORM_BY_NAME[$1]:-}" = "ESP32_PLATFORM" ] \
+      && is_lora_ota_no_external_sensors_target "$1"; then
+    return 0
+  fi
   # Keep every legacy name available to `build-firmware` and
   # `build-matching-firmwares`, but do not republish binaries that differ only
   # by a saved/default setting, or roles already supplied by Full Companion.
@@ -5416,15 +5710,30 @@ resolve_full_companion_firmwares() {
 }
 
 resolve_repeater_firmwares() {
-  get_pio_envs_for_variant_role repeater
+  local env_name
+  while IFS= read -r env_name; do
+    if ! is_redundant_bulk_build_target "$env_name"; then
+      printf '%s\n' "$env_name"
+    fi
+  done < <(get_pio_envs_for_variant_role repeater)
 }
 
 resolve_room_server_firmwares() {
-  get_pio_envs_for_variant_role room_server
+  local env_name
+  while IFS= read -r env_name; do
+    if ! is_redundant_bulk_build_target "$env_name"; then
+      printf '%s\n' "$env_name"
+    fi
+  done < <(get_pio_envs_for_variant_role room_server)
 }
 
 resolve_sensor_firmwares() {
-  get_pio_envs_for_variant_role sensor
+  local env_name
+  while IFS= read -r env_name; do
+    if ! is_redundant_bulk_build_target "$env_name"; then
+      printf '%s\n' "$env_name"
+    fi
+  done < <(get_pio_envs_for_variant_role sensor)
 }
 
 resolve_kiss_radio_firmwares() {
@@ -5435,7 +5744,8 @@ resolve_full_esp32_firmwares() {
   local env_name
 
   for env_name in "${SUPPORTED_PIO_ENVS[@]}"; do
-    if supports_esp32_full_build "$env_name"; then
+    if supports_esp32_full_build "$env_name" \
+        && ! is_redundant_bulk_build_target "$env_name"; then
       printf '%s\n' "$env_name"
     fi
   done
@@ -5620,7 +5930,7 @@ resolve_command_targets() {
 
   # Base and reduced aliases resolve to one exact-identity pair; external
   # storage and deployed compatibility identities deliberately stay separate.
-  normalize_nrf52_sensor_ota_pair_targets
+  normalize_nrf52_sensor_ota_pair_targets || return $?
 
   # Keep one queue so parallel workers stay saturated. The scheduler may pull
   # a later target forward when a generated alias shares an active PlatformIO
@@ -5771,20 +6081,65 @@ configure_effective_build_profile() {
 
 prepare_output_dir() {
   local output_dir="$OUTPUT_DIR"
+  local canonical_output_dir
+  local checkout_dir
 
-  if [ -z "$output_dir" ] || [ "$output_dir" == "/" ] || [ "$output_dir" == "." ]; then
-    echo "Refusing to clean unsafe output directory: $output_dir"
+  checkout_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
+  if ! canonical_output_dir=$(python3 - "$output_dir" "$checkout_dir" "$RESUME_BUILD_OUTPUT" <<'PY'
+from pathlib import Path
+import os
+import subprocess
+import sys
+
+try:
+    raw, checkout, resume = sys.argv[1:]
+    if not raw or '\n' in raw or '\r' in raw:
+        raise ValueError("empty or multiline output path")
+    requested = Path(raw)
+    output = requested.resolve()
+    checkout = Path(checkout).resolve()
+    protected = (Path.cwd().resolve(), checkout, Path.home().resolve())
+    if any(output == path or output in path.parents for path in protected):
+        raise ValueError("output is a protected directory or its ancestor")
+    if resume != "1" and requested.is_symlink():
+        raise ValueError("cleaning a symlink would replace it; use --resume or its explicit target")
+    if requested.exists() and not requested.is_dir():
+        raise ValueError("output already exists and is not a directory")
+    def git_path(*arguments):
+        value = subprocess.check_output(["git", "-C", str(checkout), *arguments],
+                                        stderr=subprocess.PIPE).rstrip(b'\n')
+        return (checkout / os.fsdecode(value)).resolve()
+    metadata = {checkout / ".git", git_path("rev-parse", "--absolute-git-dir"),
+                git_path("rev-parse", "--git-common-dir")}
+    if any(output == path or output in path.parents or path in output.parents
+           for path in metadata):
+        raise ValueError("output overlaps Git metadata")
+    tracked = subprocess.check_output(["git", "-C", str(checkout), "ls-files", "-z"],
+                                      stderr=subprocess.PIPE)
+    if any(output == path or output in path.parents
+           for name in tracked.split(b'\0') if name
+           for path in [(checkout / os.fsdecode(name)).resolve()]):
+        raise ValueError("output contains tracked checkout files")
+    print(output)
+except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+    print(f"Unsafe build output path: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+  ); then
+    echo "Refusing unsafe output directory: $output_dir" >&2
     exit 1
   fi
 
   if [ "$RESUME_BUILD_OUTPUT" == "1" ]; then
-    mkdir -p -- "$output_dir"
+    mkdir -p -- "$output_dir" || exit 1
     echo "Resuming build output in ${output_dir}; existing artifacts will be skipped."
     return 0
   fi
 
-  rm -rf -- "$output_dir"
-  mkdir -p -- "$output_dir"
+  # Resolve aliases before deletion, and never replace a user's output symlink.
+  # Parent symlinks may still point to a legitimate isolated output directory.
+  rm -rf -- "$canonical_output_dir" || exit 1
+  mkdir -p -- "$canonical_output_dir" || exit 1
 }
 
 run_resolved_build_targets() {
@@ -5881,15 +6236,26 @@ run_logged_build_targets() {
     for env in "${targets[@]}"; do
       log_path="${log_dir}/${env}-${profile}.log"
       log_tmp="${log_path}.tmp"
+      if [ "$RESUME_BUILD_OUTPUT" = "1" ]; then
+        log_tmp=$(mktemp "${log_path%.log}-resume-attempt.XXXXXX.log") || {
+          BATCH_BUILD_MODE=$previous_batch_build_mode
+          return 1
+        }
+      fi
       preserved_log=0
       echo "Building ${env} (${profile}); log: ${log_path}"
-      build_firmware "$env" > "$log_tmp" 2>&1
+      PIO_BUILD_JOBS_OVERRIDE=$pio_job_limit build_firmware "$env" > "$log_tmp" 2>&1
       build_status=$?
       if [ "$build_status" -eq 0 ] \
-          && grep -q "^Skipping ${env}; existing artifacts found" "$log_tmp" \
+          && grep -Eq "^Skipping ${env}; (existing artifacts found|matching recipe and qualified artifacts found)" "$log_tmp" \
           && [ -s "$log_path" ]; then
         rm -f -- "$log_tmp"
         preserved_log=1
+      elif [ "$build_status" -ne 0 ] \
+          && [ "$RESUME_BUILD_OUTPUT" = "1" ] && [ -s "$log_path" ]; then
+        # Keep the original compile log. This already-unique attempt file is
+        # the failure's real diagnostic log, including in summary/report paths.
+        log_path=$log_tmp
       else
         mv -f -- "$log_tmp" "$log_path"
       fi
@@ -5903,7 +6269,7 @@ run_logged_build_targets() {
       elif [ "$build_status" -ne 0 ]; then
         overall_status=1
         LOGGING_MATRIX_FAILURES+=("${env} (${profile}) -> ${log_path}")
-        echo "FAILED: ${env} (${profile}), status ${build_status}"
+        echo "FAILED: ${env} (${profile}), status ${build_status}; log: ${log_path}"
         echo "FAILED: ${env} (${profile}), status ${build_status}" >> "$log_path"
       else
         echo "SUCCEEDED: ${env} (${profile})"
@@ -5948,6 +6314,15 @@ run_logged_build_targets() {
       pio_env_key=$candidate_key
       log_path="${log_dir}/${env}-${profile}.log"
       log_tmp="${log_path}.tmp"
+      if [ "$RESUME_BUILD_OUTPUT" = "1" ]; then
+        log_tmp=$(mktemp "${log_path%.log}-resume-attempt.XXXXXX.log") || {
+          for interrupt_pid in "${running_pids[@]}"; do terminate_process_tree "$interrupt_pid"; done
+          for interrupt_pid in "${running_pids[@]}"; do wait "$interrupt_pid" 2>/dev/null || true; done
+          BATCH_BUILD_MODE=$previous_batch_build_mode
+          trap - INT TERM
+          return 1
+        }
+      fi
       echo "Building ${env} (${profile}); log: ${log_path}"
       (
         BATCH_BUILD_MODE=1
@@ -6005,10 +6380,13 @@ run_logged_build_targets() {
     log_tmp=${job_tmp_by_pid[$pid]}
     preserved_log=0
     if [ "$build_status" -eq 0 ] \
-        && grep -q "^Skipping ${env}; existing artifacts found" "$log_tmp" \
+        && grep -Eq "^Skipping ${env}; (existing artifacts found|matching recipe and qualified artifacts found)" "$log_tmp" \
         && [ -s "$log_path" ]; then
       rm -f -- "$log_tmp"
       preserved_log=1
+    elif [ "$build_status" -ne 0 ] \
+        && [ "$RESUME_BUILD_OUTPUT" = "1" ] && [ -s "$log_path" ]; then
+      log_path=$log_tmp
     else
       mv -f -- "$log_tmp" "$log_path"
     fi
@@ -6022,7 +6400,7 @@ run_logged_build_targets() {
     elif [ "$build_status" -ne 0 ]; then
       overall_status=1
       LOGGING_MATRIX_FAILURES+=("${env} (${profile}) -> ${log_path}")
-      echo "FAILED: ${env} (${profile}), status ${build_status}"
+      echo "FAILED: ${env} (${profile}), status ${build_status}; log: ${log_path}"
       echo "FAILED: ${env} (${profile}), status ${build_status}" >> "$log_path"
     else
       echo "SUCCEEDED: ${env} (${profile})"
@@ -6064,7 +6442,8 @@ get_esp32_full_profile_target() {
   echo "$target"
 }
 
-# The ordinary release offers one Full image per physical board and role.
+# The ordinary release combines Full images per physical board and role
+# where the runtime memory budget permits all transports.
 # Keep the exact environment names for direct --full-exact builds and for
 # legacy/partition migration packages; this selection applies only to bulk
 # Full passes. Include the board in the key so similarly named recipes cannot
@@ -6080,10 +6459,40 @@ get_ordinary_full_group_key() {
     *_repeater_observer_mqtt|*_room_server_observer_mqtt)
       role_base=${base%_observer_mqtt} ;;
     *_repeater_bridge_espnow)
-      role_base=${base%_bridge_espnow} ;;
+      # Merged repeaters and observer-backed Full images include ESP-NOW at
+      # runtime. Keep dedicated images for boards without that replacement.
+      local combined_target=""
+      local repeater_base=${base%_bridge_espnow}
+      combined_target=$(get_merged_espnow_repeater_replacement "$target") || combined_target=""
+      if [ -n "$combined_target" ] \
+          && is_supported_build_env "$combined_target" \
+          && supports_esp32_full_build "$combined_target" \
+          && [ -n "${PIO_ENV_BOARD_BY_NAME[$target]:-}" ] \
+          && [ "${PIO_ENV_BOARD_BY_NAME[$target]}" = "${PIO_ENV_BOARD_BY_NAME[$combined_target]:-}" ]; then
+        role_base=$repeater_base
+      else
+        combined_target=$(get_mqtt_enabled_target "$repeater_base") || combined_target=""
+        if [ -n "$combined_target" ] \
+            && supports_esp32_full_build "$combined_target" \
+            && [ -n "${PIO_ENV_BOARD_BY_NAME[$target]:-}" ] \
+            && [ "${PIO_ENV_BOARD_BY_NAME[$target]}" = "${PIO_ENV_BOARD_BY_NAME[$combined_target]:-}" ]; then
+          role_base=$repeater_base
+        elif is_mqtt_bridge_target "${repeater_base}_observer_mqtt_" \
+            && supports_esp32_full_build "${repeater_base}_observer_mqtt_" \
+            && [ -n "${PIO_ENV_BOARD_BY_NAME[$target]:-}" ] \
+            && [ "${PIO_ENV_BOARD_BY_NAME[$target]}" = "${PIO_ENV_BOARD_BY_NAME[${repeater_base}_observer_mqtt_]:-}" ]; then
+          role_base=$repeater_base
+        fi
+      fi ;;
     *_repeater|*_room_server) ;;
     *) role_base=$base ;;
   esac
+  # Real qualification found the triple-transport TLora image 6496 bytes
+  # short of its required internal heap. Preserve UART and MQTT as two Full
+  # identities, with ESP-NOW available in each.
+  if [ "${base,,}" = lilygo_tlora_v2_1_1_6_repeater_observer_mqtt ]; then
+    role_base=$base
+  fi
   printf '%s|%s\n' "${PIO_ENV_BOARD_BY_NAME[$target]:-$target}" "${role_base,,}"
 }
 
@@ -6093,11 +6502,15 @@ get_ordinary_full_priority() {
   case "${base,,}" in
     *_observer_mqtt) echo 20 ;;
     *_bridge_espnow) echo 10 ;;
+    tbeam_sx1262_repeater|tbeam_sx1276_repeater) echo 0 ;;
     *)
       # G2's deployed Full identity is the observer. Other audited plain
       # targets keep their own identity, with observer sources where needed.
       if is_ordinary_partition_migration_full_target "$target" \
-          || is_esp32_full_only_bulk_target "$target"; then
+          || is_esp32_full_only_bulk_target "$target" \
+          || { supports_esp32_full_shared_espnow "$target" \
+               && ! get_unified_full_infrastructure_target "$target" >/dev/null \
+               && ! is_mqtt_bridge_target "$target"; }; then
         echo 30
       else
         echo 0
@@ -6125,6 +6538,48 @@ select_ordinary_full_targets() {
   for key in "${keys[@]}"; do
     printf '%s\n' "${choice[$key]}"
   done
+}
+
+# The board menu is for ordinary installations, so use the same Full choices
+# as the release matrix instead of asking users to select a transport/default
+# alias or an older partition recipe. Exact names remain accepted by direct
+# build commands and migration tooling. Preserve other platforms' qualified
+# hardware/storage contracts and KISS, which is a separate host-modem role.
+get_interactive_build_targets() {
+  local target key priority pair_target
+  local -a full_targets=() other_keys=()
+  local -A other_choice=() other_priority=()
+  for target in "${SUPPORTED_PIO_ENVS[@]}"; do
+    is_supported_build_env "$target" || continue
+    is_redundant_bulk_build_target "$target" && continue
+    if [ "${PIO_ENV_PLATFORM_BY_NAME[$target]:-}" = ESP32_PLATFORM ] \
+        && supports_esp32_full_build "$target"; then
+      full_targets+=("$target")
+    else
+      key=$target
+      priority=0
+      # A normal nRF52 target and its generated reduced alias can both build
+      # the exact same Full/Reduced pair. Offer that operation once, preferring
+      # the ordinary board/role name. The existing resolver preserves distinct
+      # deployed IDs and external-storage contracts, so those remain choices.
+      if pair_target=$(get_nrf52_sensor_ota_pair_target "$target"); then
+        key=$pair_target
+        if ! is_lora_ota_only_target "$target"; then priority=1; fi
+      fi
+      if [ -z "${other_choice[$key]+x}" ]; then
+        other_keys+=("$key")
+        other_choice[$key]=$target
+        other_priority[$key]=$priority
+      elif [ "$priority" -gt "${other_priority[$key]}" ]; then
+        other_choice[$key]=$target
+        other_priority[$key]=$priority
+      fi
+    fi
+  done
+  for key in "${other_keys[@]}"; do
+    printf '%s\n' "${other_choice[$key]}"
+  done
+  select_ordinary_full_targets "${full_targets[@]}"
 }
 
 has_esp32_full_profile() {
@@ -6168,7 +6623,7 @@ run_full_esp32_profile() {
     if { [ "${PARTITION_MIGRATION_FULL_PROFILE_ACTIVE:-0}" = 1 ] \
         && is_ordinary_partition_migration_full_target "$full_profile_target"; } \
         || { [ "${FULL_ONLY_EXACT_PROFILE_ACTIVE:-0}" = 1 ] \
-        && is_esp32_full_only_bulk_target "$full_profile_target"; }; then
+        && is_esp32_full_release_build_target "$full_profile_target"; }; then
       continue
     fi
     # Use the same exact-board choice as single-target auto builds, including
@@ -6311,7 +6766,7 @@ run_partition_migration_full_esp32_profile() {
   fi
 
   echo "Partition-migration FULL pass: building ${#migration_targets[@]} canonical ESP32 target(s)."
-  echo "Each normal-target FULL artifact keeps its mOTA identity after its matching merged image is flashed once; legacy 1.25 MiB artifacts remain published during the transition."
+    echo "Each normal-target FULL artifact keeps its mOTA identity; install its reviewed expansion package or merged image before updating an older partition layout."
   MESHDEBUG_OVERRIDE=off
   PACKET_LOGGING_OVERRIDE=on
   MQTT_BRIDGE_OVERRIDE=off
@@ -6369,15 +6824,11 @@ run_full_esp32_build_targets() {
   else
     if [ "${SINGLE_TARGET_FULL_BUILD:-0}" != 1 ]; then
       for target in "${ordinary_full_targets[@]}"; do
-        if is_esp32_full_only_bulk_target "$target"; then
+        if is_esp32_full_release_build_target "$target"; then
           full_only_targets+=("$target")
         fi
       done
       run_full_only_esp32_profile "${full_only_targets[@]}"
-      pass_status=$?
-      if [ "$pass_status" -eq 130 ]; then return 130; fi
-      if [ "$pass_status" -ne 0 ]; then build_status=1; fi
-      run_partition_migration_full_esp32_profile "${ordinary_full_targets[@]}"
       pass_status=$?
       if [ "$pass_status" -eq 130 ]; then return 130; fi
       if [ "$pass_status" -ne 0 ]; then build_status=1; fi
@@ -6445,7 +6896,7 @@ run_logging_matrix_build_targets() {
   echo "Option 3 PlatformIO policy: one target build at a time, ${OPTION3_PIO_JOBS} compiler job(s) inside that process."
 
   for target in "${targets[@]}"; do
-    if is_esp32_full_only_bulk_target "$target"; then
+    if is_esp32_full_release_build_target "$target"; then
       # Full companion environments already select their complete profile in
       # build_firmware, so keep them in the ordinary pass to preserve their
       # established companion-specific recipe.
@@ -6471,7 +6922,7 @@ run_logging_matrix_build_targets() {
   done
 
   for target in "${ordinary_full_targets[@]}"; do
-    if is_esp32_full_only_bulk_target "$target" \
+    if is_esp32_full_release_build_target "$target" \
         && ! is_companion_radio_full_target "$target"; then
       full_only_targets+=("$target")
       full_only_exact_count=$((full_only_exact_count + 1))
@@ -6486,16 +6937,9 @@ run_logging_matrix_build_targets() {
     echo "Deferring ${full_only_standard_skip_count} ESP32 ESP-NOW target(s) to their FULL logging fallback; its persistent USB gate also provides normal output-off operation."
   fi
   if [ "$full_only_exact_count" -gt 0 ]; then
-    echo "Publishing ${full_only_exact_count} audited ESP32 target(s) as their exact-identity FULL release only; explicit --standard remains available for recovery."
+    echo "Publishing ${full_only_exact_count} ESP32 target(s) as their exact-identity FULL release only; explicit --standard remains available for recovery."
   fi
-  for target in "${ordinary_full_targets[@]}"; do
-    if is_ordinary_partition_migration_full_target "$target"; then
-      partition_migration_full_count=$((partition_migration_full_count + 1))
-    fi
-  done
-  if [ "$partition_migration_full_count" -gt 0 ]; then
-    echo "Publishing ${partition_migration_full_count} canonical ESP32 FULL migration target(s) alongside their legacy portable artifacts; flash each matching merged image once before mOTA can use FULL."
-  fi
+  echo "ESP32 ordinary releases contain only Full node images; expansion/recovery tools are packaged separately."
   ESP32_FULL_BUILD=0
   MESHDEBUG_OVERRIDE=""
   PACKET_LOGGING_OVERRIDE=""
@@ -6515,10 +6959,6 @@ run_logging_matrix_build_targets() {
   if [ "$pass_status" -eq 130 ]; then return 130; fi
   if [ "$pass_status" -ne 0 ]; then build_status=1; fi
 
-  run_partition_migration_full_esp32_profile "${ordinary_full_targets[@]}"
-  pass_status=$?
-  if [ "$pass_status" -eq 130 ]; then return 130; fi
-  if [ "$pass_status" -ne 0 ]; then build_status=1; fi
   PARTITION_MIGRATION_FULL_PROFILE_ACTIVE=1
 
   FULL_ONLY_EXACT_PROFILE_ACTIVE=1
@@ -7132,7 +7572,13 @@ main() {
       prompt_for_logging_matrix_output_policy "clean"
     fi
   else
-    RESUME_BUILD_OUTPUT=0
+    # Single-target builds still clean by default, but an explicit output
+    # policy must survive profile selection just as it does for a matrix.
+    if [ "$OUTPUT_POLICY_EXPLICIT" -eq 1 ]; then
+      normalize_resume_build_output
+    else
+      RESUME_BUILD_OUTPUT=0
+    fi
   fi
 
   if [ "$INTERACTIVE_BUILD_SELECTION" = "1" ] \

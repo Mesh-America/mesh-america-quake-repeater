@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/WiFi/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # WiFi and MQTT by Firmware Type
 
 MeshCore itself does not require WiFi or the internet. LoRa packet exchange,
@@ -159,8 +163,35 @@ reboot
 ```
 
 The SSID and password values are the rest of the command line. Spaces are
-allowed and quotes must not be added. SSIDs may contain at most 31 characters
-and passwords at most 63. Leave the password value empty for an open network.
+allowed and quotes must not be added. SSIDs may contain at most 31 characters.
+ESP32 infrastructure MQTT builds with WebConfig share one canonical WiFi
+configuration between this CLI and the browser portal. Passwords accept
+0-63 characters or exactly 64 hexadecimal characters for a raw WPA PSK.
+Leave the password value empty for an open network. Reboot after changing
+credentials to apply them; an already-running MQTT worker keeps its current
+connection settings until it stops and restarts.
+
+Older observer-only credentials remain usable until canonical WiFi settings
+are saved. The first CLI edit preserves the other legacy credential while
+saving the complete pair. Once canonical settings exist, empty, incomplete or
+unreadable canonical settings do not revive old observer credentials. Historical
+SSID-only canonical settings continue to represent an open network. Builds
+without this WebConfig integration retain their legacy 63-character password
+limit; this change does not add MQTT support to currently disabled Pico targets.
+
+On these ESP32 MQTT/WebConfig builds, an empty CLI SSID clears the configured
+network while retaining saved broker settings:
+
+```text
+set wifi.ssid
+reboot
+```
+
+Use this to return the node to unconfigured provisioning. The WebConfig setup
+form still requires a nonempty SSID. After saving a new network, verify
+`get wifi.status`, `get mqtt.config.valid` and `get mqtt.running`; credentials
+alone do not prove a broker connection. A local `get wifi.pwd` can inspect the
+password, while an authenticated remote command returns only set/unset.
 
 Useful checks are:
 
@@ -192,8 +223,9 @@ set mqtt.enabled off
 start webconfig ap
 ```
 
-After provisioning, use **Save & Reboot**, or stop the temporary portal and
-restart the bridge:
+After changing WiFi credentials, use **Save & Reboot** or `reboot`. For
+broker-only changes that keep the existing network, stop the temporary portal
+and restart the bridge:
 
 ```text
 stop webconfig
@@ -306,6 +338,15 @@ ESP-NOW, `wifi.powersave max` is unavailable because a station using maximum
 modem sleep can miss ESP-NOW broadcasts; use `min` for coexistence. The primary
 mesh transport holds the driver's RF wake reference continuously, so `min`
 does not suspend its ESP-NOW receiver.
+
+Espressif long-range WiFi (LR) trades speed for reach: its raw rates are
+250 or 500 kbit/s, with up to about 1 km in suitable line-of-sight conditions.
+LR traffic needs compatible Espressif hardware at both ends. An LR-enabled
+access point sends LR beacons that ordinary phones, routers and Raspberry Pis
+cannot receive. A mixed b/g/n+LR station can still join an ordinary router,
+using normal WiFi rates for that connection. MeshCore's setup and OTA access
+points therefore use ordinary b/g/n. See
+[Espressif's LR compatibility guide](https://docs.espressif.com/projects/esp-idf/en/v4.4.7/esp32s3/api-guides/wifi.html#long-range-lr).
 
 ESP-NOW compatibility also depends on the bytes and PHY used above the common
 Espressif transport. The historical `*_repeater_bridge_espnow` firmware wraps
@@ -422,6 +463,11 @@ over LoRa; it is not a raw `.bin` uploader. `start ota` continues to provide the
 direct browser uploader on HTTP port 80. A FULL role without WebConfig but with
 browser OTA support can use the `MeshCore-OTA` access point raised by
 `start ota`; its seeder address is `192.168.4.1:5001`.
+
+For browser uploads from an existing 1.17.1.8 ESP32 node, see the
+[1.17.1.9 WiFi upgrade guide](upgrading_1.17.1.8_to_1.17.1.9.md).
+It covers the node AP, old-page completion behavior, and choosing an
+application-only image or the exact partition-migration package.
 
 Only one external folder link can be active. A TCP client is rejected while
 `ota folder on` is using USB serial, and disconnecting `motatool` automatically
@@ -675,11 +721,12 @@ Common causes are:
 For a WiFi companion, find its station IP in the router, connect the client to
 TCP port 5000, and use the open `MeshCore-Setup-XXXX` AP at
 `http://192.168.4.1/` if it cannot join the saved network. Current firmware
-normalizes both ESP32 WiFi interfaces to standard b/g/n before advertising the
-setup AP. Full Companion targets whose primary mesh radio is ESP-NOW use
-b/g/n+LR instead and keep the setup AP, infrastructure station, and mesh on the
-persisted `espnow.channel` (channel 1 by default). Their configured 2.4 GHz
-router and every other primary ESP-NOW node must use that same channel.
+uses standard b/g/n for the setup AP, including ESP-NOW-capable targets.
+A running LR mesh conflicts with a conventional access point; current firmware
+refuses that AP startup and defers LR startup while an AP is active. A primary
+ESP-NOW target keeps its infrastructure station and mesh on the persisted
+`espnow.channel` (channel 1 by default). Its configured 2.4 GHz router and every
+other primary ESP-NOW node must use that same channel.
 MQTT-capable Companions also accept `get mqtt.enabled`, `get mqtt.running`,
 and `get mqtt.status` in their USB/TCP and browser terminals. Extended slot
 and NTP diagnostics remain infrastructure features.

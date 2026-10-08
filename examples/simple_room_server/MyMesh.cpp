@@ -1,4 +1,12 @@
 #include "MyMesh.h"
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/BootFileSystem.h>
+#if defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+    || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))
+#include <WiFi.h>
+#include <esp_wifi.h>
+#endif
+#endif
 #include <helpers/UsbLogging.h>
 #if defined(ENABLE_OTA)
 #include <helpers/ota/OtaContext.h>
@@ -7,6 +15,8 @@
 #include <helpers/radiolib/RxBoostedGainDefaults.h>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/ClientACLCLI.h>
+#include <helpers/ClientACLResponse.h>
+#include <helpers/sensors/LPPDataHelpers.h>
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/ClientPathPersistence.h>
 #include <helpers/LazyPersistence.h>
@@ -22,6 +32,7 @@
 #ifdef WITH_WEBCONFIG
 #include <WiFi.h>
 #endif
+#include <helpers/OtaChannel.h>
 
 static uint32_t nextRadioApplyRetryDelay(uint8_t& failure_count) {
   uint8_t shift = failure_count < 5 ? failure_count : 5;
@@ -143,7 +154,7 @@ void MyMesh::pushPostToClient(ClientInfo *client, PostInfo &post) {
   bool sent = false;
   if (reply) {
     reply->radio_reply = true;  // asynchronous response to the room subscription
-    if (client->out_path_len == OUT_PATH_UNKNOWN) {
+    if (!mesh::Packet::isValidPathLen(client->out_path_len)) {
       unsigned long delay_millis = 0;
       sent = sendFloodScoped(default_scope, reply, delay_millis,
                              _prefs.path_hash_mode + 1); // REVISIT
@@ -212,7 +223,11 @@ File MyMesh::openAppend(const char *fname) {
 }
 
 int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload,
-                          size_t payload_len) {
+                          size_t payload_len, size_t reply_capacity) {
+  if (sender == NULL || payload == NULL || payload_len == 0 || reply_capacity < 4) return 0;
+  if (reply_capacity > mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY) {
+    reply_capacity = mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY;
+  }
   // uint32_t now = getRTCClock()->getCurrentTimeUnique();
   // memcpy(reply_data, &now, 4);   // response packets always prefixed with timestamp
   memcpy(reply_data, &sender_timestamp, 4); // reflect sender_timestamp back in response packet (kind of like a 'tag')
@@ -242,6 +257,7 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     return 4 + sizeof(stats);
   }
   if (payload[0] == REQ_TYPE_GET_TELEMETRY_DATA) {
+    if (payload_len < 2) return 0;
     uint8_t perm_mask = ~(payload[1]); // NEW: first reserved byte (of 4), is now inverse mask to apply to permissions
 
     telemetry.reset();
@@ -258,16 +274,19 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
       telemetry.addTemperature(TELEM_CHANNEL_SELF, temperature); // Built-in MCU Temperature
     }
 
-    uint8_t tlen = telemetry.getSize();
-    memcpy(&reply_data[4], telemetry.getBuffer(), tlen);
+    const uint8_t* tbuf = telemetry.getBuffer();
+    const size_t tlen = LPPData::boundedPrefix(tbuf, telemetry.getSize(), reply_capacity - 4);
+    memcpy(&reply_data[4], tbuf, tlen);
     return 4 + tlen; // reply_len
   }
   if (payload[0] == REQ_TYPE_GET_ACCESS_LIST && sender->isAdmin()) {
+    if (payload_len < 3) return 0;
     uint8_t res1 = payload[1];   // reserved for future  (extra query params)
     uint8_t res2 = payload[2];
     if (res1 == 0 && res2 == 0) {
-      uint8_t ofs = 4;
-      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= sizeof(reply_data) - 4; i++) {
+      size_t ofs = 4;
+      // Preserve the legacy seven-byte entries within the encrypted route budget.
+      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= reply_capacity; i++) {
         auto c = acl.getClientByIdx(i);
         if (!c->isAdmin()) continue;  // skip non-Admin entries
         memcpy(&reply_data[ofs], c->id.pub_key, 6); ofs += 6;  // just 6-byte pub_key prefix
@@ -785,7 +804,7 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
     } else {
       mesh::Packet *reply = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, client->shared_secret, reply_data, 13);
       if (reply) {
-        if (client->out_path_len != OUT_PATH_UNKNOWN) { // we have an out_path, so send DIRECT
+        if (mesh::Packet::isValidPathLen(client->out_path_len)) { // we have an out_path, so send DIRECT
           sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
         } else {
           sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
@@ -982,7 +1001,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       mesh::Utils::sha256((uint8_t*)&ack_hash, 4, data, 5 + text_len,
                           client->id.pub_key, PUB_KEY_SIZE);
 
-      if (client->out_path_len == OUT_PATH_UNKNOWN) {
+      if (!mesh::Packet::isValidPathLen(client->out_path_len)) {
         mesh::Packet *ack = createAck(ack_hash);
         if (ack) sendFloodReply(ack, TXT_ACK_DELAY, packet->getPathHashSize());
         delay_millis = TXT_ACK_DELAY + REPLY_DELAY_MILLIS;
@@ -1017,7 +1036,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id, secret,
                                   temp, 5 + reply_text_len);
       if (reply) {
-        if (client->out_path_len == OUT_PATH_UNKNOWN) {
+        if (!mesh::Packet::isValidPathLen(client->out_path_len)) {
           sendFloodReply(reply, delay_millis + SERVER_RESPONSE_DELAY,
                          packet->getPathHashSize());
         } else {
@@ -1055,7 +1074,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
         // if client sends too quickly, evict()
 
         // RULE: only send keep_alive response DIRECT!
-        if (client->out_path_len != OUT_PATH_UNKNOWN) {
+        if (mesh::Packet::isValidPathLen(client->out_path_len)) {
           uint32_t ack_hash; // calc ACK to prove to sender that we got request
           mesh::Utils::sha256((uint8_t *)&ack_hash, 4, data, 9, client->id.pub_key, PUB_KEY_SIZE);
 
@@ -1066,7 +1085,9 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           }
         }
       } else {
-        int reply_len = handleRequest(client, sender_timestamp, &data[4], len - 4);
+        const size_t reply_capacity =
+            mesh::clientACLReplyCapacity(packet->isRouteFlood(), packet->path_len);
+        int reply_len = handleRequest(client, sender_timestamp, &data[4], len - 4, reply_capacity);
         if (reply_len > 0) { // valid command
           if (packet->isRouteFlood()) {
             // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
@@ -1076,7 +1097,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
           } else {
             mesh::Packet *reply = createDatagram(PAYLOAD_TYPE_RESPONSE, client->id, secret, reply_data, reply_len);
             if (reply) {
-              if (client->out_path_len != OUT_PATH_UNKNOWN) { // we have an out_path, so send DIRECT
+              if (mesh::Packet::isValidPathLen(client->out_path_len)) { // we have an out_path, so send DIRECT
                 sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
               } else {
                 sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
@@ -1417,6 +1438,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if ENV_INCLUDE_GPS == 1
   applyGpsPrefs();
 #endif
+#if defined(ESP32_PLATFORM)
+  // MQTT/WebConfig startup below may create tasks that access persisted state.
+  mesh::endEsp32BootFileInventory();
+#endif
 #ifdef WITH_MQTT_BRIDGE
   if (_prefs.bridge_enabled) {
     // Defer construction to avoid static init crashes on ESP32 classic
@@ -1428,6 +1453,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
     node_info.cr = &_prefs.cr;
     node_info.repeat_flag = &_prefs.disable_fwd;
     node_info.repeat_when_nonzero = false;
+#ifdef WITH_WEBCONFIG
+    node_info.canonical_wifi = true;
+#endif
     bridge = new MQTTBridge(node_info, _cli.getObserverPrefs(),
                             getRTCClock(), &self_id);
     if (bridge) {
@@ -1476,8 +1504,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   bool start_webui = WebConfigServer::loadEnabled(false);
 #ifdef WITH_MQTT_BRIDGE
   start_webui = start_webui || (_prefs.bridge_enabled
-      && _cli.getObserverPrefs()->wifi_ssid[0] == 0);
-  if (start_webui && _cli.getObserverPrefs()->wifi_ssid[0] == 0) {
+      && !WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs()));
+  if (start_webui && !WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs())) {
 #if defined(WITH_ESPNOW_BRIDGE)
     if (espnow_bridge.isRunning()) espnow_bridge.end();
 #endif
@@ -1486,7 +1514,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #endif
   if (start_webui) {
     char wc_reply[160];
-    startWebConfig(false, wc_reply);
+    startWebConfigImpl(false, wc_reply, true);
     mesh::usbConsolePort().printf("%s\r\n", wc_reply);
   }
 #endif
@@ -1645,7 +1673,7 @@ void MyMesh::dumpLogFile() {
     return;
   }
 #endif
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   if (hasPendingSerialOutput()) {
     mesh::usbConsolePort().printf("Err - USB output busy\r\n");
     return;
@@ -1669,9 +1697,33 @@ void MyMesh::dumpLogFile() {
 #endif
 }
 
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+void MyMesh::printAclSerial() {
+#if MESH_USB_CONSOLE_COOPERATIVE
+  if (hasPendingSerialOutput()) {
+    mesh::usbConsolePort().printf("Err - USB output busy\r\n");
+    return;
+  }
+  // Reuse the bounded file-output buffer. Command admission prevents overlapping
+  // USB jobs, and session reset cancels the retained row before a new host reads.
+  serial_acl_next = 0;
+  serial_acl_count = acl.getNumClients();
+  serial_acl_header = true;
+  serial_log_pending_size = 0;
+#else
+  mesh::usbConsolePort().printf("ACL:\r\n");
+  for (int i = 0; i < acl.getNumClients(); i++) {
+    auto c = acl.getClientByIdx(i);
+    if (c->permissions == 0) continue;
+    char public_key[PUB_KEY_SIZE * 2 + 1];
+    mesh::Utils::toHex(public_key, c->id.pub_key, PUB_KEY_SIZE);
+    mesh::usbConsolePort().printf("%02X %s\n", c->permissions, public_key);
+  }
+#endif
+}
+
+#if MESH_USB_CONSOLE_COOPERATIVE
 bool MyMesh::hasPendingSerialOutput() const {
-  return serial_log_active || serial_log_eof_pending;
+  return serial_log_active || serial_log_eof_pending || serial_acl_next >= 0;
 }
 
 void MyMesh::cancelPendingSerialOutput() {
@@ -1681,18 +1733,66 @@ void MyMesh::cancelPendingSerialOutput() {
   serial_log_skip_line = false;
   serial_log_remaining = 0;
   serial_log_pending_size = 0;
+  serial_acl_next = -1;
+  serial_acl_count = 0;
+  serial_acl_header = false;
 }
 
 void MyMesh::servicePendingSerialOutput() {
   Stream& console = mesh::usbConsolePort();
+  const auto write_pending = [&]() {
+    const int available = console.availableForWrite();
+    if (available <= 0 || serial_log_pending_size == 0) return;
+    // Retain a larger stored line across low-memory 256/512-byte HWCDC rings.
+    const size_t attempt = serial_log_pending_size < static_cast<size_t>(available)
+        ? serial_log_pending_size : static_cast<size_t>(available);
+    size_t written = console.write(
+        reinterpret_cast<const uint8_t*>(serial_log_pending), attempt);
+    if (written > attempt) written = attempt;
+    serial_log_pending_size -= written;
+    if (written > 0 && serial_log_pending_size > 0) {
+      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
+    }
+  };
+  if (serial_acl_next >= 0) {
+    if (serial_log_pending_size == 0) {
+      if (serial_acl_header) {
+        static const char header[] = "ACL:\r\n";
+        memcpy(serial_log_pending, header, sizeof(header) - 1);
+        serial_log_pending_size = sizeof(header) - 1;
+        serial_acl_header = false;
+      } else {
+        // At most one row per pass; deleted entries can be skipped without
+        // allocating a table-sized response or waiting for USB FIFO space.
+        while (serial_acl_next < serial_acl_count
+            && serial_acl_next < acl.getNumClients()) {
+          auto* client = acl.getClientByIdx(serial_acl_next++);
+          if (!client->permissions) continue;
+          char key[PUB_KEY_SIZE * 2 + 1];
+          mesh::Utils::toHex(key, client->id.pub_key, PUB_KEY_SIZE);
+          serial_log_pending_size = snprintf(serial_log_pending,
+              sizeof(serial_log_pending), "%02X %s\n", client->permissions, key);
+          break;
+        }
+        if (serial_log_pending_size == 0) {
+          serial_acl_next = -1;
+          return;
+        }
+      }
+    }
+    write_pending();
+    return;
+  }
   if (!serial_log_active) {
     // CommonCLI's synchronous EOF is suppressed until the queued dump ends.
     static const char eof[] = "  ->    EOF\r\n";
-    if (serial_log_eof_pending
-        && console.availableForWrite() >= static_cast<int>(sizeof(eof) - 1)
-        && console.write(reinterpret_cast<const uint8_t*>(eof), sizeof(eof) - 1)
-            == sizeof(eof) - 1) {
-      serial_log_eof_pending = false;
+    if (serial_log_eof_pending) {
+      if (serial_log_pending_size == 0) {
+        memcpy(serial_log_pending, eof, sizeof(eof) - 1);
+        serial_log_pending_size = sizeof(eof) - 1;
+      }
+      write_pending();
+      if (serial_log_pending_size == 0) serial_log_eof_pending = false;
     }
     return;
   }
@@ -1744,16 +1844,7 @@ void MyMesh::servicePendingSerialOutput() {
       serial_log_pending[serial_log_pending_size++] = '\n';
     }
   }
-  if (serial_log_pending_size > 0
-      && console.availableForWrite() >= static_cast<int>(serial_log_pending_size)) {
-    size_t written = console.write(
-        reinterpret_cast<const uint8_t*>(serial_log_pending), serial_log_pending_size);
-    if (written > serial_log_pending_size) written = serial_log_pending_size;
-    serial_log_pending_size -= written;
-    if (written > 0 && serial_log_pending_size > 0) {
-      memmove(serial_log_pending, serial_log_pending + written, serial_log_pending_size);
-    }
-  }
+  write_pending();
   if (serial_log_remaining == 0 && serial_log_pending_size == 0) {
     serial_log_dump.close();
     serial_log_active = false;
@@ -1865,7 +1956,30 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   }
 }
 
+void MyMesh::suspendUnconfiguredSetupBridges() {
+#if defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
+#ifdef WITH_MQTT_BRIDGE
+  if (WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs())) return;
+#else
+  char ssid[33] = {};
+  WebConfigServer::loadStandaloneWiFi(ssid, sizeof(ssid), nullptr, 0);
+  if (ssid[0]) return;
+#endif
+  _unconfigured_setup_espnow_suspended = true;
+#ifdef WITH_ESPNOW_BRIDGE
+  if (espnow_bridge.isRunning()) espnow_bridge.end();
+#endif
+#ifdef WITH_MQTT_BRIDGE
+  if (bridge && bridge->isRunning()) bridge->end();
+#endif
+#endif
+}
+
 bool MyMesh::startWebConfig(bool force_ap, char* reply) {
+  return startWebConfigImpl(force_ap, reply, false);
+}
+
+bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup) {
   if (_cli.getBoard()->isOTAUpdateRunning()) {
     strcpy(reply, "Err: OTA server is running - 'stop ota' first");
     return true;
@@ -1875,32 +1989,69 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
                                            : "Err: webconfig already running");
     return true;
   }
+  if (mesh::wireless::control().blocked(mesh::wireless::WiFi)) {
+    strcpy(reply, "Error: WiFi disabled; use set wifi on or set 2.4ghz on");
+    return true;
+  }
+#ifdef WITH_MQTT_BRIDGE
+  if ((isMqttBridgeRunning() || isMqttBridgeStopping()) && (force_ap
+#if defined(MESHCORE_EXPANDED_PARTITION_PROFILE)
+      || !WebConfigServer::hasConfiguredWiFi(_cli.getObserverPrefs())
+#endif
+     )) {
+    strcpy(reply, isMqttBridgeStopping() ? "Err: MQTT bridge is stopping - retry shortly"
+        : "Err: MQTT bridge is running - 'set bridge off' first");
+    return true;
+  }
+#endif
   if (!_webconfig) {
     void* mqtt_prefs = nullptr;
     bool owns_wifi = true;
 #ifdef WITH_MQTT_BRIDGE
     mqtt_prefs = _cli.getObserverPrefs();
-    owns_wifi = false;
+    owns_wifi = !bridge || (!bridge->isRunning() && !bridge->isStopping());
 #endif
     _webconfig = new WebConfigServer(this, mqtt_prefs, owns_wifi,
                                      self_id.pub_key, getFirmwareVer(), getBuildDate(), getRole(),
-                                     _cli.getBoard()->getManufacturerName());
+                                     _cli.getBoard()->getManufacturerName(), true);
     if (!_webconfig) {
       strcpy(reply, "Err: not enough memory for webconfig");
       return true;
     }
   }
 
-  if (force_ap) {
+  const bool setup_was_suspended = _unconfigured_setup_espnow_suspended;
+#ifdef WITH_ESPNOW_BRIDGE
+  const bool espnow_was_running = isEspNowBridgeRunning();
+#endif
+  // Only automatic first-boot setup parks the saved default bridges. A manual
+  // WiFi start (including master-radio restoration) must retain explicit ESP-NOW.
+  if (automatic_setup) suspendUnconfiguredSetupBridges();
+
 #ifdef WITH_MQTT_BRIDGE
-    if (bridge && bridge->isRunning()) {
-      strcpy(reply, "Err: MQTT bridge is running - 'set bridge off' first");
-      return true;
+  _webconfig->updateWiFiOwnership(!bridge
+      || (!bridge->isRunning() && !bridge->isStopping()));
+#endif
+
+  bool started;
+  if (force_ap) {
+    started = _webconfig->startSetupMode(reply);
+  } else {
+    started = _webconfig->startAutoMode(reply);
+  }
+  if (!started) {
+    _unconfigured_setup_espnow_suspended = setup_was_suspended;
+    bool restored = true;
+#ifdef WITH_ESPNOW_BRIDGE
+    if (espnow_was_running && !isEspNowBridgeRunning()) {
+      restored = setEspNowBridgeState(true) && restored;
     }
 #endif
-    _webconfig->startSetupMode(reply);
-  } else {
-    _webconfig->startAutoMode(reply);
+    _unconfigured_setup_espnow_suspended = setup_was_suspended;
+    if (!restored) {
+      const size_t used = strlen(reply);
+      snprintf(reply + used, 160 - used, "; bridge resume failed");
+    }
   }
   return true;
 }
@@ -1946,15 +2097,15 @@ bool MyMesh::getWebUIStatus(char* reply) const {
 }
 
 bool MyMesh::getWiFiSSID(char* reply) const {
-  return WebConfigServer::formatWiFiSSID(reply, 160);
+  return WebConfigServer::formatWiFiSSID(reply, 160, canonicalWiFiLegacyPrefs());
 }
 
 bool MyMesh::getWiFiStatus(char* reply) const {
-  return WebConfigServer::formatWiFiStatus(reply, 160);
+  return WebConfigServer::formatWiFiStatus(reply, 160, nullptr, canonicalWiFiLegacyPrefs());
 }
 
 bool MyMesh::getWiFiPowerSave(char* reply) const {
-  return WebConfigServer::formatWiFiPowerSave(reply, 160);
+  return WebConfigServer::formatWiFiPowerSave(reply, 160, canonicalWiFiLegacyPrefs());
 }
 
 bool MyMesh::getWiFiCLI(char* reply) const {
@@ -1962,7 +2113,7 @@ bool MyMesh::getWiFiCLI(char* reply) const {
 }
 
 bool MyMesh::setWiFiSSID(const char* value, char* reply) {
-  if (WebConfigServer::setStandaloneWiFiSSID(value, reply, 160)) {
+  if (WebConfigServer::setStandaloneWiFiSSID(value, reply, 160, canonicalWiFiLegacyPrefs())) {
     const bool was_running = _webconfig && _webconfig->isRunning();
     if (was_running) _webconfig->requestStop();
     if (_webconfig) _webconfig->reloadStandaloneWiFi();
@@ -1974,7 +2125,7 @@ bool MyMesh::setWiFiSSID(const char* value, char* reply) {
 }
 
 bool MyMesh::setWiFiPassword(const char* value, char* reply) {
-  if (WebConfigServer::setStandaloneWiFiPassword(value, reply, 160)) {
+  if (WebConfigServer::setStandaloneWiFiPassword(value, reply, 160, canonicalWiFiLegacyPrefs())) {
     const bool was_running = _webconfig && _webconfig->isRunning();
     if (was_running) _webconfig->requestStop();
     if (_webconfig) _webconfig->reloadStandaloneWiFi();
@@ -1986,7 +2137,7 @@ bool MyMesh::setWiFiPassword(const char* value, char* reply) {
 }
 
 bool MyMesh::setWiFiPowerSave(const char* value, char* reply) {
-  if (WebConfigServer::setStandaloneWiFiPowerSave(value, reply, 160)
+  if (WebConfigServer::setStandaloneWiFiPowerSave(value, reply, 160, canonicalWiFiLegacyPrefs())
       && _webconfig) {
     _webconfig->reloadStandaloneWiFi();
   }
@@ -2214,7 +2365,7 @@ void MyMesh::onUserGpioTimerCompleted(uint8_t pin, uint8_t state,
                                         5 + (size_t)text_len);
   if (!packet) return;
   packet->radio_reply = true;  // delayed GPIO command completion
-  if (client->out_path_len == OUT_PATH_UNKNOWN) {
+  if (!mesh::Packet::isValidPathLen(client->out_path_len)) {
     sendFlood(packet, SERVER_RESPONSE_DELAY, path_hash_size);
   } else {
     sendDirect(packet, client->out_path, client->out_path_len,
@@ -2440,17 +2591,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       return;
     }
 #endif
-    mesh::usbConsolePort().printf("ACL:\r\n");
-    for (int i = 0; i < acl.getNumClients(); i++) {
-      auto c = acl.getClientByIdx(i);
-      if (c->permissions == 0) continue;  // skip deleted (or guest) entries
-
-      // Admit each line together so concurrent USB diagnostics cannot split
-      // a public key or insert text between its permission prefix and value.
-      char public_key[PUB_KEY_SIZE * 2 + 1];
-      mesh::Utils::toHex(public_key, c->id.pub_key, PUB_KEY_SIZE);
-      mesh::usbConsolePort().printf("%02X %s\n", c->permissions, public_key);
-    }
+    printAclSerial();
     reply[0] = 0;
 #if defined(WITH_MQTT_NEIGHBORS)
   } else if (memcmp(command, "discover.neighbors", 18) == 0) {
@@ -2513,7 +2654,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
     if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
 #endif
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
     if (sender_timestamp == 0 && serial_log_eof_pending
         && strcmp(reply, "   EOF") == 0) reply[0] = 0;
 #endif
@@ -2534,7 +2675,7 @@ void MyMesh::loop() {
   // Check radio FIRST to ensure we don't miss incoming packets
   // MQTT processing can take time, so we prioritize radio reception
   mesh::Mesh::loop();
-#if MESH_ESP32_USB_CONSOLE_COOPERATIVE
+#if MESH_USB_CONSOLE_COOPERATIVE
   servicePendingSerialOutput();
 #endif
   _cli.loop();
@@ -2543,7 +2684,8 @@ void MyMesh::loop() {
   sampleTelemetryHistory();
 #endif
 #ifdef WITH_MQTT_BRIDGE
-  // bridge.loop() is now handled by FreeRTOS task on Core 0 - no need to call it here
+  // TLS runs on Core 0; the radio loop reaps only an acknowledged CLI stop.
+  if (bridge && bridge->isRunning()) bridge->loop();
 #endif
 #ifdef WITH_ESPNOW_BRIDGE
   if (espnow_bridge.isRunning()) espnow_bridge.loop();
@@ -2680,6 +2822,10 @@ void MyMesh::loop() {
 
 #ifdef WITH_WEBCONFIG
   if (_webconfig) {
+#ifdef WITH_MQTT_BRIDGE
+    _webconfig->updateWiFiOwnership(!bridge
+        || (!bridge->isRunning() && !bridge->isStopping()));
+#endif
     _webconfig->tick(millis());
     if (!_webconfig->isRunning() && !_webconfig->isStopping()) {
       delete _webconfig;
@@ -2697,6 +2843,9 @@ void MyMesh::loop() {
     // had deliberately stopped.
     mesh::usbConsolePort().printf("OTA: starting update\r\n");
     const bool bridge_was_running = bridge && bridge->isRunning();
+#ifdef WITH_ESPNOW_BRIDGE
+    const bool espnow_was_running = espnow_bridge.isRunning();
+#endif
     drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
 
     // A previously timed-out stop leaves the lifecycle dirty even though the
@@ -2704,11 +2853,15 @@ void MyMesh::loop() {
     // later request must not bypass the teardown barrier merely because there
     // is no active task left to stop this time.
     bool may_flash = !bridge || bridge->canFlashAfterStop();
-    if (bridge_was_running) {
+    if (bridge_was_running
+#ifdef WITH_ESPNOW_BRIDGE
+        || espnow_was_running
+#endif
+       ) {
       setBridgeState(false);
       // OTA must not write after a forced/timed-out MQTT shutdown: its TLS/heap
       // ownership is uncertain until a subsequent clean start/stop cycle.
-      may_flash = bridge && bridge->canFlashAfterStop();
+      may_flash = !bridge || bridge->canFlashAfterStop();
       if (!may_flash) {
         mesh::usbConsolePort().printf("OTA: aborted, MQTT stop did not complete cleanly\r\n");
       } else {
@@ -2720,7 +2873,7 @@ void MyMesh::loop() {
     }
 
     char ota_reply[160];
-    if (may_flash && !_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+    if (may_flash && !_cli.getBoard()->otaFromManifest(ota_resolve_base(_ota_update_channel), getFirmwareVer(), false, ota_reply)) {
       mesh::usbConsolePort().printf("OTA: aborted - %s\r\n", ota_reply);
       may_flash = false;
     }
@@ -2728,9 +2881,12 @@ void MyMesh::loop() {
     // Successful otaFromManifest() reboots and never returns.  Restore only a
     // bridge that was running before this attempt; leave an intentionally
     // stopped bridge stopped after any OTA refusal or download failure.
-    if (!may_flash && bridge_was_running) {
+    if (!may_flash) {
       mesh::usbConsolePort().printf("OTA: resuming bridge\r\n");
-      setBridgeState(true);
+      if (bridge_was_running) setMqttBridgeState(true);
+#ifdef WITH_ESPNOW_BRIDGE
+      if (espnow_was_running) setEspNowBridgeState(true);
+#endif
     }
   }
 #endif
@@ -2753,6 +2909,10 @@ void MyMesh::loop() {
           (unsigned long)retry_delay);
     }
   }
+
+#if defined(ESP32_PLATFORM)
+  serviceIdleWiFi();
+#endif
 
   // TODO: periodically check for OLD/inactive entries in known_clients[], and evict
 
@@ -2898,14 +3058,62 @@ uint32_t MyMesh::getPowerSaveSleepSeconds(uint32_t max_secs) const {
 }
 
 // To check if there is pending work
+#if defined(ESP32_PLATFORM)
+void MyMesh::serviceIdleWiFi() {
+#if (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+    || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
+    && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
+    && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
+  if (_cli.getBoard()->isOTAUpdateRunning()) return;
+#ifdef WITH_WEBCONFIG
+  if (isWebConfigActive()) return;
+#endif
+#ifdef WITH_MQTT_BRIDGE
+  if (_ota_update_at) return;
+  if (bridge && (bridge->isRunning() || bridge->isStopping())) return;
+#endif
+#ifdef WITH_ESPNOW_BRIDGE
+  if (isEspNowBridgeRunning()) return;
+#endif
+  if (WiFi.getMode() == WIFI_OFF && WiFi.channel() > 0
+      && !WiFi.mode(WIFI_STA)) return;
+  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+  if (WiFi.getMode() == WIFI_OFF && esp_wifi_get_mode(&sdk_mode) != ESP_OK) return;
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(false, false);
+  if (!WiFi.mode(WIFI_OFF)) return;
+  if (esp_wifi_get_mode(&sdk_mode) == ESP_OK) {
+    esp_wifi_stop();
+    esp_wifi_deinit();
+  }
+#endif
+}
+#endif
+
 bool MyMesh::hasPendingWork() const {
   if (isDualRadioActive()) return true;
   if (hasPendingOtaApply()) return true;
+#ifdef WITH_WEBCONFIG
+  if (isWebConfigActive()) return true;
+#endif
+#if defined(ESP32_PLATFORM) \
+    && (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+        || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
+    && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
+    && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
+  // Never sleep over an unowned driver whose cleanup failed or whose Arduino
+  // facade no longer reflects the live SDK state.
+  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&sdk_mode) != ESP_ERR_WIFI_NOT_INIT) return true;
+#endif
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
   if (_local_cli_output.busy()) return true;
 #endif
 #if defined(WITH_BRIDGE)
   if (bridge && bridge->isRunning()) return true; // bridge needs WiFi radio, can't sleep
+#ifdef WITH_MQTT_BRIDGE
+  if (bridge && bridge->isStopping()) return true;
+#endif
 #if defined(WITH_ESPNOW_BRIDGE)
   if (espnow_bridge.isRunning()) return true;
 #endif

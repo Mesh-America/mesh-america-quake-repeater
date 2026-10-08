@@ -1,9 +1,12 @@
 #include <Arduino.h>
 #include <stdlib.h>
 #include <initializer_list>
+#include <new>
 #include "DataStore.h"
+#include "PrefsStorageLayout.h"
 #include <helpers/FileRead.h>
 #include <helpers/AdvertDataHelpers.h>
+#include <helpers/LazyPersistence.h>
 #if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
 #include <helpers/ContactFileTransaction.h>
 #endif
@@ -50,6 +53,12 @@ DataStore::DataStore(FILESYSTEM& fs, mesh::RTCClock& clock) : _fs(&fs), _fsExtra
     identity_store(fs, "/identity")
 #endif
 {
+}
+
+DataStore::~DataStore() {
+#if defined(ESP32_PLATFORM)
+  cancelContactWrite();
+#endif
 }
 
 #if defined(EXTRAFS) || defined(QSPIFLASH)
@@ -136,6 +145,15 @@ static bool contactPathPresence(FILESYSTEM* fs, const char* path,
 #endif
 
 void DataStore::begin() {
+#if defined(ESP32_PLATFORM)
+  _advert_write.clear();
+  // Reinitialization must not retain a streaming transaction or an inode
+  // opened through an earlier filesystem route. Dirty mutations stay pending.
+  cancelContactWrite();
+#if MESH_CONTACT_CACHE
+  _contact_path_reader.close();
+#endif
+#endif
 #if defined(RP2040_PLATFORM)
   identity_store.begin();
 #endif
@@ -547,6 +565,12 @@ void DataStore::useVolatilePrimaryFS(FILESYSTEM& fs) {
 #endif
 
 void DataStore::disableSecondaryFS(bool authority_unknown) {
+#if defined(ESP32_PLATFORM)
+  cancelContactWrite();
+#if MESH_CONTACT_CACHE
+  _contact_path_reader.close();
+#endif
+#endif
   _fsExtra = nullptr;
 #if defined(NRF52_PLATFORM)
   if (authority_unknown) {
@@ -706,8 +730,13 @@ bool DataStore::removeFile(FILESYSTEM* fs, const char* filename) {
 }
 
 bool DataStore::formatFileSystem() {
-#if MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#if defined(ESP32_PLATFORM)
+  // A failed format keeps the latest accepted RAM packets available to retry.
+  _advert_write.pause();
+  cancelContactWrite();
+#if MESH_CONTACT_CACHE
   _contact_path_reader.close();
+#endif
 #endif
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   #if defined(NRF52_PLATFORM)
@@ -771,11 +800,13 @@ bool DataStore::formatFileSystem() {
   bool fs_success = ((fs::SPIFFSFS *)_fs)->format();
   esp_err_t nvs_err = nvs_flash_erase(); // no need to reinit, will be done by reboot
   if (fs_success && nvs_err == ESP_OK) {
+    _advert_write.clear();
     _identity_creation_blocked = false;
     _prefs_load_incomplete = false;
     _channel_load_incomplete = false;
     _prefs_recovery_source = nullptr;
     _channel_recovery_source = nullptr;
+    _contact_write_requested = false;
 #if MESH_CONTACT_CACHE
     _cache_load_incomplete = false;
 #else
@@ -998,7 +1029,18 @@ bool DataStore::loadPrefsInt(const char *filename,
                              double& node_lon) {
   File file = openRead(_fs, filename);
   if (file) {
-    CompanionNodePrefs loaded_prefs = _prefs;
+    CompanionNodePrefs loaded_prefs;
+    if (!loaded_prefs.copyPersistedValuesFrom(_prefs)) {
+      file.close();
+      return false;
+    }
+    // Files written before this tail existed always started Bluetooth at boot.
+    // Do not inherit a runtime off value when loading one of those images.
+    loaded_prefs.bluetooth_enabled = 1;
+    loaded_prefs.gps_sync_interval_hours = 0;
+    // Older images have no independent debug preference. Never inherit a
+    // runtime-on value when loading one of those images.
+    loaded_prefs.usb_debug_enabled = 0;
     double loaded_lat = node_lat;
     double loaded_lon = node_lon;
     // The original image ended after ble_pin at byte 84. Later releases only
@@ -1006,7 +1048,7 @@ bool DataStore::loadPrefsInt(const char *filename,
     // actually emitted by those releases, but reject a truncated field/group
     // or an unknown tail before any value reaches the live preferences.
     static const uint32_t MIN_PREFS_SIZE = 84;
-    static const uint32_t KNOWN_PREFS_SIZES[] = {
+    static const uint16_t KNOWN_PREFS_SIZES[] = {
         84, 85, 90, 91, 92, 93, 140, 141, 142, 143, 144, 155,
         156, 157, 158, 159,
         159 + sizeof(loaded_prefs.bluetooth_name),
@@ -1047,6 +1089,27 @@ bool DataStore::loadPrefsInt(const char *filename,
 #if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
         328,
 #endif
+#ifdef TBEAM_1W
+        239,  // Bluetooth enable preference, appended after one-key DM policy
+#elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        329,
+#else
+        232,
+#endif
+#ifdef TBEAM_1W
+        241,  // GPS time-sync cadence in hours, appended after Bluetooth enable
+#elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        331,
+#else
+        234,
+#endif
+#ifdef TBEAM_1W
+        242,  // Independent USB debug preference, after the published GPS tail
+#elif defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
+        332,
+#else
+        235,
+#endif
     };
     const uint32_t prefs_size = file.size();
     bool known_size = false;
@@ -1062,6 +1125,19 @@ bool DataStore::loadPrefsInt(const char *filename,
       return false;
     }
     bool success = true;
+#if defined(STM32_PLATFORM) && defined(__GNUC__)
+    using namespace mesh::companion_prefs;
+    uint8_t pad[4];
+    for (size_t i = 0; i < FIELD_COUNT; ++i) {
+      const PrefField& field = PREF_FIELDS[i];
+      if (i >= MANDATORY_FIELDS && file.available() == 0) continue;
+      // Only this normally constructed, mutable snapshot is a destination.
+      void* destination = const_cast<void*>(prefValue(field, loaded_prefs,
+          loaded_lat, loaded_lon, pad));
+      if (success && file.read(static_cast<uint8_t*>(destination), field.length)
+          != field.length) success = false;
+    }
+#else
     auto readField = [&file, &success](void* dest, size_t size) -> bool {
       if (!success
           || file.read(static_cast<uint8_t*>(dest), size) != size) {
@@ -1188,13 +1264,22 @@ bool DataStore::loadPrefsInt(const char *filename,
                       sizeof(loaded_prefs.flood_retry_advert_enabled));
     readOptionalField(&loaded_prefs.one_key_dm_enabled,
                       sizeof(loaded_prefs.one_key_dm_enabled));
+    readOptionalField(&loaded_prefs.bluetooth_enabled,
+                      sizeof(loaded_prefs.bluetooth_enabled));
+    readOptionalField(&loaded_prefs.gps_sync_interval_hours,
+                      sizeof(loaded_prefs.gps_sync_interval_hours));
+    readOptionalField(&loaded_prefs.usb_debug_enabled,
+                      sizeof(loaded_prefs.usb_debug_enabled));
+#endif
 
     // Any bytes left over form only part of a historically appended field.
     // Preserve the file and defaults rather than treating that tail as EOF.
     success = success && file.available() == 0;
+    success = success && loaded_prefs.bluetooth_enabled <= 1;
     file.close();
     if (!success) return false;
-    _prefs = loaded_prefs;
+    loaded_prefs.usb_debug_enabled = loaded_prefs.usb_debug_enabled == 1 ? 1 : 0;
+    if (!_prefs.copyPersistedValuesFrom(loaded_prefs)) return false;
     node_lat = loaded_lat;
     node_lon = loaded_lon;
     return true;
@@ -1220,135 +1305,171 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
   File file = openWrite(_fs, "/new_prefs");
 #endif
   if (file) {
+#if defined(STM32_PLATFORM) && defined(__GNUC__)
+    using namespace mesh::companion_prefs;
+    uint8_t image[235];
+    const uint8_t pad[4] = {};
+    size_t used = 0;
+    for (const PrefField& field : PREF_FIELDS) {
+      if (field.length > sizeof(image) - used) {
+        // Latch failure and stop before any out-of-bounds pointer arithmetic.
+        used = sizeof(image) + 1;
+        break;
+      }
+      memcpy(image + used, prefValue(field, _prefs, node_lat, node_lon, pad),
+          field.length);
+      used += field.length;
+    }
+    bool success = used == sizeof(image)
+        && file.write(image, sizeof(image)) == sizeof(image);
+#else
+#if defined(STM32_PLATFORM)
+    // Keep the explicit wire field list, but make one bounded atomic write.
+    // Other platforms retain direct writes and their existing stack footprint.
+    uint8_t image[235];
+    size_t image_length = 0;
+    const auto writeField = [&](const void* data, size_t size) -> bool {
+      if (image_length > sizeof(image)
+          || size > sizeof(image) - image_length) {
+        // Latch failure without reading data or advancing past the buffer.
+        // The return value only preserves the common emitter interface;
+        // the exact-length check below is the authoritative write gate.
+        image_length = sizeof(image) + 1;
+        return true;
+      }
+      memcpy(image + image_length, data, size);
+      image_length += size;
+      return true;
+    };
+#else
+    const auto writeField = [&file](const void* data, size_t size) -> bool {
+      return file.write(static_cast<const uint8_t*>(data), size) == size;
+    };
+#endif
     uint8_t pad[8];
     memset(pad, 0, sizeof(pad));
 
-    bool success = file.write((uint8_t *)&_prefs.airtime_factor, sizeof(float)) == sizeof(float); // 0
-    success = success && file.write((uint8_t *)_prefs.node_name, sizeof(_prefs.node_name)) == sizeof(_prefs.node_name); // 4
-    success = success && file.write(pad, 4) == 4;                                            // 36
-    success = success && file.write((uint8_t *)&node_lat, sizeof(node_lat)) == sizeof(node_lat); // 40
-    success = success && file.write((uint8_t *)&node_lon, sizeof(node_lon)) == sizeof(node_lon); // 48
-    success = success && file.write((uint8_t *)&_prefs.freq, sizeof(_prefs.freq)) == sizeof(_prefs.freq); // 56
-    success = success && file.write((uint8_t *)&_prefs.sf, sizeof(_prefs.sf)) == sizeof(_prefs.sf); // 60
-    success = success && file.write((uint8_t *)&_prefs.cr, sizeof(_prefs.cr)) == sizeof(_prefs.cr); // 61
-    success = success && file.write((uint8_t *)&_prefs.client_repeat, sizeof(_prefs.client_repeat)) == sizeof(_prefs.client_repeat); // 62
-    success = success && file.write((uint8_t *)&_prefs.manual_add_contacts, sizeof(_prefs.manual_add_contacts)) == sizeof(_prefs.manual_add_contacts); // 63
-    success = success && file.write((uint8_t *)&_prefs.bw, sizeof(_prefs.bw)) == sizeof(_prefs.bw); // 64
-    success = success && file.write((uint8_t *)&_prefs.tx_power_dbm, sizeof(_prefs.tx_power_dbm)) == sizeof(_prefs.tx_power_dbm); // 68
-    success = success && file.write((uint8_t *)&_prefs.telemetry_mode_base, sizeof(_prefs.telemetry_mode_base)) == sizeof(_prefs.telemetry_mode_base); // 69
-    success = success && file.write((uint8_t *)&_prefs.telemetry_mode_loc, sizeof(_prefs.telemetry_mode_loc)) == sizeof(_prefs.telemetry_mode_loc); // 70
-    success = success && file.write((uint8_t *)&_prefs.telemetry_mode_env, sizeof(_prefs.telemetry_mode_env)) == sizeof(_prefs.telemetry_mode_env); // 71
-    success = success && file.write((uint8_t *)&_prefs.rx_delay_base, sizeof(_prefs.rx_delay_base)) == sizeof(_prefs.rx_delay_base); // 72
-    success = success && file.write((uint8_t *)&_prefs.advert_loc_policy, sizeof(_prefs.advert_loc_policy)) == sizeof(_prefs.advert_loc_policy); // 76
-    success = success && file.write((uint8_t *)&_prefs.multi_acks, sizeof(_prefs.multi_acks)) == sizeof(_prefs.multi_acks); // 77
-    success = success && file.write((uint8_t *)&_prefs.path_hash_mode, sizeof(_prefs.path_hash_mode)) == sizeof(_prefs.path_hash_mode); // 78
-    success = success && file.write(pad, 1) == 1;                                            // 79
-    success = success && file.write((uint8_t *)&_prefs.ble_pin, sizeof(_prefs.ble_pin)) == sizeof(_prefs.ble_pin); // 80
-    success = success && file.write((uint8_t *)&_prefs.buzzer_quiet, sizeof(_prefs.buzzer_quiet)) == sizeof(_prefs.buzzer_quiet); // 84
-    success = success && file.write((uint8_t *)&_prefs.gps_enabled, sizeof(_prefs.gps_enabled)) == sizeof(_prefs.gps_enabled); // 85
-    success = success && file.write((uint8_t *)&_prefs.gps_interval, sizeof(_prefs.gps_interval)) == sizeof(_prefs.gps_interval); // 86
-    success = success && file.write((uint8_t *)&_prefs.autoadd_config, sizeof(_prefs.autoadd_config)) == sizeof(_prefs.autoadd_config); // 87
-    success = success && file.write((uint8_t *)&_prefs.autoadd_max_hops, sizeof(_prefs.autoadd_max_hops)) == sizeof(_prefs.autoadd_max_hops); // 88
-    success = success && file.write((uint8_t *)&_prefs.rx_boosted_gain, sizeof(_prefs.rx_boosted_gain)) == sizeof(_prefs.rx_boosted_gain); // 89
-    success = success && file.write((uint8_t *)_prefs.default_scope_name, sizeof(_prefs.default_scope_name)) == sizeof(_prefs.default_scope_name); // 90
-    success = success && file.write((uint8_t *)_prefs.default_scope_key, sizeof(_prefs.default_scope_key)) == sizeof(_prefs.default_scope_key); // 121
-    success = success && file.write((uint8_t *)&_prefs.radio_fem_rxgain, sizeof(_prefs.radio_fem_rxgain)) == sizeof(_prefs.radio_fem_rxgain); // 122
-    success = success && file.write((uint8_t *)&_prefs.radio_fem_rxgain_override,
-               sizeof(_prefs.radio_fem_rxgain_override)) == sizeof(_prefs.radio_fem_rxgain_override); // 123
-    success = success && file.write((uint8_t *)&_prefs.vibe_quiet,
-               sizeof(_prefs.vibe_quiet)) == sizeof(_prefs.vibe_quiet);                    // 124
-    success = success && file.write((uint8_t *)&_prefs.radio_fem_txgain,
-               sizeof(_prefs.radio_fem_txgain)) == sizeof(_prefs.radio_fem_txgain);        // 125
-    success = success && file.write((uint8_t *)&_prefs.rx_powersaving_enabled,
-               sizeof(_prefs.rx_powersaving_enabled)) == sizeof(_prefs.rx_powersaving_enabled); // 126
-    success = success && file.write((uint8_t *)&_prefs.rx_ps_rx_us,
-               sizeof(_prefs.rx_ps_rx_us)) == sizeof(_prefs.rx_ps_rx_us);                  // 127
-    success = success && file.write((uint8_t *)&_prefs.rx_ps_sleep_us,
-               sizeof(_prefs.rx_ps_sleep_us)) == sizeof(_prefs.rx_ps_sleep_us);            // 131
-    success = success && file.write((uint8_t *)&_prefs.rx_ps_level,
-               sizeof(_prefs.rx_ps_level)) == sizeof(_prefs.rx_ps_level);                  // 135
-    success = success && file.write((uint8_t *)&_prefs.rx_ps_preamble,
-               sizeof(_prefs.rx_ps_preamble)) == sizeof(_prefs.rx_ps_preamble);            // 136
-    success = success && file.write((uint8_t *)&_prefs.powersaving_enabled,
-               sizeof(_prefs.powersaving_enabled)) == sizeof(_prefs.powersaving_enabled); // 137
-    success = success && file.write((uint8_t *)&_prefs.wifi_enabled,
-               sizeof(_prefs.wifi_enabled)) == sizeof(_prefs.wifi_enabled);               // 138
-    success = success && file.write((uint8_t *)&_prefs.powersaving_policy_version,
-               sizeof(_prefs.powersaving_policy_version))
-               == sizeof(_prefs.powersaving_policy_version);                              // 139
-    success = success && file.write((uint8_t *)&_prefs.usb_logging_enabled,
-               sizeof(_prefs.usb_logging_enabled))
-               == sizeof(_prefs.usb_logging_enabled);                                    // 140
-    success = success && file.write((uint8_t *)_prefs.bluetooth_name,
-               sizeof(_prefs.bluetooth_name)) == sizeof(_prefs.bluetooth_name);          // 141
-    success = success && file.write(
+    bool success = writeField((uint8_t *)&_prefs.airtime_factor, sizeof(float)); // 0
+    success = success && writeField((uint8_t *)_prefs.node_name, sizeof(_prefs.node_name)); // 4
+    success = success && writeField(pad, 4);                                            // 36
+    success = success && writeField((uint8_t *)&node_lat, sizeof(node_lat)); // 40
+    success = success && writeField((uint8_t *)&node_lon, sizeof(node_lon)); // 48
+    success = success && writeField((uint8_t *)&_prefs.freq, sizeof(_prefs.freq)); // 56
+    success = success && writeField((uint8_t *)&_prefs.sf, sizeof(_prefs.sf)); // 60
+    success = success && writeField((uint8_t *)&_prefs.cr, sizeof(_prefs.cr)); // 61
+    success = success && writeField((uint8_t *)&_prefs.client_repeat, sizeof(_prefs.client_repeat)); // 62
+    success = success && writeField((uint8_t *)&_prefs.manual_add_contacts, sizeof(_prefs.manual_add_contacts)); // 63
+    success = success && writeField((uint8_t *)&_prefs.bw, sizeof(_prefs.bw)); // 64
+    success = success && writeField((uint8_t *)&_prefs.tx_power_dbm, sizeof(_prefs.tx_power_dbm)); // 68
+    success = success && writeField((uint8_t *)&_prefs.telemetry_mode_base, sizeof(_prefs.telemetry_mode_base)); // 69
+    success = success && writeField((uint8_t *)&_prefs.telemetry_mode_loc, sizeof(_prefs.telemetry_mode_loc)); // 70
+    success = success && writeField((uint8_t *)&_prefs.telemetry_mode_env, sizeof(_prefs.telemetry_mode_env)); // 71
+    success = success && writeField((uint8_t *)&_prefs.rx_delay_base, sizeof(_prefs.rx_delay_base)); // 72
+    success = success && writeField((uint8_t *)&_prefs.advert_loc_policy, sizeof(_prefs.advert_loc_policy)); // 76
+    success = success && writeField((uint8_t *)&_prefs.multi_acks, sizeof(_prefs.multi_acks)); // 77
+    success = success && writeField((uint8_t *)&_prefs.path_hash_mode, sizeof(_prefs.path_hash_mode)); // 78
+    success = success && writeField(pad, 1);                                            // 79
+    success = success && writeField((uint8_t *)&_prefs.ble_pin, sizeof(_prefs.ble_pin)); // 80
+    success = success && writeField((uint8_t *)&_prefs.buzzer_quiet, sizeof(_prefs.buzzer_quiet)); // 84
+    success = success && writeField((uint8_t *)&_prefs.gps_enabled, sizeof(_prefs.gps_enabled)); // 85
+    success = success && writeField((uint8_t *)&_prefs.gps_interval, sizeof(_prefs.gps_interval)); // 86
+    success = success && writeField((uint8_t *)&_prefs.autoadd_config, sizeof(_prefs.autoadd_config)); // 87
+    success = success && writeField((uint8_t *)&_prefs.autoadd_max_hops, sizeof(_prefs.autoadd_max_hops)); // 88
+    success = success && writeField((uint8_t *)&_prefs.rx_boosted_gain, sizeof(_prefs.rx_boosted_gain)); // 89
+    success = success && writeField((uint8_t *)_prefs.default_scope_name, sizeof(_prefs.default_scope_name)); // 90
+    success = success && writeField((uint8_t *)_prefs.default_scope_key, sizeof(_prefs.default_scope_key)); // 121
+    success = success && writeField((uint8_t *)&_prefs.radio_fem_rxgain, sizeof(_prefs.radio_fem_rxgain)); // 122
+    success = success && writeField((uint8_t *)&_prefs.radio_fem_rxgain_override,
+               sizeof(_prefs.radio_fem_rxgain_override)); // 123
+    success = success && writeField((uint8_t *)&_prefs.vibe_quiet,
+               sizeof(_prefs.vibe_quiet));                    // 124
+    success = success && writeField((uint8_t *)&_prefs.radio_fem_txgain,
+               sizeof(_prefs.radio_fem_txgain));        // 125
+    success = success && writeField((uint8_t *)&_prefs.rx_powersaving_enabled,
+               sizeof(_prefs.rx_powersaving_enabled)); // 126
+    success = success && writeField((uint8_t *)&_prefs.rx_ps_rx_us,
+               sizeof(_prefs.rx_ps_rx_us));                  // 127
+    success = success && writeField((uint8_t *)&_prefs.rx_ps_sleep_us,
+               sizeof(_prefs.rx_ps_sleep_us));            // 131
+    success = success && writeField((uint8_t *)&_prefs.rx_ps_level,
+               sizeof(_prefs.rx_ps_level));                  // 135
+    success = success && writeField((uint8_t *)&_prefs.rx_ps_preamble,
+               sizeof(_prefs.rx_ps_preamble));            // 136
+    success = success && writeField((uint8_t *)&_prefs.powersaving_enabled,
+               sizeof(_prefs.powersaving_enabled)); // 137
+    success = success && writeField((uint8_t *)&_prefs.wifi_enabled,
+               sizeof(_prefs.wifi_enabled));               // 138
+    success = success && writeField((uint8_t *)&_prefs.powersaving_policy_version,
+               sizeof(_prefs.powersaving_policy_version));                              // 139
+    success = success && writeField((uint8_t *)&_prefs.usb_logging_enabled,
+               sizeof(_prefs.usb_logging_enabled));                                    // 140
+    success = success && writeField((uint8_t *)_prefs.bluetooth_name,
+               sizeof(_prefs.bluetooth_name));          // 141
+    success = success && writeField(
                (uint8_t *)&_prefs.display_rotation_degrees,
-               sizeof(_prefs.display_rotation_degrees))
-               == sizeof(_prefs.display_rotation_degrees);
-    success = success && file.write((uint8_t *)&_prefs.cad_enabled,
-               sizeof(_prefs.cad_enabled)) == sizeof(_prefs.cad_enabled);
-    success = success && file.write((uint8_t *)&_prefs.cad_scan_timeout_ms,
-               sizeof(_prefs.cad_scan_timeout_ms))
-               == sizeof(_prefs.cad_scan_timeout_ms);
-    success = success && file.write((uint8_t *)&_prefs.cad_retry_delay_ms,
-               sizeof(_prefs.cad_retry_delay_ms))
-               == sizeof(_prefs.cad_retry_delay_ms);
-    success = success && file.write((uint8_t *)&_prefs.cad_max_duration_ms,
-               sizeof(_prefs.cad_max_duration_ms))
-               == sizeof(_prefs.cad_max_duration_ms);
-    success = success && file.write((uint8_t *)&_prefs.bluetooth_mac_mode,
-               sizeof(_prefs.bluetooth_mac_mode))
-               == sizeof(_prefs.bluetooth_mac_mode);
-    success = success && file.write((uint8_t *)_prefs.bluetooth_mac,
-               sizeof(_prefs.bluetooth_mac)) == sizeof(_prefs.bluetooth_mac);
-    success = success && file.write(
+               sizeof(_prefs.display_rotation_degrees));
+    success = success && writeField((uint8_t *)&_prefs.cad_enabled,
+               sizeof(_prefs.cad_enabled));
+    success = success && writeField((uint8_t *)&_prefs.cad_scan_timeout_ms,
+               sizeof(_prefs.cad_scan_timeout_ms));
+    success = success && writeField((uint8_t *)&_prefs.cad_retry_delay_ms,
+               sizeof(_prefs.cad_retry_delay_ms));
+    success = success && writeField((uint8_t *)&_prefs.cad_max_duration_ms,
+               sizeof(_prefs.cad_max_duration_ms));
+    success = success && writeField((uint8_t *)&_prefs.bluetooth_mac_mode,
+               sizeof(_prefs.bluetooth_mac_mode));
+    success = success && writeField((uint8_t *)_prefs.bluetooth_mac,
+               sizeof(_prefs.bluetooth_mac));
+    success = success && writeField(
                (uint8_t *)&_prefs.bluetooth_stealth_peer_type,
-               sizeof(_prefs.bluetooth_stealth_peer_type))
-               == sizeof(_prefs.bluetooth_stealth_peer_type);
-    success = success && file.write(
+               sizeof(_prefs.bluetooth_stealth_peer_type));
+    success = success && writeField(
                (uint8_t *)_prefs.bluetooth_stealth_peer,
-               sizeof(_prefs.bluetooth_stealth_peer))
-               == sizeof(_prefs.bluetooth_stealth_peer);
-    success = success && file.write(
+               sizeof(_prefs.bluetooth_stealth_peer));
+    success = success && writeField(
                (uint8_t *)&_prefs.bluetooth_stealth_mode,
-               sizeof(_prefs.bluetooth_stealth_mode))
-               == sizeof(_prefs.bluetooth_stealth_mode);
+               sizeof(_prefs.bluetooth_stealth_mode));
 
-    success = success && file.write((uint8_t *)&_prefs.tx_delay_factor,
-        sizeof(_prefs.tx_delay_factor)) == sizeof(_prefs.tx_delay_factor);
-    success = success && file.write((uint8_t *)&_prefs.direct_tx_delay_factor,
-        sizeof(_prefs.direct_tx_delay_factor)) == sizeof(_prefs.direct_tx_delay_factor);
-    success = success && file.write((uint8_t *)&_prefs.interference_threshold,
-        sizeof(_prefs.interference_threshold)) == sizeof(_prefs.interference_threshold);
-    success = success && file.write((uint8_t *)&_prefs.agc_reset_interval,
-        sizeof(_prefs.agc_reset_interval)) == sizeof(_prefs.agc_reset_interval);
-    success = success && file.write((uint8_t *)&_prefs.tz_offset,
-        sizeof(_prefs.tz_offset)) == sizeof(_prefs.tz_offset);
+    success = success && writeField((uint8_t *)&_prefs.tx_delay_factor,
+        sizeof(_prefs.tx_delay_factor));
+    success = success && writeField((uint8_t *)&_prefs.direct_tx_delay_factor,
+        sizeof(_prefs.direct_tx_delay_factor));
+    success = success && writeField((uint8_t *)&_prefs.interference_threshold,
+        sizeof(_prefs.interference_threshold));
+    success = success && writeField((uint8_t *)&_prefs.agc_reset_interval,
+        sizeof(_prefs.agc_reset_interval));
+    success = success && writeField((uint8_t *)&_prefs.tz_offset,
+        sizeof(_prefs.tz_offset));
 #ifdef TBEAM_1W
-    success = success && file.write((uint8_t *)_prefs.fan_mode,
-        sizeof(_prefs.fan_mode)) == sizeof(_prefs.fan_mode);
-    success = success && file.write((uint8_t *)&_prefs.fan_lo,
-        sizeof(_prefs.fan_lo)) == sizeof(_prefs.fan_lo);
-    success = success && file.write((uint8_t *)&_prefs.fan_hi,
-        sizeof(_prefs.fan_hi)) == sizeof(_prefs.fan_hi);
+    success = success && writeField((uint8_t *)_prefs.fan_mode,
+        sizeof(_prefs.fan_mode));
+    success = success && writeField((uint8_t *)&_prefs.fan_lo,
+        sizeof(_prefs.fan_lo));
+    success = success && writeField((uint8_t *)&_prefs.fan_hi,
+        sizeof(_prefs.fan_hi));
 #endif
 #if defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)
-    success = success && file.write((uint8_t *)_prefs.wifi_ssid,
-        sizeof(_prefs.wifi_ssid)) == sizeof(_prefs.wifi_ssid);
-    success = success && file.write((uint8_t *)_prefs.wifi_pwd,
-        sizeof(_prefs.wifi_pwd)) == sizeof(_prefs.wifi_pwd);
+    success = success && writeField((uint8_t *)_prefs.wifi_ssid,
+        sizeof(_prefs.wifi_ssid));
+    success = success && writeField((uint8_t *)_prefs.wifi_pwd,
+        sizeof(_prefs.wifi_pwd));
 #endif
-    success = success && file.write((uint8_t *)&_prefs.flood_retry_attempts,
-        sizeof(_prefs.flood_retry_attempts)) == sizeof(_prefs.flood_retry_attempts);
-    success = success && file.write((uint8_t *)&_prefs.flood_retry_max_path,
-        sizeof(_prefs.flood_retry_max_path)) == sizeof(_prefs.flood_retry_max_path);
-    success = success && file.write((uint8_t *)&_prefs.flood_retry_group_max_path,
-        sizeof(_prefs.flood_retry_group_max_path)) == sizeof(_prefs.flood_retry_group_max_path);
-    success = success && file.write((uint8_t *)&_prefs.flood_retry_advert_enabled,
-        sizeof(_prefs.flood_retry_advert_enabled)) == sizeof(_prefs.flood_retry_advert_enabled);
-    success = success && file.write((uint8_t *)&_prefs.one_key_dm_enabled,
-        sizeof(_prefs.one_key_dm_enabled)) == sizeof(_prefs.one_key_dm_enabled);
+    // Pack only the explicit persisted tail, never the class's padded layout.
+    // memcpy retains the GPS field's established native byte representation.
+    uint8_t tail[9] = {
+        _prefs.flood_retry_attempts, _prefs.flood_retry_max_path,
+        _prefs.flood_retry_group_max_path, _prefs.flood_retry_advert_enabled,
+        _prefs.one_key_dm_enabled, _prefs.bluetooth_enabled, 0, 0,
+        _prefs.usb_debug_enabled};
+    memcpy(tail + 6, &_prefs.gps_sync_interval_hours,
+        sizeof(_prefs.gps_sync_interval_hours));
+    success = success && writeField(tail, sizeof(tail));
 
+#if defined(STM32_PLATFORM)
+    success = success && image_length == sizeof(image)
+        && file.write(image, sizeof(image)) == sizeof(image);
+#endif
+#endif
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
     success = file.commit(success);
     if (!success) MESH_DEBUG_PRINTLN("DataStore: atomic preferences write failed");
@@ -1809,6 +1930,9 @@ bool DataStore::writeContactPage(DataStoreHost* host, uint8_t page,
 #endif
 
 void DataStore::loadContacts(DataStoreHost* host) {
+#if defined(ESP32_PLATFORM)
+  cancelContactWrite();
+#endif
 #if !defined(NRF52_PLATFORM) && !MESH_CONTACT_CACHE
   if (_uncached_contact_load_incomplete) return;
 #endif
@@ -2116,6 +2240,9 @@ void DataStore::loadContacts(DataStoreHost* host) {
 }
 
 bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactInfo& c)) {
+#if defined(ESP32_PLATFORM)
+  cancelContactWrite();
+#endif
   if (hasIncompleteContactLoad()) return false;
 #if defined(NRF52_PLATFORM)
   bool success = true;
@@ -2126,7 +2253,11 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
     success = markContactDirty(*contact) && success;
   }
   return flushContactWrites(host, filter) && success;
-#elif MESH_CONTACT_CACHE && defined(ESP32_PLATFORM)
+#elif defined(ESP32_PLATFORM)
+  // Explicit save/flush callers require a fully durable current table. An
+  // unfinished lazy transaction may contain an earlier revision: discard it
+  // before synchronously writing the current contacts through the same format.
+#if MESH_CONTACT_CACHE
   auto& paths = mesh::contactPathStorage();
   paths.beginCommit();
   for (uint32_t i = 0;; ++i) {
@@ -2136,23 +2267,35 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
   }
   if (!paths.preserveSnapshots(0, 0x8000)) {
     paths.endCommit(false);
+    _contact_write_requested = true;
     return false;
   }
+#endif
   // The cold-path reader reuses one SPIFFS File during this streaming write.
   // Close it before replacing the original name so later reads reopen the
   // committed file. No complete contact-table copy is needed in RAM.
-  mesh::ContactFileTransaction writer(_getContactsChannelsFS(), "/contacts3");
+  mesh::ContactFileTransaction writer(_getContactsChannelsFS(), "/contacts3",
+                                      companionPathPresence);
   bool success = writer;
   uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
   for (uint32_t i = 0; success; ++i) {
+#if MESH_CONTACT_CACHE
     auto* c = host->getContactForStore(i);
     if (!c) break;
+#else
+    ContactInfo snapshot;
+    if (!host->getContactForSave(i, snapshot)) break;
+    const auto* c = &snapshot;
+#endif
     if (filter && !filter(*c)) continue;
     success = serializeContactRecord(*c, record)
         && writer.write(record, sizeof(record)) == sizeof(record);
   }
+#if MESH_CONTACT_CACHE
   _contact_path_reader.close();
+#endif
   success = writer.commit(success);
+#if MESH_CONTACT_CACHE
   if (success) {
     uint16_t index = 0;
     for (uint32_t i = 0;; ++i) {
@@ -2163,6 +2306,8 @@ bool DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactIn
     }
   }
   paths.endCommit(success);
+#endif
+  _contact_write_requested = !success;
   return success;
 #else
 #if defined(STM32_PLATFORM)
@@ -2218,6 +2363,10 @@ bool DataStore::markContactDirty(const ContactInfo& contact) {
   return _dirty_contact_pages.mark(slot / mesh::storage::CONTACTS_PER_PAGE);
 #else
   (void)contact;
+#if defined(ESP32_PLATFORM)
+  ++_contact_write_revision;
+  _contact_write_requested = true;
+#endif
   return true;
 #endif
 }
@@ -2231,6 +2380,10 @@ bool DataStore::releaseContact(const ContactInfo& contact) {
   return _dirty_contact_pages.mark(slot / mesh::storage::CONTACTS_PER_PAGE);
 #else
   (void)contact;
+#if defined(ESP32_PLATFORM)
+  ++_contact_write_revision;
+  _contact_write_requested = true;
+#endif
   return true;
 #endif
 }
@@ -2298,6 +2451,165 @@ bool DataStore::truncateLegacyContacts(uint16_t remaining_contacts) {
 }
 #endif
 
+#if defined(ESP32_PLATFORM)
+void DataStore::cancelContactWrite() {
+  if (_contact_write == nullptr) return;
+  delete _contact_write;
+  _contact_write = nullptr;
+#if MESH_CONTACT_CACHE
+  _contact_path_reader.close();
+  mesh::contactPathStorage().endCommit(false);
+#endif
+  _contact_write_host = nullptr;
+  _contact_write_filter = nullptr;
+}
+
+#if MESH_CONTACT_CACHE
+bool DataStore::cancelCooperativeWrite() {
+  // Cache pressure inside serialization/snapshot preservation must keep the
+  // reentrancy veto. Only an app/radio path update between service passes can
+  // abandon the lazy job before the ordinary guarded eviction flush.
+  if (_contact_write == nullptr || _contact_write_servicing) return false;
+  cancelContactWrite();
+  return true;
+}
+#endif
+
+bool DataStore::serviceContactWrite(DataStoreHost* host,
+                                   bool (*filter)(const ContactInfo&)) {
+  struct ServiceGuard {
+    bool& active;
+    explicit ServiceGuard(bool& value) : active(value) { active = true; }
+    ~ServiceGuard() { active = false; }
+  } guard(_contact_write_servicing);
+  if (hasIncompleteContactLoad()) {
+    cancelContactWrite();
+    return false;
+  }
+  _contact_write_requested = true;
+  if (_contact_write != nullptr
+      && (_contact_write_active_revision != _contact_write_revision
+          || _contact_write_host != host || _contact_write_filter != filter)) {
+    // A mutation can move records or replace path handles. Never publish the
+    // indices of an obsolete streaming snapshot. Keep dirty state armed and
+    // start the current revision on a later loop pass.
+    cancelContactWrite();
+    return true;
+  }
+#if MESH_CONTACT_CACHE
+  auto& paths = mesh::contactPathStorage();
+#endif
+  if (_contact_write == nullptr) {
+#if MESH_CONTACT_CACHE
+    paths.beginCommit();
+    for (uint32_t i = 0;; ++i) {
+      auto* contact = host->getContactForStore(i);
+      if (contact == nullptr) break;
+      if (!filter || filter(*contact)) paths.mark(contact->path_ref.handle());
+    }
+    if (!paths.preserveSnapshots(0, 0x8000)) {
+      paths.endCommit(false);
+      return false;
+    }
+#endif
+    _contact_write = new (std::nothrow) mesh::ContactFileTransaction(
+        _getContactsChannelsFS(), "/contacts3", companionPathPresence, true);
+    if (_contact_write == nullptr) {
+#if MESH_CONTACT_CACHE
+      paths.endCommit(false);
+#endif
+      return false;
+    }
+    _contact_write_host = host;
+    _contact_write_filter = filter;
+    _contact_write_active_revision = _contact_write_revision;
+    _contact_write_index = 0;
+    _contact_write_verifying = false;
+    return true;
+  }
+  if (!static_cast<bool>(*_contact_write)) {
+    // The revision/session guard above also applies to every setup step.
+    // Keep initialization separate from serialization, including its final
+    // buffer configuration, so transports are serviced between operations.
+    const auto progress = _contact_write->serviceBegin(true);
+    if (progress == mesh::ContactFileTransaction::BeginProgress::Failed) {
+      cancelContactWrite();
+      return false;
+    }
+    return true;
+  }
+  if (!_contact_write_verifying) {
+#if MESH_CONTACT_CACHE
+    ContactInfo* contact;
+    do {
+      contact = host->getContactForStore(_contact_write_index++);
+    } while (contact != nullptr && filter && !filter(*contact));
+#else
+    ContactInfo snapshot;
+    bool available;
+    do {
+      available = host->getContactForSave(_contact_write_index++, snapshot);
+    } while (available && filter && !filter(snapshot));
+    const ContactInfo* contact = available ? &snapshot : nullptr;
+#endif
+    if (contact != nullptr) {
+      uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
+      if (serializeContactRecord(*contact, record)
+          && _contact_write->write(record, sizeof(record)) == sizeof(record)) {
+        return true;
+      }
+      cancelContactWrite();
+      return false;
+    }
+#if MESH_CONTACT_CACHE
+    _contact_path_reader.close();
+#endif
+    _contact_write_verifying = true;
+    return true;
+  }
+#if MESH_CONTACT_CACHE
+  if (_contact_write->readyToPublish()
+      && !paths.preserveSnapshots(0, 0x8000)) {
+    cancelContactWrite();
+    return false;
+  }
+  if (_contact_write->readyToPublish()) {
+    // Cold app reads and final snapshot preservation can reopen the original
+    // inode during verification. Close it at the actual publication boundary.
+    _contact_path_reader.close();
+  }
+#endif
+  // Keep the 64-byte CRC scratch while verifying at most 512 bytes per
+  // background pass; transports run between these bounded batches.
+  const auto progress = _contact_write->serviceCommit(true, 8, true);
+  if (progress == mesh::ContactFileTransaction::CommitProgress::Pending) {
+    return true;
+  }
+  if (progress == mesh::ContactFileTransaction::CommitProgress::Failed) {
+    cancelContactWrite();
+    return false;
+  }
+#if MESH_CONTACT_CACHE
+  // serviceCommit's final name replacement and this handle publication are
+  // one non-yielding section. Every later cold read sees the corresponding
+  // committed file and source indices, including retained ContactInfo copies.
+  uint16_t index = 0;
+  for (uint32_t i = 0;; ++i) {
+    auto* contact = host->getContactForStore(i);
+    if (contact == nullptr) break;
+    if (!filter || filter(*contact)) paths.publish(contact->path_ref.handle(), index++);
+  }
+  paths.endCommit(true);
+#endif
+  delete _contact_write;
+  _contact_write = nullptr;
+  _contact_write_host = nullptr;
+  _contact_write_filter = nullptr;
+  _contact_write_requested = false;
+  return true;
+}
+#endif
+
 bool DataStore::serviceContactWrites(DataStoreHost* host,
                                      bool (*filter)(const ContactInfo& c)) {
 #if defined(NRF52_PLATFORM)
@@ -2351,6 +2663,8 @@ bool DataStore::serviceContactWrites(DataStoreHost* host,
   if (!writeContactPage(host, (uint8_t)page, filter)) return false;
   _dirty_contact_pages.clear((uint8_t)page);
   return true;
+#elif defined(ESP32_PLATFORM)
+  return serviceContactWrite(host, filter);
 #else
   return saveContacts(host, filter);
 #endif
@@ -2358,6 +2672,9 @@ bool DataStore::serviceContactWrites(DataStoreHost* host,
 
 bool DataStore::flushContactWrites(DataStoreHost* host,
                                    bool (*filter)(const ContactInfo& c)) {
+#if defined(ESP32_PLATFORM)
+  cancelContactWrite();
+#endif
   if (hasIncompleteContactLoad()) return false;
 #if defined(NRF52_PLATFORM)
   while (hasPendingContactWrites()) {
@@ -2373,6 +2690,8 @@ bool DataStore::hasPendingContactWrites() const {
 #if defined(NRF52_PLATFORM)
   return !hasIncompleteContactLoad()
       && (!_dirty_contact_pages.empty() || _legacy_contacts_pending_cleanup);
+#elif defined(ESP32_PLATFORM)
+  return _contact_write_requested || _contact_write != nullptr;
 #else
   return false;
 #endif
@@ -2646,6 +2965,9 @@ void DataStore::checkAdvBlobFile() {
 }
 
 bool DataStore::migrateToSecondaryFS() {
+#if defined(ESP32_PLATFORM)
+  cancelContactWrite();
+#endif
   if (_fsExtra == nullptr) return false;
 
   // Implemented below through verified copy transactions. On nRF52, all
@@ -3446,9 +3768,34 @@ inline void makeBlobPath(const uint8_t key[], int key_len, char* path, size_t pa
 
 uint8_t DataStore::getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]) {
   char path[64];
+#if defined(ESP32_PLATFORM)
+  if (key_len <= 0) return 0;
+#endif
   makeBlobPath(key, key_len, path, sizeof(path));
 
-  if (_fs->exists(path)) {
+#if defined(ESP32_PLATFORM)
+  const int prefix_len = key_len > 8 ? 8 : key_len;
+  for (const auto& slot : _advert_write.slots) {
+    if (slot.len && slot.key_len == prefix_len
+        && memcmp(slot.key, key, prefix_len) == 0) {
+      memcpy(dest_buf, slot.bytes, slot.len);
+      return slot.len;
+    }
+  }
+  // SPIFFS cannot rename over an existing file. A reset between the staged
+  // target->backup and temp->target renames leaves the prior valid cache here.
+  _advert_write.synchronous_io = true;
+  bool present = false;
+  if (!companionPathPresence(_fs, path, present)) return 0;
+  if (!present) {
+    const size_t used = strlen(path);
+    strcpy(path + used, ".bak");
+    if (!companionPathPresence(_fs, path, present)) return 0;
+  }
+#else
+  const bool present = _fs->exists(path);
+#endif
+  if (present) {
     File f = openRead(_fs, path);
     if (f) {
       int len = f.read(dest_buf, 255); // currently MAX 255 byte blob len supported!!
@@ -3462,12 +3809,21 @@ uint8_t DataStore::getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_b
 bool DataStore::putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], uint8_t len) {
   char path[64];
   makeBlobPath(key, key_len, path, sizeof(path));
+#if defined(ESP32_PLATFORM)
+  _advert_write.synchronous_io = true;
+  invalidateAdvertWrite(key, key_len);
+#endif
 
   File f = openWrite(_fs, path);
   if (f) {
     int n = f.write(src_buf, len);
     f.close();
-    if (n == len) return true; // success!
+    if (n == len) {
+#if defined(ESP32_PLATFORM)
+      retireAdvertWrite(key, key_len);
+#endif
+      return true;
+    }
 
     _fs->remove(path); // blob was only partially written!
   }
@@ -3478,9 +3834,296 @@ bool DataStore::deleteBlobByKey(const uint8_t key[], int key_len) {
   char path[64];
   makeBlobPath(key, key_len, path, sizeof(path));
 
+#if defined(ESP32_PLATFORM)
+  _advert_write.synchronous_io = true;
+  invalidateAdvertWrite(key, key_len);
+  // VFS remove() logs an error for normal absence, contaminating the binary
+  // USB stream. Distinguish absence from metadata failure before calling it;
+  // a real deletion failure must preserve the live contact for rollback.
+  char backup[68];
+  snprintf(backup, sizeof(backup), "%s.bak", path);
+  bool present = false, backup_present = false;
+  // Probe both before mutating either; removing the backup first preserves
+  // the authoritative target if a later deletion fails and the contact rolls
+  // back. A successful deletion invalidates publication before staged cleanup.
+  if (!companionPathPresence(_fs, path, present)
+      || !companionPathPresence(_fs, backup, backup_present)) return false;
+  if (backup_present && !_fs->remove(backup)) return false;
+  if (present && !_fs->remove(path)) return false;
+  retireAdvertWrite(key, key_len);
+  return true;
+#else
   _fs->remove(path);
   
   return true; // return true even if file did not exist
+#endif
+}
+#endif
+
+#if defined(ESP32_PLATFORM)
+bool DataStore::queueAdvertByKey(const uint8_t key[], int key_len,
+                                const uint8_t src_buf[], uint8_t len) {
+  if (key_len <= 0 || len == 0) return false;
+  const uint8_t prefix_len = key_len > 8 ? 8 : key_len;
+  AdvertWriteState::Slot* chosen = nullptr;
+  for (auto& slot : _advert_write.slots) {
+    if (slot.len && slot.key_len == prefix_len
+        && memcmp(slot.key, key, prefix_len) == 0) {
+      chosen = &slot;
+      break;
+    }
+    if (!slot.len && chosen == nullptr) chosen = &slot;
+  }
+  // Never force a filesystem flush or allocate another packet on overflow.
+  if (chosen == nullptr) return false;
+  memcpy(chosen->key, key, prefix_len);
+  memcpy(chosen->bytes, src_buf, len);
+  chosen->key_len = prefix_len;
+  chosen->len = len;
+  chosen->revision = ++_advert_write.revision;
+  return true;
+}
+
+void DataStore::retireAdvertWrite(const uint8_t key[], int key_len) {
+  if (key_len <= 0) return;
+  const int prefix_len = key_len > 8 ? 8 : key_len;
+  for (auto& slot : _advert_write.slots) {
+    if (slot.len && slot.key_len == prefix_len
+        && memcmp(slot.key, key, prefix_len) == 0) {
+      slot.len = 0;
+      slot.revision = ++_advert_write.revision;
+    }
+  }
+}
+
+void DataStore::invalidateAdvertWrite(const uint8_t key[], int key_len) {
+  if (key_len <= 0) return;
+  const int prefix_len = key_len > 8 ? 8 : key_len;
+  auto& job = _advert_write;
+  for (auto& slot : job.slots) {
+    if (slot.len && slot.key_len == prefix_len
+        && memcmp(slot.key, key, prefix_len) == 0) {
+      slot.revision = ++job.revision;
+    }
+  }
+  if (job.stage != AdvertWriteState::Stage::Idle
+      && job.active_key_len == prefix_len
+      && memcmp(job.active_key, key, prefix_len) == 0) {
+    // A synchronous API may have changed target/backup even when it returned
+    // failure. Re-probe the independent active key before recovery/publication.
+    job.cancelling = true;
+    job.stage = AdvertWriteState::Stage::CancelClose;
+    job.retry_at = 0;
+  }
+}
+
+bool DataStore::consumeSynchronousAdvertIO() {
+  const bool result = _advert_write.synchronous_io;
+  _advert_write.synchronous_io = false;
+  return result;
+}
+
+bool DataStore::hasPendingAdvertWrites() const {
+  if (_advert_write.stage != AdvertWriteState::Stage::Idle) return true;
+  for (const auto& slot : _advert_write.slots) if (slot.len) return true;
+  return false;
+}
+
+bool DataStore::isAdvertWriteDue(uint32_t now) const {
+  return hasPendingAdvertWrites() && (_advert_write.retry_at == 0
+      || static_cast<int32_t>(now - _advert_write.retry_at) >= 0);
+}
+
+bool DataStore::serviceAdvertWrites(uint32_t now) {
+  auto& job = _advert_write;
+  using Stage = AdvertWriteState::Stage;
+  static const char* const temp = "/advert.tmp";
+  if (!isAdvertWriteDue(now)) return true;
+  job.retry_at = 0;
+  if (job.stage == Stage::Idle) {
+    for (uint8_t n = 0; n < AdvertWriteState::CAPACITY; ++n) {
+      const uint8_t i = (job.next + n) % AdvertWriteState::CAPACITY;
+      if (!job.slots[i].len) continue;
+      job.active = i;
+      job.next = (i + 1) % AdvertWriteState::CAPACITY;
+      job.active_revision = job.slots[i].revision;
+      job.active_key_len = job.slots[i].key_len;
+      memcpy(job.active_key, job.slots[i].key, job.active_key_len);
+      makeBlobPath(job.slots[i].key, job.slots[i].key_len,
+                   job.target, sizeof(job.target));
+      snprintf(job.backup, sizeof(job.backup), "%s.bak", job.target);
+      job.offset = 0;
+      job.cancelling = false;
+      job.stage = Stage::TargetProbe;
+      break;
+    }
+    if (job.stage == Stage::Idle) return true;
+  }
+  auto& slot = job.slots[job.active];
+  if (!job.cancelling && (!slot.len || slot.revision != job.active_revision)) {
+    job.cancelling = true;
+    job.stage = Stage::CancelClose;
+  }
+  const auto retry = [&]() {
+    const uint32_t delay = mesh::recordLazyPersistenceSaveFailure(
+        job.failures, 1000, mesh::LAZY_PERSISTENCE_MAX_RETRY_DELAY_MILLIS);
+    job.retry_at = now + delay;
+    if (job.retry_at == 0) job.retry_at = 1;
+    return false;
+  };
+  const auto fail = [&]() {
+    job.cancelling = true;
+    job.stage = Stage::CancelClose;
+    return retry();
+  };
+  const auto prepared = [&]() {
+    if (job.cancelling) {
+      job.stage = Stage::Idle;
+      job.active = AdvertWriteState::CAPACITY;
+    } else job.stage = Stage::OpenWrite;
+  };
+  // Exactly one filesystem API operation in each arm. In particular, open,
+  // fclose (which may flush stdio), crypto in BaseChatMesh, and contact-file
+  // work must not accumulate in the same serviced loop pass. SPIFFS may still
+  // spend an unbounded amount of wall time inside one individual operation.
+  switch (job.stage) {
+    case Stage::TargetProbe:
+      if (!companionPathPresence(_fs, job.target, job.target_present)) return fail();
+      job.stage = Stage::BackupProbe;
+      break;
+    case Stage::BackupProbe:
+      if (!companionPathPresence(_fs, job.backup, job.backup_present)) return fail();
+      job.stage = job.backup_present ? (job.target_present ? Stage::RemoveBackup
+                                                         : Stage::RestoreBackup)
+                                     : Stage::TempProbe;
+      break;
+    case Stage::RestoreBackup:
+      if (!_fs->rename(job.backup, job.target)) return fail();
+      job.stage = Stage::TempProbe;
+      break;
+    case Stage::RemoveBackup:
+      if (!_fs->remove(job.backup)) return fail();
+      job.stage = Stage::TempProbe;
+      break;
+    case Stage::TempProbe:
+      if (!companionPathPresence(_fs, temp, job.temp_present)) return fail();
+      if (job.temp_present) job.stage = Stage::RemoveTemp;
+      else prepared();
+      break;
+    case Stage::RemoveTemp:
+      if (!_fs->remove(temp)) return fail();
+      prepared();
+      break;
+    case Stage::OpenWrite:
+      job.file = openWrite(_fs, temp);
+      if (!job.file) return fail();
+      job.stage = Stage::ConfigureWrite;
+      break;
+    case Stage::ConfigureWrite:
+      if (!job.file.setBufferSize(sizeof(job.scratch))) return fail();
+      job.stage = Stage::Write;
+      break;
+    case Stage::Write: {
+      const uint8_t count = static_cast<size_t>(slot.len - job.offset) > sizeof(job.scratch)
+          ? sizeof(job.scratch) : slot.len - job.offset;
+      if (job.file.write(slot.bytes + job.offset, count) != count) return fail();
+      job.offset += count;
+      if (job.offset == slot.len) job.stage = Stage::CloseWrite;
+      break;
+    }
+    case Stage::CloseWrite:
+      job.file.close();
+      job.stage = Stage::OpenVerify;
+      break;
+    case Stage::OpenVerify:
+      job.file = openRead(_fs, temp);
+      if (!job.file) return fail();
+      job.stage = Stage::ConfigureVerify;
+      break;
+    case Stage::ConfigureVerify:
+      if (!job.file.setBufferSize(sizeof(job.scratch))) return fail();
+      job.stage = Stage::VerifySize;
+      break;
+    case Stage::VerifySize:
+      if (job.file.size() != slot.len) return fail();
+      job.offset = 0;
+      job.stage = Stage::Verify;
+      break;
+    case Stage::Verify: {
+      const uint8_t count = static_cast<size_t>(slot.len - job.offset) > sizeof(job.scratch)
+          ? sizeof(job.scratch) : slot.len - job.offset;
+      if (job.file.read(job.scratch, count) != count
+          || memcmp(job.scratch, slot.bytes + job.offset, count) != 0) return fail();
+      job.offset += count;
+      if (job.offset == slot.len) job.stage = Stage::CloseVerify;
+      break;
+    }
+    case Stage::CloseVerify:
+      job.file.close();
+      job.stage = Stage::PublishTargetProbe;
+      break;
+    case Stage::PublishTargetProbe:
+      if (!companionPathPresence(_fs, job.target, job.target_present)) return fail();
+      job.stage = Stage::PublishBackupProbe;
+      break;
+    case Stage::PublishBackupProbe:
+      if (!companionPathPresence(_fs, job.backup, job.backup_present)) return fail();
+      job.stage = job.target_present ? (job.backup_present ? Stage::PublishRemoveBackup
+                                                         : Stage::PublishBackup)
+                                     : Stage::Publish;
+      break;
+    case Stage::PublishRemoveBackup:
+      if (!_fs->remove(job.backup)) return fail();
+      job.stage = Stage::PublishBackup;
+      break;
+    case Stage::PublishBackup:
+      if (!_fs->rename(job.target, job.backup)) return fail();
+      job.backup_present = true;
+      job.stage = Stage::Publish;
+      break;
+    case Stage::Publish:
+      // SPIFFS rejects rename over an existing destination. The two renames
+      // have an explicit gap; RAM serves the new packet and disk readers after
+      // a reset use the old backup. No unverified temp is ever a visible blob.
+      if (!_fs->rename(temp, job.target)) return fail();
+      job.stage = Stage::PublishCleanup;
+      break;
+    case Stage::PublishCleanup:
+      if (job.backup_present && !_fs->remove(job.backup)) return retry();
+      slot.len = 0;
+      job.failures = 0;
+      job.stage = Stage::Idle;
+      job.active = AdvertWriteState::CAPACITY;
+      break;
+    case Stage::CancelClose:
+      job.file.close();
+      job.stage = Stage::TargetProbe;
+      break;
+    case Stage::Idle:
+      break;
+  }
+  return true;
+}
+
+bool DataStore::flushAdvertWrites(uint32_t now) {
+  // Explicit reboot/shutdown/import paths require durability and may block.
+  // On failure keep accepted packets in RAM, but never leave a file open.
+  _advert_write.synchronous_io = hasPendingAdvertWrites()
+      || _advert_write.synchronous_io;
+  for (unsigned pass = 0; hasPendingAdvertWrites() && pass < 512; ++pass) {
+    _advert_write.retry_at = 0;
+    if (!serviceAdvertWrites(now)) {
+      const uint32_t retry_at = _advert_write.retry_at;
+      _advert_write.pause();
+      _advert_write.retry_at = retry_at;
+      return false;
+    }
+  }
+  if (hasPendingAdvertWrites()) {
+    _advert_write.pause();
+    return false;
+  }
+  return true;
 }
 #endif
 

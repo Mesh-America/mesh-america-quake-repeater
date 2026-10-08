@@ -25,7 +25,9 @@ jobs:
       - name: Verify protocol, encryption, scheduling and MQTT decoding
         run: |
           python3 -B test/test_management_report.py -v
+          python3 -B test/test_management_cli_wrapper.py -v
           node test/test_management_decoder.js
+          node scripts/test_telemetry_decoder.js
 
   stm32-companion-smoke:
     runs-on: ubuntu-latest
@@ -38,6 +40,12 @@ jobs:
 
       - name: Compile ordinary STM32 USB Companion with pinned core and RadioLib
         run: pio run -e RAK_3x72_companion_radio_usb
+
+      - name: Qualify Wio-E5 Mini Companion at release version length
+        run: >-
+          bash build.sh build-firmware wio-e5-mini_companion_radio_usb
+          --firmware-version v1.17.1.9-halo-keymind-cascade-dev
+          --radio-preset usa-cascade-fixed --profile cascade --require-ota
 
   bootloader-version:
     runs-on: ubuntu-latest
@@ -82,22 +90,56 @@ jobs:
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
 
+      - name: Install signed-package verification dependency
+        run: python3 -m pip install cryptography
+
       - name: Verify ArduinoJson pin
         run: |
           python3 -B scripts/check_arduinojson_pin.py --self-test
           python3 -B scripts/check_arduinojson_pin.py
 
       - name: Run Unit Tests
-        run: pio test -e native -e native_kiss_modem -vv
+        run: pio test -e native -e native_kiss_modem -e native_ota_channel -vv
+
+      - name: Verify OTA channel persistence and published image tags
+        run: |
+          python3 -B test/test_ota_channel_persistence.py -v
+          python3 -B test/test_observer_ota_channel.py -v
+          python3 -B test/test_observer_build_channels.py -v
+          python3 -B scripts/verify_ota_channel.py --self-test
+
+      - name: Verify build output cleanup safety
+        run: python3 -B test/test_build_output_safety.py -v
+
+      - name: Verify serial mOTA response deadlines and RX fairness
+        run: python3 -B test/test_mota_serial_deadline.py -v
 
       - name: Verify filter playground modes and built-in defaults
         run: node scripts/test_filter_tool.js
 
       - name: Verify bridge filter wiring and shorthand permissions
-        run: python3 -B test/test_transport_filter_wiring.py -v
+        run: |
+          python3 -B test/test_transport_filter_wiring.py -v
+          python3 -B test/test_rs232_runtime.py -v
+          python3 -B test/test_rs232_mqtt_runtime.py -v
+          python3 -B test/test_rs232_driver_lifecycle.py -v
+
+      - name: Verify saved repeat-off trace exception and relay guards
+        run: |
+          python3 -B test/test_repeater_trace_repeat.py -v
+          python3 -B test/test_repeater_trace_forwarding.py -v
+
+      - name: Verify telemetry schedule input and persistence rollback
+        run: python3 -B test/test_telemetry_tx_command.py -v
+
+      - name: Verify transactional telemetry preferences and legacy route recovery
+        run: python3 -B test/test_telemetry_tx_persistence.py -v
 
       - name: Verify MQTT start results and connection-attempt accounting
         run: python3 -B test/test_mqtt_transport_results.py -v
+
+      - name: Verify DNS lease restoration and bounded diagnostics
+        run: python3 -B test/test_network_dns.py -v
 
       - name: Verify Companion contact and channel TX routing
         run: |
@@ -105,12 +147,24 @@ jobs:
           sudo apt-get install -y libssl-dev
           python3 -B test/test_companion_tx_routing.py -v
           python3 -B test/test_companion_discovery.py -v
+          python3 -B test/test_repeater_discovery.py -v
+          python3 -B test/test_companion_discovery_correlation.py -v
           python3 -B test/test_pico_ble_queues.py -v
           python3 -B test/test_companion_preferences_transaction.py -v
+          python3 -B test/test_companion_prefs_values.py -v
+          python3 -B test/test_companion_prefs_image.py -v
+          python3 -B test/test_companion_prefs_tail.py -v
           python3 -B test/test_companion_radio_settings_transaction.py -v
           python3 -B test/test_companion_prefs_transactions.py -v
           python3 -B test/test_companion_primary_radio_persistence.py -v
           python3 -B test/test_companion_response_bounds.py -v
+          python3 -B test/test_companion_ack_delivery.py -v
+          python3 -B test/test_companion_delayed_reply_delivery.py -v
+          python3 -B test/test_companion_hardware_serial.py -v
+          python3 -B test/test_companion_hardware_serial_gps.py -v
+          python3 -B test/test_companion_contact_lifetime.py -v
+          python3 -B test/test_companion_identity_cli.py -v
+          python3 -B test/test_companion_packet_stream.py -v
           python3 -B test/test_companion_uncached_storage.py -v
           python3 -B test/test_companion_ota_config.py -v
           python3 -B test/test_ota_identity_policy.py -v
@@ -118,12 +172,15 @@ jobs:
           python3 -B test/test_common_radio_persistence.py -v
           python3 -B test/test_common_cli_save_results.py -v
           python3 -B test/test_common_prefs_commit.py -v
+          python3 -B test/test_common_prefs_legacy_rxgain.py -v
+          python3 -B test/test_flood_policy_capacity.py -v
           python3 -B test/test_mqtt_prefs_commit.py -v
           python3 -B test/test_identity_and_settings_recovery.py -v
           python3 -B test/test_contact_cache.py -v
 
       - name: Verify receive recovery and pinned radio status transport
         run: |
+          python3 -B test/test_dispatcher_startup_watchdog.py -v
           python3 -B test/test_radio_receive_contract.py
           python3 - <<'PY'
           from pathlib import Path
@@ -141,6 +198,7 @@ jobs:
         run: |
           python3 -B test/test_carrier_wave.py
           python3 -B test/test_radio_profile_cli.py
+          python3 -B test/test_radio_profile_spiffs_missing.py -v
           python3 -B test/test_radio_reply_mutation.py
           python3 -B test/test_radio_profile_scan.py
           python3 -B test/test_repeater_radio_timing_integration.py
@@ -152,6 +210,9 @@ jobs:
           python3 -B test/test_ota_store_resume.py -v
           python3 -B test/test_ota_catalog_lifetime.py -v
           python3 -B test/test_ota_store_flash_nrf52_hybrid.py -v
+          python3 -B test/test_tower_bootloader_caps.py -v
+          python3 -B test/test_tower_auto_storage.py -v
+          python3 -B test/test_tower_auto_integration.py -v
           python3 -B test/test_ota_dev_staging.py -v
           python3 -B test/test_ota_dev_reboot_guard.py -v
 
@@ -166,36 +227,129 @@ jobs:
         run: |
           python3 -B -m unittest discover -s test -p 'test_profile_*.py' -v
           python3 -B -m unittest discover -s tools/hil -p 'test_*.py' -v
+          python3 -B test/test_hil_esp32_self_serve_ota.py -v
+          python3 -B test/test_hil_esp32_usb_host_reboot.py -v
 
       - name: Verify ESP32 static DRAM budget
         run: |
           python3 -B test/test_esp32_dram.py
+          python3 -B test/test_battery_charge_cli.py -v
+          python3 -B test/test_tbeam_charge_target.py -v
           python3 -B test/test_elrs_power.py
           python3 -B test/test_ota_heap_context.py
+          python3 -B test/test_ota_self_serve_policy.py -v
+          python3 -B test/test_ota_self_metadata_cache.py -v
+          python3 -B test/test_ota_nrf52_display_cache.py -v
+          python3 -B test/test_ota_device_deflate_encoder.py -v
+          python3 -B test/test_ota_device_deflate_role.py -v
           python3 -B test/test_client_acl_spiffs.py
+          python3 -B test/test_client_acl_metadata.py -v
           python3 -B test/test_client_acl_cli.py -v
+          python3 -B test/test_client_acl_response.py -v
+          python3 -B test/test_client_acl_infrastructure.py -v
+          python3 -B test/test_stored_client_reply_routes.py -v
 
-      - name: Verify ESP32 USB sleep and G3 button wake
-        run: python3 -B test/test_esp32_usb_sleep.py
+      - name: Setup Node for official app compatibility tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache pinned official app and browser protocol sources
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/meshcore-tests
+          key: official-clients-84bc39a950735aaffa93d912556852a4c22e235d0cc4e4d04790113207f13a68-aff42ad8ef2b332f24d644ff6a783f8272a88ff2
+
+      - name: Verify stock app radio and Access Control compatibility
+        run: |
+          node --version
+          python3 -B test/test_official_app_compatibility.py -v
+
+      - name: Verify ESP32 USB reboot sleep grace and G3 button wake
+        run: |
+          python3 -B test/test_usb_host_sleep_policy.py
+          python3 -B test/test_esp32_usb_sleep.py
+          python3 -B test/test_esp32_full_sleep.py
+          python3 -B test/test_esp32_full_power_lifecycle.py
+
+      - name: Verify official web console framing and power-saving idle sessions
+        run: |
+          python3 -B test/test_official_web_console.py -v
+          python3 -B test/test_hil_linux_web_serial.py -v
+          python3 -B test/test_hil_slowfi_guard.py -v
+
+      - name: Verify official setup GUI initial time command deadline
+        run: python3 -B test/test_official_config_gui.py -v
+
+      - name: Verify ESP32 boot filesystem inventory and recovery safety
+        run: |
+          python3 -B test/test_esp32_boot_file_inventory.py -v
+          python3 -B test/test_esp32_boot_file_lifecycle.py -v
+
+      - name: Verify WiFi OTA startup and WebConfig handoff
+        run: |
+          python3 -B test/test_wifi_ota_start.py -v
+          python3 -B test/test_webconfig_ap_start.py -v
+          python3 -B test/test_esp32_wifi_scan_fix.py -v
+          python3 -B test/test_esp32_wifi_scan_recipes.py -v
+
+      - name: Verify browser OTA completion and immediate HTTP listener restart
+        run: python3 -B test/test_async_web_lifecycle.py -v
 
       - name: Verify GPS status distinguishes user settings from receiver sleep
         run: |
           python3 -B test/test_gps_status.py
           python3 -B test/test_gps_upstream_adaptations.py -v
+          python3 -B test/test_esp32_gps_discovery.py -v
+          python3 -B test/test_gps_sync_interval.py -v
+          python3 -B test/test_gps_sync_preferences.py -v
           python3 -B test/test_t1000e_sensor_power.py -v
+          python3 -B test/test_sensor_battery_alerts.py -v
+          python3 -B test/test_sensor_subscriptions.py -v
+          python3 -B test/test_sensor_reply_bounds.py -v
 
       - name: Verify Companion ASCII defaults and USB session cleanup
         run: |
           python3 -B test/test_companion_usb_default.py
+          python3 -B test/test_companion_usb_input.py
+          python3 -B test/test_companion_ota_includes.py
+          python3 -B test/test_companion_usb_logging_handoff.py
+          python3 -B test/test_companion_usb_mota_exit.py
+          python3 -B test/test_common_cli_logging_transaction.py
+          python3 -B test/test_usb_diagnostic_logging.py
           python3 -B test/test_nrf52_usb_client.py
+          python3 -B test/test_nrf52_usb_lifecycle.py
+          python3 -B test/test_nrf52_usb_logging_contract.py
           python3 -B test/test_esp32_usb_serial_hygiene.py
+          python3 -B test/test_esp32_tinyusb_nonblocking.py
+          python3 -B test/test_esp32_usb_session_fix.py
+          python3 -B test/test_hwcdc_tx_backport.py -v
+          python3 -B test/test_hwcdc_startup_session.py -v
+          python3 -B test/test_hwcdc_313_startup_session.py -v
+          python3 -B test/test_hwcdc_3311_startup_session.py -v
+          python3 -B test/test_esp32_hwcdc_recipes.py -v
+          python3 -B test/test_hwcdc_role_transport.py -v
+          python3 -B test/test_hwcdc_write_capacity.py -v
+          python3 -B test/test_esp32_file_buffer_fix.py -v
+          python3 -B test/test_companion_usb_logging_reply.py
+          python3 -B test/test_esp32_tinyusb_cooperative_output.py
+          python3 -B test/test_esp32_tinyusb_role_hygiene.py
           python3 -B test/test_stm32_float_conversion.py
 
       - name: Verify Companion contact persistence and OTA sleep guards
-        run: python3 -B test/test_companion_contact_sleep_contract.py -v
+        run: |
+          python3 -B test/test_companion_contact_sleep_contract.py -v
+          python3 -B test/test_esp32_cooperative_contacts.py -v
+          python3 -B test/test_esp32_contact_writer_batch.py -v
+          python3 -B test/test_esp32_contact_crc_batch.py -v
+          python3 -B test/test_esp32_contact_publication.py -v
+          python3 -B test/test_esp32_advert_cache.py -v
 
       - name: Verify Companion Bluetooth CLI connection protection
         run: python3 -B test/test_companion_bluetooth_control.py -v
+
+      - name: Verify Companion Bluetooth reboot persistence
+        run: python3 -B test/test_companion_bluetooth_persistence.py -v
 
       - name: Verify nRF52 SoftDevice LTO and persistent BLE subscriptions
         env:
@@ -215,6 +369,9 @@ jobs:
           python3 -B test/test_serial_ethernet_sessions.py -v
           python3 -B test/test_companion_wifi_session.py -v
           python3 -B test/test_espnow_radio_lifecycle.py -v
+          python3 -B test/test_wifi_ap_lr_safety.py -v
+          python3 -B test/test_espnow_runtime.py -v
+          python3 -B test/test_wifi_ota_lifecycle.py -v
 
       - name: Verify message reader buttons, touch targets, and footer layouts
         working-directory: test
@@ -226,8 +383,18 @@ jobs:
           test_indicator_display_profile test_indicator_render_profile
           test_indicator_exclusive_transport test_companion_transport_selector
 
-      - name: Verify logging sleep guards and instructions
+      - name: Verify independent USB packet/debug logging, recovery, and instructions
         run: |
+          python3 -B test/test_common_usb_debug.py
+          python3 -B test/test_companion_usb_logging.py
+          python3 -B test/test_usb_logging_watchdog.py
+          python3 -B test/test_usb_watchdog_event.py
+          python3 -B test/test_usb_logging_client_activity.py
+          python3 -B test/test_usb_logging_watchdog_runtime.py
+          python3 -B test/test_usb_logging_watchdog_roles.py
+          python3 -B test/test_nrf52_usb_console.py
+          python3 -B test/test_esp32_tinyusb_nonblocking.py
+          python3 -B test/test_esp32_tinyusb_role_hygiene.py
           python3 -B test/test_logging_sleep_contract.py
           python3 -B test/test_picker_controls_generator.py
           python3 -B test/test_firmware_picker_package.py
@@ -236,10 +403,14 @@ jobs:
       - name: Verify Full logging compiler flags and packaged capabilities
         run: |
           python3 -B test/test_upstream_observer_recipes.py -v
+          python3 -B test/test_station_g3_sensor_recipes.py -v
           python3 -B test/test_full_build_flag_dedup.py
           python3 -B test/test_full_logging_compile.py
           python3 -B test/test_full_logging_resume.py
+          python3 -B test/test_xiao_canonical_logging.py -v
+          python3 -B test/test_firmware_build_recipe.py -v
           python3 -B test/test_firmware_capabilities.py
+          MESHCORE_TEST_REAL_PIO_PATHS=1 python3 -B test/test_esp32_partition_migration_build_dir.py -v
           bash test/test_build_profiles.sh
           bash test/test_full_infrastructure_selection.sh
           bash test/test_nrf52_ota_profiles.sh
@@ -263,7 +434,9 @@ jobs:
           python3 -B test/test_neighbor_scope_storage.py
           python3 -B test/test_ed25519_compact.py
           python3 -B test/test_cascade_release_package.py
+          python3 -B test/test_release_publication.py
           python3 -B test/test_local_release_full_selection.py
+          python3 -B test/test_local_release_capacity_archive.py
           python3 -B test/test_t096_full_memory.py
           python3 -B test/test_nrf52_ble_startup.py
           python3 -B test/test_nrf52_ble_trace.py
@@ -287,6 +460,16 @@ jobs:
 
       - name: Verify Companion Bluetooth settings and WebConfig
         run: |
+          python3 -B test/test_gps_voice_buttons.py -v
+          python3 -B test/test_gps_voice_generator.py -v
+          python3 -B test/test_button_voice_actions.py -v
+          python3 -B test/test_button_voice_generator.py -v
+          python3 -B test/test_button_voice_preview.py -v
+          python3 -B test/test_g726_voice.py -v
+          MESH_G726_TEST_SANITIZERS=1 python3 -B test/test_g726_voice.py -v
+          python3 -B test/test_g726_voice_generator.py -v
+          python3 -B test/test_voice_prefixes.py -v
+          MESH_VOICE_TEST_SANITIZERS=1 python3 -B test/test_voice_prefixes.py -v
           python3 -B test/test_nimble_companion.py
           python3 -B test/test_bluetooth_pairing_ui.py
           python3 -B test/test_companion_pairing_display.py
@@ -302,6 +485,12 @@ jobs:
           python3 -B test/test_webconfig_ui.py
           python3 -B test/test_webconfig_gzip.py
           python3 -B test/test_webconfig_secret_masking.py
+          python3 -B test/test_webconfig_station_ownership.py -v
+          python3 -B test/test_mqtt_canonical_wifi.py -v
+          python3 -B test/test_mqtt_ap_ownership.py -v
+          python3 -B test/test_companion_ap_ownership.py -v
+          python3 -B test/test_heltec_v4_wifi_setup_page.py -v
+          python3 -B test/test_sensor_webconfig_capabilities.py -v
           python3 -B test/test_webconfig_ui_runtime.py
 
       - name: Upload Test Results
@@ -311,3 +500,17 @@ jobs:
         with:
           name: test-results
           path: .pio/build/native/
+
+  hosted-doc-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install the documentation renderer
+        run: python3 -m pip install mkdocs==1.6.1 mkdocs-material==9.7.7
+      - name: Verify source links and published page routes
+        run: python3 -B test/test_hosted_doc_links.py -v
+      - name: Verify hosted-link visibility and navigation
+        run: node test/test_hosted_doc_links.js

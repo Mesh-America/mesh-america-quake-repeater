@@ -44,16 +44,20 @@ struct Prefs {
   uint8_t manual_add_contacts=0,telemetry_mode_base=0,telemetry_mode_loc=0;
   uint8_t telemetry_mode_env=0,advert_loc_policy=0,multi_acks=0;
   uint8_t path_hash_mode=0,client_repeat=0,autoadd_config=0,autoadd_max_hops=2,gps_enabled=0;
+  uint16_t gps_sync_interval_hours=0;
   uint8_t rx_boosted_gain=0,powersaving_enabled=0;
   int8_t tx_power_dbm=3;
 };
 struct Sensors {
   double node_lat=10,node_lon=20;
   std::string gps="0",interval="60",other="old";
-  bool accepts=true;
+  bool accepts=true,gps_available=true;
   bool powersaving_enabled=false;
+  uint16_t gps_sync_hours=0;
   void setPowerSavingEnabled(bool enabled) { powersaving_enabled=enabled; }
+  void applyGpsTimeSyncInterval(uint16_t hours) { gps_sync_hours=hours; }
   const char* getSettingByKey(const char* key) {
+    if(!strcmp(key,"gps") && !gps_available)return nullptr;
     return !strcmp(key,"gps") ? gps.c_str() : interval.c_str();
   }
   bool setSettingValue(const char* key,const char* value) {
@@ -114,17 +118,24 @@ struct MyMesh {
   void writeOKFrame() { replies.push_back(0); }
   void writeErrFrame(uint8_t error) { replies.push_back(error); }
   void updateGpsTelemetryPolicy() { ++gps_policy_updates; }
-  void applyGpsPrefs() {
-    sensors.setSettingValue("gps",_prefs.gps_enabled?"1":"0");
-    char s[16];snprintf(s,sizeof(s),"%lu",(unsigned long)_prefs.gps_interval);
-    sensors.setSettingValue("gps_interval",s);
-  }
+#if ENV_INCLUDE_GPS == 1
+  bool setGpsEnabled(bool);
+  @APPLY_GPS_PREFS@
+#endif
   MyMesh& terminalOutput() { return *this; }
   void print(const char* value) { output+=value; }
   void frame(size_t len) { @FRAMES@ }
   void web(const char* key,const char* value,char* reply) { @WEB@ }
   void terminal(const char* config) { @TERMINAL@ }
-  bool gps(const char* gps_value,char* reply) { const size_t reply_size=160;@GPS@;return false; }
+  bool gps(const char* gps_value,char* reply) {
+#if ENV_INCLUDE_GPS == 1
+    const size_t reply_size=160;
+    @GPS@
+#else
+    (void)gps_value;(void)reply;
+#endif
+    return false;
+  }
   bool hasOutbound() const { return false; }
   bool millisHasNowPassed(uint32_t) const { return true; }
   uint32_t futureMillis(uint32_t delay) const { return delay+100; }
@@ -155,6 +166,9 @@ struct MyMesh {
   }
 };
 @METHODS@
+#if ENV_INCLUDE_GPS == 1
+@GPS_METHOD@
+#endif
 static void u32(std::vector<uint8_t>& bytes,uint32_t value) {
   for(unsigned i=0;i<4;++i) bytes.push_back(uint8_t(value>>(8*i)));
 }
@@ -218,12 +232,38 @@ int main() {
     m.expectOriginal();
   }
 #if ENV_INCLUDE_GPS == 1
-  for(bool save_ok:{false,true}) {
+  for(bool initial:{false,true})for(bool save_ok:{false,true}) {
     MyMesh m;char reply[160]={};m.storage_accepts=save_ok;
-    assert(m.gps("on",reply));++checks;
+    m._prefs.gps_enabled=m.durable.gps_enabled=initial;
+    sensors.gps=initial?"1":"0";
+    assert(m.gps(initial?"off":"on",reply));++checks;
+    const bool expected=save_ok?!initial:initial;
     assert(error(reply)!=save_ok && m.saves==1);
-    assert(sensors.gps==(save_ok?"1":"0"));
-    if(!save_ok)m.laterSaveCannotResurrectFailure();
+    assert(sensors.gps==(expected?"1":"0") && sensors.interval=="60");
+    assert(m._prefs.gps_enabled==expected && m.durable.gps_enabled==expected);
+    m.storage_accepts=true;assert(m.saveAdvertName("later"));
+    assert(m.durable.gps_enabled==expected);
+  }
+  for(bool initial:{false,true})for(bool available:{false,true}) {
+    MyMesh m;char reply[160]={};
+    m._prefs.gps_enabled=m.durable.gps_enabled=initial;
+    sensors.gps=initial?"1":"0";
+    sensors.gps_available=available;sensors.accepts=false;
+    assert(m.gps(initial?"off":"on",reply));++checks;
+    assert(error(reply) && m.saves==0);
+    assert(sensors.gps==(initial?"1":"0"));
+    assert(m._prefs.gps_enabled==initial && m.durable.gps_enabled==initial);
+  }
+  for(const char* value:{"", "1", "ON", "on extra"}) {
+    MyMesh m;char reply[160]={};assert(m.gps(value,reply));++checks;
+    assert(error(reply) && m.saves==0 && sensors.gps=="0");m.expectOriginal();
+  }
+#else
+  {
+    MyMesh m;char reply[160]="unchanged";
+    assert(!m.gps("on",reply) && !m.gps("off",reply));++checks;
+    assert(!strcmp(reply,"unchanged") && m.saves==0 && sensors.gps=="0");
+    m.expectOriginal();
   }
 #endif
   // Checked RXPS applies roll back hardware too, and keep retrying a busy
@@ -352,6 +392,8 @@ class CompanionPrefsTransactionTests(unittest.TestCase):
                 'static uint32_t nextRadioApplyRetryDelay(',
             )),
             '@SAVE_PREFERENCE@': extract_braced(header, 'template <typename T> bool savePreference('),
+            '@APPLY_GPS_PREFS@': extract_braced(header, 'void applyGpsPrefs('),
+            '@GPS_METHOD@': extract_braced(text, 'bool MyMesh::setGpsEnabled('),
             '@METHODS@': '\n'.join(extract_braced(text,sig) for sig in (
                 'bool MyMesh::saveAdvertName(', 'bool MyMesh::saveAdvertLocation(',
                 'bool MyMesh::applyAndSaveRxPowerSaving(',

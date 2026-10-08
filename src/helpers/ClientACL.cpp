@@ -13,8 +13,23 @@
 static const uint8_t CONTACT_RECORD_VERSION_ALT_PATH = 1;
 static const uint8_t EMPTY_OUT_PATH[MAX_PATH_SIZE] = {};
 
-static File openRead(FILESYSTEM* fs, const char* filename) {
+static File openRead(FILESYSTEM* fs, const char* filename,
+                     bool* metadata_ok = nullptr) {
+#if defined(ESP32_PLATFORM)
+  bool present = false;
+  if (!mesh::filePresence(fs, filename, present)) {
+    if (metadata_ok) *metadata_ok = false;
+    return mesh::emptyFile(fs);
+  }
+  if (!present) return mesh::emptyFile(fs);
+  File file = fs->open(filename);
+  if (!file && metadata_ok) *metadata_ok = false;
+  if (file && file.isDirectory()) file.close();
+  return file;
+#else
+  (void)metadata_ok;
   return mesh::openFileRead(fs, filename);
+#endif
 }
 
 #if !defined(NRF52_PLATFORM)
@@ -27,9 +42,12 @@ static const size_t LEGACY_CONTACT_RECORD_SIZE =
 static bool readPersistedClientPath(FILESYSTEM* fs,
                                     const uint8_t pubkey[PUB_KEY_SIZE],
                                     uint8_t* path_len,
-                                    uint8_t path[MAX_PATH_SIZE]) {
+                                    uint8_t path[MAX_PATH_SIZE],
+                                    bool* metadata_ok = nullptr) {
+#if !defined(ESP32_PLATFORM)
   if (!fs->exists(mesh::CLIENT_ACL_PRIMARY_PATH)) return false;
-  File file = openRead(fs, mesh::CLIENT_ACL_PRIMARY_PATH);
+#endif
+  File file = openRead(fs, mesh::CLIENT_ACL_PRIMARY_PATH, metadata_ok);
   if (!file) return false;
 
   bool found = false;
@@ -87,10 +105,11 @@ static mesh::StoredClientPathView storedClientPathForSave(
     FILESYSTEM* fs,
     const ClientInfo* client,
     uint8_t prior_path[MAX_PATH_SIZE],
-    uint8_t* prior_path_len) {
+    uint8_t* prior_path_len,
+    bool* metadata_ok = nullptr) {
   const bool prior_exists = !client->out_path_is_persistable
       && readPersistedClientPath(
-          fs, client->id.pub_key, prior_path_len, prior_path);
+          fs, client->id.pub_key, prior_path_len, prior_path, metadata_ok);
   return mesh::selectStoredClientPath(
       client->out_path_is_persistable,
       client->out_path_len,
@@ -132,25 +151,32 @@ static bool readMatches(File& file, const uint8_t* expected, size_t length) {
   return true;
 }
 
-static bool validateContactsFileIntegrity(FILESYSTEM* fs,
-                                          const char* filename) {
-  File file = openRead(fs, filename);
-  if (!file) return false;
+static mesh::ClientACLFileValidation validateContactsFileIntegrityChecked(
+    FILESYSTEM* fs, const char* filename) {
+  bool metadata_ok = true;
+  File file = openRead(fs, filename, &metadata_ok);
+  if (!metadata_ok) return mesh::ClientACLFileValidation::MetadataError;
+  if (!file) return mesh::ClientACLFileValidation::Invalid;
   const size_t size = file.size();
   const bool has_crc = size >= 8 && (size - 8) % CONTACT_RECORD_SIZE == 0;
   // A backup means publication was interrupted or is being finalized. In that
   // state a primary without its CRC trailer is a torn new image, not a legacy
   // image, even when truncation lands exactly on a record-size multiple.
-  const bool crc_required = strcmp(filename, mesh::CLIENT_ACL_PRIMARY_PATH) == 0
-      && fs->exists(mesh::CLIENT_ACL_BACKUP_PATH);
+  bool crc_required = false;
+  if (strcmp(filename, mesh::CLIENT_ACL_PRIMARY_PATH) == 0
+      && !mesh::clientACLFilePresence(fs, mesh::CLIENT_ACL_BACKUP_PATH,
+                                     crc_required)) {
+    file.close();
+    return mesh::ClientACLFileValidation::MetadataError;
+  }
   if (!has_crc && size % CONTACT_RECORD_SIZE != 0
       && size % LEGACY_CONTACT_RECORD_SIZE != 0) {
     file.close();
-    return false;
+    return mesh::ClientACLFileValidation::Invalid;
   }
   if (!has_crc) {
     file.close();
-    return !crc_required; // standalone legacy fixed-record image
+    return mesh::clientACLValidation(!crc_required); // standalone legacy image
   }
   uint32_t crc = 0xFFFFFFFFUL;
   size_t remaining = size - 8;
@@ -159,7 +185,7 @@ static bool validateContactsFileIntegrity(FILESYSTEM* fs,
     const size_t chunk = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
     if (file.read(buffer, chunk) != (int)chunk) {
       file.close();
-      return false;
+      return mesh::ClientACLFileValidation::Invalid;
     }
     crc = mesh::updateClientACLCRC(crc, buffer, chunk);
     remaining -= chunk;
@@ -172,7 +198,12 @@ static bool validateContactsFileIntegrity(FILESYSTEM* fs,
       && memcmp(magic, mesh::CLIENT_ACL_CRC_MAGIC, sizeof(magic)) == 0
       && stored_crc == (crc ^ 0xFFFFFFFFUL);
   file.close();
-  return valid;
+  return mesh::clientACLValidation(valid);
+}
+
+static bool validateContactsFileIntegrity(FILESYSTEM* fs, const char* filename) {
+  return validateContactsFileIntegrityChecked(fs, filename)
+      == mesh::ClientACLFileValidation::Valid;
 }
 
 static bool verifyContactsFile(
@@ -197,10 +228,11 @@ static bool verifyContactsFile(
         || (filter && !filter(c))) continue;
     uint8_t prior_path_len = OUT_PATH_UNKNOWN;
     uint8_t prior_path[MAX_PATH_SIZE] = {};
+    bool metadata_ok = true;
     const mesh::StoredClientPathView persisted_path =
         storedClientPathForSave(
-            fs, c, prior_path, &prior_path_len);
-    matches = readMatches(file, c->id.pub_key, 32)
+            fs, c, prior_path, &prior_path_len, &metadata_ok);
+    matches = metadata_ok && readMatches(file, c->id.pub_key, 32)
         && readMatches(file, &c->permissions, 1)
         && readMatches(file, (uint8_t*)&c->extra.room.sync_since, 4)
         && readMatches(file, unused, sizeof(unused))
@@ -609,7 +641,7 @@ void ClientACL::load(FILESYSTEM* fs, const mesh::LocalIdentity& self_id) {
   }
 #if !defined(NRF52_PLATFORM)
   if (!mesh::recoverClientACLFilesVerified(
-          _fs, validateContactsFileIntegrity)) {
+          _fs, validateContactsFileIntegrityChecked)) {
     MESH_DEBUG_PRINTLN("ERROR: ClientACL::load could not recover contacts files");
     return;
   }
@@ -748,7 +780,7 @@ bool ClientACL::save(FILESYSTEM* fs, bool (*filter)(ClientInfo*)) {
   mesh::AtomicFileWriter file(_fs, "/s_contacts");
 #else
   if (!mesh::recoverClientACLFilesVerified(
-          _fs, validateContactsFileIntegrity)) {
+          _fs, validateContactsFileIntegrityChecked)) {
     MESH_DEBUG_PRINTLN("ERROR: ClientACL::save recovery is incomplete");
     return false;
   }
@@ -780,10 +812,11 @@ bool ClientACL::save(FILESYSTEM* fs, bool (*filter)(ClientInfo*)) {
     success = success && (file.write(unused, 2) == 2);
     uint8_t prior_path_len = OUT_PATH_UNKNOWN;
     uint8_t prior_path[MAX_PATH_SIZE] = {};
+    bool metadata_ok = true;
     const mesh::StoredClientPathView persisted_path =
         storedClientPathForSave(
-            _fs, c, prior_path, &prior_path_len);
-    success = success
+            _fs, c, prior_path, &prior_path_len, &metadata_ok);
+    success = success && metadata_ok
         && (file.write(&persisted_path.encoded_path_len, 1) == 1);
     success = success
         && (file.write(persisted_path.path, MAX_PATH_SIZE) == MAX_PATH_SIZE);
@@ -837,7 +870,7 @@ bool ClientACL::save(FILESYSTEM* fs, bool (*filter)(ClientInfo*)) {
     return false;
   }
   success = mesh::publishVerifiedClientACLTemp(
-      _fs, true, validateContactsFileIntegrity);
+      _fs, true, validateContactsFileIntegrityChecked);
   if (!success) {
     MESH_DEBUG_PRINTLN("ERROR: ClientACL::save atomic publish failed");
   }

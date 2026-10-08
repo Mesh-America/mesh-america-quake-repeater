@@ -24,6 +24,8 @@ class Esp32TinyUsbRoleHygieneTest(unittest.TestCase):
             r"return buffered_esp32_tinyusb_terminal_port;\s+"
             r"#elif MESH_ESP32_HWCDC_SESSION_GUARD\s+"
             r"return guarded_esp32_hwcdc_port;\s+"
+            r"#elif MESH_NRF52_USB_CONSOLE_COOPERATIVE\s+"
+            r"return buffered_primary_usb_terminal_port;\s+"
             r"#else\s+return Serial;\s+#endif",
         )
 
@@ -140,15 +142,19 @@ class Esp32TinyUsbRoleHygieneTest(unittest.TestCase):
 
     def test_sleep_keeps_raw_flush_only_for_other_esp32_transports(self):
         text = source("src/helpers/ESP32Board.cpp")
+        shutdown = text[text.index("void ESP32Board::shutdownPeripherals(") :
+                        text.index("void ESP32Board::powerOff(")]
         sleep = text[text.index("void ESP32Board::enterDeepSleep(") :]
+        self.assertIn("shutdownPeripherals();", sleep)
         guard = re.search(
             r"#if MESH_ESP32_USB_CONSOLE_COOPERATIVE\s+"
             r"mesh::serviceUsbTerminalPort\(\);\s+"
             r"#else\s+Serial\.flush\(\);\s+#endif",
-            sleep,
+            shutdown,
         )
         self.assertIsNotNone(guard)
-        self.assertEqual(sleep.count("Serial.flush();"), 1)
+        self.assertEqual(shutdown.count("Serial.flush();"), 1)
+        self.assertNotIn("Serial.flush();", sleep)
 
     def test_large_file_dumps_are_bounded_and_cancelable(self):
         for role in ROLES:
@@ -177,9 +183,10 @@ class Esp32TinyUsbRoleHygieneTest(unittest.TestCase):
                     loop.index("servicePendingSerialOutput();"),
                 )
 
-    def test_recent_list_advances_only_after_whole_row_admission(self):
+    def test_recent_list_advances_only_after_retained_row_finishes(self):
         text = source("examples/simple_repeater/MyMesh.cpp")
         start = text.index("void MyMesh::servicePendingSerialOutput()")
+        start = text.index("if (serial_recent_next >= 0)", start)
         service = text[start : text.index("if (!serial_log_active)", start)]
         self.assertIn("char record[64];", service)
         self.assertIn("serial_recent_next < serial_recent_count", service)
@@ -187,10 +194,12 @@ class Esp32TinyUsbRoleHygieneTest(unittest.TestCase):
         self.assertNotIn("getRecentRepeaterBySortedIdx", service)
         self.assertNotRegex(service, r"\b(?:while|for)\s*\(")
         self.assertLess(
-            service.index("console.availableForWrite() < length"),
+            service.index("if (serial_log_pending_size != 0) return;"),
             service.index("++serial_recent_next"),
         )
-        self.assertIn("!= static_cast<size_t>(length)) return;", service)
+        self.assertIn("if (serial_log_pending_size == 0)", service)
+        self.assertIn("memcpy(serial_log_pending, record, length);", service)
+        self.assertIn("write_pending();", service)
 
     def test_functional_reserve_fits_default_full_acl_plus_command_echo(self):
         logging = source("src/helpers/UsbLogging.cpp")

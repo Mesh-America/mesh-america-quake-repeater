@@ -136,6 +136,9 @@ POST_INSTALL_READY_PROBE_INTERVAL_SECONDS = 10
 # or build VM. Keep the explicit preparation workflow bounded; Pi-class radio
 # hosts should serve an already-built, hash-verified package instead.
 DEFAULT_PACKAGE_BUILD_TIMEOUT_SECONDS = 60 * 60
+# Newer motatool versions precompress every payload block before opening the
+# device link. CPU-bound preparation must not consume the COUNT attach timer.
+DEFAULT_SEEDER_PREPARE_WAIT_SECONDS = 30 * 60
 COMPANION_TERMINAL_START = "+++MESHCORE-TERM-START"
 COMPANION_TERMINAL_STOP = "+++MESHCORE-TERM-STOP"
 # Firmware may hold the apply reboot for up to 15 seconds while its reply
@@ -3040,6 +3043,7 @@ def recommended_temp_radio_minutes(
         remote_setup_seconds
         + source_setup_seconds
         + TEMP_RADIO_SWITCH_DELAY_SECONDS
+        + getattr(args, "seeder_prepare_wait", DEFAULT_SEEDER_PREPARE_WAIT_SECONDS)
         + args.seeder_start_wait
         + args.discovery_timeout
         + args.transfer_timeout_minutes * 60
@@ -3059,7 +3063,8 @@ def warn_short_temp_radio_window(
     if selected < recommended:
         print(
             f"warning: TempRadio window is {selected} minutes; {recommended} minutes "
-            "covers the combined worst-case setup, discovery, transfer, and "
+            "covers the combined worst-case setup, seeder preparation, discovery, "
+            "transfer, and "
             "final checks. Continuing; the lease may expire before OTA completes.",
             file=sys.stderr,
         )
@@ -3794,6 +3799,12 @@ def verify_shared_source_identity(
 
 class SeederProcess:
     READY_PATTERN = re.compile(r"(?mi)^\s*\[dev\]\s+COUNT\s*->\s*\d+\b")
+    PREPARE_PATTERN = re.compile(
+        r"(?mi)^[ \t]*preparing raw-DEFLATE transport\b.*\bbefore opening the link\b"
+    )
+    PREPARE_PROGRESS_PATTERN = re.compile(
+        r"(?mi)^[ \t]*compressed (\d+)/(\d+) blocks[ \t\r]*$"
+    )
     ATTACH_ERROR_PATTERN = re.compile(
         r"(?mi)^\s*\[dev\].*\b(?:ERR|ERROR)\b|"
         r"folder\s+(?:is\s+)?already\s+(?:owned|attached)|"
@@ -3856,7 +3867,16 @@ class SeederProcess:
             )
 
     def _wait_until_attached(self) -> None:
-        deadline = time.monotonic() + self.args.seeder_start_wait
+        started = time.monotonic()
+        attach_deadline = started + self.args.seeder_start_wait
+        prepare_wait = getattr(
+            self.args, "seeder_prepare_wait", DEFAULT_SEEDER_PREPARE_WAIT_SECONDS
+        )
+        prepare_deadline = started + prepare_wait
+        preparing = False
+        prepared = False
+        last_progress = None
+        next_notice = started + 30
         while True:
             self.ensure_running("during startup")
             detail = self._log_tail()
@@ -3867,11 +3887,57 @@ class SeederProcess:
                 )
             if self.READY_PATTERN.search(detail):
                 return
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            if not prepared:
+                progress = self.PREPARE_PROGRESS_PATTERN.findall(detail)
+                latest_progress = tuple(map(int, progress[-1])) if progress else None
+                if not preparing and (
+                    self.PREPARE_PATTERN.search(detail) or latest_progress is not None
+                ):
+                    preparing = True
+                    print(
+                        "[seeder] preparing compressed blocks on the host; "
+                        f"allowing up to {prepare_wait:g}s before the device "
+                        "COUNT timer starts"
+                    )
+                if preparing:
+                    if now >= prepare_deadline:
+                        raise OtaError(
+                            "motatool seeder host compression did not complete "
+                            f"within {prepare_wait:g}s; the device COUNT timer has "
+                            "not started. Increase --seeder-prepare-wait on a slow "
+                            "host and leave enough TempRadio time for the transfer.\n"
+                            f"{detail}"
+                        )
+                    if latest_progress is not None:
+                        done, total = latest_progress
+                        if done == total and total > 0:
+                            prepared = True
+                            preparing = False
+                            attach_deadline = now + self.args.seeder_start_wait
+                            print(
+                                "[seeder] host compression complete; "
+                                "waiting for the device COUNT acknowledgement"
+                            )
+                    if preparing and (
+                        latest_progress != last_progress or now >= next_notice
+                    ):
+                        counts = (
+                            f" ({latest_progress[0]}/{latest_progress[1]} blocks)"
+                            if latest_progress is not None else ""
+                        )
+                        print(
+                            f"[seeder] still compressing{counts}; "
+                            f"{now - started:.0f}s elapsed"
+                        )
+                        last_progress = latest_progress
+                        next_notice = now + 30
+            remaining = (prepare_deadline if preparing else attach_deadline) - now
             if remaining <= 0:
+                phase = " after host compression completed" if prepared else ""
                 raise OtaError(
                     "motatool seeder did not receive the device COUNT "
-                    f"acknowledgement within {self.args.seeder_start_wait:g}s:\n"
+                    f"acknowledgement within {self.args.seeder_start_wait:g}s{phase}:\n"
                     f"{detail}"
                 )
             time.sleep(min(0.1, remaining))
@@ -7889,7 +7955,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--discovery-interval", type=int, default=8)
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--transfer-timeout-minutes", type=int, default=110)
-    parser.add_argument("--seeder-start-wait", type=int, default=5)
+    parser.add_argument(
+        "--seeder-prepare-wait", type=int, default=DEFAULT_SEEDER_PREPARE_WAIT_SECONDS,
+        help="maximum seconds for motatool host compression before opening the device link",
+    )
+    parser.add_argument(
+        "--seeder-start-wait", type=int, default=5,
+        help="seconds to wait for the device COUNT acknowledgement after host compression",
+    )
     parser.add_argument(
         "--reboot-wait",
         type=int,
@@ -8124,8 +8197,8 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
             parser.error(f"{label} contains an unsupported control character")
     for name in (
         "reply_timeout", "discovery_timeout", "discovery_interval", "poll_seconds",
-        "transfer_timeout_minutes", "seeder_start_wait", "reboot_wait",
-        "package_build_timeout",
+        "transfer_timeout_minutes", "seeder_prepare_wait", "seeder_start_wait",
+        "reboot_wait", "package_build_timeout",
     ):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")

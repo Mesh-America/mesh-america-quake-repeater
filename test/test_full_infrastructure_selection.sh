@@ -8,6 +8,36 @@ fail() { echo "test_full_infrastructure_selection: $*" >&2; exit 1; }
 # Resolve real board inheritance, but never compile or flash firmware.
 init_project_context >/dev/null
 
+# No fixture assertion is allowed to fall through into a firmware build. The
+# sole PlatformIO operation above resolves board metadata; all later calls are
+# errors, including dependency preflight before the compiler entry point.
+pio() { fail "selection fixture attempted PlatformIO after metadata resolution"; }
+prepare_esp32_arduino3_framework() { fail "selection fixture reached build preflight"; }
+run_pio_with_size_detection() { fail "selection fixture attempted compilation"; }
+collect_build_artifacts() { fail "selection fixture attempted artifact publication"; }
+
+use_qualified_resume_fixture() {
+  fixture_output_dir=$(mktemp -d "${TMPDIR:-/tmp}/mesh-full-selection.XXXXXX")
+  OUTPUT_DIR=$fixture_output_dir
+  trap 'rm -rf -- "$fixture_output_dir"' EXIT
+  # These tests mock package qualification to inspect target selection. Supply
+  # a real, schema-valid receipt for the new recipe gate too; its actual
+  # occupied/matches helpers run normally. Recipe hashing and package sealing
+  # are exercised independently by test_firmware_build_recipe.py.
+  compute_build_recipe_digest() {
+    python3 - "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" "$1" "$3" <<'PY'
+import json
+from pathlib import Path
+import sys
+digest = "a" * 64
+manifest = {"target": sys.argv[2], "platformio_env": sys.argv[3],
+            "build_recipe": {"schema_version": 1, "sha256": digest}}
+Path(sys.argv[1]).write_text(json.dumps(manifest) + "\n")
+print(digest)
+PY
+  }
+}
+
 assert_auto_unified() (
   local plain=$1 expected=$2
   BUILD_PROFILE_OVERRIDE=auto
@@ -89,11 +119,12 @@ for target in "${!PIO_ENV_PLATFORM_BY_NAME[@]}"; do
     full_only_count=$((full_only_count + 1))
   fi
 done
-[ "$full_only_count" -eq 147 ] || fail "expected 147 same-partition FULL-only targets, found $full_only_count"
+[ "$full_only_count" -eq 149 ] || fail "expected 149 same-partition FULL-only targets, found $full_only_count"
 
 for target in heltec_rc32_repeater Station_G2_repeater_observer_mqtt \
     Heltec_v3_repeater heltec_v4_r8_repeater \
-    heltec_v4_tft_repeater RAK_3112_repeater; do
+    heltec_v4_tft_repeater RAK_3112_repeater \
+    Station_G3_ESP32_sensor Station_G3_ESP32_r2_sensor; do
   is_esp32_full_only_bulk_target "$target" || fail "missed same-partition FULL-only target $target"
 done
 for target in LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt_ \
@@ -180,8 +211,9 @@ done
 
 # Direct observer promotion must use the matrix's exact output recipe even if
 # interactive flags previously requested MQTT without USB logging. Stop at the
-# existing-artifact check to exercise the real build entry point without pio run.
+# matching-recipe/qualified-artifact check without entering compilation.
 (
+  use_qualified_resume_fixture
   ESP32_FULL_BUILD=0
   BUILD_PROFILE_EFFECTIVE=standard
   BUILD_PROFILE_OVERRIDE=auto
@@ -211,6 +243,7 @@ done
 # A canonical bulk build promotes an audited target in-place, retaining its
 # environment/mOTA identity. Explicit standard builds remain untouched above.
 (
+  use_qualified_resume_fixture
   ESP32_FULL_BUILD=0
   BUILD_PROFILE_EFFECTIVE=standard
   BUILD_PROFILE_OVERRIDE=auto
@@ -232,6 +265,7 @@ done
     || fail "FULL-only bulk target lost its exact identity"
 )
 (
+  use_qualified_resume_fixture
   ESP32_FULL_BUILD=0
   BUILD_PROFILE_EFFECTIVE=standard
   BUILD_PROFILE_OVERRIDE=auto
@@ -250,6 +284,7 @@ done
     || fail "V4 Full did not keep its identity and unified feature recipe"
 )
 (
+  use_qualified_resume_fixture
   ESP32_FULL_BUILD=0
   BUILD_PROFILE_EFFECTIVE=standard
   BUILD_PROFILE_OVERRIDE=standard
@@ -296,23 +331,24 @@ done
     || fail "matrix emitted duplicate RC32 Full identities"
 )
 
-# A three-identity group keeps the audited plain target; a group without an
-# audited plain Full uses the feature-complete observer. Different hardware
-# variants must remain separate.
+# Canonical board/role identities share one exact Full pass. A group without
+# an audited plain Full keeps its feature-complete observer identity; legacy
+# observer/ESP-NOW aliases must not create duplicate builds or lose a role.
 (
   calls=()
   run_logged_build_targets() {
-    [ "$ESP32_FULL_BUILD" = 1 ] && calls+=("$*")
+    [ "$PACKET_LOGGING_OVERRIDE" = on ] || fail "multi-role Full lost packet logging"
+    [ "$MQTT_BRIDGE_OVERRIDE" = off ] || fail "multi-role Full changed its exact-identity recipe"
+    [ "$MESHDEBUG_OVERRIDE" = off ] || fail "multi-role Full enabled verbose debug"
+    calls+=("$BUILD_PROFILE_EFFECTIVE:$ESP32_FULL_BUILD:$FIRMWARE_FILENAME_INFIX:$*")
   }
   run_logging_matrix_build_targets Heltec_v3_repeater \
     Heltec_v3_repeater_observer_mqtt Heltec_v3_repeater_bridge_espnow \
     Tbeam_SX1262_repeater_bridge_espnow Tbeam_SX1262_repeater_observer_mqtt \
     Heltec_v3_room_server >/dev/null
-  [ "${#calls[@]}" -eq 2 ] || fail "multi-role matrix emitted too many Full passes"
-  [ "${calls[0]}" = 'Heltec_v3_repeater Heltec_v3_room_server' ] \
-    || fail "plain V3 Full identity or separate room role was lost"
-  [ "${calls[1]}" = Tbeam_SX1262_repeater_observer_mqtt ] \
-    || fail "T-Beam observer Full identity was lost"
+  [ "${#calls[@]}" -eq 1 ] || fail "multi-role matrix did not emit one exact Full pass"
+  [ "${calls[0]}" = 'full:1:full-logging:Heltec_v3_repeater Tbeam_SX1262_repeater_observer_mqtt Heltec_v3_room_server' ] \
+    || fail "multi-role Full changed canonical identities, roles, order, or profile"
 )
 
 (
@@ -329,16 +365,19 @@ done
 
 (
   calls=()
-  run_logged_build_targets() { calls+=("$*"); }
+  run_logged_build_targets() {
+    [ "$PACKET_LOGGING_OVERRIDE" = on ] || fail "Full-only bulk lost packet logging"
+    [ "$MQTT_BRIDGE_OVERRIDE" = off ] || fail "Full-only bulk changed its exact-identity recipe"
+    [ "$MESHDEBUG_OVERRIDE" = off ] || fail "Full-only bulk enabled verbose debug"
+    calls+=("$BUILD_PROFILE_EFFECTIVE:$ESP32_FULL_BUILD:$FIRMWARE_FILENAME_INFIX:$*")
+  }
   run_full_esp32_build_targets all heltec_v4_r8_repeater \
     heltec_v4_r8_repeater_observer_mqtt \
     Tbeam_SX1262_repeater_bridge_espnow \
     Tbeam_SX1262_repeater_observer_mqtt >/dev/null
-  [ "${#calls[@]}" -eq 2 ] || fail "Full-only bulk command emitted duplicate roles"
-  [ "${calls[0]}" = heltec_v4_r8_repeater ] \
-    || fail "Full-only bulk command lost the audited plain identity"
-  [ "${calls[1]}" = Tbeam_SX1262_repeater_observer_mqtt ] \
-    || fail "Full-only bulk command lost the T-Beam observer identity"
+  [ "${#calls[@]}" -eq 1 ] || fail "Full-only bulk did not emit one exact Full pass"
+  [ "${calls[0]}" = 'full:1:full-logging:heltec_v4_r8_repeater Tbeam_SX1262_repeater_observer_mqtt' ] \
+    || fail "Full-only bulk changed canonical identities, order, or profile"
 )
 
 (

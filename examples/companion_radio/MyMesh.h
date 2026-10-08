@@ -42,6 +42,7 @@
 #include <RTClib.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/BaseSerialInterface.h>
+#include <helpers/CompanionDelayedReplies.h>
 #include <helpers/CompanionMotaControl.h>
 #include <helpers/IdentityStore.h>
 #include <helpers/LogicalMessageCache.h>
@@ -49,6 +50,7 @@
 #include <helpers/StaticPoolPacketManager.h>
 #include <helpers/TerminalCommandTracker.h>
 #include <helpers/TerminalDisplayFilter.h>
+#include <helpers/UsbLogging.h>
 #include <target.h>
 #if defined(OTA_SHARED_COMPANION_QUEUE)
 #include <helpers/BorrowableFrameBuffer.h>
@@ -186,7 +188,7 @@ public:
   void activateRadio();
   bool isRadioReady() const { return _radio_available; }
   void startInterface(BaseSerialInterface &serial);
-  void cancelSerialResponseStream();
+  void cancelSerialResponseStream(BaseSerialInterface* route = NULL);
   void cancelSerialOperationsForRoute(BaseSerialInterface* route);
   bool hasFiniteDelayedReplyForRoute(BaseSerialInterface* route) const;
   void resetUsbHostSessionInput();
@@ -194,6 +196,8 @@ public:
   const char *getNodeName();
   CompanionNodePrefs *getNodePrefs();
   uint32_t getBLEPin();
+  bool setBluetoothEnabledPreference(bool enabled);
+  bool isBluetoothEnabledPreference() const;
 #if defined(BLE_PIN_CODE)
   bool prepareBluetoothMacForBoot(bool& address_rotated);
   bool armBluetoothMacRotationAfterConnection();
@@ -299,6 +303,11 @@ public:
   // setup/status commands here; Full builds add TempRadio and OTA commands.
   bool handleLocalControlCommand(const char* command, char* reply,
                                  size_t reply_size);
+  void applyUsbLoggingState(bool enabled);
+  // A framed USB logging change cannot abandon its requester before the
+  // acknowledgement has entered the transport. Other transports stay live.
+  void beginUsbLoggingReplyBarrier(BaseSerialInterface* route);
+  void endUsbLoggingReplyBarrier(bool reply_queued);
   bool handleTxRoutingCommand(const char* command, char* reply, size_t reply_size);
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
@@ -348,6 +357,9 @@ protected:
   bool sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
 
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
+#if MESH_PACKET_LOGGING && !MESH_PACKET_LOGGING_COMPACT
+  const char* getLogDateTime() override;
+#endif
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
   void logRx(mesh::Packet* packet, int len, float score) override;
   void logTx(mesh::Packet* packet, int len) override;
@@ -359,13 +371,14 @@ protected:
   bool canMutateContacts() const override;
   void onContactsFull() override;
   bool onContactOverwrite(const ContactInfo& contact) override;
+  void onContactReferenceChanged(const ContactInfo* previous, ContactInfo* replacement) override;
   bool onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_t in_path_len, uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
   void onContactPathUpdated(const ContactInfo &contact) override;
 #if COMPANION_FEATURE_TEXT_TERMINAL
   void onContactVisit(const ContactInfo& contact) override;
 #endif
-  ContactInfo* processAck(const uint8_t *data) override;
+  bool processAck(const uint8_t *data, ContactInfo*& peer) override;
 #if MESH_ENABLE_ONE_KEY_DM
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
                       const mesh::Identity& sender, uint8_t* data,
@@ -402,6 +415,8 @@ protected:
   uint32_t calcFloodTimeoutMillisFor(uint32_t pkt_airtime_millis) const override;
   uint32_t calcDirectTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t path_len) const override;
   void onSendTimeout() override;
+  bool allowRequestTag(uint32_t tag) override;
+  bool allocateRequestTag(uint32_t& tag) override;
 
   // DataStoreHost methods
   bool onContactLoaded(const ContactInfo& contact) override { return addContact(contact); }
@@ -416,9 +431,18 @@ protected:
 
 public:
   bool savePrefs() {
+    const uint8_t previous_usb_debug = _prefs.usb_debug_enabled;
+    _prefs.usb_debug_enabled = _prefs.usb_debug_enabled == 1 ? 1 : 0;
     const bool saved =
         _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
-    if (saved) _prefs.clearDirty();
+    if (saved) {
+      _prefs.clearDirty();
+#if MESH_USB_LOGGING_AVAILABLE
+      mesh::setUsbDebugEnabled(_prefs.usb_debug_enabled != 0);
+#endif
+    } else {
+      _prefs.usb_debug_enabled = previous_usb_debug;
+    }
     return saved;
   }
 #if COMPANION_FEATURE_READER
@@ -427,16 +451,19 @@ public:
 #endif
 
 #if ENV_INCLUDE_GPS == 1
+  bool setGpsEnabled(bool enabled);
   void applyGpsPrefs() {
     sensors.setSettingValue("gps", _prefs.gps_enabled ? "1" : "0");
     char interval_str[12];  // Max: 24 hours = 86400 seconds (5 digits + null)
     sprintf(interval_str, "%u", _prefs.gps_interval);
     sensors.setSettingValue("gps_interval", interval_str);
+    sensors.applyGpsTimeSyncInterval(_prefs.gps_sync_interval_hours);
   }
 #endif
 
   // To check if there is pending work
   bool hasPendingWork() const;
+  bool canRecoverUsbLogging() const;
 
 private:
   // Only snapshot the changed value: CompanionNodePrefs owns self-referencing
@@ -453,9 +480,10 @@ private:
   void writeOKFrame(BaseSerialInterface* route = nullptr);
   void writeErrFrame(uint8_t err_code,
                      BaseSerialInterface* route = nullptr);
-  size_t writePendingSerialFrame(const uint8_t frame[], size_t len);
+  size_t writePendingSerialFrame(const uint8_t frame[], size_t len, uint32_t now);
   void writeDisabledFrame();
-  bool writeContactRespFrame(uint8_t code, const ContactInfo &contact);
+  bool writeContactRespFrame(uint8_t code, const ContactInfo &contact,
+                             BaseSerialInterface* route = NULL);
   void stopContactsIterator();
   bool updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, const uint8_t *frame, int len);
   bool addToOfflineQueue(const uint8_t frame[], int len);
@@ -464,7 +492,12 @@ private:
     return _store->getBlobByKey(key, key_len, dest_buf);
   }
   bool putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], int len) override {
+#if defined(ESP32_PLATFORM)
+    return len > 0 && len <= 255
+        && _store->queueAdvertByKey(key, key_len, src_buf, len);
+#else
     return _store->putBlobByKey(key, key_len, src_buf, len);
+#endif
   }
 
   void checkCLIRescueCmd();
@@ -520,13 +553,17 @@ private:
                                const ContactInfo& recipient, int result,
                                uint32_t timeout_millis);
   void clearTerminalLogin();
+  void clearTerminalLogin(uint32_t now);
   void serviceTerminalLogin();
+  void serviceTerminalLogin(uint32_t now);
   void sendTerminalLogin(ContactInfo& recipient, const char* password);
   void clearTerminalCommand();
   void serviceTerminalCommand();
   void sendTerminalCommand(ContactInfo& recipient, const char* command);
   void clearTerminalTrace();
+  void clearTerminalTrace(uint32_t now);
   void serviceTerminalTrace();
+  void serviceTerminalTrace(uint32_t now);
   void sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
                               uint8_t hop_count, const char* target);
   void sendTerminalTrace(ContactInfo& recipient);
@@ -544,8 +581,15 @@ private:
   void cancelPendingRadioParamApply();
   void servicePendingRadioParamApply();
   void servicePendingSerialReply();
+  void servicePendingSerialReply(uint32_t now);
+  bool beginPendingRequest(mesh::CompanionDelayedReplies::Kind kind,
+                           const ContactInfo& contact, bool terminal = false);
+  void armPendingRequest(uint32_t tag, uint32_t timeout, bool flood);
+  void finishPendingRequest(int result, uint32_t tag, uint32_t timeout);
+  void abandonPendingRequest();
   void clearBinaryTraceReply();
   void serviceBinaryTraceReply();
+  void serviceBinaryTraceReply(uint32_t now);
   void cancelSigningSession();
   void serviceSigningSession();
 #if COMPANION_FEATURE_TEMP_RADIO
@@ -558,6 +602,9 @@ private:
   // helpers, short-cuts
   bool saveChannels() { return _store->saveChannels(this); }
   void saveContacts();
+#if defined(ESP32_PLATFORM)
+  void servicePersistence();
+#endif
   void scheduleContactWriteRetry();
   bool isContactWriteDue() const;
   bool flushContactsBeforeReboot();
@@ -602,12 +649,8 @@ private:
   bool _wc_mqtt_dirty;
   bool _wc_batch_active = false;
 #endif
-  uint32_t pending_login;
-  uint32_t pending_status;
-  uint32_t pending_telemetry, pending_discovery;   // pending _TELEMETRY_REQ
-  uint32_t pending_req;   // pending _BINARY_REQ
-  BaseSerialInterface* pending_serial_reply_route;
-  unsigned long pending_serial_reply_deadline;
+  mesh::CompanionDelayedReplies _delayed_replies;
+  bool _request_tag_rejected = false;
   BaseSerialInterface* private_key_backup_route = nullptr;
   unsigned long private_key_backup_deadline = 0;
   char private_key_backup_nonce[17] = {};
@@ -617,6 +660,7 @@ private:
   AbstractUITask* _ui;
 
   ContactsIterator _iter;
+  BaseSerialInterface* _iter_reply_route;
   ContactInfo _iter_pending_contact;
   uint32_t _iter_filter_since;
   uint32_t _iter_next_frame_at;
@@ -637,12 +681,13 @@ private:
   uint8_t _terminal_recipient_key[PUB_KEY_SIZE];
   uint8_t _terminal_tmp_buf[MAX_TRANS_UNIT];
   bool _terminal_login_pending;
-  uint8_t _terminal_login_key[4];
+  uint8_t _terminal_login_key[PUB_KEY_SIZE];
   unsigned long _terminal_login_expires_at;
   char _terminal_login_target[32];
   mesh::TerminalCommandTracker<PUB_KEY_SIZE> _terminal_command;
   char _terminal_command_target[32];
   bool _terminal_trace_pending;
+  uint8_t _terminal_trace_history = mesh::CompanionDelayedReplies::NO_HISTORY;
   uint8_t _terminal_trace_hash_size;
   uint32_t _terminal_trace_tag;
   uint32_t _terminal_trace_auth;
@@ -662,11 +707,6 @@ private:
   uint8_t command_radio_repeat;
   unsigned long command_radio_apply_deadline;
   BaseSerialInterface* command_radio_reply_route;
-  bool binary_trace_pending;
-  uint32_t binary_trace_tag;
-  uint32_t binary_trace_auth;
-  unsigned long binary_trace_deadline;
-  BaseSerialInterface* binary_trace_reply_route;
   // Deferred so USB/TCP terminals can transmit the acknowledgement before
   // the transport disappears. Also used by USB interface changes.
   unsigned long _scheduled_reboot_at;
@@ -691,6 +731,9 @@ private:
   unsigned long sign_data_deadline;
   unsigned long dirty_contacts_expiry;
   uint8_t dirty_contacts_failures;
+#if defined(ESP32_PLATFORM)
+  bool _advert_write_next = true;
+#endif
 
   TransportKey send_scope;
 
@@ -731,17 +774,18 @@ private:
 #endif
 
   struct AckTableEntry {
+    uint8_t retry_key[MAX_HASH_SIZE];
+    bool confirmed; // msg_sent holds the frozen RTT while host admission is pending
+#if COMPANION_FEATURE_TEXT_TERMINAL
+    bool terminal_origin;
+#endif
     unsigned long msg_sent;
     unsigned long expires_at;
     uint32_t ack;
     uint32_t message_timestamp;
     ContactInfo* contact;
     uint8_t text_fingerprint[MAX_HASH_SIZE];
-    uint8_t retry_key[MAX_HASH_SIZE];
     BaseSerialInterface* reply_route;
-#if COMPANION_FEATURE_TEXT_TERMINAL
-    bool terminal_origin;
-#endif
   };
   #define EXPECTED_ACK_TABLE_SIZE 8
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table

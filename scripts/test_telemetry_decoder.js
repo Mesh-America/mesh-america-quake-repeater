@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
 const decoder = require("../docs/_javascript/telemetry_decoder.js");
 
 let passed = 0;
@@ -60,6 +63,148 @@ function externalPacket(epoch, channel, codes) {
     Buffer.from("3e00", "hex"), header, pack15(codes),
   ]).toString("hex").toUpperCase();
 }
+
+// Run the real browser entry point. The DOM boundary starts with the empty host
+// shipped in Markdown and exposes only controls inserted by the actual script.
+function browserFixture(readyState = "complete") {
+  const fields = new Map();
+  const examples = new Map();
+  const downloads = [];
+  const blobs = new Map();
+  const events = new Map();
+  function element(tagName = "div", attributes = {}) {
+    const handlers = new Map();
+    return {
+      tagName, value: "", checked: false, hidden: false, textContent: "", children: [],
+      classList: { add() {} },
+      getAttribute(name) { return attributes[name] ?? null; },
+      addEventListener(name, callback) { handlers.set(name, callback); },
+      emit(name, event = {}) {
+        assert.ok(handlers.has(name), `Missing ${name} handler on ${tagName}`);
+        return handlers.get(name)(event);
+      },
+      append(...children) { this.children.push(...children); },
+      appendChild(child) { this.children.push(child); },
+      replaceChildren(...children) { this.children = children; },
+      focus() { this.focused = true; },
+      click() {
+        downloads.push({ filename: this.download, blob: blobs.get(this.href) });
+      },
+      remove() {},
+    };
+  }
+  const root = element();
+  let markup = "<p>Enable JavaScript on the documentation website to use the decoder.</p>";
+  Object.defineProperty(root, "innerHTML", {
+    get() { return markup; },
+    set(value) {
+      markup = value;
+      fields.clear(); examples.clear();
+      for (const match of value.matchAll(/<([a-z][a-z0-9]*)\b([^>]*)>/gi)) {
+        const attributes = Object.fromEntries(
+          Array.from(match[2].matchAll(/([\w-]+)="([^"]*)"/g), (item) => [item[1], item[2]])
+        );
+        const node = element(match[1], attributes);
+        node.hidden = /(?:^|\s)hidden(?:\s|$)/.test(match[2]);
+        if (attributes["data-role"]) fields.set(attributes["data-role"], node);
+        if (attributes["data-telemetry-example"]) {
+          examples.set(attributes["data-telemetry-example"], node);
+        }
+      }
+    },
+  });
+  root.querySelector = (selector) => {
+    const match = selector.match(/^\[data-role='([^']+)'\]$/);
+    return match ? fields.get(match[1]) ?? null : null;
+  };
+  root.querySelectorAll = (selector) => selector === "[data-telemetry-example]"
+    ? Array.from(examples.values()) : [];
+  const context = {
+    atob: globalThis.atob, URLSearchParams, location: { search: "" },
+    Blob: class { constructor(parts, options) { this.parts = parts; this.options = options; } },
+    URL: {
+      createObjectURL(blob) { const url = `blob:${blobs.size}`; blobs.set(url, blob); return url; },
+      revokeObjectURL(url) { blobs.delete(url); },
+    },
+    document: {
+      readyState, body: element("body"), createElement: element,
+      querySelector: (selector) => selector === "[data-telemetry-decoder]" ? root : null,
+      addEventListener: (name, callback) => events.set(name, callback),
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(
+    path.join(__dirname, "../docs/_javascript/telemetry_decoder.js"), "utf8"
+  ), context);
+  return { root, fields, examples, downloads, boot() { events.get("DOMContentLoaded")(); } };
+}
+
+test("GitHub readers can open the hosted decoder from its packet section", () => {
+  const documentation = fs.readFileSync(
+    path.join(__dirname, "../docs/telemetry_decoder.md"), "utf8"
+  );
+  const hostedDecoder =
+    "https://mikecarper.github.io/MeshCore/telemetry_decoder/#decode-a-packet";
+  const introduction = documentation.split("## Send raw telemetry packets")[0];
+  assert.ok(introduction.includes(
+    'class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/telemetry_decoder/"'
+  ), "The source-visible banner must link to the canonical hosted page.");
+  assert.ok(!introduction.includes(`](${hostedDecoder})`),
+    "The introduction must use the banner that disappears on the official host.");
+  const packetSection = documentation.split("## Decode a packet\n")[1]
+    .split('<div class="telemetry-tool"')[0];
+  assert.ok(packetSection.includes(`](${hostedDecoder})`),
+    "The GitHub #decode-a-packet anchor must lead readers to the working tool.");
+  assert.match(documentation, /GitHub's Markdown preview[\s\S]*cannot run/);
+  assert.doesNotMatch(documentation, /<(?:textarea|input|button)\b/i,
+    "GitHub Markdown must not display a browser-only form.");
+  assert.match(documentation, /<div class="telemetry-tool" data-telemetry-decoder>/);
+  const configuration = fs.readFileSync(path.join(__dirname, "../mkdocs.yml"), "utf8");
+  assert.match(configuration, /^\s+- _javascript\/telemetry_decoder\.js\?v=\S+$/m,
+    "A versioned script prevents the old cached script from using the new empty host.");
+});
+
+test("browser initialization creates the form and wires every example", () => {
+  const fixture = browserFixture();
+  assert.match(fixture.root.innerHTML, /<textarea[\s\S]*data-role="input"/);
+  for (const [example, count] of [
+    ["packetTemperature", 8], ["packetVoltage", 8],
+    ["packetExternalVoltage", 8], ["externalVoltage", 48],
+  ]) {
+    fixture.examples.get(example).emit("click");
+    assert.strictEqual(fixture.fields.get("results").hidden, false,
+      fixture.fields.get("error").textContent);
+    assert.strictEqual(fixture.fields.get("error").hidden, true);
+    assert.strictEqual(fixture.fields.get("table").children[1].children.length, count);
+  }
+});
+
+test("browser form waits for DOM ready and preserves decode, clear and CSV", () => {
+  const fixture = browserFixture("loading");
+  assert.strictEqual(fixture.fields.size, 0);
+  fixture.boot();
+  fixture.fields.get("input").value = VOLTAGE_PACKET;
+  let prevented = false;
+  fixture.fields.get("input").emit("keydown", {
+    key: "Enter", ctrlKey: true, preventDefault() { prevented = true; },
+  });
+  assert.strictEqual(prevented, true);
+  fixture.fields.get("download").emit("click");
+  assert.strictEqual(fixture.downloads.length, 1);
+  assert.strictEqual(fixture.downloads[0].filename,
+    "meshcore-telemetry-1122334455667788-voltage.csv");
+  const csv = fixture.downloads[0].blob.parts.join("");
+  assert.match(csv, /2\.86 V/);
+  assert.strictEqual(csv.split("\r\n").length, 9);
+  fixture.fields.get("clear").emit("click");
+  assert.strictEqual(fixture.fields.get("input").value, "");
+  assert.strictEqual(fixture.fields.get("results").hidden, true);
+  fixture.fields.get("input").value = "not a telemetry packet";
+  fixture.fields.get("decode").emit("click");
+  assert.strictEqual(fixture.fields.get("error").hidden, false);
+  fixture.examples.get("packetTemperature").emit("click");
+  assert.strictEqual(fixture.fields.get("error").hidden, true);
+  assert.strictEqual(fixture.fields.get("results").hidden, false);
+});
 
 test("decodes complete analyzer temperature packet hex", () => {
   const decoded = decoder.decodeRawTelemetryHex(TEMPERATURE_PACKET);

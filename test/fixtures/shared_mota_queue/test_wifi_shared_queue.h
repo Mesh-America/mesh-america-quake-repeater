@@ -115,6 +115,36 @@ static void test_wifi_shared_queue(Queue& q, CheckMessages check_messages) {
     packets.clear();
   }
 
+  // TCP keeps legacy retries on the same connection. A genuinely new socket
+  // starts its next catalog handshake without old transport state.
+  WiFi.connected = true;
+  auto stalled = connect_host();
+  WiFiOtaSeeder::loop();
+  assert(WiFiOtaSeeder::isAttached() && ota_ctx().manager.servedCount() == 1);
+  stalled->respond = [](const uint8_t* request, size_t) {
+    assert(request[2] == MS_OP_COUNT);
+    return std::vector<uint8_t>{'m', 's', MS_OP_COUNT, MS_STATUS_OK};
+  };
+  const unsigned before_timeout = stalled->requests;
+  ota_ctx().manager.refresh_sources();
+  assert(stalled->requests == before_timeout + 1);
+  assert(ota_ctx().manager.servedCount() == 0);
+  WiFiOtaSeeder::loop();
+  ota_ctx().manager.refresh_sources();
+  assert(stalled->requests == before_timeout + 2);
+  stalled->connected = false;
+  WiFiOtaSeeder::loop();
+  ota_release_context_if_idle(true);
+  auto replacement = connect_host();
+  WiFiOtaSeeder::loop();
+  assert(replacement->requests >= 2 && WiFiOtaSeeder::isAttached());
+  assert(ota_ctx().manager.servedCount() == 1);
+  WiFiOtaSeeder::stop();
+  ota_release_context_if_idle(true);
+  assert(!ota_context_if_active() && q.buffer.capacity() == 256);
+  check_messages();
+  packets.clear();
+
   // An incoming TCP client and listener stop must not detach a USB source.
   char reply[160];
   assert(ota_acquire_context(reply, sizeof reply));

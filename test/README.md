@@ -28,6 +28,7 @@ python3 test/test_nimble_companion.py           # real adapter, fixed/random PIN
 python3 test/test_companion_pairing_display.py # real OLED pairing wake, USB coexistence and button navigation
 python3 test/test_companion_identity_startup.py # real saved/missing/unreadable identity branch and truthful startup phases
 python3 test/test_startup_screen.py            # early display ordering and cooperative entropy progress
+python3 -B test/test_common_prefs_legacy_rxgain.py -v # compact stock gain, appended tails and truncation
 python3 test/test_companion_settings_persistence_contract.py  # Atomic settings and appended Bluetooth fields
 python3 test/test_webconfig_ui.py              # Web controls, reboot handling and generated-page consistency
 python3 test/test_webconfig_ui_runtime.py      # Real Chromium, including independent stealth toggle
@@ -61,6 +62,71 @@ The WebConfig browser suite skips if no Chromium-family browser is available.
 With a sandboxed browser that cannot read `/tmp`, set `TMPDIR` to a writable
 directory visible to that browser before running it. The Bluetooth settings
 contracts and WebConfig suites also run in the unit-test GitHub workflow.
+
+The common preference gain tests compile the current reader and writer sections
+with unmodified, commit-bound stock 1.14.0 and 1.14.1 writer excerpts. They cover
+the saved enabled gain in a compact 290-byte image, newer explicit on/off tails,
+legacy MQTT gaps, truncation, and a reverted-code failure. Zero at the old offset
+is indistinguishable from pre-1.14.1 padding, so the compact-image fallback keeps
+the board default for zero or invalid values. These are host tests, not a
+physical upgrade test.
+
+### Linux native Web Serial preflight
+
+After the last pyserial query, prepare the explicit radio TTY before a native
+Chromium Web Serial trial. Some Linux Chromium builds inherit `VMIN=0` from
+pyserial and mistake an idle read for device loss. Pause other serial clients
+first; another opener can change these settings or consume replies.
+
+```python
+from tools.hil.linux_web_serial import prepared_linux_web_serial
+
+with prepared_linux_web_serial("/dev/serial/by-id/<exact-radio>-if00") as host:
+    # Run the native browser controller here and record host with its receipt.
+    # Its finally cleanup must close the browser reader, writer and port.
+    # Controllers must route termination signals into that same cleanup.
+    ...
+```
+
+The helper changes/checks only `VMIN=1, VTIME=0`, closes its descriptor before
+the trial, and restores all original termios attributes on context exit or
+failed preparation. It does not call DTR/RTS, reset USB, send data, change
+firmware, extend a deadline, or retry a command. Endpoint replacement and
+failed readback are explicit failures. The real Linux pseudoterminal regression
+uses no radio and is included in the unit-test workflow:
+
+```sh
+python3 -B test/test_hil_linux_web_serial.py -v
+```
+
+See [the scoped G2 comparison and Chromium source evidence](../docs/research/linux_chromium_web_serial_tty.md).
+
+### Timed WiFi return guard
+
+The host-only SlowFi guard tests use fake NetworkManager responses and local
+locks. They cover recurring recovery after more than five failures, bounded
+attempts, exact original UUID plus connected-state proof, overlapping attempts,
+cleanup refusal while the original network is unproven, owned-profile collisions,
+and timer-stop side effects with uncertain results. They do not test a real
+systemd timer, WiFi association, a Pi, or a radio:
+
+```sh
+python3 -B test/test_hil_slowfi_guard.py -v
+```
+
+The helper's CLI defaults to a plan and makes no NetworkManager/systemd calls:
+
+```sh
+python3 -B -m tools.hil.slowfi_guard --config /path/to/reviewed-config.json
+```
+
+A future hardware test must separately bind and stage the reviewed host config,
+use a fresh owned unit identity, and prove the actual first timer deadline before
+changing the Pi's network. The rendered guard first attempts the original UUID
+after 660 seconds, then retries 30 seconds after each bounded attempt until the
+original UUID is connected. It never edits the original profile. Live recovery
+and cleanup require explicit authorization, root-owned staged files and host
+identity checks; cleanup also refuses unless the original network is proven.
 
 The bootloader-version regression compiles the production reader with a C++17
 `g++` (or `CXX`) compiler. Its offline cases include the MeshTower V2 SD 2.4.6

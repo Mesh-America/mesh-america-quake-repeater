@@ -49,6 +49,7 @@ COMMON_QUERY_EXCEPTIONS = {
     'bootloader.ver': 'Installed bootloader identity',
     'bridge.running': 'Live bridge state; set bridge.enabled controls intent',
     'espnow.running': 'Live ESP-NOW bridge state; set espnow.enabled controls intent',
+    'rs232.running': 'Live UART bridge state; set rs232.enabled controls intent',
     'bridge.type': 'Build-selected bridge transport',
     'password': 'Written by the password command, not set password',
     'public.key': 'Derived from identity; written through set prv.key',
@@ -62,11 +63,13 @@ COMMON_QUERY_EXCEPTIONS = {
     'wifi.pwd': 'Setter is in the observer or standalone-WiFi delegate',
 }
 OBSERVER_QUERY_EXCEPTIONS = {
+    'link.dns': 'Live resolver list, gateway, and retained per-medium lease diagnostics',
     'mqtt.config.valid': 'Configuration validation result',
     'mqtt.enabled': 'Stored in common NodePrefs; set mqtt.enabled is handled by CommonCLI',
     'mqtt.ntp.diag': 'NTP diagnostics',
     'mqtt.presets': 'List of available presets',
     'mqtt.running': 'Live state; set mqtt.enabled controls intent',
+    'mqtt.stopping': 'Pending worker-owned shutdown; set mqtt.enabled off requests it',
     'mqtt.stats': 'Runtime MQTT statistics',
     'wifi.status': 'Live connection status',
 }
@@ -85,6 +88,12 @@ class CLISettingsContractTest(unittest.TestCase):
             'esp32_mqtt_espnow': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_MQTT_BRIDGE',
                                    'WITH_ESPNOW_BRIDGE', 'WITH_BRIDGE'],
             'rs232_gps': ['WITH_BRIDGE', 'WITH_RS232_BRIDGE', 'ENV_INCLUDE_GPS'],
+            'rs232_espnow': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_BRIDGE',
+                            'WITH_RS232_BRIDGE', 'WITH_ESPNOW_BRIDGE'],
+            'mqtt_rs232_espnow': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_BRIDGE',
+                                  'WITH_MQTT_BRIDGE', 'WITH_RS232_BRIDGE', 'WITH_ESPNOW_BRIDGE'],
+            'mqtt_rs232': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_BRIDGE',
+                           'WITH_MQTT_BRIDGE', 'WITH_RS232_BRIDGE'],
             'espnow': ['ESP_PLATFORM', 'ESP32_PLATFORM', 'WITH_BRIDGE', 'WITH_ESPNOW_BRIDGE', 'MESH_PRIMARY_ESPNOW'],
             'lr2021': ['USE_LR2021'],
         }
@@ -195,6 +204,7 @@ class CLISettingsContractTest(unittest.TestCase):
             'key.backup.transport',                  # Identity-backup transport capability
             'mqtt', 'mqtt.running',                  # MQTT connection status
             'password', 'prv.key',                   # Local secret/identity reads
+            'public.key',                            # Read-only public identity
             'pwrmgt.bootreason', 'role',             # Boot/build facts
             'radio.rxps.config',                     # Detail view of radio.rxps
             'wifi.status', 'wifi.ip',                # Live WiFi link state

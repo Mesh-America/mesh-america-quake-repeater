@@ -1,8 +1,10 @@
 #pragma once
 
+#include "UsbLoggingStatus.h"
+
 // Canonical USB-capable images compile at least one of these two diagnostics.
-// One runtime gate covers every diagnostic category that writes to the USB
-// Serial stream, so a separate logging firmware is unnecessary.
+// A master USB output gate and a separate debug-verbosity gate keep packet
+// capture available without verbose diagnostics or a separate logging image.
 #if !defined(MESH_USB_LOGGING_DISABLED) && defined(ARDUINO) && \
     ((defined(MESH_DEBUG) && MESH_DEBUG) || \
      (defined(MESH_PACKET_LOGGING) && MESH_PACKET_LOGGING))
@@ -41,10 +43,21 @@
   #define MESH_ESP32_USB_CONSOLE_COOPERATIVE 0
 #endif
 
+#if defined(NRF52_PLATFORM) && defined(USE_TINYUSB)
+  #define MESH_NRF52_USB_CONSOLE_COOPERATIVE 1
+#else
+  #define MESH_NRF52_USB_CONSOLE_COOPERATIVE 0
+#endif
+#define MESH_USB_CONSOLE_COOPERATIVE \
+  (MESH_ESP32_USB_CONSOLE_COOPERATIVE || MESH_NRF52_USB_CONSOLE_COOPERATIVE)
+
 namespace mesh {
 
 #ifndef MESH_ESP32_USB_TX_BUFFER_SIZE
   #define MESH_ESP32_USB_TX_BUFFER_SIZE 4096
+#endif
+#ifndef MESH_ESP32_USB_RX_BUFFER_SIZE
+  #define MESH_ESP32_USB_RX_BUFFER_SIZE 1024
 #endif
 
 namespace detail {
@@ -65,19 +78,34 @@ inline size_t nextUsbLoggingIdentityOffset(size_t current_offset,
 // protect framed traffic and restores its saved choice after preferences load.
 bool isUsbLoggingEnabled();
 void setUsbLoggingEnabled(bool enabled);
+// Verbose diagnostics are opt-in and persisted by the role preferences.
+// The requested setting survives switching the master USB output gate off.
+bool isUsbDebugEnabled();
+void setUsbDebugEnabled(bool enabled);
+inline bool isUsbDebugLoggingEnabled() {
+  return isUsbLoggingEnabled() && isUsbDebugEnabled();
+}
 
 // Kept as a platform-neutral persistence hook. Single-TTY builds need no
 // descriptor mirror; nRF52 selects its optional second interface after loading
 // the normal role preferences.
 bool saveUsbLoggingBootPreference(bool enabled);
+// Select the saved Companion packet-stream mode before preferences enable
+// logging and before the optional second CDC is configured. This keeps CLI
+// replies and packet records on one port for stock serial packet bridges.
+void configureUsbLoggingPacketStream(bool enabled);
+bool isUsbLoggingPacketStream();
 
 // Record the HWCDC TX ring size actually allocated during early setup. A zero
 // value keeps reset cleanup quarantined and eligible for a minimum-size retry
 // instead of mistaking an allocation failure for a permanently non-empty ring.
 void setUsbCompanionTxBufferCapacity(size_t capacity);
 
-// Configure ESP32 HWCDC's bounded write timeout and TX ring before Serial.begin
-// creates its mutex and enables the USB ISR. Safe as a no-op on other ports.
+// Configure ESP32 HWCDC's RX queue, bounded write timeout and TX ring before
+// Serial.begin creates its mutex and enables the USB ISR. HWCDC silently drops
+// incoming bytes when its queue is full; hosts must wait for each command reply
+// rather than pipeline bursts larger than the bounded queue. Safe as a no-op
+// on other ports.
 void prepareUsbLoggingPort();
 
 // Start the optional dedicated USB logging interface. Ordinary and single-TTY
@@ -91,6 +119,9 @@ void beginUsbLoggingPort();
 // such as /dev/ttyACM1 or COM7.
 void serviceUsbLoggingPort();
 Stream& usbLoggingPort();
+// Debug-only output uses the same bounded transport when BOTH gates are on.
+// Packet records, identity markers and functional replies must not use this.
+Stream& usbDebugPort();
 // Primary USB Companion data stream. Native TinyUSB on nRF52 and ESP32 uses
 // one FIFO attempt per write, never the framework's wait-for-space loop.
 // Callers retain and retry unwritten suffixes. Other platforms retain Serial
@@ -99,7 +130,7 @@ Stream& usbCompanionPort();
 // A primary nRF52 client may send commands with DTR low (stock MeshCLI does).
 // Accept actual input in the current USB session as proof of a reader, while
 // retaining the same close/reset generation gate used by the transport.
-#if defined(NRF52_PLATFORM) && defined(ENABLE_USB_INTERFACE)
+#if defined(NRF52_PLATFORM) && (defined(ENABLE_USB_INTERFACE) || defined(USE_TINYUSB))
 bool isUsbCompanionClientConnected();
 #endif
 // Serial mOTA requests are binary records of at most 11 bytes. On TinyUSB this
@@ -129,6 +160,8 @@ uint32_t usbTerminalDroppedBytes();
 // CDC0 DTR-low on TinyUSB, or a hardware CDC bus reset on ESP32. This is
 // independent of polling current line/SOF state; ESP32 retains that poll as a
 // fallback because its bundled framework event queue is finite.
+// The first HWCDC call ends cold-start enumeration before protocol input is
+// processed. Enumeration during setup preserves the first host's queued RX.
 bool takeUsbTerminalSessionReset();
 // After the application has reset its protocol state, atomically purge any
 // CDC0 writer that raced the close callback and reopen the producer gate. A
