@@ -11,6 +11,9 @@ import sys
 import struct
 import zipfile
 import zlib
+from package_meshtext_license import (CAPABILITY as MESHTEXT_CAPABILITY,
+    meshtext_evidence, notice_bytes as meshtext_notice_bytes,
+    notice_record as meshtext_notice_record)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "mota"))
 from motalib import parse_nrf52_layout
@@ -186,6 +189,19 @@ def main() -> int:
 
     checks = []
     malformed = False
+    third_party_notices = []
+    try:
+        codec_symbols, chat_symbols = meshtext_evidence(args.image)
+        if codec_symbols:
+            stem = args.output.name.removesuffix(".capabilities.json")
+            third_party_notices.append(meshtext_notice_record(stem, meshtext_notice_bytes()))
+        if chat_symbols:
+            checks.append({"capability": MESHTEXT_CAPABILITY,
+                           "evidence": "; ".join(chat_symbols), "present": True,
+                           "source": "linked ELF symbols"})
+    except (OSError, ValueError) as error:
+        print(f"capability check: cannot qualify linked Meshtext code: {error}", file=sys.stderr)
+        malformed = True
     application = b""
     if args.expect_application:
         try:
@@ -245,6 +261,8 @@ def main() -> int:
         "ota_update_evidence": ota_evidence,
         "verified": not malformed and not missing and (not args.require_ota or ota_verified),
     }
+    if third_party_notices:
+        manifest["third_party_notices"] = third_party_notices
     if ota_verified and args.platform == "NRF52_PLATFORM" and "lora" in ota_methods:
         with zipfile.ZipFile(args.dfu_package) as package:
             app = json.loads(package.read("manifest.json"))["manifest"]["application"]

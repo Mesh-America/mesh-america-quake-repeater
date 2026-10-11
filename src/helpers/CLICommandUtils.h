@@ -136,6 +136,17 @@ inline const char* terminalPasswordInput(const char* line) {
       == TerminalArgumentCommandMatch::Valid) {
     return password;
   }
+  // `set mt.channel <slot> <name> <PSK>`: never echo private channel keys.
+  const char* channel = nullptr;
+  if (parseTerminalArgumentCommand(setting, "mt.channel", channel)
+      == TerminalArgumentCommandMatch::Valid) {
+    for (unsigned token = 0; token < 2; ++token) {
+      while (*channel && *channel != ' ' && *channel != '\t') ++channel;
+      channel = skipRecentRepeaterSpaces(channel);
+      if (!*channel) return nullptr;
+    }
+    return channel;
+  }
   return nullptr;
 }
 

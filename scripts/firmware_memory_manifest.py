@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from package_nrf52_font_license import validate_artifact_notice
+from package_meshtext_license import validate_artifact_notice as validate_meshtext_notice
 
 
 def digest(path):
@@ -43,6 +44,7 @@ def artifact_files(stem):
     candidates = [stem.parent / (stem.name + suffix)
                   for suffix in (".bin", "-merged.bin", ".uf2", ".zip", ".hex", ".capabilities.json",
                                  ".font-license.txt")]
+    candidates.append(stem.parent / (stem.name + ".meshtext-license.txt"))
     return [p for p in candidates if p.is_file()]
 
 
@@ -50,6 +52,7 @@ def package_report(directory, stem):
     stem = Path(stem)
     report = validate_build(directory)
     validate_artifact_notice(stem)
+    validate_meshtext_notice(stem)
     files = artifact_files(stem)
     if len(files) < 2 or not any(p.suffix in (".bin", ".uf2", ".zip", ".hex") for p in files):
         raise ValueError("cannot qualify an empty firmware package")
@@ -64,6 +67,7 @@ def package_report(directory, stem):
 def validate_package(stem):
     stem = Path(stem)
     validate_artifact_notice(stem)
+    validate_meshtext_notice(stem)
     report = passing_report(stem.parent / (stem.name + ".memory.json"))
     actual = {p.name: digest(p) for p in artifact_files(stem)}
     if len(actual) < 2 or actual != report.get("files"):

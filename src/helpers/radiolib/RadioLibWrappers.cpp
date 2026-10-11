@@ -298,6 +298,9 @@ bool RadioLibWrapper::restoreAfterDeepInit() {
     restored = _radio->setPreambleLength(currentPreambleLength())
         == RADIOLIB_ERR_NONE;
   }
+#if MESH_ENABLE_MESHTEXT_CHAT
+  restored = restored && applyProtocol(_physical_protocol);
+#endif
   if (_dbm_valid) {
     restored = applyCachedTxPower(_cur_dbm) == RADIOLIB_ERR_NONE && restored;
   }
@@ -323,6 +326,9 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
   const uint8_t previous_sf = _cur_sf;
   const uint8_t previous_cr = _cur_cr;
   const uint16_t previous_preamble = _physical_preamble;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  const auto previous_protocol = _physical_protocol;
+#endif
   const uint8_t previous_profile = _active_profile;
   const uint32_t previous_generation = _profile_generation;
   const bool previous_refresh = _profile_refresh_required;
@@ -337,6 +343,10 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
   _physical_preamble = profilePreamble(0);
 
   bool success = applyParams(freq, bw, sf, cr);
+#if MESH_ENABLE_MESHTEXT_CHAT
+  success = success && applyProtocol(requested.protocol);
+  if (success) _physical_protocol = requested.protocol;
+#endif
   if (success) {
     cacheParams(freq, bw, sf, cr);
     _active_profile = 0;
@@ -367,6 +377,9 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
     _profile_generation = previous_generation;
     _profile_refresh_required = previous_refresh;
     _physical_preamble = previous_preamble;
+#if MESH_ENABLE_MESHTEXT_CHAT
+    _physical_protocol = previous_protocol;
+#endif
     _rx_ps_enabled = previous_rxps;
     _profile_saved_rxps = previous_saved_rxps;
     _rx_ps_continuous_fallback = previous_fallback;
@@ -375,6 +388,9 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
     bool restored = had_previous_params
       && _radio->standby() == RADIOLIB_ERR_NONE
       && applyParams(previous_freq, previous_bw, previous_sf, previous_cr);
+#if MESH_ENABLE_MESHTEXT_CHAT
+    restored = restored && applyProtocol(previous_protocol);
+#endif
 
     if (!restored) restored = restoreAfterDeepInit();
     if (restored) endReconfigure(resume_rx);
@@ -391,6 +407,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
 
 bool RadioLibWrapper::validateProfile(const mesh::RadioProfileParams& p) const {
   if (!mesh::RadioProfiles::valid(p)) return false;
+  if (p.protocol == mesh::RadioProfileProtocol::Meshtext && !supportsMeshtext()) return false;
 #if defined(USE_SX1276)
   return p.freq >= 137 && p.freq <= 1020 && p.sf >= 7 && p.bw <= 500;
 #elif defined(USE_SX1272)
@@ -432,8 +449,19 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   const bool old_refresh = _profile_refresh_required;
   const bool old_params_valid = _params_valid;
   const uint16_t old_preamble = _physical_preamble;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  const auto old_protocol = _physical_protocol;
+#endif
   _physical_preamble = preamble;
   bool applied = applyParams(p.freq, p.bw, p.sf, p.cr);
+#if MESH_ENABLE_MESHTEXT_CHAT
+  // Changing only the protocol still changes the sync word. Conversely a
+  // failed write must not publish the new generation or cached wire format.
+  if (applied && (_physical_protocol != p.protocol || _profile_refresh_required)) {
+    applied = applyProtocol(p.protocol);
+  }
+  if (applied) _physical_protocol = p.protocol;
+#endif
   if (applied) {
     cacheParams(p.freq, p.bw, p.sf, p.cr);
     _active_profile = profile;
@@ -456,8 +484,14 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
     _profile_generation = old_generation;
     _profile_refresh_required = old_refresh;
     _physical_preamble = old_preamble;
+#if MESH_ENABLE_MESHTEXT_CHAT
+    _physical_protocol = old_protocol;
+#endif
     bool restored = old_params_valid && _radio->standby() == RADIOLIB_ERR_NONE
         && applyParams(old_freq, old_bw, old_sf, old_cr);
+#if MESH_ENABLE_MESHTEXT_CHAT
+    restored = restored && applyProtocol(old_protocol);
+#endif
     if (!restored) restored = restoreAfterDeepInit();
     if (restored) endReconfigure(resume);
     if (!restored || (resume && !isInRecvMode())) _profile_refresh_required = true;
@@ -631,6 +665,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetPrimaryParams(const mesh::Rad
   const bool was_temp = _profiles.primary_temporary;
   const uint32_t generation = _profiles.generation[0];
   _profiles.primary.preamble = p.preamble;
+  _profiles.primary.protocol = p.protocol;
   _profiles.primary_temporary = temporary;
   const auto result = trySetParams(p.freq, p.bw, p.sf, p.cr, timings);
   if (result != mesh::RadioParamApplyResult::APPLIED) {

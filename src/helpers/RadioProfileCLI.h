@@ -4,6 +4,7 @@
 #include <helpers/IdentityStore.h>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/FleetControlConfig.h>
+#include <helpers/MeshtextConfig.h>
 
 namespace mesh {
 
@@ -28,6 +29,20 @@ class RadioProfileCLI {
   RadioCrossMode cross_ = RadioCrossMode::Auto;
   uint8_t reply_setting_ = 0;  // reserved image byte: 0 = role default
   bool infrastructure_replies_ = false;
+  // Saved Off can be an explicit veto, rather than an unused secondary slot.
+  bool manual_secondary_ = false;
+  uint32_t secondary_intent_generation_ = 0;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  RadioProfileConfig auto_secondary_;
+  bool auto_secondary_requested_ = false;
+  bool secondary_protocol_overlay_ = false;
+  RadioProfileProtocol secondary_protocol_ = RadioProfileProtocol::MeshCore;
+  RadioProfileConfig owned_secondary_snapshot_;
+  uint32_t owned_secondary_generation_ = 0;
+  bool owns_secondary_runtime_ = false, external_secondary_override_ = false;
+  bool runtimeSecondaryUnchanged() const;
+  void protectExternalSecondary();
+#endif
   Schedule schedules_[8];
   uint32_t temp_remaining_ms_ = 0;
   uint32_t temp_start_ms_ = 0;
@@ -63,17 +78,21 @@ class RadioProfileCLI {
 #if MESH_ENABLE_FLEET_CONTROL
   bool stageRemoteSchedule(unsigned slot, const Schedule& schedule);
 #endif
-  bool save(const RadioProfileConfig& config, uint16_t preamble, RadioCrossMode cross);
+  bool save(const RadioProfileConfig& config, uint16_t preamble, RadioCrossMode cross,
+            int8_t manual_secondary = -1);
   bool prepareSavedImage(const char* path, const RadioProfileConfig& config,
-                         uint16_t preamble, RadioCrossMode cross);
+                         uint16_t preamble, RadioCrossMode cross, int8_t manual_secondary = -1);
   bool commitSavedImage(const char* path);
   bool discardCorruptSavedImagesForWrite();
   bool applyReplyMutation();
   ImageReadResult readImage(const char* path, uint8_t* bytes, size_t size);
   bool writeImage(const char* path, const uint8_t* bytes, size_t size);
   void publish();
+  bool hasSecondarySchedule() const;
+  bool secondaryRuntimeBusy() const;
+  void noteSecondaryManualChange();
   void formatConfig(char* reply, size_t capacity, const RadioProfileConfig& config,
-                    bool temporary, uint32_t remaining_ms) const;
+                    bool temporary, uint32_t remaining_ms, bool automatic = false) const;
  public:
   void begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool infrastructure_replies = false);
   void loop();
@@ -85,6 +104,19 @@ class RadioProfileCLI {
   bool hasReplyMutation() const { return remote_mutation_ != RemoteMutation::None; }
   uint32_t replyMutationGeneration() const { return remote_generation_; }
   bool finishReplyMutation(bool delivered);
+  // Channel-derived RF settings are RAM-only and never replace explicit saved
+  // settings (including Off). Repeated identical requests do not retune.
+  bool requestAutoSecondary(const RadioProfileConfig& config);
+  void clearAutoSecondary();
+  bool autoSecondaryActive() const;
+  bool canAutoSecondary() const;
+  // Borrow a manually configured RF tuple without persisting its wire protocol
+  // or the foreign network's fixed preamble. Temporary sessions take priority.
+  bool useSecondaryProtocol(RadioProfileProtocol protocol);
+  void clearSecondaryProtocol();
+  bool manualSecondaryConfigured() const { return manual_secondary_ && saved_.mode != RadioProfileMode::Off; }
+  const RadioProfileConfig& savedSecondaryConfig() const { return saved_; }
+  uint32_t secondaryIntentGeneration() const { return secondary_intent_generation_; }
   uint16_t primaryPreamble() const { return primary_preamble_; }
   // Infrastructure owns a newer, atomic primary tuple in /com_prefs. Adopting
   // its committed value changes saved intent only, never the running radio.

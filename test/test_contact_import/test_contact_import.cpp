@@ -37,10 +37,26 @@ public:
 };
 class Tables : public mesh::MeshTables {
 public:
-  bool wasSeen(const mesh::Packet*) override { return false; }
-  void markSeen(const mesh::Packet*) override {}
+  // Existing admission tests do not deduplicate. Opt in for receive-order
+  // regressions with a real payload/type hash, deliberately excluding profile.
+  bool deduplicate = false, have_seen = false;
+  unsigned seen_queries = 0, seen_marks = 0;
+  uint8_t seen_hash[MAX_HASH_SIZE] = {};
+  bool wasSeen(const mesh::Packet* packet) override {
+    if (!deduplicate) return false;
+    ++seen_queries;
+    uint8_t hash[MAX_HASH_SIZE];
+    packet->calculatePacketHash(hash);
+    return have_seen && !memcmp(hash, seen_hash, sizeof(hash));
+  }
+  void markSeen(const mesh::Packet* packet) override {
+    if (!deduplicate) return;
+    ++seen_marks;
+    packet->calculatePacketHash(seen_hash);
+    have_seen = true;
+  }
   void markSent(const mesh::Packet*) override {}
-  void clear(const mesh::Packet*) override {}
+  void clear(const mesh::Packet*) override { have_seen = false; }
 };
 class Chat : public BaseChatMesh {
 public:
@@ -57,6 +73,12 @@ public:
   bool writable = true;
   uint8_t max_hops = 1;
   unsigned discovered = 0, stored = 0, full = 0;
+  bool forward_packets = false, reject_primary_groups = false;
+  bool bind_secondary_groups = false, packet_group_search = false;
+  uint32_t direct_forward_delay = 0;
+  unsigned group_admissions = 0, group_searches = 0, received_groups = 0;
+  uint8_t last_search_origin = 0xFF;
+  mesh::GroupChannel primary_group, secondary_group, received_group;
   Chat(Radio& radio, Clock& clock, RNG& rng, RTC& rtc,
        StaticPoolPacketManager& pool, Tables& tables)
       : BaseChatMesh(radio, clock, rng, rtc, pool, tables) {}
@@ -64,7 +86,40 @@ public:
   bool shouldAutoAddContactType(uint8_t) const override { return auto_add; }
   uint8_t getAutoAddMaxHops() const override { return max_hops; }
   bool canMutateContacts() const override { return writable; }
-  bool allowPacketForward(const mesh::Packet*) override { return false; }
+  bool allowPacketForward(const mesh::Packet*) override { return forward_packets; }
+  uint32_t getDirectRetransmitDelay(const mesh::Packet*) override { return direct_forward_delay; }
+  bool allowGroupPacketOnRadio(mesh::Packet* packet) override {
+    ++group_admissions;
+    // Stub only the application's policy, not the core admission/order path.
+    if (reject_primary_groups && packet->radio_origin == 0) return false;
+    if (bind_secondary_groups && packet->radio_origin == 1) {
+      packet->tx_radio = mesh::RADIO_TX_SECONDARY;
+    }
+    return true;
+  }
+  int searchChannelsForPacket(const mesh::Packet* packet, const uint8_t* hash,
+                             mesh::GroupChannel channels[], int max_matches) override {
+    if (!packet_group_search) {
+      return BaseChatMesh::searchChannelsForPacket(packet, hash, channels, max_matches);
+    }
+    ++group_searches;
+    last_search_origin = packet->radio_origin;
+    const auto& channel = packet->radio_origin == 1 ? secondary_group : primary_group;
+    if (max_matches < 1 || channel.hash[0] != hash[0]) return 0;
+    channels[0] = channel;
+    return 1;
+  }
+  void onGroupDataRecv(mesh::Packet* packet, uint8_t type,
+                       const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
+    if (!packet_group_search) {
+      BaseChatMesh::onGroupDataRecv(packet, type, channel, data, len);
+      return;
+    }
+    ++received_groups;
+    received_group = channel;
+    // Native AES is a no-op mock. Production Utils/HMAC and the core channel
+    // search/decrypt path run, but these tests make no plaintext/AES assertion.
+  }
   void onContactsFull() override { ++full; }
   bool putBlobByKey(const uint8_t*, int, const uint8_t*, int) override {
     ++stored;
@@ -122,6 +177,43 @@ protected:
   bool queue(mesh::Packet packet) {
     uint8_t raw[MAX_TRANS_UNIT];
     return chat.importContact(raw, packet.writeTo(raw));
+  }
+  void configureGroupSearch() {
+    chat.packet_group_search = true;
+    memset(chat.primary_group.secret, 0, sizeof(chat.primary_group.secret));
+    memset(chat.secondary_group.secret, 0, sizeof(chat.secondary_group.secret));
+    memset(chat.primary_group.secret, 1, 16);
+    memset(chat.secondary_group.secret, 2, 16);
+    // Simulate the supported one-byte channel-hash collision. Authentication
+    // must distinguish these keys, not the packet's channel hash alone.
+    chat.primary_group.hash[0] = chat.secondary_group.hash[0] = 17;
+  }
+  mesh::Packet groupPacket(const mesh::GroupChannel& channel, uint8_t route = ROUTE_TYPE_FLOOD) {
+    mesh::Packet packet;
+    packet.header = route | (PAYLOAD_TYPE_GRP_TXT << PH_TYPE_SHIFT);
+    packet.setPathHashSizeAndCount(1, 0);
+    memset(packet.payload, 0, sizeof(packet.payload));
+    uint8_t data[CIPHER_BLOCK_SIZE] = {};
+    const uint32_t timestamp = 10;
+    memcpy(data, &timestamp, sizeof(timestamp));
+    memcpy(data + 5, "hello", 5);
+    packet.payload[0] = channel.hash[0];
+    packet.payload_len = 1 + mesh::Utils::encryptThenMAC(
+        channel.secret, packet.payload + 1, data, sizeof(data));
+    return packet;
+  }
+  bool queueReceived(mesh::Packet packet, uint8_t origin) {
+    auto* received = chat.obtainNewPacket();
+    if (received == nullptr) return false;
+    packet.radio_profile = packet.radio_origin = origin;
+    packet.radio_generation = packet.radio_origin_generation = radio.config.generation[origin];
+    packet.radio_local = packet.radio_bound = false;
+    packet.radio_reply = packet.radio_reply_force = false;
+    packet.tx_radio = mesh::RADIO_TX_AUTO;
+    *received = packet;
+    pool.queueInbound(received, 0);
+    chat.loop();
+    return true;
   }
 };
 
@@ -305,6 +397,108 @@ TEST_F(ContactImport, ContactRoutingAlsoControlsAcknowledgementsAndReturnedPaths
   ASSERT_EQ(2, pool.getOutboundTotal());
   EXPECT_EQ(1, pool.getOutboundByIdx(0)->radio_profile);
   EXPECT_EQ(1, pool.getOutboundByIdx(1)->radio_profile);
+}
+
+TEST_F(ContactImport, GroupAdmissionRejectsWrongProfileBeforeGlobalDeduplication) {
+  radio.dual = true;
+  radio.config.secondary.mode = mesh::RadioProfileMode::RxTx;
+  radio.config.cross = mesh::RadioCrossMode::Off;
+  tables.deduplicate = true;
+  chat.reject_primary_groups = true;
+  configureGroupSearch();
+  const auto packet = groupPacket(chat.secondary_group);
+
+  ASSERT_TRUE(queueReceived(packet, 0));
+  EXPECT_EQ(chat.group_admissions, 1u);
+  EXPECT_EQ(chat.group_searches, 0u);
+  EXPECT_EQ(chat.received_groups, 0u);
+  EXPECT_EQ(tables.seen_queries, 0u);
+  EXPECT_EQ(tables.seen_marks, 0u);
+  EXPECT_FALSE(tables.wasSeen(&packet));
+  EXPECT_EQ(pool.getFreeCount(), 8);
+
+  // Exactly the same wire payload must remain eligible on its allowed radio.
+  ASSERT_TRUE(queueReceived(packet, 1));
+  EXPECT_EQ(chat.group_admissions, 2u);
+  EXPECT_EQ(chat.group_searches, 1u);
+  EXPECT_EQ(chat.last_search_origin, 1);
+  EXPECT_EQ(chat.received_groups, 1u);
+  EXPECT_EQ(tables.seen_marks, 1u);
+  EXPECT_TRUE(tables.wasSeen(&packet));
+  EXPECT_EQ(pool.getFreeCount(), 8);
+
+  ASSERT_TRUE(queueReceived(packet, 1));
+  EXPECT_EQ(chat.group_admissions, 3u);
+  EXPECT_EQ(chat.group_searches, 1u);
+  EXPECT_EQ(chat.received_groups, 1u);
+  EXPECT_EQ(tables.seen_marks, 1u);
+}
+
+TEST_F(ContactImport, PacketAwareGroupSearchUsesCapturedOriginAndAuthenticatedKey) {
+  radio.dual = true;
+  radio.config.secondary.mode = mesh::RadioProfileMode::RxTx;
+  configureGroupSearch();
+  const auto secondary_packet = groupPacket(chat.secondary_group);
+  uint8_t plaintext[MAX_PACKET_PAYLOAD];
+  ASSERT_GT(mesh::Utils::MACThenDecrypt(chat.secondary_group.secret, plaintext,
+      secondary_packet.payload + 1, secondary_packet.payload_len - 1), 0);
+  ASSERT_EQ(mesh::Utils::MACThenDecrypt(chat.primary_group.secret, plaintext,
+      secondary_packet.payload + 1, secondary_packet.payload_len - 1), 0);
+
+  // The transceiver reports primary while a delayed secondary packet is
+  // processed. The packet-aware hook must receive the captured RX origin.
+  ASSERT_EQ(radio.receiveProfile(), 0);
+  ASSERT_TRUE(queueReceived(secondary_packet, 1));
+  EXPECT_EQ(chat.last_search_origin, 1);
+  EXPECT_EQ(chat.received_groups, 1u);
+  EXPECT_EQ(memcmp(chat.received_group.secret, chat.secondary_group.secret, PUB_KEY_SIZE), 0);
+  ASSERT_TRUE(queueReceived(secondary_packet, 0));
+  EXPECT_EQ(chat.last_search_origin, 0);
+  EXPECT_EQ(chat.received_groups, 1u); // same hash, wrong authenticated key
+  ASSERT_TRUE(queueReceived(groupPacket(chat.primary_group), 0));
+  EXPECT_EQ(chat.received_groups, 2u);
+  EXPECT_EQ(memcmp(chat.received_group.secret, chat.primary_group.secret, PUB_KEY_SIZE), 0);
+  EXPECT_EQ(chat.group_searches, 3u);
+  EXPECT_EQ(pool.getFreeCount(), 8);
+}
+
+TEST_F(ContactImport, GroupAdmissionBindsDirectRelayBeforeCrossProfileFanout) {
+  radio.dual = true;
+  radio.config.secondary.mode = mesh::RadioProfileMode::RxTx;
+  radio.config.cross = mesh::RadioCrossMode::On;
+  tables.deduplicate = true;
+  chat.forward_packets = chat.reject_primary_groups = chat.bind_secondary_groups = true;
+  chat.direct_forward_delay = 100;
+  configureGroupSearch();
+  auto packet = groupPacket(chat.secondary_group, ROUTE_TYPE_DIRECT);
+  chat.self_id.pub_key[0] = 0x42;
+  packet.setPathHashSizeAndCount(1, 2);
+  packet.path[0] = chat.self_id.pub_key[0];
+  packet.path[1] = 0x93;
+
+  ASSERT_TRUE(queueReceived(packet, 0));
+  EXPECT_EQ(tables.seen_queries, 0u);
+  EXPECT_EQ(tables.seen_marks, 0u);
+  EXPECT_EQ(pool.getOutboundTotal(), 0);
+  EXPECT_EQ(pool.getFreeCount(), 8);
+
+  ASSERT_TRUE(queueReceived(packet, 1));
+  EXPECT_EQ(chat.group_admissions, 2u);
+  EXPECT_EQ(chat.group_searches, 0u); // direct relay returns before local search
+  EXPECT_EQ(chat.received_groups, 0u);
+  EXPECT_EQ(tables.seen_marks, 1u);
+  ASSERT_EQ(pool.getOutboundTotal(), 1); // cross=on must not add a primary copy
+  const auto* relayed = pool.getOutboundByIdx(0);
+  ASSERT_NE(relayed, nullptr);
+  EXPECT_EQ(relayed->radio_profile, 1);
+  EXPECT_EQ(relayed->radio_origin, 1);
+  EXPECT_EQ(relayed->tx_radio, mesh::RADIO_TX_SECONDARY);
+  EXPECT_TRUE(relayed->radio_bound);
+  EXPECT_FALSE(relayed->radio_reply);
+  EXPECT_FALSE(relayed->radio_reply_force);
+  EXPECT_EQ(relayed->getPathHashCount(), 1);
+  EXPECT_EQ(relayed->path[0], 0x93);
+  EXPECT_EQ(pool.getFreeCount(), 7);
 }
 } // namespace
 

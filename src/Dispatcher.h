@@ -5,6 +5,7 @@
 #include <Packet.h>
 #include <Utils.h>
 #include <RadioProfiles.h>
+#include <helpers/MeshtextConfig.h>
 #ifndef RADIO_LIVENESS_SOFT_ONLY
   #include <helpers/RadioLivenessTracker.h>
 #endif
@@ -45,6 +46,7 @@ public:
   virtual RadioProfiles* profiles() { return nullptr; }
   virtual const RadioProfiles* profiles() const { return nullptr; }
   virtual bool validateProfile(const RadioProfileParams&) const { return false; }
+  virtual bool supportsMeshtext() const { return false; }
   virtual uint8_t receiveProfile() const { return 0; }
   virtual uint32_t receiveProfileGeneration() const {
     return profiles() ? profiles()->generation[receiveProfile()] : 0;
@@ -341,6 +343,21 @@ class Dispatcher {
   uint32_t receive_context_generation = 0;
   bool receive_context_active = false;
   uint32_t profile_cad_busy[2] = {};
+#if MESH_ENABLE_MESHTEXT_CHAT
+  // One bounded user-send slot; never placed in the MeshCore packet pool.
+  uint8_t foreign_radio_bytes[MAX_TRANS_UNIT] = {};
+  uint16_t foreign_radio_length = 0;
+  uint8_t foreign_radio_profile = 0;
+  uint32_t foreign_radio_generation = 0;
+  uint32_t foreign_radio_retry_at = 0, foreign_radio_prepare_deadline = 0;
+  uint32_t foreign_radio_start = 0, foreign_radio_expiry = 0;
+  bool foreign_radio_sending = false;
+  bool foreign_radio_yield_meshcore = false;
+  bool isForeignRadioCurrent() const;
+  bool serviceForeignRadioFrame();
+  bool checkForeignRadioSend();
+  void finishForeignRadioFrame(bool success, bool account_airtime);
+#endif
 
   void processRecvPacket(Packet* pkt);
   void releaseDroppedOutbound();
@@ -423,6 +440,15 @@ protected:
   virtual void onTracePacketQueuedForSend(Packet* packet) { }
   virtual void onSendComplete(Packet* packet) { }
   virtual void onSendFail(Packet* packet) { }
+#if MESH_ENABLE_MESHTEXT_CHAT
+  // Foreign RX is consumed here before MeshCore parsing or any raw bridge.
+  // Returning false drops the frame; it never falls through to MeshCore.
+  virtual bool onForeignRadioFrame(const uint8_t*, size_t, uint8_t, uint32_t, float, float) { return false; }
+  virtual void onForeignRadioSendComplete(bool) { }
+  virtual bool allowForeignRadioTransmit() const { return true; }
+  bool queueForeignRadioFrame(const uint8_t* bytes, size_t length, uint8_t profile, uint32_t generation);
+  bool hasForeignRadioFrame() const { return foreign_radio_length != 0; }
+#endif
   virtual void onRadioProfileCopyQueued(Packet* packet, const Packet* original, uint8_t priority) { }
   // Policy gate for the other profile only; same-profile TX remains eligible.
   // Called before admitting copies (including bound retry packets) to a queue.
@@ -504,7 +530,13 @@ public:
   // Raw radio reads, local sends, and statistics resets do not update this clock.
   uint32_t getLastMeshCoreRecvMillis() const { return last_meshcore_recv_millis; }
   uint16_t getErrFlags() const { return _err_flags; }  // Get error flags
-  bool hasOutbound() const { return outbound != NULL; }
+  bool hasOutbound() const {
+    return outbound != NULL
+#if MESH_ENABLE_MESHTEXT_CHAT
+        || hasForeignRadioFrame()
+#endif
+        ;
+  }
   bool isCurrentOutbound(const Packet* packet) const { return outbound == packet; }
   void resetStats() {
     n_sent_flood = n_sent_direct = n_recv_flood = n_recv_direct = 0;

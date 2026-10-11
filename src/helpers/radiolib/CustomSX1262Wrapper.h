@@ -38,8 +38,20 @@ public:
   ~CustomSX1262Wrapper() { unregisterInterruptAction(); }
   CustomSX1262Wrapper(CustomSX1262& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
   bool supportsCarrierWave() const override { return true; }
+#if MESH_ENABLE_MESHTEXT_CHAT
+  bool supportsMeshtext() const override { return true; }
+#endif
 
 protected:
+#if MESH_ENABLE_MESHTEXT_CHAT
+  bool applyProtocol(mesh::RadioProfileProtocol protocol) override {
+    auto* radio = static_cast<CustomSX1262*>(_radio);
+    const uint8_t sync = protocol == mesh::RadioProfileProtocol::Meshtext ? 0x2b : 0x12;
+    // Stage shared packet invariants only in a proven owned RX hop; normal
+    // initialization/rollback still repairs the complete RadioLib state.
+    return radio->setProfileProtocol(sync) == RADIOLIB_ERR_NONE;
+  }
+#endif
   int16_t applyCachedTxPower(int8_t dbm) override {
 #ifdef SX126X_PA_RAMP_TIME
     // External-PA boards such as the T-Beam 1W require a slower PA ramp. Use

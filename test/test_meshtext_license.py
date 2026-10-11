@@ -1,0 +1,203 @@
+"""Qualify linked chat code and ship its MIT notice without touching firmware."""
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import package_meshtext_license as license
+import firmware_memory_manifest as memory
+import firmware_build_recipe as recipe
+import package_cascade_release as release
+
+SYMBOLS = ("_ZN4mesh2mt10encodeTextEj", "_ZN4mesh2mt10decodeTextEj",
+           "_ZN6MyMesh16sendMeshtextTextEj", "_ZN6MyMesh19onForeignRadioFrameEj",
+           "_ZN4mesh10Dispatcher22queueForeignRadioFrameEj")
+
+
+def elf32(path, symbols=SYMBOLS, flags=6, undefined=(), zero=()):
+    names, table = bytearray(b"\0"), bytearray(16)
+    data = b"CODE" * max(1, len(symbols))
+    for i, name in enumerate(symbols):
+        offset = len(names)
+        names += name.encode() + b"\0"
+        table += struct.pack("<IIIBBH", offset, 0x40000000 + i * 4,
+                             0 if name in zero else 4, 0x12, 0, 0 if name in undefined else 1)
+    payload = 52 + 4 * 40
+    strings = payload + len(data)
+    symtab = strings + len(names)
+    header = b"\x7fELF\x01\x01\x01" + bytes(9)
+    header += struct.pack("<HH5I6H", 2, 40, 1, 0, 0, 52, 0, 52, 0, 0, 40, 4, 0)
+    sections = bytes(40)
+    sections += struct.pack("<10I", 0, 1, flags, 0x40000000, payload, len(data), 0, 0, 4, 0)
+    sections += struct.pack("<10I", 0, 3, 0, 0, strings, len(names), 0, 0, 1, 0)
+    sections += struct.pack("<10I", 0, 2, 0, 0, symtab, len(table), 2, 1, 4, 16)
+    path.write_bytes(header + sections + data + names + table)
+
+
+class MeshtextLicenseTest(unittest.TestCase):
+    def qualify(self, build, stem):
+        output = stem.parent / (stem.name + ".capabilities.json")
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/check_firmware_capabilities.py"),
+            "--image", str(build / "firmware.elf"), "--output", str(output),
+            "--target", "test_companion_radio_usb", "--platform", "ESP32_PLATFORM",
+            "--build-profile", "standard"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(output.read_text())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires a Linux ELF compiler")
+    def test_compiler_produced_symbols_qualify_chat_and_notice(self):
+        compiler = shutil.which("g++")
+        if compiler is None:
+            self.skipTest("g++ is not installed")
+        # Do not build symbol spellings from SYMBOLS: the compiler must independently
+        # produce the Itanium name lengths that the production matcher recognizes.
+        source = """
+namespace mesh {
+namespace mt {
+unsigned encodeText(unsigned value) { return value + 1; }
+unsigned decodeText(unsigned value) { return value + 2; }
+}
+class Dispatcher {
+public: unsigned queueForeignRadioFrame(unsigned);
+};
+unsigned Dispatcher::queueForeignRadioFrame(unsigned value) { return value + 3; }
+}
+class MyMesh {
+public:
+    unsigned sendMeshtextText(unsigned);
+    unsigned onForeignRadioFrame(unsigned);
+};
+unsigned MyMesh::sendMeshtextText(unsigned value) { return value + 4; }
+unsigned MyMesh::onForeignRadioFrame(unsigned value) { return value + 5; }
+extern "C" void _start() {}
+"""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            input_path = root / "linked.cpp"
+            input_path.write_text(source)
+            result = subprocess.run([compiler, "-m32", "-O0", "-fno-pie", "-no-pie",
+                "-fno-exceptions", "-fno-rtti", "-fno-stack-protector", "-nostdlib",
+                "-Wl,-e,_start", "-Wl,--build-id=none", str(input_path),
+                "-o", str(root / "firmware.elf")], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            codec, chat = license.meshtext_evidence(root / "firmware.elf")
+            self.assertEqual(len(codec), 2)
+            self.assertEqual(len(chat), 5)
+            manifest = self.qualify(root, root / "compiled")
+            self.assertIn(license.CAPABILITY, manifest["capabilities"])
+            self.assertEqual(manifest["verification"][0]["source"], "linked ELF symbols")
+            self.assertEqual(license.collect_build_notice(root, root / "compiled").read_bytes(),
+                             license.notice_bytes())
+
+    def test_only_allocated_defined_executable_symbols_qualify(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "firmware.elf"
+            elf32(path)
+            codec, chat = license.meshtext_evidence(path)
+            self.assertEqual(len(codec), 2)
+            self.assertEqual(len(chat), 5)
+            for flags in (0, 2, 4):
+                elf32(path, flags=flags)
+                self.assertEqual(license.meshtext_evidence(path), ([], []))
+            for missing in SYMBOLS:
+                elf32(path, undefined=(missing,))
+                self.assertFalse(license.meshtext_evidence(path)[1])
+                elf32(path, zero=(missing,))
+                self.assertFalse(license.meshtext_evidence(path)[1])
+            path.write_bytes(b"debug strings " + b"\0".join(s.encode() for s in SYMBOLS))
+            self.assertEqual(license.meshtext_evidence(path), ([], []))
+
+    def test_partial_codec_still_requires_license_but_never_advertises_chat(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            elf32(root / "firmware.elf", symbols=SYMBOLS[:1])
+            manifest = self.qualify(root, root / "partial")
+            self.assertNotIn(license.CAPABILITY, manifest["capabilities"])
+            self.assertEqual(manifest["third_party_notices"][0]["license"], "MIT")
+            self.assertEqual(license.collect_build_notice(root, root / "partial").read_bytes(), license.notice_bytes())
+
+    def test_unaffected_builds_reject_stale_output_notice(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            elf32(root / "firmware.elf", symbols=("unrelated_defined_function",))
+            manifest = self.qualify(root, root / "plain")
+            self.assertNotIn("third_party_notices", manifest)
+            self.assertIsNone(license.collect_build_notice(root, root / "plain"))
+            notice = license.sidecar(root / "plain")
+            notice.write_bytes(license.notice_bytes())
+            with self.assertRaisesRegex(ValueError, "stale"):
+                license.collect_build_notice(root, root / "plain")
+            self.assertEqual(notice.read_bytes(), license.notice_bytes())
+
+    def test_notice_is_hashed_staged_and_recipe_bound_without_binary_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            build, output = root / "build", root / "out"
+            build.mkdir(); output.mkdir()
+            elf32(build / "firmware.elf")
+            label = "v1.17.1.9-halo-keymind-cascade-dev"
+            version = label + "-deadbeef"
+            stem = output / ("test_companion_radio_usb-" + version)
+            manifest = self.qualify(build, stem)
+            self.assertIn(license.CAPABILITY, manifest["capabilities"])
+            self.assertEqual(manifest["verification"][0]["source"], "linked ELF symbols")
+            app, merged = b"qualified-application", b"qualified-merged"
+            (output / (stem.name + ".bin")).write_bytes(app)
+            (output / (stem.name + "-merged.bin")).write_bytes(merged)
+            notice = license.collect_build_notice(build, stem)
+            self.assertEqual(notice.read_bytes(), license.notice_bytes())
+            self.assertEqual(license.collect_build_notice(build, stem), notice)
+            report = dict(schema_version=1, passed=True, available_internal_bytes=80000,
+                          required_heap_bytes=50000, largest_internal_region_bytes=80000,
+                          required_contiguous_bytes=5120,
+                          elf_sha256=hashlib.sha256((build / "firmware.elf").read_bytes()).hexdigest(), target="build_env")
+            (build / "firmware.memory.json").write_text(json.dumps(report))
+            memory.package_report(build, stem)
+            proof = memory.validate_package(stem)
+            self.assertEqual(proof["files"][notice.name], hashlib.sha256(notice.read_bytes()).hexdigest())
+            records = release.collect_artifacts(output, version)
+            self.assertEqual(sum(path == notice for path in records[0]["files"]), 1)
+            self.assertTrue(recipe.package_occupied(stem))
+            commit = "deadbeef" + "0" * 32
+            status = root / "status"
+            status.write_text("state=completed\nexit_code=0\n"
+                f"working_directory={root}\noutput_directory=out\nsource_commit={commit}\n"
+                f"firmware_version={label}\nfirmware_profile=cascade\n"
+                "radio_frequency=909.5\nradio_bandwidth=500\nradio_sf=5\nradio_cr=5\n")
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/package_cascade_release.py"),
+                "--input", str(output), "--output", str(root / "stage"), "--build-status", str(status),
+                "--version", "1.17.1.9", "--commit", commit], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            staged = root / "stage/companion"
+            self.assertEqual((staged / notice.name).read_bytes(), license.notice_bytes())
+            self.assertIn(notice.name, (staged / "TARGET-MANIFEST.json").read_text())
+            self.assertIn(notice.name, (staged / "SHA256SUMS.txt").read_text())
+            self.assertEqual((output / (stem.name + ".bin")).read_bytes(), app)
+            self.assertEqual((output / (stem.name + "-merged.bin")).read_bytes(), merged)
+            notice.write_bytes(b"tampered")
+            with self.assertRaisesRegex(ValueError, "mismatched"):
+                memory.validate_package(stem)
+            notice.unlink()
+            with self.assertRaisesRegex(ValueError, "missing"):
+                memory.validate_package(stem)
+
+    def test_license_only_package_blocks_resume_and_missing_metadata_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            stem = root / "occupied"
+            license.sidecar(stem).write_bytes(license.notice_bytes())
+            self.assertTrue(recipe.package_occupied(stem))
+            (root / "occupied.capabilities.json").write_text(json.dumps({"capabilities": [license.CAPABILITY]}))
+            with self.assertRaisesRegex(ValueError, "lacks"):
+                license.validate_artifact_notice(stem)
+
+
+if __name__ == "__main__":
+    unittest.main()

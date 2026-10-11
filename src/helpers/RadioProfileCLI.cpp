@@ -95,7 +95,7 @@ RadioProfileCLI::ImageReadResult RadioProfileCLI::readImage(
   if (!read_complete) return ImageReadResult::Unreadable;
   uint32_t stored;
   memcpy(&stored, bytes + size - 4, 4);
-  return bytes[0] == 'R' && bytes[1] == '2' && bytes[2] == 1
+  return bytes[0] == 'R' && bytes[1] == '2' && (bytes[2] == 1 || bytes[2] == 2)
       && stored == checksum(bytes, size - 4)
       ? ImageReadResult::Valid : ImageReadResult::Invalid;
 }
@@ -119,9 +119,10 @@ bool RadioProfileCLI::writeImage(const char* path, const uint8_t* bytes, size_t 
       && memcmp(bytes, verify, size) == 0;
 }
 
-bool RadioProfileCLI::save(const RadioProfileConfig& config, uint16_t preamble, RadioCrossMode cross) {
+bool RadioProfileCLI::save(const RadioProfileConfig& config, uint16_t preamble, RadioCrossMode cross,
+                           int8_t manual_secondary) {
   if (!discardCorruptSavedImagesForWrite()) return false;
-  return prepareSavedImage(TempPath, config, preamble, cross) && commitSavedImage(TempPath);
+  return prepareSavedImage(TempPath, config, preamble, cross, manual_secondary) && commitSavedImage(TempPath);
 }
 
 bool RadioProfileCLI::discardCorruptSavedImagesForWrite() {
@@ -143,9 +144,18 @@ bool RadioProfileCLI::discardCorruptSavedImagesForWrite() {
 }
 
 bool RadioProfileCLI::prepareSavedImage(const char* path, const RadioProfileConfig& config,
-                                      uint16_t preamble, RadioCrossMode cross) {
+                                      uint16_t preamble, RadioCrossMode cross, int8_t manual_secondary) {
   if (!fs_ || hold_) return false;
   uint8_t image[ImageSize] = {'R', '2', 1, (uint8_t)config.mode};
+#if MESH_ENABLE_MESHTEXT_CHAT
+  // Version 2 keeps the 24-byte layout and CRC; bit 7 records explicit radio2
+  // intent. Other settings can save an unused Off slot without claiming it.
+  image[2] = 2;
+  const bool manual = manual_secondary < 0 ? manual_secondary_ : manual_secondary != 0;
+  if (manual || config.mode != RadioProfileMode::Off) image[3] |= 0x80;
+#else
+  (void)manual_secondary;
+#endif
   memcpy(image + 4, &config.params.freq, 4);
   memcpy(image + 8, &config.params.bw, 4);
   image[12] = config.params.sf; image[13] = config.params.cr;
@@ -176,6 +186,12 @@ void RadioProfileCLI::begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool in
   fs_ = fs; radio_ = radio; rtc_ = rtc; last_ms_ = millis();
   hold_ = false;
   recoverable_corrupt_store_ = false;
+  manual_secondary_ = false;
+  secondary_intent_generation_ = 0;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  auto_secondary_requested_ = secondary_protocol_overlay_ = false;
+  owns_secondary_runtime_ = external_secondary_override_ = false;
+#endif
   infrastructure_replies_ = infrastructure_replies;
   if (radio_ && radio_->profiles()) {
     radio_->profiles()->reply_tx = infrastructure_replies ? RADIO_TX_BOTH : RADIO_TX_AUTO;
@@ -206,7 +222,10 @@ void RadioProfileCLI::begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool in
             || backup_image == ImageReadResult::Invalid);
     return;
   }
-  saved_.mode = (RadioProfileMode)bytes[3];
+  // Legacy Off is ambiguous: preserve it as deliberate manual intent rather
+  // than allowing a newly installed automatic feature to turn the radio on.
+  manual_secondary_ = bytes[2] == 1 || (bytes[3] & 0x80) != 0;
+  saved_.mode = (RadioProfileMode)(bytes[2] == 2 ? bytes[3] & 0x7F : bytes[3]);
   memcpy(&saved_.params.freq, bytes + 4, 4);
   memcpy(&saved_.params.bw, bytes + 8, 4);
   saved_.params.sf = bytes[12]; saved_.params.cr = bytes[13];
@@ -215,6 +234,7 @@ void RadioProfileCLI::begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool in
   cross_ = (RadioCrossMode)bytes[18];
   reply_setting_ = validReplySetting(bytes[19]) ? bytes[19] : 0;
   if ((uint8_t)saved_.mode > 2 || (uint8_t)cross_ > 2
+      || (bytes[2] == 2 && saved_.mode != RadioProfileMode::Off && !manual_secondary_)
       || (saved_.mode != RadioProfileMode::Off && !radio_->validateProfile(saved_.params))
       || (primary_preamble_ && (primary_preamble_ < 8 || primary_preamble_ > RadioProfiles::MaxPreamble))) {
     // A CRC-valid image can still be semantically stale (for example, after
@@ -257,9 +277,160 @@ void RadioProfileCLI::publish() {
       ? (validReplySetting(reply_setting_) ? reply_setting_ & 7 : RADIO_TX_BOTH) : RADIO_TX_AUTO;
   radio_->profiles()->reply_force = infrastructure_replies_
       && validReplySetting(reply_setting_) && (reply_setting_ & 8);
+#if MESH_ENABLE_MESHTEXT_CHAT
+  protectExternalSecondary();
+  if (external_secondary_override_) return;
+#endif
   if (publish_pending_ && (int32_t)(millis() - publish_after_ms_) < 0) return;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  // An accepted remote command owns the old RX generation until its reply has
+  // completed (or its atomic storage commit has succeeded).
+  if (hasReplyMutation()) return;
+#endif
   publish_pending_ = false;
-  radio_->profiles()->setSecondary(temp_active_ ? temporary_ : saved_, temp_active_);
+  RadioProfileConfig config = temp_active_ ? temporary_ : saved_;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (auto_secondary_requested_ && canAutoSecondary()) config = auto_secondary_;
+  else if (secondary_protocol_overlay_ && manualSecondaryConfigured() && !secondaryRuntimeBusy()) {
+    config.params.protocol = secondary_protocol_;
+    if (secondary_protocol_ == RadioProfileProtocol::Meshtext) config.params.preamble = 16;
+  }
+#endif
+  radio_->profiles()->setSecondary(config, temp_active_);
+#if MESH_ENABLE_MESHTEXT_CHAT
+  owns_secondary_runtime_ = auto_secondary_requested_ || secondary_protocol_overlay_;
+  if (owns_secondary_runtime_) {
+    owned_secondary_snapshot_ = config;
+    owned_secondary_generation_ = radio_->profiles()->generation[1];
+  }
+#endif
+}
+
+#if MESH_ENABLE_MESHTEXT_CHAT
+bool RadioProfileCLI::runtimeSecondaryUnchanged() const {
+  if (!owns_secondary_runtime_ || !radio_ || !radio_->profiles()) return true;
+  const auto* profiles = radio_->profiles();
+  return profiles->generation[1] == owned_secondary_generation_
+      && profiles->secondary.mode == owned_secondary_snapshot_.mode
+      && profiles->secondary.params == owned_secondary_snapshot_.params;
+}
+
+void RadioProfileCLI::protectExternalSecondary() {
+  if (runtimeSecondaryUnchanged()) return;
+  // Another owner changed the running tuple without a CLI mutation. Relinquish
+  // our RAM layer without restoring Off over that owner's settings, now or on
+  // later loop publications. An explicit CLI change can claim ownership back.
+  external_secondary_override_ = true;
+  owns_secondary_runtime_ = auto_secondary_requested_ = secondary_protocol_overlay_ = false;
+}
+#endif
+
+bool RadioProfileCLI::hasSecondarySchedule() const {
+  for (const auto& schedule : schedules_) if (schedule.active) return true;
+  return false;
+}
+
+bool RadioProfileCLI::secondaryRuntimeBusy() const {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (external_secondary_override_ || !runtimeSecondaryUnchanged()) return true;
+#endif
+  return !fs_ || !radio_ || !radio_->profiles() || hold_ || temp_pending_ || temp_active_
+      || publish_pending_ || hasReplyMutation() || hasSecondarySchedule()
+      || radio_->profiles()->primary_temporary || radio_->profiles()->secondary_temporary;
+}
+
+void RadioProfileCLI::noteSecondaryManualChange() {
+  ++secondary_intent_generation_;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  auto_secondary_requested_ = secondary_protocol_overlay_ = false;
+  owns_secondary_runtime_ = external_secondary_override_ = false;
+#endif
+}
+
+bool RadioProfileCLI::canAutoSecondary() const {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (manual_secondary_ || saved_.mode != RadioProfileMode::Off || secondaryRuntimeBusy()) return false;
+  const auto& current = radio_->profiles()->secondary;
+  return current.mode == RadioProfileMode::Off || (auto_secondary_requested_
+      && current.mode == auto_secondary_.mode && current.params == auto_secondary_.params);
+#else
+  return false;
+#endif
+}
+
+bool RadioProfileCLI::requestAutoSecondary(const RadioProfileConfig& config) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (!canAutoSecondary() || config.mode == RadioProfileMode::Off
+      || (uint8_t)config.mode > (uint8_t)RadioProfileMode::RxTx
+      || !radio_->validateProfile(config.params)) return false;
+  if (auto_secondary_requested_ && (config.mode != auto_secondary_.mode
+      || config.params != auto_secondary_.params)) return false;
+  auto preview = *radio_->profiles();
+  preview.setSecondary(config, false);
+  if (!preview.automaticPreambleFits()) return false;
+  auto_secondary_ = config;
+  auto_secondary_requested_ = true;
+  publish();
+  return autoSecondaryActive();
+#else
+  (void)config;
+  return false;
+#endif
+}
+
+void RadioProfileCLI::clearAutoSecondary() {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (!auto_secondary_requested_) return;
+  protectExternalSecondary();
+  auto_secondary_requested_ = false;
+  owns_secondary_runtime_ = secondary_protocol_overlay_;
+  publish();
+#endif
+}
+
+bool RadioProfileCLI::autoSecondaryActive() const {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (!auto_secondary_requested_ || !canAutoSecondary()) return false;
+  const auto& current = radio_->profiles()->secondary;
+  return !radio_->profiles()->secondary_temporary && current.mode == auto_secondary_.mode
+      && current.params == auto_secondary_.params;
+#else
+  return false;
+#endif
+}
+
+bool RadioProfileCLI::useSecondaryProtocol(RadioProfileProtocol protocol) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (protocol == RadioProfileProtocol::MeshCore) {
+    clearSecondaryProtocol();
+    return true;
+  }
+  if (protocol != RadioProfileProtocol::Meshtext || !manualSecondaryConfigured()
+      || secondaryRuntimeBusy()) return false;
+  auto preview = *radio_->profiles();
+  auto config = saved_;
+  config.params.protocol = protocol;
+  config.params.preamble = 16;
+  preview.setSecondary(config, false);
+  if (!radio_->validateProfile(config.params) || !preview.automaticPreambleFits()) return false;
+  secondary_protocol_ = protocol;
+  secondary_protocol_overlay_ = true;
+  publish();
+  return true;
+#else
+  (void)protocol;
+  return false;
+#endif
+}
+
+void RadioProfileCLI::clearSecondaryProtocol() {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (!secondary_protocol_overlay_) return;
+  protectExternalSecondary();
+  secondary_protocol_overlay_ = false;
+  owns_secondary_runtime_ = auto_secondary_requested_;
+  publish();
+#endif
 }
 
 bool RadioProfileCLI::stageRemoteMutation(RemoteMutation kind, const RadioProfileConfig& config,
@@ -308,6 +479,7 @@ bool RadioProfileCLI::applyReplyMutation() {
   remote_mutation_ = RemoteMutation::None;
   remote_delivered_ = false;
   if (kind == RemoteMutation::None) return true;
+  noteSecondaryManualChange();
   if (kind == RemoteMutation::Temporary) {
     pending_temporary_ = remote_config_;
     pending_duration_ms_ = remote_duration_ms_;
@@ -315,6 +487,7 @@ bool RadioProfileCLI::applyReplyMutation() {
     temp_pending_ = true;
   } else if (kind == RemoteMutation::Saved) {
     saved_ = remote_config_;
+    manual_secondary_ = true;
     publish_pending_ = true; publish_after_ms_ = millis();
 #if MESH_ENABLE_FLEET_CONTROL
   } else if (kind == RemoteMutation::AddSavedSchedule
@@ -348,7 +521,7 @@ bool RadioProfileCLI::applyReplyMutation() {
     schedule_retry_ms_ = 0;
 #endif
   } else {
-    if (kind == RemoteMutation::Off) { saved_ = {}; schedule_retry_ms_ = 0; }
+    if (kind == RemoteMutation::Off) { saved_ = {}; manual_secondary_ = true; schedule_retry_ms_ = 0; }
     temp_pending_ = temp_active_ = false; temp_remaining_ms_ = 0;
     for (auto& s : schedules_) if (kind == RemoteMutation::Off || s.temporary) s = {};
   }
@@ -393,13 +566,13 @@ void RadioProfileCLI::loop() {
       if (s.active && !s.temporary && epoch >= s.start && (!next || s.start < next->start)) next = &s;
     }
     if (!next) break;
-    if (!save(next->config, primary_preamble_, cross_)) {
+    if (!save(next->config, primary_preamble_, cross_, true)) {
       // Keep the requested time and order intact. A failed earlier entry must
       // not be retried after a later one and overwrite the newer settings.
       schedule_retry_ms_ = 60000;
       break;
     }
-    saved_ = next->config; *next = {};
+    saved_ = next->config; manual_secondary_ = true; noteSecondaryManualChange(); *next = {};
   }
   for (auto& s : schedules_) {
     if (!s.active || !s.temporary || s.started || epoch < s.start || temp_active_ || temp_pending_ || hasReplyMutation()) continue;
@@ -487,14 +660,14 @@ void RadioProfileCLI::appendChirpWarning(char* reply, size_t capacity, const Rad
 }
 
 void RadioProfileCLI::formatConfig(char* reply, size_t capacity, const RadioProfileConfig& config,
-                                   bool temporary, uint32_t remaining) const {
+                                   bool temporary, uint32_t remaining, bool automatic) const {
   if (config.mode == RadioProfileMode::Off) { snprintf(reply, capacity, "> off"); return; }
   RadioProfiles preview = *radio_->profiles();
   preview.setSecondary(config, temporary);
   uint16_t preamble = preview.preamble(1, 32);
-  snprintf(reply, capacity, "> %.3f,%.3f,%u,%u,%s,%u%s", config.params.freq, config.params.bw,
+  snprintf(reply, capacity, "> %.3f,%.3f,%u,%u,%s,%u%s%s", config.params.freq, config.params.bw,
            config.params.sf, config.params.cr, modeName(config.mode), preamble,
-           config.params.preamble ? "" : " (auto)");
+           config.params.preamble ? "" : " (auto)", automatic ? "; auto-owned" : "");
   if (temporary) {
     uint32_t minutes = (remaining + 59999UL) / 60000UL;
     const size_t used = strlen(reply);
@@ -643,14 +816,45 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     return true;
   }
   if ((base || temporary) && verb == Get && !*args) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+    if (base && autoSecondaryActive()) {
+      formatConfig(reply, capacity, auto_secondary_, false, 0, true);
+      return true;
+    }
+    if (base && saved_.mode == RadioProfileMode::Off) {
+      snprintf(reply, capacity, "> off (%s)", manual_secondary_ ? "manual" : "automatic allowed");
+      return true;
+    }
+#endif
     if (temporary && !temp_active_ && !temp_pending_) snprintf(reply, capacity, "> off");
     else formatConfig(reply, capacity, temporary ? (temp_pending_ ? pending_temporary_ : temporary_) : saved_,
                       temporary, temp_pending_ ? pending_duration_ms_ : temp_remaining_ms_);
     return true;
   }
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (base && verb == Set && !strcmp(args, "auto")) {
+    // This clears only saved permission, never an active/pending lease or a
+    // schedule. Remote acknowledgement staging must not weaken that contract.
+    if (remote_command_ || temp_pending_ || temp_active_ || hasSecondarySchedule()
+        || hasReplyMutation() || publish_pending_ || radio_->profiles()->primary_temporary
+        || radio_->profiles()->secondary_temporary) {
+      snprintf(reply, capacity, "Error: automatic radio2 requires no pending change, lease or schedule");
+      return true;
+    }
+    if (!save({}, primary_preamble_, cross_, 0)) {
+      snprintf(reply, capacity, "Error: settings could not be saved"); return true;
+    }
+    noteSecondaryManualChange();
+    saved_ = {}; manual_secondary_ = false;
+    publish_pending_ = true; publish_after_ms_ = millis() + 2000;
+    publish();
+    snprintf(reply, capacity, "OK - automatic radio2 permitted in 2s");
+    return true;
+  }
+#endif
   if ((base || temporary) && verb == Set && !strcmp(args, "off")) {
-    if (base && !(remote_command_ ? prepareSavedImage(ReplyPath, {}, primary_preamble_, cross_)
-                                 : save({}, primary_preamble_, cross_))) {
+    if (base && !(remote_command_ ? prepareSavedImage(ReplyPath, {}, primary_preamble_, cross_, true)
+                                 : save({}, primary_preamble_, cross_, true))) {
       snprintf(reply, capacity, "Error: settings could not be saved"); return true;
     }
     if (remote_command_) {
@@ -659,7 +863,8 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
           ? "saved radio2 restored" : "single radio");
       return true;
     }
-    if (base) { saved_ = {}; schedule_retry_ms_ = 0; }
+    noteSecondaryManualChange();
+    if (base) { saved_ = {}; manual_secondary_ = true; schedule_retry_ms_ = 0; }
     temp_pending_ = temp_active_ = false; temp_remaining_ms_ = 0;
     for (auto& s : schedules_) if (base || s.temporary) s = {};
     publish_pending_ = true; publish_after_ms_ = millis() + 2000;
@@ -691,6 +896,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
         }
         schedules_[first+i] = {};
       }
+      noteSecondaryManualChange();
       publish(); snprintf(reply, capacity, "OK"); return true;
     }
     if (!index) {
@@ -767,7 +973,9 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
         if (!stageRemoteSchedule(i, s)) {
           snprintf(reply, capacity, "Error: radio acknowledgement pending"); return true;
         }
-      } else schedules_[first+i] = s;
+      } else { schedules_[first+i] = s; noteSecondaryManualChange(); publish(); }
+#else
+      noteSecondaryManualChange(); publish();
 #endif
       snprintf(reply, capacity, "OK - %s %u queued, preamble=%u", key, i+1, preview.preamble(1, 32));
       appendChirpWarning(reply, capacity, preview); return true;
@@ -780,18 +988,24 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     }
     if (remote_command_) stageRemoteMutation(RemoteMutation::Temporary, config, minutes * 60000UL);
     else {
+      noteSecondaryManualChange();
       pending_temporary_ = config; pending_duration_ms_ = minutes * 60000UL;
       temp_start_ms_ = millis() + 2000; temp_pending_ = true;
+#if MESH_ENABLE_MESHTEXT_CHAT
+      publish_pending_ = true; publish_after_ms_ = temp_start_ms_;
+#endif
     }
     // An existing session remains active until the new request can take over.
     snprintf(reply, capacity, "OK - tempradio2 %lud%luh%lum (%lu min); preamble=%u",
         (unsigned long)(minutes/1440), (unsigned long)(minutes/60%24),
         (unsigned long)(minutes%60), (unsigned long)minutes, preview.preamble(1, 32));
-  } else if (remote_command_ ? prepareSavedImage(ReplyPath, config, primary_preamble_, cross_)
-                            : save(config, primary_preamble_, cross_)) {
+  } else if (remote_command_ ? prepareSavedImage(ReplyPath, config, primary_preamble_, cross_, true)
+                            : save(config, primary_preamble_, cross_, true)) {
     if (remote_command_) stageRemoteMutation(RemoteMutation::Saved, config);
     else {
+      noteSecondaryManualChange();
       saved_ = config;
+      manual_secondary_ = true;
       publish_pending_ = true; publish_after_ms_ = millis() + 2000;
       publish();
     }

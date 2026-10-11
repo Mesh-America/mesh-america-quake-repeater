@@ -393,6 +393,11 @@ TEST(CLICommandUtils, MasksTerminalPasswordInput) {
   const char* wifi = "set wifi.pwd secret phrase";
   EXPECT_STREQ("secret phrase", mesh::cli::terminalPasswordInput(wifi));
   EXPECT_EQ(nullptr, mesh::cli::terminalPasswordInput("set wifi.pwd "));
+  EXPECT_FALSE(mesh::cli::shouldMaskTerminalInput("set mt.channel 1 mt-longfast "));
+  EXPECT_FALSE(mesh::cli::shouldMaskTerminalInput("get mt.channel 1"));
+  EXPECT_TRUE(mesh::cli::shouldMaskTerminalInput("set mt.channel 1 mt-longfast a"));
+  EXPECT_STREQ("secret", mesh::cli::terminalPasswordInput("SET MT.CHANNEL 1 mt-Team secret"));
+  EXPECT_STREQ("AQ==", mesh::cli::terminalPasswordInput("set mt.channel 1 mt-longfast AQ=="));
 }
 
 TEST(CLICommandUtils, BackspaceErasesAsciiAndUtf8Characters) {

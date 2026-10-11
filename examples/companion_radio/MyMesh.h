@@ -26,6 +26,10 @@
 
 #include "DataStore.h"
 #include <helpers/RadioProfileCLI.h>
+#include <helpers/MeshtextConfig.h>
+#if MESH_ENABLE_MESHTEXT_CHAT
+#include <helpers/CompanionMeshtextChannel.h>
+#endif
 #include <helpers/CompanionNotificationPolicy.h>
 #include "NodePrefs.h"
 
@@ -351,6 +355,37 @@ protected:
   uint8_t getExtraAckTransmitCount() const override;
   bool filterRecvFloodPacket(mesh::Packet* packet) override;
   bool allowPacketForward(const mesh::Packet* packet) override;
+  bool allowGroupPacketOnRadio(mesh::Packet* packet) override;
+  int searchChannelsForPacket(const mesh::Packet* packet, const uint8_t* hash,
+                             mesh::GroupChannel channels[], int max_matches) override;
+  void onGroupDataRecv(mesh::Packet* packet, uint8_t type,
+                       const mesh::GroupChannel& channel, uint8_t* data, size_t len) override;
+  bool isAliasRadio2Defined() const;
+  bool resolveChannelAlias(ChannelDetails& channel) const;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  void beginMeshtext();
+  void refreshMeshtextIdentity();
+  void refreshMeshtextProfile();
+  bool isMeshtextChannel(const ChannelDetails& channel) const;
+  bool validateMeshtextChannelChange(int index, const ChannelDetails& channel);
+  bool handleMeshtextCommand(const char* command, char* reply, size_t capacity);
+  bool saveMeshtextSettings(mesh::mt::Region region, uint32_t slot, uint8_t hops = UINT8_MAX,
+                             const char* short_name = nullptr, uint32_t node_override = UINT32_MAX);
+  bool eraseMeshtextSettings();
+  bool sendMeshtextText(const ChannelDetails& channel, const char* text, size_t length);
+  bool sendMeshtextNodeInfo(const ChannelDetails& channel);
+  bool onForeignRadioFrame(const uint8_t* bytes, size_t length, uint8_t profile,
+                          uint32_t generation, float snr, float rssi) override;
+  void onForeignRadioSendComplete(bool success) override;
+  bool allowForeignRadioTransmit() const override {
+    return _radio_available && _scheduled_reboot_at == 0 && _mt_active;
+  }
+  mesh::mt::Region meshtextRegion() const;
+#endif
+  bool queueChannelText(uint8_t index, const uint8_t secret[32], float snr,
+                        uint8_t path_len, uint32_t timestamp, const char* text,
+                        bool is_emergency_channel);
+  int findChannelIdxForPacket(const mesh::GroupChannel& channel, const mesh::Packet* packet);
   bool allowFloodRetry(const mesh::Packet* packet) const override;
   uint8_t getFloodRetryMaxPathLength(const mesh::Packet* packet) const override;
   uint8_t getFloodRetryMaxAttempts(const mesh::Packet* packet) const override;
@@ -436,13 +471,18 @@ protected:
   bool getContactForSave(uint32_t idx, ContactInfo& contact) override { return getContactByIdx(idx, contact); }
   ContactInfo* getContactForStore(uint32_t idx) override { return getContactPtrByIdx(idx); }
   void onContactCacheFlushed() override;
-  bool onChannelLoaded(uint8_t channel_idx, const ChannelDetails& ch) override { return setChannel(channel_idx, ch); }
-  bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) override { return getChannel(channel_idx, ch); }
+  // A legacy malformed alias must not quarantine every other saved channel.
+  // The raw slot remains visible to the app so it can be renamed or deleted.
+  bool onChannelLoaded(uint8_t channel_idx, const ChannelDetails& ch) override { return BaseChatMesh::setChannel(channel_idx, ch); }
+  bool getChannelForSave(uint8_t channel_idx, ChannelDetails& ch) override { return BaseChatMesh::getChannel(channel_idx, ch); }
 
   void clearPendingReqs();
   bool hasPendingReqs() const;
 
 public:
+  // Runtime copies use the wire PSK; storage/app keep the original alias PSK.
+  bool getChannel(int channel_idx, ChannelDetails& channel);
+  bool setChannel(int channel_idx, const ChannelDetails& channel);
   bool savePrefs() {
     const uint8_t previous_usb_debug = _prefs.usb_debug_enabled;
     _prefs.usb_debug_enabled = _prefs.usb_debug_enabled == 1 ? 1 : 0;
@@ -647,6 +687,20 @@ private:
 
   DataStore* _store;
   mesh::RadioProfileCLI _radio_profiles;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  mesh::mt::Region _mt_region = mesh::mt::Region::Unset;
+  uint32_t _mt_slot = 0, _mt_node = 0, _mt_packet_id = 0;
+  uint32_t _mt_default_node = 0, _mt_node_override = 0;
+  char _mt_short_name[17] = {};
+  uint8_t _mt_hop_limit = 7;
+  uint32_t _mt_sent = 0, _mt_failed = 0, _mt_received = 0;
+  mesh::mt::SeenPackets _mt_seen;
+  bool _mt_settings_valid = true, _mt_active = false;
+  bool _mt_profile_dirty = true, _mt_last_radio_ready = false;
+  uint32_t _mt_primary_generation = 0, _mt_secondary_generation = 0, _mt_intent_generation = 0;
+  float _mt_primary_frequency = 0;
+  const char* _mt_status = "no Meshtext channels";
+#endif
   uint16_t _temp_radio_preamble = 0;
   CompanionNodePrefs _prefs;
   #if COMPANION_FEATURE_NOTIFICATIONS

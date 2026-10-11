@@ -155,6 +155,37 @@ class CustomSX1262 : public SX1262 {
       return SX1262::invertIQ(enable);
     }
 
+    // MeshCore and Meshtext share CRC-on, explicit-header, normal-IQ LoRa
+    // packet settings. Only an acknowledged owned RX-to-RX hop may stage
+    // these fields: startReceive() then commits one complete packet tuple,
+    // including RadioLib's fixInvertedIQ register workaround, before SetRx.
+    // Ordinary setup/TX/CAD/sleep/recovery retains the normal setter path.
+    int16_t setProfileProtocol(uint8_t syncWord) {
+      const bool stage = _profileSwitch.canResumeFast();
+      const int16_t rc = SX1262::setSyncWord(syncWord);
+      if (rc != RADIOLIB_ERR_NONE) {
+        _profileSwitch.packetResult(rc, preambleLengthLoRa, crcTypeLoRa,
+                                   implicitLen, headerType, invertIQEnabled);
+        return rc;
+      }
+      if (!stage) {
+        int16_t state = setCRC(1);
+        if (state == RADIOLIB_ERR_NONE) state = explicitHeader();
+        if (state == RADIOLIB_ERR_NONE) state = invertIQ(false);
+        return state;
+      }
+
+      crcTypeLoRa = RADIOLIB_SX126X_LORA_CRC_ON;
+      implicitLen = 0xff; // RadioLib explicitHeader() default receive length.
+      headerType = RADIOLIB_SX126X_LORA_HEADER_EXPLICIT;
+      invertIQEnabled = RADIOLIB_SX126X_LORA_IQ_STANDARD;
+      // Even an unchanged software tuple must be acknowledged once after the
+      // protocol write. Failed packet/IQ-workaround/SetRx commands revoke the
+      // owned context; the wrapper restores the old protocol with full setup.
+      _profileSwitch.invalidatePacket();
+      return RADIOLIB_ERR_NONE;
+    }
+
     // Ordinary setters can change hardware or leave RadioLib's fields updated
     // after a failed write. They cannot preserve our acknowledged hop tuple.
     int16_t setBandwidth(float bw) override {

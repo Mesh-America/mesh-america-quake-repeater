@@ -578,6 +578,14 @@ protected:
    */
   virtual int searchChannelsByHash(const uint8_t* hash, GroupChannel channels[], int max_matches);
 
+  // Use captured RX origin: queued packets can outlive a transceiver retune.
+  virtual int searchChannelsForPacket(const Packet* packet, const uint8_t* hash,
+                                     GroupChannel channels[], int max_matches) {
+    return searchChannelsByHash(hash, channels, max_matches);
+  }
+  // Known wrong-profile traffic must not poison global receive deduplication.
+  virtual bool allowGroupPacketOnRadio(Packet* packet) { return true; }
+
   /**
    * \brief  A structurally valid encrypted group packet has been observed.
    *         Called once for each unseen packet before local channel matching and

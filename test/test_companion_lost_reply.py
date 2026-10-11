@@ -31,7 +31,8 @@ class CompanionLostReplyTests(unittest.TestCase):
         methods += "\n".join(extract_braced(source, signature) for signature in (
             "void MyMesh::onMessageRecv(",
             "void MyMesh::onCLICommandRecv(", "bool MyMesh::onSignedMessageRecv(",
-            "void MyMesh::onChannelMessageRecv(", "void MyMesh::clearExpectedAck(",
+            "void MyMesh::onChannelMessageRecv(", "bool MyMesh::queueChannelText(",
+            "void MyMesh::clearExpectedAck(",
             "void MyMesh::expireExpectedAcks(", "bool MyMesh::processAck(",
         ))
         methods += "\n" + "\n".join(extract_braced(base, signature).replace(

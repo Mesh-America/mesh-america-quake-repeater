@@ -7,6 +7,10 @@
 See [two LoRa profiles](radio_profiles.md) for `radio2`, `tempradio2`, scheduling,
 RX-only mode, cross-transmission policy, and optional radio preambles.
 
+For supported Full Companions, see [Meshtext channel chat](radio_profiles.md#meshtext-channel-chat)
+for `mt-` channels and the explicit `send mt.nodeinfo <channel slot>` command.
+Chat remains plain text; NodeInfo is sent only when that command is requested.
+
 See [carrier-wave RF checks](carrier_wave.md) for `cw on [seconds]`,
 `cw2 on [seconds]`, and stopping a carrier with `off`.
 

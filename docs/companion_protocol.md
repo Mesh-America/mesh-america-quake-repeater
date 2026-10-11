@@ -545,6 +545,11 @@ Byte 1: Channel index (0 through max_channels - 1)
 
 **Response**: `PACKET_CHANNEL_INFO` (0x12) with channel details
 
+On builds with `MESH_ENABLE_MESHTEXT_CHAT=1`, a capable client can append a
+third request byte of `32` (`1F <index> 20`) to retrieve the complete 32-byte
+secret for an `mt-` channel. Ordinary two-byte requests, and requests for
+MeshCore channels, retain the original 16-byte secret response.
+
 ---
 
 ### 4. Set Channel
@@ -583,7 +588,27 @@ Bytes 34-49: Secret (16 bytes)
     [16 bytes of secret]
 ```
 
-**Note**: The 32-byte secret variant is unsupported and returns `PACKET_ERROR`.
+**Meshtext-only extension**: With `MESH_ENABLE_MESHTEXT_CHAT=1`, a 66-byte
+`SET_CHANNEL` frame can supply 32 secret bytes at offsets 34–65 for an `mt-`
+channel. Non-MT channels and feature-disabled builds reject this variant with
+`PACKET_ERROR`; the standard 50-byte MeshCore command is unchanged. The MT
+backend uses AES-256 when the upper 16 bytes are nonzero, otherwise AES-128.
+
+A legacy 50-byte SET of an existing MT channel preserves its upper 16 key
+bytes when the supplied lower half is unchanged. This permits an old client's
+GET/edit/SET round trip without silently truncating a provisioned AES-256 key.
+To explicitly replace or downgrade that key, send the full 32-byte variant
+(zero the upper half for AES-128). A client using only the legacy GET cannot
+export a complete AES-256 key. Stock app editors do not gain 256-bit
+provisioning or sharing from this firmware extension.
+
+For local CLI provisioning without implementing the binary extension, use
+`set mt.channel` with a 32- or 64-digit hexadecimal PSK; see the
+[private-channel commands](radio_profiles.md#meshtext-channel-chat).
+
+MT channel changes can also fail with a bad-state error for conflicting
+presets, an unsuitable manual radio2 profile, ambiguous region or a busy
+automatic owner. See [Meshtext channel chat](radio_profiles.md#meshtext-channel-chat).
 
 **Response**: `PACKET_OK` (0x00) on success, `PACKET_ERROR` (0x01) on failure
 
@@ -1035,7 +1060,9 @@ Bytes 2-33: Channel Name (32 bytes, null-terminated)
 Bytes 34-49: Secret (16 bytes)
 ```
 
-**Note**: The device returns the 16-byte channel secret in this response.
+**Note**: The normal response contains the 16-byte channel secret. An opt-in
+32-byte MT GET described above extends the secret through byte 65; response
+code, index and name fields remain unchanged.
 
 **PACKET_DEVICE_INFO** (0x0D):
 ```

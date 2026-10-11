@@ -4,6 +4,7 @@
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
 #include <helpers/CompanionTxRoutingCLI.h>
+#include <helpers/CompanionChannelAlias.h>
 #include <helpers/FleetCommand.h>
 #include "CompanionBluetooth.h"
 #include "CompanionWireless.h"
@@ -1639,7 +1640,8 @@ static bool __attribute__((noinline)) hasEmergencyClientRepeat(uint16_t key) {
 }
 
 bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
-  if (emergency_client_repeat_packet != NULL && packet->getPathHashCount() > 0) {
+  if (emergency_client_repeat_packet != NULL && packet->getPathHashCount() > 0
+      && packet->radio_origin == emergency_client_repeat_packet->radio_origin) {
     if (emergencyClientRepeatKey(packet) == emergency_client_repeat_key) {
       releasePacket(emergency_client_repeat_packet);
       emergency_client_repeat_packet = NULL;
@@ -1656,6 +1658,127 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   _clock_sync.observeAcceptedFlood(packet);
 #endif
   return true;
+}
+
+bool MyMesh::isAliasRadio2Defined() const {
+  const auto profiles = _radio->profiles();
+  return profiles != nullptr && profiles->enabled();
+}
+
+bool MyMesh::resolveChannelAlias(ChannelDetails& channel) const {
+  uint8_t original_key[16];
+  memcpy(original_key, channel.channel.secret, sizeof(original_key));
+  if (!resolveCompanionChannelKey(channel.name, channel.channel.secret,
+      [](uint8_t* out, size_t size, const uint8_t* text, int length) {
+        mesh::Utils::sha256(out, size, text, length);
+      })) return false;
+  const auto kind = parseCompanionChannelAlias(channel.name).kind;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (isMeshtextChannel(channel)) channel.channel.tx_radio = mesh::RADIO_TX_OFF;
+#endif
+  if (isAliasRadio2Defined()
+      && (kind == CompanionChannelKind::Radio2 || kind == CompanionChannelKind::Meshtext)) {
+    channel.channel.tx_radio = kind == CompanionChannelKind::Radio2
+        ? mesh::RADIO_TX_SECONDARY : mesh::RADIO_TX_OFF;
+  }
+  if (memcmp(original_key, channel.channel.secret, sizeof(original_key)) != 0) {
+    // BaseChatMesh already cached the hash for ordinary/private keys. Only a
+    // rewritten automatic alias needs another SHA-256 during receive scans.
+    mesh::Utils::sha256(channel.channel.hash, sizeof(channel.channel.hash), channel.channel.secret, 16);
+  }
+  return true;
+}
+
+bool MyMesh::getChannel(int channel_idx, ChannelDetails& channel) {
+  return BaseChatMesh::getChannel(channel_idx, channel) && resolveChannelAlias(channel);
+}
+
+bool MyMesh::setChannel(int channel_idx, const ChannelDetails& channel) {
+  if (parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Invalid) return false;
+  return BaseChatMesh::setChannel(channel_idx, channel);
+}
+
+int MyMesh::searchChannelsForPacket(const mesh::Packet* packet, const uint8_t* hash,
+                                  mesh::GroupChannel matches[], int max_matches) {
+  int count = 0;
+  const bool radio2_defined = isAliasRadio2Defined();
+  for (int priority = 0; priority < 2; ++priority) {
+    for (int i = 0; i < MAX_GROUP_CHANNELS && count < max_matches; ++i) {
+      ChannelDetails channel;
+      if (!getChannel(i, channel) || channel.name[0] == 0
+#if MESH_ENABLE_MESHTEXT_CHAT
+          || isMeshtextChannel(channel)
+#endif
+          || companionChannelReceivePriority(channel.name, packet->radio_origin, radio2_defined) != priority
+          || channel.channel.hash[0] != hash[0]) continue;
+      bool duplicate = false;
+      for (int j = 0; j < count; ++j) {
+        if (memcmp(matches[j].secret, channel.channel.secret, sizeof(channel.channel.secret)) == 0) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) matches[count++] = channel.channel;
+    }
+  }
+  return count;
+}
+
+int MyMesh::findChannelIdxForPacket(const mesh::GroupChannel& key, const mesh::Packet* packet) {
+  const bool radio2_defined = isAliasRadio2Defined();
+  for (int priority = 0; priority < 2; ++priority) {
+    for (int i = 0; i < MAX_GROUP_CHANNELS; ++i) {
+      ChannelDetails channel;
+      if (getChannel(i, channel) && channel.name[0] != 0
+#if MESH_ENABLE_MESHTEXT_CHAT
+          && !isMeshtextChannel(channel)
+#endif
+          && companionChannelReceivePriority(channel.name, packet->radio_origin, radio2_defined) == priority
+          && memcmp(channel.channel.secret, key.secret, sizeof(key.secret)) == 0) return i;
+    }
+  }
+  return -1;
+}
+
+bool MyMesh::allowGroupPacketOnRadio(mesh::Packet* packet) {
+  if (!isAliasRadio2Defined() || packet->payload_len < 1) return true;
+  if (packet->payload_len > MAX_PACKET_PAYLOAD) return false;
+  // Reject only an authenticated key match. The one-byte channel hash alone
+  // must not suppress unrelated channels or opaque relaying.
+  for (int i = 0; i < MAX_GROUP_CHANNELS; ++i) {
+    ChannelDetails channel;
+    if (!getChannel(i, channel) || channel.name[0] == 0
+        || channel.channel.hash[0] != packet->payload[0]) continue;
+    const auto alias = parseCompanionChannelAlias(channel.name);
+    if (alias.kind != CompanionChannelKind::Radio2
+        && alias.kind != CompanionChannelKind::Meshtext) continue;
+    uint8_t data[MAX_PACKET_PAYLOAD];
+    if (mesh::Utils::MACThenDecrypt(channel.channel.secret, data, packet->payload + 1,
+                                  packet->payload_len - 1) <= 0) continue;
+    const int selected = findChannelIdxForPacket(channel.channel, packet);
+    if (selected < 0) return false;
+    ChannelDetails selected_channel;
+    if (getChannel(selected, selected_channel)
+        && parseCompanionChannelAlias(selected_channel.name).kind == CompanionChannelKind::Radio2) {
+      // Also bind direct-path relaying, which runs before local delivery.
+      packet->tx_radio = mesh::RADIO_TX_SECONDARY;
+    }
+    return true;
+  }
+  return true;
+}
+
+void MyMesh::onGroupDataRecv(mesh::Packet* packet, uint8_t type,
+                           const mesh::GroupChannel& key, uint8_t* data, size_t len) {
+  const int index = findChannelIdxForPacket(key, packet);
+  if (index < 0) return;
+  ChannelDetails channel;
+  if (getChannel(index, channel) && isAliasRadio2Defined()
+      && parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Radio2) {
+    // Forwarding and the emergency hold copy stay on the originating profile.
+    packet->tx_radio = mesh::RADIO_TX_SECONDARY;
+  }
+  BaseChatMesh::onGroupDataRecv(packet, type, key, data, len);
 }
 
 #ifdef COMPANION_MESH_CLOCK_SYNC
@@ -1923,74 +2046,11 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   const bool is_emergency_channel =
       memcmp(channel.secret, EMERGENCY_CHANNEL_SECRET,
              sizeof(EMERGENCY_CHANNEL_SECRET)) == 0;
-  int i = 0;
-  if (app_target_ver >= 3) {
-    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
-    out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
-    out_frame[i++] = 0; // reserved1
-    out_frame[i++] = 0; // reserved2
-  } else {
-    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV;
-  }
-
-  uint8_t channel_idx = findChannelIdx(channel);
-  out_frame[i++] = channel_idx;
-  uint8_t path_len = out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
-
-  out_frame[i++] = TXT_TYPE_PLAIN;
-  memcpy(&out_frame[i], &timestamp, 4);
-  i += 4;
-  int tlen = strlen(text); // TODO: UTF-8 ??
-  if (i + tlen > MAX_FRAME_SIZE) {
-    tlen = MAX_FRAME_SIZE - i;
-  }
-  memcpy(&out_frame[i], text, tlen);
-  i += tlen;
-  const bool queued = addToOfflineQueue(out_frame, i);
-
-#if COMPANION_FEATURE_NOTIFICATIONS
-  const bool notification_managed = _notifications.message(nullptr, channel.secret, _serial->isConnected(), millis());
-  if (_ui) _ui->setMessageNotificationOverride(notification_managed, _notifications.overridesScreen());
-#else
-  const bool notification_managed = false;
-#endif
-  if (_serial->isConnected()) {
-    uint8_t frame[1];
-    frame[0] = PUSH_CODE_MSG_WAITING;
-    _serial->writeFrame(frame, 1);
-  } else {
-#ifdef DISPLAY_CLASS
-    if (_ui && !notification_managed) _ui->notify(UIEventType::channelMessage);
-#endif
-  }
-
-#if COMPANION_FEATURE_TEXT_TERMINAL
-  if (hasTerminalOutput()
-      && _terminal_display.shouldShowChannel(is_emergency_channel)) {
-    ChannelDetails details;
-    const char* channel_name = getChannel(channel_idx, details) ? details.name : "Unknown";
-    terminalOutput().printf(
-        "\r\nCHANNEL MSG -> %s (%s)\r\n  %s\r\n> ", channel_name,
-        pkt->isRouteDirect() ? "DIRECT" : "FLOOD", text);
-  }
-#endif
-#ifdef DISPLAY_CLASS
-  // Get the channel name from the channel index
-  const char *channel_name = "Unknown";
-  ChannelDetails channel_details;
-  if (getChannel(channel_idx, channel_details)) {
-    channel_name = channel_details.name;
-  }
-  char channel_label[64];
-  snprintf(channel_label, sizeof(channel_label), "Ch %u %s",
-           (unsigned int)channel_idx, channel_name);
-  if (_ui) {
-    _ui->newMsg(path_len, channel_label, text, offline_queue_len,
-                channel_idx, channel_name, queued ? offline_queue_len - 1 : -1);
-  }
-#endif
-
-  if (_ui) _ui->setMessageNotificationOverride(false);
+  const int selected_channel = findChannelIdxForPacket(channel, pkt);
+  if (selected_channel < 0) return;
+  queueChannelText(selected_channel, channel.secret, pkt->getSNR(),
+                   pkt->isRouteFlood() ? pkt->path_len : 0xFF,
+                   timestamp, text, is_emergency_channel);
 
   if (pkt->isRouteFlood() && is_emergency_channel) {
     bool zero_path = pkt->getPathHashCount() == 0;
@@ -2016,6 +2076,84 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   }
 }
 
+bool MyMesh::queueChannelText(uint8_t channel_idx, const uint8_t secret[32], float snr,
+                            uint8_t path_len, uint32_t timestamp, const char* text,
+                            bool is_emergency_channel) {
+  if (!text || channel_idx >= MAX_GROUP_CHANNELS) return false;
+  int i = 0;
+  if (app_target_ver >= 3) {
+    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
+    const float bounded_snr = !isfinite(snr) ? 0 : snr < -32 ? -32 : snr > 31.75f ? 31.75f : snr;
+    out_frame[i++] = (int8_t)(bounded_snr * 4);
+    out_frame[i++] = 0; // reserved1
+    out_frame[i++] = 0; // reserved2
+  } else {
+    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV;
+  }
+
+  out_frame[i++] = channel_idx;
+  out_frame[i++] = path_len;
+
+  out_frame[i++] = TXT_TYPE_PLAIN;
+  memcpy(&out_frame[i], &timestamp, 4);
+  i += 4;
+  int tlen = strlen(text); // TODO: UTF-8 ??
+  if (i + tlen > MAX_FRAME_SIZE) {
+    tlen = MAX_FRAME_SIZE - i;
+    while (tlen > 0 && (uint8_t(text[tlen]) & 0xc0) == 0x80) --tlen;
+  }
+  memcpy(&out_frame[i], text, tlen);
+  i += tlen;
+  const bool queued = addToOfflineQueue(out_frame, i);
+  if (!queued) return false;
+
+#if COMPANION_FEATURE_NOTIFICATIONS
+  const bool notification_managed = _notifications.message(nullptr, secret, _serial && _serial->isConnected(), millis());
+  if (_ui) _ui->setMessageNotificationOverride(notification_managed, _notifications.overridesScreen());
+#else
+  const bool notification_managed = false;
+#endif
+  if (_serial && _serial->isConnected()) {
+    uint8_t frame[1];
+    frame[0] = PUSH_CODE_MSG_WAITING;
+    _serial->writeFrame(frame, 1);
+  } else {
+#ifdef DISPLAY_CLASS
+    if (_ui && !notification_managed) _ui->notify(UIEventType::channelMessage);
+#endif
+  }
+
+#if COMPANION_FEATURE_TEXT_TERMINAL
+  if (hasTerminalOutput()
+      && _terminal_display.shouldShowChannel(is_emergency_channel)) {
+    ChannelDetails details;
+    const char* channel_name = getChannel(channel_idx, details) ? details.name : "Unknown";
+    terminalOutput().printf(
+        "\r\nCHANNEL MSG -> %s (%s)\r\n  %s\r\n> ", channel_name,
+        path_len == 0xFF ? "DIRECT" : "FLOOD", text);
+  }
+#endif
+#ifdef DISPLAY_CLASS
+  // Get the channel name from the channel index
+  const char *channel_name = "Unknown";
+  ChannelDetails channel_details;
+  if (getChannel(channel_idx, channel_details)) {
+    channel_name = channel_details.name;
+  }
+  char channel_label[64];
+  snprintf(channel_label, sizeof(channel_label), "Ch %u %s",
+           (unsigned int)channel_idx, channel_name);
+  if (_ui) {
+    _ui->newMsg(path_len, channel_label, text, offline_queue_len,
+                channel_idx, channel_name, queued ? offline_queue_len - 1 : -1);
+  }
+#endif
+
+  if (_ui) _ui->setMessageNotificationOverride(false);
+
+  return true;
+}
+
 void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint16_t data_type,
                                const uint8_t *data, size_t data_len) {
   if (data_len > MAX_CHANNEL_DATA_LENGTH) {
@@ -2030,7 +2168,9 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   out_frame[i++] = 0; // reserved1
   out_frame[i++] = 0; // reserved2
 
-  uint8_t channel_idx = findChannelIdx(channel);
+  const int selected_channel = findChannelIdxForPacket(channel, pkt);
+  if (selected_channel < 0) return;
+  uint8_t channel_idx = selected_channel;
   out_frame[i++] = channel_idx;
   out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
   out_frame[i++] = (uint8_t)(data_type & 0xFF);
@@ -2954,6 +3094,9 @@ void MyMesh::begin(bool has_display, bool radio_available,
 #endif
 
   configureRadioFromPrefs();
+#if MESH_ENABLE_MESHTEXT_CHAT
+  beginMeshtext();
+#endif
 
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
   _mqtt_enabled = CompanionMqttSetupPortal::loadEnabled();
@@ -3412,6 +3555,14 @@ bool MyMesh::handleTxRoutingCommand(const char* command, char* reply, size_t rep
   if (parsed.set && policy != parsed.policy) {
     bool saved;
     if (parsed.channel) {
+      const auto alias = parseCompanionChannelAlias(channel.name);
+      if (isAliasRadio2Defined()
+          && (alias.kind == CompanionChannelKind::Radio2 || alias.kind == CompanionChannelKind::Meshtext)) {
+        snprintf(reply, reply_size, "Error: channel prefix controls routing; rename it to change routing");
+        return true;
+      }
+      // Persist the app PSK, not the resolved wire-key copy used for reporting.
+      getChannelForSave(channel_index, channel);
       const ChannelDetails previous = channel;
       channel.channel.tx_radio = parsed.policy;
       saved = setChannel(channel_index, channel) && saveChannels();
@@ -3460,6 +3611,9 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   }
 
   if (handleTxRoutingCommand(command, reply, reply_size)) return true;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (handleMeshtextCommand(command, reply, reply_size)) return true;
+#endif
   if (mesh::handleUsbLoggingWatchdogCommand(command, reply, reply_size)) return true;
 #if COMPANION_FEATURE_OTA_CLI
   const auto* ota_context = mesh::ota::ota_context_if_active();
@@ -5733,7 +5887,16 @@ void MyMesh::handleCmdFrame(size_t len) {
     } else {
       ChannelDetails channel;
       bool success = getChannel(channel_idx, channel);
-      if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+      if (success && isMeshtextChannel(channel)) {
+        if (sendMeshtextText(channel, text, len - i)) writeOKFrame();
+        else writeErrFrame(ERR_CODE_BAD_STATE);
+      } else
+#endif
+      if (success && isAliasRadio2Defined()
+          && parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Meshtext) {
+        writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+      } else if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
@@ -5777,6 +5940,13 @@ void MyMesh::handleCmdFrame(size_t len) {
     ChannelDetails channel;
     if (!getChannel(channel_idx, channel)) {
       writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
+#if MESH_ENABLE_MESHTEXT_CHAT
+    } else if (isMeshtextChannel(channel)) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // channel text only, never raw/admin data
+#endif
+    } else if (isAliasRadio2Defined()
+        && parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Meshtext) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
     } else if (data_type == DATA_TYPE_RESERVED) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     } else if (payload_len > MAX_GROUP_DATA_LENGTH) {
@@ -6250,6 +6420,11 @@ void MyMesh::handleCmdFrame(size_t len) {
 #if ENABLE_PRIVATE_KEY_IMPORT
     if (!mesh::LocalIdentity::validatePrivateKey(&cmd_frame[1])) {
         writeErrFrame(ERR_CODE_ILLEGAL_ARG); // invalid key
+#if MESH_ENABLE_MESHTEXT_CHAT
+    } else if (hasForeignRadioFrame()) {
+        // Finish queued/sending MT text before changing its sender identity.
+        writeErrFrame(ERR_CODE_BAD_STATE);
+#endif
     } else if (!flushContactsBeforeReboot()) {
         // loadContacts() resets the dirty-page map, so never replace the
         // identity and reload while newer contact state exists only in RAM.
@@ -6259,6 +6434,9 @@ void MyMesh::handleCmdFrame(size_t len) {
         identity.readFrom(&cmd_frame[1], 64);
         if (_store->saveMainIdentity(identity)) {
           self_id = identity;
+#if MESH_ENABLE_MESHTEXT_CHAT
+          refreshMeshtextIdentity();
+#endif
 #if defined(ENABLE_OTA)
           mesh::ota::ota_refresh_seeder_identity(self_id.pub_key);
 #endif
@@ -6447,36 +6625,99 @@ void MyMesh::handleCmdFrame(size_t len) {
   } else if (cmd_frame[0] == CMD_GET_CHANNEL && len >= 2) {
     uint8_t channel_idx = cmd_frame[1];
     ChannelDetails channel;
-    if (getChannel(channel_idx, channel)) {
+    if (getChannelForSave(channel_idx, channel)) {
       int i = 0;
       out_frame[i++] = RESP_CODE_CHANNEL_INFO;
       out_frame[i++] = channel_idx;
       strcpy((char *)&out_frame[i], channel.name);
       i += 32;
-      memcpy(&out_frame[i], channel.channel.secret, 16);
-      i += 16; // NOTE: only 128-bit supported
+      size_t key_size = 16; // Original app response remains byte-for-byte compatible.
+#if MESH_ENABLE_MESHTEXT_CHAT
+      if (len >= 3 && cmd_frame[2] == 32 && isMeshtextChannel(channel)) key_size = 32;
+#endif
+      memcpy(&out_frame[i], channel.channel.secret, key_size);
+      i += key_size;
       _serial->writeFrame(out_frame, i);
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND);
     }
   } else if (cmd_frame[0] == CMD_SET_CHANNEL && len >= 2 + 32 + 32) {
-    writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // not supported (yet)
+#if MESH_ENABLE_MESHTEXT_CHAT
+    const uint8_t channel_idx = cmd_frame[1];
+    ChannelDetails previous{}, channel{};
+    StrHelper::strncpy(channel.name, (char *)&cmd_frame[2], 32);
+    memcpy(channel.channel.secret, &cmd_frame[2 + 32], sizeof(channel.channel.secret));
+    if (parseCompanionChannelAlias(channel.name).kind != CompanionChannelKind::Meshtext) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // MeshCore wire protocol is still AES-128.
+      return;
+    }
+    if (!validateMeshtextChannelChange(channel_idx, channel)) {
+      writeErrFrame(ERR_CODE_BAD_STATE);
+      return;
+    }
+    if (!getChannelForSave(channel_idx, previous) || !setChannel(channel_idx, channel)) {
+      writeErrFrame(ERR_CODE_NOT_FOUND);
+    } else if (!saveChannels()) {
+      setChannel(channel_idx, previous);
+      writeErrFrame(ERR_CODE_FILE_IO_ERROR);
+    } else {
+      _mt_seen.clear();
+      _mt_profile_dirty = true;
+      refreshMeshtextProfile();
+      writeOKFrame();
+    }
+#else
+    writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+#endif
   } else if (cmd_frame[0] == CMD_SET_CHANNEL && len >= 2 + 32 + 16) {
     uint8_t channel_idx = cmd_frame[1];
-    ChannelDetails previous;
+    ChannelDetails previous{};
     ChannelDetails channel;
     StrHelper::strncpy(channel.name, (char *)&cmd_frame[2], 32);
     memset(channel.channel.secret, 0, sizeof(channel.channel.secret));
     memcpy(channel.channel.secret, &cmd_frame[2 + 32], 16); // NOTE: only 128-bit supported
-    const bool have_previous = getChannel(channel_idx, previous);
+    const auto alias = parseCompanionChannelAlias(channel.name);
+    if (alias.kind == CompanionChannelKind::Invalid) {
+      writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+      return;
+    }
+#if MESH_ENABLE_MESHTEXT_CHAT
+    // Legacy apps fetch only 16 bytes. A label-only edit must not silently
+    // truncate a provisioned MT AES-256 key to AES-128. An explicit 32-byte SET
+    // (zero upper half for AES-128) is the unambiguous way to replace that key.
+    if (alias.kind == CompanionChannelKind::Meshtext
+        && getChannelForSave(channel_idx, previous) && isMeshtextChannel(previous)
+        && !memcmp(channel.channel.secret, previous.channel.secret, 16)) {
+      memcpy(channel.channel.secret + 16, previous.channel.secret + 16, 16);
+    }
+    if (!validateMeshtextChannelChange(channel_idx, channel)) {
+      writeErrFrame(ERR_CODE_BAD_STATE); // Conflicting preset, manual RF, region or busy owner.
+      return;
+    }
+#else
+    if (alias.kind == CompanionChannelKind::Meshtext && isAliasRadio2Defined()) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // Meshtext transport not implemented yet.
+      return;
+    }
+#endif
+    const bool have_previous = getChannelForSave(channel_idx, previous);
+    ChannelDetails wire_channel = channel;
+    ChannelDetails previous_wire_channel = previous;
+    resolveChannelAlias(wire_channel);
+    if (have_previous) resolveChannelAlias(previous_wire_channel);
     if (have_previous && channel.name[0] != 0 && previous.name[0] != 0
-        && !memcmp(channel.channel.secret, previous.channel.secret, sizeof(channel.channel.secret))) {
+        && !memcmp(wire_channel.channel.secret, previous_wire_channel.channel.secret, sizeof(channel.channel.secret))) {
       channel.channel.tx_radio = previous.channel.tx_radio;
     }
     if (!have_previous
         || !setChannel(channel_idx, channel)) {
       writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
     } else if (saveChannels()) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+      _mt_seen.clear();
+      _mt_profile_dirty = true;
+      refreshMeshtextProfile();
+#endif
       writeOKFrame();
     } else {
       // AtomicFileWriter preserves the last complete channels file. Keep the
@@ -8695,6 +8936,21 @@ void MyMesh::handleTerminalDisplayCommand(const char* arguments) {
 
 void MyMesh::sendTerminalChannelMessage(ChannelDetails& channel,
                                         const char* text) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (isMeshtextChannel(channel)) {
+    if (text && sendMeshtextText(channel, text, strlen(text))) {
+      terminalOutput().printf("  Queued to %s (Meshtext).\r\n", channel.name);
+    } else {
+      terminalOutput().printf("  ERROR: %s; use get mt.status\r\n", _mt_status);
+    }
+    return;
+  }
+#endif
+  if (isAliasRadio2Defined()
+      && parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Meshtext) {
+    terminalOutput().print("  ERROR: Meshtext channel transport is not available\r\n");
+    return;
+  }
   const size_t prefix_len = strlen(_prefs.node_name) + 2;  // "name: "
   const size_t max_text_len = prefix_len < MAX_TEXT_LEN
       ? MAX_TEXT_LEN - prefix_len : 0;
@@ -9570,6 +9826,20 @@ void MyMesh::handleTerminalCommand(char* command) {
         "  board\r\n"
         "  version\r\n");
     terminalOutput().print("  get storage.layout\r\n");
+#if MESH_ENABLE_MESHTEXT_CHAT
+    terminalOutput().print("  get mt.status / get mt.region / get mt.slot / get mt.hops\r\n"
+        "  get mt.node / get mt.shortname\r\n"
+        "  set mt.region <auto|us|eu868|eu433|anz>\r\n"
+        "  set mt.slot <0|1-based frequency slot>\r\n"
+        "  set mt.hops <0..7> (saved; default 7)\r\n"
+        "  set mt.node <!8hex|default> (saved; use a unique ID)\r\n"
+        "  set mt.shortname <1..4 UTF-8 characters|default> (saved; NodeInfo uses 4 bytes)\r\n"
+        "  send mt.nodeinfo <channel slot> (one manual advert; no automatic adverts)\r\n"
+        "  set mt.preset <longfast|shortturbo|...> (saved manual radio2)\r\n"
+        "  set mt.channel <slot> <mt-name> <32/64 hex digits|AQ==>\r\n"
+        "  get mt.channel <slot> / delete mt.channel <slot>\r\n"
+        "  Join #mt-longfast or #mt-shortturbo in the app for automatic radio2\r\n");
+#endif
 #if defined(NRF52_PLATFORM) && defined(EXTRAFS) && !defined(QSPIFLASH)
     terminalOutput().print("  get flash.health\r\n");
 #endif
@@ -9830,6 +10100,12 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
       stopContactsIterator();
       resetContacts();
       mesh::resetLazyPersistenceAfterSuccess(dirty_contacts_expiry, dirty_contacts_failures);
+#if MESH_ENABLE_MESHTEXT_CHAT
+      if (!eraseMeshtextSettings()) {
+        snprintf(reply, reply_size, "File system erased; Error: MT settings erase failed");
+        return true;
+      }
+#endif
       snprintf(reply, reply_size, "File system erase: OK");
     } else {
       snprintf(reply, reply_size, "File system erase: Err");
@@ -10369,6 +10645,12 @@ complete_line:
       }
     } else if (strcmp(cli_command, "erase") == 0) {
       bool success = _store->formatFileSystem();
+#if MESH_ENABLE_MESHTEXT_CHAT
+      if (success && !eraseMeshtextSettings()) {
+        output.println("  Error: file system erased, but MT settings erase failed");
+        return;
+      }
+#endif
       if (success) {
         output.println("  > erase done");
       } else {
@@ -10611,6 +10893,9 @@ void MyMesh::loop() {
 #endif
 
   _radio_profiles.loop();
+#if MESH_ENABLE_MESHTEXT_CHAT
+  refreshMeshtextProfile();
+#endif
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
   if (_mqtt_bridge) _mqtt_bridge->servicePendingClockCorrection();
 #endif

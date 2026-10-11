@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <math.h>
 #include <stdint.h>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #define MAX_HASH_SIZE 8
 #define MAX_TEXT_LEN 150
 #define MAX_FRAME_SIZE 172
+#define MAX_GROUP_CHANNELS 40
 #define EXPECTED_ACK_TABLE_SIZE 8
 #define TXT_TYPE_PLAIN 0
 #define TXT_TYPE_CLI_COMMAND 1
@@ -169,7 +171,7 @@ public:
   bool hasTerminalOutput() const { return false; }
   Terminal& terminalOutput() { return terminal; }
   void rememberOneKeyAck(ContactInfo&) {}
-  uint8_t findChannelIdx(const mesh::GroupChannel&) { return 0; }
+  int findChannelIdxForPacket(const mesh::GroupChannel&, const mesh::Packet*) { return 0; }
   bool getChannel(int, ChannelDetails&) { return false; }
   uint16_t emergencyClientRepeatKey(mesh::Packet*) { return 0; }
   bool hasEmergencyClientRepeat(uint16_t) { return false; }
@@ -223,6 +225,7 @@ public:
   void onCLICommandRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*, char*);
   bool onSignedMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const uint8_t*, const char*);
   void onChannelMessageRecv(const mesh::GroupChannel&, mesh::Packet*, uint32_t, const char*);
+  bool queueChannelText(uint8_t, const uint8_t[32], float, uint8_t, uint32_t, const char*, bool);
   bool handleDirectCommand(const char*, char*, size_t);
   bool handleCommand(const char*, uint32_t, char*);
   mesh::Packet* composeMsgPacket(const ContactInfo&, uint32_t, uint8_t, const char*, uint32_t&);

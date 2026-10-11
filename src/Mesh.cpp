@@ -1061,6 +1061,10 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
     return ACTION_RELEASE;
   }
 
+  if ((pkt->getPayloadType() == PAYLOAD_TYPE_GRP_TXT
+       || pkt->getPayloadType() == PAYLOAD_TYPE_GRP_DATA)
+      && !allowGroupPacketOnRadio(pkt)) return ACTION_RELEASE;
+
   if (pkt->isRouteDirect() && pkt->getPathHashCount() > 0) {
     // check for 'early received' ACK
     if (pkt->getPayloadType() == PAYLOAD_TYPE_ACK) {
@@ -1262,7 +1266,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
         onGroupPacketRecv(pkt);
         // scan channels DB, for all matching hashes of 'channel_hash' (max 4 matches supported ATM)
         GroupChannel channels[4];
-        int num = searchChannelsByHash(&channel_hash, channels, 4);
+        int num = searchChannelsForPacket(pkt, &channel_hash, channels, 4);
         // for each matching channel, try to decrypt data
         for (int j = 0; j < num; j++) {
           // decrypt, checking MAC is valid

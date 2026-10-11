@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
     else if (which == "wrong_size") { state.bytes.pop_back(); expected = Result::Invalid; }
     else if (which == "corrupt_crc") { state.bytes[7] ^= 1; expected = Result::Invalid; }
     else if (which == "future_version") {
-      state.bytes[2] = 2;
+      state.bytes[2] = 3;
       const uint32_t crc = mesh::checksum(state.bytes.data(), state.bytes.size() - 4);
       memcpy(state.bytes.data() + state.bytes.size() - 4, &crc, 4);
       expected = Result::Invalid;

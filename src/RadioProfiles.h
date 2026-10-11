@@ -9,6 +9,7 @@ namespace mesh {
 
 enum class RadioProfileMode : uint8_t { Off = 0, Rx = 1, RxTx = 2 };
 enum class RadioCrossMode : uint8_t { Auto = 0, On = 1, Off = 2 };
+enum class RadioProfileProtocol : uint8_t { MeshCore = 0, Meshtext = 1 };
 
 // These are modulation profiles of ONE transceiver, never additional radios.
 struct RadioProfileParams {
@@ -17,10 +18,11 @@ struct RadioProfileParams {
   uint16_t preamble = 0;  // 0 = automatic, otherwise symbols
   uint8_t sf = 0;
   uint8_t cr = 0;
+  RadioProfileProtocol protocol = RadioProfileProtocol::MeshCore;
 
   bool operator==(const RadioProfileParams& other) const {
     return freq == other.freq && bw == other.bw && sf == other.sf
-        && cr == other.cr && preamble == other.preamble;
+        && cr == other.cr && preamble == other.preamble && protocol == other.protocol;
   }
   bool operator!=(const RadioProfileParams& other) const { return !(*this == other); }
 };
@@ -102,8 +104,9 @@ class RadioProfiles {
         || (reply_rx_override && secondary.mode == RadioProfileMode::Rx)));
   }
   bool canCross() const {
-    return cross == RadioCrossMode::On || (cross == RadioCrossMode::Auto
-        && primary_temporary == secondary_temporary);
+    return primary.protocol == secondary.params.protocol
+        && (cross == RadioCrossMode::On || (cross == RadioCrossMode::Auto
+        && primary_temporary == secondary_temporary));
   }
   uint8_t transmitMask(uint8_t origin) const {
     if (origin > 1) origin = 0;
@@ -117,6 +120,7 @@ class RadioProfiles {
   static bool valid(const RadioProfileParams& p) {
     if (!isfinite(p.freq) || !isfinite(p.bw) || p.freq < 150 || p.freq > 2500
         || p.sf < 5 || p.sf > 12 || p.cr < 5 || p.cr > 8
+        || (p.protocol != RadioProfileProtocol::MeshCore && p.protocol != RadioProfileProtocol::Meshtext)
         || (p.preamble != 0 && (p.preamble < 8 || p.preamble > MaxPreamble))) return false;
     static constexpr float bandwidths[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f,
                                62.5f, 125, 250, 500, 1000, 812.5f, 1625};
@@ -219,6 +223,9 @@ class RadioProfiles {
   }
   uint16_t preamble(uint8_t profile, uint16_t single_profile_default) const {
     const auto& p = params(profile);
+    // The foreign network's wire format has a fixed 16-symbol preamble;
+    // MeshCore's scan recommendations must never silently lengthen it.
+    if (p.protocol == RadioProfileProtocol::Meshtext) return 16;
     if (p.preamble) return p.preamble;
     if (!enabled()) return single_profile_default;
     // Do not expose an unmeasured short preamble while the startup test runs.
@@ -235,6 +242,9 @@ class RadioProfiles {
     }
     // Recommendations over 128 are reported as unsafe, but the profile can
     // still run at the cap when its physical preamble is legal.
+    // A foreign network fixes its own preamble and cannot advertise our scan
+    // cycle. Accept safe wire settings, but do not claim loss-free scanning.
+    if (enabled() && primary.protocol != secondary.params.protocol) return true;
     if (enabled()) {
       const uint8_t slow = slowerProfile();
       const double available = double(preamble(slow, 32)) / 2.0 * symbolUs(params(slow))

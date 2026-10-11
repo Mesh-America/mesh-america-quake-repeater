@@ -23,6 +23,7 @@ from motalib import (  # noqa: E402
 )
 from check_esp32_app_size import app_partition_size  # noqa: E402
 from firmware_memory_manifest import validate_package  # noqa: E402
+from package_meshtext_license import validate_artifact_notice as validate_meshtext_notice
 
 
 BOARDS = {
@@ -587,6 +588,9 @@ def package_board(name: str, spec: dict, build_dir: Path, output_dir: Path,
         "target-partitions.bin": table,
         "capabilities.json": capability_path.read_bytes(),
     }
+    meshtext_notice = validate_meshtext_notice(build_dir / stem)
+    if meshtext_notice is not None:
+        files[meshtext_notice.name] = meshtext_notice.read_bytes()
     if spec.get("expander_bridge"):
         expander_body = (utility_build_dir / spec["expander_bridge"] /
                          "firmware.bin").read_bytes()

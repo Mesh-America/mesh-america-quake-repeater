@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import re
+from cpp_source import body
 
 
 root = Path(__file__).resolve().parents[1]
@@ -82,10 +83,17 @@ assert re.search(
 assert terminal.index("handleLocalControlCommand(") < terminal.index(
     'strncmp(command, "set ", 4) == 0'
 )
-assert 'terminalOutput().print("  board\\r\\n")' in terminal
-assert 'terminalOutput().print("  version\\r\\n")' in terminal
-assert 'terminalOutput().print("  get pwrmgt.bootreason\\r\\n")' in terminal
-assert 'terminalOutput().print("  set pin <0-999999>\\r\\n")' in terminal
+# Help is emitted in bounded chunks with concatenated C++ literals. Check the
+# actual help branch rather than requiring one print() call per command.
+help_branch = body(terminal, 'if (strcmp(command, "help") == 0)')
+for help_line in ('  board\\r\\n', '  version\\r\\n',
+                  '  get pwrmgt.bootreason\\r\\n', '  set pin <0-999999>\\r\\n',
+                  '  set mt.hops <0..7> (saved; default 7)\\r\\n',
+                  '  get mt.node / get mt.shortname\\r\\n',
+                  '  set mt.node <!8hex|default> (saved; use a unique ID)\\r\\n',
+                  '  set mt.shortname <1..4 UTF-8 characters|default> (saved; NodeInfo uses 4 bytes)\\r\\n',
+                  '  send mt.nodeinfo <channel slot> (one manual advert; no automatic adverts)\\r\\n'):
+    assert help_line in help_branch
 assert re.search(
     r"#if COMPANION_FEATURE_MEMORY_DIAGNOSTICS\s+"
     r'terminalOutput\(\)\.print\("  memory\\r\\n"\);\s+#endif',

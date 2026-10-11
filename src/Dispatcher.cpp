@@ -48,6 +48,12 @@ void Dispatcher::setRadioAvailable(bool available) {
   if (radio_available == available) return;
 
   radio_available = available;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (!available && hasForeignRadioFrame()) {
+    if (foreign_radio_sending) _radio->onSendFinished();
+    finishForeignRadioFrame(false, foreign_radio_sending);
+  }
+#endif
   radio_nonrx_timer_armed = false;
   if (!dispatcher_started || !radio_available) return;
 
@@ -68,6 +74,12 @@ void Dispatcher::setRadioAvailable(bool available) {
 }
 
 void Dispatcher::begin() {
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (hasForeignRadioFrame()) {
+    if (foreign_radio_sending && radio_available) _radio->onSendFinished();
+    finishForeignRadioFrame(false, foreign_radio_sending);
+  }
+#endif
   n_sent_flood = n_sent_direct = 0;
   n_recv_flood = n_recv_direct = 0;
   last_meshcore_recv_millis = 0;
@@ -259,6 +271,154 @@ void Dispatcher::failOutboundTransmit() {
   outbound_cancellation = OutboundCancellation::None;
 }
 
+#if MESH_ENABLE_MESHTEXT_CHAT
+bool Dispatcher::isForeignRadioCurrent() const {
+  const auto* profiles = _radio->profiles();
+  return radio_available && _radio->supportsMeshtext() && profiles
+      && allowForeignRadioTransmit()
+      && foreign_radio_profile == 1 && profiles->enabled()
+      && profiles->canTransmit(foreign_radio_profile)
+      && profiles->params(foreign_radio_profile).protocol == RadioProfileProtocol::Meshtext
+      && foreign_radio_generation == profiles->generation[foreign_radio_profile];
+}
+
+bool Dispatcher::queueForeignRadioFrame(const uint8_t* bytes, size_t length,
+                                        uint8_t profile, uint32_t generation) {
+  const auto* profiles = _radio->profiles();
+  if (!bytes || !length || length > sizeof(foreign_radio_bytes) || hasForeignRadioFrame()
+      || !radio_available || !_radio->supportsMeshtext() || _radio->isCarrierWaveActive()
+      || !allowForeignRadioTransmit()
+      || !profiles || profile != 1 || !profiles->enabled() || !profiles->canTransmit(profile)
+      || profiles->params(profile).protocol != RadioProfileProtocol::Meshtext
+      || generation != profiles->generation[profile]) return false;
+  memcpy(foreign_radio_bytes, bytes, length);
+  foreign_radio_length = (uint16_t)length;
+  foreign_radio_profile = profile;
+  foreign_radio_generation = generation;
+  foreign_radio_retry_at = foreign_radio_prepare_deadline = 0;
+  foreign_radio_sending = false;
+  return true;
+}
+
+void Dispatcher::finishForeignRadioFrame(bool success, bool account_airtime) {
+  if (!hasForeignRadioFrame()) return;
+  if (account_airtime) {
+    const uint32_t elapsed = (uint32_t)_ms->getMillis() - foreign_radio_start;
+    total_air_time += elapsed;
+    updateTxBudget();
+    tx_budget_ms = elapsed >= tx_budget_ms ? 0 : tx_budget_ms - elapsed;
+    if (tx_budget_ms < MIN_TX_BUDGET_RESERVE_MS) {
+      const float duty_cycle = 1.0f / (1.0f + getAirtimeBudgetFactor());
+      next_tx_time = futureMillis((unsigned long)((MIN_TX_BUDGET_RESERVE_MS - tx_budget_ms) / duty_cycle));
+    } else next_tx_time = _ms->getMillis();
+  }
+  if (success && _radio->profiles()) ++_radio->profiles()->tx_packets[foreign_radio_profile];
+  // Release ownership before calling the application; it may submit another
+  // explicit user message. No retry is scheduled after any failure/timeout.
+  foreign_radio_length = 0;
+  foreign_radio_sending = false;
+  foreign_radio_yield_meshcore = true;
+  profile_cad_busy[foreign_radio_profile] = 0;
+  foreign_radio_retry_at = foreign_radio_prepare_deadline = 0;
+  radio_nonrx_start = _ms->getMillis();
+  onForeignRadioSendComplete(success);
+}
+
+bool Dispatcher::serviceForeignRadioFrame() {
+  if (!hasForeignRadioFrame()) return false;
+  if (!foreign_radio_sending) {
+    if (!isForeignRadioCurrent()) finishForeignRadioFrame(false, false);
+    return false;
+  }
+  if (_radio->isSendComplete()) {
+    const bool current = isForeignRadioCurrent();
+    _radio->onSendFinished();
+    finishForeignRadioFrame(current, true);
+    return false;
+  }
+  if (millisHasNowPassed(foreign_radio_expiry)) {
+    _radio->onSendFinished();
+    finishForeignRadioFrame(false, true);
+    _err_flags |= ERR_EVENT_RADIO_WATCHDOG;
+    _radio->recoverRadio(true);
+    return false;
+  }
+  return true;
+}
+
+bool Dispatcher::checkForeignRadioSend() {
+  if (!hasForeignRadioFrame() || outbound || foreign_radio_sending) return false;
+  if (!isForeignRadioCurrent()) {
+    finishForeignRadioFrame(false, false);
+    return false;
+  }
+  if (!restoreOutboundTxOverrides() || _radio->isCarrierWaveActive()) return false;
+  const uint32_t now = _ms->getMillis();
+  // Continuous explicit foreign chat must leave due MeshCore traffic a turn
+  // between messages; a blocked/absent MeshCore queue does not stall MT.
+  if (foreign_radio_yield_meshcore && _mgr->getOutboundCount(now) > 0) {
+    foreign_radio_yield_meshcore = false;
+    return false;
+  }
+  if (foreign_radio_retry_at && (int32_t)(now - foreign_radio_retry_at) < 0) return false;
+  updateTxBudget();
+  const uint32_t airtime = validPrepareBusyAirtime(
+      _radio->getProfileAirtime(foreign_radio_profile, foreign_radio_length));
+  if (!airtime) { finishForeignRadioFrame(false, false); return false; }
+  if (tx_budget_ms < airtime / MIN_TX_BUDGET_AIRTIME_DIV) {
+    const float duty_cycle = 1.0f / (1.0f + getAirtimeBudgetFactor());
+    next_tx_time = futureMillis((unsigned long)((airtime / MIN_TX_BUDGET_AIRTIME_DIV - tx_budget_ms) / duty_cycle));
+    return false;
+  }
+  if (!millisHasNowPassed(next_tx_time)) return false;
+  const auto prepared = _radio->prepareTransmitProfile(foreign_radio_profile);
+  if (prepared == RadioParamApplyResult::BUSY) {
+    if (!foreign_radio_prepare_deadline) {
+      uint32_t maximum = validPrepareBusyAirtime(_radio->getProfileAirtime(0, MAX_TRANS_UNIT));
+      const uint32_t other = validPrepareBusyAirtime(_radio->getProfileAirtime(1, MAX_TRANS_UNIT));
+      if (other > maximum) maximum = other;
+      foreign_radio_prepare_deadline = now + maximum * 3 / 2 + RADIO_PREPARE_BUSY_GRACE_MS;
+      if (!foreign_radio_prepare_deadline) foreign_radio_prepare_deadline = 1;
+    } else if (millisHasNowPassed(foreign_radio_prepare_deadline)) {
+      finishForeignRadioFrame(false, false);
+      _err_flags |= ERR_EVENT_RADIO_WATCHDOG;
+      _radio->recoverRadio(true);
+      return false;
+    }
+    foreign_radio_retry_at = now + 10;
+    return false;
+  }
+  foreign_radio_prepare_deadline = 0;
+  if (prepared != RadioParamApplyResult::APPLIED || !isForeignRadioCurrent()) {
+    finishForeignRadioFrame(false, false);
+    return false;
+  }
+  // CAD is the normal bounded pre-transmit check. Waiting does not retain the
+  // transceiver: MeshCore RX/TX and profile scanning continue in the meantime.
+  uint32_t& busy_since = profile_cad_busy[foreign_radio_profile];
+  if (_radio->isReceiving()) {
+    if (!busy_since) busy_since = now ? now : 1;
+    if ((uint32_t)(now - busy_since) <= getCADFailMaxDuration()) {
+      foreign_radio_retry_at = now + getCADFailRetryDelay();
+      return false;
+    }
+    _err_flags |= ERR_EVENT_CAD_TIMEOUT;
+  }
+  busy_since = 0;
+  foreign_radio_retry_at = 0;
+  foreign_radio_start = _ms->getMillis();
+  if (!_radio->startSendRaw(foreign_radio_bytes, foreign_radio_length)) {
+    // RadioLib owns failure cleanup (including the board's FEM). Unlike
+    // MeshCore reliable routing, foreign chat never retries autonomously.
+    finishForeignRadioFrame(false, false);
+    return false;
+  }
+  foreign_radio_sending = true;
+  foreign_radio_expiry = foreign_radio_start + airtime * 3 / 2 + 1000;
+  return true;
+}
+#endif
+
 int Dispatcher::calcRxDelay(float score, uint32_t air_time) const {
   return (int) ((powf(10.0f, 0.85f - score) - 1.0f) * air_time);
 }
@@ -301,6 +461,9 @@ void Dispatcher::logPacketLine(const char* direction, const Packet* packet,
 
 bool Dispatcher::getNextQueueWakeDelay(uint32_t& delay_millis) const {
   if (isDualRadioActive()) { delay_millis = 0; return true; }
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (hasForeignRadioFrame()) { delay_millis = 0; return true; }
+#endif
   const uint32_t now = _ms->getMillis();
   bool found = false;
   uint32_t shortest_delay = 0;
@@ -371,6 +534,11 @@ void Dispatcher::loop() {
   // A maintenance carrier has no TxDone packet. Keep its deadline serviced,
   // but leave queued packets and RX/AGC watchdogs alone until normal RX returns.
   if (_radio->isCarrierWaveActive()) return;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  // Use the same physical-radio owner and cleanup path as MeshCore TX. A
+  // foreign packet never enters the MeshCore retry/forwarding machinery.
+  if (serviceForeignRadioFrame()) return;
+#endif
 
   const unsigned long now = _ms->getMillis();
   if (!radio_nonrx_timer_armed) {
@@ -632,7 +800,11 @@ void Dispatcher::loop() {
     }
 #endif
   }
+#if MESH_ENABLE_MESHTEXT_CHAT
+  if (!checkForeignRadioSend()) checkSend();
+#else
   checkSend();
+#endif
   releaseDroppedOutbound();
 }
 
@@ -728,6 +900,24 @@ void Dispatcher::checkRecv() {
       snr = _radio->getLastSNR();
       rssi = _radio->getLastRSSI();
 
+      const uint8_t profile = _radio->receiveProfile();
+      const auto* profiles = _radio->profiles();
+      // Protocol is selected by the receiving modem, never guessed from a
+      // payload byte. No foreign bytes may leak into MeshCore raw sinks,
+      // parsing, duplicate suppression, direct forwarding, or app counters.
+      if (profiles && profile < 2
+          && profiles->params(profile).protocol == RadioProfileProtocol::Meshtext) {
+#if MESH_ENABLE_MESHTEXT_CHAT
+        if (profiles->enabled() && _radio->receiveProfileGeneration() == profiles->generation[profile]) {
+          rx_air_time += _radio->getProfileAirtime(profile, len);
+          ++_radio->profiles()->rx_packets[profile];
+          onForeignRadioFrame(raw, (size_t)len, profile, profiles->generation[profile], snr, rssi);
+        }
+#endif
+        _radio->onReceiveProcessed();
+        return;
+      }
+
       // TRACE and CONTROL are direct-only.  Reject a flood framing before
       // raw hooks can expose it to USB logs, MQTT, ESP-NOW, or another bridge.
       // The header check is deliberate: it also holds when the packet pool is
@@ -793,6 +983,7 @@ void Dispatcher::processRecvPacket(Packet* pkt) {
   const auto* profiles = _radio->profiles();
   if (profiles && (pkt->radio_profile > 1
       || (pkt->radio_profile == 1 && !profiles->enabled())
+      || profiles->params(pkt->radio_profile).protocol != RadioProfileProtocol::MeshCore
       || pkt->radio_generation != profiles->generation[pkt->radio_profile])) {
     releasePacket(pkt);
     return;
@@ -1083,8 +1274,15 @@ uint8_t Dispatcher::getTransmitProfileMask(const Packet* packet) const {
   uint8_t origin = packet->radio_profile;
   if (policy == RADIO_TX_AUTO && packet->radio_local && packet->getPayloadType() == PAYLOAD_TYPE_OTA
       && profiles->secondary_temporary && !profiles->primary_temporary) origin = 1;
-  return policy == RADIO_TX_AUTO ? profiles->transmitMask(origin)
+  uint8_t mask = policy == RADIO_TX_AUTO ? profiles->transmitMask(origin)
       : explicitRadioTxMask(policy, profiles->canTransmit(1, force));
+  // Explicit BOTH/secondary/reply-force policies cannot turn a MeshCore
+  // packet into foreign-network traffic. The raw API is its only TX path.
+  for (uint8_t profile = 0; profile < 2; ++profile) {
+    if (profiles->params(profile).protocol != RadioProfileProtocol::MeshCore)
+      mask &= (uint8_t)~(1U << profile);
+  }
+  return mask;
 }
 
 uint32_t Dispatcher::getTransmitAirtime(const Packet* packet) const {
@@ -1099,8 +1297,10 @@ uint32_t Dispatcher::getTransmitAirtime(const Packet* packet) const {
 
 bool Dispatcher::isPacketRadioCurrent(const Packet* packet) const {
   const auto* p = _radio->profiles();
-  if (!p || !packet->radio_bound) return true;
+  if (!p) return true;
   const uint8_t target = packet->radio_profile;
+  if (target > 1 || p->params(target).protocol != RadioProfileProtocol::MeshCore) return false;
+  if (!packet->radio_bound) return true;
   const uint8_t origin = packet->radio_origin;
   const bool force = packet->radio_reply && packet->radio_reply_force;
   return target < 2 && origin < 2 && p->canTransmit(target, force)

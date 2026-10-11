@@ -4743,6 +4743,9 @@ collect_build_artifacts() {
       ;;
   esac
 
+  python3 scripts/package_meshtext_license.py collect "$build_output_dir" \
+    --stem "${OUTPUT_DIR}/${firmware_filename}" || return $?
+
   python3 scripts/firmware_memory_manifest.py package "$build_output_dir" \
     --stem "${OUTPUT_DIR}/${firmware_filename}" || return $?
 }

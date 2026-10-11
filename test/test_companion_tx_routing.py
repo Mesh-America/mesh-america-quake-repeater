@@ -17,6 +17,7 @@ HARNESS = r'''
 #include <RadioProfiles.h>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/CompanionTxRoutingCLI.h>
+#include <helpers/CompanionChannelAlias.h>
 #include <helpers/IdentityStore.h>
 #include "ContactFileTransaction.h"
 #if defined(STM32_PLATFORM)
@@ -65,14 +66,26 @@ public:
  bool canMutateContacts() const { return writable && !store.hasIncompleteContactLoad(); }
  int getTotalContactSlots() const { return contacts.size(); }
  ContactInfo* getContactPtrByIdx(int i) { return &contacts.at(i); }
- bool getChannel(int i, ChannelDetails& c) { if (i<0 || i>=MAX_GROUP_CHANNELS) return false; c=channels[i]; return true; }
+ bool getChannel(int i, ChannelDetails& c) {
+   if (i<0 || i>=MAX_GROUP_CHANNELS) return false;
+   c=channels[i];
+   if (radio.config.enabled()) {
+     auto kind=parseCompanionChannelAlias(c.name).kind;
+     if (kind==CompanionChannelKind::Radio2) c.channel.tx_radio=mesh::RADIO_TX_SECONDARY;
+     else if (kind==CompanionChannelKind::Meshtext) c.channel.tx_radio=mesh::RADIO_TX_OFF;
+   }
+   return true;
+ }
  bool setChannel(int i, const ChannelDetails& c) { if (i<0 || i>=MAX_GROUP_CHANNELS) return false; channels[i]=c; return true; }
  bool saveChannels() { ++writes; return writes_ok && store.saveChannels(this); }
  bool scheduleContactWrite(const ContactInfo&) { ++writes; return writes_ok; }
  bool flushContactsBeforeReboot() { return writes_ok; }
  bool onChannelLoaded(uint8_t i,const ChannelDetails& c) override { return setChannel(i,c); }
- bool getChannelForSave(uint8_t i,ChannelDetails& c) override { return getChannel(i,c); }
+ bool getChannelForSave(uint8_t i,ChannelDetails& c) override {
+   if (i>=MAX_GROUP_CHANNELS) return false; c=channels[i]; return true;
+ }
  bool handleTxRoutingCommand(const char*,char*,size_t);
+ bool isAliasRadio2Defined() const { return radio.config.enabled(); }
 };
 @METHODS@
 
@@ -232,6 +245,24 @@ int main() {
  for (auto& byte : node.store.fs.files["/channels2"]) byte=0;
  node.store.loadChannels(&node);
  for (auto& c : node.channels) assert(c.channel.tx_radio==mesh::RADIO_TX_AUTO);
+ // Prefix-bound routes cannot be silently overridden. With no radio2, the
+ // ordinary raw/manual policy can still be changed without rewriting the PSK.
+ MyMesh aliased;
+ strcpy(aliased.channels[1].name,"#r2-emergency");
+ aliased.channels[1].channel.secret[0]=42;
+ aliased.radio.config.secondary.mode=mesh::RadioProfileMode::RxTx;
+ auto alias_cmd=[&](const char* text) { assert(aliased.handleTxRoutingCommand(text,reply,sizeof(reply))); };
+ alias_cmd("get tx.channel 1"); assert(strstr(reply,"active=radio2"));
+ alias_cmd("set tx.channel 1 radio"); assert(strstr(reply,"prefix controls routing"));
+ assert(aliased.writes==0 && aliased.channels[1].channel.tx_radio==mesh::RADIO_TX_AUTO);
+ alias_cmd("set tx.channel 1 radio2"); assert(!strncmp(reply,"OK",2) && aliased.writes==0);
+ aliased.radio.config.secondary.mode=mesh::RadioProfileMode::Off;
+ alias_cmd("set tx.channel 1 radio"); assert(!strncmp(reply,"OK",2));
+ assert(aliased.channels[1].channel.tx_radio==mesh::RADIO_TX_PRIMARY);
+ assert(aliased.channels[1].channel.secret[0]==42);
+ assert(aliased.store.fs.files["/channels2"][68+36]==42);
+ aliased.radio.config.secondary.mode=mesh::RadioProfileMode::Rx;
+ alias_cmd("get tx.channel 1"); assert(strstr(reply,"active=off") && strstr(reply,"unavailable"));
 }
 '''
 
@@ -266,9 +297,9 @@ class CompanionTxRoutingTest(unittest.TestCase):
 
     def test_phone_protocol_updates_preserve_same_channel_policy(self):
         source = (ROOT / 'examples/companion_radio/MyMesh.cpp').read_text()
-        command = source[source.index('const bool have_previous = getChannel(channel_idx, previous);'):]
+        command = source[source.index('const bool have_previous = getChannelForSave(channel_idx, previous);'):]
         command = command[:command.index('} else if (cmd_frame[0] == CMD_SIGN_START')]
-        self.assertIn('!memcmp(channel.channel.secret, previous.channel.secret, sizeof(channel.channel.secret))', command)
+        self.assertIn('!memcmp(wire_channel.channel.secret, previous_wire_channel.channel.secret, sizeof(channel.channel.secret))', command)
         self.assertIn('channel.channel.tx_radio = previous.channel.tx_radio;', command)
         self.assertIn('setChannel(channel_idx, previous);', command)
         self.assertIn('handleTxRoutingCommand(command, reply, reply_size)',

@@ -51,6 +51,21 @@ connection. Use the WiFi MOTA seeder on port 5001 for a host folder over WiFi.
 
 ## Local maintenance commands
 
+Supported ESP32-S3/SX1262 Full Companions also support
+[Meshtext channel chat](radio_profiles.md#meshtext-channel-chat):
+
+```text
+set mt.shortname MIKE
+send mt.nodeinfo 0
+channel 0 Hello
+```
+
+Use a configured `mt-` channel slot. The explicit `send mt.nodeinfo` command
+queues one standard name/ID advertisement; chat carries only the entered text.
+There are no automatic NodeInfo sends or responses. The long name comes from
+the existing node name; `get mt.shortname` shows the effective four-byte short
+name. These commands are not added to smaller or feature-disabled builds.
+
 Local means a connection directly to the node: USB, BLE or WiFi/Ethernet
 Companion protocol, a TCP terminal, or the browser CLI on the LAN. These
 connections can use the following commands when the role and build include

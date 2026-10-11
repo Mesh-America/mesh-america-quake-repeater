@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from firmware_memory_manifest import validate_package
 from check_nrf52_uf2 import check_uf2
 from package_nrf52_font_license import validate_artifact_notice
+from package_meshtext_license import validate_artifact_notice as validate_meshtext_notice
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,6 +162,9 @@ def collect_artifacts(directory, version):
         font_notice = validate_artifact_notice(directory / stem)
         if font_notice is not None:
             files.append(font_notice)
+        meshtext_notice = validate_meshtext_notice(directory / stem)
+        if meshtext_notice is not None:
+            files.append(meshtext_notice)
         manifest["runtime_ram"] = {key: memory[key] for key in (
             "passed", "available_internal_bytes", "required_heap_bytes", "elf_sha256")}
         accounted.update(files)
@@ -192,8 +196,11 @@ def category(record):
 
 
 def sha256(path):
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def completed_matrix_failures(status, allow_partial=False):

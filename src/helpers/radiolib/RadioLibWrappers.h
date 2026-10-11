@@ -89,6 +89,14 @@ protected:
   mesh::RadioProfiles _profiles;
   uint8_t _active_profile = 0;
   uint16_t _physical_preamble = 0;
+#if MESH_ENABLE_MESHTEXT_CHAT
+  mesh::RadioProfileProtocol _physical_protocol = mesh::RadioProfileProtocol::MeshCore;
+  // Wire settings are a transaction with the modulation tuple. Unsupported
+  // wrappers decline rather than claiming a profile was applied.
+  virtual bool applyProtocol(mesh::RadioProfileProtocol protocol) {
+    return protocol == mesh::RadioProfileProtocol::MeshCore;
+  }
+#endif
   uint32_t _profile_generation = 0;
   uint32_t _profile_scan_generation[2] = {};
   uint32_t _profile_visit_stamp = 0;
