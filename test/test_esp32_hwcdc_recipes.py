@@ -65,7 +65,8 @@ USB_PARTITION_BRIDGES = {
 }
 
 # Pin reviewed family/transport counts rather than copying a machine's
-# environment inventory. Mixed families have explicit role rules below.
+# environment inventory. USB partition bridges are tallied separately above;
+# mixed firmware families have explicit role rules below.
 UNCHANGED_COUNTS = {
     ("ESP32-S3-WROOM-1-N4", "uart"): 21,
     ("ebyte_eora-s3", "hwcdc"): 8,
@@ -295,6 +296,9 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                                    else (definition, 1)
                                    for definition in row["env"].get("CPPDEFINES", []))
                 self.assertEqual(str(definitions.get("MESHCORE_MIGRATION_USB")), "1")
+                for option in ("ARDUINO_USB_MSC_ON_BOOT", "ARDUINO_USB_DFU_ON_BOOT",
+                               "ARDUINO_USB_ON_BOOT"):
+                    self.assertEqual(str(definitions.get(option, 0)), "0", option)
                 self.assertFalse(self.sdk["hwcdc_primary_enabled"](row["env"]))
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
 
