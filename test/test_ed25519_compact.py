@@ -116,6 +116,10 @@ class Ed25519CompactTest(unittest.TestCase):
                 ("compact_sha512", ["-DED25519_COMPACT_SHA512=1"]),
                 ("compact_base_sha512", ["-DED25519_COMPACT_BASE=1",
                                          "-DED25519_COMPACT_SHA512=1"]),
+                ("compact_scalar", ["-DED25519_COMPACT_SCALAR=1"]),
+                ("compact_all", ["-DED25519_COMPACT_BASE=1",
+                                 "-DED25519_COMPACT_SHA512=1",
+                                 "-DED25519_COMPACT_SCALAR=1"]),
             ):
                 executable = Path(temp_dir) / label
                 subprocess.run(
