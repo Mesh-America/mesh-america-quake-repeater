@@ -107,6 +107,8 @@ int main(int argc, char** argv) {
     sensors.seed(47.6062f, -122.3321f);
     sensors.block(true); // Cached reading must not reclaim a bridge-owned UART.
     const unsigned starts = sensors.starts, stops = sensors.stops;
+    // UART ownership setup may consult the provider; cache reads must not.
+    const unsigned providers = sensors.providers, queries = sensors.queries;
     const bool active = sensors.active, receiving = sensors.receiving();
     for (unsigned i = 0; i < 100; ++i) {
       assert(sensors.getCachedGpsPosition(latitude, longitude));
@@ -115,7 +117,7 @@ int main(int argc, char** argv) {
       assert(mesh::readFleetLocation(prefs, sensors, lat, lon));
     }
     assert(sensors.starts == starts && sensors.stops == stops && sensors.active == active);
-    assert(sensors.receiving() == receiving && sensors.providers == 0 && sensors.queries == 0);
+    assert(sensors.receiving() == receiving && sensors.providers == providers && sensors.queries == queries);
     assert(sensors.powersaving_enabled && !sensors.active && !sensors.receiving());
   } else if (scenario == "cache_freshness" || scenario == "cache_wrap") {
     const uint32_t start = scenario == "cache_wrap" ? UINT32_MAX - 1000 : 0;

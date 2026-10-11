@@ -182,7 +182,10 @@ class CLISettingsContractTest(unittest.TestCase):
                 'recent.repeaters',       # Discovery/cache query
             }),
             ('simple_room_server', 'MyMesh.cpp', {'acl'}),
-            ('simple_sensor', 'SensorMesh.cpp', {'acl'}),
+            ('simple_sensor', 'SensorMesh.cpp', {
+                'acl',
+                'tracker',  # Aggregate status; set tracker.<key> changes settings
+            }),
         ):
             text = (ROOT/'examples'/role/filename).read_text(encoding='utf-8')
             sets, gets = full_command_keys(text)
