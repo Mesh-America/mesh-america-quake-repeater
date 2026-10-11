@@ -145,9 +145,13 @@ and LoRa artifacts remain unchanged. Exact new board/role migration packages
 also include their matching `usb-bridge.bin`.
 
 A host can pair this standalone set with an older, exact Full migration ZIP;
-the Full image retains its original release/source identity. For meshfirmware,
-set `MESHFIRMWARE_USB_MIGRATION_SET` to the local set ZIP, or place it beside
-the flasher at `tools/meshcore-usb-partition-bridges.zip`. The original Full
+the Full image retains its original release/source identity. Meshfirmware
+downloads a versioned, checksum-pinned published USB set when a qualified
+older package has no USB bridge. It does not use an untested `latest` bridge,
+and an ordinary update that fits does not download migration utilities.
+For an offline or explicitly selected set, use `MESHFIRMWARE_USB_MIGRATION_SET`,
+or place the ZIP beside the flasher at `tools/meshcore-usb-partition-bridges.zip`.
+The original Full
 package must still match the selected final image and prove the target layout.
 No app-only upload or manual partition-table write substitutes for that proof.
 
