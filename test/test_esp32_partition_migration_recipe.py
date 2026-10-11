@@ -18,7 +18,7 @@ from build_esp32_partition_migration import (  # noqa: E402
     build_steps, bundle_release, verify_archive,
 )
 from package_esp32_partition_migration import (  # noqa: E402
-    BOARDS, bridge_with_successor_endf, mota_full, readme,
+    BOARDS, USB_BRIDGE_PROFILES, bridge_with_successor_endf, mota_full, readme,
 )
 from motalib import FwIdent, build_endf, parse_endf_ident  # noqa: E402
 
@@ -54,6 +54,7 @@ class Esp32MigrationRecipeTest(unittest.TestCase):
             with self.subTest(board=board):
                 self.assertIn(spec["target"], env_names)
                 self.assertIn(spec["wifi_bridge"], env_names)
+                self.assertIn(spec["usb_bridge"], env_names)
                 self.assertIn(spec["lora_bridge"], env_names)
                 if spec.get("expander_bridge"):
                     self.assertIn(spec["expander_bridge"], env_names)
@@ -93,17 +94,19 @@ class Esp32MigrationRecipeTest(unittest.TestCase):
     def test_full_images_precede_every_bridge_and_builds_are_serial(self):
         steps = build_steps(["heltec-v4", "xiao-s3-wio"], "v1.17.1.7-test",
                             "usa-cascadia", "cascade", 4)
-        self.assertEqual(8, len(steps))
-        self.assertEqual([True, True] + [False] * 6,
+        self.assertEqual(10, len(steps))
+        self.assertEqual([True, True] + [False] * 8,
                          [full for _, full in steps])
         self.assertEqual("heltec_v4_repeater", steps[0][0][3])
         self.assertEqual("Xiao_S3_WIO_repeater", steps[1][0][3])
         self.assertTrue(all("--full-exact" in command for command, _ in steps[:2]))
         self.assertEqual([
             "heltec_v4_partition_migrator",
+            "esp32_s3_16mb_partition_migrator_usb",
             "heltec_v4_partition_migrator_lora_repeater",
             "heltec_v4_partition_expander",
             "xiao_s3_partition_migrator",
+            "esp32_s3_8mb_partition_migrator_usb",
             "xiao_s3_partition_migrator_lora_repeater",
             "Xiao_S3_WIO_partition_expander",
         ], [command[3] for command, _ in steps[2:]])
@@ -113,14 +116,15 @@ class Esp32MigrationRecipeTest(unittest.TestCase):
         self.assertIn("automatically", guide)
         self.assertIn("already-expanded board", guide)
 
-    def test_4mb_roles_share_two_chip_family_bridges(self):
+    def test_4mb_roles_share_three_chip_family_bridges(self):
         steps = build_steps(["thinknode-m2-repeater", "thinknode-m2-room-server"],
                             "v1.17.1.7-test", "usa-cascadia", "cascade", 4)
-        self.assertEqual([True, True, False, False], [full for _, full in steps])
+        self.assertEqual([True, True, False, False, False], [full for _, full in steps])
         self.assertEqual("ThinkNode_M2_Repeater", steps[0][0][3])
         self.assertEqual("ThinkNode_M2_room_server", steps[1][0][3])
         self.assertEqual("esp32_s3_4mb_partition_migrator", steps[2][0][3])
-        self.assertEqual("esp32_s3_4mb_partition_migrator_lora", steps[3][0][3])
+        self.assertEqual("esp32_s3_4mb_partition_migrator_usb", steps[3][0][3])
+        self.assertEqual("esp32_s3_4mb_partition_migrator_lora", steps[4][0][3])
         guide = readme("thinknode-m2-repeater", BOARDS["thinknode-m2-repeater"],
                        "v1.17.1.7-test", "01234567", full_mota_blocks=900)
         self.assertIn("old slot B", guide)
@@ -136,11 +140,30 @@ class Esp32MigrationRecipeTest(unittest.TestCase):
     def test_sensor_and_room_roles_share_the_8mb_bridge(self):
         steps = build_steps(["xiao-s3-wio-sensor", "xiao-s3-wio-room-server"],
                             "v1.17.1.7-test", "usa-cascadia", "cascade", 4)
-        self.assertEqual([True, True, False, False], [full for _, full in steps])
+        self.assertEqual([True, True, False, False, False], [full for _, full in steps])
         self.assertEqual("Xiao_S3_WIO_sensor", steps[0][0][3])
         self.assertEqual("Xiao_S3_WIO_room_server", steps[1][0][3])
         self.assertEqual("esp32_s3_8mb_partition_migrator", steps[2][0][3])
-        self.assertEqual("esp32_s3_8mb_partition_migrator_lora", steps[3][0][3])
+        self.assertEqual("esp32_s3_8mb_partition_migrator_usb", steps[3][0][3])
+        self.assertEqual("esp32_s3_8mb_partition_migrator_lora", steps[4][0][3])
+
+    def test_all_six_usb_chip_capacity_profiles_are_built_once_and_wifi_retained(self):
+        steps = build_steps(list(BOARDS), "v1.17.1.7-test", "usa-cascadia", "cascade", 4)
+        utilities = [command[3] for command, full in steps if not full]
+        expected = set(USB_BRIDGE_PROFILES.values())
+        self.assertEqual(6, len(expected))
+        self.assertEqual(expected, {spec["usb_bridge"] for spec in BOARDS.values()})
+        for env in expected:
+            self.assertEqual(1, utilities.count(env))
+        self.assertTrue({spec["wifi_bridge"] for spec in BOARDS.values()} <= set(utilities))
+        self.assertTrue({spec["lora_bridge"] for spec in BOARDS.values()} <= set(utilities))
+        guide = readme("heltec-v4", BOARDS["heltec-v4"], "v1.17.1.7-test", "01234567")
+        self.assertIn("usb-bridge.bin", guide)
+        self.assertIn("application USB\nCDC disabled", guide)
+        self.assertIn("ROM download mode in software", guide)
+        uart = readme("heltec-v2-repeater", BOARDS["heltec-v2-repeater"], "v1.17.1.7-test", "01234567")
+        self.assertIn("DTR/RTS", uart)
+        self.assertNotIn("ROM download mode in software", uart)
 
     def test_full_mota_can_exceed_old_seeder_scratch_limit(self):
         image = b"\xE9" + b"\0" * (1024 * 2048)

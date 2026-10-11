@@ -2,7 +2,7 @@
 <p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/esp32_wifi_partition_migration/">View this page on MeshCore Docs</a>.</p>
 <!-- meshcore-hosted-doc-link:end -->
 
-# ESP32 legacy-partition migration over Wi-Fi or LoRa
+# ESP32 legacy-partition migration over USB, Wi-Fi or LoRa
 
 The partition-migration bridge lets a supported ESP32 node move from a small
 dual-OTA layout to a verified larger dual-OTA layout without cable flashing or
@@ -11,6 +11,20 @@ updater for the Full image after migration. The LoRa version preserves a
 verified old OTA receiver so it can fetch the Full image into the expanded
 inactive slot. On 8/16 MiB flash the bridge restores identity before handing
 off; the 4 MiB route keeps identity staged until the Full image's first boot.
+
+The distinct USB version performs verified identity/configuration restoration
+before the host writes the final app. It keeps application USB CDC disabled
+during flash operations and prevents Arduino startup from automatically
+erasing damaged/full NVS. S3/C3 return to ROM download automatically once
+restoration settles; original ESP32 reports matching-MAC settled UART status
+before the host uses DTR/RTS. Neither route needs physical BOOT access, but
+classic boards require their working USB-UART automatic-reset circuit.
+
+The host must verify the same physical USB device and original chip MAC, the
+exact target table, CRC-valid NVS restored/no-pending markers, and current OTA
+metadata before flashing the unchanged final app. USB reappearance, a timer,
+or settled status alone is not recovery proof. An interrupted migration retains
+its pending host record and device-side restoration markers for a safe retry.
 
 It has explicit, byte-for-byte generated target plans for the 4 MiB MeshCore
 dual-OTA Full table and Arduino ESP32 `default_8MB.csv` and
@@ -104,6 +118,38 @@ Use `--dry-run` to inspect the command order without building. The resulting
 ZIPs appear under `.releases/esp32-expanded-<commit>/packages/`. The recipe
 requires a clean checkout so each ZIP identifies the firmware commit it was
 built from. It creates files only; it does not flash a device or erase flash.
+
+## Independent USB firmware set
+
+The USB intermediate firmware has six distinct chip/flash-capacity builds:
+
+| Chip | Flash capacities | USB completion |
+| --- | --- | --- |
+| Original ESP32 | 4, 8 MiB | Settled UART status, then host DTR/RTS |
+| ESP32-C3 | 4 MiB | Automatic ROM return |
+| ESP32-S3 | 4, 8, 16 MiB | Automatic ROM return |
+
+To build only this complete set, without rebuilding or relabeling any Full
+firmware release, run serially in WSL/Linux:
+
+```bash
+python3 -B scripts/build_esp32_partition_migration.py --usb-only
+```
+
+This creates `meshcore-usb-partition-bridges.zip` under
+`.releases/esp32-usb-bridges-<commit>/`. Its manifest records each binary's chip,
+capacity, bytes and SHA-256, plus the utility source commit, dirty-tree state
+and runtime/configuration source hashes. All six are mandatory, and both the
+USB migration and NVS no-autoerase guard markers are verified. Existing Wi-Fi
+and LoRa artifacts remain unchanged. Exact new board/role migration packages
+also include their matching `usb-bridge.bin`.
+
+A host can pair this standalone set with an older, exact Full migration ZIP;
+the Full image retains its original release/source identity. For meshfirmware,
+set `MESHFIRMWARE_USB_MIGRATION_SET` to the local set ZIP, or place it beside
+the flasher at `tools/meshcore-usb-partition-bridges.zip`. The original Full
+package must still match the selected final image and prove the target layout.
+No app-only upload or manual partition-table write substitutes for that proof.
 
 The catalog covers canonical ESP32 repeater, room-server, and sensor roles on
 4, 8, and 16 MiB chip-family plans, including historical 1.25 MiB candidates

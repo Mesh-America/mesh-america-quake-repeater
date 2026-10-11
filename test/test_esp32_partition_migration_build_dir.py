@@ -28,7 +28,7 @@ from motalib import (  # noqa: E402
 
 VERSION = "v1.17.1.9-test"
 SOURCE = "01234567"
-UTILITY_KEYS = ("wifi_bridge", "expander_bridge", "lora_bridge")
+UTILITY_KEYS = ("wifi_bridge", "usb_bridge", "expander_bridge", "lora_bridge")
 
 
 @contextmanager
@@ -148,6 +148,13 @@ print(json.dumps([["platformio", [["build_dir", str(directory.resolve())]]]]))
                 directory = tree / env
                 directory.mkdir(parents=True)
                 image = b"\xe9" + label.encode("ascii") + b" " + key.encode("ascii")
+                if key == "usb_bridge":
+                    header = bytearray(24)
+                    header[0:3] = b"\xe9\x01\x02"
+                    header[3] = {4: 2, 8: 3, 16: 4}[spec["flash_bytes"] // 1048576] << 4
+                    struct.pack_into("<H", header, 12, spec["usb_chip"])
+                    image = (bytes(header) + package.USB_BRIDGE_MARKER + b"\0"
+                             + package.USB_NVS_GUARD_MARKER + b"\0" + image[1:])
                 (directory / "firmware.bin").write_bytes(image)
                 result[key] = image
         return result
@@ -165,6 +172,17 @@ print(json.dumps([["platformio", [["build_dir", str(directory.resolve())]]]]))
                 digest, name = row.split("  ", 1)
                 self.assertEqual(hashlib.sha256(archive.read(name)).hexdigest(), digest)
             self.assertEqual(archive.read("wifi-bridge.bin"), expected["wifi_bridge"])
+            self.assertEqual(archive.read("usb-bridge.bin"), expected["usb_bridge"])
+            usb = manifest["usb_migration"]
+            spec = package.BOARDS[board]
+            self.assertEqual(usb["format"], "meshcore-usb-partition-migration-v1")
+            self.assertEqual(usb["environment"], spec["usb_bridge"])
+            self.assertEqual(usb["chip"], spec["usb_chip"])
+            self.assertEqual(usb["flash_bytes"], spec["flash_bytes"])
+            self.assertEqual(usb["automatic_rom_return"], spec["usb_chip"] != 0)
+            self.assertEqual(usb["uart_completion_status"], spec["usb_chip"] == 0)
+            self.assertIs(usb["host_software_bootloader_entry"], True)
+            self.assertIs(usb["application_usb_cdc"], False)
             if "expander_bridge" in expected:
                 self.assertEqual(archive.read("partition-expander.bin"), expected["expander_bridge"])
             for key, name in (("expander_bridge", "partition-expander.mota"),
@@ -229,6 +247,39 @@ print(json.dumps([["platformio", [["build_dir", str(directory.resolve())]]]]))
                     with self.assertRaises(FileNotFoundError):
                         package.package_board("heltec-v4", spec, self.artifacts,
                                               self.output, VERSION, SOURCE)
+                self.assertFalse(self.output.exists())
+
+    def test_all_six_usb_profiles_have_exact_chip_capacity_and_safe_manifest(self):
+        boards = ("thinknode-m2-repeater", "heltec-v3-repeater", "heltec-v4",
+                  "generic-e22-sx1262-repeater", "heltec-v2-repeater", "heltec-ct62-sensor")
+        self.assertEqual({package.BOARDS[b]["usb_bridge"] for b in boards},
+                         set(package.USB_BRIDGE_PROFILES.values()))
+        for board in boards:
+            with self.subTest(board=board):
+                spec, identity = self.qualified_full(board)
+                expected = self.utility_tree(self.custom, spec, "ALL USB")
+                archive = package.package_board(board, spec, self.artifacts,
+                                                self.output, VERSION, SOURCE, self.custom)
+                self.check_archive(archive, board, expected, identity)
+
+    def test_usb_wrong_chip_capacity_flash_mode_marker_or_fit_refuses_publication(self):
+        spec, _ = self.qualified_full("heltec-v4")
+        expected = self.utility_tree(self.custom, spec, "USB VALID")
+        path = self.custom / spec["usb_bridge"] / "firmware.bin"
+        original = expected["usb_bridge"]
+        wrong_chip = bytearray(original); struct.pack_into("<H", wrong_chip, 12, 5)
+        wrong_flash = bytearray(original); wrong_flash[3] = 0x20
+        wrong_mode = bytearray(original); wrong_mode[2] = 0
+        cases = (bytes(wrong_chip), bytes(wrong_flash), bytes(wrong_mode),
+                 original.replace(package.USB_BRIDGE_MARKER, b"old Wi-Fi-only bridge"),
+                 original.replace(package.USB_NVS_GUARD_MARKER, b"unsafe NVS initialization"),
+                 original + b"\0" * package.LEGACY_SLOT_BYTES, b"\xe9tiny")
+        for image in cases:
+            with self.subTest(size=len(image)):
+                path.write_bytes(image)
+                with self.assertRaises(ValueError):
+                    package.package_board("heltec-v4", spec, self.artifacts,
+                                          self.output, VERSION, SOURCE, self.custom)
                 self.assertFalse(self.output.exists())
 
     def test_missing_explicit_tree_never_falls_back_to_valid_ambient_or_default(self):
@@ -434,7 +485,7 @@ class MigrationMetadataTest(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             recipe.main()
         self.assertEqual(len(self.queries()), 1)
-        self.assertEqual(len(calls), 5)  # One Full, three utilities, one packager.
+        self.assertEqual(len(calls), 6)  # One Full, four utilities, one packager.
         for command, child_environment in calls:
             self.assertEqual(child_environment["PLATFORMIO_BUILD_DIR"], str(self.fixture.custom.resolve()))
             self.assertEqual(child_environment["MIGRATION_TEST_OTHER"], "preserved-option")
@@ -493,7 +544,8 @@ class MigrationMetadataTest(unittest.TestCase):
                                              self.fixture.custom)
         self.assertEqual(environment, previous)
         self.assertFalse(self.record.exists())
-        self.assertEqual([item[0] for item in captured], ["full", "utility", "utility", "utility"])
+        self.assertEqual([item[0] for item in captured],
+                         ["full", "utility", "utility", "utility", "utility"])
         for _, child_environment in captured:
             self.assertEqual(child_environment["PLATFORMIO_BUILD_DIR"], str(self.fixture.custom.resolve()))
             self.assertEqual(child_environment["MIGRATION_TEST_OTHER"], "preserved-option")
@@ -517,6 +569,8 @@ class MigrationMetadataTest(unittest.TestCase):
                 mock.patch.object(recipe, "BOARDS", {"heltec-v4": spec}), \
                 mock.patch.object(package, "BOARDS", {"heltec-v4": spec}), \
                 mock.patch.object(recipe, "git", return_value=SOURCE + "a" * 32), \
+                mock.patch.object(recipe, "digest", side_effect=lambda path:
+                                  hashlib.sha256(path.read_bytes()).hexdigest()), \
                 mock.patch.dict(os.environ, environment, clear=True), \
                 mock.patch.object(subprocess, "run", side_effect=run), \
                 redirect_stdout(io.StringIO()):

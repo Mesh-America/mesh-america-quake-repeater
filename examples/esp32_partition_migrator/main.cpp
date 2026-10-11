@@ -1,8 +1,10 @@
 #include <Arduino.h>
+#if !defined(MESHCORE_MIGRATION_USB) || !MESHCORE_MIGRATION_USB
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include "../../arch/esp32/AsyncElegantOTA/src/AsyncElegantOTA.h"
+#endif
 #include <Preferences.h>
 #include <SPIFFS.h>
 #include <esp_ota_ops.h>
@@ -16,7 +18,11 @@
 #endif
 
 #include <helpers/ESP32PartitionMigrationPolicy.h>
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+#include <helpers/ESP32PartitionMigrationUsbRecovery.h>
+#else
 #include <helpers/esp32/WiFiRadioPolicy.h>
+#endif
 
 #if defined(MOTA_MIGRATION_TARGET_ID)
 String partitionExpanderStatus();
@@ -92,7 +98,16 @@ constexpr char kLegacyBridgeImageMarker[] = "MeshCore Wi-Fi partition migration"
 static_assert(sizeof(kMigrationNvsNamespace) - 1 <= 15,
               "ESP32 NVS namespace names are limited to 15 characters");
 
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+mesh::esp32_partition_usb::Recovery usb_recovery;
+bool usb_settled = false;
+bool usb_restored = false;
+uint32_t usb_status_at = 0;
+char usb_command[32] = {};
+size_t usb_command_bytes = 0;
+#else
 AsyncWebServer server(80);
+#endif
 bool migration_started = false;
 bool migration_complete = false;
 bool expanded_layout_ready = false;
@@ -997,11 +1012,10 @@ void runMigration() {
   Serial.println("Migration: boot slot selected for restart");
 
   Serial.println("Migration: publishing expanded partition table");
-  // This bridge is built without native USB CDC, so a connected USB host cannot
-  // post a flash-backed event while the partition-sector operation disables the
-  // flash cache. Stop UART0 as well: the S3's serial event path is otherwise
-  // still able to interrupt the raw flash operation. The bridge has no native
-  // USB CDC; the final normal repeater build restores its standard USB behavior.
+  // Both Wi-Fi and dedicated USB bridge images disable application USB CDC.
+  // Stop UART0 during this deliberately dangerous raw sector operation too.
+  // Normal ESP-IDF start/end cache hooks remain installed throughout.  The USB
+  // bridge returns to the ROM only after its next boot verifies all restoration.
   Serial.flush();
   Serial.end();
   const bool table_published = publishExpandedPartitionTable(*plan);
@@ -1021,13 +1035,18 @@ void runMigration() {
         ? "Migration complete; restarting LoRa bridge"
         : "Migration complete; resuming old LoRa receiver");
 #else
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+    strcpy(status_text, "Migration complete; restarting USB restore bridge");
+#else
     strcpy(status_text, "Migration complete; restarting Wi-Fi uploader");
+#endif
 #endif
     reboot_at = millis() + kMigrationRestartDelayMs;
   }
   Serial.println(status_text);
 }
 
+#if !defined(MESHCORE_MIGRATION_USB) || !MESHCORE_MIGRATION_USB
 void sendHome(AsyncWebServerRequest* request) {
   const char* mode = status_text;
   String page;
@@ -1108,12 +1127,74 @@ void startServer() {
   if (!expanded_layout_ready || identity_ready) AsyncElegantOTA.begin(&server);
   server.begin();
 }
+#else
+bool verifiedUsbHandoff() {
+  Preferences nvs;
+  if (!nvs.begin(kMigrationNvsNamespace, true)) return false;
+  const bool verified = nvs.getBool(kMigrationConfigRestoredKey, false)
+      && !nvs.getBool(kMigrationConfigPendingKey, false)
+      && !nvs.getBool(kMigrationIdentityPendingKey, false);
+  nvs.end();
+  return verified;
+}
+
+void sendUsbState() {
+  // Public state only: never serialize identity/configuration or staged blobs.
+  Serial.printf("MESHCORE_USB_MIGRATION_STATE {\"format\":\"%s\","
+                "\"device_mac\":\"%s\",\"settled\":%s,\"restored\":%s}\n",
+                mesh::esp32_partition_usb::kFormat, usb_recovery.deviceMac(),
+                usb_settled ? "true" : "false", usb_restored ? "true" : "false");
+}
+
+void settleUsbMigration(bool restored) {
+  usb_settled = true;
+  usb_restored = restored;
+  sendUsbState();
+  // Classic ESP32 intentionally remains in this quiet UART state until the
+  // host sees the matching MAC + settled signal and asserts DTR/RTS.  Native
+  // devices instead reappear as ROM USB automatically, including on refusal.
+  usb_recovery.returnToRom();
+  usb_status_at = millis();
+}
+
+void serviceUsbState() {
+  while (Serial.available()) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == '\n' || c == '\r') {
+      usb_command[usb_command_bytes] = 0;
+      if (strcmp(usb_command, "migration status") == 0) sendUsbState();
+      usb_command_bytes = 0;
+    } else if (usb_command_bytes + 1 < sizeof(usb_command)) {
+      usb_command[usb_command_bytes++] = c;
+    } else {
+      usb_command_bytes = 0;  // bounded, non-authoritative diagnostic parser
+    }
+  }
+  if (usb_settled && static_cast<uint32_t>(millis() - usb_status_at) >= 1000) {
+    sendUsbState();
+    usb_status_at = millis();
+  }
+}
+#endif
 
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
   delay(250);
+
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+  // Referenced at runtime so the packager can require this exact binary marker.
+  Serial.println(mesh::esp32_partition_usb::kImageMarker);
+  Serial.println(meshEsp32MigrationNvsGuardMarker());
+  const char* recovery_error = usb_recovery.prepare();
+  if (recovery_error) {
+    strncpy(status_text, recovery_error, sizeof(status_text) - 1);
+    Serial.println(status_text);
+    settleUsbMigration(false);
+    return;
+  }
+#endif
 
   PartitionRefs refs;
   migration::PartitionGeometry geometry = {};
@@ -1141,20 +1222,44 @@ void setup() {
     strcpy(status_text, "Refused: unsupported legacy source layout");
   }
 
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+  if (expanded_layout_ready) {
+    // Restoration has completed and no further filesystem/NVS write remains.
+    // A layout alone is not permission to flash the final application.
+    const bool restored = identity_ready && verifiedUsbHandoff();
+    if (identity_ready && !restored)
+      strcpy(status_text, "Refused: verified USB configuration handoff is absent");
+    Serial.println(status_text);
+    settleUsbMigration(restored);
+  } else if (migration_at == 0) {
+    Serial.println(status_text);
+    settleUsbMigration(false);
+  } else {
+    Serial.println(status_text);
+    sendUsbState();
+  }
+#else
   startServer();
   Serial.printf("%s. Join %s (password: %s), then open http://192.168.4.1/\n",
                 status_text, kApSsid, kApPassword);
+#endif
 }
 
 void loop() {
   if (!migration_started && migration_at != 0
       && static_cast<int32_t>(millis() - migration_at) >= 0) {
     runMigration();
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+    if (!migration_complete) settleUsbMigration(false);
+#endif
   }
   if ((reboot_at != 0 && static_cast<int32_t>(millis() - reboot_at) >= 0)
       || reboot_requested) {
     delay(100);
     ESP.restart();
   }
+#if defined(MESHCORE_MIGRATION_USB) && MESHCORE_MIGRATION_USB
+  serviceUsbState();
+#endif
   delay(10);
 }

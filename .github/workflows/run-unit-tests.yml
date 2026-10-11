@@ -515,6 +515,8 @@ jobs:
           python3 -B test/test_firmware_build_recipe.py -v
           python3 -B test/test_firmware_capabilities.py
           MESHCORE_TEST_REAL_PIO_PATHS=1 python3 -B test/test_esp32_partition_migration_build_dir.py -v
+          python3 -B test/test_esp32_partition_migration_usb.py -v
+          python3 -B test/test_usb_partition_bridge_set.py -v
           bash test/test_build_profiles.sh
           bash test/test_full_infrastructure_selection.sh
           bash test/test_nrf52_ota_profiles.sh

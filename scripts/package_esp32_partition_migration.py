@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the two-stage Wi-Fi and LoRa ESP32 partition migrations."""
+"""Package verified two-stage Wi-Fi, USB and LoRa ESP32 partition migrations."""
 
 from __future__ import annotations
 
@@ -270,16 +270,70 @@ add_roles("generic-e22-sx1268", 4, {
     "repeater": "Generic_E22_sx1268_repeater",
 }, bridge="esp32_4mb_partition_migrator")
 
+USB_BRIDGE_MARKER = b"MeshCore USB partition migration bridge v1"
+USB_NVS_GUARD_MARKER = b"MeshCore USB NVS no-autoerase guard v1"
+USB_BRIDGE_PROFILES = {
+    (9, 4): "esp32_s3_4mb_partition_migrator_usb",
+    (9, 8): "esp32_s3_8mb_partition_migrator_usb",
+    (9, 16): "esp32_s3_16mb_partition_migrator_usb",
+    (0, 4): "esp32_4mb_partition_migrator_usb",
+    (0, 8): "esp32_8mb_partition_migrator_usb",
+    (5, 4): "esp32_c3_4mb_partition_migrator_usb",
+}
+
+
+def usb_bridge_profile(spec: dict) -> tuple[int, str]:
+    """Map reviewed chip-family bridges, never a generic S3 fallback."""
+    wifi = spec["wifi_bridge"]
+    if wifi.startswith("esp32_c3_"):
+        chip = 5
+    elif wifi.startswith("esp32_s3_") or wifi in (
+            "heltec_v4_partition_migrator", "xiao_s3_partition_migrator"):
+        chip = 9
+    elif wifi.startswith("esp32_"):
+        chip = 0
+    else:
+        raise ValueError(f"unreviewed USB migration chip-family bridge: {wifi}")
+    flash_mib = spec["flash_bytes"] // (1024 * 1024)
+    if spec["flash_bytes"] != flash_mib * 1024 * 1024:
+        raise ValueError("USB migration flash capacity must be exact MiB")
+    profile = USB_BRIDGE_PROFILES.get((chip, flash_mib))
+    if profile is None:
+        raise ValueError("no reviewed USB bridge for this chip and flash capacity")
+    return chip, profile
+
+
 for specification in BOARDS.values():
     specification.setdefault("role", role_for_target(specification["target"]))
     if specification["lora_bridge"] is None:
         specification["lora_bridge"] = specification["wifi_bridge"] + "_lora"
+    specification["usb_chip"], specification["usb_bridge"] = usb_bridge_profile(specification)
 
 LEGACY_SLOT_BYTES = 0x140000
 
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def validate_usb_bridge(image: bytes, spec: dict) -> None:
+    """Refuse stale Wi-Fi binaries and wrong-family/capacity utility builds."""
+    if len(image) < 24 or image[0] != 0xE9 or not 1 <= image[1] <= 16:
+        raise ValueError("USB bridge is not a valid ESP32 application image")
+    chip, profile = usb_bridge_profile(spec)
+    image_chip = struct.unpack_from("<H", image, 12)[0]
+    expected_flash = {4 * 1024 * 1024: 2, 8 * 1024 * 1024: 3,
+                      16 * 1024 * 1024: 4}[spec["flash_bytes"]]
+    if image_chip != chip or image[3] >> 4 != expected_flash:
+        raise ValueError(f"USB bridge chip/flash header does not match {profile}")
+    if image[2] != 2:
+        raise ValueError("USB migration bridge must use the reviewed DIO flash mode")
+    if USB_BRIDGE_MARKER not in image:
+        raise ValueError("USB bridge lacks the automatic-ROM migration capability marker")
+    if USB_NVS_GUARD_MARKER not in image:
+        raise ValueError("USB bridge lacks the reviewed NVS no-autoerase guard")
+    if len(image) > LEGACY_SLOT_BYTES:
+        raise ValueError("USB bridge does not fit the 1.25 MiB legacy slot")
 
 
 def resolve_pio_build_dir(pio_build_dir: Path | None = None, *,
@@ -390,6 +444,13 @@ def check_esp32_stage(package: bytes, image: bytes, slot_bytes: int) -> None:
 
 def readme(board: str, spec: dict, version: str, source: str,
            has_full_mota: bool = True, full_mota_blocks: int = 0) -> str:
+    usb_return = (
+        "On native ESP32-S3/C3, it then returns to the chip's ROM download "
+        "mode in software."
+        if spec["usb_chip"] != 0 else
+        "On classic ESP32, it publishes settled completion status on UART; "
+        "the host then uses the existing USB-UART bridge's DTR/RTS bootloader reset."
+    )
     expander_instructions = ""
     if spec.get("expander_bridge"):
         expander_instructions = f"""## Partition Expander route (automatic LoRa finish)
@@ -424,6 +485,31 @@ installing the bridge; the bridge does not itself repeat normal traffic.
 2. Keep power stable. Join `MeshCore-Migrate` (password `meshcore-migrate`),
    open `http://192.168.4.1/`, and wait for **Expanded layout ready**.
 3. At that page's `/update`, upload `full-application.bin`.
+"""
+    usb_instructions = f"""## Host-managed USB route
+
+`usb-bridge.bin` is a separate, verified **{spec['usb_bridge']}** first stage
+for this chip family and flash capacity. Do not substitute `wifi-bridge.bin`
+or a USB diagnostic harness. The production USB bridge keeps application USB
+CDC disabled during cache-disabled flash operations; it does not enable the
+old unsafe Wi-Fi bridge's native CDC callback path.
+
+An identity-bound host flasher installs only this small app into the existing
+OTA slots, inactive first and active last, without erasing the chip. Keep power
+stable while the bridge expands the table and restores and verifies identity
+and supported configuration across both boots. {usb_return} Neither route
+needs physical BOOT/RESET access or a Wi-Fi network change, including on an
+elevated remote node. A classic board must have a working automatic USB-UART
+reset circuit; a direct UART adapter without that circuit is not sufficient.
+
+The host must reverify the same physical USB identity and original chip MAC,
+read the exact target table, stable NVS restore markers and valid OTA metadata,
+and refuse the final app unless all completion checks pass. A timer, USB
+reappearance or partition-table match alone is not success. On a failed
+migration the bridge can return to ROM for diagnosis; this likewise does not
+authorize the final app. After verified completion, write `full-application.bin`
+to the expanded OTA slots with the active slot last. Never write
+`target-partitions.bin` directly or erase NVS to force success.
 """
     if spec["lora_bridge"]:
         slot_instructions = (
@@ -518,7 +604,8 @@ the 96-byte public/private identity in unchanged NVS, preserves a bootable old
 receiver, and changes the partition table. On 8/16 MiB LoRa and Wi-Fi routes
 the bridge restores and verifies the identity in expanded SPIFFS; on the
 4 MiB LoRa route the new Full firmware does so at first boot. No full-chip
-erase or USB connection is used.
+erase is used. The Wi-Fi/LoRa routes need no USB connection; the separate USB
+route below is managed by an identity-verified host flasher.
 The table sector and inactive app sectors are erased as part of migration.
 SPIFFS may be reformatted. The Wi-Fi bridge restores verified radio 1 and
 radio 2 settings, node name, ACL and login replay state, region keys, and
@@ -530,6 +617,7 @@ on an inaccessible node without accepting that risk and testing a sacrificial
 example of the same board first.
 
 {wifi_instructions}
+{usb_instructions}
 {expander_instructions}
 {lora_instructions}
 """
@@ -576,6 +664,8 @@ def package_board(name: str, spec: dict, build_dir: Path, output_dir: Path,
         raise ValueError(f"{name}: Full image identity or partition fit failed")
 
     wifi_bridge = (utility_build_dir / spec["wifi_bridge"] / "firmware.bin").read_bytes()
+    usb_bridge = (utility_build_dir / spec["usb_bridge"] / "firmware.bin").read_bytes()
+    validate_usb_bridge(usb_bridge, spec)
     bridge_ident = FwIdent(pack_version(version.split("-", 1)[0]), target_id, hw_id)
     if len(wifi_bridge) > LEGACY_SLOT_BYTES:
         raise ValueError(f"{name}: bridge does not fit the 1.25 MiB legacy slot")
@@ -584,6 +674,7 @@ def package_board(name: str, spec: dict, build_dir: Path, output_dir: Path,
 
     files = {
         "wifi-bridge.bin": wifi_bridge,
+        "usb-bridge.bin": usb_bridge,
         "full-application.bin": full_image,
         "target-partitions.bin": table,
         "capabilities.json": capability_path.read_bytes(),
@@ -635,6 +726,18 @@ def package_board(name: str, spec: dict, build_dir: Path, output_dir: Path,
         "legacy_slot_bytes": LEGACY_SLOT_BYTES,
         "expanded_slot_bytes": slot_bytes,
         "atomic_power_loss_recovery": False,
+        "usb_migration": {
+            "format": "meshcore-usb-partition-migration-v1",
+            "bridge": "usb-bridge.bin",
+            "environment": spec["usb_bridge"],
+            "chip": spec["usb_chip"],
+            "flash_bytes": spec["flash_bytes"],
+            "automatic_rom_return": spec["usb_chip"] != 0,
+            "uart_completion_status": spec["usb_chip"] == 0,
+            "host_software_bootloader_entry": True,
+            "application_usb_cdc": False,
+            "completion": "verified-target-table-nvs-restoration-otadata",
+        },
         "lora_bridge_mode": ("slot-b-only-full-identity-recovery"
                              if spec["flash_bytes"] == 4 * 1024 * 1024
                              else "either-slot-preserve-receiver"),

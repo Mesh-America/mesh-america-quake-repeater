@@ -200,7 +200,7 @@ def migration_targets() -> list[str]:
 
 def migration_bridges() -> list[str]:
     return sorted({name for spec in BOARDS.values()
-                   for name in (spec.get("wifi_bridge"), spec.get("lora_bridge"),
+                   for name in (spec.get("wifi_bridge"), spec.get("usb_bridge"), spec.get("lora_bridge"),
                                 spec.get("expander_bridge")) if name})
 
 
