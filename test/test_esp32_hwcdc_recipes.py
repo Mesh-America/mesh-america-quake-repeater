@@ -52,6 +52,18 @@ LEGACY_DIAGNOSTIC_CDC_OVERRIDES = {
     "xiao_s3_partition_migrator_test_usb_diagnostic",
 }
 
+# Host-managed partition utilities keep application CDC disabled while flash
+# tables change. Review them by name, independently of normal firmware roles:
+# S3/C3 recover the ROM USB interface, and classic ESP32 uses external UART.
+USB_PARTITION_BRIDGES = {
+    "esp32_s3_4mb_partition_migrator_usb": ("esp32-s3-devkitc-1", "esp32s3", "uart"),
+    "esp32_s3_8mb_partition_migrator_usb": ("esp32-s3-devkitc-1", "esp32s3", "uart"),
+    "esp32_s3_16mb_partition_migrator_usb": ("esp32-s3-devkitc-1", "esp32s3", "uart"),
+    "esp32_c3_4mb_partition_migrator_usb": ("esp32-c3-devkitm-1", "esp32c3", "uart"),
+    "esp32_4mb_partition_migrator_usb": ("esp32dev", "esp32", "classic_uart"),
+    "esp32_8mb_partition_migrator_usb": ("esp32dev", "esp32", "classic_uart"),
+}
+
 # Pin reviewed family/transport counts rather than copying a machine's
 # environment inventory. Mixed families have explicit role rules below.
 UNCHANGED_COUNTS = {
@@ -149,6 +161,11 @@ def bool_option(value):
 
 
 def expected_other_transport(board, name):
+    if name in USB_PARTITION_BRIDGES:
+        expected_board, _, kind = USB_PARTITION_BRIDGES[name]
+        if board != expected_board:
+            raise AssertionError(f"USB partition bridge {name} changed board: {board}")
+        return kind
     choices = {kind for family, kind in UNCHANGED_COUNTS if family == board}
     if len(choices) == 1:
         return next(iter(choices))
@@ -261,7 +278,25 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 self.assertEqual(self.sdk["hwcdc_primary_enabled"](row["env"]),
                                  row["kind"] == "hwcdc")
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
-        self.assertEqual(counts, {"hwcdc": 323, "uart": 118, "classic_uart": 61})
+        expected = Counter({"hwcdc": 323, "uart": 118, "classic_uart": 61})
+        expected.update(kind for _, _, kind in USB_PARTITION_BRIDGES.values())
+        self.assertEqual(counts, expected)
+
+    def test_usb_partition_bridges_keep_application_usb_disabled(self):
+        names = {name for name in self.rows if name.startswith("esp32_")
+                 and name.endswith("_partition_migrator_usb")}
+        self.assertEqual(names, USB_PARTITION_BRIDGES.keys())
+        for name, (board, mcu, kind) in USB_PARTITION_BRIDGES.items():
+            with self.subTest(environment=name):
+                row = self.rows[name]
+                self.assertEqual((row["board"], row["mcu"], row["kind"]), (board, mcu, kind))
+                self.assertEqual(row["values"], {USB_MODE: "0", USB_CDC: "0"})
+                definitions = dict(definition if isinstance(definition, (tuple, list))
+                                   else (definition, 1)
+                                   for definition in row["env"].get("CPPDEFINES", []))
+                self.assertEqual(str(definitions.get("MESHCORE_MIGRATION_USB")), "1")
+                self.assertFalse(self.sdk["hwcdc_primary_enabled"](row["env"]))
+                self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
 
     def test_all_m5stack_native_usb_roles_select_hwcdc_and_its_startup_patch(self):
         # M5's documented USB-C wiring exposes C6 Serial/JTAG, including when
@@ -306,7 +341,9 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 expected = expected_other_transport(row["board"], name)
                 self.assertEqual(row["kind"], expected)
                 counts[row["board"], row["kind"]] += 1
-        self.assertEqual(counts, UNCHANGED_COUNTS)
+        expected = Counter(UNCHANGED_COUNTS)
+        expected.update((board, kind) for board, _, kind in USB_PARTITION_BRIDGES.values())
+        self.assertEqual(counts, expected)
 
     def test_non_esp32_recipes_do_not_acquire_esp32_usb_selectors(self):
         count = 0
