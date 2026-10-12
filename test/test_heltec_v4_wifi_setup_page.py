@@ -104,6 +104,7 @@ class HeltecV4WiFiSetupPageTest(unittest.TestCase):
 #include <cstdint>
 #include <cstddef>
 #include <helpers/WirelessControl.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 #define UI_WIFI_SETUP_HOME_PAGE 1
 #define UI_NO_DISCOVER_SCREEN 1
 #define UI_NO_HIBERNATE 1
@@ -140,22 +141,37 @@ struct HomeScreen : UIScreen {
 };
 int main() {
   UITask task; HomeScreen home(&task);
+  auto& network_power = mesh::wifi::networkPower();
+  network_power.setManaged(true);
+  network_power.setSuspended(true);
+  assert(network_power.backgroundSuspended());
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(static_cast<char>(KEY_NEXT)));
   assert(home._page == HomeScreen::FIRST);
   assert(!companion_wifi_setup_requested && !companion_wifi_setup_stop_requested);
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(static_cast<char>(KEY_PREV)));
   assert(home._page == HomeScreen::WIFI_SETUP);
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(KEY_ENTER));
   assert(companion_wifi_setup_requested && !companion_wifi_setup_stop_requested);
+  assert(network_power.consumeProbeRequest());
+  assert(!network_power.consumeProbeRequest());
+  // The UI hands off a probe; only the network owner may resume transports.
+  assert(network_power.backgroundSuspended());
   WebConfigServer::active = true;
   assert(home.handleInput(KEY_ENTER));
   assert(!companion_wifi_setup_requested && companion_wifi_setup_stop_requested);
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(static_cast<char>(KEY_RIGHT)));
   assert(home._page == HomeScreen::FIRST);
   assert(!companion_wifi_setup_requested && companion_wifi_setup_stop_requested);
+  assert(!network_power.consumeProbeRequest());
   assert(home.handleInput(static_cast<char>(KEY_LEFT)));
   assert(home._page == HomeScreen::WIFI_SETUP);
+  assert(!network_power.consumeProbeRequest());
   requestCompanionWiFiSetupStop();
+  assert(!network_power.consumeProbeRequest());
   struct Backend : mesh::wireless::Backend {
     uint8_t available() const override { return mesh::wireless::WiFi; }
     uint8_t enabled() const override { return mesh::wireless::WiFi; }
@@ -168,6 +184,8 @@ int main() {
   mesh::wireless::control().service(250);
   requestCompanionWiFiSetup();
   assert(!companion_wifi_setup_requested && companion_wifi_setup_stop_requested);
+  assert(!network_power.consumeProbeRequest());
+  assert(network_power.backgroundSuspended());
 }
 '''
         source = (source.replace("@REQUESTS@", requests).replace("@PAGES@", page_enum)

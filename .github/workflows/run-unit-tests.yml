@@ -217,7 +217,7 @@ jobs:
       - name: Verify transactional telemetry preferences and legacy route recovery
         run: python3 -B test/test_telemetry_tx_persistence.py -v
 
-      - name: Verify MQTT start results and connection-attempt accounting
+      - name: Verify MQTT and WiFi ownership, recovery and power policy
         run: |
           python3 -B test/test_mqtt_transport_results.py -v
           python3 -B test/test_mqtt_tls_security.py -v
@@ -231,6 +231,8 @@ jobs:
           python3 -B test/test_mqtt_wifi_network_power.py -v
           python3 -B test/test_companion_wifi_network_power.py -v
           python3 -B test/test_webconfig_network_power.py -v
+          python3 -B test/test_companion_ap_ownership.py -v
+          python3 -B test/test_heltec_v4_wifi_setup_page.py -v
 
       - name: Verify DNS lease restoration and bounded diagnostics
         run: python3 -B test/test_network_dns.py -v
@@ -616,8 +618,6 @@ jobs:
           python3 -B test/test_webconfig_station_ownership.py -v
           python3 -B test/test_mqtt_canonical_wifi.py -v
           python3 -B test/test_mqtt_ap_ownership.py -v
-          python3 -B test/test_companion_ap_ownership.py -v
-          python3 -B test/test_heltec_v4_wifi_setup_page.py -v
           python3 -B test/test_sensor_webconfig_capabilities.py -v
           python3 -B test/test_webconfig_ui_runtime.py
           python3 -B test/test_webconfig_lost_reply.py -v

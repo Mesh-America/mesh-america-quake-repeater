@@ -3,6 +3,7 @@
 #include <cstring>
 #include <string>
 #include "helpers/WiFiReconnectPolicy.h"
+#include "helpers/WiFiNetworkPowerPolicy.h"
 #define WIFI_DEBUG_PRINTLN(...) ((void)0)
 using wifi_mode_t=int;using esp_err_t=int;
 constexpr int ESP_OK=0,ESP_FAIL=-1,ESP_ERR_WIFI_NOT_INIT=-2;
@@ -59,6 +60,8 @@ void saveCompanionWiFi(){}
 char configured_wifi_ssid[8]="mesh",configured_wifi_password[8]="secret";
 bool companion_wifi_has_credentials=true,companion_wifi_requested=true,companion_wifi_active=true;
 bool companion_wifi_services_stopped=true;
+bool companion_wifi_background_stopped=false,companion_wifi_espnow_restore_pending=true;
+bool companion_wifi_webconfig_start_pending=false;
 bool companion_wifi_credential_reload_pending=true;
 unsigned long companion_wifi_credential_reload_at=1;
 bool wifi_setup_recovery_mode=false,wifi_setup_attempted=true;
@@ -70,6 +73,10 @@ void applyCompanionWiFiPowerSave(){++power_writes;}
 constexpr int TCP_PORT=1234;
 struct Interface{void begin(int){++socket_starts;}void enable(){}}wifi_interface;
 void ota_console_start(){++console_starts;}
+@POWER_GUARDS@
+#ifdef WITH_WEBCONFIG
+@AUTO_WEBCONFIG@
+#endif
 @RELOAD@
 @START_WIFI@
 void serviceStation(){
@@ -129,5 +136,45 @@ int main(int argc,char** argv){
   assert(companion_wifi_active&&!companion_wifi_services_stopped&&board.inhibit_sleep);
   assert(mode_writes==1&&joins==1&&socket_starts==1&&console_starts==1&&power_writes==1);
   startCompanionWiFi();assert(mode_writes==1&&socket_starts==1);
+ }else if(scenario=="suspended"){
+  auto& power=mesh::wifi::networkPower();
+  power.setManaged(true);power.setSuspended(true);
+  board.ota=false;companion_wifi_active=false;sdk_mode=WIFI_STA;
+  serviceCompanionWiFiCredentialReload();startCompanionWiFi();
+  assert(mode_writes==0&&disconnects==0&&joins==0&&credential_loads==0);
+  assert(companion_wifi_credential_reload_pending&&companion_wifi_credential_reload_at==1);
+  assert(!companion_wifi_active&&companion_wifi_requested&&companion_wifi_services_stopped);
+  assert(companion_wifi_espnow_restore_pending);
+  assert(socket_starts==0&&console_starts==0&&power_writes==0&&!board.inhibit_sleep);
+  assert(!companionWiFiAutomaticRecoveryAllowed());
+  // A fresh foreground hold admits startup, but only after AP teardown.
+  power.setHold(mesh::wifi::NetworkPowerHold::CompanionClient,true);
+  startCompanionWiFi();
+  assert(companion_wifi_active&&!companion_wifi_services_stopped&&board.inhibit_sleep);
+  assert(mode_writes==1&&joins==1&&socket_starts==1&&console_starts==1&&power_writes==1);
+  assert(!companion_wifi_espnow_restore_pending);
+  serviceCompanionWiFiCredentialReload();
+  assert(!companion_wifi_credential_reload_pending&&companion_wifi_credential_reload_at==0);
+  assert(credential_loads==1&&mode_writes==2&&disconnects==1&&joins==2);
+  power.setHold(mesh::wifi::NetworkPowerHold::CompanionClient,false);
+  power.setManaged(false);
+  assert(companionWiFiAutomaticRecoveryAllowed()&&!companionWiFiBackgroundSuspended());
+ }else if(scenario=="suspended_ap"){
+  auto& power=mesh::wifi::networkPower();
+  power.setManaged(true);power.setSuspended(true);
+  companion_wifi_active=false;
+  for(bool ota:{false,true}){
+   board.ota=ota;
+   power.setHold(mesh::wifi::NetworkPowerHold::WebConfig,!ota);
+   assert(!companionWiFiBackgroundSuspended());
+   for(int mode:{WIFI_AP,WIFI_AP_STA}){
+    sdk_mode=mode;serviceCompanionWiFiCredentialReload();startCompanionWiFi();
+    assert_untouched();
+    assert(companion_wifi_credential_reload_pending&&companion_wifi_credential_reload_at==1);
+    assert(companion_wifi_espnow_restore_pending&&credential_loads==0);
+    assert(!companion_wifi_active&&companion_wifi_requested&&companion_wifi_services_stopped);
+    assert(socket_starts==0&&console_starts==0&&power_writes==0&&!board.inhibit_sleep);
+   }
+  }
  }else assert(false);
 }
