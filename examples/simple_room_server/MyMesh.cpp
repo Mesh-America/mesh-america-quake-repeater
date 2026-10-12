@@ -1,6 +1,7 @@
 #include "MyMesh.h"
 #if defined(ESP32_PLATFORM)
 #include <helpers/esp32/BootFileSystem.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 #if defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
     || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))
 #include <WiFi.h>
@@ -3119,6 +3120,9 @@ bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup
     return true;
   }
   if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) {
+    if (!automatic_setup && !_webconfig->isStopping()) {
+      _webconfig->requestNetworkAccess();
+    }
     strcpy(reply, _webconfig->isStopping() ? "Err: webconfig still stopping, retry shortly"
                                            : "Err: webconfig already running");
     return true;
@@ -3154,6 +3158,7 @@ bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup
     }
   }
 
+  if (!automatic_setup) _webconfig->requestNetworkAccess();
   const bool setup_was_suspended = _unconfigured_setup_espnow_suspended;
 #ifdef WITH_ESPNOW_BRIDGE
   const bool espnow_was_running = isEspNowBridgeRunning();
@@ -4198,11 +4203,15 @@ void MyMesh::serviceIdleWiFi() {
     && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
     && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
   if (_cli.getBoard()->isOTAUpdateRunning()) return;
+  if (mesh::wifi::networkPower().foregroundActive()) return;
 #ifdef WITH_WEBCONFIG
-  if (isWebConfigActive()) return;
+  if (isWebConfigActive() && (!mesh::wifi::networkPower().backgroundSuspended()
+      || _webconfig->isNetworkForegroundActive(millis()))) return;
 #endif
 #ifdef WITH_MQTT_BRIDGE
   if (_ota_update_at) return;
+  // The MQTT worker also owns its suspended station: Core 1 must not race
+  // the worker's shutdown or the next bounded probe on Core 0.
   if (bridge && (bridge->isRunning() || bridge->isStopping())) return;
 #endif
 #ifdef WITH_ESPNOW_BRIDGE
@@ -4226,8 +4235,12 @@ void MyMesh::serviceIdleWiFi() {
 bool MyMesh::hasPendingWork() const {
   if (isDualRadioActive()) return true;
   if (hasPendingOtaApply()) return true;
+#if defined(ESP32_PLATFORM)
+  if (mesh::wifi::networkPower().foregroundActive()) return true;
+#endif
 #ifdef WITH_WEBCONFIG
-  if (isWebConfigActive()) return true;
+  if (isWebConfigActive() && (!mesh::wifi::networkPower().backgroundSuspended()
+      || _webconfig->isNetworkForegroundActive(millis()))) return true;
 #endif
 #if defined(ESP32_PLATFORM) \
     && (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
@@ -4243,7 +4256,11 @@ bool MyMesh::hasPendingWork() const {
   if (_local_cli_output.busy()) return true;
 #endif
 #if defined(WITH_BRIDGE)
-  if (bridge && bridge->isRunning()) return true; // bridge needs WiFi radio, can't sleep
+#ifdef WITH_MQTT_BRIDGE
+  if (bridge && bridge->isRunning() && !bridge->isNetworkSuspended()) return true;
+#else
+  if (bridge && bridge->isRunning()) return true;
+#endif
 #ifdef WITH_MQTT_BRIDGE
   if (bridge && bridge->isStopping()) return true;
 #endif

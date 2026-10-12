@@ -102,6 +102,32 @@ best effort rather than durable storage. Each enabled slot publishes
 independently, so one failed broker does not intentionally stop the other
 slots.
 
+## Automatic network outage power saving
+
+ESP32 MQTT firmware uses one shared outage timer for MQTT and NTP. If no broker
+demonstrates a working connection for five minutes, the MQTT worker stops its
+clients and NTP request before suspending background WiFi. Saved WiFi and broker
+settings remain enabled. Failed requests, a WiFi association, and NTP replies
+alone do not restart the outage timer or keep a failed MQTT uplink awake.
+
+After 30 minutes, the firmware opens a recovery window lasting up to two
+minutes. A broker acknowledgment or a connection that stays up for 30 seconds
+returns the node to normal operation. Otherwise WiFi is suspended for another
+30 minutes. An explicit management request can ask for an earlier probe.
+Automatic NTP requests have a 15-second timeout; failed requests wait 30 minutes
+instead of repeatedly running a blocking server search. Successful NTP retains
+the daily refresh schedule.
+
+Active browser administration, setup/OTA access points, connected Companion
+clients, and an attached WiFi OTA seeder protect their network access. An idle
+WebConfig listener does not prevent the cooldown. An enabled SNMP agent keeps a
+working LAN connection available. ESP-NOW keeps its radio and channel; only the
+failed infrastructure connection is suspended. LoRa continues operating, and
+when CPU power saving is enabled, its normal sleep eligibility returns after
+background WiFi shuts down. USB console and logging sleep rules still apply
+separately. This policy does not automatically turn off working services or
+expire an active setup access point.
+
 See [MQTT_IMPLEMENTATION.md](https://github.com/mikecarper/MeshCore/blob/keymindCascade/MQTT_IMPLEMENTATION.md) for the complete preset
 list, custom broker configuration, topic formats, authentication, diagnostics,
 and memory limits.

@@ -87,6 +87,10 @@ class WebConfigStationOwnershipTest(unittest.TestCase):
     def test_non_mqtt_portal_retains_saved_station_recovery(self):
         self.compile_and_run(self.station_fixture())
 
+    def test_shared_outage_blocks_idle_portal_reconnect_and_allows_foreground(self):
+        self.compile_and_run(self.station_fixture(), "-DWITH_MQTT_BRIDGE=1",
+                             "-DTEST_BACKGROUND_SUSPEND=1")
+
     def test_manual_companion_start_preserves_legacy_join_and_15s_fallback(self):
         self.compile_and_run(self.station_fixture(), "-DWITH_MQTT_BRIDGE=1",
                              "-DTEST_LEGACY_COMPANION=1")

@@ -7,6 +7,7 @@
 #include <WiFi.h>
 
 #include <helpers/WiFiOtaSeederPolicy.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 #include <helpers/WiFiOtaSeederStatus.h>
 #include <helpers/UsbLogging.h>
 #include <helpers/ota/FolderMotaStore.h>
@@ -54,6 +55,7 @@ void detachTcpFolder(bool disconnected) {
 void stopClient(bool disconnected = false) {
   detachTcpFolder(disconnected);
   if (seeder_client) seeder_client.stop();
+  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::OtaSeeder, false);
 }
 
 }  // namespace
@@ -89,6 +91,7 @@ void WiFiOtaSeeder::loop() {
     // A different host transport may already own the replacement context.
     if (active && !active->folder_active) active->clear_folder_dest();
     tcp_folder_attached = false;
+    mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::OtaSeeder, false);
   }
   if (seeder_client && seeder_client.connected()) return;
 
@@ -125,6 +128,7 @@ void WiFiOtaSeeder::loop() {
   }
 
   tcp_folder_attached = true;
+  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::OtaSeeder, true);
   char link_info[24];
   snprintf(link_info, sizeof(link_info), "tcp %s",
            seeder_client.remoteIP().toString().c_str());

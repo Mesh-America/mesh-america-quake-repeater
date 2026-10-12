@@ -150,6 +150,7 @@ struct MQTTBridge {
   } _slots[RUNTIME_MQTT_SLOTS];
   std::atomic<bool> _stop_requested{false}, _slot_attempt_pending[RUNTIME_MQTT_SLOTS] = {};
   bool _slot_force_jwt_mint[RUNTIME_MQTT_SLOTS] = {};
+  bool _slot_reconfigure_pending[RUNTIME_MQTT_SLOTS] = {};
   bool _initialized = true;
   int _max_active_slots = 2;
   MQTTPrefs prefs;
@@ -189,6 +190,14 @@ int main() {
   assert(slot.client->_buffer_capacity == 896);
   char token[8] = "old-jwt";
   slot.auth_token = token;
+  stop_result = ESP_ERR_INVALID_STATE;
+  bridge.applySlotPreset(0, "jwt");
+  assert(slot.client->isStarted() && slot.initial_connect_done);
+  assert(slot.preset == &plain_preset && strcmp(token, "old-jwt") == 0);
+  assert(bridge._slot_reconfigure_pending[0]);
+  assert(init_calls == 1 && destroy_calls == 0);
+  stop_result = ESP_OK;
+  bridge._slot_reconfigure_pending[0] = false;  // worker consumes the retry flag
   bridge.applySlotPreset(0, "jwt");
   assert(token[0] == '\0' && slot.preset == &jwt_preset);
   assert(slot.client->_buffer_capacity == 896);
@@ -287,6 +296,10 @@ class MqttNetworkTimeoutTest(unittest.TestCase):
         preamble = preamble.replace(
             'void vTaskDelay(unsigned) { assert(false && "stub disconnect must deliver its event"); }',
             'void vTaskDelay(unsigned ticks) { assert(ticks == 50); }')
+        preamble = preamble.replace(
+            'int esp_mqtt_client_stop(void*) { ++stop_calls; return ESP_OK; }',
+            'static int stop_result = ESP_OK;\n'
+            'int esp_mqtt_client_stop(void*) { ++stop_calls; return stop_result; }')
         source = "#define ESP_PLATFORM 1\n" + preamble + RECONFIGURE_PREAMBLE
         source += "\n".join(method(adapter, signature) for signature in (
             "PsychicMqttClient::PsychicMqttClient()",

@@ -113,6 +113,7 @@ struct MQTTNodeInfo {
 class MQTTBridge : public AbstractBridge {
   bool running = false;
   bool stopping = false;
+  bool network_suspended = false;
 public:
   inline static unsigned live = 0, fail_starts = 0;
   unsigned begins = 0, ends = 0, loops = 0, sent = 0, received = 0;
@@ -127,12 +128,21 @@ public:
     assert(filters); ++begins;
     if (fail_starts) { --fail_starts; return; }
     running = true;
+    network_suspended = false;
   }
-  void end() override { ++ends; running = stopping = false; }
+  void end() override { ++ends; running = stopping = network_suspended = false; }
   void requestStop() { stopping = running; }
   bool isStopping() const { return stopping; }
   bool isRunning() const override { return running; }
-  void loop() override { ++loops; if (stopping) { ++ends; running = stopping = false; } }
+  bool isNetworkSuspended() const { return network_suspended; }
+  void setNetworkSuspended(bool paused) {
+    assert(running && !stopping);
+    network_suspended = paused;
+  }
+  void loop() override {
+    ++loops;
+    if (stopping) { ++ends; running = stopping = network_suspended = false; }
+  }
   void sendPacket(mesh::Packet* p) override { if (allow(p)) ++sent; }
   void onPacketReceived(mesh::Packet* p) { if (allow(p)) ++received; }
 };
@@ -270,6 +280,29 @@ int main() {
     expect_get(cli, "bridge.type", "> mqtt+rs232+espnow");
     expect_get(cli, "rs232.enabled", "> off");
     expect_get(cli, "rs232.running", "> off");
+    fresh.mqtt_bridge->setNetworkSuspended(true);
+    assert(fresh.isMqttBridgeRunning() && fresh._prefs.bridge_enabled);
+    assert(fresh.bridgesPreventSleep());  // ESP-NOW retains its radio owner.
+    assert(fresh.setEspNowBridgeState(false));
+    assert(!fresh.bridgesPreventSleep());  // Paused MQTT is still configured.
+    assert(fresh.setRs232BridgeState(true));
+    assert(fresh.bridgesPreventSleep());  // An active UART remains independent.
+    assert(fresh.setRs232BridgeState(false));
+    assert(!fresh.bridgesPreventSleep());
+    fresh.mqtt_bridge->setNetworkSuspended(false);
+    assert(fresh.bridgesPreventSleep());  // The recovery probe owns the radio.
+    char pause_reply[256] = {};
+    cli.set("espnow.enabled off", pause_reply);
+    assert(strcmp(pause_reply, "OK") == 0);
+    fresh.mqtt_bridge->setNetworkSuspended(true);
+    assert(fresh.requestMqttBridgeStop());
+    assert(fresh.isMqttBridgeStopping() && fresh.bridgesPreventSleep());
+    fresh.serviceBridges();
+    assert(!fresh.isMqttBridgeRunning() && !fresh.bridgesPreventSleep());
+    assert(fresh.setBridgeState(true));
+    assert(fresh.isMqttBridgeRunning() && fresh.bridgesPreventSleep());
+    cli.set("espnow.enabled on", pause_reply);
+    assert(strcmp(pause_reply, "OK") == 0 && fresh.isEspNowBridgeRunning());
   }
   MyMesh mesh; mesh.defaults(); mesh.boot(); CommonCLI cli(mesh);
   char reply[256] = {};

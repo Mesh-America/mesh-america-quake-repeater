@@ -191,6 +191,7 @@ TASK_PREAMBLE = r'''
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include "helpers/WiFiNetworkPowerPolicy.h"
 #define PORTABLE_MQTT_OBSERVER 1
 #define MQTT_DEBUG_PRINTLN(...) ((void)0)
 using TickType_t = uint32_t;
@@ -215,7 +216,12 @@ struct MQTTPrefs {
   bool mqtt_status_enabled = true;
 };
 struct MQTTBridge {
+  mesh::wifi::NetworkPowerPolicy _network_power_policy;
+  std::atomic<bool> _network_suspended{false};
+  bool _network_espnow_restore_pending = false;
   struct Slot {
+    struct Client { bool isStarted() const { return false; } };
+    Client* client = nullptr;
     bool enabled = true, initial_connect_done = false, connected = false;
     unsigned long last_reconnect_attempt = 0;
   } _slots[RUNTIME_MQTT_SLOTS];
@@ -244,6 +250,14 @@ struct MQTTBridge {
     assert(!_stop_acked);
   }
   bool initializeWiFiInTask() { return true; }
+  bool serviceNetworkPower(uint32_t) { work(); return true; }
+  void serviceBackgroundNtp(uint32_t) {
+    work();
+    if (scenario == 7) {
+      _ntp_synced = true;
+      _stop_requested = true;
+    }
+  }
   bool handleWiFiConnection(unsigned long) { work(); return false; }
   bool syncTimeWithNTP(bool = false, bool = false) {
     work();
@@ -296,6 +310,7 @@ struct MQTTBridge {
   }
   bool waitUnlessStopping(uint32_t delay_ms);
   void mqttTaskLoop();
+  void applyTimezoneRules() {}
 };
 void vTaskDelay(TickType_t ticks) {
   assert(ticks > 0);
@@ -375,6 +390,7 @@ ASYNC_STOP_PREAMBLE = r'''
 #include <limits>
 #include "helpers/MQTTLifecycle.h"
 #include "helpers/MQTTConnectionPolicy.h"
+#include "helpers/WiFiNetworkPowerPolicy.h"
 #define ESP_PLATFORM 1
 #define MQTT_DEBUG_PRINTLN(...) ((void)0)
 #define pdMS_TO_TICKS(ms) (ms)
@@ -406,6 +422,7 @@ struct MQTTBridge {
   } ops{this};
   MQTTLifecycle::Coordinator _lifecycle{ops, 1};
   std::atomic<bool> _stop_requested{false}, _stop_acked{false};
+  std::atomic<bool> _network_suspended{true};
   bool _initialized = true, resources_owned = true;
   bool _slots_setup_done = true, _staged_raw_valid = true;
   bool _ntp_estimate_requested = true, _ntp_estimate_done = true, _ntp_estimate_ok = true;
@@ -416,6 +433,8 @@ struct MQTTBridge {
     assert(_lifecycle.requestStart());
     assert(_lifecycle.onTaskStarted());
     s_mqtt_bridge_instance = this;
+    mesh::wifi::networkPower().setManaged(true);
+    mesh::wifi::networkPower().setSuspended(true);
   }
   void cancelNtpRefresh() { ++cancels; }
   void requestStop();
@@ -452,6 +471,7 @@ static void assert_finished(MQTTBridge& bridge, bool clean) {
   assert(!bridge._ntp_estimate_requested && !bridge._ntp_estimate_done);
   assert(!bridge._ntp_estimate_ok && bridge._ntp_estimate_epoch == 0);
   assert(bridge.cancels == 1);
+  assert(!bridge._network_suspended && !mesh::wifi::networkPower().managed());
 }
 '''
 
@@ -547,6 +567,7 @@ class MqttTransportResultsTests(unittest.TestCase):
             path.write_text(source, encoding="utf-8")
             exe = Path(temp) / ("worker.exe" if os.name == "nt" else "worker")
             result = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra",
+                                     "-I", str(ROOT / "src"),
                                      str(path), "-o", str(exe)], text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             for scenario in range(12):

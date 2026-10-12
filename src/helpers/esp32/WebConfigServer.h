@@ -36,6 +36,7 @@
 #include <helpers/RoomWebMailbox.h>
 #include <helpers/WiFiPowerSave.h>
 #include <helpers/WiFiReconnectPolicy.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 #include <helpers/ui/DisplayBuildFlags.h>
 
 class AsyncWebServer;
@@ -252,6 +253,12 @@ public:
   bool stopForOTA(char reply[]);
   void tick(uint32_t now);             // call every loop iteration
 
+  // A listening LAN portal is not itself a reason to keep a failed background
+  // network awake. Explicit starts and real browser activity get a bounded
+  // window; AP setup and in-flight work retain the radio until they complete.
+  void requestNetworkAccess();
+  bool isNetworkForegroundActive(uint32_t now) const;
+
   Mode mode() const { return _mode; }
   bool isRunning() const { return _mode != MODE_OFF; }
   bool isStopping() const { return _stopping; }
@@ -367,6 +374,7 @@ private:
   uint32_t _diag_last = 0;
 
   volatile uint32_t _last_activity = 0;
+  volatile uint32_t _network_activity_until = 0;
   uint32_t _reboot_at = 0;         // 0 = none scheduled
   uint32_t _stop_warn_at = 0;
   bool _stop_warned = false;
@@ -378,6 +386,8 @@ private:
   bool _board_cmds_probed = false;
 
   void createServer();
+  void noteNetworkActivity();
+  void refreshNetworkPowerHold(uint32_t now);
   bool beginSavedStation(uint32_t now);
   void registerRoutes();
   typedef void (WebConfigServer::*RequestHandler)(AsyncWebServerRequest*);

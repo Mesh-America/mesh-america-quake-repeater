@@ -366,7 +366,8 @@ public:
 
     /**
      * @brief Disconnects the MQTT client from the server.
-     * This call might be blocking until the client is stopped cleanly
+     * Disconnect notification waits at most one second before SDK stop.
+     * A failed SDK stop leaves isStarted() true so callers retain ownership.
      */
     void disconnect();
 
@@ -494,10 +495,10 @@ private:
     esp_mqtt_client_handle_t _client = nullptr;
     esp_mqtt_client_config_t _mqtt_cfg;
     esp_mqtt_error_codes_t _lastError;
-    bool _connected = false;
-    bool _stopMqttClient = false;
+    std::atomic<bool> _connected{false};
+    std::atomic<bool> _stopMqttClient{false};
     bool _config_dirty = true;
-    bool _started = false;
+    std::atomic<bool> _started{false};
 
     // Runtime cap on the esp-mqtt outbox for QoS 0 async publishes (bytes).
     // 0 = disabled. Enforced in publish(); not an esp-mqtt config field.

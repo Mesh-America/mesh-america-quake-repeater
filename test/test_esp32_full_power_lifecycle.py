@@ -24,6 +24,7 @@ FIXTURE = r'''
 #include <cstring>
 #include <new>
 #include <helpers/WebConfigBatch.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 #include <helpers/WirelessControl.h>
 uint32_t now = 0;
 uint32_t millis() { return now; }
@@ -143,6 +144,8 @@ struct MQTTNodeInfo {
   uint8_t* sf; uint8_t* cr; uint8_t* repeat_flag; bool repeat_when_nonzero; bool canonical_wifi = false;
 };
 struct MQTTBridge : AbstractBridge {
+  bool network_suspended = false;
+  bool isNetworkSuspended() const { return network_suspended; }
   template<class... Args> explicit MQTTBridge(Args...) {}
   void setDeviceID(const char*) {} void setFirmwareVersion(const char*) {}
   void setBoardModel(const char*) {} void setBuildDate(const char*) {}
@@ -156,6 +159,8 @@ struct WebConfigServer {
   uint32_t _setup_started_at = 0;
   int _mode = 0;
   static constexpr int MODE_SETUP = 1;
+  static constexpr int MODE_LAN = 2;
+  uint32_t foreground_until = 0;
   char _wifi_ssid[33] = {};
   template<class... Args> WebConfigServer(void*, void* prefs, bool owner, Args...) : owns(owner) {
     if (prefs) strcpy(_wifi_ssid, static_cast<ObserverPrefs*>(prefs)->wifi_ssid);
@@ -165,6 +170,14 @@ struct WebConfigServer {
   bool isRunning() const { return running; }
   bool isStopping() const { return stopping; }
   void updateWiFiOwnership(bool owner) { owns = owner; }
+  void requestNetworkAccess() {
+    foreground_until = millis() + 120000;
+    mesh::wifi::networkPower().requestProbe();
+  }
+  bool isNetworkForegroundActive(uint32_t tick) const {
+    return _mode == MODE_SETUP || stopping
+        || (foreground_until && int32_t(tick - foreground_until) < 0);
+  }
   bool startSetupMode(char* reply) {
     if (!allow_start) {
       if (owns) stopOwnedWiFiRadio();
@@ -405,6 +418,51 @@ class ESP32FullPowerLifecycleTest(unittest.TestCase):
         for role in ("simple_repeater", "simple_room_server"):
             with self.subTest(role=role):
                 self.compile_and_run(self.fixture(role), *FLAGS)
+
+    def test_suspended_mqtt_idle_portal_and_foreground_ownership(self):
+        checks = r'''
+int main() {
+  MyMesh node; char reply[160] = {};
+  strcpy(node._cli.prefs.wifi_ssid, "working-network");
+  auto& power = mesh::wifi::networkPower();
+  power.setManaged(true);
+  assert(node.setMqttBridgeState(true));
+  assert(node.startWebConfig(false, reply));
+  node._webconfig->_mode = WebConfigServer::MODE_LAN;
+  now += 120001; // Explicit-start lease has elapsed; listener is idle.
+  power.consumeProbeRequest();
+  node.@WORKER@->network_suspended = true;
+  power.setSuspended(true);
+  unsigned off_before = WiFi.off_modes;
+  node.serviceIdleWiFi();
+  assert(WiFi.off_modes == off_before && sdk_started);
+  assert(node.hasPendingWork()); // Cannot sleep before worker shutdown completes.
+  WiFi.mode(WIFI_OFF); // Only the Core 0 network owner performs this shutdown.
+  node.serviceIdleWiFi();
+  assert(!sdk_initialized && !node.hasPendingWork());
+  assert(node.getPowerSaveSleepSeconds(30) == 30);
+  // An operator can wake the existing listener without creating a second
+  // server, taking station ownership, or deinitializing the worker's driver.
+  assert(node.startWebConfig(false, reply));
+  assert(power.consumeProbeRequest());
+  assert(node._webconfig->isNetworkForegroundActive(now));
+  assert(node.hasPendingWork());
+  now += 120001;
+  assert(!node.hasPendingWork());
+  power.setHold(mesh::wifi::NetworkPowerHold::OtaSeeder, true);
+  assert(node.hasPendingWork());
+  power.setHold(mesh::wifi::NetworkPowerHold::OtaSeeder, false);
+  assert(!node.hasPendingWork());
+  power.setSuspended(false);
+  node.@WORKER@->network_suspended = false;
+  node.serviceIdleWiFi();
+  assert(node.hasPendingWork()); // Resume is owned by the MQTT worker too.
+  power.setManaged(false);
+}
+'''
+        for role in ("simple_repeater", "simple_room_server"):
+            with self.subTest(role=role):
+                self.compile_and_run(self.fixture(role, checks), *FLAGS)
 
     def test_primary_radios_and_wifi_disabled_images_do_not_reclaim_wifi(self):
         for role in ("simple_repeater", "simple_room_server"):

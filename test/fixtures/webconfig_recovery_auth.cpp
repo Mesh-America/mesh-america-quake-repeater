@@ -47,6 +47,8 @@ struct WebConfigServer {
   uint32_t _last_activity=0, _session_last_seen=0, _login_lock_until=0;
   int _login_fails=0; Callback callback; Callback* _cb=&callback;
   WebConfigServer() { strcpy(callback.node.admin_password, "existing-secret"); }
+  unsigned network_activity = 0;
+  void noteNetworkActivity() { ++network_activity; }
   bool checkAuth(AsyncWebServerRequest*);
   void handleLogin(AsyncWebServerRequest*);
   void handleLogout(AsyncWebServerRequest*);
@@ -58,12 +60,15 @@ int main() {
   attacker.body="{\"set\":{\"password\":\"attacker\",\"wifi.ssid\":\"EvilNet\"}}";
   attacker._tempObject=attacker.body.data();
   assert(!portal.checkAuth(&attacker));
+  assert(portal.network_activity==0);
   portal.checkConfigPost(&attacker);
   assert(attacker.status==401 && !portal.config_accepted);
   attacker.password("wrong"); portal.handleLogin(&attacker);
   assert(attacker.status==401 && portal._session_token[0]==0);
+  assert(portal.network_activity==0);
   AsyncWebServerRequest admin; admin.password("existing-secret");
   portal.handleLogin(&admin); assert(admin.status==200);
+  assert(portal.network_activity>0);
   assert(strlen(portal._session_token)==32);
   assert(admin.response.headers["Set-Cookie"].find("HttpOnly; SameSite=Lax")!=std::string::npos);
   admin.header.cookies=std::string("wcs=")+portal._session_token;

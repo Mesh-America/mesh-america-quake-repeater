@@ -89,6 +89,15 @@ static constexpr uint32_t MQTT_NTP_NON_ESP_SETTLE_MS = 5000UL;
 #endif
 static constexpr unsigned long MQTT_NTP_MIN_VALID_EPOCH = 1767225600UL;
 
+static uint32_t mqttNtpFailureRetryAt(uint32_t now) {
+#ifdef ESP_PLATFORM
+  const uint32_t deadline = now + mesh::wifi::kNetworkRecoveryIntervalMs;
+  return deadline == 0 ? 1 : deadline;
+#else
+  return MQTTConnectionPolicy::ntpRetryAt(now);
+#endif
+}
+
 static bool mqttNtpRefreshDue(uint32_t now, uint32_t last_sync,
                               uint32_t retry_at) {
   return MQTTConnectionPolicy::ntpRefreshDue(now, last_sync, retry_at);
@@ -1346,6 +1355,10 @@ void MQTTBridge::finishStopped() {
   // Timezone is inline class storage (_timezone_storage) - nothing to delete.
   // The shared JSON document's pools were freed by releaseRuntimeBuffers() above.
   _initialized = false;
+#ifdef ESP_PLATFORM
+  _network_suspended.store(false, std::memory_order_release);
+  mesh::wifi::networkPower().setManaged(false);
+#endif
   // A clean task stop already cancels this on its owning core. The second
   // cancellation is intentionally idempotent and also releases the lease
   // after the lifecycle's bounded forced-stop fallback.
@@ -1449,6 +1462,16 @@ void MQTTBridge::LifecycleOps::onStopComplete(bool clean) {
 // ---------------------------------------------------------------------------
 // FreeRTOS task entry point
 // ---------------------------------------------------------------------------
+void MQTTBridge::applyTimezoneRules() {
+  TimeChangeRule dst_rule, std_rule;
+  if (!timezoneRulesFromString(_obs->timezone_string, dst_rule, std_rule)) {
+    TimeChangeRule utc = {"UTC", Last, Sun, Mar, 0, 0};
+    dst_rule = utc;
+    std_rule = utc;
+  }
+  _timezone_storage.setRules(dst_rule, std_rule);
+}
+
 #ifdef ESP_PLATFORM
 void MQTTBridge::mqttTask(void* parameter) {
   MQTTBridge* bridge = static_cast<MQTTBridge*>(parameter);
@@ -1559,10 +1582,168 @@ bool MQTTBridge::waitUnlessStopping(uint32_t delay_ms) {
   return false;
 }
 
+bool MQTTBridge::serviceNetworkPower(uint32_t now) {
+  auto& control = mesh::wifi::networkPower();
+  bool useful_network = false;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
+    const uint32_t acknowledgments = _slots[i].client
+        ? _slots[i].client->getPublishAck() : 0;
+    const bool broker_replied = acknowledgments != 0
+        && acknowledgments != _network_publish_acks[i];
+    _network_publish_acks[i] = acknowledgments;
+    // A flapping CONNACK must not buy another full outage window forever.
+    // A PUBACK proves delivery immediately; a quiet connection must stay up
+    // for 30 seconds, leaving time to prove recovery within the probe window.
+    if (_slots[i].enabled && _slots[i].connected
+        && (broker_replied || (now - static_cast<uint32_t>(_slots[i].connected_at_ms)
+                >= mesh::wifi::kNetworkHealthyMs))) {
+      useful_network = true;
+    }
+  }
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  const bool ap_active = esp_wifi_get_mode(&mode) == ESP_OK && (mode & WIFI_MODE_AP);
+  bool foreground = control.foregroundActive() || ap_active
+      || (_board && _board->isOTAUpdateRunning())
+      || _ntp_force_requested || _ntp_diag_requested;
+#ifdef WITH_SNMP
+  foreground = foreground || (_snmp_agent && _snmp_agent->isRunning()
+                              && WiFi.status() == WL_CONNECTED);
+#endif
+  const auto action = _network_power_policy.update(
+      now, useful_network, foreground, control.consumeProbeRequest());
+  if (action == mesh::wifi::NetworkPowerPolicy::Action::Suspend) {
+    const bool newly_suspended = !_network_suspended.load(std::memory_order_acquire);
+    if (newly_suspended) {
+      cancelNtpRefresh();
+      _ntp_sync_pending = false;
+      for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
+        _slot_attempt_pending[i] = false;
+        if (_slots[i].client && _slots[i].client->isStarted()) {
+          _slots[i].client->disconnect();
+          // The wrapper only clears isStarted after SDK stop succeeds. Never
+          // hand station ownership off while any transport still runs.
+          if (_slots[i].client->isStarted()) return false;
+        }
+        _slots[i].connected = false;
+        _slots[i].connected_at_ms = 0;
+        _status_publish_pending[i] = false;
+      }
+      updateCachedConnectionStatus();
+      _network_suspended.store(true, std::memory_order_release);
+      control.setSuspended(true);  // TLS/SNTP teardown precedes the handoff.
+      MQTT_DEBUG_PRINTLN("Network unavailable; suspending background WiFi for 30 minutes");
+    }
+    if (_manage_wifi && !control.foregroundActive()
+        && !(_board && _board->isOTAUpdateRunning())
+        && mqttStationWiFiMutationAllowed()
+        && (newly_suspended || (!mesh::wifi::espNowChannelConstrained()
+                               && WiFi.getMode() != WIFI_OFF))) {
+      WiFi.setAutoReconnect(false);
+      WiFi.disconnect(false, false);
+      if (mesh::wifi::espNowChannelConstrained()) {
+        // ESP-NOW is an independent radio owner. Stop failed STA attempts,
+        // keeping its driver, protocol and fixed channel available.
+        _network_espnow_restore_pending =
+            mesh::wifi::restoreEspNowChannel() != ESP_OK;
+        _network_espnow_restore_at = static_cast<uint32_t>(millis()) + 1000U;
+      } else if (WiFi.getMode() != WIFI_OFF) {
+        WiFi.mode(WIFI_OFF);
+      }
+    }
+    serviceEspNowChannelRestore(static_cast<uint32_t>(millis()));
+    return false;
+  }
+  _network_espnow_restore_pending = false;
+  if (_network_suspended.exchange(false, std::memory_order_acq_rel)) {
+    // Publish before restarting: the Companion/role loop must not reclaim
+    // WiFi underneath a new association or TLS handshake.
+    control.setSuspended(false);
+    _last_wifi_check = now - 10001UL;
+    _wifi_status_initialized = false;
+    _last_slot_reconnect_ms = now - MQTTConnectionPolicy::kReconnectGuardMs;
+    for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
+      _slots[i].circuit_breaker_tripped = false;
+      _slots[i].last_reconnect_attempt = now - MQTTConnectionPolicy::reconnectDelayMs(
+          _slots[i].reconnect_backoff, static_cast<uint8_t>(i));
+    }
+    _ntp_refresh_retry_at = 0;
+    _ntp_sync_pending = !_fresh_ntp_this_boot.load(std::memory_order_acquire);
+    if (_manage_wifi) initializeWiFiInTask();
+    MQTT_DEBUG_PRINTLN("Starting bounded network recovery probe");
+  }
+  return true;
+}
+
+void MQTTBridge::serviceEspNowChannelRestore(uint32_t now) {
+  if (!_network_espnow_restore_pending) return;
+  if (!_manage_wifi || !_network_suspended.load(std::memory_order_acquire)
+      || !mesh::wifi::espNowChannelConstrained()) {
+    _network_espnow_restore_pending = false;
+    return;
+  }
+  // Disconnect and scan completion are asynchronous. Retry only a failed
+  // channel write, once per second, without another station disconnect or
+  // driver mode change. Foreground owners retain their channel throughout.
+  if (mesh::wifi::networkPower().foregroundActive()
+      || (_board && _board->isOTAUpdateRunning())
+      || !mqttStationWiFiMutationAllowed()
+      || static_cast<int32_t>(now - _network_espnow_restore_at) < 0) return;
+  _network_espnow_restore_pending = mesh::wifi::restoreEspNowChannel() != ESP_OK;
+  _network_espnow_restore_at = static_cast<uint32_t>(millis()) + 1000U;
+}
+
+void MQTTBridge::serviceBackgroundNtp(uint32_t now) {
+  if (WiFi.status() != WL_CONNECTED) {
+    pollNtpRefresh(now);
+    return;
+  }
+  // A retained/admin-set clock can start MQTT without a blocking multi-server
+  // NTP walk. It is not credited as a fresh internet reply or useful network.
+  if (!_ntp_synced.load(std::memory_order_acquire)) {
+    uint32_t system_time = 0;
+    MQTTConnectionPolicy::checkedRtcEpoch(static_cast<int64_t>(time(nullptr)),
+        MQTT_NTP_MIN_VALID_EPOCH, system_time);
+    const uint32_t rtc_time = _rtc ? _rtc->getCurrentTime() : 0;
+    const auto source = MQTTConnectionPolicy::chooseFallbackClock(
+        false, system_time, rtc_time, MQTT_NTP_MIN_VALID_EPOCH);
+    if (source != MQTTConnectionPolicy::ClockSource::None) {
+      const uint32_t epoch = source == MQTTConnectionPolicy::ClockSource::Rtc
+          ? rtc_time : system_time;
+      struct timeval accepted = {static_cast<time_t>(epoch), 0};
+      settimeofday(&accepted, nullptr);
+      if (_rtc) {
+        _rtc->setCurrentTime(epoch);
+        if (epoch < rtc_time) {
+          _backward_clock_reset_epoch.store(epoch, std::memory_order_release);
+        }
+      }
+      _ntp_synced.store(true, std::memory_order_release);
+    }
+  }
+  pollNtpRefresh(now);
+  if (_ntp_refresh_pending) return;
+  const bool bootstrap = _ntp_sync_pending
+      || !_fresh_ntp_this_boot.load(std::memory_order_acquire);
+  const bool retry_due = _ntp_refresh_retry_at == 0
+      || mqttNtpRefreshDue(now, _last_ntp_sync, _ntp_refresh_retry_at);
+  if ((bootstrap && retry_due)
+      || mqttNtpRefreshDue(now, _last_ntp_sync, _ntp_refresh_retry_at)) {
+    _ntp_sync_pending = false;
+    refreshNTP();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // mqttTaskLoop() - main loop running on Core 0
 // ---------------------------------------------------------------------------
 void MQTTBridge::mqttTaskLoop() {
+  _network_power_policy = mesh::wifi::NetworkPowerPolicy();
+  _network_suspended.store(false, std::memory_order_release);
+  _network_espnow_restore_pending = false;
+  mesh::wifi::networkPower().setManaged(true);
+  // Timezone configuration is independent of whether an NTP server answers.
+  // The old blocking bootstrap applied these rules as a side effect.
+  applyTimezoneRules();
   // An active OTA/setup AP can outlive MQTT's start request. Stay stoppable
   // while waiting, and leave slot/TLS work until station initialization ran.
   while (!_stop_requested && !initializeWiFiInTask()) {
@@ -1586,10 +1767,21 @@ void MQTTBridge::mqttTaskLoop() {
     if (_stop_requested) {
       MQTT_DEBUG_PRINTLN("MQTT task: cooperative stop - tearing down clients on Core 0");
       cancelNtpRefresh();
+      bool transports_stopped = true;
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
         teardownSlot(i);
+        if (_slots[i].client && _slots[i].client->isStarted()) transports_stopped = false;
+      }
+      if (!transports_stopped) {
+        // Retain clients, tokens and the stop acknowledgment until SDK stop
+        // actually succeeds. end() still owns the explicitly dirty timeout
+        // fallback; this worker must never label a failed stop as clean.
+        vTaskDelay(pdMS_TO_TICKS(100));
+        continue;
       }
       destroySlotClients();
+      _network_suspended.store(false, std::memory_order_release);
+      mesh::wifi::networkPower().setManaged(false);
       _stop_acked.store(true, std::memory_order_release);  // teardown precedes Core 1 release
       return;
     }
@@ -1612,6 +1804,15 @@ void MQTTBridge::mqttTaskLoop() {
     #endif
 
     unsigned long now = millis();
+
+    // The MQTT and NTP schedulers share this single WiFi outage budget.
+    // Quiesce on the owner core before an external Companion station owner
+    // sees the suspension flag; failed timers cannot wake each other up.
+    if (!serviceNetworkPower(static_cast<uint32_t>(now))) {
+      processPacketQueue();
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
 
     // Periodic heap + publish-health snapshot. Gated behind MQTT_MEMORY_DEBUG (a
     // dedicated diagnostics flag, NOT enabled on production or plain MQTT_DEBUG builds)
@@ -1644,21 +1845,7 @@ void MQTTBridge::mqttTaskLoop() {
       }
     }
 
-    // Check for pending NTP sync (triggered from WiFi event handler)
-    if (_ntp_sync_pending && WiFi.status() == WL_CONNECTED) {
-      _ntp_sync_pending = false;
-      syncTimeWithNTP();
-    }
-
-    // Retry NTP every 30s if initial sync failed (slots can't start without valid time)
-    if (!_ntp_synced.load(std::memory_order_acquire)
-        && WiFi.status() == WL_CONNECTED) {
-      static unsigned long last_ntp_retry = 0;
-      if (now - last_ntp_retry >= 30000) {
-        last_ntp_retry = now;
-        syncTimeWithNTP();
-      }
-    }
+    serviceBackgroundNtp(static_cast<uint32_t>(now));
 
     // Process a CLI-requested forced NTP sync (queued from Core 1). Running it here
     // keeps all NTP I/O on Core 0; requestForcedNtpSync() blocks the CLI thread until
@@ -1793,16 +1980,8 @@ void MQTTBridge::mqttTaskLoop() {
     // Periodic configuration check (throttled to avoid spam)
     checkConfigurationMismatch();
 
-    // Periodic NTP refresh (once per day) - lightweight, non-blocking.
-    // Uses async SNTP instead of the heavy syncTimeWithNTP() which blocks Core 0
-    // for up to 20+ seconds with DNS lookups, UDP sockets, and retry loops.
-    pollNtpRefresh(now);
-    if (WiFi.status() == WL_CONNECTED
-        && !_ntp_refresh_pending
-        && mqttNtpRefreshDue(now, _last_ntp_sync,
-                             _ntp_refresh_retry_at)) {
-      refreshNTP();
-    }
+    // Automatic boot/reconnect/daily NTP is serviced above as one bounded
+    // asynchronous operation. Explicit administrator diagnostics remain separate.
 
     // Publish status updates (handle millis() overflow correctly).
     // Read the toggle live from prefs (like mqtt.packets/rx/tx below) so a
@@ -2142,9 +2321,13 @@ bool MQTTBridge::setupSlot(int index) {
   // transport handles are reused; setCredentials / setServer overwrite the config
   // fields in place before connect() restarts the ESP-IDF client.
   if (slot.initial_connect_done) {
-    if (slot.client->connected()) {
+    if (slot.client->isStarted()) {
       _slot_attempt_pending[index] = false;
       slot.client->disconnect();
+    }
+    if (slot.client->isStarted()) {
+      slot.last_reconnect_attempt = millis();
+      return false;
     }
     // Clear TLS verification fields so a stale CA-bundle attach or cert
     // pointer from a prior preset doesn't override the new one.
@@ -2375,6 +2558,7 @@ void MQTTBridge::teardownSlot(int index, bool force) {
     delay(50);
     #endif
   }
+  if (slot.client && !force && slot.client->isStarted()) return;
 
   // Invalidate the token but keep the buffer: the client survives teardown and still
   // holds this pointer in its config (see MQTTSlot::auth_token).
@@ -3062,6 +3246,7 @@ void MQTTBridge::setSlotPreset(int slot_index, const char* preset_name) {
   #ifdef ESP_PLATFORM
   if (_mqtt_task_handle != nullptr) {
     _slot_reconfigure_pending[slot_index] = true;
+    mesh::wifi::networkPower().requestProbe();
     MQTT_DEBUG_PRINTLN("MQTT%d reconfigure queued (preset: %s)", slot_index + 1, preset_name);
     return;
   }
@@ -3077,6 +3262,12 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
   MQTTSlot& slot = _slots[slot_index];
 
   teardownSlot(slot_index);
+  if (slot.client && slot.client->isStarted()) {
+    // Keep the requested preset queued and the running SDK's current config
+    // untouched until its owning task can complete the failed stop.
+    _slot_reconfigure_pending[slot_index] = true;
+    return;
+  }
 
   if (strcmp(preset_name, MQTT_PRESET_NONE) == 0 || preset_name[0] == '\0') {
     slot.enabled = false;
@@ -4460,7 +4651,21 @@ void MQTTBridge::refreshNTP() {
 #endif
   _ntp_refresh_previous_epoch =
       _rtc ? (unsigned long)_rtc->getCurrentTime() : 0;
+#ifdef ESP_PLATFORM
+  const char* servers[kMaxNtpServers];
+  int server_count = 0;
+  fillNtpServerList(_obs, servers, server_count);
+  const int first = _background_ntp_server % server_count;
+  // Let SNTP try three servers within one 15-second request, rotating through
+  // the configured list across probes instead of blocking on every server.
+  configTime(0, 0, servers[first], servers[(first + 1) % server_count],
+             servers[(first + 2) % server_count]);
+  // A blackholed leading server can consume the whole SDK receive timeout.
+  // Advance by one so every server eventually leads, even with six entries.
+  _background_ntp_server = static_cast<uint8_t>((first + 1) % server_count);
+#else
   configTime(0, 0, effectiveNtpPrimary(_obs));
+#endif
   _ntp_refresh_retry_at = 0;
   _ntp_refresh_started_at = millis();
   _ntp_refresh_pending = true;
@@ -4473,7 +4678,7 @@ void MQTTBridge::pollNtpRefresh(uint32_t now) {
   const uint32_t elapsed = now - _ntp_refresh_started_at;
   if (WiFi.status() != WL_CONNECTED) {
     cancelNtpRefresh();
-    _ntp_refresh_retry_at = mqttNtpRetryAt(now);
+    _ntp_refresh_retry_at = mqttNtpFailureRetryAt(now);
     MQTT_DEBUG_PRINTLN("NTP refresh aborted; WiFi disconnected");
     return;
   }
@@ -4514,7 +4719,7 @@ void MQTTBridge::pollNtpRefresh(uint32_t now) {
     // The ESP status is edge-like and may reset after it is read, so retry the
     // whole operation instead of waiting on a completion that was consumed.
     cancelNtpRefresh();
-    _ntp_refresh_retry_at = mqttNtpRetryAt(now);
+    _ntp_refresh_retry_at = mqttNtpFailureRetryAt(now);
     MQTT_DEBUG_PRINTLN(
         "NTP refresh returned implausible time %lld; retry scheduled",
         (long long)raw_system_time);
@@ -4523,7 +4728,7 @@ void MQTTBridge::pollNtpRefresh(uint32_t now) {
 
   if (elapsed >= MQTT_NTP_REFRESH_TIMEOUT_MS) {
     cancelNtpRefresh();
-    _ntp_refresh_retry_at = mqttNtpRetryAt(now);
+    _ntp_refresh_retry_at = mqttNtpFailureRetryAt(now);
     MQTT_DEBUG_PRINTLN("NTP refresh timed out; retry scheduled");
   }
 }
@@ -4845,6 +5050,7 @@ void MQTTBridge::runNtpEstimateProbe() {
 
 bool MQTTBridge::requestNtpTimeEstimate() {
   if (!isRunning() || _stop_requested.load(std::memory_order_acquire)
+      || isNetworkSuspended()
       || WiFi.status() != WL_CONNECTED || _ntp_estimate_requested) return false;
   _ntp_estimate_done = false;
   _ntp_estimate_ok = false;

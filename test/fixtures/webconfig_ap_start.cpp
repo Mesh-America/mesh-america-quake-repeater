@@ -337,6 +337,8 @@ struct WebConfigServer {
   bool auth_allowed = true;
   ~WebConfigServer() { delete _dns; }
   void createServer() { ++servers; }
+  void requestNetworkAccess() {}
+  void refreshNetworkPowerHold(uint32_t) {}
   bool startSetupMode(char reply[]);
   bool checkAuth(AsyncWebServerRequest*) const { return auth_allowed; }
   void handleScan(AsyncWebServerRequest* req);

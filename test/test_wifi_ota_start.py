@@ -343,7 +343,9 @@ int main() {
         source = (ROOT / "src/helpers/esp32/WebConfigServer.cpp").read_text()
         methods = "\n".join(extract_braced(source, signature) for signature in (
             "void WebConfigServer::requestStop(", "bool WebConfigServer::stopForOTA(",
-            "void WebConfigServer::finalizeTeardown("))
+            "void WebConfigServer::finalizeTeardown(",
+            "bool WebConfigServer::isNetworkForegroundActive(",
+            "void WebConfigServer::refreshNetworkPowerHold("))
         fixture = (ROOT / "test/fixtures/webconfig_ota_handoff.cpp").read_text()
         self.compile_and_run(fixture.replace("@METHODS@", methods))
 

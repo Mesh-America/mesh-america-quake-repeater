@@ -187,9 +187,14 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
   MyMesh mesh; mesh.defaults(); mesh.boot(); CommonCLI cli(mesh);
   expect_get(cli, "bridge.type", "> mqtt+rs232");
   assert(mesh.isMqttBridgeRunning() && !mesh.isRs232BridgeRunning());
+  mesh.mqtt_bridge->setNetworkSuspended(true);
+  assert(mesh.isMqttBridgeRunning() && mesh._prefs.bridge_enabled);
+  assert(!mesh.bridgesPreventSleep());
   char reply[256] = {};
   cli.set("rs232.enabled on", reply); assert(strcmp(reply, "OK") == 0);
   assert(mesh.isRs232BridgeRunning() && mesh.isMqttBridgeRunning());
+  assert(mesh.bridgesPreventSleep());  // Paused MQTT cannot mask an active UART.
+  mesh.mqtt_bridge->setNetworkSuspended(false);
   const unsigned starts = mesh.mqtt_bridge->begins;
   cli.set("bridge.baud 57600", reply); assert(strcmp(reply, "OK") == 0);
   assert(mesh.isRs232BridgeRunning() && mesh.mqtt_bridge->begins == starts);

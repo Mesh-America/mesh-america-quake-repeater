@@ -25,6 +25,7 @@ class MeshSNMPAgent;  // Forward declaration
 
 #ifdef ESP_PLATFORM
 #include "helpers/esp32/SntpOperationCoordinator.h"
+#include "helpers/WiFiNetworkPowerPolicy.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -447,6 +448,17 @@ private:
   unsigned long _last_wifi_reconnect_attempt;
   uint8_t _wifi_reconnect_backoff_attempt;  // 0..5 -> 15s, 30s, 60s, 120s, 300s; reset on connect
   unsigned long _last_slot_reconnect_ms;   // guards against concurrent TLS handshakes (15 s inter-slot gap)
+#ifdef ESP_PLATFORM
+  mesh::wifi::NetworkPowerPolicy _network_power_policy;
+  std::atomic<bool> _network_suspended{false};
+  uint8_t _background_ntp_server = 0;
+  uint32_t _network_publish_acks[RUNTIME_MQTT_SLOTS] = {};
+  bool _network_espnow_restore_pending = false;
+  uint32_t _network_espnow_restore_at = 0;
+  bool serviceNetworkPower(uint32_t now);
+  void serviceEspNowChannelRestore(uint32_t now);
+  void serviceBackgroundNtp(uint32_t now);
+#endif
 
   AlertFaultPolicy::OutageSnapshot wifiOutage() const {
     return AlertFaultPolicy::unpackOutageSnapshot(
@@ -550,6 +562,7 @@ private:
   void getClientVersion(char* buffer, size_t buffer_size) const;
   void logMemoryStatus();
   void refreshOriginFromPrefs();
+  void applyTimezoneRules();
   // begin()/end()-scoped PSRAM buffers. Each allocation is independent so a
   // transient heap shortage degrades to the existing stack fallback instead
   // of making the bridge unusable.
@@ -606,6 +619,15 @@ public:
   void requestStop();
   bool isStopping() const { return _lifecycle.isStopInProgress(); }
   bool isRunning() const override { return _initialized; }
+  // Configured and still scheduling recovery, but transports are quiesced.
+  // Do not conflate automatic suspension with a persisted bridge disable.
+  bool isNetworkSuspended() const {
+#ifdef ESP_PLATFORM
+    return _network_suspended.load(std::memory_order_acquire);
+#else
+    return false;
+#endif
+  }
   void loop() override;
   void onPacketReceived(mesh::Packet *packet) override;
   void sendPacket(mesh::Packet *packet) override;

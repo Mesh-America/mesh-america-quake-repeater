@@ -5,11 +5,14 @@
 #include <cstring>
 #include <initializer_list>
 #include <helpers/RoomWebMailbox.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 
 static uint32_t millis() { return 123; }
 struct WebConfigBatch {
   static uint32_t scheduleAt(uint32_t now, uint32_t delay) { return now + delay; }
+  static bool deadlineReached(uint32_t now, uint32_t at) { return int32_t(now - at) >= 0; }
 };
+struct WCLock { explicit WCLock(void*) {} };
 constexpr int WIFI_STA = 1;
 constexpr int WIFI_AP = 2;
 struct WiFiFake {
@@ -29,7 +32,7 @@ struct DNS { void stop() {} };
 struct Callbacks { unsigned stops = 0; void onWebConfigStopped() { ++stops; } };
 struct WebConfigServer {
   enum Mode { MODE_OFF, MODE_LAN, MODE_SETUP };
-  enum { STOP_WARN_MS = 1000, BATCH_IDLE = 0, BATCH_CONFIG = 0 };
+  enum { STOP_WARN_MS = 1000, BATCH_IDLE = 0, BATCH_PENDING = 1, BATCH_CONFIG = 0 };
   Server server;
   Server* _server = &server;
   DNS* _dns = nullptr;
@@ -46,11 +49,18 @@ struct WebConfigServer {
   uint32_t _setup_reconnect_deadline = 0, _reboot_at = 0, _batch_state = 0;
   uint32_t _batch_next = 0, _setup_wifi_handoff_deadline = 0, _batch_kind = 0;
   uint32_t _board_cmds = 0;
+  uint32_t _network_activity_until = 0;
+  void* _mux = nullptr;
+  struct Terminal { bool running = false; struct { bool pending = false; } queue; };
+  Terminal* _terminal = nullptr;
   char _wifi_ssid[32] = {}, _setup_wifi_handoff_ip[16] = {};
   char _session_token[16] = {}, _stats_json[16] = {};
   bool routes = true;
   void detachRoutes() { routes = false; }
   void closeTerminal() {}
+  uint32_t handlerRefCount() const { return 0; }
+  bool isNetworkForegroundActive(uint32_t) const;
+  void refreshNetworkPowerHold(uint32_t);
   bool isRunning() const { return _mode != MODE_OFF; }
   bool isStopping() const { return _stopping; }
   void requestStop();
@@ -75,6 +85,7 @@ int main() {
       assert(portal.stopForOTA(reply));
       assert(strcmp(reply, "WebConfig stopped") == 0);
       assert(!portal.routes && !portal.server.listening && portal.isStopping());
+      assert(mesh::wifi::networkPower().foregroundActive());
       assert(WiFi.sta && !WiFi.ap && WiFi.stops == 0);
       assert(WiFi.connected == !setup);
       // OTA can now bind port 80 and create its own AP, while HTTP request
@@ -86,6 +97,7 @@ int main() {
       assert(WiFi.ap && WiFi.sta && WiFi.stops == 0);
       assert(WiFi.ap_stops == unsigned(setup));
       assert(portal.callbacks.stops == 1 && !portal._keep_wifi_on_stop);
+      assert(!mesh::wifi::networkPower().foregroundActive());
     }
   }
   WebConfigServer ordinary;

@@ -28,6 +28,7 @@ HARNESS = r'''
 #include <helpers/RoomWebMailbox.h>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/WebConfigBatch.h>
+#include <helpers/WiFiNetworkPowerPolicy.h>
 using String = std::string;
 #define PROGMEM
 @HTML@
@@ -153,9 +154,15 @@ struct WebConfigServer {
   static constexpr size_t MAX_BODY = @MAX_BODY@;
   static constexpr uint32_t STOP_WARN_MS = WebConfigBatch::kStopWarnMs;
   enum Mode { MODE_OFF, MODE_SETUP, MODE_LAN };
+  enum { BATCH_IDLE, BATCH_PENDING };
   Mode _mode = MODE_LAN;
+  unsigned _batch_state = BATCH_IDLE;
+  bool _setup_wifi_handoff_pending = false;
+  struct Terminal { bool running = false; struct { bool pending = false; } queue; };
+  Terminal* _terminal = nullptr;
   bool _stopping = false, _stop_warned = false, _board_cmds_probed = true;
   uint32_t _handler_refs = 0, _stop_warn_at = 0, _last_activity = 0;
+  uint32_t _network_activity_until = 0;
   std::mutex mutex;
   SemaphoreHandle_t _mux = &mutex;
   mesh::RoomWebMailbox* _room_mailbox = nullptr;
@@ -170,11 +177,16 @@ struct WebConfigServer {
     if (allocate) _room_mailbox = new mesh::RoomWebMailbox;
     registerRoutes(); _active = this;
   }
-  ~WebConfigServer() { if (_active == this) _active = nullptr; delete _room_mailbox; }
+  ~WebConfigServer() {
+    if (_active == this) _active = nullptr;
+    delete _room_mailbox;
+    mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::WebConfig, false);
+  }
   void finalizeTeardown() { // Dependency stub: production tick decides when reclaim is safe.
     assert(_handler_refs == 0); ++finalizations;
     delete _room_mailbox; _room_mailbox = nullptr; _server = nullptr;
     _stopping = false; _cb->onWebConfigStopped();
+    _network_activity_until = 0; refreshNetworkPowerHold(millis());
   }
   void probeBoardCommands() { _board_cmds_probed = true; }
   void serviceTerminal(uint32_t) {}
@@ -183,6 +195,9 @@ struct WebConfigServer {
   void requestStop();
   void detachRoutes();
   uint32_t handlerRefCount() const;
+  void noteNetworkActivity();
+  bool isNetworkForegroundActive(uint32_t) const;
+  void refreshNetworkPowerHold(uint32_t);
   void registerRoutes();
   static void dispatchRequest(AsyncWebServerRequest*, RequestHandler);
   static void collectBody(AsyncWebServerRequest*, uint8_t*, size_t, size_t, size_t);
@@ -342,6 +357,8 @@ static void boundsAndFloors() {
 static void pagesAndAvailability() {
   Callbacks cb; WebConfigServer server(cb); AsyncWebServerRequest page;
   server.host.invoke("/room", HTTP_GET, page); assert(page.status == 200);
+  assert(server.isNetworkForegroundActive(ticks));
+  assert(mesh::wifi::networkPower().foregroundActive());
   assert(page.reply.find("MeshCore Room") != String::npos && page.response_type == "text/html; charset=utf-8");
   assert(page.response_headers["Cache-Control"] == "no-store");
   assert(page.response_headers["X-Content-Type-Options"] == "nosniff" && page.response_headers["Referrer-Policy"] == "no-referrer");
@@ -360,12 +377,14 @@ static void lifecycle() {
     assert(server.handlerRefCount() == 1);
     server.requestStop(); server.tick(ticks);
     assert(server._stopping && server._room_mailbox && server.finalizations == 0);
+    assert(mesh::wifi::networkPower().foregroundActive());
     assert(cb.calls == 0);
   };
   submit(server, pending); assert(pending.status == 202 && server.host.ended);
   assert(server.handlerRefCount() == 0 && server._stopping && cb.calls == 0);
   AsyncWebServerRequest unavailable; identity(unavailable); result(server, unavailable); assert(unavailable.status == 503);
   server.tick(ticks); assert(!server._room_mailbox && !server._stopping && cb.stops == 1 && server.finalizations == 1);
+  assert(!mesh::wifi::networkPower().foregroundActive());
   assert(cb.calls == 0); // Pending work is canceled, never executed after stop.
   Callbacks off_cb; WebConfigServer off(off_cb); AsyncWebServerRequest post; identity(post); body(post, "{}"); submit(off, post);
   off._mode = WebConfigServer::MODE_OFF; off.tick(ticks); assert(off_cb.calls == 0);
@@ -435,6 +454,9 @@ class RoomWebHttpTests(unittest.TestCase):
             "void WebConfigServer::handleRoomResult(", "void WebConfigServer::collectBody(",
             "void WebConfigServer::dispatchRequest(", "void WebConfigServer::detachRoutes(",
             "uint32_t WebConfigServer::handlerRefCount(", "void WebConfigServer::requestStop(",
+            "void WebConfigServer::noteNetworkActivity(",
+            "bool WebConfigServer::isNetworkForegroundActive(",
+            "void WebConfigServer::refreshNetworkPowerHold(",
             "void WebConfigServer::registerRoutes(")]
         tick = extract_braced(source, "void WebConfigServer::tick(")
         # Execute the exact stop/OFF guards and loop service calls; SDK Wi-Fi,

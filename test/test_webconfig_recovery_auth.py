@@ -54,7 +54,7 @@ class WebConfigRecoveryAuthTest(unittest.TestCase):
 
     def test_old_interface_only_fallback_fails_executable_regression(self):
         fixture = self.fixture()
-        old = fixture.replace("if (_initial_setup || _wifi_ssid[0] == 0) return true;", "return true;", 1)
+        old = fixture.replace("if (_initial_setup || _wifi_ssid[0] == 0) { noteNetworkActivity(); return true; }", "return true;", 1)
         self.assertNotEqual(old, fixture)
         self.compile_run(old, expect_rejection=True)
 

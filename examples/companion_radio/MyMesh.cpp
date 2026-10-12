@@ -4721,7 +4721,10 @@ void MyMesh::serviceMQTT(const char* wifi_ssid, const char* wifi_password) {
     }
   }
 
-  if (WiFi.status() == WL_CONNECTED && _mqtt_configured && !_mqtt_started && _mqtt_bridge
+  // Start the recovery scheduler even when the router is down at boot. The
+  // Companion still owns association; waiting for GOT_IP here would leave its
+  // failed station outside MQTT/NTP's shared power budget indefinitely.
+  if (_mqtt_configured && !_mqtt_started && _mqtt_bridge
 #ifdef WITH_WEBCONFIG
       && !isWebConfigSetupActive()
 #endif

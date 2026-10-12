@@ -368,6 +368,7 @@ WebConfigServer::WebConfigServer(Callbacks* callbacks, void* mqtt_prefs, bool ow
 
 WebConfigServer::~WebConfigServer() {
   detachRoutes();
+  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::WebConfig, false);
   closeTerminal();
   delete _room_mailbox;
   if (_mux) vSemaphoreDelete(_mux);
@@ -653,6 +654,14 @@ bool WebConfigServer::formatWiFiStatus(
     appendOtaSeederStatus(reply, reply_len);
     return true;
   }
+  if (mesh::wifi::networkPower().backgroundSuspended()
+      && !mesh::wifi::networkPower().foregroundActive()) {
+    snprintf(reply, reply_len,
+             "> suspended; recovery every 30 minutes, SSID: %s",
+             configured ? ssid : "(not configured)");
+    appendOtaSeederStatus(reply, reply_len);
+    return true;
+  }
   if (active && active->_mode == MODE_CONNECTING) {
     snprintf(reply, reply_len, "> connecting, SSID: %s",
              configured ? ssid : "(not configured)");
@@ -754,6 +763,35 @@ bool WebConfigServer::getSetupInfo(char* ssid, size_t ssid_len, char* ip, size_t
   return true;
 }
 
+void WebConfigServer::noteNetworkActivity() {
+  // This is separate from _last_activity, which also tracks boot and captive
+  // portal events. Those events must not renew an idle LAN listener's lease.
+  _network_activity_until = WebConfigBatch::scheduleAt(millis(), 120000UL);
+  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::WebConfig, true);
+}
+
+void WebConfigServer::requestNetworkAccess() {
+  noteNetworkActivity();
+  mesh::wifi::networkPower().requestProbe();
+}
+
+bool WebConfigServer::isNetworkForegroundActive(uint32_t now) const {
+  if (_mode == MODE_OFF && !_stopping) return false;
+  if (_mode == MODE_SETUP || _stopping || handlerRefCount() != 0) return true;
+  WCLock lock(_mux);
+  if (_batch_state == BATCH_PENDING || _setup_wifi_handoff_pending) return true;
+  if (_terminal && (_terminal->running || _terminal->queue.pending)) return true;
+  if (_room_mailbox && (_room_mailbox->state() == mesh::RoomWebMailbox::State::Pending
+      || _room_mailbox->state() == mesh::RoomWebMailbox::State::Running)) return true;
+  return _network_activity_until
+      && !WebConfigBatch::deadlineReached(now, _network_activity_until);
+}
+
+void WebConfigServer::refreshNetworkPowerHold(uint32_t now) {
+  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::WebConfig,
+                                  isNetworkForegroundActive(now));
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -817,6 +855,9 @@ bool WebConfigServer::startSetupMode(char reply[]) {
     strcpy(reply, "Err: webconfig busy");
     return false;
   }
+  // Publish the foreground owner before changing interfaces. The background
+  // worker must not power down the station underneath this AP startup.
+  requestNetworkAccess();
   _retry_saved_wifi_in_setup = false;
   _setup_reconnect_in_progress = false;
   _setup_reconnect_deadline = 0;
@@ -888,6 +929,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   }
   if (!ap_ok) {
     if (!promote_lan) stopOwnedWiFiRadio();
+    refreshNetworkPowerHold(millis());
     strcpy(reply, "Err: failed to start AP");
     return false;
   }
@@ -905,6 +947,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   _initial_setup = _wifi_ssid[0] == 0 && node.admin_password[0] != 0;
   _setup_started_at = millis();
   _last_activity = _setup_started_at;
+  refreshNetworkPowerHold(_setup_started_at);
   // Keep the pre-AP scan results for the picker. Only an explicit browser
   // rescan needs to leave the AP's home channel after clients have joined.
 
@@ -942,6 +985,8 @@ bool WebConfigServer::startLanMode(char reply[]) {
 }
 
 bool WebConfigServer::beginSavedStation(uint32_t now) {
+  if (mesh::wifi::networkPower().backgroundSuspended()
+      && !isNetworkForegroundActive(now)) return false;
   WiFi.mode(WIFI_STA);
   if (mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) {
     return false;
@@ -1020,6 +1065,7 @@ void WebConfigServer::requestStop() {
   _stopping = true;
   _stop_warn_at = WebConfigBatch::scheduleAt(millis(), STOP_WARN_MS);
   _stop_warned = false;
+  refreshNetworkPowerHold(millis());
 }
 
 bool WebConfigServer::stopForOTA(char reply[]) {
@@ -1095,6 +1141,8 @@ void WebConfigServer::finalizeTeardown() {
   _stats_json[0] = 0;
   _board_cmds = 0;
   _board_cmds_probed = false;
+  _network_activity_until = 0;
+  refreshNetworkPowerHold(millis());
   if (_cb) _cb->onWebConfigStopped();
 }
 
@@ -1113,6 +1161,7 @@ void WebConfigServer::probeBoardCommands() {
 }
 
 void WebConfigServer::tick(uint32_t now) {
+  refreshNetworkPowerHold(now);
   if (_stopping) {
     uint32_t refs = handlerRefCount();
     switch (WebConfigBatch::stopStep(refs, _stop_warned, _stop_warn_at, now)) {
@@ -1136,6 +1185,12 @@ void WebConfigServer::tick(uint32_t now) {
 
   serviceTerminal(now);
   serviceRoom(now);
+
+  // The MQTT/NTP owner has stopped its transports before publishing this
+  // state. An idle portal must not start an independent reconnect loop while
+  // those consumers are in their shared thirty-minute recovery cooldown.
+  if (mesh::wifi::networkPower().backgroundSuspended()
+      && !isNetworkForegroundActive(now)) return;
 
   // A primary ESP-NOW radio and its WiFi station cannot remain on different
   // channels. Reject a router-driven channel move (for example a CSA) and put
@@ -1614,6 +1669,8 @@ void WebConfigServer::dispatchRequest(AsyncWebServerRequest* req,
     return;
   }
 
+  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::WebConfig, true);
+
   (target->*handler)(req);
 
   portENTER_CRITICAL(&s_wc_route_mux);
@@ -1729,6 +1786,7 @@ static bool roomRequestIdentity(AsyncWebServerRequest* req, uint8_t (&token)[32]
 void WebConfigServer::handleRoomPage(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF || !_cb || !_cb->supportsRoomService()) { req->send(404); return; }
   _last_activity = millis();
+  noteNetworkActivity();
   auto* response = new (std::nothrow) WebConfigPacedProgmemResponse(
       "text/html; charset=utf-8", reinterpret_cast<const uint8_t*>(ROOM_WEB_HTML), sizeof(ROOM_WEB_HTML) - 1);
   if (!response) { req->send(503); return; }
@@ -1765,6 +1823,7 @@ void WebConfigServer::handleRoomPost(AsyncWebServerRequest* req) {
   }
   if (result == mesh::RoomWebMailbox::Result::Accepted) {
     _last_activity = millis();
+    noteNetworkActivity();
     req->send(202, "application/json", "{\"accepted\":true}");
   } else if (result == mesh::RoomWebMailbox::Result::Busy) {
     req->send(429, "application/json", "{\"error\":\"room service busy\"}");
@@ -1814,7 +1873,7 @@ bool WebConfigServer::checkAuth(AsyncWebServerRequest* req) {
     // saved WiFi network must not grant that same password-reset privilege.
     if (!req || !req->client()
         || req->client()->localIP() != WiFi.softAPIP()) return false;
-    if (_initial_setup || _wifi_ssid[0] == 0) return true;
+    if (_initial_setup || _wifi_ssid[0] == 0) { noteNetworkActivity(); return true; }
   } else if (_mode != MODE_LAN) {
     return false;
   }
@@ -1823,7 +1882,7 @@ bool WebConfigServer::checkAuth(AsyncWebServerRequest* req) {
     WCLock lock(_mux);
     _cb->getNodeSnapshot(node);
   }
-  if (node.admin_password[0] == 0) return true;
+  if (node.admin_password[0] == 0) { noteNetworkActivity(); return true; }
   if (_session_token[0] == 0) return false;
   if (!req->hasHeader("Cookie")) return false;
   const String& cookies = req->getHeader("Cookie")->value();
@@ -1834,6 +1893,7 @@ bool WebConfigServer::checkAuth(AsyncWebServerRequest* req) {
   if ((uint32_t)(now - _session_last_seen) > WEBCONFIG_SESSION_TTL_MS) return false;
   if (!fixedTimeEquals(token.c_str(), _session_token, 32)) return false;
   _session_last_seen = now;  // sliding expiry
+  noteNetworkActivity();
   return true;
 }
 
@@ -1857,6 +1917,7 @@ static void webConfigRejectEncoding(AsyncWebServerRequest* req) {
 void WebConfigServer::handleRoot(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
   _last_activity = millis();
+  noteNetworkActivity();
   if (!webConfigClientAcceptsGzip(req)) { webConfigRejectEncoding(req); return; }
   if (req->hasHeader("If-None-Match") &&
       req->getHeader("If-None-Match")->value() == WEBCONFIG_HTML_ETAG) {
@@ -1876,6 +1937,7 @@ void WebConfigServer::handleRoot(AsyncWebServerRequest* req) {
 void WebConfigServer::handleUi(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
   _last_activity = millis();
+  noteNetworkActivity();
   if (!req->hasParam("v") ||
       req->getParam("v")->value() != WEBCONFIG_HTML_VERSION) {
     // Part URLs are immutable. Never serve a new layout under an old loader's
@@ -1988,6 +2050,7 @@ void WebConfigServer::handleLogin(AsyncWebServerRequest* req) {
       return;
     }
     if (_initial_setup || _wifi_ssid[0] == 0) {
+      noteNetworkActivity();
       req->send(200, "application/json", "{\"ok\":true}");
       return;
     }
@@ -1998,6 +2061,7 @@ void WebConfigServer::handleLogin(AsyncWebServerRequest* req) {
     _cb->getNodeSnapshot(node);
   }
   if (node.admin_password[0] == 0) {
+    noteNetworkActivity();
     req->send(200, "application/json", "{\"ok\":true}");
     return;
   }
@@ -2026,6 +2090,7 @@ void WebConfigServer::handleLogin(AsyncWebServerRequest* req) {
   _login_lock_until = 0;
   for (int i = 0; i < 4; i++) sprintf(&_session_token[i * 8], "%08lx", (unsigned long)esp_random());
   _session_last_seen = now;
+  noteNetworkActivity();
 
   AsyncWebServerResponse* res = req->beginResponse(200, "application/json", "{\"ok\":true}");
   char cookie[80];
@@ -2951,6 +3016,7 @@ void WebConfigServer::handleScan(AsyncWebServerRequest* req) {
 void WebConfigServer::handlePresets(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }
   _last_activity = millis();
+  noteNetworkActivity();
 #ifdef WITH_MQTT_BRIDGE
   if (_mqtt_prefs == NULL) {
     req->send(200, "application/json", "{\"presets\":[]}");

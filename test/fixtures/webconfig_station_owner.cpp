@@ -23,6 +23,7 @@ struct WebConfigServer {
   bool isRunning() const { return false; }
   bool isStopping() const { return false; }
   void updateWiFiOwnership(bool owner) { owns = owner; }
+  void requestNetworkAccess() {}
   bool startAutoMode(char* reply) { strcpy(reply, "starting"); return true; }
   bool startSetupMode(char* reply) { strcpy(reply, "setup"); return true; }
 };
