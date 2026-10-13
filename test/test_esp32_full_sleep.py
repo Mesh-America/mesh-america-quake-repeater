@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
+from test_morse_loop_policy import RADIO as MORSE_RADIO
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -25,10 +26,11 @@ def run_cpp(source, defines=()):
     with tempfile.TemporaryDirectory(prefix="mesh-full-sleep-") as directory:
         cpp = Path(directory) / "test.cpp"
         exe = Path(directory) / "test"
+        (Path(directory) / "Dispatcher.h").write_text(MORSE_RADIO, encoding="ascii")
         cpp.write_text(source)
         built = subprocess.run(
             [os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
-             "-I", str(ROOT / "src"),
+             "-I", str(Path(directory)), "-I", str(ROOT / "src"),
              *("-D" + flag for flag in defines), str(cpp), "-o", str(exe)],
             text=True, capture_output=True)
         if built.returncode:
@@ -91,14 +93,14 @@ int main() {
         usb_held = function((ROOT / "src/helpers/ESP32Board.h").read_text(),
                             "bool isUsbSleepHeld()")
         start = main.index("  // USB power alone")
-        end = main.index("#if defined(ESP32) && defined(WIFI_SSID)",
-                         main.index("else if (the_mesh.getNodePrefs()->powersaving_enabled)", start))
+        end = main.index("#if defined(ESP32) && defined(WIFI_SSID)", start)
         branch = main[start:end]
         source = r'''
 #include <cassert>
 #include <cstdint>
 #include <helpers/UsbHostSleepPolicy.h>
 #include <helpers/WiFiNetworkPowerPolicy.h>
+#include <helpers/MorseLoopPolicy.h>
 static uint32_t now = 1000;
 uint32_t millis() { return now; }
 using esp_err_t = int;
@@ -127,10 +129,17 @@ struct Board {
   bool isRadioTestActive() const { return test; }
 } board;
 struct Prefs { bool powersaving_enabled = true; } prefs;
+struct TestRadio : mesh::Radio {
+  bool tx = false, rx = false, cw = false;
+  bool isMorseTxActive() const override { return tx; }
+  bool isMorseRxActive() const override { return rx; }
+  bool isCarrierWaveActive() const override { return cw; }
+} timing_radio;
 struct Mesh {
   bool pending = false;
   Prefs* getNodePrefs() { return &prefs; }
   bool hasPendingWork() const { return pending; }
+  mesh::Radio* getProfileRadio() { return &timing_radio; }
 } the_mesh;
 struct Interfaces { bool pending = false; bool hasPendingIO() const { return pending; } } interface_manager;
 struct Sensors { bool gps_uart = false; bool gpsUsesSerialUart(uint8_t uart) const { return uart == 1 && gps_uart; } } sensors;
@@ -153,12 +162,23 @@ Control& control() { return controller; }
 }
 @SUSPENDED@
 @READY@
-void idle() { @BRANCH@ }
+void idle() { const bool morse_timing = mesh::morseTimingActive(the_mesh.getProfileRadio()); @BRANCH@ }
 template<class T> void blocks(T& flag) {
   flag = true; int before = sleeps; idle(); assert(sleeps == before); flag = false;
 }
 int main() {
   idle(); assert(sleeps == 1);
+  for (bool* active : {&timing_radio.tx, &timing_radio.rx}) {
+    *active = true;
+    int before_sleeps = sleeps, before_yields = yields;
+    idle();
+    assert(sleeps == before_sleeps && yields == before_yields);
+    *active = false;
+    idle(); assert(sleeps == before_sleeps + 1);
+  }
+  timing_radio.cw = true;
+  int before_cw = sleeps; idle(); assert(sleeps == before_cw + 1);
+  timing_radio.cw = false;
   for (unsigned service : {1u, 2u, 4u}) {
     companion_wireless.services = service; int before = sleeps; idle(); assert(sleeps == before);
   }

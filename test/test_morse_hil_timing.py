@@ -199,6 +199,9 @@ int main() {
             def set_hil_timing(self,timing):
                 actions.append((self.serial_number,"device timing",timing))
                 return "> jitter=15%; drift=10%; extraGap=25%; seed=12345"
+            def set_rx_squelch(self,value):
+                actions.append((self.serial_number,"receive squelch",value))
+                return "> auto; volatile HIL RX only"
             def start_when_idle(self,command): return self.command(command)
             def capture(self): return self.decoded
         human=bench.parse_human_timing("15,10,25,12345")

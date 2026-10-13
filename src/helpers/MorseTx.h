@@ -12,6 +12,19 @@ namespace mesh {
 static_assert(MESH_MORSE_MAX_WPM >= 1 && MESH_MORSE_MAX_WPM <= 255,
               "Morse WPM must fit the command/API byte");
 
+#if defined(MESH_MORSE_HIL_PRODUCTION_RF) && MESH_MORSE_HIL_PRODUCTION_RF
+// Compile-time evidence that a production-equivalent RF comparison did not
+// accidentally inherit the faster bench tuple through PlatformIO's flags.
+#if !defined(MESH_MORSE_HIL) || !MESH_MORSE_HIL \
+    || MESH_MORSE_HIL_WARM_TX != 0 || MESH_MORSE_HIL_RSSI_WINDOW != 0 \
+    || MESH_MORSE_HIL_PA_RAMP_US != 3400 \
+    || MESH_MORSE_HIL_SAMPLE_INTERVAL_MS != 2 \
+    || MESH_MORSE_HIL_FAST_OFF_DEBOUNCE != 0 \
+    || MESH_MORSE_HIL_PACKET_GATING != 0
+#error "Production-equivalent HIL requires the shipping Morse RF settings"
+#endif
+#endif
+
 enum class MorseTxResult : uint8_t {
   Started, Stopped, Busy, Unsupported, InvalidFrequency, Overlap,
   InvalidText, InvalidSpeed, TooLong, Failed

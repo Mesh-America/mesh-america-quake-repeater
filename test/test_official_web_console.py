@@ -75,9 +75,26 @@ def firmware_harness(*, lose_sleep_guard=False, lose_crlf=False,
                             'console.printf("  -> %s\\n", reply);')
     start = main.index("  bool can_power_save =")
     end = main.index("  if (the_mesh.getNodePrefs()->reboot_interval", start)
-    power_loop = main[start:end]
+    morse_declaration = "  const bool morse_timing = mesh::morseTimingActive(&radio_driver);"
+    assert morse_declaration in main[:start], "Missing live Morse ownership snapshot"
+    power_loop = morse_declaration + "\n" + main[start:end]
+    morse_helper = body((ROOT / "src/helpers/MorseLoopPolicy.h").read_text(),
+                        "inline bool morseTimingActive(const Radio* radio)")
+    # Model only RF ownership at the peripheral boundary; use the real helper
+    # and loop guards rather than making every invocation permanently idle.
+    morse_radio = r'''
+namespace mesh {
+struct Radio {
+  bool tx = false, rx = false, cw = false;
+  bool isMorseTxActive() const { return tx; }
+  bool isMorseRxActive() const { return rx; }
+};
+@MORSE_HELPER@
+}
+static mesh::Radio radio_driver;
+'''.replace("@MORSE_HELPER@", morse_helper)
     fixture = (ROOT / "test/fixtures/official_web_console/firmware.cpp").read_text()
-    return source + (fixture.replace("@SETTER@", setter).replace("@GETTER@", getter)
+    return source + morse_radio + (fixture.replace("@SETTER@", setter).replace("@GETTER@", getter)
                      .replace("@COMMAND_PUMP@", pump).replace("@POWER_LOOP@", power_loop))
 
 
@@ -139,6 +156,43 @@ class OfficialWebConsoleTests(unittest.TestCase):
         result = self.run_contract(lose_crlf=True)
         self.assertNotEqual(result.returncode, 0, "Negative control did not detect buffered replies")
         self.assertIn("power-saving setter", result.stderr)
+
+    def test_actual_morse_ownership_blocks_sleep_and_idle_delay_then_resumes(self):
+        source = firmware_harness().split("int main() {", 1)[0] + r'''
+int main() {
+  attachHost(false); Serial.terminal_open = false;
+  prefs.powersaving_enabled = 1; mock_millis = 300000;
+  const unsigned before = yield_ms;
+  radio_driver.tx = true;
+  require(mesh::morseTimingActive(&radio_driver), "Morse TX ownership was lost");
+  power_loop();
+  require(sleep_calls == 0 && yield_ms == before, "Morse TX slept or inserted an idle delay");
+  radio_driver.tx = false; radio_driver.rx = true;
+  require(mesh::morseTimingActive(&radio_driver), "Morse RX ownership was lost");
+  power_loop();
+  require(sleep_calls == 0 && yield_ms == before, "Morse RX slept or inserted an idle delay");
+  radio_driver.rx = false; radio_driver.cw = true;
+  require(!mesh::morseTimingActive(&radio_driver), "Unkeyed CW changed the Morse loop policy");
+  radio_driver.cw = false;
+  power_loop();
+  require(sleep_calls == 1, "Power saving did not resume when Morse released RF ownership");
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="official-console-morse-ownership-") as temporary:
+            cpp = Path(temporary) / "ownership.cpp"
+            binary = Path(temporary) / "ownership"
+            cpp.write_text(source, encoding="ascii")
+            sanitizers = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                           "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else [])
+            result = subprocess.run([self.compiler, "-std=c++17", "-Wall", "-Wextra",
+                "-DARDUINO_USB_MODE=1", "-DARDUINO_USB_CDC_ON_BOOT=1", "-DESP32_PLATFORM=1",
+                "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=1", "-DMESH_USB_CONSOLE_COOPERATIVE=1",
+                "-DMESH_USB_LOGGING_AVAILABLE=1", "-DCONFIG_TINYUSB_ENABLED=0",
+                "-I", str(ROOT / "src"), *sanitizers, str(cpp), "-o", str(binary)],
+                text=True, capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

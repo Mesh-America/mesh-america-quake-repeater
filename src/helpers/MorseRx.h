@@ -23,6 +23,22 @@
 
 namespace mesh {
 
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+// Volatile bench squelch, not a saved setting or a production noise model.
+// AUTO retains the complete adaptive detector; a finite floor lets controlled
+// RF tests reject measured quiet-envelope excursions before they become keys.
+inline float& morseHilSquelchStorage() {
+  static float value = NAN;
+  return value;
+}
+inline float morseHilSquelch() { return morseHilSquelchStorage(); }
+inline bool setMorseHilSquelch(float value) {
+  if (!isnan(value) && (!isfinite(value) || value < -160.0f || value > 0.0f)) return false;
+  morseHilSquelchStorage() = value;
+  return true;
+}
+#endif
+
 enum class MorseRxResult : uint8_t {
   Started, Stopped, Busy, Unsupported, InvalidFrequency, Overlap,
   InvalidSpeed, InvalidDuration, Failed
@@ -129,6 +145,10 @@ public:
 #endif
   static_assert(ReceiverBitRateKbps >= 0.6f && ReceiverBitRateKbps <= 300.0f,
                 "HIL GFSK receiver clock must remain in the supported range");
+#if defined(MESH_MORSE_HIL_PRODUCTION_RF) && MESH_MORSE_HIL_PRODUCTION_RF
+  static_assert(ReceiverBitRateKbps == 1.2f,
+                "Production-equivalent HIL requires the shipping Morse receiver clock");
+#endif
   static constexpr uint32_t MinDurationMillis = 1000UL;
   static constexpr uint32_t MaxDurationMillis = 300000UL;
   static constexpr uint32_t NoiseLearningMillis = 500UL;
@@ -267,6 +287,16 @@ public:
       if (provisional_fall < 5.0f) provisional_fall = 5.0f;
       if (threshold < _signal - provisional_fall) threshold = _signal - provisional_fall;
     }
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+    const float squelch = morseHilSquelch();
+    if (isfinite(squelch)) {
+      // Bound both edges with the same three-dB hysteresis. This prevents a
+      // quiet pre-key from absorbing the following real dot; nothing is
+      // removed from, or rewritten in, the decoded transcript afterwards.
+      const float floor = squelch - (_keyed ? 3.0f : 0.0f);
+      if (threshold < floor) threshold = floor;
+    }
+#endif
     const bool raw_keyed = rssi_dbm >= threshold;
     if (!_keyed && !raw_keyed && !_candidate_valid) {
       // Drift slowly while quiet; follow a lower floor faster without letting
@@ -402,12 +432,13 @@ private:
     // longer physical gaps and remain distinguishable at the nominal timing.
     const uint16_t nominal_q5 = uint16_t(uint32_t(_nominal_unit) * UnitScale);
     const uint16_t gap_unit_q5 = _unit_q5 < nominal_q5 ? _unit_q5 : nominal_q5;
-    // Ordinary +/-20% gap jitter still separates an intra-letter gap (<=1.2
-    // units) from a letter gap (>=2.4), and letters (<=3.6) from words (>=5.6).
-    // Keep some margin at 2.25/5.5 units rather than merging shortened gaps.
+    // Use the ordinary 1/3 and 3/7 gap midpoints. +/-20% human jitter leaves
+    // intra-letter gaps <=1.2, letter gaps >=2.4/<=3.6 and word gaps >=5.6.
+    // The 2/5 boundaries also leave room for a biased RF falling edge to
+    // shorten a gap; 2.25/5.5 merged measured ordinary human-timing words.
     // This is not automatic Farnsworth-spacing or unknown-speed acquisition.
-    if (gap * 4UL * UnitScale >= uint32_t(gap_unit_q5) * 9UL && !_letter_flushed) flushLetter();
-    if (gap * 2UL * UnitScale >= uint32_t(gap_unit_q5) * 11UL && !_word_flushed && _letter_flushed) {
+    if (gap * UnitScale >= uint32_t(gap_unit_q5) * 2UL && !_letter_flushed) flushLetter();
+    if (gap * UnitScale >= uint32_t(gap_unit_q5) * 5UL && !_word_flushed && _letter_flushed) {
       append(' ');
       _word_flushed = true;
     }

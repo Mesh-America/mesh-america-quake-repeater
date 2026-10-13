@@ -209,10 +209,11 @@ inline bool handleMorseCommand(Radio* radio, const char* command,
   const bool speed = length == 9 && !strncmp(key, "morse.wpm", 9);
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
   const bool hil_timing = length == 16 && !strncmp(key, "morse.hil.timing", 16);
+  const bool hil_squelch = length == 17 && !strncmp(key, "morse.hil.squelch", 17);
 #endif
   if (!base && !frequency && !speed
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
-      && !hil_timing
+      && !hil_timing && !hil_squelch
 #endif
       ) return false;
   if (!radio || (!radio->supportsMorseTx()
@@ -225,6 +226,40 @@ inline bool handleMorseCommand(Radio* radio, const char* command,
   }
   const char* args = cli::skipRecentRepeaterSpaces(key + length);
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  if (hil_squelch) {
+#if MESH_ENABLE_MORSE_RX
+    if (!radio->supportsMorseRx()) {
+      snprintf(reply, capacity, "Error: Morse RX unsupported on this radio");
+      return true;
+    }
+    if (query) {
+      if (*args) snprintf(reply, capacity, "Error: unexpected argument");
+      else if (isnan(morseHilSquelch())) snprintf(reply, capacity, "> auto; volatile HIL RX only");
+      else snprintf(reply, capacity, "> %.3f dBm; volatile HIL RX only", morseHilSquelch());
+      return true;
+    }
+    if (!setting) {
+      snprintf(reply, capacity, "Error: use get/set morse.hil.squelch auto|-160..0");
+      return true;
+    }
+    if (radio->isCarrierWaveActive() || radio->isMorseTxActive() || radio->isMorseRxActive()
+        || !radio->isInRecvMode() || radio->isReceiving()) {
+      snprintf(reply, capacity, "Error: radio busy; HIL squelch changes require idle RX");
+      return true;
+    }
+    float value = NAN;
+    if ((strcmp(args, "auto") && (!cli::parseDecimalStrict(args, value)
+        || !isfinite(value))) || !setMorseHilSquelch(value)) {
+      snprintf(reply, capacity, "Error: use morse.hil.squelch auto or -160..0 dBm");
+      return true;
+    }
+    if (isnan(value)) snprintf(reply, capacity, "OK - HIL Morse squelch auto; volatile RX only");
+    else snprintf(reply, capacity, "OK - HIL Morse squelch %.3f dBm; volatile RX only", value);
+#else
+    snprintf(reply, capacity, "Error: Morse RX unsupported on this radio");
+#endif
+    return true;
+  }
   if (hil_timing) {
     if (query) {
       if (*args) snprintf(reply, capacity, "Error: unexpected argument");

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 
+from test_morse_loop_policy import RADIO as MORSE_RADIO
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -308,6 +309,7 @@ V4_BUTTON_HARNESS = r'''
 #include <helpers/UsbHostSleepPolicy.h>
 #include <helpers/ui/MomentaryButton.h>
 #include <helpers/ui/DisplayPowerPolicy.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <array>
 #include <stdexcept>
 #include <iostream>
@@ -367,6 +369,13 @@ struct ESP32Board : MainBoard {
   bool isExternalPowered() const { return false; }
 @METHODS@
 } board;
+struct TestRadio : mesh::Radio {
+  bool tx = false, rx = false;
+  bool isMorseTxActive() const override { return tx; }
+  bool isMorseRxActive() const override { return rx; }
+} timing_radio;
+struct TestMesh { mesh::Radio* getProfileRadio() { return &timing_radio; } } the_mesh;
+TestMesh& activeSensorMesh() { return the_mesh; }
 @BUTTON_CONSTRUCTOR@
 struct TestDisplay {
   mesh::ui::DisplayPowerPrefs prefs;
@@ -402,6 +411,9 @@ int main() {
     g_mock_millis = 1000;
     g_mock_pin_levels[PIN_USER_BTN] = HIGH;
     user_btn.begin();
+    require(!mesh::morseTimingActive(the_mesh.getProfileRadio()), "idle radio acquired Morse ownership");
+    timing_radio.tx = true;
+    require(mesh::morseTimingActive(the_mesh.getProfileRadio()), "TX ownership was not visible to UI");
     ui.loop();
     require(!display.isOn(), "button-mode screen did not start blank");
     require(roleCanPowerSave(), "idle button blocked initial power saving");
@@ -441,11 +453,16 @@ int main() {
     require(display.isOn(), "real UITask click did not wake the screen");
     require(!user_btn.needsPolling() && roleCanPowerSave(),
             "completed gesture permanently disabled power saving");
+    timing_radio.tx = false;
+    timing_radio.rx = true;
+    require(mesh::morseTimingActive(activeSensorMesh().getProfileRadio()), "RX ownership was not visible to UI");
     board.sleep(30);
     require(sleep_calls == 2, "released button failed to allow sleep again");
     g_mock_millis += 15000;
     ui.loop();
     require(!display.isOn(), "button screen failed to expire normally");
+    timing_radio.rx = false;
+    require(!mesh::morseTimingActive(the_mesh.getProfileRadio()), "Morse ownership failed to release");
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n'; return 1;
   }
@@ -482,6 +499,7 @@ class Esp32UsbSleepTest(unittest.TestCase):
         compiler = os.environ.get("CXX", "c++")
         self.assertIsNotNone(shutil.which(compiler), "a C++17 compiler is required")
         with tempfile.TemporaryDirectory(prefix="meshcore-v4-button-wake-") as directory:
+            (Path(directory) / "Dispatcher.h").write_text(MORSE_RADIO, encoding="ascii")
             for family in ("heltec_v4", "heltec_v4_r8"):
                 target = (ROOT / f"variants/{family}/target.cpp").read_text()
                 constructor = re.search(
@@ -536,7 +554,7 @@ class Esp32UsbSleepTest(unittest.TestCase):
                                 "-DUSER_BTN_MULTICLICK=" +
                                 selected.get("USER_BTN_MULTICLICK", "1"),
                                 "-DPOWEROFF_DELAY=2000",
-                                *flags, "-I", str(ROOT / "test/mocks"),
+                                *flags, "-I", str(Path(directory)), "-I", str(ROOT / "test/mocks"),
                                 "-I", str(ROOT / "src"), str(cpp),
                                 str(ROOT / "src/helpers/ui/MomentaryButton.cpp"),
                                 "-o", str(stem)], capture_output=True, text=True, timeout=60)

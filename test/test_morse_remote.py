@@ -237,6 +237,10 @@ class BenchControlTests(unittest.TestCase):
                             raise RuntimeError("injected gain set failure")
                         return "OK"
                     def start_when_idle(self,text): return self.command(text)
+                    def set_rx_squelch(self,value=None):
+                        assert value is None, "Default quiet control must retain automatic squelch"
+                        self.commands.extend(["set morse.hil.squelch auto","get morse.hil.squelch"])
+                        return "> auto; volatile HIL RX only"
                     def capture(self):
                         if failure=="capture": raise RuntimeError("injected capture failure")
                         return ""
@@ -261,6 +265,9 @@ class BenchControlTests(unittest.TestCase):
                 else:
                     self.assertEqual(len(result["trials"]),2)
                     self.assertTrue(all(item["kind"]=="quiet_control" and item["passed"] for item in result["trials"]))
+                    self.assertTrue(all(item["rx_squelch_dbm"] is None
+                                        and item["rx_squelch_status"]=="> auto; volatile HIL RX only"
+                                        for item in result["trials"]))
 
 
 class HandoffProtocolTests(unittest.IsolatedAsyncioTestCase):

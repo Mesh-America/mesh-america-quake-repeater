@@ -16,9 +16,10 @@ from unittest.mock import Mock, patch
 import warnings
 import zipfile
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 from tools.hil import verified_nrf_flash as guard
 
-ROOT = Path(__file__).resolve().parents[1]
 serial_stub = types.ModuleType("serial")
 serial_tools_stub = types.ModuleType("serial.tools")
 serial_tools_stub.list_ports = types.SimpleNamespace(comports=Mock(return_value=[]))

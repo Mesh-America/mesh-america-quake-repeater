@@ -109,13 +109,13 @@ static void fractional_gap_comparisons() {
   rx._last_edge = 100;
   rx._code = 2;
   rx._symbols = 1;
+  rx.flushGap(108);
+  assert(rx.length() == 0); // eight ms is still shorter than two fractional units
   rx.flushGap(109);
-  assert(rx.length() == 0); // nine ms is still shorter than 2.25 fractional units
-  rx.flushGap(110);
   assert(std::strcmp(rx.text(), "E") == 0);
-  rx.flushGap(122);
-  assert(std::strcmp(rx.text(), "E") == 0); // 22 ms is shorter than 5.5 fractional units
-  rx.flushGap(123);
+  rx.flushGap(120);
+  assert(std::strcmp(rx.text(), "E") == 0); // 20 ms is shorter than five fractional units
+  rx.flushGap(121);
   assert(std::strcmp(rx.text(), "E ") == 0);
 
   begin(rx, 240);
@@ -123,13 +123,13 @@ static void fractional_gap_comparisons() {
   rx._last_edge = 100;
   rx._code = 2;
   rx._symbols = 1;
-  rx.flushGap(111);
+  rx.flushGap(109);
   assert(rx.length() == 0);
-  rx.flushGap(112);
+  rx.flushGap(110);
   assert(std::strcmp(rx.text(), "E") == 0);
-  rx.flushGap(127);
+  rx.flushGap(124);
   assert(std::strcmp(rx.text(), "E") == 0);
-  rx.flushGap(128);
+  rx.flushGap(125);
   assert(std::strcmp(rx.text(), "E ") == 0);
 }
 

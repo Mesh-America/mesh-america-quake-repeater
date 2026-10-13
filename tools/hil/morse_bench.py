@@ -52,6 +52,18 @@ def parse_human_timing(text):
             "extra_gap_percent": gap, "seed": seed}
 
 
+def parse_rx_squelch(text):
+    """A volatile HIL receive threshold, never a radio TX-power setting."""
+    if text == "auto":
+        return None
+    if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", text):
+        raise argparse.ArgumentTypeError("RX squelch must be auto or a finite -160..0 dBm value")
+    value = float(text)
+    if not math.isfinite(value) or not -160 <= value <= 0:
+        raise argparse.ArgumentTypeError("RX squelch must be between -160 and 0 dBm")
+    return round(value, 3)
+
+
 def live_temporary_profile(reply):
     """Parse only confirmed live profiles, never saved/pending radio settings."""
     fields = r"(\d+(?:\.\d+)?),(\d+(?:\.\d+)?),(\d+),(\d+)"
@@ -161,6 +173,7 @@ class Console:
         self.command(f"set morse.freq {cw_frequency:.6f}")
         self.command("set morse.wpm 25")
         self.set_hil_timing()
+        self.set_rx_squelch()
         self.apply_live_temporary(PACKET_RADIO)
 
     def set_hil_timing(self, timing=None):
@@ -182,6 +195,27 @@ class Console:
         observed = re.search(r"jitter=(\d+)%; drift=(-?\d+)%; extraGap=(\d+)%; seed=(\d+)", reply)
         if not observed or tuple(map(int, observed.groups())) != values:
             raise RuntimeError(("HIL timing readback mismatch", chosen, reply))
+        return reply
+
+    def set_rx_squelch(self, value=None):
+        if value is not None and (not math.isfinite(value) or not -160 <= value <= 0):
+            raise ValueError("RX squelch must be auto or between -160 and 0 dBm")
+        chosen = "auto" if value is None else f"{value:.3f}"
+        try:
+            self.start_when_idle("set morse.hil.squelch " + chosen)
+        except RuntimeError as error:
+            message = str(error)
+            unsupported = "Error: HIL-only" in message or (
+                "morse.hil.squelch" in message and re.search(r"\bunknown (?:command|setting)\b", message, re.I))
+            if value is None and unsupported and not getattr(self, "failed", False):
+                return "production image: adaptive RX squelch only"
+            raise
+        reply = self.command("get morse.hil.squelch")
+        observed = re.search(r"> (auto|[+-]?\d+(?:\.\d+)?)(?: dBm)?; volatile HIL RX only", reply)
+        if (not observed or (value is None and observed[1] != "auto")
+                or (value is not None and (observed[1] == "auto"
+                    or not math.isclose(float(observed[1]), value, abs_tol=.00051, rel_tol=0)))):
+            raise RuntimeError(("HIL RX squelch readback mismatch", chosen, reply))
         return reply
 
     def apply_live_temporary(self, profile, timeout=12):
@@ -260,17 +294,19 @@ class Console:
             if not getattr(self, "failed", False):
                 self.command("morse stop", allow_error=True)
                 self.set_hil_timing()
+                self.set_rx_squelch()
                 self.command("set morse.wpm 25", allow_error=True)
         finally:
             self.port.close()
 
 
-def trial(tx, rx, wpm, message, seconds=60, trace=False, human_timing=None):
+def trial(tx, rx, wpm, message, seconds=60, trace=False, human_timing=None, rx_squelch=None):
     tx.command("morse stop")
     rx.command("morse stop")
     tx.command(f"set morse.wpm {wpm}")
     rx.command(f"set morse.wpm {wpm}")
     timing_status = tx.set_hil_timing(human_timing)
+    squelch_status = rx.set_rx_squelch(rx_squelch)
     rx.start_when_idle(f"morse listen {seconds / 60:.4f}")
     # Establish a real quiet RSSI floor before any carrier transmission.
     time.sleep(.8)
@@ -293,6 +329,7 @@ def trial(tx, rx, wpm, message, seconds=60, trace=False, human_timing=None):
             "sent": message, "decoded": decoded, "passed": decoded.strip() == message,
             "tx_elapsed_s": round(tx_finished - started, 3),
             "human_timing": human_timing or STANDARD_TIMING, "tx_timing_status": timing_status,
+            "rx_squelch_dbm": rx_squelch, "rx_squelch_status": squelch_status,
             "rx_status": rx_status, "rx_stats": stats}
     if trace:
         result["trace"] = rx.trace()
@@ -315,6 +352,8 @@ def main():
     parser.add_argument("--human-timing", nargs="?", type=parse_human_timing,
                         const="15,10,25,12345",
                         help="Device-timed HIL jitter,drift,extraGap,seed; default preset15,10,25,12345")
+    parser.add_argument("--rx-squelch", type=parse_rx_squelch, default=None,
+                        help="HIL receiver squelch floor in dBm (-160..0), default adaptive auto")
     parser.add_argument("--quiet-seconds", type=int, default=0,
                         help="No-transmitter receive control, 1-30 seconds")
     parser.add_argument("--t096-rxgain", choices=("on", "off"),
@@ -333,6 +372,7 @@ def main():
                "requested_chip_power_dbm": -9,
                "partner": args.partner, "direction": args.direction,
                "human_timing": args.human_timing or STANDARD_TIMING,
+               "rx_squelch_dbm": args.rx_squelch,
                "scope": "Experimental HIL applications on this pair; not production speed qualification or all radio families.",
                "trials": [], "finished": False}
     devices = {}
@@ -350,11 +390,14 @@ def main():
             original_gain = match[1]
             devices["t096"].command("set radio.fem.rxgain " + args.t096_rxgain)
         if args.quiet_seconds:
-            for device in devices.values():
+            squelch_status = {}
+            for name, device in devices.items():
+                squelch_status[name] = device.set_rx_squelch(args.rx_squelch)
                 device.start_when_idle(f"morse listen {args.quiet_seconds / 60:.4f}")
             time.sleep(args.quiet_seconds + .2)
             for name, device in devices.items():
                 result = {"kind": "quiet_control", "receiver": name,
+                          "rx_squelch_dbm": args.rx_squelch, "rx_squelch_status": squelch_status[name],
                           "rx_stats": device.command("morse stats")}
                 device.command("morse stop")
                 result["decoded"] = device.capture()
@@ -378,6 +421,8 @@ def main():
                         options = {"trace": args.trace}
                         if args.human_timing is not None:
                             options["human_timing"] = args.human_timing
+                        if args.rx_squelch is not None:
+                            options["rx_squelch"] = args.rx_squelch
                         result = trial(devices[tx_name], devices[rx_name], rate, message, **options)
                         result["repeat"] = repeat
                         results["trials"].append(result)
