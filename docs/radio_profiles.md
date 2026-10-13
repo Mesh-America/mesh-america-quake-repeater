@@ -281,8 +281,10 @@ recognize these aliases.
 ### Meshtext channel chat
 
 `MESH_ENABLE_MESHTEXT_CHAT` enables the text-only Meshtext backend in the
-Companion. It defaults on only for ESP32-S3 **Full Companion** builds using
-SX1262 LoRa, not an ESP-NOW primary. Other builds default off. This is not
+Companion. It defaults on for ESP32-S3 **Full Companion** builds using
+SX1262 LoRa and for the RAK4631 **Full Companion** starting with 1.17.1.10
+preview3. An ESP-NOW primary and other builds default off. RAK4631 1.17.1.10
+preview2 and earlier builds did not include this backend. This is not
 a replacement for stock peer firmware or a cross-protocol bridge.
 
 In an enabled build, an `mt-` name always requests Meshtext, even if radio2 is

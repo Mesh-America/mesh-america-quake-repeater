@@ -1,8 +1,12 @@
 #include "MyMesh.h"
 
 #if MESH_ENABLE_MESHTEXT_CHAT
+#if defined(NRF52_PLATFORM)
+#include <helpers/NRF52Crypto.h>
+#else
 #include <Preferences.h>
 #include <esp_system.h>
+#endif
 #include <helpers/CLICommandUtils.h>
 #include <helpers/UTF8Helpers.h>
 
@@ -98,15 +102,31 @@ void MyMesh::beginMeshtext() {
   refreshMeshtextIdentity();
   // Independent random boot seed, then monotonic IDs. Never reuse a packet ID
   // within this boot (including failed admission) with the same CTR sender.
+#if defined(NRF52_PLATFORM)
+  getRNG()->random(reinterpret_cast<uint8_t*>(&_mt_packet_id), sizeof(_mt_packet_id));
+#if defined(USE_CC310_HW_CRYPTO)
+  mesh::mixCC310Random(reinterpret_cast<uint8_t*>(&_mt_packet_id), sizeof(_mt_packet_id));
+#endif
+#else
   _mt_packet_id = esp_random();
+#endif
   if (!_mt_packet_id) _mt_packet_id = 1;
+  uint8_t image[SettingsSize] = {}, expected[SettingsSize] = {};
+#if defined(NRF52_PLATFORM)
+  size_t size = 0;
+  if (!_store->loadMeshtextSettings(image, size)) { _mt_settings_valid = false; return; }
+#else
   Preferences prefs;
   if (!prefs.begin("mesh-mt", false)) { _mt_settings_valid = false; return; }
   const size_t size = prefs.getBytesLength("settings");
+#endif
   if (size) {
-    uint8_t image[SettingsSize] = {}, expected[SettingsSize] = {};
+#if defined(NRF52_PLATFORM)
+    _mt_settings_valid = size == SettingsSize;
+#else
     _mt_settings_valid = (size == SettingsSize || size == LegacySettingsSize)
         && prefs.getBytes("settings", image, size) == size;
+#endif
     if (_mt_settings_valid) {
       const auto region = static_cast<mesh::mt::Region>(image[4]);
       const bool legacy = size == LegacySettingsSize;
@@ -138,7 +158,9 @@ void MyMesh::beginMeshtext() {
       }
     }
   }
+#if !defined(NRF52_PLATFORM)
   prefs.end();
+#endif
   refreshMeshtextProfile();
 }
 
@@ -149,8 +171,12 @@ bool MyMesh::saveMeshtextSettings(mesh::mt::Region region, uint32_t slot, uint8_
   if (node_override == UINT32_MAX) node_override = _mt_node_override;
   if (region > mesh::mt::Region::ANZ || slot > 1024 || hops > 7 || !validShortName(short_name)
       || !validNodeOverride(node_override) || hasForeignRadioFrame()) return false;
-  uint8_t image[SettingsSize], verify[SettingsSize];
+  uint8_t image[SettingsSize];
   makeSettings(image, region, slot, hops, short_name, node_override);
+#if defined(NRF52_PLATFORM)
+  const bool ok = _store->saveMeshtextSettings(image);
+#else
+  uint8_t verify[SettingsSize];
   Preferences prefs;
   if (!prefs.begin("mesh-mt", false)) return false;
   // NVS commits this one blob atomically; never split region and slot into
@@ -159,8 +185,9 @@ bool MyMesh::saveMeshtextSettings(mesh::mt::Region region, uint32_t slot, uint8_
       && prefs.getBytes("settings", verify, sizeof(verify)) == sizeof(verify)
       && memcmp(image, verify, sizeof(image)) == 0;
   prefs.end();
+#endif
   if (!ok) {
-    // A failed read-back cannot prove whether NVS committed. Suspend the
+    // A failed read-back cannot prove whether storage committed. Suspend the
     // backend rather than silently use one network now and another at boot.
     _mt_settings_valid = false;
     _mt_profile_dirty = true;
@@ -188,6 +215,9 @@ bool MyMesh::eraseMeshtextSettings() {
   _mt_seen.clear();
   _radio_profiles.clearAutoSecondary();
   _radio_profiles.clearSecondaryProtocol();
+#if defined(NRF52_PLATFORM)
+  const bool ok = _store->eraseMeshtextSettings();
+#else
   Preferences prefs;
   if (!prefs.begin("mesh-mt", false)) {
     _mt_status = "Meshtext settings erase failed";
@@ -195,6 +225,7 @@ bool MyMesh::eraseMeshtextSettings() {
   }
   const bool ok = !prefs.getBytesLength("settings") || prefs.remove("settings");
   prefs.end();
+#endif
   if (ok) {
     _mt_region = mesh::mt::Region::Unset; _mt_slot = 0; _mt_hop_limit = 7;
     _mt_short_name[0] = 0; _mt_node_override = 0; _mt_node = _mt_default_node;

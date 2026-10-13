@@ -70,6 +70,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capability", action="append", default=[])
     parser.add_argument("--reduction", action="append", default=[])
     parser.add_argument("--require-ota", action="store_true")
+    parser.add_argument(
+        "--require-meshtext", action="store_true",
+        help="Require linked Meshtext encode/decode and Companion raw-frame transport implementations.",
+    )
     parser.add_argument("--firmware-bin", type=Path)
     parser.add_argument("--partitions", type=Path)
     parser.add_argument("--dfu-package", type=Path)
@@ -190,6 +194,7 @@ def main() -> int:
     checks = []
     malformed = False
     third_party_notices = []
+    codec_symbols, chat_symbols = [], []
     try:
         codec_symbols, chat_symbols = meshtext_evidence(args.image)
         if codec_symbols:
@@ -202,6 +207,10 @@ def main() -> int:
     except (OSError, ValueError) as error:
         print(f"capability check: cannot qualify linked Meshtext code: {error}", file=sys.stderr)
         malformed = True
+    if args.require_meshtext and not chat_symbols:
+        checks.append({"capability": MESHTEXT_CAPABILITY,
+                       "evidence": "Meshtext encode/decode, Companion send/receive, and Dispatcher raw-frame queue implementations",
+                       "present": False, "source": "linked ELF symbols"})
     application = b""
     if args.expect_application:
         try:
@@ -237,6 +246,10 @@ def main() -> int:
     capabilities = stable_unique(
         args.capability + [check["capability"] for check in checks]
     )
+    if not chat_symbols:
+        # Neither a requested capability nor CLI strings prove the optional
+        # codec and its complete Companion transport survived linking.
+        capabilities = [value for value in capabilities if value != MESHTEXT_CAPABILITY]
     missing = [check for check in checks if not check["present"]]
     ota_methods = stable_unique([
         check["capability"].removeprefix("ota.update.")

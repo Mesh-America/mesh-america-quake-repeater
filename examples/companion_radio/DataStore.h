@@ -188,6 +188,11 @@ public:
 #if defined(NRF52_PLATFORM)
   void useVolatilePrimaryFS(FILESYSTEM& fs);
   bool isVolatilePrimaryFS() const { return _volatile_primary_fs; }
+  // Meshtext settings belong to the primary store, alongside the identity.
+  // An absent record is size zero; unreadable or volatile storage is failure.
+  bool loadMeshtextSettings(uint8_t image[40], size_t& size);
+  bool saveMeshtextSettings(const uint8_t image[40]);
+  bool eraseMeshtextSettings();
 #endif
   void markPrimaryFSUnavailable();
   void disableSecondaryFS(bool authority_unknown = true);

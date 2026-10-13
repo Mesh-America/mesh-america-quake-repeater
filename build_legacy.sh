@@ -4473,6 +4473,11 @@ write_build_capability_manifest() {
       || is_xiao_qspi_canonical_repeater_build "$env_name"; then
     checker_args+=(--require-ota)
   fi
+  if [ "$env_name" = "RAK_4631_companion_radio_full" ]; then
+    # This profile is offered for MeshTalk testing. Check executable codec and
+    # Companion transport definitions, not a channel name or CLI help string.
+    checker_args+=(--require-meshtext)
+  fi
   if [ "$env_platform" = "ESP32_PLATFORM" ]; then
     checker_args+=(--firmware-bin "${build_output_dir}/firmware.bin"
                    --partitions "${build_output_dir}/partitions.bin")

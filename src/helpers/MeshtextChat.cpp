@@ -265,6 +265,11 @@ bool modemConfig(Region region, Preset preset, RadioProfileParams& params, uint3
   return true;
 }
 
+// Keep the nRF52 codec entry points visible under LTO so release qualification
+// can verify executable send/receive code instead of assuming a feature flag.
+#if defined(NRF52_PLATFORM) && defined(__GNUC__)
+__attribute__((noinline))
+#endif
 size_t encodeText(uint32_t from, uint32_t id, uint8_t hop_limit, const char* channel_name,
                   const uint8_t* key, size_t key_len, const char* text, size_t text_len,
                   uint8_t out[MaxFrameSize]) {
@@ -317,6 +322,9 @@ size_t encodeNodeInfo(uint32_t from, uint32_t id, uint8_t hop_limit, const char*
   return finishFrame(from, id, hop_limit, channel_name, key, key_len, out, count);
 }
 
+#if defined(NRF52_PLATFORM) && defined(__GNUC__)
+__attribute__((noinline))
+#endif
 bool decodeText(const uint8_t* raw, size_t length, const char* channel_name,
                 const uint8_t* key, size_t key_len, uint32_t local_node, DecodedText& decoded) {
   if (raw == nullptr || key == nullptr || (key_len != 16 && key_len != 32)

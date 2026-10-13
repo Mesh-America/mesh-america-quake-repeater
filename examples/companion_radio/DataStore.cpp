@@ -371,7 +371,7 @@ static void cleanupAtomicTempFiles(FILESYSTEM* fs) {
       "/_main.id.tmp", "/new_prefs.tmp", "/channels2.tmp",
       "/contacts3.tmp", "/contacts4.mig.tmp", "/adv_blobs.tmp",
       "/.extrafs.mig.tmp", "/extrafs.badpages.tmp",
-      "/extrafs.badpages.bak.tmp"};
+      "/extrafs.badpages.bak.tmp", "/mesh_mt.tmp"};
   for (size_t i = 0; i < sizeof(fixed_temp_paths) / sizeof(fixed_temp_paths[0]); i++) {
     if (fs->exists(fixed_temp_paths[i])) fs->remove(fixed_temp_paths[i]);
   }
@@ -572,6 +572,56 @@ void DataStore::useVolatilePrimaryFS(FILESYSTEM& fs) {
   _identity_creation_blocked = false;
   _contact_load_incomplete = false;
   _prefs_load_incomplete = false;
+}
+
+bool DataStore::loadMeshtextSettings(uint8_t image[40], size_t& size) {
+  size = 0;
+  if (image == nullptr || _fs == nullptr || _primary_storage_unavailable
+      || _volatile_primary_fs) return false;
+  bool present = false;
+  uint32_t stored_size = 0;
+  if (!contactPathPresence(_fs, "/mesh_mt", present, &stored_size)) return false;
+  if (!present) return true;
+  // This backend has never stored the legacy ESP32-only NVS formats. Do not
+  // accept a truncated image, directory or uncommitted .tmp as fresh defaults.
+  if (stored_size != 40) return false;
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    File file = openRead(_fs, "/mesh_mt");
+    if (!file) continue;
+    uint8_t loaded[40];
+    const bool ok = !file.isDirectory() && file.size() == sizeof(loaded)
+        && file.read(loaded, sizeof(loaded)) == sizeof(loaded);
+    file.close();
+    if (ok) {
+      memcpy(image, loaded, sizeof(loaded));
+      size = sizeof(loaded);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool DataStore::saveMeshtextSettings(const uint8_t image[40]) {
+  if (image == nullptr || _fs == nullptr || _primary_storage_unavailable
+      || _volatile_primary_fs) return false;
+  bool present = false;
+  if (!contactPathPresence(_fs, "/mesh_mt", present)) return false;
+  if (!contactPathPresence(_fs, "/mesh_mt.tmp", present)) return false;
+  if (present && !_fs->remove("/mesh_mt.tmp")) return false;
+  mesh::AtomicFileWriter file(_fs, "/mesh_mt");
+  return file && file.write(image, 40) == 40 && file.commit();
+}
+
+bool DataStore::eraseMeshtextSettings() {
+  if (_fs == nullptr || _primary_storage_unavailable || _volatile_primary_fs) return false;
+  bool present = false;
+  // A staging file must never become a recovery source after explicit erase.
+  for (const char* path : {"/mesh_mt.tmp", "/mesh_mt"}) {
+    if (!contactPathPresence(_fs, path, present)) return false;
+    if (present && !_fs->remove(path)) return false;
+    if (!contactPathPresence(_fs, path, present) || present) return false;
+  }
+  return true;
 }
 #endif
 

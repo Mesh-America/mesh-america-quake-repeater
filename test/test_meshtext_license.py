@@ -51,6 +51,71 @@ class MeshtextLicenseTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(output.read_text())
 
+    def require_chat(self, build, *extra_args):
+        output = build / "required.capabilities.json"
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/check_firmware_capabilities.py"),
+            "--image", str(build / "firmware.elf"), "--output", str(output),
+            "--target", "RAK_4631_companion_radio_full", "--platform", "NRF52_PLATFORM",
+            "--build-profile", "full", "--require-meshtext", *extra_args],
+            capture_output=True, text=True)
+        return result, json.loads(output.read_text())
+
+    def test_required_chat_accepts_complete_linked_codec_and_transport(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            elf32(root / "firmware.elf")
+            result, manifest = self.require_chat(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(manifest["verified"])
+            self.assertIn(license.CAPABILITY, manifest["capabilities"])
+            check = next(item for item in manifest["verification"]
+                         if item["capability"] == license.CAPABILITY)
+            self.assertTrue(check["present"])
+            self.assertEqual(check["source"], "linked ELF symbols")
+            self.assertEqual(len(check["evidence"].split("; ")), len(SYMBOLS))
+
+    def test_required_chat_rejects_every_missing_or_nonrunning_implementation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cases = [("unrelated code", {"symbols": ("_ZN4mesh9unrelatedEv",)}),
+                     ("codec only", {"symbols": SYMBOLS[:2]}),
+                     ("transport only", {"symbols": SYMBOLS[2:]}),
+                     ("unallocated", {"flags": 4}),
+                     ("data section", {"flags": 2})]
+            for symbol in SYMBOLS:
+                cases += [("missing " + symbol, {"symbols": tuple(name for name in SYMBOLS if name != symbol)}),
+                          ("undefined " + symbol, {"undefined": (symbol,)}),
+                          ("zero size " + symbol, {"zero": (symbol,)})]
+            for label, options in cases:
+                with self.subTest(label=label):
+                    elf32(root / "firmware.elf", **options)
+                    result, manifest = self.require_chat(root)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertFalse(manifest["verified"])
+                    self.assertNotIn(license.CAPABILITY, manifest["capabilities"])
+                    self.assertIn("promised", result.stderr)
+                    self.assertIn("linked ELF symbols", result.stderr)
+
+    def test_required_chat_cannot_be_qualified_by_cli_strings_or_requested_capabilities(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            marker = "get mt.status"
+            images = [b"CLI " + marker.encode() + b"\0" + b"\0".join(s.encode() for s in SYMBOLS)]
+            elf32(root / "firmware.elf", symbols=SYMBOLS[:2])
+            images.append((root / "firmware.elf").read_bytes() + marker.encode() +
+                          b"\0".join(s.encode() for s in SYMBOLS))
+            for image in images:
+                with self.subTest(elf=image.startswith(b"\x7fELF")):
+                    (root / "firmware.elf").write_bytes(image)
+                    result, manifest = self.require_chat(root, "--capability", license.CAPABILITY,
+                                                         "--expect", license.CAPABILITY + "=" + marker)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertFalse(manifest["verified"])
+                    self.assertNotIn(license.CAPABILITY, manifest["capabilities"])
+                    marker_check = next(item for item in manifest["verification"]
+                                        if item["source"] == "linked image")
+                    self.assertTrue(marker_check["present"])
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "requires a Linux ELF compiler")
     def test_compiler_produced_symbols_qualify_chat_and_notice(self):
         compiler = shutil.which("g++")

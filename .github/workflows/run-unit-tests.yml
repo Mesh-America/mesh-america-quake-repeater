@@ -10,6 +10,18 @@ on:
   workflow_dispatch:
 
 jobs:
+  nrf52-companion-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+      - name: Qualify RAK4631 Full Companion with linked Meshtext support
+        run: >-
+          bash build.sh build-firmware RAK_4631_companion_radio_full
+          --firmware-version v1.17.1.10-halo-keymind-cascade-dev
+          --radio-preset usa-cascade-fixed --profile cascade --require-ota
+
   nrf52-sensor-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -287,10 +299,12 @@ jobs:
       - name: Verify Meshtext chat codec, transport and Companion integration
         run: |
           python3 -B test/test_meshtext_chat.py -v
+          python3 -B test/test_meshtext_config.py -v
           python3 -B test/test_meshtext_transport.py -v
           python3 -B test/test_meshtext_license.py -v
           python3 -B test/test_radio_profile_auto.py -v
           python3 -B test/test_companion_meshtext.py -v
+          python3 -B test/test_companion_meshtext_storage.py -v
           python3 -B test/test_meshtext_auto_radio2_hil.py -v
           python3 -B test/test_meshtext_auto_radio2_hil_sdk.py -v
 
