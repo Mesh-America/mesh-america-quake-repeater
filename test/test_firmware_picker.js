@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
 const picker = require("../docs/_javascript/firmware_picker.js");
 
 const bootloaderManifest = require("../docs/_data/bootloader_manifest.json");
@@ -1628,6 +1631,161 @@ const escapedShare = picker.selectionFromUrl('https://example.com/?role=%3Cscrip
 assert.deepStrictEqual(escapedShare.filters, {});
 assert.deepStrictEqual(escapedShare.unavailable, ['role=<script>']);
 console.log('shareable picker URL tests passed');
+
+// Compact links navigate to the picker and retain the same selection semantics.
+// Parameter values stay readable rather than depending on catalog row numbers.
+const shortShareBase = 'https://example.com/p/?h=storage#installation-methods';
+const shortShareUrl = picker.shortSelectionUrl(shortShareBase, shareFilters, true);
+const shortShareParsedUrl = new URL(shortShareUrl);
+assert.strictEqual(shortShareParsedUrl.pathname, '/p/');
+assert.strictEqual(shortShareParsedUrl.searchParams.get('h'), 'storage');
+assert.strictEqual(shortShareParsedUrl.hash, '#installation-methods');
+assert(shortShareUrl.length < shareUrl.length);
+assert.strictEqual(shortShareParsedUrl.searchParams.get('s'),
+  '1.hRAK_4631.rcompanion.lusb.olora-source.mfull.ffull.vdefault.iuf2');
+assert(picker.FACET_FIELDS.every(field => !shortShareParsedUrl.searchParams.has(field)));
+assert(!shortShareParsedUrl.searchParams.has('chipAuto'));
+const restoredShortShare = picker.selectionFromUrl(shortShareUrl, controlled.profiles);
+assert.deepStrictEqual(restoredShortShare, restoredShare);
+assert.strictEqual(picker.shortSelectionUrl(shortShareUrl, {}, false), shortShareBase);
+assert.strictEqual(picker.selectionUrl(shortShareUrl, {}, false), shortShareBase,
+  'Legacy serialization must also remove the compact selection when clearing');
+
+const manualShortShare = picker.shortSelectionUrl(shortShareBase, shareFilters, false);
+const manualShortSelection = picker.selectionFromUrl(manualShortShare, controlled.profiles);
+assert.strictEqual(manualShortSelection.automaticChipFamily, false);
+for (const field of picker.FACET_FIELDS) {
+  assert.strictEqual(manualShortSelection.filters[field], shareFilters[field], field);
+}
+assert(new URL(manualShortShare).searchParams.get('s').split('.').includes('a0'));
+const anyChipShortSelection = picker.selectionFromUrl(picker.shortSelectionUrl(shortShareBase,
+  {...shareFilters, chipFamily: ''}, false), controlled.profiles);
+assert.strictEqual(anyChipShortSelection.automaticChipFamily, false);
+assert(!anyChipShortSelection.filters.chipFamily);
+assert.strictEqual(anyChipShortSelection.filters.hardware, 'RAK_4631');
+
+const partialShortShare = picker.shortSelectionUrl(shortShareBase,
+  {hardwareFamily: 'RAK_4631', hardware: 'RAK_4631', role: 'companion'}, true);
+assert.strictEqual(new URL(partialShortShare).searchParams.get('s'), '1.hRAK_4631.rcompanion');
+assert.deepStrictEqual(picker.selectionFromUrl(partialShortShare, controlled.profiles), {
+  filters: {hardwareFamily: 'RAK_4631', hardware: 'RAK_4631', role: 'companion'},
+  automaticChipFamily: true, unavailable: [],
+});
+const familyOnlyShortSelection = picker.selectionFromUrl(picker.shortSelectionUrl(shortShareBase,
+  {hardwareFamily: 'RAK_4631'}, true), controlled.profiles);
+assert.deepStrictEqual(familyOnlyShortSelection.filters, {hardwareFamily: 'RAK_4631'});
+assert.strictEqual(familyOnlyShortSelection.automaticChipFamily, true);
+
+// Opening, editing and clearing a compact link must not resurrect stale choices.
+const changedShortSelection = {...restoredShortShare.filters, install: ''};
+const editedShortShare = picker.shortSelectionUrl(shortShareUrl, changedShortSelection, true);
+const editedShortSelection = picker.selectionFromUrl(editedShortShare, controlled.profiles);
+assert.deepStrictEqual(editedShortSelection.unavailable, []);
+assert.strictEqual(editedShortSelection.filters.install, undefined);
+assert.strictEqual(new URL(editedShortShare).searchParams.getAll('s').length, 1);
+const editedLegacyShare = picker.selectionUrl(shortShareUrl, changedShortSelection, true);
+assert(!new URL(editedLegacyShare).searchParams.has('s'));
+assert.strictEqual(picker.selectionFromUrl(editedLegacyShare, controlled.profiles).filters.install, undefined);
+const compactWithLegacy = shortShareUrl.replace('#installation-methods', '') +
+  '&hardware=RAK_3401&role=repeater&chipAuto=0';
+assert.deepStrictEqual(picker.selectionFromUrl(compactWithLegacy, controlled.profiles), restoredShortShare,
+  'A compact selection must not inherit stale legacy picker fields');
+const normalizedCompact = new URL(picker.shortSelectionUrl(compactWithLegacy, shareFilters, true));
+assert(!normalizedCompact.searchParams.has('hardware'));
+assert(!normalizedCompact.searchParams.has('role'));
+assert(!normalizedCompact.searchParams.has('chipAuto'));
+assert.strictEqual(normalizedCompact.searchParams.get('h'), 'storage');
+
+const staleShortSelection = picker.selectionFromUrl(
+  'https://example.com/p/?s=1.hRAK_4631.rcompanion.vremoved.ibin', controlled.profiles);
+assert.strictEqual(staleShortSelection.filters.hardware, 'RAK_4631');
+assert.strictEqual(staleShortSelection.filters.role, 'companion');
+assert.deepStrictEqual(staleShortSelection.unavailable, ['variant=removed', 'install=bin']);
+const escapedShortSelection = picker.selectionFromUrl(
+  'https://example.com/p/?s=1.r%253Cscript%253E', controlled.profiles);
+assert.deepStrictEqual(escapedShortSelection.filters, {});
+assert.deepStrictEqual(escapedShortSelection.unavailable, ['role=<script>']);
+for (const malformedQuery of [
+  's=', 's=2.hRAK_4631', 's=1.hRAK_4631.hRAK_3401', 's=1.xjunk',
+  's=1.h%252', 's=1.a2', 's=1.a0.a0', 's=1.hRAK_4631&s=1.hRAK_3401',
+  's=1.', 's=1.h',
+]) {
+  const invalid = picker.selectionFromUrl('https://example.com/p/?' + malformedQuery, controlled.profiles);
+  assert.deepStrictEqual(invalid.filters, {}, malformedQuery);
+  assert(invalid.unavailable.length > 0, malformedQuery + ' must explain the invalid selection');
+}
+
+// Field delimiters and URL punctuation are data inside a catalog identifier.
+const punctuationHardware = 'Board.rev/2 +100%?x#';
+const punctuationProfile = {chipFamily: 'esp32', hardwareFamily: 'Board_Family',
+  hardware: punctuationHardware, role: 'repeater', logging: 'none', ota: 'none',
+  mode: 'standard', feature: 'standard', variant: 'rev.2+hot/cold 50% \u00e9',
+  installKinds: ['merged-bin']};
+const punctuationFilters = Object.fromEntries(picker.FACET_FIELDS.map(field =>
+  [field, field === 'install' ? 'merged-bin' : punctuationProfile[field]]));
+const punctuationShortUrl = picker.shortSelectionUrl(shortShareBase, punctuationFilters, false);
+const punctuationTokens = new URL(punctuationShortUrl).searchParams.get('s').split('.');
+assert.strictEqual(decodeURIComponent(punctuationTokens.find(token => token.startsWith('h')).slice(1)),
+  punctuationHardware);
+assert(punctuationTokens.includes('gBoard_Family'), 'Different family and hardware IDs must both survive');
+const punctuationSelection = picker.selectionFromUrl(punctuationShortUrl, [punctuationProfile]);
+assert.deepStrictEqual(punctuationSelection.unavailable, []);
+assert.deepStrictEqual(punctuationSelection.filters, punctuationFilters);
+assert.strictEqual(punctuationSelection.automaticChipFamily, false);
+
+for (const candidateCatalog of [catalog, controlled, currentCatalog, chipCatalog, withMigrations]) {
+  for (const profile of candidateCatalog.profiles) {
+    for (const install of profile.installKinds) {
+      for (const logging of picker.profileFieldValues(profile, 'logging')) {
+        for (const automatic of [false, true]) {
+          const chosen = Object.fromEntries(picker.FACET_FIELDS.map(field =>
+            [field, field === 'install' ? install : field === 'logging' ? logging :
+              picker.profileFieldValues(profile, field)[0] || '']));
+          const compactUrl = picker.shortSelectionUrl(shortShareBase, chosen, automatic);
+          const compactSelection = picker.selectionFromUrl(compactUrl, candidateCatalog.profiles);
+          const legacySelection = picker.selectionFromUrl(
+            picker.selectionUrl(shortShareBase, chosen, automatic), candidateCatalog.profiles);
+          const choiceDescription = profile.target + ' / ' + install + ' / logging=' + logging +
+            ' / automatic=' + automatic;
+          assert.deepStrictEqual(compactSelection.unavailable, [], choiceDescription);
+          assert.deepStrictEqual(compactSelection, legacySelection, choiceDescription);
+          assert(candidateCatalog.profiles.filter(item => picker.profileMatchesFacets(item, compactSelection.filters))
+            .includes(profile), profile.target + ' must remain reachable');
+        }
+      }
+    }
+  }
+}
+console.log('compact picker URL compatibility, validation, escaping and catalog round trips passed');
+
+// Exercise the actual short-route script, including its fallback navigation link.
+const shortRouteHtml = fs.readFileSync(path.join(__dirname, '../docs/p/index.html'), 'utf8');
+const shortRouteScript = shortRouteHtml.match(/<script>([\s\S]*?)<\/script>/);
+assert(shortRouteScript, 'The short picker route must contain its navigation script');
+for (const routeHref of [
+  'https://example.com/MeshCore/p/?s=1.hRAK_4631.rcompanion#installation-methods',
+  'https://example.com/MeshCore/p/?s=1.hRAK_4631&url=https%3A%2F%2Fother.test%2Fevil#installation-methods',
+  'https://example.com/MeshCore/p/',
+]) {
+  const sourceUrl = new URL(routeHref);
+  const expectedDestination = 'https://example.com/MeshCore/firmware_picker/' +
+    sourceUrl.search + sourceUrl.hash;
+  const fallbackLink = {href: '../firmware_picker/'};
+  const redirectedUrls = [];
+  vm.runInNewContext(shortRouteScript[1], {
+    URL,
+    window: {location: {href: routeHref, search: sourceUrl.search, hash: sourceUrl.hash,
+      replace: href => redirectedUrls.push(href)}},
+    document: {getElementById: id => {
+      assert.strictEqual(id, 'picker-link');
+      return fallbackLink;
+    }},
+  });
+  assert.deepStrictEqual(redirectedUrls, [expectedDestination]);
+  assert.strictEqual(fallbackLink.href, expectedDestination);
+  assert.strictEqual(new URL(fallbackLink.href).origin, sourceUrl.origin);
+}
+console.log('short picker route preserves selections and redirects only to the same-origin picker');
 
 // One choice carries OTA, feature set and sensor/storage tradeoffs together.
 // Every existing profile remains reachable and resolves to its original files.

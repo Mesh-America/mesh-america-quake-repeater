@@ -40,6 +40,8 @@ class OfflinePickerPackageTests(unittest.TestCase):
         self.assertTrue(all('uploader' not in asset for asset in embedded['releases'][0]['assets']))
         self.assertIn('Full supported sensors', packaged)
         self.assertIn('Reduced sensors', packaged)
+        self.assertIn('data-share-url="https://mikecarper.github.io/MeshCore/p/"', packaged)
+        self.assertIn('shortSelectionUrl', packaged)
 
     def test_controls_must_belong_to_the_packaged_release_family(self):
         with self.assertRaisesRegex(ValueError, 'match the supplied release family'):

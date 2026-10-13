@@ -8,7 +8,6 @@ edit_uri: !ENV [MKDOCS_EDIT_URI, 'edit/main/docs/']
 
 hooks:
   - scripts/docs_partition_catalog.py
-  - scripts/docs_firmware_shortlinks.py
 
 # Keep historical URLs for bookmarks while showing only the organized copies.
 not_in_nav: |
@@ -46,7 +45,6 @@ nav:
   - Home: index.md
   - Firmware and tools:
       - firmware_picker.md
-      - Short firmware links: d.md
       - notifications.md
       - preset_test.md
       - filter_tool.md
@@ -133,7 +131,7 @@ extra_javascript:
   - _javascript/hosted_doc_links.js?v=20261007-1
   - _javascript/notification_builder.js?v=20261006-channel9
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.js
-  - _javascript/firmware_picker.js?v=20261008-rak-uart2-1
+  - _javascript/firmware_picker.js?v=20261012-short-picker-1
   - _javascript/telemetry_decoder.js?v=20261007-hosted-form
   - _javascript/management_decoder.js
   - _javascript/filter_tool.js?v=20261002-hashbytes-2plus

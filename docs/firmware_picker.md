@@ -4,10 +4,6 @@
 
 # Firmware picker
 
-For shorter, version-pinned firmware download URLs, use
-[Short firmware links](d.md). Those links serve the original verified firmware
-files and include the RAK4631 Full Companion 1.17.1.10 preview2 for MeshTalk testing.
-
 Each result now includes **Restore your settings after flashing**. Its commands
 follow the selected logging mode and the exact image's verified role/hardware
 controls. Click On, Off, or Check to view and copy the commands; Companion
@@ -45,7 +41,7 @@ The picker reads public release metadata from GitHub. It does not upload device
 information. Hardware names, target names, and download links come directly
 from the published firmware assets.
 
-<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.9-88c85108" data-bootloaders-url="../_data/bootloader_manifest.json?v=20261002-1" data-share-url="https://mikecarper.github.io/MeshCore/firmware_picker/">
+<div class="firmware-picker" data-firmware-picker data-release-repo="mikecarper/MeshCore" data-controls-url="../_data/firmware_controls.json?v=1.17.1.9-88c85108" data-bootloaders-url="../_data/bootloader_manifest.json?v=20261002-1" data-share-url="https://mikecarper.github.io/MeshCore/p/">
   <div class="firmware-picker-intro" role="note">
     <strong>Current release set</strong>
     <p data-role="release-set">Loading release information...</p>
@@ -74,7 +70,7 @@ from the published firmware assets.
   <p class="firmware-picker-order-note">
     Pick in any order. Use <strong>Any</strong> to clear one choice, or clear
     everything with the button below. The address bar updates with your choices;
-    copy its URL to reopen or share the same selection.
+    use <strong>Copy link to settings</strong> for a shorter link to the same selection.
   </p>
 
   <form class="firmware-picker-form" data-role="form">
@@ -150,7 +146,7 @@ from the published firmware assets.
     <div class="firmware-picker-form-actions firmware-picker-wide">
       <button type="reset" data-action="clear" disabled>Clear all choices</button>
       <button type="button" data-action="copy-link" disabled>Copy link to settings</button>
-      <a data-role="share-link" hidden>Link to these settings</a>
+      <a data-role="share-link" hidden>Short link to these settings</a>
       <p data-role="link-status" aria-live="polite"></p>
     </div>
   </form>
@@ -253,31 +249,38 @@ changing roles or partition layouts.
 
 ## Share a selection
 
-Select any combination of choices, then copy the address bar or use **Copy link
-to settings**. Opening the link restores those choices after the release
+Select any combination of choices, then use **Copy link to settings** for a
+short URL under `https://mikecarper.github.io/MeshCore/p/`. Opening the link
+restores those choices after the release
 catalog loads. Partial selections work too, so you can share a board and role
 while leaving other choices open. **Clear all choices** removes the picker
 parameters from the URL. Changes update the current browser-history entry
 without reloading the page or adding a Back-button entry for every click.
 
-For example, [RAK3401 unified Full repeater](?hardware=RAK_3401&role=repeater&ota=lora-receiver&feature=full&variant=default)
+For example, [RAK3401 unified Full repeater](https://mikecarper.github.io/MeshCore/p/?s=1.hRAK_3401.rrepeater.olora-receiver.ffull.vdefault)
 preselects that board, role, OTA capability, and Full sensor policy. Supported
 internal or external storage is detected by the unified image.
 
-The query parameters are `chipFamily`, `hardwareFamily`, `hardware`, `role`,
+Short links encode only the selected choices in a versioned `s` parameter.
+Hardware identifiers stay readable, and the link omits redundant hardware-family
+and automatically selected chip-family values. It keeps profile and install
+choices explicitly rather than relying on the current catalog's defaults.
+The address bar also uses the compact selection format; copying it works too.
+
+Existing long links still work. Their query parameters are `chipFamily`, `hardwareFamily`, `hardware`, `role`,
 `logging`, `ota`, `mode`, `feature`, `variant`, and `install`. Values use the
 picker's internal identifiers rather than the displayed labels. One Firmware
 profile button sets `ota`, `feature`, and `variant` together. Existing links
 with only some of those choices still work and show their partial selection.
-The generated
-link also records `chipAuto` so automatic chip-family selection or an explicit
+The selection also records when chip-family filtering was chosen manually so
+automatic chip-family selection or an explicit
 **Any** choice behaves the same after reopening. Existing section anchors and
 unrelated query parameters are preserved.
 
 Links use the current release catalog. If a linked choice is no longer available
 or conflicts with another choice, the picker identifies it and asks you to
 review the remaining selections. The downloadable HTML's **Copy link to
-settings** button creates a public website link that other people can open.
+settings** button creates a short public website link that other people can open.
 
 ## FULL versus standard
 
