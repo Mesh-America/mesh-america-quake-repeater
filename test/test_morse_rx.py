@@ -162,10 +162,36 @@ template<typename T,typename=void> struct HasCapturePointer : std::false_type {}
 template<typename T> struct HasCapturePointer<T,std::void_t<decltype(T::_morse_rx)>> : std::true_type {};
 template<typename T,typename=void> struct HasCaptureAllocator : std::false_type {};
 template<typename T> struct HasCaptureAllocator<T,std::void_t<decltype(&T::canAllocateMorseReceiver)>> : std::true_type {};
+template<typename T,typename=void> struct HasCaptureOwner : std::false_type {};
+template<typename T> struct HasCaptureOwner<T,std::void_t<decltype(T::_morse_rx_owned)>> : std::true_type {};
+template<typename T,typename=void> struct HasCaptureReadErrors : std::false_type {};
+template<typename T> struct HasCaptureReadErrors<T,std::void_t<decltype(T::_morse_rx_read_errors)>> : std::true_type {};
+template<typename T,typename=void> struct HasFskState : std::false_type {};
+template<typename T> struct HasFskState<T,std::void_t<decltype(T::_morse_rx_fsk_mode)>> : std::true_type {};
+template<typename T,typename=void> struct HasReceivePreparation : std::false_type {};
+template<typename T> struct HasReceivePreparation<T,std::void_t<decltype(&T::prepareMorseReceiver)>> : std::true_type {};
+template<typename T,typename=void> struct HasReceiveStart : std::false_type {};
+template<typename T> struct HasReceiveStart<T,std::void_t<decltype(&T::startMorseReceiver)>> : std::true_type {};
+template<typename T,typename=void> struct HasReceiveRead : std::false_type {};
+template<typename T> struct HasReceiveRead<T,std::void_t<decltype(&T::readMorseRssi)>> : std::true_type {};
+template<typename T,typename=void> struct HasReceiveBandwidth : std::false_type {};
+template<typename T> struct HasReceiveBandwidth<T,std::void_t<decltype(&T::morseReceiverBandwidthKHz)>> : std::true_type {};
 int main() {
   static_assert(MESH_ENABLE_MORSE_RX==EXPECTED_RX,"STM32 RX opt-in must be explicit");
   static_assert(HasCapturePointer<STMReceive>::value==bool(EXPECTED_RX),"disabled RX must exclude capture metadata");
   static_assert(HasCaptureAllocator<STMReceive>::value==bool(EXPECTED_RX),"disabled RX must exclude allocation machinery");
+  static_assert(HasCaptureOwner<STMReceive>::value==bool(EXPECTED_RX),"disabled RX must exclude ownership state");
+  static_assert(HasCaptureReadErrors<STMReceive>::value==bool(EXPECTED_RX),"disabled RX must exclude read-error state");
+#if MESH_ENABLE_MORSE_RX || !defined(STM32_PLATFORM)
+  constexpr bool expected_native_hooks=true;
+#else
+  constexpr bool expected_native_hooks=false;
+#endif
+  static_assert(HasFskState<STMReceive>::value==expected_native_hooks,"compact STM must exclude the unused FSK byte");
+  static_assert(HasReceivePreparation<STMReceive>::value==expected_native_hooks,"compact STM must exclude native RX preparation");
+  static_assert(HasReceiveStart<STMReceive>::value==expected_native_hooks,"compact STM must exclude native RX start");
+  static_assert(HasReceiveRead<STMReceive>::value==expected_native_hooks,"compact STM must exclude native RSSI read");
+  static_assert(HasReceiveBandwidth<STMReceive>::value==expected_native_hooks,"compact STM must exclude native bandwidth hook");
   advance(0);
   STMReceive w;
 #if MESH_ENABLE_MORSE_RX
@@ -197,11 +223,13 @@ int main() {
         arduino = ("#pragma once\n#include <cstdint>\n#include <cmath>\n#include <cstdio>\n"
                    "#include <cstdlib>\n#include <cstring>\ninline uint32_t g_mock_millis=0;\n"
                    "inline uint32_t millis() { return g_mock_millis; }\n")
-        for enabled in (0,1):
-            with self.subTest(explicit_rx_opt_in=bool(enabled)):
-                flags = ["-Wno-unused-parameter", "-DSTM32_PLATFORM", f"-DEXPECTED_RX={enabled}"]
-                if enabled:
-                    flags.append("-DMESH_ENABLE_MORSE_RX=1")
+        for platform, enabled in (("STM32_PLATFORM",0),("STM32_PLATFORM",1),(None,0)):
+            with self.subTest(platform=platform, explicit_rx_opt_in=bool(enabled)):
+                flags = ["-Wno-unused-parameter", f"-DEXPECTED_RX={enabled}"]
+                if platform:
+                    flags.append(f"-D{platform}")
+                if enabled or not platform:
+                    flags.append(f"-DMESH_ENABLE_MORSE_RX={enabled}")
                 compile_run(self, code, flags=flags, headers={
                             "Dispatcher.h": portable_radio_header(), "Arduino.h": arduino})
 

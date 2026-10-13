@@ -14,6 +14,8 @@ MOCKS = r'''
 #include <vector>
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <helpers/bridges/RS232Heartbeat.h>
 #define MAX_TRANS_UNIT 255
 using portMUX_TYPE=int;
 #define portMUX_INITIALIZER_UNLOCKED 0
@@ -84,6 +86,7 @@ class Stream {
 public:
  std::vector<uint8_t> input,output;size_t position=0,write_limit=1000;unsigned reads=0;
  int available(){return input.size()-position;}
+ int availableForWrite(){return static_cast<int>(write_limit);}
  int read(){++reads;return position<input.size()?input[position++]:-1;}
  size_t write(const uint8_t* bytes,size_t length){
   length=std::min(length,write_limit);output.insert(output.end(),bytes,bytes+length);return length;
@@ -126,6 +129,12 @@ static void append(HardwareSerial& serial,const std::vector<uint8_t>& frame){
 }
 static mesh::Packet packet(uint8_t id,size_t length=4){
  mesh::Packet p;p.length=length;memset(p.data,id,sizeof(p.data));return p;
+}
+static std::vector<uint8_t> uart_frame(const mesh::Packet& p){
+ const uint16_t sum=BridgeBase::fletcher16(p.data,p.length);
+ std::vector<uint8_t> result={0xc0,0x3e,uint8_t(p.length>>8),uint8_t(p.length)};
+ result.insert(result.end(),p.data,p.data+p.length);
+ result.push_back(uint8_t(sum>>8));result.push_back(uint8_t(sum));return result;
 }
 static void complete(ESPNowBridge& bridge,int status=ESP_NOW_SEND_SUCCESS){
  const uint8_t mac[6]={255,255,255,255,255,255};
@@ -172,9 +181,17 @@ int main(){
  serial.position=serial.input.size();append(serial,uart_frame(5));mgr.exhausted=true;
  bridge.loop();assert(bridge._rx_packet_ready);bridge.end();mgr.exhausted=false;bridge.begin();
  bridge.loop();assert((mgr.received==std::vector<uint8_t>{1,2,4})); // held frame cannot cross restart
- auto outgoing=packet(6);serial.write_limit=2;bridge.sendPacket(&outgoing);
- assert(!bridge._seen_packets.wasSeen(&outgoing)); // failed admission can retry
- serial.write_limit=1000;bridge.sendPacket(&outgoing);assert(bridge._seen_packets.wasSeen(&outgoing));
+ auto outgoing=packet(6),waiting=packet(8);serial.write_limit=2;bridge.sendPacket(&outgoing);
+ assert(bridge._seen_packets.wasSeen(&outgoing)&&bridge._tx_size==10&&bridge._tx_pos==2);
+ // A short hardware write retains the accepted complete frame. A caller's
+ // additional packet cannot overwrite or interleave it, and remains retryable.
+ bridge.sendPacket(&waiting);assert(!bridge._seen_packets.wasSeen(&waiting));
+ assert(bridge._tx_size==10&&bridge._tx_pos==4);
+ serial.write_limit=1000;bridge.loop();assert(serial.output==uart_frame(outgoing)&&bridge._tx_size==0);
+ bridge.sendPacket(&outgoing);assert(serial.output==uart_frame(outgoing)); // duplicate does not replay the short-written prefix
+ bridge.sendPacket(&waiting);assert(bridge._seen_packets.wasSeen(&waiting));
+ auto expected=uart_frame(outgoing);auto tail=uart_frame(waiting);expected.insert(expected.end(),tail.begin(),tail.end());
+ assert(serial.output==expected); // retry preserves byte-exact ordering
  bridge.allowed=false;auto blocked=packet(7);auto total=serial.output.size();
  bridge.sendPacket(&blocked);assert(serial.output.size()==total);
  bridge.allowed=true;serial.input.clear();serial.position=0;

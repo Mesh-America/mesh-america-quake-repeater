@@ -17,6 +17,29 @@ inline const char* morseUsageError() {
 #endif
 }
 
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+inline bool parseMorseHilTiming(const char* argument, MorseHilTimingConfig& timing) {
+  if (!argument || strlen(argument) >= 64) return false;
+  char fields[64];
+  strcpy(fields, argument);
+  char* values[4] = {fields, nullptr, nullptr, nullptr};
+  for (unsigned index = 0; index < 3; ++index) {
+    char* separator = strchr(values[index], ',');
+    if (!separator) return false;
+    *separator = 0; values[index + 1] = separator + 1;
+  }
+  if (strchr(values[3], ',')) return false;
+  uint32_t jitter = 0, gap = 0, seed = 0;
+  int32_t drift = 0;
+  if (!cli::parseUnsignedIntegerStrict(values[0], jitter) || jitter > 20
+      || !cli::parseIntegerStrict(values[1], drift) || drift < -20 || drift > 20
+      || !cli::parseUnsignedIntegerStrict(values[2], gap) || gap > 50
+      || !cli::parseUnsignedIntegerStrict(values[3], seed) || !seed) return false;
+  timing = MorseHilTimingConfig(uint8_t(jitter), int8_t(drift), uint8_t(gap), seed);
+  return true;
+}
+#endif
+
 // Intercept only an explicitly authenticated remote callback. Local USB/BLE
 // commands keep immediate listening; a nonzero timestamp alone is not authority.
 inline bool handleMorseReplyCommand(MorseReplyHandoff& handoff, Radio* radio,
@@ -184,12 +207,55 @@ inline bool handleMorseCommand(Radio* radio, const char* command,
   const bool base = length == 5 && !strncmp(key, "morse", 5);
   const bool frequency = length == 10 && !strncmp(key, "morse.freq", 10);
   const bool speed = length == 9 && !strncmp(key, "morse.wpm", 9);
-  if (!base && !frequency && !speed) return false;
-  if (!radio || (!radio->supportsMorseTx() && !radio->supportsMorseRx())) {
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  const bool hil_timing = length == 16 && !strncmp(key, "morse.hil.timing", 16);
+#endif
+  if (!base && !frequency && !speed
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+      && !hil_timing
+#endif
+      ) return false;
+  if (!radio || (!radio->supportsMorseTx()
+#if MESH_ENABLE_MORSE_RX
+      && !radio->supportsMorseRx()
+#endif
+      )) {
     snprintf(reply, capacity, "Error: Morse unsupported on this radio");
     return true;
   }
   const char* args = cli::skipRecentRepeaterSpaces(key + length);
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  if (hil_timing) {
+    if (query) {
+      if (*args) snprintf(reply, capacity, "Error: unexpected argument");
+      else {
+        const auto& timing = morseHilTiming();
+        snprintf(reply, capacity, "> jitter=%u%%; drift=%d%%; extraGap=%u%%; seed=%lu; volatile HIL TX only",
+            unsigned(timing.jitter_percent), int(timing.drift_percent),
+            unsigned(timing.extra_gap_percent), (unsigned long)timing.seed);
+      }
+      return true;
+    }
+    if (!setting) {
+      snprintf(reply, capacity, "Error: use get/set morse.hil.timing");
+      return true;
+    }
+    if (radio->isCarrierWaveActive() || radio->isMorseTxActive() || radio->isMorseRxActive()
+        || !radio->isInRecvMode() || radio->isReceiving()) {
+      snprintf(reply, capacity, "Error: radio busy; HIL timing changes require idle RX");
+      return true;
+    }
+    MorseHilTimingConfig timing;
+    if (!parseMorseHilTiming(args, timing) || !setMorseHilTiming(timing)) {
+      snprintf(reply, capacity, "Error: use jitter0-20,drift-20..20,extraGap0-50,seed1..4294967295");
+      return true;
+    }
+    snprintf(reply, capacity, "OK - HIL Morse timing %u,%d,%u,%lu; volatile TX only",
+        unsigned(timing.jitter_percent), int(timing.drift_percent),
+        unsigned(timing.extra_gap_percent), (unsigned long)timing.seed);
+    return true;
+  }
+#endif
   const auto& current = morseSettings();
   if ((query || (base && !*args && !setting)) && !morseSettingsUsable()) {
     snprintf(reply, capacity, "Error: saved Morse settings unavailable; verify and save morse.freq");
@@ -210,7 +276,11 @@ inline bool handleMorseCommand(Radio* radio, const char* command,
       snprintf(reply, capacity, "Error: verify and save morse.freq before changing Morse WPM");
       return true;
     }
-    if (radio->isCarrierWaveActive() || radio->isMorseTxActive() || radio->isMorseRxActive()) {
+    if (radio->isCarrierWaveActive() || radio->isMorseTxActive()
+#if MESH_ENABLE_MORSE_RX
+        || radio->isMorseRxActive()
+#endif
+        ) {
       snprintf(reply, capacity, "Error: radio busy; stop Morse/CW before changing settings");
       return true;
     }

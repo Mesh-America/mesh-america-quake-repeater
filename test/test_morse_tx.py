@@ -41,6 +41,32 @@ def compile_run(testcase, code, includes=(), flags=(), headers=None):
 
 
 class MorseTxTests(unittest.TestCase):
+    def test_flash_table_preserves_every_byte_of_the_original_itu_lookup(self):
+        compile_run(self, r'''
+#include <helpers/MorseTx.h>
+#include <cassert>
+static uint8_t original(char c) {
+  if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
+  static const uint8_t letters[] = {5,24,26,12,2,18,14,16,4,23,13,20,7,6,15,22,29,10,8,3,9,17,11,25,27,28};
+  static const uint8_t digits[] = {63,47,39,35,33,32,48,56,60,62};
+  if (c >= 'A' && c <= 'Z') return letters[c - 'A'];
+  if (c >= '0' && c <= '9') return digits[c - '0'];
+  switch (c) {
+    case '.': return 85; case ',': return 115; case '?': return 76;
+    case '\'': return 94; case '!': return 107; case '/': return 50;
+    case '(': return 54; case ')': return 109; case '&': return 40;
+    case ':': return 120; case ';': return 106; case '=': return 49;
+    case '+': return 42; case '-': return 97; case '_': return 77;
+    case '"': return 82; case '$': return 137; case '@': return 90;
+    default: return 0;
+  }
+}
+int main() {
+  for (unsigned byte = 0; byte < 256; ++byte)
+    assert(mesh::MorseTx::codeFor(char(byte)) == original(char(byte)));
+}
+''')
+
     def test_production_encoder_alphabet_punctuation_limits_and_exact_timing(self):
         code = (ROOT / "test/fixtures/morse_encoder.cpp").read_text(encoding="ascii")
         compile_run(self, code)

@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/morse_rx_hil_2026-10-12/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Morse receive hardware checkpoint - 12 October 2026
 
 Status: **incomplete hardware validation**. The release default remains
@@ -118,3 +122,47 @@ installed images and exact USB identities, and run the isolated timing A/B,
 repeated mixed-message speed boundary tests, and the five-minute multipage
 LoRa capture/recovery test. Only then choose and verify any production cap
 or tuning changes. No commit or push was performed for this checkpoint.
+
+## Follow-up: 13 October 2026
+
+The original checkpoint above is historical. Its implementation and Reader /
+RS232 integration were subsequently pushed as `0be4c7488` and `396304822`.
+
+- The receiver now keeps its timing estimate in Q5 rather than whole
+  milliseconds, eliminating the rounding deadband without changing its
+  4168-byte production allocation. Letter/word split thresholds of 2.25/5.5
+  dot units tolerate ordinary +/-20% gap jitter; doubled letter spacing
+  remains explicitly ambiguous, not a supported exact-decoding result.
+- A volatile, default-off HIL transmitter injects seeded phase jitter,
+  gradual speed drift and modest extra spacing. Its exact pre-key duration
+  check retains the 180-second ceiling. Shipping images contain neither
+  the HIL configuration nor its command branch.
+- Fresh focused verification passed 108/108 tests. The real HIL scheduler
+  and receiver passed 154 exact human-timing vectors through experimental
+  240 WPM; 84 additional supported synthetic vectors passed. These are
+  software tests, not physical RF speed qualification.
+- The CI stability group passed 106/106. The bridge recovery fixture now
+  includes the actual RS232 power/heartbeat helpers and verifies byte-exact
+  retained short writes. Source/published documentation links passed 7/7
+  tests plus browser-script checks.
+- Compact STM32 USB Companion links at 228868/229376 flash bytes with
+  unchanged commands and ITU character support. An exhaustive 256-byte
+  comparison verifies the compact ASCII lookup against the original.
+- All four nRF52 HIL targets compiled. Fresh application-only DFU packages
+  were installed on the identity-bound RAK4631, MeshPocket and T096 without
+  changing their bootloaders or SoftDevices.
+- A five-minute remote receive session expired and restored LoRa. All 424
+  captured characters were returned exactly in four LoRa pages, but the
+  decoded RF text did not match the nine transmitted messages: this is a
+  transport/recovery pass and a decoding failure, not an overall pass.
+- Six-second no-intentional-TX controls at 902.1 and 903.1 MHz were empty
+  on the RAK, but produced false characters on the MeshPocket. A subsequent
+  25-WPM alphabet/digit message decoded exactly from Pocket to RAK; the
+  reverse direction had errors. One clean message does not establish a
+  zero-error speed limit.
+
+RF investigation and repeated standard/uneven-timing speed qualification
+remain in progress. Default 25 WPM, public ceiling 60 WPM, radio bandwidth,
+and shipping RF filtering have not been changed. Packet control stays at
+909.5 MHz / 500 kHz / SF5 / CR5; CW remains separate at 902.100 MHz by default.
+Raw results remain in `out/morse-rx/` and the Pi run directory above.

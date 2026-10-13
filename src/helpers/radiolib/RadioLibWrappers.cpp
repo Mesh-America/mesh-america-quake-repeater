@@ -235,7 +235,11 @@ bool RadioLibWrapper::setTxPower(int8_t dbm) {
   // A CW power-meter sweep may re-key the carrier. During Morse that would
   // turn an inter-symbol gap into RF and corrupt the text, so keep the whole
   // message exclusive (including cleanup retries).
-  if ((_morse_owned || _morse_rx_owned) && _cw_active) return false;
+  if ((_morse_owned
+#if MESH_ENABLE_MORSE_RX
+      || _morse_rx_owned
+#endif
+      ) && _cw_active) return false;
   if (_cw_active) {
     if (_cw_stopping) return false;
     // Permit meter sweeps through the board's normal power/PA calibration.
@@ -1006,7 +1010,9 @@ void RadioLibWrapper::checkReceiveMode(uint32_t now) {
 uint32_t RadioLibWrapper::carrierWaveRemainingMillis() const {
   if (!_cw_active || _cw_stopping) return 0;
   if (_morse_owned) return morseTxRemainingMillis();
+#if MESH_ENABLE_MORSE_RX
   if (_morse_rx_owned) return morseRxRemainingMillis();
+#endif
   const int32_t remaining = static_cast<int32_t>(_cw_until - millis());
   return remaining > 0 ? static_cast<uint32_t>(remaining) : 0;
 }
@@ -1015,13 +1021,21 @@ mesh::RadioParamApplyResult RadioLibWrapper::setCarrierWave(uint8_t profile, uin
   using Result = mesh::RadioParamApplyResult;
   // The shared emergency stop also covers chips exposing Morse without the
   // older profile-CW CLI capability.
-  if (!duration_ms && (_morse_owned || _morse_rx_owned)) return stopCarrierWave() ? Result::APPLIED : Result::FAILED;
+  if (!duration_ms && (_morse_owned
+#if MESH_ENABLE_MORSE_RX
+      || _morse_rx_owned
+#endif
+      )) return stopCarrierWave() ? Result::APPLIED : Result::FAILED;
   if (!supportsCarrierWave()) return Result::FAILED;
   if (!duration_ms) return !_cw_active || stopCarrierWave() ? Result::APPLIED : Result::FAILED;
   if (profile > 1 || duration_ms > CarrierWaveMaxMillis || !_params_valid
       || !_profiles.canTransmit(profile)) return Result::FAILED;
   if (_cw_active) {
-    if (_morse_owned || _morse_rx_owned || _cw_stopping || profile != _cw_profile
+    if (_morse_owned
+#if MESH_ENABLE_MORSE_RX
+        || _morse_rx_owned
+#endif
+        || _cw_stopping || profile != _cw_profile
         || _cw_generation != _profiles.generation[profile]) return Result::BUSY;
     _cw_until = static_cast<uint32_t>(millis()) + duration_ms;
     return Result::APPLIED;
@@ -1402,13 +1416,17 @@ bool RadioLibWrapper::stopCarrierWave() {
     return false;
   }
   _morse_owned = false;
+#if MESH_ENABLE_MORSE_RX
   _morse_rx_owned = false;
+#endif
   _board->setRadioTestActive(false);
   return true;
 }
 
 bool RadioLibWrapper::serviceCarrierWave() {
+#if MESH_ENABLE_MORSE_RX
   if (serviceMorseRx()) return true;
+#endif
   if (serviceMorseTx()) return true;
   if (_cw_active) {
     const uint32_t now = millis();

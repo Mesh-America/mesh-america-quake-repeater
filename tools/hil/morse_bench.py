@@ -8,6 +8,7 @@ The active LoRa packet profile stays at 909.5 MHz, 500 kHz, SF5, CR5.
 import argparse
 import json
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import time
@@ -18,6 +19,8 @@ SERIALS = {"rak": "9AB3B64C641BA927", "t096": "651F8E496197F882",
            "pocket": "93DA83ADF7B2092B"}
 DEFAULT_CW_FREQUENCY = 902.1
 PACKET_RADIO = "909.5,500,5,5"
+STANDARD_TIMING = {"jitter_percent": 0, "drift_percent": 0,
+                   "extra_gap_percent": 0, "seed": 1}
 MESSAGES = (
     "SOS TEST DE N0CALL 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     "E T I M S O H Z 5 0 PARIS QUICK BROWN FOX JUMPS OVER LAZY DOG",
@@ -38,6 +41,17 @@ def parse_cw_frequency(text):
     return frequency
 
 
+def parse_human_timing(text):
+    match = re.fullmatch(r"(\d+),([+-]?\d+),(\d+),(\d+)", text)
+    if not match:
+        raise argparse.ArgumentTypeError("Use jitter,drift,extraGap,seed (for example15,10,25,12345)")
+    jitter, drift, gap, seed = map(int, match.groups())
+    if not 0 <= jitter <= 20 or not -20 <= drift <= 20 or not 0 <= gap <= 50 or not 1 <= seed <= 0xffffffff:
+        raise argparse.ArgumentTypeError("Jitter0-20%, drift-20..20%, extra gap0-50%, seed1..4294967295 only")
+    return {"jitter_percent": jitter, "drift_percent": drift,
+            "extra_gap_percent": gap, "seed": seed}
+
+
 def live_temporary_profile(reply):
     """Parse only confirmed live profiles, never saved/pending radio settings."""
     fields = r"(\d+(?:\.\d+)?),(\d+(?:\.\d+)?),(\d+),(\d+)"
@@ -48,6 +62,27 @@ def live_temporary_profile(reply):
     if match is None:
         return None
     return float(match[1]), float(match[2]), int(match[3]), int(match[4])
+
+
+def matched_console_reply(data, command, companion):
+    """Require this command's complete echo before its reply and final prompt."""
+    text = data.decode("utf-8", errors="replace")
+    echoes = list(re.finditer(r"(?:^|\r?\n)(?:> )?" + re.escape(command) + r"\r?\n", text))
+    if not echoes:
+        return None
+    # A timed-out session is never reused, so repeated polling cannot confuse
+    # an old echo with a new request. Discard complete *different* stale frames.
+    echo = echoes[-1]
+    tail = text[echo.end():]
+    response = re.search(r"(?m)^  (?:-> |ERROR:|OK(?=\r?(?:\n|$)| -))", tail)
+    if response is None:
+        return None
+    ending = re.search(r"\r?\n> " if companion else r"\r?\n",
+                       tail[response.start():])
+    if ending is None:
+        return None
+    end = echo.end() + response.start() + ending.end()
+    return text[echo.start():end].lstrip("\r\n")
 
 
 class Console:
@@ -64,6 +99,7 @@ class Console:
         self.port.port = matches[0].device
         self.port.open()
         self.commands = []
+        self.failed = False
         try:
             hello = self.read_quiet(1)
             if companion and "WELCOME" not in hello:
@@ -85,25 +121,33 @@ class Console:
                 quiet = time.monotonic() + .12
         return data.decode("utf-8", errors="replace")
 
-    def command(self, text, timeout=3, allow_error=False):
-        if self.port.in_waiting:
-            self.read_quiet(.15)
-        self.port.write((text + "\r\n").encode())
+    def command(self, text, timeout=10, allow_error=False):
+        if getattr(self, "failed", False):
+            raise RuntimeError(("CLI session desynchronized; refusing further commands", self.serial_number, text))
+        if "\r" in text or "\n" in text:
+            raise ValueError("One CLI command per request only")
         data = bytearray()
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            data.extend(self.port.read(self.port.in_waiting or 1))
-            reply = data.decode("utf-8", errors="replace")
-            # Flash writes/display callbacks can outlast a quiet interval.
-            # Await the command response AND its closing owned-terminal prompt,
-            # not merely an echoed command or asynchronous RX prompt redraw.
-            complete = reply.endswith("\r\n> ") if self.companion else reply.endswith("\r\n")
-            if ("  -> " in reply or "  ERROR:" in reply
-                    or re.search(r"(?:^|\r\n)  OK(?:\r\n| -)", reply)) and complete:
-                break
-        else:
-            raise RuntimeError(("Incomplete CLI response", self.serial_number, text,
-                                data.decode("utf-8", errors="replace")))
+        try:
+            if self.port.in_waiting:
+                self.read_quiet(.15)
+            self.port.write((text + "\r\n").encode())
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                data.extend(self.port.read(self.port.in_waiting or 1))
+                reply = matched_console_reply(data, text, self.companion)
+                if reply is not None:
+                    break
+            else:
+                raise RuntimeError(("Incomplete CLI response", self.serial_number, text,
+                                    data.decode("utf-8", errors="replace")))
+        except BaseException as error:
+            # Do not issue another command after a missing echo/reply/transport
+            # completion: a late response would otherwise shift every exchange.
+            self.failed = True
+            self.commands.append({"command": text, "reply": data.decode("utf-8", errors="replace"),
+                                  "failed": True, "error": str(error),
+                                  "utc": datetime.now(timezone.utc).isoformat()})
+            raise
         self.commands.append({"command": text, "reply": reply})
         if not reply or (not allow_error and re.search(r"\b(?:Error|ERROR|ERR)\b", reply)):
             raise RuntimeError((self.serial_number, text, reply))
@@ -116,7 +160,29 @@ class Console:
         self.start_when_idle("set radio2 off")
         self.command(f"set morse.freq {cw_frequency:.6f}")
         self.command("set morse.wpm 25")
+        self.set_hil_timing()
         self.apply_live_temporary(PACKET_RADIO)
+
+    def set_hil_timing(self, timing=None):
+        chosen = timing or STANDARD_TIMING
+        values = tuple(chosen[field] for field in ("jitter_percent", "drift_percent", "extra_gap_percent", "seed"))
+        command = "set morse.hil.timing " + ",".join(map(str, values))
+        try:
+            self.start_when_idle(command)
+        except RuntimeError as error:
+            # A shipping image contains no timing variation state. Any other
+            # error (including busy/recovery) must not masquerade as standard.
+            message = str(error)
+            unsupported = "Error: HIL-only" in message or (
+                "morse.hil.timing" in message and re.search(r"\bunknown (?:command|setting)\b", message, re.I))
+            if timing is None and unsupported and not getattr(self, "failed", False):
+                return "production image: standard timing only"
+            raise
+        reply = self.command("get morse.hil.timing")
+        observed = re.search(r"jitter=(\d+)%; drift=(-?\d+)%; extraGap=(\d+)%; seed=(\d+)", reply)
+        if not observed or tuple(map(int, observed.groups())) != values:
+            raise RuntimeError(("HIL timing readback mismatch", chosen, reply))
+        return reply
 
     def apply_live_temporary(self, profile, timeout=12):
         expected = tuple(float(value) for value in profile.split(","))
@@ -136,7 +202,7 @@ class Console:
     def start_when_idle(self, text):
         deadline = time.monotonic() + 10
         while True:
-            reply = self.command(text, allow_error=True)
+            reply = self.command(text, timeout=15, allow_error=True)
             if "Error: radio busy" not in reply:
                 if re.search(r"\b(?:Error|ERROR|ERR)\b", reply):
                     raise RuntimeError((self.serial_number, text, reply))
@@ -191,17 +257,20 @@ class Console:
 
     def close(self):
         try:
-            self.command("morse stop", allow_error=True)
-            self.command("set morse.wpm 25", allow_error=True)
+            if not getattr(self, "failed", False):
+                self.command("morse stop", allow_error=True)
+                self.set_hil_timing()
+                self.command("set morse.wpm 25", allow_error=True)
         finally:
             self.port.close()
 
 
-def trial(tx, rx, wpm, message, seconds=60, trace=False):
+def trial(tx, rx, wpm, message, seconds=60, trace=False, human_timing=None):
     tx.command("morse stop")
     rx.command("morse stop")
     tx.command(f"set morse.wpm {wpm}")
     rx.command(f"set morse.wpm {wpm}")
+    timing_status = tx.set_hil_timing(human_timing)
     rx.start_when_idle(f"morse listen {seconds / 60:.4f}")
     # Establish a real quiet RSSI floor before any carrier transmission.
     time.sleep(.8)
@@ -223,6 +292,7 @@ def trial(tx, rx, wpm, message, seconds=60, trace=False):
             "tx_serial": tx.serial_number, "rx_serial": rx.serial_number,
             "sent": message, "decoded": decoded, "passed": decoded.strip() == message,
             "tx_elapsed_s": round(tx_finished - started, 3),
+            "human_timing": human_timing or STANDARD_TIMING, "tx_timing_status": timing_status,
             "rx_status": rx_status, "rx_stats": stats}
     if trace:
         result["trace"] = rx.trace()
@@ -242,6 +312,9 @@ def main():
     parser.add_argument("--direction", choices=("both", "to-rak", "from-rak"), default="both",
                         help="Test both directions, partner TX to RAK, or RAK TX to partner")
     parser.add_argument("--trace", action="store_true", help="Requires a MESH_MORSE_HIL trace build")
+    parser.add_argument("--human-timing", nargs="?", type=parse_human_timing,
+                        const="15,10,25,12345",
+                        help="Device-timed HIL jitter,drift,extraGap,seed; default preset15,10,25,12345")
     parser.add_argument("--quiet-seconds", type=int, default=0,
                         help="No-transmitter receive control, 1-30 seconds")
     parser.add_argument("--t096-rxgain", choices=("on", "off"),
@@ -259,6 +332,7 @@ def main():
     results = {"frequency_mhz": args.cw_frequency, "packet_radio": PACKET_RADIO,
                "requested_chip_power_dbm": -9,
                "partner": args.partner, "direction": args.direction,
+               "human_timing": args.human_timing or STANDARD_TIMING,
                "scope": "Experimental HIL applications on this pair; not production speed qualification or all radio families.",
                "trials": [], "finished": False}
     devices = {}
@@ -301,7 +375,10 @@ def main():
             for tx_name, rx_name in directions:
                 for repeat in range(args.repeats):
                     for message in MESSAGES[:args.messages]:
-                        result = trial(devices[tx_name], devices[rx_name], rate, message, trace=args.trace)
+                        options = {"trace": args.trace}
+                        if args.human_timing is not None:
+                            options["human_timing"] = args.human_timing
+                        result = trial(devices[tx_name], devices[rx_name], rate, message, **options)
                         result["repeat"] = repeat
                         results["trials"].append(result)
                         printable = {key: value for key, value in result.items() if key != "trace"}
@@ -312,6 +389,7 @@ def main():
         results["finished"] = True
     except BaseException as error:
         results["error"] = str(error)
+        results["error_utc"] = datetime.now(timezone.utc).isoformat()
         raise
     finally:
         if original_gain is not None:

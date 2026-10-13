@@ -152,7 +152,8 @@ public:
     clear();
     _started = _last_edge = now;
     _until = now + duration_ms;
-    _nominal_unit = _unit = MorseTx::unitMillis(wpm);
+    _nominal_unit = MorseTx::unitMillis(wpm);
+    _unit_q5 = uint16_t(uint32_t(_nominal_unit) * UnitScale);
     _noise = _signal = 0;
     _samples = 0;
     _last_sample_at = now;
@@ -180,7 +181,7 @@ public:
   size_t length() const { return _length; }
   bool truncated() const { return _truncated; }
   float noiseDbm() const { return _have_noise ? _noise : -200.0f; }
-  uint16_t unitMillis() const { return _unit; }
+  uint16_t unitMillis() const { return uint16_t((_unit_q5 + UnitScale / 2) / UnitScale); }
   void diagnostics(MorseRxDiagnostics& out) const {
     out.noise_dbm = _have_noise ? _noise : NAN;
     out.last_dbm = _last_rssi;
@@ -188,7 +189,7 @@ public:
     out.maximum_dbm = _maximum_rssi;
     out.samples = _samples;
     out.max_sample_gap_ms = _max_sample_gap_ms;
-    out.unit_ms = _unit;
+    out.unit_ms = unitMillis();
     out.read_errors = 0;
   }
 
@@ -289,7 +290,7 @@ public:
       traceSample(rssi_dbm, now, raw_keyed);
       return;
     }
-    uint16_t debounce = _unit / 4;
+    uint16_t debounce = _unit_q5 / (4 * UnitScale);
     uint16_t minimum_debounce = 2;
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL \
     && defined(MESH_MORSE_HIL_FAST_OFF_DEBOUNCE) \
@@ -331,13 +332,19 @@ public:
   }
 
 private:
+  // Keep fractional timing in the existing 16-bit field: a whole-ms 1/8 EMA
+  // has a four-ms rounding deadband and cannot adapt at fast Morse speeds.
+  // Q5 supports the full 1 WPM, +25% range without adding receiver memory.
+  static constexpr uint16_t UnitScale = 32;
+  static_assert((1200UL * 5 / 4) * UnitScale <= UINT16_MAX,
+                "fractional Morse timing must fit its existing 16-bit field");
   char _capture[CaptureCapacity + 1] = {};
   uint32_t _started = 0, _until = 0, _last_edge = 0, _candidate_at = 0;
   float _noise = 0, _signal = 0;
   float _last_rssi = NAN, _minimum_rssi = NAN, _maximum_rssi = NAN;
   uint32_t _samples = 0;
   uint32_t _last_sample_at = 0, _max_sample_gap_ms = 0;
-  uint16_t _length = 0, _unit = 0, _nominal_unit = 0;
+  uint16_t _length = 0, _unit_q5 = 0, _nominal_unit = 0;
   uint8_t _code = 1, _symbols = 0;
   bool _active = false, _keyed = false, _have_noise = false;
   bool _floor_settled = false;
@@ -393,20 +400,26 @@ private:
     // gaps. Never feed that fixed delay back into an even longer gap threshold.
     // Faster-peer adaptation still lowers the threshold; slower peers have
     // longer physical gaps and remain distinguishable at the nominal timing.
-    const uint16_t gap_unit = _unit < _nominal_unit ? _unit : _nominal_unit;
-    if (gap * 2UL >= uint32_t(gap_unit) * 5UL && !_letter_flushed) flushLetter();
-    if (gap >= uint32_t(gap_unit) * 6UL && !_word_flushed && _letter_flushed) {
+    const uint16_t nominal_q5 = uint16_t(uint32_t(_nominal_unit) * UnitScale);
+    const uint16_t gap_unit_q5 = _unit_q5 < nominal_q5 ? _unit_q5 : nominal_q5;
+    // Ordinary +/-20% gap jitter still separates an intra-letter gap (<=1.2
+    // units) from a letter gap (>=2.4), and letters (<=3.6) from words (>=5.6).
+    // Keep some margin at 2.25/5.5 units rather than merging shortened gaps.
+    // This is not automatic Farnsworth-spacing or unknown-speed acquisition.
+    if (gap * 4UL * UnitScale >= uint32_t(gap_unit_q5) * 9UL && !_letter_flushed) flushLetter();
+    if (gap * 2UL * UnitScale >= uint32_t(gap_unit_q5) * 11UL && !_word_flushed && _letter_flushed) {
       append(' ');
       _word_flushed = true;
     }
   }
   void recordMark(uint32_t duration_ms) {
-    if (duration_ms * 3UL < _unit) return; // sub-third-dot glitches
-    if (duration_ms > uint32_t(_unit) * 6UL || _symbols >= 7) {
+    const uint32_t duration_q5 = duration_ms * UnitScale;
+    if (duration_q5 * 3UL < _unit_q5) return; // sub-third-dot glitches
+    if (duration_q5 > uint32_t(_unit_q5) * 6UL || _symbols >= 7) {
       _bad_pattern = true;
       return;
     }
-    const bool dash = duration_ms >= uint32_t(_unit) * 2UL;
+    const bool dash = duration_q5 >= uint32_t(_unit_q5) * 2UL;
     _code = uint8_t((_code << 1) | (dash ? 1 : 0));
     ++_symbols;
     uint32_t observed = dash ? (duration_ms + 1) / 3 : duration_ms;
@@ -414,7 +427,7 @@ private:
     const uint32_t upper = uint32_t(_nominal_unit) * 5 / 4;
     if (observed < lower) observed = lower;
     if (observed > upper) observed = upper;
-    _unit = uint16_t((uint32_t(_unit) * 7 + observed + 4) / 8);
+    _unit_q5 = uint16_t((uint32_t(_unit_q5) * 7 + observed * UnitScale + 4) / 8);
   }
 };
 

@@ -123,10 +123,15 @@ protected:
 #endif
   float _morse_rx_frequency = mesh::MorseTx::DefaultFrequencyMHz;
   uint32_t _morse_rx_next_sample = 0, _morse_capture_generation = 0;
-#endif
   bool _morse_rx_owned = false;
-  bool _morse_rx_fsk_mode = false;
   uint8_t _morse_rx_read_errors = 0;
+#endif
+#if MESH_ENABLE_MORSE_RX || !defined(STM32_PLATFORM)
+  // Non-STM wrappers retain their native hook declarations for an explicit
+  // RX-disabled build; those hooks may still compile but cannot be admitted.
+  bool _morse_rx_fsk_mode = false;
+#endif
+  // End Morse RX state.
   bool stopCarrierWave();
   bool serviceCarrierWave();
   bool serviceMorseTx();
@@ -247,6 +252,9 @@ protected:
   }
   virtual int16_t enterMorseCarrier() { return _radio->transmitDirect(); }
   virtual int16_t leaveMorseCarrier() { return _radio->standby(); }
+#if MESH_ENABLE_MORSE_RX || !defined(STM32_PLATFORM)
+  // Compact integrated-STM builds cannot receive Morse. Do not pin unused
+  // native RX thunks and vtable slots in their already full application slot.
   virtual float morseReceiverBandwidthKHz() const { return 0.0f; }
   virtual int16_t prepareMorseReceiver(float frequency_mhz) {
     (void)frequency_mhz;
@@ -258,6 +266,7 @@ protected:
   virtual float readMorseRssi() { return getCurrentRSSI(); }
 #if MESH_ENABLE_MORSE_RX
   virtual bool canAllocateMorseReceiver() const;
+#endif
 #endif
   // Native-CW radios keep their modem. Reapply cached power in case a meter
   // sweep failed halfway through; SX127x also rebuilds its LoRa configuration.

@@ -120,19 +120,19 @@ class BenchControlTests(unittest.TestCase):
             def __init__(self,chunks): self.chunks=iter(chunks); self.reads=0; self.writes=[]
             def write(self,data): self.writes.append(data)
             def read(self,length): self.reads+=1; return next(self.chunks,b"")
-        for parts in ((b"set tempradio 909.5,500,5,5,30\r\n",b"  OK\r\n",b"> "),
-                      (b"get morse\r\n  -> > off;\r\n",b"> ")):
+        for command,parts in (("set tempradio 909.5,500,5,5,30",(b"set tempradio 909.5,500,5,5,30\r\n",b"  OK\r\n",b"> ")),
+                              ("get morse",(b"get morse\r\n  -> > off;\r\n",b"> "))):
             receiver=object.__new__(actual_bench.Console)
             receiver.companion=True; receiver.serial_number="test"; receiver.commands=[]; receiver.port=Port(parts)
             with patch.object(actual_bench,"time",types.SimpleNamespace(monotonic=lambda:0)):
-                reply=receiver.command("set tempradio 909.5,500,5,5,30")
+                reply=receiver.command(command)
             self.assertEqual(reply,b"".join(parts).decode())
             self.assertEqual(receiver.port.reads,len(parts))
-            self.assertEqual(receiver.port.writes,[b"set tempradio 909.5,500,5,5,30\r\n"])
+            self.assertEqual(receiver.port.writes,[(command+"\r\n").encode()])
         receiver=object.__new__(actual_bench.Console)
         receiver.companion=True; receiver.serial_number="test"; receiver.commands=[]
         receiver.port=Port((b"set tempradio 909.5,500,5,5,30\r\n> ",))
-        times=iter((0,0,4))
+        times=iter((0,0,11))
         with patch.object(actual_bench,"time",types.SimpleNamespace(monotonic=lambda:next(times))):
             with self.assertRaisesRegex(RuntimeError,"Incomplete CLI response"):
                 receiver.command("set tempradio 909.5,500,5,5,30")

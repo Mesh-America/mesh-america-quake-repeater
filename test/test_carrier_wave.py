@@ -127,8 +127,6 @@ struct RadioLibWrapper : mesh::Radio {
   uint8_t _morse_wpm=mesh::MorseTx::DefaultWpm;
   uint32_t _morse_generation[2]={};
   @MORSE_RX_FIELDS@
-  bool _morse_rx_owned=false, _morse_rx_fsk_mode=false;
-  uint8_t _morse_rx_read_errors=0;
   bool receiver_allocation_ok=true, fail_morse_params=false;
   float rssi=-110, morse_bandwidth=0;
   uint32_t rssi_latency=0;
@@ -187,6 +185,7 @@ struct RadioLibWrapper : mesh::Radio {
   virtual float getCurrentRSSI() { ++rssi_reads; g_mock_millis+=rssi_latency; return rssi; }
   bool setTxPower(int8_t dbm);
   @NATIVE_HOOKS@
+#if MESH_ENABLE_MORSE_RX || !defined(STM32_PLATFORM)
   @RX_HOOKS@
   @RX_START_HOOKS@
   // Explicit stand-in for a proven native-RSSI modem. Concrete production
@@ -197,6 +196,7 @@ struct RadioLibWrapper : mesh::Radio {
     if (!applyParams(freq,morseReceiverBandwidthKHz(),7,5)) return RADIOLIB_ERR_UNKNOWN;
     return RADIOLIB_ERR_NONE;
   }
+#endif
   virtual bool supportsRadioDeepInit() const { return deep_supported; }
   uint8_t beginReconfigure();
   void endReconfigure(bool resume) { if (resume) startRecv(); }
@@ -236,6 +236,9 @@ struct RadioLibWrapper : mesh::Radio {
   void onSendFinished() override {}
 };
 @METHODS@
+#if MESH_ENABLE_MORSE_RX || !defined(STM32_PLATFORM)
+// SX1276/DAC declarations are exercised on their actual non-STM targets;
+// compact integrated-STM builds do not compile these other native chips.
 struct CustomSX1276Wrapper : RadioLibWrapper {
   CustomSX1276Wrapper() { reset_ok=true; }
   @SX1276_METHODS@
@@ -251,6 +254,7 @@ struct DacCarrier : CustomSX1276Wrapper {
   void writeGainControl(uint8_t value) { gain=value; }
   @DAC_METHODS@
 };
+#endif
 static void advance(uint32_t ms) { g_mock_millis+=ms; }
 int main() {
   using Result=mesh::RadioParamApplyResult;
@@ -472,7 +476,7 @@ def production_harness():
     code = HARNESS.replace('@METHODS@', '\n'.join(extract_transition(s) for s in signatures))
     header = (ROOT/'src/helpers/radiolib/RadioLibWrappers.h').read_text()
     fields_start = header.rfind('#if MESH_ENABLE_MORSE_RX',0,header.index('mesh::MorseRx* _morse_rx'))
-    fields_end = header.index('  bool _morse_rx_owned',fields_start)
+    fields_end = header.index('  // End Morse RX state.',fields_start)
     code = code.replace('@MORSE_RX_FIELDS@',header[fields_start:fields_end])
     code = code.replace('@MORSE_DESTRUCTOR@',method(header,'~RadioLibWrapper('))
     code = code.replace('@NATIVE_HOOKS@', '\n'.join(method(header, s) for s in (
