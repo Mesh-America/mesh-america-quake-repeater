@@ -4,6 +4,10 @@
 
 # Firmware picker
 
+For shorter, version-pinned firmware download URLs, use
+[Short firmware links](d.md). Those links serve the original verified firmware
+files and include the RAK4631 Full Companion 1.17.1.10 preview2 for MeshTalk testing.
+
 Each result now includes **Restore your settings after flashing**. Its commands
 follow the selected logging mode and the exact image's verified role/hardware
 controls. Click On, Off, or Check to view and copy the commands; Companion

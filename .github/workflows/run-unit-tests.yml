@@ -191,6 +191,11 @@ jobs:
       - name: Verify build output cleanup safety
         run: python3 -B test/test_build_output_safety.py -v
 
+      - name: Verify immutable short firmware downloads and Pages publishing
+        run: |
+          python3 -B test/test_firmware_shortlinks.py -v
+          python3 -B test/test_docs_firmware_shortlinks.py -v
+
       - name: Verify serial mOTA response deadlines and RX fairness
         run: |
           python3 -B test/test_mota_serial_deadline.py -v

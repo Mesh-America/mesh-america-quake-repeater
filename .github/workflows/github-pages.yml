@@ -23,6 +23,12 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Preserve published firmware short-link identities
+        run: |
+          python scripts/check_published_firmware_shortlinks.py \
+            --manifest docs/_data/firmware_shortlinks.json \
+            --previous "$RUNNER_TEMP/previous-firmware-shortlinks.json"
+
       - name: Build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -32,6 +38,8 @@ jobs:
           MKDOCS_EDIT_URI: edit/${{ github.ref_name }}/docs/
         run: |
           pip install mkdocs-material
+          python -B test/test_firmware_shortlinks.py -v
+          python -B test/test_docs_firmware_shortlinks.py -v
           node test/test_firmware_picker.js
           node test/test_partition_catalog_viewer.js
           python scripts/sync_bootloader_manifest.py
