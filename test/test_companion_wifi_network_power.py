@@ -47,8 +47,9 @@ struct Interface {
   int ends = 0, begins = 0;
   bool isConnected() const { return connected; }
   void end() { enabled = false; ++ends; }
-  void begin(int) { ++begins; }
+  bool begin(int) { ++begins; return true; }
   void enable() { enabled = true; }
+  bool isListening() const { return enabled && begins > ends; }
 } wifi_interface;
 struct ConsoleClient {
   bool active = false;
@@ -71,6 +72,7 @@ void mesh::wifi::setStationAutoReconnect(bool value) { WiFi.setAutoReconnect(val
 
 struct Tracker { void noteDisconnected(uint32_t) {} } wifi_reconnect_tracker;
 bool companion_wifi_active = true, companion_wifi_requested = true;
+bool companion_wifi_interface_registered = true;
 bool companion_wifi_background_stopped = false;
 bool companion_wifi_espnow_restore_pending = false;
 uint32_t companion_wifi_espnow_restore_at = 0;
@@ -116,6 +118,7 @@ void reset() {
   test_now = 10000;
   board = {}; wifi_interface = {}; ota_console_client = {}; WiFi = {};
   companion_wifi_active = companion_wifi_requested = true;
+  companion_wifi_interface_registered = true;
   companion_wifi_background_stopped = false;
   companion_wifi_espnow_restore_pending = false;
   companion_wifi_espnow_restore_at = 0;
@@ -345,6 +348,15 @@ int main() {
   assert(!companion_wifi_webconfig_start_pending);
   mesh::wifi::networkPower().setManaged(false);
   assert(companionWiFiAutomaticRecoveryAllowed());
+
+  // Recovery cannot publish a listener that no dispatcher registered.
+  reset();
+  companion_wifi_interface_registered = false;
+  mesh::wifi::networkPower().setSuspended(true);
+  serviceCompanionWiFiBackgroundPower();
+  mesh::wifi::networkPower().setSuspended(false);
+  serviceCompanionWiFiBackgroundPower();
+  assert(!companion_wifi_background_stopped && wifi_interface.begins == 0);
 }
 '''
 

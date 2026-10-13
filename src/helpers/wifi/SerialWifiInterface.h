@@ -5,12 +5,63 @@
 #include <WiFi.h>
 
 class SerialWifiInterface : public BaseSerialInterface {
+public:
+  enum class State : uint8_t { Off, WaitingIp, Retrying, Listening };
+  enum class StartError : uint8_t { None, InvalidPort, StartFailed };
+  enum class DisconnectReason : uint8_t {
+    None, PeerClosed, FrameTimeout, InvalidHeader, ShortHeader, ShortPayload,
+    Replaced, Disabled, Ended
+  };
+  struct Status {
+    State state;
+    bool enabled;  // Logical enable intent, including a listener awaiting retry.
+    bool requested;
+    bool addressReady;
+    bool listening;  // Actual SDK listener state, not merely an assigned IP.
+    bool clientConnected;
+    uint16_t port;
+    uint32_t beginAttempts;
+    uint32_t beginFailures;
+    uint32_t retryInMs;
+    StartError lastStartError;
+    int lastErrno;
+    uint32_t acceptedClients;
+    uint32_t validFrames;
+    uint8_t lastOpcode;
+    uint32_t txFrames;
+    uint8_t lastTxOpcode;
+    uint32_t disconnects;
+    DisconnectReason lastDisconnectReason;
+  };
+
+private:
   bool deviceConnected;
+  // Keep enable intent separate from actual protocol availability. A failed
+  // cold listener needs loop service; a healthy accepted socket remains usable.
   bool _isEnabled;
   unsigned long _last_write;
 
-  WiFiServer server;
-  WiFiClient client;
+  // Arduino's listener conversion and client health accessor are not const.
+  mutable WiFiServer server;
+  mutable WiFiClient client;
+  bool listener_requested = false;
+  bool listener_was_healthy = false;
+  bool listener_attempted = false;
+  uint16_t listener_port = 0;
+  uint8_t consecutive_start_failures = 0;
+  uint32_t listener_last_attempt = 0;
+  uint32_t listener_retry_ms = 0;
+  uint32_t listener_begin_attempts = 0;
+  uint32_t listener_begin_failures = 0;
+  StartError listener_last_error = StartError::None;
+  int listener_last_errno = 0;
+  uint32_t accepted_clients = 0;
+  uint32_t valid_frames = 0;
+  uint8_t last_opcode = 0;
+  uint32_t tx_frames = 0;
+  uint8_t last_tx_opcode = 0;
+  uint32_t disconnect_count = 0;
+  DisconnectReason last_disconnect_reason = DisconnectReason::None;
 
   struct FrameHeader {
     uint8_t type;
@@ -44,7 +95,10 @@ class SerialWifiInterface : public BaseSerialInterface {
   void clearBuffers();
   void expireHeldQueue(uint32_t now);
   void selectClient(const IPAddress& ip, uint32_t now);
-  void disconnectClient(bool cancel_session);
+  void disconnectClient(bool cancel_session, DisconnectReason reason);
+  bool addressReady();
+  bool serviceListener(uint32_t now);
+  void stopListener(DisconnectReason reason);
 
 protected:
 
@@ -58,8 +112,14 @@ public:
     received_frame_header.length = 0;
   }
 
-  void begin(int port);
+  // Explicitly request a listener; does not enable the protocol interface.
+  // Failure or an unready network is retried by loop() only while enabled.
+  bool begin(int port);
   void end();
+  Status getStatus();
+  static const char* stateName(State state);
+  static const char* startErrorName(StartError error);
+  static const char* disconnectReasonName(DisconnectReason reason);
   // Called synchronously while disconnected, on teardown or before a different
   // IP can send commands/receive replies. Same-IP live replacement preserves
   // the existing owner; actual disconnects cancel its pending operations.
@@ -71,7 +131,12 @@ public:
   // BaseSerialInterface methods
   void enable() override;
   void disable() override;
-  bool isEnabled() const override { return _isEnabled; }
+  bool isEnabled() const override {
+    // Losing the accept listener must not cancel a stream whose separately
+    // accepted socket is still healthy. Failed cold starts remain unavailable.
+    return _isEnabled && listener_requested
+        && (static_cast<bool>(server) || (deviceConnected && client.connected()));
+  }
   void loop() override;
 
   bool isConnected() const override;

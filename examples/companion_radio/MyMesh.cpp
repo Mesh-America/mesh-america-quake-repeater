@@ -4308,6 +4308,10 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     snprintf(reply, reply_size, "> %u", (unsigned)_prefs.wifi_enabled);
     return true;
   }
+  if (strcmp(command, "get wifi.tcp") == 0) {
+    formatCompanionWiFiTcpStatus(reply, reply_size);
+    return true;
+  }
   if (strncmp(command, "set wifi.enabled ", 17) == 0) {
     int32_t enabled;
     if (!mesh::cli::parseIntegerStrict(command + 17, enabled)

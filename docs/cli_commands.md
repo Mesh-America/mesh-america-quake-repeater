@@ -422,6 +422,26 @@ credentials alone do not turn it on. ESP32 simultaneous-transport builds apply
 the change from the main loop; exclusive-transport builds and Pico W apply it
 after reboot. This does not disable a primary ESP-NOW mesh radio or add Bluetooth
 to a WiFi-only build.
+
+ESP32 WiFi Companions also accept `get wifi.tcp` over USB, BLE, or the browser
+CLI. This checks the app's TCP listener (normally port `5000`), not just the
+WiFi association. `listening` means the socket is open; `waiting-ip` means no
+usable station or setup-AP address yet; `retrying` means listener startup
+failed and will be retried automatically; `off` means no enabled listener
+request. `reg=1` confirms the interface is registered for Companion commands.
+`client=1` means a TCP client is connected. `acc`, `rx`, and `tx` count accepted
+clients, complete received frames, and complete transmitted frames since boot;
+the value after `/` is the last frame's hexadecimal opcode. `fail`, `err`, and
+`retry` show listener failures, the last socket error, and seconds until retry.
+`drop` gives the last client-disconnect reason. These counters contain no
+message contents or credentials. An open listener does not prove a router or
+guest-network firewall permits access from the phone.
+
+Listener retries wait 1, 2, 4, 8, 16, then at most 30 seconds. They do not
+reconnect WiFi, interrupt BLE/WebConfig/OTA, replace a healthy app connection,
+or re-enable explicitly disabled WiFi. `get display.wifi` includes `tcp=1`
+only when the listener is actually open; `services=1` alone is not proof.
+
 See [local maintenance commands](terminal_chat_cli.md#local-maintenance-commands)
 for the complete access rules. WiFi-only Companions accept
 all three modes. A Full Companion that runs BLE and infrastructure WiFi

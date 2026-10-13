@@ -66,6 +66,9 @@ enum class CompanionWiFiDisplayState : uint8_t {
 // distinguish network state from a stale or incorrect LCD frame.
 void noteCompanionWiFiDisplayState(CompanionWiFiDisplayState state);
 void formatCompanionWiFiDisplayStatus(char* reply, size_t reply_size);
+// Inspect the actual Companion TCP listener and completed protocol traffic;
+// reading this diagnostic never opens a client or restarts a live session.
+void formatCompanionWiFiTcpStatus(char* reply, size_t reply_size);
 #ifdef WITH_WEBCONFIG
 // Use Companion ownership state when formatting an otherwise ambiguous idle or
 // disconnected station; WebConfig being stopped does not mean WiFi is off.

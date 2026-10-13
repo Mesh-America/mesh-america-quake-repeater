@@ -1,6 +1,7 @@
 #include "SerialWifiInterface.h"
 #include "../CompanionFrameQueue.h"
 #include <WiFi.h>
+#include <errno.h>
 
 static constexpr uint32_t WIFI_FRAME_TIMEOUT_MS = 5000;
 
@@ -23,18 +24,28 @@ void SerialWifiInterface::expireHeldQueue(uint32_t now) {
 void SerialWifiInterface::loop() {
   const uint32_t now = (uint32_t)millis();
   expireHeldQueue(now);
-  if (deviceConnected && (!client.connected()
-      || (receive_pending && (uint32_t)(now - receive_started) >= WIFI_FRAME_TIMEOUT_MS))) {
-    disconnectClient(true);
+  // Use enable intent, not isEnabled(): an unavailable listener must recover
+  // even though MultiSerialInterface correctly declines to dispatch into it.
+  if (_isEnabled && listener_requested) serviceListener(now);
+  if (deviceConnected && !client.connected()) {
+    disconnectClient(true, DisconnectReason::PeerClosed);
+  } else if (deviceConnected && receive_pending
+      && (uint32_t)(now - receive_started) >= WIFI_FRAME_TIMEOUT_MS) {
+    disconnectClient(true, DisconnectReason::FrameTimeout);
   }
 }
 
-void SerialWifiInterface::disconnectClient(bool cancel_session) {
+void SerialWifiInterface::disconnectClient(bool cancel_session,
+                                           DisconnectReason reason) {
   const bool was_connected = deviceConnected;
   deviceConnected = false;
   if (client) client.stop();
   resetReceivedFrameHeader();
   send_offset = 0; // A reconnect must replay the whole frame, never its suffix.
+  if (was_connected) {
+    ++disconnect_count;
+    last_disconnect_reason = reason;
+  }
   if (cancel_session && was_connected && session_changed != nullptr) {
     session_changed(session_context);
   }
@@ -74,18 +85,99 @@ void SerialWifiInterface::selectClient(const IPAddress& ip, uint32_t now) {
   queue_has_ip = true;
 }
 
-void SerialWifiInterface::begin(int port) {
-  // wifi setup is handled outside of this class, only starts the server
-  server.begin(port);
+bool SerialWifiInterface::addressReady() {
+  if (WiFi.status() == WL_CONNECTED
+      && static_cast<uint32_t>(WiFi.localIP()) != 0) return true;
+#if defined(ESP32)
+  // A setup/OTA AP is usable even when STA has no association. Do not start a
+  // listener for an AP's default address when the AP interface is disabled.
+  if ((WiFi.getMode() & WIFI_AP)
+      && static_cast<uint32_t>(WiFi.softAPIP()) != 0) return true;
+#endif
+  return false;
+}
+
+bool SerialWifiInterface::serviceListener(uint32_t now) {
+  if (!listener_requested) return false;
+  if (static_cast<bool>(server)) {
+    listener_was_healthy = true;
+    return true;  // Pico W begin() would otherwise replace a healthy listener.
+  }
+  if (listener_was_healthy) {
+    // Release a stale listening descriptor, not the separately accepted
+    // client or its response queue. Link changes alone do not take this path.
+    server.end();
+    listener_was_healthy = false;
+    listener_attempted = false;
+    listener_retry_ms = 0;
+    consecutive_start_failures = 0;
+  }
+  if (!addressReady()) return false;
+  if (listener_attempted
+      && (uint32_t)(now - listener_last_attempt) < listener_retry_ms) return false;
+
+  listener_last_attempt = now;
+  listener_attempted = true;
+  ++listener_begin_attempts;
+  // The ESP32 SDK silently returns from begin() after socket/bind/listen
+  // errors. Capture errno before end() can replace it during descriptor cleanup.
+  errno = 0;
+  server.begin(listener_port);
+  if (!static_cast<bool>(server)) {
+    listener_last_errno = errno;
+    listener_last_error = StartError::StartFailed;
+    ++listener_begin_failures;
+    server.end();  // Also releases a socket left behind by a failed bind/listen.
+    if (consecutive_start_failures < 6) ++consecutive_start_failures;
+    listener_retry_ms = consecutive_start_failures < 6
+        ? (1000U << (consecutive_start_failures - 1)) : 30000U;
+    return false;
+  }
+  listener_was_healthy = true;
+  consecutive_start_failures = 0;
+  listener_retry_ms = 0;
+  listener_last_error = StartError::None;
+  listener_last_errno = 0;
+  return true;
+}
+
+bool SerialWifiInterface::begin(int port) {
+  if (port <= 0 || port > 65535) {
+    listener_last_error = StartError::InvalidPort;
+    listener_last_errno = 0;
+    return false;
+  }
+  const bool new_request = !listener_requested || listener_port != port;
+  if (listener_port != 0 && listener_port != port) {
+    server.end();  // Explicit listener reconfiguration leaves an accepted client intact.
+    listener_was_healthy = false;
+  }
+  listener_port = static_cast<uint16_t>(port);
+  listener_requested = true;
+  if (new_request) {
+    listener_attempted = false;
+    listener_retry_ms = 0;
+    consecutive_start_failures = 0;
+  }
+  // Existing callers begin before enable. This explicit request may start
+  // immediately, but background retries never implicitly re-enable it.
+  return serviceListener((uint32_t)millis());
+}
+
+void SerialWifiInterface::stopListener(DisconnectReason reason) {
+  _isEnabled = false;
+  listener_requested = false;
+  server.end();
+  listener_was_healthy = false;
+  listener_attempted = false;
+  listener_retry_ms = 0;
+  consecutive_start_failures = 0;
+  disconnectClient(true, reason);
+  clearBuffers();
 }
 
 void SerialWifiInterface::end() {
-  disable();
-  if (client) client.stop();
-  server.end();
-  deviceConnected = false;
-  resetReceivedFrameHeader();
-  clearBuffers();
+  stopListener(DisconnectReason::Ended);
 }
 
 // ---------- public methods
@@ -98,9 +190,61 @@ void SerialWifiInterface::enable() {
 }
 
 void SerialWifiInterface::disable() {
-  _isEnabled = false;
-  disconnectClient(true);
-  clearBuffers();
+  stopListener(DisconnectReason::Disabled);
+}
+
+SerialWifiInterface::Status SerialWifiInterface::getStatus() {
+  const bool ready = addressReady();
+  const bool listening = static_cast<bool>(server);
+  State state = State::Off;
+  if (_isEnabled && listener_requested) {
+    state = !ready ? State::WaitingIp
+        : listening ? State::Listening : State::Retrying;
+  }
+  const uint32_t elapsed = (uint32_t)((uint32_t)millis() - listener_last_attempt);
+  const uint32_t retry = listener_requested && listener_attempted
+      && !listening && elapsed < listener_retry_ms
+      ? listener_retry_ms - elapsed : 0;
+  return {state, _isEnabled, listener_requested, ready, listening,
+          deviceConnected && client.connected(), listener_port,
+          listener_begin_attempts, listener_begin_failures, retry,
+          listener_last_error, listener_last_errno, accepted_clients,
+          valid_frames, last_opcode, tx_frames, last_tx_opcode,
+          disconnect_count, last_disconnect_reason};
+}
+
+const char* SerialWifiInterface::stateName(State state) {
+  switch (state) {
+    case State::Off: return "off";
+    case State::WaitingIp: return "waiting-ip";
+    case State::Retrying: return "retrying";
+    case State::Listening: return "listening";
+  }
+  return "unknown";
+}
+
+const char* SerialWifiInterface::startErrorName(StartError error) {
+  switch (error) {
+    case StartError::None: return "none";
+    case StartError::InvalidPort: return "invalid-port";
+    case StartError::StartFailed: return "start-failed";
+  }
+  return "unknown";
+}
+
+const char* SerialWifiInterface::disconnectReasonName(DisconnectReason reason) {
+  switch (reason) {
+    case DisconnectReason::None: return "none";
+    case DisconnectReason::PeerClosed: return "peer-closed";
+    case DisconnectReason::FrameTimeout: return "frame-timeout";
+    case DisconnectReason::InvalidHeader: return "invalid-header";
+    case DisconnectReason::ShortHeader: return "short-header";
+    case DisconnectReason::ShortPayload: return "short-payload";
+    case DisconnectReason::Replaced: return "replaced";
+    case DisconnectReason::Disabled: return "disabled";
+    case DisconnectReason::Ended: return "ended";
+  }
+  return "unknown";
 }
 
 size_t SerialWifiInterface::writeFrame(const uint8_t src[], size_t len) {
@@ -146,14 +290,17 @@ void SerialWifiInterface::resetReceivedFrameHeader() {
 
 size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
   loop();
-  if (!_isEnabled) return 0;
+  if (!isEnabled()) return 0;
   // check if new client connected
-  auto newClient = server.available();
+  // Continue an accepted client's RX/TX during listener repair, but never
+  // call the SDK accept path while its listening descriptor is unavailable.
+  auto newClient = static_cast<bool>(server) ? server.available() : WiFiClient();
   if (newClient) {
     const IPAddress new_ip = newClient.remoteIP();
 
     // disconnect existing client
-    disconnectClient(!queue_has_ip || queue_ip != new_ip);
+    disconnectClient(!queue_has_ip || queue_ip != new_ip,
+                     DisconnectReason::Replaced);
 
     // Partition queues and cancel the displaced session before exposing the
     // new connection to response producers or consuming its first command.
@@ -161,6 +308,7 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
 
     // switch active connection to new client
     client = newClient;
+    ++accepted_clients;
 
     // forget received frame header
     resetReceivedFrameHeader();
@@ -174,7 +322,7 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
     }
   } else {
     if (deviceConnected) {
-      disconnectClient(true);
+      disconnectClient(true, DisconnectReason::PeerClosed);
       WIFI_DEBUG_PRINTLN("Disconnected");
     }
   }
@@ -196,6 +344,8 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
       send_offset += written < remaining ? written : remaining;
       if (send_offset < total) return 0;
       send_offset = 0;
+      ++tx_frames;
+      last_tx_opcode = send_queue[0].buf[0];
       send_queue_len--;
       for (int i = 0; i < send_queue_len; i++) {   // delete top item from queue
         send_queue[i] = send_queue[i + 1];
@@ -211,7 +361,7 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
         if (client.available() < 3) return 0;
         uint8_t header[3];
         if (client.readBytes(header, sizeof(header)) != sizeof(header)) {
-          disconnectClient(true);
+          disconnectClient(true, DisconnectReason::ShortHeader);
           return 0;
         }
         received_frame_header.type = header[0];
@@ -220,17 +370,19 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
         // avoids unbounded discard loops and interpreting its tail as commands.
         if (received_frame_header.type != '<' || received_frame_header.length == 0
             || received_frame_header.length > MAX_FRAME_SIZE) {
-          disconnectClient(true);
+          disconnectClient(true, DisconnectReason::InvalidHeader);
           return 0;
         }
       }
       const size_t frame_length = received_frame_header.length;
       if (client.available() < (int)frame_length) return 0;
       if (dest == nullptr || client.readBytes(dest, frame_length) != frame_length) {
-        disconnectClient(true);
+        disconnectClient(true, DisconnectReason::ShortPayload);
         return 0; // Never dispatch a truncated command, even after a short read.
       }
       resetReceivedFrameHeader();
+      ++valid_frames;
+      last_opcode = dest[0];
       return frame_length;
       
     }

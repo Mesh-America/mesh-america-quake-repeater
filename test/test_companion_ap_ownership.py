@@ -66,6 +66,10 @@ class CompanionAccessPointOwnershipTest(unittest.TestCase):
         self.run_fixture("start_wifi")
         self.run_fixture("start_wifi", webconfig=False)
 
+    def test_failed_transport_registration_does_not_start_unserviced_socket(self):
+        self.run_fixture("registration")
+        self.run_fixture("registration", webconfig=False)
+
     def test_deliberate_recovery_setup_handoff_remains_available(self):
         self.run_fixture("setup_handoff")
         self.run_fixture("setup_handoff", webconfig=False)

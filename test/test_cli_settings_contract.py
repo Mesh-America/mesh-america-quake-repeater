@@ -203,6 +203,7 @@ class CLISettingsContractTest(unittest.TestCase):
         self.assertEqual(gets - sets, {
             'contact.cache', 'contact.cache.timing',  # Contact-storage diagnostics
             'display.wifi',                          # Connection/display status
+            'wifi.tcp',                              # Read-only app listener/traffic diagnostic
               'dm.held',                               # Read-only pending-DM count
             'flash.health',                          # Read-only flash health diagnostics
             'key.backup.transport',                  # Identity-backup transport capability

@@ -525,6 +525,17 @@ their views. Companion session state is device-wide, so use one active
 Companion application at a time. On nRF52, BLE remains available while USB is
 in terminal or mOTA mode.
 
+The Companion TCP listener starts only after a usable WiFi station or setup-AP
+address exists. If opening the socket fails, it closes any failed-start socket
+and retries with a delay capped at 30 seconds, without restarting the WiFi
+connection or disturbing BLE, WebConfig, OTA, or a healthy accepted TCP client.
+Turning WiFi off or suspending it cancels the listener request; retry service
+cannot turn it back on. Use `get wifi.tcp` through BLE, USB, or the browser CLI
+to inspect listener state, registration, accepted clients, completed RX/TX
+frames, and errors without a PC port probe. `get display.wifi` also shows the
+actual `tcp` listener flag independently of the network-services flag. A
+listening socket alone cannot detect LAN firewall or guest-network isolation.
+
 On WiFi TCP port 5000, reconnecting from the same IP retains queued outgoing
 frames. A different IP takes over immediately, but never receives the previous
 IP's replies: up to four queued frames are parked separately for 30 seconds

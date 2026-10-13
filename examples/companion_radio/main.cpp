@@ -115,6 +115,7 @@ MultiSerialInterface interface_manager;
     #include <esp_sntp.h>
     #include <esp_wifi.h>
     SerialWifiInterface wifi_interface;
+    static bool companion_wifi_interface_registered = false;
     #ifndef WIFI_PWD
       #define WIFI_PWD ""
     #endif
@@ -1903,14 +1904,35 @@ void halt() {
         esp_wifi_sta_get_ap_info(&access_point) == ESP_OK;
     snprintf(reply, reply_size,
              "> state=%s, frames=%lu, display=%u/%02X, requested=%u, services=%u, "
-             "wl=%d, idf=%u, IP=%s",
+             "wl=%d, idf=%u, IP=%s, tcp=%u",
              names[state], (unsigned long)companion_wifi_display_frames,
              companion_display_available ? 1U : 0U,
              (unsigned int)companion_display_begin_status,
              companion_wifi_requested ? 1U : 0U,
              companion_wifi_active ? 1U : 0U, (int)WiFi.status(),
              idf_associated ? 1U : 0U,
-             WiFi.localIP().toString().c_str());
+             WiFi.localIP().toString().c_str(),
+             wifi_interface.getStatus().listening ? 1U : 0U);
+  }
+
+  void formatCompanionWiFiTcpStatus(char* reply, size_t reply_size) {
+    if (reply == nullptr || reply_size == 0) return;
+    const auto status = wifi_interface.getStatus();
+    // Fit even full-width counters in the 160-byte Companion CLI reply. No
+    // self-probe connection: it would displace the user's single TCP session.
+    snprintf(reply, reply_size,
+             "> tcp=%u %s reg=%u ip=%u client=%u fail=%lu err=%d retry=%lus "
+             "acc=%lu rx=%lu/%02X tx=%lu/%02X drop=%s",
+             (unsigned int)(status.port ? status.port : TCP_PORT),
+             SerialWifiInterface::stateName(status.state),
+             companion_wifi_interface_registered ? 1U : 0U,
+             status.addressReady ? 1U : 0U, status.clientConnected ? 1U : 0U,
+             (unsigned long)status.beginFailures, status.lastErrno,
+             (unsigned long)((status.retryInMs + 999U) / 1000U),
+             (unsigned long)status.acceptedClients,
+             (unsigned long)status.validFrames, (unsigned int)status.lastOpcode,
+             (unsigned long)status.txFrames, (unsigned int)status.lastTxOpcode,
+             SerialWifiInterface::disconnectReasonName(status.lastDisconnectReason));
   }
 
 #ifdef WITH_WEBCONFIG
@@ -2402,8 +2424,10 @@ void halt() {
 #endif
 
     applyCompanionWiFiPowerSave();
-    wifi_interface.begin(TCP_PORT);
-    wifi_interface.enable();
+    if (companion_wifi_interface_registered) {
+      wifi_interface.begin(TCP_PORT);
+      wifi_interface.enable();
+    }
 #ifdef ENABLE_OTA
     ota_console_start();
 #endif
@@ -2501,8 +2525,10 @@ void halt() {
       mesh::wifi::beginStation(configured_wifi_ssid, configured_wifi_password);
     }
     applyCompanionWiFiPowerSave();
-    wifi_interface.begin(TCP_PORT);
-    wifi_interface.enable();
+    if (companion_wifi_interface_registered) {
+      wifi_interface.begin(TCP_PORT);
+      wifi_interface.enable();
+    }
 #ifdef ENABLE_OTA
     ota_console_start();
 #endif
@@ -3612,12 +3638,17 @@ void setup() {
                 "Failed to restore ESP-NOW/WiFi protocol coexistence");
           }
 #endif
-          WIFI_DEBUG_PRINTLN("connected! IP %s  (companion app on :%d)",
+          WIFI_DEBUG_PRINTLN("connected! IP %s  (companion TCP port :%d requested; get wifi.tcp for listener status)",
                              WiFi.localIP().toString().c_str(), TCP_PORT);
       }
   });
 
-  interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
+  companion_wifi_interface_registered =
+      interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
+  if (!companion_wifi_interface_registered) {
+    wifi_interface.disable();
+    WIFI_DEBUG_PRINTLN("Companion WiFi interface registration failed");
+  }
 #if !defined(COMPANION_EXCLUSIVE_WIFI_BLE)
   companion_wifi_requested = the_mesh.getNodePrefs()->wifi_enabled != 0;
 #endif
@@ -3672,8 +3703,9 @@ void setup() {
     WiFi.setTimeout(WIFI_RETRY_TIMEOUT);
     WiFi.beginNoBlock(pico_wifi_ssid, pico_wifi_pwd);
     last_wifi_reconnect_attempt = millis();
-    wifi_interface.begin(TCP_PORT);
-    interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
+    if (interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface)) {
+      wifi_interface.begin(TCP_PORT);
+    }
   }
 #endif
 #if defined(ENABLE_USB_INTERFACE)

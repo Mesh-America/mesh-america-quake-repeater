@@ -59,6 +59,7 @@ Portal& wifiSetupPortal(){return portal;}
 void saveCompanionWiFi(){}
 char configured_wifi_ssid[8]="mesh",configured_wifi_password[8]="secret";
 bool companion_wifi_has_credentials=true,companion_wifi_requested=true,companion_wifi_active=true;
+bool companion_wifi_interface_registered=true;
 bool companion_wifi_services_stopped=true;
 bool companion_wifi_background_stopped=false,companion_wifi_espnow_restore_pending=true;
 bool companion_wifi_webconfig_start_pending=false;
@@ -71,7 +72,11 @@ void loadCompanionWiFiCredentials(){++credential_loads;}
 void resetCompanionWiFiRecoveryState(){wifi_reconnect_tracker=WiFiReconnectPolicy::Tracker();}
 void applyCompanionWiFiPowerSave(){++power_writes;}
 constexpr int TCP_PORT=1234;
-struct Interface{void begin(int){++socket_starts;}void enable(){}}wifi_interface;
+struct Interface{
+ bool begin(int){++socket_starts;return true;}
+ void enable(){}
+ bool isListening()const{return socket_starts>0;}
+}wifi_interface;
 void ota_console_start(){++console_starts;}
 @POWER_GUARDS@
 #ifdef WITH_WEBCONFIG
@@ -136,6 +141,12 @@ int main(int argc,char** argv){
   assert(companion_wifi_active&&!companion_wifi_services_stopped&&board.inhibit_sleep);
   assert(mode_writes==1&&joins==1&&socket_starts==1&&console_starts==1&&power_writes==1);
   startCompanionWiFi();assert(mode_writes==1&&socket_starts==1);
+ }else if(scenario=="registration"){
+  companion_wifi_interface_registered=false;
+  companion_wifi_active=false;board.ota=false;sdk_mode=WIFI_STA;
+  startCompanionWiFi();
+  assert(companion_wifi_active&&board.inhibit_sleep&&!companion_wifi_services_stopped);
+  assert(socket_starts==0&&console_starts==1&&joins==1);
  }else if(scenario=="suspended"){
   auto& power=mesh::wifi::networkPower();
   power.setManaged(true);power.setSuspended(true);
