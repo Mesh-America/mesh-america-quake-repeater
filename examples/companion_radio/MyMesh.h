@@ -4,6 +4,7 @@
 #include <Mesh.h>
 #include "AbstractUITask.h"
 #include "CompanionFeatures.h"
+#include <helpers/CompanionReader.h>
 
 /*------------ Frame Protocol --------------*/
 #define FIRMWARE_VER_CODE 14
@@ -255,7 +256,10 @@ public:
   bool ownsStreamTerminal(const Stream& output) const override {
     return isNetworkTerminalMode(output);
   }
-  void runStreamTerminal(char* command) override { handleTerminalCommand(command); }
+  void runStreamTerminal(char* command) override { handleTerminalCommand(command, false); }
+#if COMPANION_FEATURE_READER
+  bool streamTerminalBusy() const override;
+#endif
   void endStreamTerminal(Stream& output) override;
 #endif
   void rebootNow() override;
@@ -301,7 +305,8 @@ public:
   bool isTerminalWaitingForInput() const {
     return _terminal_mode && _terminal_usb_silent;
   }
-  void handleTerminalCommand(char* command);
+  void handleTerminalCommand(char* command, bool reader_prompt = true,
+                             mesh::ReaderTryWrite reader_try_write = nullptr);
 #if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
   bool enterNetworkTerminalMode(Stream& output);
   void exitNetworkTerminalMode(Stream& output);

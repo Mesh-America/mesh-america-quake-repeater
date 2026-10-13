@@ -160,6 +160,62 @@ class Nrf52FlashTrimTest(unittest.TestCase):
                             str(fixture / "test_domain_trim.c"), "-o", str(executable)], check=True)
             subprocess.run([str(executable)], check=True)
 
+    def test_companion_keeps_small_crypto_stack_fonts_reader_and_usb_transports(self):
+        for platform, mcu, expected in (("nordicnrf52", "nrf52840", True),
+                                        ("nordicnrf52", "nrf52832", True),
+                                        ("espressif32", "esp32s3", False)):
+            with self.subTest(platform=platform, mcu=mcu):
+                defines = TRIM.companion_trim_policy(platform, mcu,
+                    "+<*> +<../examples/companion_radio/*.cpp>")
+                self.assertEqual(bool(defines), expected)
+                if not expected:
+                    continue
+                self.assertEqual(defines["MESH_NRF52_COMPANION_TRIM"], 1)
+                self.assertEqual(defines["ED25519_SMALL_BASE"], 1)
+                self.assertEqual(defines["ED25519_COMPACT_SHA512"], 1)
+                self.assertEqual(defines["ED25519_COMPACT_SCALAR"], 1)
+                self.assertEqual(defines["CFG_TUD_MSC"], 0)
+                self.assertEqual(defines["CFG_TUD_HID"], 0)
+                for name in ("MESH_NRF52_FLASH_TRIM", "ED25519_COMPACT_BASE",
+                             "CFG_TUD_CDC", "CFG_TUD_DFU",
+                             "CFG_TUD_DFU_RUNTIME", "COMPANION_FEATURE_READER"):
+                    self.assertNotIn(name, defines)
+                self.assertFalse(any(name.startswith("CFG_TUH") for name in defines))
+
+    def test_companion_role_requires_selected_source_and_honors_explicit_options(self):
+        for sources in ("+<*>", "+<../examples/simple_secure_chat>",
+                        "+<../examples/companion_radio> -<../examples/companion_radio>",
+                        "+<../examples/companion_radio> +<../examples/simple_repeater>"):
+            self.assertEqual(TRIM.companion_trim_policy("nordicnrf52", "nrf52840", sources), {})
+        for flags in ("-DMESH_NRF52_COMPANION_TRIM=0", "-UMESH_NRF52_COMPANION_TRIM",
+                      "-DMESH_NRF52_FLASH_TRIM=0"):
+            self.assertEqual(TRIM.companion_trim_policy("nordicnrf52", "nrf52840",
+                "+<../examples/companion_radio>", flags), {})
+        result = TRIM.companion_trim_policy("nordicnrf52", "nrf52840",
+            "+<../examples/companion_radio>", "-DCFG_TUD_MSC=1 -USSD1306_NO_SPLASH")
+        self.assertNotIn("CFG_TUD_MSC", result)
+        self.assertNotIn("SSD1306_NO_SPLASH", result)
+        result = TRIM.companion_trim_policy("nordicnrf52", "nrf52840",
+            "+<../examples/companion_radio>",
+            "-DED25519_SMALL_BASE=0 -UED25519_COMPACT_SHA512 -UED25519_COMPACT_SCALAR")
+        for name in ("ED25519_SMALL_BASE", "ED25519_COMPACT_SHA512", "ED25519_COMPACT_SCALAR"):
+            self.assertNotIn(name, result)
+        for value in (0, 1):
+            result = TRIM.companion_trim_policy("nordicnrf52", "nrf52840",
+                "+<../examples/companion_radio>", "-DED25519_COMPACT_BASE=%d" % value)
+            self.assertNotIn("ED25519_SMALL_BASE", result)
+
+    @unittest.skipUnless(shutil.which("cc"), "a native C compiler is required")
+    def test_companion_uses_same_p256_domain_wrapper(self):
+        fixture = ROOT / "test/fixtures/nrf52_flash_trim"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "cc310-companion-test"
+            subprocess.run(["cc", "-std=c99", "-Wall", "-Wextra", "-Werror",
+                            "-DMESH_NRF52_COMPANION_TRIM=1", "-I" + str(fixture),
+                            str(ROOT / "src/helpers/nrf52/Cc310DomainTrim.c"),
+                            str(fixture / "test_domain_trim.c"), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
 
 if __name__ == "__main__":
     unittest.main()

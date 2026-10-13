@@ -111,6 +111,52 @@ class CompanionReaderTest(unittest.TestCase):
             self.assertNotIn("readerData", result)
             self.assertNotIn("handleReaderCommand", result)
 
+    def test_tcp_reader_write_returns_immediately_under_socket_backpressure(self):
+        compiler = shutil.which("g++")
+        if not compiler:
+            self.skipTest("host G++ required")
+        source = (ROOT / "examples/companion_radio/main.cpp").read_text()
+        callback = extract_braced(source, "static size_t ota_console_try_reader_write(")
+        harness = r'''
+#include <Arduino.h>
+#include <cassert>
+#include <sys/socket.h>
+#include <unistd.h>
+class WiFiClient : public Stream {
+  int socket_;
+public:
+  explicit WiFiClient(int socket) : socket_(socket) {}
+  int fd() const { return socket_; }
+};
+@CALLBACK@
+int main() {
+  alarm(3); // A blocking write to a full socket fails the test, never hangs CI.
+  int sockets[2];
+  assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+  int capacity = 1024;
+  assert(setsockopt(sockets[0], SOL_SOCKET, SO_SNDBUF, &capacity, sizeof(capacity)) == 0);
+  uint8_t data[96] = {};
+  while (send(sockets[0], data, sizeof(data), MSG_DONTWAIT) > 0) {}
+  WiFiClient client(sockets[0]), invalid(-1);
+  for (int i = 0; i < 100; ++i)
+    assert(ota_console_try_reader_write(client, data, sizeof(data)) == 0);
+  assert(client.writes == 0); // The blocking Stream path must never be used.
+  uint8_t drained[8192];
+  assert(recv(sockets[1], drained, sizeof(drained), 0) > 0);
+  assert(ota_console_try_reader_write(client, data, sizeof(data)) > 0);
+  assert(ota_console_try_reader_write(invalid, data, sizeof(data)) == 0);
+  close(sockets[0]);
+  close(sockets[1]);
+}
+'''.replace("@CALLBACK@", callback)
+        with tempfile.TemporaryDirectory(prefix="mesh-reader-socket-") as directory:
+            cpp = Path(directory) / "socket.cpp"
+            binary = Path(directory) / "socket-test"
+            cpp.write_text(harness)
+            self.run_checked([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                              "-I" + str(FIXTURE), str(cpp), "-o", str(binary)])
+            self.run_checked([str(binary)])
+
     def test_terminal_dispatch_is_separate_from_bounded_api_replies(self):
         source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="utf-8")
         start = source.index("void MyMesh::handleTerminalCommand(")
@@ -119,7 +165,7 @@ class CompanionReaderTest(unittest.TestCase):
         self.assertEqual(source.count("mesh::handleReaderCommand("), 2)
         self.assertLess(terminal.index("mesh::handleReaderCommand("),
                         terminal.index("char local_reply[160]"))
-        self.assertIn("get reader <chapter>:<verse> (World English Bible, offline)", terminal)
+        self.assertIn("get reader <chapter>[:<verse>[-<last>]] [page] (World English Bible, offline)", terminal)
         self.assertEqual(terminal.count("#if COMPANION_FEATURE_READER"), 2)
         rescue = extract_braced(source, "void MyMesh::checkCLIRescueCmd()")
         self.assertLess(rescue.index("mesh::handleReaderCommand(cli_command, output)"),

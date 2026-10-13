@@ -1,11 +1,13 @@
-"""Feature-preserving flash trim for nRF52 infrastructure, never Companions.
+"""Role-specific feature-preserving flash trims for nRF52 firmware.
 
 Decide from the effective source filter as well as the environment/OTA alias
 and flags: build.sh can synthesize profiles over another PlatformIO recipe.
 Unknown roles fail closed. No shared framework or downloaded library is edited.
 CDC, USB host, sensor/GPS support, BLE P-256, and stored Ed25519 keys remain.
-The compact Ed25519 implementation trades more signing time/stack for flash;
-the nRF52 base keeps an 8 KiB loop stack for this and the existing OTA path.
+Infrastructure uses RAM-built compact Ed25519 and display-font trims.
+Companion uses a 960-byte Ed25519 flash table to keep signing stack bounded,
+and retains all UI fonts and the Reader. The nRF52 base keeps an 8 KiB loop
+stack for crypto and the existing OTA path.
 """
 
 import fnmatch
@@ -48,6 +50,20 @@ TRIM_DEFINES = {
 }
 CC310_ARCHIVE_SHA256 = "97dc648d44520e47252f62c402a71f976e36d7b3aef99235bbdc4de79a928577"
 CC310_ARCHIVE = "src/cortex-m4/fpv4-sp-d16-hard/libnrf_cc310_0.9.13-no-interrupts.a"
+
+# Companion retains all UI fonts and uses a small Ed25519 flash table instead
+# of the infrastructure implementation's extra 1.8 KiB of signing stack.
+# These options remove library code/data that its application never uses;
+# CDC, DFU, BLE pairing, USB host and UBX navigation remain available.
+COMPANION_TRIM_DEFINES = {
+    name: value for name, value in TRIM_DEFINES.items()
+    if name not in ("MESH_NRF52_FLASH_TRIM", "ED25519_COMPACT_BASE",
+                    "ED25519_COMPACT_SHA512")
+}
+COMPANION_TRIM_DEFINES["MESH_NRF52_COMPANION_TRIM"] = 1
+COMPANION_TRIM_DEFINES["ED25519_SMALL_BASE"] = 1
+COMPANION_TRIM_DEFINES["ED25519_COMPACT_SHA512"] = 1
+COMPANION_TRIM_DEFINES["ED25519_COMPACT_SCALAR"] = 1
 
 
 def flag_defines(flags=(), cppdefines=()):
@@ -133,6 +149,27 @@ def supported_cc310(framework_dir, mcu, defines):
     return archive.is_file() and hashlib.sha256(archive.read_bytes()).hexdigest() == CC310_ARCHIVE_SHA256
 
 
+def companion_trim_policy(platform, mcu, src_filter, flags=(), cppdefines=()):
+    """Qualify the actual Companion sources, independent of board/alias name."""
+    if platform != "nordicnrf52" or not str(mcu).lower().startswith("nrf52"):
+        return {}
+    if not source_selected(src_filter, COMPANION_SOURCES[0]):
+        return {}
+    if any(source_selected(src_filter, source) for source in ROLE_SOURCES):
+        return {}
+    values = flag_defines(flags, cppdefines)
+    for name in ("MESH_NRF52_FLASH_TRIM", "MESH_NRF52_COMPANION_TRIM"):
+        if name in values and not _enabled(values[name]):
+            return {}
+    definitions = {name: value for name, value in COMPANION_TRIM_DEFINES.items()
+                   if name not in values}
+    # The older compact option uses #ifdef, so even an explicit =0 selects
+    # that path. Preserve any caller choice instead of enabling both modes.
+    if values.get("ED25519_COMPACT_BASE") is not None:
+        definitions.pop("ED25519_SMALL_BASE", None)
+    return definitions
+
+
 def trim_tft_library(build_env, node):
     # PlatformIO invokes this on TFT_eSPI's library builder, which is already
     # a private clone. Do not add a global forced include to the project: its
@@ -153,14 +190,21 @@ def install(build_env):
     cppdefines = build_env.get("CPPDEFINES", ())
     definitions = trim_policy(platform.name, mcu, build_env["PIOENV"],
                               build_env.get("SRC_FILTER", ()), flags, cppdefines)
+    infrastructure = bool(definitions)
+    if not infrastructure:
+        definitions = companion_trim_policy(platform.name, mcu,
+                                            build_env.get("SRC_FILTER", ()), flags, cppdefines)
     if not definitions:
         return
     build_env["MESH_NRF52_FLASH_TRIM_ACTIVE"] = True
     build_env.AppendUnique(CPPDEFINES=list(definitions.items()))
-    print("nRF52 infrastructure flash trim: compact crypto, unused USB device classes/GPS cache/vendor splash, compact OTA target names")
+    if infrastructure:
+        print("nRF52 infrastructure flash trim: compact crypto, unused USB device classes/GPS cache/vendor splash, compact OTA target names")
+    else:
+        print("nRF52 Companion flash trim: small crypto table, unused USB device classes/GPS cache/vendor splash; fonts and Reader retained")
     framework = platform.get_package_dir("framework-arduinoadafruitnrf52")
     values = flag_defines(flags, cppdefines)
-    if values.get("ST7789") is not None:
+    if infrastructure and values.get("ST7789") is not None:
         # Keep the font license with this qualified display build, including
         # cached DFU packages. The hook independently checks the effective
         # font override and excludes every Companion transport/profile.
@@ -169,7 +213,7 @@ def install(build_env):
         font_license = importlib.util.module_from_spec(hook_spec)
         hook_spec.loader.exec_module(font_license)
         font_license.install(build_env)
-    if (values.get("DISPLAY_CLASS") == "ST7735Display"
+    if (infrastructure and values.get("DISPLAY_CLASS") == "ST7735Display"
             and source_selected(build_env.get("SRC_FILTER", ()), "helpers/ui/ST7735Display.cpp")):
         build_env.AddBuildMiddleware(trim_tft_library, "*TFT_eSPI*/*.cpp")
     if framework and supported_cc310(framework, mcu, values):
@@ -177,7 +221,7 @@ def install(build_env):
         build_env.AppendUnique(CPPPATH=[str(Path(framework) / "libraries/Adafruit_nRFCrypto/src/nrf_cc310/include")])
         # BuildSources is called on this selected nRF52 environment only. The
         # wrapper is not in the common source filter and cannot leak to other
-        # platforms or an excluded Companion role.
+        # platforms or an unqualified role.
         build_env.BuildSources("$BUILD_DIR/nrf52-flash-trim",
                                "$PROJECT_DIR/src/helpers/nrf52",
                                "+<Cc310DomainTrim.c>")

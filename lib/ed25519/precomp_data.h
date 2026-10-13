@@ -43,8 +43,11 @@ static const ge_precomp Bi[8] = {
 
 
 /* base[i][j] = (j+1)*256^i*B */
+#if defined(ED25519_SMALL_BASE) && ED25519_SMALL_BASE && defined(ED25519_COMPACT_BASE)
+#error "Choose either the small flash table or the RAM-built compact table"
+#endif
 #ifndef ED25519_COMPACT_BASE
-static const ge_precomp base[32][8] = {
+static const ge_precomp base[][8] = {
     {
         {
             { 25967493, -14356035, 29566456, 3660896, -12694345, 4014787, 27544626, -11754271, -6079156, 2047605 },
@@ -87,6 +90,7 @@ static const ge_precomp base[32][8] = {
             { 27431194, 8222322, 16448760, -3907995, -18707002, 11938355, -32961401, -2970515, 29551813, 10109425 },
         },
     },
+#if !defined(ED25519_SMALL_BASE) || !ED25519_SMALL_BASE
     {
         {
             { -13657040, -13155431, -31283750, 11777098, 21447386, 6519384, -2378284, -1627556, 10092783, -4764171 },
@@ -1389,5 +1393,6 @@ static const ge_precomp base[32][8] = {
             { -20430234, 14955537, -24126347, 8124619, -5369288, -5990470, 30468147, -13900640, 18423289, 4177476 },
         },
     },
+#endif
 };
 #endif

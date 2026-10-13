@@ -8663,6 +8663,9 @@ Stream& MyMesh::terminalOutput() {
 }
 
 void MyMesh::resetTerminalSession() {
+#if COMPANION_FEATURE_READER
+  mesh::cancelReaderCommand();
+#endif
   _terminal_recipient_set = false;
   memset(_terminal_recipient_key, 0, sizeof(_terminal_recipient_key));
   clearTerminalLogin();
@@ -9332,13 +9335,21 @@ void MyMesh::sendTerminalRawTrace(const char* arguments) {
                          target);
 }
 
-void MyMesh::handleTerminalCommand(char* command) {
+#if defined(WITH_WEBCONFIG) && COMPANION_FEATURE_READER
+bool MyMesh::streamTerminalBusy() const {
+  return mesh::readerCommandActive(_terminal_output);
+}
+#endif
+
+void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
+                                   mesh::ReaderTryWrite reader_try_write) {
   while (*command == ' ' || *command == '\t') command++;
   if (*command == 0) return;
   mesh::cli::normalizeCommandVerb(command);
 
 #if COMPANION_FEATURE_READER
-  if (mesh::handleReaderCommand(command, terminalOutput())) return;
+  if (mesh::handleReaderCommand(command, terminalOutput(), reader_prompt,
+                                reader_try_write)) return;
 #endif
 
   // Match the repeater ASCII reply envelope so unmodified serial packet
@@ -9847,7 +9858,7 @@ void MyMesh::handleTerminalCommand(char* command) {
     terminalOutput().print("  get flash.health\r\n");
 #endif
 #if COMPANION_FEATURE_READER
-    terminalOutput().print("  get reader <chapter>:<verse> (World English Bible, offline)\r\n");
+    terminalOutput().print("  get reader <chapter>[:<verse>[-<last>]] [page] (World English Bible, offline)\r\n");
 #endif
     terminalOutput().print("  get pwrmgt.bootreason\r\n");
 #if COMPANION_FEATURE_MEMORY_DIAGNOSTICS
@@ -10001,6 +10012,9 @@ void MyMesh::handleTerminalCommand(char* command) {
 #endif
 
 void MyMesh::enterCLIRescue() {
+#if COMPANION_FEATURE_READER
+  mesh::cancelReaderCommand();
+#endif
   _cli_rescue = true;
   cli_command[0] = 0;
   _cli_line_overflow = false;
@@ -10608,7 +10622,7 @@ complete_line:
     reply_buf[0] = 0;
 #if COMPANION_FEATURE_READER
     if (mesh::handleReaderCommand(cli_command, output)) {
-      // USB rescue is a text stream and can print the complete verse.
+      // USB rescue streams chapters/ranges cooperatively like the terminal.
     } else
 #endif
     if (handleCommand(cli_command, 0, reply_buf)) {
@@ -10935,6 +10949,9 @@ void MyMesh::loop() {
   serviceTerminalTrace();
 #endif
   servicePendingSerialReply();
+#if COMPANION_FEATURE_READER
+  mesh::serviceReaderCommand();
+#endif
   serviceBinaryTraceReply();
   serviceSigningSession();
   if (!command_radio_apply_pending && saved_radio_apply_pending && !hasOutbound()
@@ -11085,6 +11102,9 @@ bool MyMesh::canRecoverUsbLogging() const {
 }
 
 bool MyMesh::hasPendingWork() const {
+#if COMPANION_FEATURE_READER
+  if (mesh::readerCommandActive()) return true;
+#endif
 #if COMPANION_FEATURE_NOTIFICATIONS
   if (_notifications.active()) return true;
 #endif

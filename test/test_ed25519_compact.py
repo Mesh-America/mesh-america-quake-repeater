@@ -34,6 +34,69 @@ class SHA512Context(ctypes.Structure):
 
 
 class Ed25519CompactTest(unittest.TestCase):
+    def test_small_flash_table_matches_standard_for_scalars_keys_and_signatures(self):
+        # Exercise every bit/carry boundary and deterministic random scalars,
+        # rather than validating only the two RFC keypair examples.
+        with tempfile.TemporaryDirectory() as directory:
+            wrapper = Path(directory) / "wrapper.c"
+            wrapper.write_text('''#include "ge.h"
+void public_from_scalar(unsigned char *out, const unsigned char *scalar) {
+    ge_p3 point;
+    ge_scalarmult_base(&point, scalar);
+    ge_p3_tobytes(out, &point);
+}
+''')
+            libraries = []
+            for label, flags in (
+                ("standard", []),
+                ("small_sha512", ["-DED25519_SMALL_BASE=1", "-DED25519_COMPACT_SHA512=1"]),
+                ("small_all", ["-DED25519_SMALL_BASE=1", "-DED25519_COMPACT_SHA512=1",
+                               "-DED25519_COMPACT_SCALAR=1"]),
+            ):
+                path = Path(directory) / (label + ".so")
+                subprocess.run(["cc", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+                                "-shared", "-fPIC", "-DED25519_NO_SEED=1", *flags,
+                                "-I" + str(ED25519), str(wrapper),
+                                *(str(source) for source in SOURCES),
+                                str(ED25519 / "key_exchange.c"), "-o", str(path)], check=True)
+                library = ctypes.CDLL(str(path))
+                library.public_from_scalar.argtypes = [ctypes.c_void_p] * 2
+                library.ed25519_create_keypair.argtypes = [ctypes.c_void_p] * 3
+                library.ed25519_sign.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p]
+                library.ed25519_key_exchange.argtypes = [ctypes.c_void_p] * 3
+                libraries.append(library)
+            rng = random.Random(0xED960)
+            scalars = [0, (1 << 255) - 1]
+            scalars += [value for bit in range(255)
+                        for value in ((1 << bit) - 1, 1 << bit, (1 << bit) + 1)]
+            scalars += [rng.getrandbits(255) for _ in range(1024)]
+            for scalar in scalars:
+                outputs = []
+                for library in libraries:
+                    out = ctypes.create_string_buffer(32)
+                    library.public_from_scalar(out, scalar.to_bytes(32, "little"))
+                    outputs.append(out.raw)
+                for output in outputs[1:]:
+                    self.assertEqual(outputs[0], output, "scalar=%x" % scalar)
+            for iteration in range(128):
+                seed = rng.getrandbits(256).to_bytes(32, "little")
+                peer_seed = rng.getrandbits(256).to_bytes(32, "little")
+                length = (0, 1, 111, 112, 127, 128, 129, 255, 256, 4097)[iteration % 10]
+                message = bytes(rng.randrange(256) for _ in range(length))
+                outputs = []
+                for library in libraries:
+                    pub, prv = ctypes.create_string_buffer(32), ctypes.create_string_buffer(64)
+                    peer, peer_prv = ctypes.create_string_buffer(32), ctypes.create_string_buffer(64)
+                    sig, secret = ctypes.create_string_buffer(64), ctypes.create_string_buffer(32)
+                    library.ed25519_create_keypair(pub, prv, seed)
+                    library.ed25519_create_keypair(peer, peer_prv, peer_seed)
+                    library.ed25519_sign(sig, message, len(message), pub, prv)
+                    library.ed25519_key_exchange(secret, peer, prv)
+                    outputs.append((pub.raw, prv.raw, sig.raw, secret.raw))
+                for output in outputs[1:]:
+                    self.assertEqual(outputs[0], output)
+
     def build_sha512_library(self, temp_dir, compact):
         library = Path(temp_dir) / f"sha512-{int(compact)}.so"
         flags = ["-DED25519_COMPACT_SHA512=1"] if compact else []
@@ -113,6 +176,10 @@ class Ed25519CompactTest(unittest.TestCase):
             for label, extra_flags in (
                 ("standard", []),
                 ("compact", ["-DED25519_COMPACT_BASE=1"]),
+                ("small", ["-DED25519_SMALL_BASE=1"]),
+                ("small_sha512", ["-DED25519_SMALL_BASE=1", "-DED25519_COMPACT_SHA512=1"]),
+                ("small_all", ["-DED25519_SMALL_BASE=1", "-DED25519_COMPACT_SHA512=1",
+                               "-DED25519_COMPACT_SCALAR=1"]),
                 ("compact_sha512", ["-DED25519_COMPACT_SHA512=1"]),
                 ("compact_base_sha512", ["-DED25519_COMPACT_BASE=1",
                                          "-DED25519_COMPACT_SHA512=1"]),

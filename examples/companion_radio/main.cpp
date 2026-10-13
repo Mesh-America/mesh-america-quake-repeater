@@ -6,6 +6,7 @@
 #include <Mesh.h>
 #include <helpers/BluetoothMac.h>
 #include "MyMesh.h"
+#include <helpers/CompanionReader.h>
 #include "CompanionBluetooth.h"
 #include "CompanionWireless.h"
 #include "CompanionWiFi.h"
@@ -989,6 +990,9 @@ static bool usb_terminal_host_reset_completion_pending = false;
 static uint32_t usb_terminal_host_reset_retry_at = 0;
 
 static void resetUsbTerminalHostSession() {
+#if COMPANION_FEATURE_READER
+  mesh::cancelReaderCommand(&mesh::usbTerminalPort());
+#endif
   // Stop only work routed to the old USB host; a simultaneous BLE/WiFi
   // transaction is independent and must continue. Clear the route after
   // stopping its producer so no response can fall back to another transport.
@@ -1230,7 +1234,10 @@ static void serviceUsbTerminal() {
         usb_logging_terminal_mode = false;
       }
 #endif
-      usbTerminalOutput().print("> ");
+#if COMPANION_FEATURE_READER
+      if (!mesh::readerCommandActive(&usbTerminalOutput()))
+#endif
+        usbTerminalOutput().print("> ");
       return; // service at most one command per mesh loop
     }
 
@@ -2087,6 +2094,7 @@ void halt() {
    the same role CLI here as its USB terminal. Other OTA-enabled Companion
    builds expose local maintenance commands and `ota ...` commands. */
 #if defined(ESP32) && defined(WIFI_SSID) && defined(ENABLE_OTA)
+  #include <lwip/sockets.h>
   #include <helpers/ota/OtaCli.h>          // mesh::ota::handle_ota_command(line, reply, board)
   #include <helpers/esp32/WiFiOtaSeeder.h>
   #ifndef OTA_CONSOLE_TCP_PORT
@@ -2097,6 +2105,17 @@ void halt() {
   static char    ota_console_line[MAX_TRANS_UNIT * 2 + 32];
   static size_t ota_console_len = 0;
   static bool ota_console_discard_line = false;
+#if COMPANION_FEATURE_NETWORK_TERMINAL && COMPANION_FEATURE_READER
+  static size_t ota_console_try_reader_write(Stream& output,
+                                             const uint8_t* data, size_t size) {
+    // WiFiClient::write retries socket readiness with one-second waits.
+    // A paused chapter reader must instead leave its cursor for the next loop.
+    const int socket = static_cast<WiFiClient&>(output).fd();
+    if (socket < 0) return 0;
+    const int written = ::send(socket, data, size, MSG_DONTWAIT);
+    return written > 0 ? static_cast<size_t>(written) : 0;
+  }
+#endif
 #if COMPANION_FEATURE_NETWORK_TERMINAL && defined(ENABLE_USB_INTERFACE)
   static mesh::UsbTcpTerminalHandoff ota_console_usb_handoff;
 #endif
@@ -2220,8 +2239,16 @@ void halt() {
           ota_console_discard_line = false;
           return;
         }
+#if COMPANION_FEATURE_READER
+        the_mesh.handleTerminalCommand(ota_console_line, true,
+                                       ota_console_try_reader_write);
+#else
         the_mesh.handleTerminalCommand(ota_console_line);
-        ota_console_client.print("> ");
+#endif
+#if COMPANION_FEATURE_READER
+        if (!mesh::readerCommandActive(&ota_console_client))
+#endif
+          ota_console_client.print("> ");
 #else
         char reply[160]; reply[0] = 0;
         if (!handleCompanionWirelessCommand(ota_console_line, reply, sizeof(reply), CompanionWirelessSource::Network)

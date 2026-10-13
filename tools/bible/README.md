@@ -5,13 +5,23 @@ include an embedded 879-verse corpus from the World English Bible:
 
 ```text
 get reader 3:16
+get reader 2
+get reader 2:2-12
 ```
 
-Book/verb case and surrounding spaces are ignored. One chapter:verse reference
-is required; ranges, whole chapters and other books are not supported. ASCII
-verse text is printed in full, including verses longer than the ordinary
-160-byte CLI response. This is a local terminal command, not a LoRa request or
-an extension of the framed Companion API. No WiFi, phone, API key, filesystem
+Verb case and surrounding spaces are ignored. A chapter number selects the
+whole chapter; `chapter:first-last` selects an inclusive range within it.
+Other books and ranges crossing chapter boundaries are not supported.
+USB/TCP/browser text terminals print each selected verse in full. The output
+advances by at most 96 bytes per mesh loop and resumes after short or zero-byte
+writes, so a chapter larger than the USB queue does not get truncated. A new
+terminal command or a session disconnect cancels unfinished output.
+
+The app's local USB/BLE CLI uses the existing bounded reply frames. Long verses
+and selections include a `Next: get reader ...` continuation, preserving the
+last verse of a range. An optional page number refers to the first verse in
+that command: `get reader 21:17 2`. No radio request can access the reader.
+No WiFi, phone, API key, filesystem
 space or bootloader update is needed. Reduced/ordinary Companion and other
 roles omit the corpus. `COMPANION_FEATURE_READER=0` excludes it from a Full build.
 

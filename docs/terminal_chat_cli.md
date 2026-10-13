@@ -200,10 +200,21 @@ ESP32 and nRF52 Full Companions include an offline World English Bible lookup:
 
 ```text
 get reader 3:16
+get reader 2
+get reader 2:2-12
 ```
 
-This returns a single complete verse from the embedded corpus, using plain ASCII punctuation
-with unchanged wording and capitalization, through the local USB/TCP terminal.
+These select a verse, an entire chapter, or an inclusive verse range from the
+embedded corpus. Local USB/TCP/browser terminals stream the complete selection
+in small chunks, keeping the radio loop running while the terminal drains.
+A new command or disconnected session cancels unfinished output. Text uses
+plain ASCII punctuation with unchanged wording and capitalization.
+
+In the app's USB/BLE CLI, each reply stays within the existing frame limit.
+Follow the displayed `Next: get reader ...` command to continue a long verse
+or advance through the selected chapter/range. The optional final number is
+the page within the first verse of that command, for example `get reader 21:17 2`.
+The continuation command retains the requested range's end.
 See [Reader lookup and compression](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/bible/README.md) for the
 source, supported build profiles and memory costs.
 

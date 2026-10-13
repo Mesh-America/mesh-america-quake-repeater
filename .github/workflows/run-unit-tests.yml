@@ -22,6 +22,11 @@ jobs:
           --firmware-version v1.17.1.10-halo-keymind-cascade-dev
           --radio-preset usa-cascade-fixed --profile cascade --require-ota
 
+      - name: Verify linked Companion crypto, retained Reader and ARM stack use
+        run: |
+          python3 -m pip install unicorn==2.1.4
+          python3 -B scripts/check_nrf52_companion_crypto.py .pio/build/RAK_4631_companion_radio_full/firmware.elf
+
   nrf52-sensor-smoke:
     runs-on: ubuntu-latest
     steps:
