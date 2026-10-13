@@ -10,6 +10,7 @@
 #include <helpers/UsbLogging.h>
 #include <helpers/UsbLoggingWatchdog.h>
 #include <helpers/UsbLoggingClientActivity.h>
+#include <helpers/MorseLoopPolicy.h>
 #if defined(NRF52_PLATFORM) && MESH_ENABLE_SENSOR_TRACKER
 #include <utility/SoftwareTimer.h>
 static SoftwareTimer tracker_wake_timer;
@@ -327,7 +328,8 @@ void loop() {
   board.loop();   // let the board feed its watchdog, run periodic housekeeping
 
   the_mesh.loop();
-  sensors.loop();
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
+  if (!morse_timing) sensors.loop();
 #ifdef DISPLAY_CLASS
   if (display_ready) ui_task.loop();
 #endif
@@ -342,6 +344,7 @@ void loop() {
 
   bool can_power_save = (the_mesh.getNodePrefs()->powersaving_enabled
                         || the_mesh.isTrackerModeEnabled())
+      && !morse_timing
       && !board.isUsbDataConnected()
       && !mesh::isUsbLoggingWatchdogArmed();
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
@@ -372,7 +375,7 @@ void loop() {
 #endif
   }
 #if defined(ESP32_PLATFORM)
-  if (!can_power_save && (the_mesh.getNodePrefs()->powersaving_enabled
+  if (!morse_timing && !can_power_save && (the_mesh.getNodePrefs()->powersaving_enabled
                          || the_mesh.isTrackerModeEnabled())) {
     delay(1); // Keep USB and the button wake interval serviced while idle.
   }

@@ -67,7 +67,9 @@ class AdvertCacheTest(unittest.TestCase):
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-DESP32_PLATFORM=1', '-DESP32=1', f'-DMESH_CONTACT_CACHE={cache}',
                 '-I', str(ROOT / 'test/fixtures/advert_cache'),
-                '-I', str(ROOT / 'src'), '-I', str(temp),
+                # Ensure the generated mesh.h wins over Mesh.h on case-folded
+                # Windows/WSL filesystems as well as case-sensitive CI hosts.
+                '-I', str(temp), '-I', str(ROOT / 'src'),
                 str(ROOT / 'test/fixtures/advert_cache/test.cpp'), '-o', str(binary),
             ], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)

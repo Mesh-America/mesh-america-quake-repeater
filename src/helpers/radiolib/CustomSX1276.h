@@ -1,7 +1,9 @@
 #pragma once
 
 #include <RadioLib.h>
+#include <math.h>
 #include "MeshCore.h"
+#include "../MorseRx.h"
 
 #define RH_RF95_MODEM_STATUS_CLEAR               0x10
 #define RH_RF95_MODEM_STATUS_HEADER_INFO_VALID   0x08
@@ -12,6 +14,36 @@
 class CustomSX1276 : public SX1276 {
   public:
     CustomSX1276(Module *mod) : SX1276(mod) { }
+
+    int16_t beginMorseReceive(float frequency_mhz) {
+      int16_t status = SX1276::beginFSK(frequency_mhz,
+          mesh::MorseRx::ReceiverBitRateKbps, 0.6f, 2.6f, 2, 16, false);
+#ifdef SX127X_CURRENT_LIMIT
+      if (status == RADIOLIB_ERR_NONE) status = setCurrentLimit(SX127X_CURRENT_LIMIT);
+#endif
+      // The API argument is the register encoding: zero means two samples,
+      // not zero samples. Continuous direct RX has no preamble/sync gating.
+      if (status == RADIOLIB_ERR_NONE) status = setRSSIConfig(0);
+      return status;
+    }
+
+    float getMorseRssi() {
+      // SX127x has no SPI command-status byte. Check modem and chip identity
+      // instead of interpreting an absent/wrong-modem read as valid power.
+      const uint8_t version = getChipVersion();
+      if (getActiveModem() != RADIOLIB_SX127X_FSK_OOK
+          || (version != RADIOLIB_SX1278_CHIP_VERSION
+              && version != RADIOLIB_SX1278_CHIP_VERSION_ALT
+              && version != RADIOLIB_SX1278_CHIP_VERSION_RFM9X)) return NAN;
+      const int16_t raw = this->mod->SPIgetRegValue(RADIOLIB_SX127X_REG_RSSI_VALUE_FSK);
+      return raw < 0 ? NAN : raw * -0.5f;
+    }
+
+    int16_t setMorsePaRamp() {
+      // Slowest supported PA envelope (3400 us), to soften CW keying edges.
+      // std_init() restores RadioLib's normal packet ramp after Morse.
+      return this->mod->SPIsetRegValue(RADIOLIB_SX127X_REG_PA_RAMP, 0, 3, 0);
+    }
 
   #ifdef RP2040_PLATFORM
     bool std_init(SPIClassRP2040* spi = NULL)

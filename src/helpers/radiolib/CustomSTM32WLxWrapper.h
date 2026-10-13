@@ -4,17 +4,63 @@
 #include "CustomSTM32WLx.h"
 #include "RadioLibWrappers.h"
 #include "SX126xReset.h"
+#include "SX126xMorseRamp.h"
+#include "SX126xMorseReceiver.h"
 #include <math.h>
 
 class CustomSTM32WLxWrapper : public RadioLibWrapper {
+  using DeepInitCallback = bool (*)();
+  DeepInitCallback _deep_init = nullptr;
 protected:
   int8_t readReceiveMode() override { return sx126xReceiveMode((SX126x*)_radio); }
 
 public:
   ~CustomSTM32WLxWrapper() { unregisterInterruptAction(); }
   CustomSTM32WLxWrapper(CustomSTM32WLx& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
+  bool supportsMorseTx() const override { return true; }
+#if MESH_ENABLE_MORSE_RX
+  bool supportsMorseRx() const override { return supportsRadioDeepInit(); }
+#endif
+  void setDeepInitCallback(DeepInitCallback callback) { _deep_init = callback; }
 
 protected:
+#if MESH_ENABLE_MORSE_RX
+  float morseReceiverBandwidthKHz() const override { return 4.8f; }
+  int16_t prepareMorseReceiver(float frequency_mhz) override {
+    if (!supportsRadioDeepInit()) return RADIOLIB_ERR_UNSUPPORTED;
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    _morse_rx_fsk_mode = true;
+    return prepareSX126xMorseReceiver(static_cast<CustomSTM32WLx*>(_radio), frequency_mhz);
+  }
+#endif
+  bool radioDeepInit() override {
+    // STM32WLx begin() owns the integrated radio reset. Reuse target.cpp's
+    // complete RF switch/TCXO setup rather than pretending there is an NRST.
+    return _deep_init && _deep_init();
+  }
+  bool supportsRadioDeepInit() const override { return _deep_init != nullptr; }
+#if MESH_ENABLE_MORSE_RX
+  float readMorseRssi() override { return static_cast<CustomSTM32WLx*>(_radio)->getMorseRssi(); }
+#endif
+  int16_t prepareMorseCarrier(float frequency_mhz) override {
+    const int16_t status = RadioLibWrapper::prepareMorseCarrier(frequency_mhz);
+    return status == RADIOLIB_ERR_NONE
+        ? setSX126xMorseRamp(static_cast<CustomSTM32WLx*>(_radio)) : status;
+  }
+  int16_t leaveMorseCarrier() override {
+    return leaveSX126xMorseCarrier(static_cast<CustomSTM32WLx*>(_radio));
+  }
+  bool restoreCarrierWaveModem() override {
+#if MESH_ENABLE_MORSE_RX
+    if (_morse_rx_fsk_mode) {
+      const bool restored = restoreAfterDeepInit();
+      if (restored) _morse_rx_fsk_mode = false;
+      return restored;
+    }
+#endif
+    return restoreSX126xPacketRamp(static_cast<CustomSTM32WLx*>(_radio)) == RADIOLIB_ERR_NONE
+        && RadioLibWrapper::restoreCarrierWaveModem();
+  }
   bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     return ((CustomSTM32WLx *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE
         && ((CustomSTM32WLx *)_radio)->setSpreadingFactor(sf) == RADIOLIB_ERR_NONE
@@ -25,6 +71,7 @@ protected:
 
 public:
   bool setCodingRate(uint8_t cr) override {
+    if (isCarrierWaveActive()) return false;
     return ((CustomSTM32WLx *)_radio)->setCodingRate(cr) == RADIOLIB_ERR_NONE;
   }
 

@@ -266,6 +266,7 @@ bool SensorMesh::handleTrackerPath(mesh::Packet* packet, uint8_t* path, uint8_t 
 
 void SensorMesh::onSendComplete(mesh::Packet* packet) {
   mesh::Mesh::onSendComplete(packet);
+  _cli.morseReply().complete(packet);
   if (!tracker_pending || !packet || packet->getPayloadType() != PAYLOAD_TYPE_REQ) return;
   uint8_t hash[MAX_HASH_SIZE];
   packet->calculatePacketHash(hash);
@@ -277,6 +278,7 @@ void SensorMesh::onSendComplete(mesh::Packet* packet) {
 
 void SensorMesh::onSendFail(mesh::Packet* packet) {
   mesh::Mesh::onSendFail(packet);
+  _cli.morseReply().fail(packet);
   if (!tracker_pending || !packet) return;
   uint8_t hash[MAX_HASH_SIZE];
   packet->calculatePacketHash(hash);

@@ -3,6 +3,7 @@
 #include <helpers/ui/DisplayPowerSettings.h>
 #include <helpers/UsbLoggingWatchdog.h>
 #include <helpers/UsbLoggingClientActivity.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <Mesh.h>
 #include <helpers/BluetoothMac.h>
 #include "MyMesh.h"
@@ -681,6 +682,14 @@ static bool usb_mota_disconnect_armed = false;
 // their ordinary stream.
 static Stream& usbTerminalOutput() {
   return mesh::usbTerminalPort();
+}
+
+static void syncUsbTerminalInputEditing() {
+#if COMPANION_FEATURE_TEXT_TERMINAL
+  the_mesh.setTerminalInputEditing(usbTerminalOutput(),
+      usb_terminal_line_len != 0 || usb_terminal_discard_line
+      || mesh::usbCompanionPort().available() > 0);
+#endif
 }
 
 static void clearUsbTerminalLine() {
@@ -1468,7 +1477,7 @@ bool MyMesh::beginStreamTerminal(Stream& output) {
           hasObservableActiveUsbTerminalClient(), input_idle,
           usb_serial_interface.getCompletedFrameCount())) return false;
   if (ascii_selected) leaveUsbTerminalMode(false);
-  if (enterNetworkTerminalMode(output)) {
+  if (enterNetworkTerminalMode(output, true)) {
     serviceUsbLoggingOwnership(mesh::isUsbLoggingEnabled());
     return true;
   }
@@ -1489,7 +1498,7 @@ void MyMesh::endStreamTerminal(Stream& output) {
 }
 #elif defined(WITH_WEBCONFIG)
 bool MyMesh::beginStreamTerminal(Stream& output) {
-  return enterNetworkTerminalMode(output);
+  return enterNetworkTerminalMode(output, true);
 }
 
 void MyMesh::endStreamTerminal(Stream& output) {
@@ -3836,6 +3845,9 @@ void loop() {
   serviceUsbMotaResponseBoundary();
 #endif
 #endif
+#if defined(ENABLE_USB_INTERFACE)
+  syncUsbTerminalInputEditing();
+#endif
   the_mesh.loop();
 #if defined(NRF52_PLATFORM) && defined(EXTRAFS) && !defined(QSPIFLASH)
   // The flash-page number is retained across a software reset without trying
@@ -3857,6 +3869,7 @@ void loop() {
 #endif
 #if defined(ENABLE_USB_INTERFACE)
   serviceUsbTerminal();
+  syncUsbTerminalInputEditing();
   // Commands can synchronously enqueue a multi-line reply. Give it the
   // remaining CDC FIFO capacity now; later loops retain any unwritten suffix.
   mesh::serviceUsbTerminalPort();
@@ -3865,17 +3878,20 @@ void loop() {
 #if COMPANION_FEATURE_BLE_MOTA_SOURCE
   ble_mota_source_control.loop();
 #endif
-  sensors.loop();
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
+  if (!morse_timing) sensors.loop();
 #if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI) && defined(PIN_USER_BTN)
   serviceWioE5HeadlessControls();
 #endif
 #ifdef DISPLAY_CLASS
+  // Keep button/touch and critical UI power checks live. UITask itself skips
+  // only background redraws while the radio needs precise Morse timing.
   #ifdef INDICATOR_WIFI_FONT_RECOVERY
   // The Indicator keeps rendering with its built-in fallback while a missing
   // SD font is recovered by a background TLS task.  This poll only launches
   // work after station Wi-Fi connects and installs a completed font on the
   // main/UI task.
-  display.serviceFontRecovery();
+  if (!morse_timing) display.serviceFontRecovery();
   #endif
   #if defined(ESP32) && defined(WIFI_SSID) && defined(WITH_WEBCONFIG) \
       && UI_WIFI_SETUP_HOME_PAGE != 1
@@ -3887,8 +3903,8 @@ void loop() {
   #if defined(TBEAM_1W) && defined(PIN_WIFI_BTN)
     ui_task.serviceWiFiToggleButton();
   #endif
-    ui_task.loop();  // Continue button/touch handling while the portal is active.
-    renderCompanionSetupDisplay();
+    ui_task.loop();
+    if (!morse_timing) renderCompanionSetupDisplay();
   } else {
     ui_task.loop();
   }
@@ -3897,7 +3913,7 @@ void loop() {
   #endif
 #endif
 #if defined(COMPANION_PAIRING_UI_HIL)
-  companionPairingUiHilProbe();
+  if (!morse_timing) companionPairingUiHilProbe();
 #endif
   rtc_clock.tick();
   board.loop();
@@ -3916,6 +3932,7 @@ void loop() {
   // USB power alone (for example, a wall charger) does not inhibit sleep.
   // Host sessions, live logging, and button activity still need service.
   bool can_sleep = the_mesh.getNodePrefs()->powersaving_enabled
+      && !morse_timing
       && !the_mesh.hasPendingWork()
       && !mesh::isUsbLoggingWatchdogArmed()
       && !mesh::wireless::control().pending();
@@ -3967,7 +3984,7 @@ void loop() {
 #endif
   }
 #if defined(ESP32_PLATFORM)
-  else if (the_mesh.getNodePrefs()->powersaving_enabled) {
+  else if (!morse_timing && the_mesh.getNodePrefs()->powersaving_enabled) {
     delay(1); // CPU idle remains available while USB/logging/button holds are active.
   }
 #endif

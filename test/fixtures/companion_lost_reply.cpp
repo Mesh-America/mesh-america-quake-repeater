@@ -103,6 +103,12 @@ struct WebConfigServer { static constexpr uint32_t CAP_LOST_REPLY = 1UL << 18; }
 
 class MyMesh {
 public:
+  struct NoMorseReply {
+    uint32_t generation() const { return 0; }
+    void beginCommand(const uint8_t*) {}
+    void endCommand() {}
+  } _morse_reply;
+  bool _morse_reply_admission = false;
   struct Prefs { uint8_t lost_reply = 0; } _prefs;
   Clock clock, *_ms = &clock;
   Manager manager, *_mgr = &manager;

@@ -5,7 +5,12 @@
 #include "HilStartupTrace.h"
 #include <helpers/ui/DisplayPowerSettings.h>
 #include <helpers/BatteryChargeCLI.h>
+#include <helpers/MorseCLI.h>
+#include <helpers/MorseLoopPolicy.h>
 #include "CLICommandUtils.h"
+#ifdef WITH_RS232_BRIDGE
+#include "bridges/RS232PowerSettings.h"
+#endif
 #include "GpsPowerPolicy.h"
 #include "FloodAdvertCLI.h"
 #include "StorageLayout.h"
@@ -155,8 +160,19 @@ static bool isGpioConfig(const char* config) {
 #endif
 
 void CommonCLI::loop() {
-  _radio_profiles.loop();
-  loopManagement();
+#if MESH_ENABLE_MORSE_RX
+  if (_morse_reply.pending()) {
+    const ClientInfo* actor = _acl->getClient(_morse_reply.actor(), PUB_KEY_SIZE);
+    const auto& settings = mesh::morseSettings();
+    _morse_reply.service(_callbacks->getProfileRadio(), millis(),
+        actor && actor->isAdmin(), mesh::morseSettingsUsable(),
+        settings.frequency_khz, settings.wpm);
+  }
+#endif
+  if (!mesh::morseTimingActive(_callbacks->getProfileRadio())) {
+    _radio_profiles.loop();
+    loopManagement();
+  }
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)
   _user_gpio.loop();
   UserGpio::Completion completion;
@@ -749,6 +765,7 @@ static void formatSnrDbX4Short(char* dest, size_t dest_len, int16_t snr_x4) {
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   mesh::hilStartupTrace("prefs_profiles_begin");
   _radio_profiles.begin(fs, _callbacks->getProfileRadio(), _rtc, true);
+  mesh::loadMorseSettings(fs);
   mesh::hilStartupTrace("prefs_profiles_ready");
   _prefs->primary_radio_preamble = _radio_profiles.primaryPreamble();
 #if !defined(WITH_MQTT_BRIDGE) && (defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM))
@@ -785,6 +802,9 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   _prefs->trace_when_repeat_off = 0;
   _prefs->ota_channel = 0;
 #ifdef WITH_RS232_BRIDGE
+  _prefs->rs232_heartbeat = 1;
+  _prefs->rs232_autosleep = 1;
+  _prefs->rs232_idle_seconds = mesh::bridge::rs232power::DEFAULT_IDLE_SECONDS;
   _prefs->bridge_uart = WITH_RS232_BRIDGE_UART;
 #else
   _prefs->bridge_uart = 0;
@@ -848,6 +868,12 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #endif
 #endif
     if (legacy && _prefs->loadSerial(legacy)) {
+#ifdef WITH_RS232_BRIDGE
+      // Observer JSON migration can use the checked writer directly. Normalize
+      // runtime fields here too, not just the bytes emitted by that writer.
+      mesh::bridge::rs232power::sanitize(_prefs->rs232_heartbeat,
+          _prefs->rs232_autosleep, _prefs->rs232_idle_seconds);
+#endif
       loaded = true;
       is_upgrade = true;
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
@@ -1031,6 +1057,11 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
   _prefs->gps_sync_interval_hours = 0;
   _prefs->ota_channel = 0;
   _prefs->rs232_bridge_enabled = 0;
+#ifdef WITH_RS232_BRIDGE
+  _prefs->rs232_heartbeat = 1;
+  _prefs->rs232_autosleep = 1;
+  _prefs->rs232_idle_seconds = mesh::bridge::rs232power::DEFAULT_IDLE_SECONDS;
+#endif
 #if defined(RP2040_PLATFORM)
   File file = fs->open(filename, "r");
 #else
@@ -1468,6 +1499,15 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 #ifdef WITH_RS232_BRIDGE
                                 has_runtime_rs232_intent = rs232_profile == 0xB1
                                     && rs232_intent <= 1;
+                                if (has_runtime_rs232_intent && file.available() > 0) {
+                                  uint8_t power_tail[mesh::bridge::rs232power::PREFS_SIZE];
+                                  const size_t count = file.read(power_tail, sizeof(power_tail));
+                                  if (!mesh::bridge::rs232power::decodePrefs(power_tail, count,
+                                          _prefs->rs232_heartbeat, _prefs->rs232_autosleep,
+                                          _prefs->rs232_idle_seconds)) {
+                                    _com_prefs_needs_upgrade = true;
+                                  }
+                                }
 #endif
                               }
                             }
@@ -1871,6 +1911,13 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   const uint8_t rs232_profile = 0;
 #endif
   WRITE_COMMON_PREFS(&rs232_profile);                          // UART intent belongs to this profile
+#ifdef WITH_RS232_BRIDGE
+  uint8_t power_tail[mesh::bridge::rs232power::PREFS_SIZE];
+  mesh::bridge::rs232power::encodePrefs(power_tail, prefs->rs232_heartbeat,
+                                      prefs->rs232_autosleep,
+                                      prefs->rs232_idle_seconds);
+  WRITE_COMMON_PREFS_BYTES(power_tail, sizeof(power_tail));
+#endif
 
 #undef WRITE_COMMON_PREFS_BYTES
 #undef WRITE_COMMON_PREFS
@@ -1885,6 +1932,10 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     _common_save_succeeded = false;
     _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
     _prefs->trace_when_repeat_off = _prefs->trace_when_repeat_off == 1 ? 1 : 0;
+#ifdef WITH_RS232_BRIDGE
+    mesh::bridge::rs232power::sanitize(_prefs->rs232_heartbeat,
+        _prefs->rs232_autosleep, _prefs->rs232_idle_seconds);
+#endif
 #if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
     _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
 #elif !defined(WITH_RS232_BRIDGE)
@@ -2052,6 +2103,13 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     const uint8_t rs232_profile = 0;
 #endif
     file.write(&rs232_profile, sizeof(rs232_profile));           // UART intent belongs to this profile
+#ifdef WITH_RS232_BRIDGE
+    uint8_t power_tail[mesh::bridge::rs232power::PREFS_SIZE];
+    mesh::bridge::rs232power::encodePrefs(power_tail, _prefs->rs232_heartbeat,
+                                        _prefs->rs232_autosleep,
+                                        _prefs->rs232_idle_seconds);
+    file.write(power_tail, sizeof(power_tail));
+#endif
 
     _common_save_succeeded = file.commit();
     if (!_common_save_succeeded) {
@@ -2866,6 +2924,11 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     if (handleManagementCommand(command, reply)) return;
     if (mesh::wireless::control().handle(command, reply, 160, millis(),
                                        _callbacks->wirelessCommandSource(sender_timestamp))) return;
+    // Infrastructure callers can already have reflected a three-byte CLI
+    // request prefix into the same 160-byte reply. Reserve it for bulk pages.
+    if (mesh::handleMorseReplyCommand(_morse_reply, _callbacks->getProfileRadio(),
+                                      command, reply, 160 - 3, millis())) return;
+    if (mesh::handleMorseCommand(_callbacks->getProfileRadio(), command, reply, 160 - 3)) return;
     if (_radio_profiles.handle(command, reply, 160, sender_timestamp != 0)) return;
 #if defined(ENABLE_OTA)
     const auto* ota_context = mesh::ota::ota_context_if_active();
@@ -3928,6 +3991,59 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   }
 #endif
 #ifdef WITH_RS232_BRIDGE
+  if (strncmp(config, "rs232.heartbeat ", 16) == 0) {
+    bool enable = false;
+    if (!parseOnOffStrict(config + 16, enable)) {
+      strcpy(reply, "Error: use set rs232.heartbeat on|off");
+      return;
+    }
+    const uint8_t previous = _prefs->rs232_heartbeat;
+    _prefs->rs232_heartbeat = enable ? 1 : 0;
+    if (!trySavePrefs()) {
+      _prefs->rs232_heartbeat = previous;
+      strcpy(reply, "Error: RS232 heartbeat not saved; unchanged");
+    } else {
+      strcpy(reply, enable ? "OK - RS232 heartbeat enabled" : "OK - heartbeat and standby disabled");
+    }
+    return;
+  }
+  if (strncmp(config, "rs232.autosleep ", 16) == 0) {
+    bool enable = false;
+    const bool force = strcmp(config + 16, "force") == 0;
+    if (!force && !parseOnOffStrict(config + 16, enable)) {
+      strcpy(reply, "Error: use set rs232.autosleep on|off|force");
+      return;
+    }
+    const uint8_t previous = _prefs->rs232_autosleep;
+    _prefs->rs232_autosleep = force ? 2 : enable ? 1 : 0;
+    if (!trySavePrefs()) {
+      _prefs->rs232_autosleep = previous;
+      strcpy(reply, "Error: RS232 autosleep not saved; unchanged");
+    } else {
+      strcpy(reply, force ? "OK - forced standby; stock/unknown peers can miss packets"
+          : enable ? "OK - standby after peer heartbeat confirmed; stock stays active"
+                   : "OK - RS232 standby disabled");
+    }
+    return;
+  }
+  if (strncmp(config, "rs232.idle ", 11) == 0) {
+    uint32_t seconds = 0;
+    if (!mesh::cli::parseUnsignedIntegerStrict(config + 11, seconds)
+        || seconds < mesh::bridge::rs232power::MIN_IDLE_SECONDS
+        || seconds > mesh::bridge::rs232power::MAX_IDLE_SECONDS) {
+      strcpy(reply, "Error: use set rs232.idle 60..3600 seconds");
+      return;
+    }
+    const uint16_t previous = _prefs->rs232_idle_seconds;
+    _prefs->rs232_idle_seconds = static_cast<uint16_t>(seconds);
+    if (!trySavePrefs()) {
+      _prefs->rs232_idle_seconds = previous;
+      strcpy(reply, "Error: RS232 idle not saved; unchanged");
+    } else {
+      sprintf(reply, "OK - RS232 idle %us", static_cast<unsigned>(seconds));
+    }
+    return;
+  }
   if (strncmp(config, "rs232.enabled ", 14) == 0) {
     bool enable = false;
     if (!parseOnOffStrict(config + 14, enable)) {
@@ -3946,7 +4062,6 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     uint8_t& intent = _prefs->bridge_enabled;
 #endif
     const uint8_t previous_enabled = intent;
-    const bool previous_running = _callbacks->isRs232BridgeRunning();
     intent = enable ? 1 : 0;
     const bool applied = _callbacks->setRs232BridgeState(enable);
     const bool saved = applied && trySavePrefs();
@@ -3955,7 +4070,9 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #ifndef WITH_MQTT_BRIDGE
       _prefs->rs232_bridge_enabled = _prefs->bridge_enabled == 1 ? 1 : 0;
 #endif
-      const bool restored = _callbacks->setRs232BridgeState(previous_running);
+      // Saved-on may currently be in soft standby. Restore an owner as well
+      // as its intent, otherwise no object remains to execute the wake timer.
+      const bool restored = _callbacks->setRs232BridgeState(previous_enabled != 0);
       strcpy(reply, restored
           ? "Error: RS232 change failed; setting unchanged"
           : "Error: RS232 change failed; previous runtime could not be restored");
@@ -4192,6 +4309,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: unsupported");
     }
   } else if (memcmp(config, "radio.fem.rxgain ", 17) == 0) {
+    const auto* radio = _callbacks->getProfileRadio();
+    if (radio && (radio->isMorseTxActive() || radio->isMorseRxActive())) {
+      strcpy(reply, "Error: stop Morse before changing LoRa FEM gain");
+      return;
+    }
     if (!_board->canControlLoRaFemLna()) {
       strcpy(reply, "Error: unsupported");
     } else if (memcmp(&config[17], "on", 2) == 0) {
@@ -4218,6 +4340,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: state must be on or off");
     }
   } else if (memcmp(config, "radio.fem.txgain ", 17) == 0) {
+    const auto* radio = _callbacks->getProfileRadio();
+    if (radio && (radio->isMorseTxActive() || radio->isMorseRxActive())) {
+      strcpy(reply, "Error: stop Morse before changing LoRa FEM gain");
+      return;
+    }
     if (!_board->canControlLoRaFemPaGain()) {
       strcpy(reply, "Error: unsupported");
     } else if (memcmp(&config[17], "on", 2) == 0) {
@@ -4867,7 +4994,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         return;
       }
       const uint8_t previous_enabled = _prefs->bridge_enabled;
-      const bool previous_running = _callbacks->isRs232BridgeRunning();
+      const bool previous_running = previous_enabled != 0;
       _prefs->bridge_enabled = enable;
       const bool applied = _callbacks->setRs232BridgeState(enable);
       if (applied && trySavePrefs()) {
@@ -4942,7 +5069,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (mesh::cli::parseUnsignedIntegerStrict(&config[12], baud)
         && baud >= 9600 && baud <= BRIDGE_MAX_BAUD) {
       const uint32_t previous_baud = _prefs->bridge_baud;
-      const bool previous_running = _callbacks->isRs232BridgeRunning();
+      const bool previous_running =
+#ifdef WITH_MQTT_BRIDGE
+          _prefs->rs232_bridge_enabled != 0;
+#else
+          _prefs->bridge_enabled != 0;
+#endif
       _prefs->bridge_baud = baud;
       const bool applied =
 #ifdef WITH_MQTT_BRIDGE
@@ -4994,7 +5126,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         return;
       }
       const uint8_t previous_uart = _prefs->bridge_uart;
-      const bool previous_running = _callbacks->isRs232BridgeRunning();
+      const bool previous_running =
+#ifdef WITH_MQTT_BRIDGE
+          _prefs->rs232_bridge_enabled != 0;
+#else
+          _prefs->bridge_enabled != 0;
+#endif
       _prefs->bridge_uart = (uint8_t)uart;
       const bool applied =
 #ifdef WITH_MQTT_BRIDGE
@@ -5565,6 +5702,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->bridge_pkt_src ? "rx" : "tx");
 #endif
 #ifdef WITH_RS232_BRIDGE
+  } else if (configKeyEquals(config, "rs232.heartbeat")) {
+    sprintf(reply, "> %s", _prefs->rs232_heartbeat ? "on" : "off");
+  } else if (configKeyEquals(config, "rs232.autosleep")) {
+    sprintf(reply, "> %s", _prefs->rs232_autosleep == 2 ? "force"
+        : _prefs->rs232_autosleep == 1 ? "on" : "off");
+  } else if (configKeyEquals(config, "rs232.idle")) {
+    sprintf(reply, "> %us", static_cast<unsigned>(_prefs->rs232_idle_seconds));
+  } else if (configKeyEquals(config, "rs232.status")) {
+    _callbacks->formatRs232Status(reply);
   } else if (configKeyEquals(config, "rs232.enabled")) {
     sprintf(reply, "> %s",
 #ifdef WITH_MQTT_BRIDGE

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "helpers/bridges/BridgeBase.h"
+#include "helpers/bridges/RS232Heartbeat.h"
 
 #include <Stream.h>
 
@@ -109,6 +110,19 @@ public:
    */
   void onPacketReceived(mesh::Packet *packet) override;
 
+  using PowerAction = mesh::bridge::RS232PowerPolicy::Action;
+
+  // The owner supplies a fresh, nonzero boot/object session before begin().
+  // This is not a persistent identity or authentication secret.
+  void setHeartbeatSession(uint64_t session);
+  void setHeartbeatEnabled(bool enabled);
+  PowerAction servicePowerPolicy(bool allow_standby, uint32_t idle_ms, uint32_t now,
+                                 bool force_unconfirmed = false);
+  void completePowerAction(PowerAction action, bool success, uint32_t now);
+  uint32_t powerWakeDelayMs(uint32_t now) const;
+  void formatHeartbeatStatus(char* out, size_t capacity, uint32_t now) const;
+  bool isPowerSuspended() const { return _power.suspended(); }
+
 private:
   /**
    * RS232 Protocol Structure:
@@ -149,6 +163,50 @@ private:
 
   /** Current position in the receive buffer */
   uint16_t _rx_buffer_pos = 0;
+
+  // Data and control share this owned buffer, so partial UART writes can never
+  // interleave frames. It owns bytes, not a mesh::Packet from the shared pool.
+  uint8_t _tx_buffer[MAX_SERIAL_PACKET_SIZE];
+  uint16_t _tx_size = 0;
+  uint16_t _tx_pos = 0;
+  uint32_t _tx_wire_until = 0;
+  bool _tx_wire_pending = false;
+  bool _tx_is_ping = false;
+  uint32_t _tx_ping_challenge = 0;
+
+  mesh::bridge::RS232PowerPolicy _power;
+  uint64_t _session = 0;
+  uint64_t _peer_session = 0;
+  uint64_t _pong_target = 0;
+  uint32_t _pong_challenge = 0;
+  uint32_t _challenge_counter = 0;
+  uint32_t _outstanding_challenge = 0;
+  uint32_t _outstanding_since = 0;
+  uint32_t _next_ping = 0;
+  uint32_t _last_ack = 0;
+  uint32_t _last_legacy_rx = 0;
+  uint32_t _rx_started = 0;
+  uint32_t _rx_packet_received_ms = 0;
+  uint32_t _partial_suspend_until = 0;
+  uint32_t _idle_ms = 300000;
+  bool _heartbeat_enabled = true;
+  bool _standby_armed = false;
+  bool _ping_due = true;
+  bool _have_ack = false;
+  bool _ack_fresh = false;
+  bool _legacy_rx = false;
+  bool _legacy_fresh = false;
+  bool _partial_suspend_grace = false;
+
+  void resetTransportState();
+  void expirePartialReceive(uint32_t now);
+  void expireHeartbeatFreshness(uint32_t now);
+  uint32_t frameAssemblyMs() const;
+  bool txPending(uint32_t now) const;
+  void drainTransmit(uint32_t now, bool blocking = false);
+  void serviceHeartbeat(uint32_t now);
+  bool queueControl(char opcode, uint64_t target, uint32_t challenge);
+  void handleControl(uint32_t now);
 };
 
 #endif

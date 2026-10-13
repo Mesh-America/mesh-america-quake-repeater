@@ -102,6 +102,9 @@ struct CLI {
   bool finishReplyMutation(bool) { return true; }
 };
 struct Radio { uint32_t last_rx = 0; uint32_t getLastRecvMillis() { return last_rx; } };
+// This fixture exercises packet-radio scheduling, not a Morse session. The
+// separate Morse loop-policy suite executes the real ownership predicate.
+namespace mesh { bool morseTimingActive(const Radio*) { return false; } }
 struct Barrier { bool held = false; bool waiting() const { return held; } void clear() { held = false; } };
 struct ScheduledRadioSetting {
   bool active = false, temporary = false, started = false;

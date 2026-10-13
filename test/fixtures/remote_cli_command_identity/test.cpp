@@ -13,6 +13,7 @@
 #include <helpers/HostCliBridge.h>
 #include <helpers/ClientACLResponse.h>
 #include <array>
+#include "production_morse.inc"
 
 #undef MESH_DEBUG_PRINTLN
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
@@ -89,6 +90,8 @@ public:
       void beginReplyCommand() {}
       void endReplyCommand() {}
     } profiles;
+    mesh::MorseReplyHandoff morse;
+    mesh::MorseReplyHandoff& morseReply() { return morse; }
     Profiles& radioProfiles() { return profiles; }
   } _cli;
   uint32_t primary_radio_mutation_generation = 0, radio_reply_deadline = 0;
@@ -118,6 +121,8 @@ public:
   // exact reply-barrier ownership below remain production code.
   enum class Mutation { None, Primary, Secondary } accepted_mutation = Mutation::None;
   bool queue_accepts = true;
+  bool morse_mode = false;
+  TestRadio morse_radio;
   int cancellations = 0;
   mesh::Packet queued_ack;
   std::vector<std::string> replies;
@@ -143,6 +148,7 @@ public:
   }
   bool sendRemoteCliReply(ClientInfo* client, const uint8_t* secret, uint8_t, uint32_t,
                          const char* reply, const TransportKey*, mesh::Packet** queued = nullptr) {
+    if (queued && _cli.morseReply().pending()) _cli.morseReply().prepareReply(&queued_ack);
     if (!queue_accepts) return false;
     if (queued) *queued = &queued_ack;
     std::array<uint8_t, PUB_KEY_SIZE> key{}, shared{};
@@ -166,6 +172,8 @@ public:
   void handleCommand(uint32_t, ClientInfo* sender, char* command, char* reply, int, uint8_t) {
     ++executions;
     #include "normalization.inc"
+    if (morse_mode && (mesh::handleMorseReplyCommand(_cli.morseReply(), &morse_radio, command, reply, 157, millis())
+        || mesh::handleMorseCommand(&morse_radio, command, reply, 157))) return;
     if (!fail_command) {
       // Accepted route changes mirror handleClientPathCommand's live ACL edits.
       if (strcmp(command, "set outpath flood") == 0) sender->out_path_len = 0xfe;
@@ -286,7 +294,54 @@ static void hostIdentityLifecycle() {
 }
 #endif
 
+static void morseRemoteDispatchCases() {
+  for (const char* stop : {"morse stop ", "morse  stop  ", "morse\tstop", "AA|morse\t\tstop\t "}) {
+    MyMesh value; value.morse_mode=true; value.morse_radio.rx_supported=true;
+    value.receive("morse listen 1",101,1);
+    assert(value._cli.morseReply().pending() && value._cli.morseReply().contains(&value.queued_ack));
+    assert(value.executions==1 && !value.morse_radio.rx_starts && value.replies.size()==1);
+    value.receive("morse listen 1",102,1);
+    assert(value.executions==1 && value.replies.size()==1); // authoritative cached ACK is not duplicated
+    value.receive("get morse",103,2);
+    assert(value.replies.back().find("waiting for command reply")!=std::string::npos);
+    value.receive("morse read",104,3);
+    assert(value.replies.back().find("> 0000/0000")!=std::string::npos);
+    value.receive("morse stats",105,4);
+    assert(value.replies.back().find("no Morse RX statistics")!=std::string::npos);
+    assert(value._cli.morseReply().pending() && !value.morse_radio.rx_starts);
+    value.receive(stop,106,5);
+    assert(!value._cli.morseReply().pending() && !value.morse_radio.rx_starts);
+    assert(value.replies.back().find("pending Morse RX cancelled")!=std::string::npos);
+  }
+  {
+    MyMesh value; value.morse_mode=true; value.morse_radio.rx_supported=true;
+    value.receive("morse listen .5",101,1);
+    mesh::Packet copy;
+    value._cli.morseReply().copy(&value.queued_ack,&copy);
+    value._cli.morseReply().complete(&value.queued_ack);
+    assert(!value._cli.morseReply().service(&value.morse_radio,millis(),true,true,902100,25));
+    value._cli.morseReply().complete(&copy);
+    assert(value._cli.morseReply().service(&value.morse_radio,millis(),true,true,902100,25));
+    assert(value.morse_radio.rx_starts==1 && value.morse_radio.rx_duration==30000);
+  }
+  {
+    MyMesh value; value.morse_mode=true; value.morse_radio.rx_supported=true; value.queue_accepts=false;
+    value.receive("morse listen 1",101,1);
+    assert(!value._cli.morseReply().pending() && !value.morse_radio.rx_starts);
+  }
+  for (const char* mutation : {"set morse.freq 903", "set morse.wpm 30", "morse send E", "cw on", "set radio2 off"}) {
+    MyMesh value; value.morse_mode=true; value.morse_radio.rx_supported=true;
+    value.receive("morse listen 1",101,1);
+    const auto generation=value._cli.morseReply().generation();
+    value.receive(mutation,102,2);
+    assert(value.replies.back().find("handoff pending")!=std::string::npos);
+    assert(value._cli.morseReply().pending() && value._cli.morseReply().generation()==generation);
+    assert(!value.morse_radio.rx_starts);
+  }
+}
+
 int main() {
+  morseRemoteDispatchCases();
 #if MESH_ENABLE_HOST_CLI
   hostIdentityLifecycle();
 #endif

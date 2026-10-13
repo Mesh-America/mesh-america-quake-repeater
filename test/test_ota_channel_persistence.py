@@ -223,6 +223,7 @@ def persistence_harness():
         "static float defaultLoRaBandwidth(", "static void markDirectRetryPrefsValid(",
         "static void applyFloodRetryPreset(", "static void applyDirectRetryPreset(",
         "static void setDefaultDirectRetryPrefs(", "static bool directRetryPrefsValid("))
+    helpers = '#include <helpers/bridges/RS232PowerSettings.h>\n' + helpers
     methods = "\n".join(extract_braced(source, signature) for signature in (
         "static const char* commonPrefsSaveResultName(",
         "bool CommonCLI::recoverCommonPrefsFiles(",

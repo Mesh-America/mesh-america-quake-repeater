@@ -5,6 +5,8 @@
 #include "RXPowerSaving.h"
 #include "LR1110RxRecovery.h"
 #include "LR1110ProfileSwitchState.h"
+#include "LR11x0MorseRfSwitch.h"
+#include "../MorseRx.h"
 
 #ifndef MC_LR1110_FAST_PROFILE_SWITCH
 // All MeshCore LR1110 targets use the checked FS-mode continuous-RX retune.
@@ -26,9 +28,40 @@ class CustomLR1110 : public LR1110 {
   bool _profileStandbyWarm = false;
   bool _profilePacketDirty = false;
   uint32_t _profileFastResumes = 0;
+  LR11x0MorseRfSwitch _morse_rf_switch;
 
   public:
     CustomLR1110(Module *mod) : LR1110(mod) { }
+
+    void setRfSwitchTable(const uint32_t (&pins)[Module::RFSWITCH_MAX_PINS],
+                          const Module::RfSwitchMode_t table[]) {
+      _morse_rf_switch.capture(this->mod, pins, table);
+      LR1110::setRfSwitchTable(pins, table);
+    }
+
+    int16_t beginMorseReceive(float frequency_mhz) {
+      _profileSwitch.invalidate();
+      _profilePacketDirty = false;
+      int16_t status = LR1110::beginGFSK(frequency_mhz,
+          mesh::MorseRx::ReceiverBitRateKbps, 0.6f, 4.8f, 2, 16, tcxoVoltage);
+      if (status == RADIOLIB_ERR_NONE) status = applyMeshCoreTcxoDelay();
+      if (status == RADIOLIB_ERR_NONE) status = setRegulatorDCDC();
+      if (status == RADIOLIB_ERR_NONE) status = _morse_rf_switch.restore(
+          [this](uint8_t enable, const uint8_t* modes) {
+            return setDioAsRfSwitch(enable, modes[0], modes[1], modes[2],
+                modes[3], modes[4], modes[5], modes[6]);
+          });
+      if (status == RADIOLIB_ERR_NONE) status = LR1110::setRxBoostedGainMode(_rx_boosted);
+      if (status == RADIOLIB_ERR_NONE) {
+        // The LR11xx public sync-word setter rejects length zero. Stage the
+        // native no-lock packet tuple and commit it through checked setCRC.
+        syncWordLength = preambleDetLength = 0;
+        status = LR1110::setCRC(0);
+      }
+      // Infinite continuous RX samples envelope power independently of the
+      // FSK packet detector; no direct-data pin or TX/PA activation is used.
+      return status;
+    }
 
     void setProfileSwitchOptimization(bool enabled) {
       _profileSwitch.enabled = enabled;

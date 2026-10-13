@@ -29,7 +29,19 @@ PREAMBLE = r'''
 #define MAX_MQTT_SLOTS 2
 #define MAX_LORA_TX_POWER 22
 #define TXT_TYPE_CLI_COMMAND 1
+uint32_t millis() { return 0; }
 namespace mesh {
+// The real Morse parser, capture paging and ownership are executed by their
+// dedicated tests. This fixture isolates unrelated local/remote CLI access.
+template <typename Radio>
+bool handleMorseCommand(Radio*, const char*, char*, size_t) { return false; }
+struct MorseReplyHandoff {
+  unsigned generation() const { return 0; }
+  void beginCommand(const uint8_t*) {}
+  void endCommand() {}
+};
+template <typename Radio>
+bool handleMorseReplyCommand(MorseReplyHandoff&, Radio*, const char*, char*, size_t, uint32_t) { return false; }
 struct RadioProfileCLI {
   bool remote_origin=false;
   bool handle(const char*, char*, size_t, bool remote=false) { remote_origin=remote;return false; }
@@ -58,6 +70,7 @@ struct Utils {
 }
 struct ContactInfo {
   bool allowed=true;
+  struct { uint8_t pub_key[32] = {}; } id;
   bool isRemoteCLIAllowed() const { return allowed; }
 };
 struct WiFiSetupPortal {
@@ -117,6 +130,8 @@ struct WebConfigServer {
 const char* FIRMWARE_VERSION="test";
 const char* FIRMWARE_BUILD_DATE="test";
 struct MyMesh : CompanionFleetFixture {
+  mesh::MorseReplyHandoff _morse_reply;
+  bool _morse_reply_admission = false;
   mesh::RadioProfileCLI _radio_profiles;
   Identity self_id;
   Store store; Store* _store=&store;

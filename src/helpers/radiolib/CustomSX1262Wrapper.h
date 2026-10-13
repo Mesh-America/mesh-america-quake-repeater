@@ -4,6 +4,8 @@
 #include "CustomSX1262.h"
 #include "RadioLibWrappers.h"
 #include "SX126xReset.h"
+#include "SX126xMorseRamp.h"
+#include "SX126xMorseReceiver.h"
 
 #ifndef USE_SX1262
 #define USE_SX1262
@@ -38,11 +40,36 @@ public:
   ~CustomSX1262Wrapper() { unregisterInterruptAction(); }
   CustomSX1262Wrapper(CustomSX1262& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
   bool supportsCarrierWave() const override { return true; }
+  bool supportsMorseRx() const override { return MESH_ENABLE_MORSE_RX && supportsRadioDeepInit(); }
 #if MESH_ENABLE_MESHTEXT_CHAT
   bool supportsMeshtext() const override { return true; }
 #endif
 
 protected:
+  float morseReceiverBandwidthKHz() const override { return 4.8f; }
+  int16_t prepareMorseReceiver(float frequency_mhz) override {
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    _morse_rx_fsk_mode = true; // partial reset/configuration also needs full restoration
+    if (!prepareRadioHardReset()) return RADIOLIB_ERR_UNKNOWN;
+    auto* radio = static_cast<CustomSX1262*>(_radio);
+    radio->invalidateMorseModemCache();
+    const int16_t status = prepareSX126xMorseReceiver(radio, frequency_mhz);
+    return status == RADIOLIB_ERR_NONE && !_board->finishRadioHardReset()
+        ? RADIOLIB_ERR_UNKNOWN : status;
+  }
+  float readMorseRssi() override { return static_cast<CustomSX1262*>(_radio)->getMorseRssi(); }
+  int16_t prepareMorseCarrier(float frequency_mhz) override {
+    const int16_t status = RadioLibWrapper::prepareMorseCarrier(frequency_mhz);
+    return status == RADIOLIB_ERR_NONE
+        ? setSX126xMorseRamp(static_cast<CustomSX1262*>(_radio)) : status;
+  }
+  int16_t leaveMorseCarrier() override {
+    return leaveSX126xMorseCarrier(static_cast<CustomSX1262*>(_radio));
+  }
+  bool restoreCarrierWaveModem() override {
+    return restoreSX126xPacketRamp(static_cast<CustomSX1262*>(_radio)) == RADIOLIB_ERR_NONE
+        && RadioLibWrapper::restoreCarrierWaveModem();
+  }
 #if MESH_ENABLE_MESHTEXT_CHAT
   bool applyProtocol(mesh::RadioProfileProtocol protocol) override {
     auto* radio = static_cast<CustomSX1262*>(_radio);

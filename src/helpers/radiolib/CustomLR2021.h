@@ -3,6 +3,7 @@
 #include <RadioLib.h>
 #include "MeshCore.h"
 #include "LR2021Band.h"
+#include "../MorseRx.h"
 
 #ifndef LR2021_TX_BUSY_TIMEOUT_MS
 #define LR2021_TX_BUSY_TIMEOUT_MS 1000UL
@@ -17,10 +18,27 @@ class CustomLR2021 : public LR2021 {
   uint32_t _rf_switch_pins[Module::RFSWITCH_MAX_PINS] = {};
   const Module::RfSwitchMode_t* _rf_switch_table = nullptr;
 
-  void restoreRfSwitchTable() {
-    if (_rf_switch_table != nullptr) {
-      LR2021::setRfSwitchTable(_rf_switch_pins, _rf_switch_table);
+  int16_t restoreRfSwitchTable() {
+    if (!_rf_switch_table) return RADIOLIB_ERR_NONE;
+    for (size_t i = 0; i < Module::RFSWITCH_MAX_PINS; ++i) {
+      const uint32_t pin = _rf_switch_pins[i];
+      if (pin == RADIOLIB_NC || !(pin & RFSWITCH_PIN_FLAG)) continue;
+      const uint8_t dio = RADIOLIB_LRXXXX_DIOx_VAL(pin);
+      if (dio >= 7) return RADIOLIB_ERR_UNKNOWN;
+      uint8_t config = 0;
+      for (size_t j = 0; j < 8 && _rf_switch_table[j].mode != LR2021::MODE_END_OF_TABLE; ++j) {
+        const uint8_t mode = _rf_switch_table[j].mode;
+        if (mode > 0 && mode <= 8
+            && _rf_switch_table[j].values[i] == this->mod->hal->GpioLevelHigh)
+          config |= 1UL << (mode - 1);
+      }
+      const uint8_t pull = dio == 0 ? RADIOLIB_LR2021_DIO_SLEEP_PULL_UP
+                                   : RADIOLIB_LR2021_DIO_SLEEP_PULL_AUTO;
+      int16_t status = setDioFunction(dio + 5, RADIOLIB_LR2021_DIO_FUNCTION_RF_SWITCH, pull);
+      if (status == RADIOLIB_ERR_NONE) status = setDioRfSwitchConfig(dio + 5, config);
+      if (status != RADIOLIB_ERR_NONE) return status;
     }
+    return RADIOLIB_ERR_NONE;
   }
 
   uint8_t rfSwitchRxMode() const {
@@ -33,6 +51,24 @@ class CustomLR2021 : public LR2021 {
 
   public:
     CustomLR2021(Module *mod) : LR2021(mod) { irqDioNum = LR2021_IRQ_DIO; }
+
+    int16_t beginMorseReceive(float frequency_mhz) {
+      const uint8_t gain = mesh::lr2021::isHighBand(frequency_mhz) ? gainModeHf : gainModeLf;
+      int16_t status = LR2021::beginGFSK(frequency_mhz,
+          mesh::MorseRx::ReceiverBitRateKbps, 0.6f, 4.8f, 2, 16, tcxoVoltage);
+      if (status == RADIOLIB_ERR_NONE) status = restoreRfSwitchTable();
+      if (status == RADIOLIB_ERR_NONE) status = LR2021::setRxBoostedGainMode(gain);
+      if (status == RADIOLIB_ERR_NONE) {
+        uint8_t unused_sync = 0;
+        status = LR2021::setSyncWord(&unused_sync, 0);
+      }
+      if (status == RADIOLIB_ERR_NONE) {
+        preambleDetLength = 0;
+        status = LR2021::setCRC(0);
+      }
+      // launchMode() retains this chip's band-aware RX RF switch selection.
+      return status;
+    }
 
     bool std_init(SPIClass* spi = NULL) {
   #ifdef LR2021_TCXO_VOLTAGE
@@ -81,7 +117,8 @@ class CustomLR2021 : public LR2021 {
     #endif
 
       // begin() resets the radio, including its DIO-controlled RF routing.
-      restoreRfSwitchTable();
+      status = restoreRfSwitchTable();
+      if (status != RADIOLIB_ERR_NONE) return false;
 
       return true;  // success
     }
@@ -107,6 +144,13 @@ class CustomLR2021 : public LR2021 {
     }
 
     float getFreqMHz() const { return freqMHz; }
+
+    int16_t transmitMorseCarrier() {
+      // RadioLib's generic direct-TX path always selects MODE_TX. Use the
+      // band-aware routing also used by our normal packet transmit path.
+      this->mod->setRfSwitchState(rfSwitchTxMode());
+      return this->setTxTestMode(RADIOLIB_LR2021_TX_TEST_MODE_CW);
+    }
 
     int16_t setRxBoostedGainMode(uint8_t level) {
       int16_t status = LR2021::setRxBoostedGainMode(level);

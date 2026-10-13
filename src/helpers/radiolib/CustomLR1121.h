@@ -2,6 +2,8 @@
 
 #include <RadioLib.h>
 #include "MeshCore.h"
+#include "LR11x0MorseRfSwitch.h"
+#include "../MorseRx.h"
 
 class CustomLR1121 : public LR1121 {
   uint32_t _preambleMillis = 66;
@@ -9,9 +11,33 @@ class CustomLR1121 : public LR1121 {
   uint32_t _activityAt = 0;
   bool _headerSeen = false;
   bool _rx_boosted = false;
+  LR11x0MorseRfSwitch _morse_rf_switch;
 
   public:
     CustomLR1121(Module *mod) : LR1121(mod) { }
+
+    void setRfSwitchTable(const uint32_t (&pins)[Module::RFSWITCH_MAX_PINS],
+                          const Module::RfSwitchMode_t table[]) {
+      _morse_rf_switch.capture(this->mod, pins, table);
+      LR1121::setRfSwitchTable(pins, table);
+    }
+
+    int16_t beginMorseReceive(float frequency_mhz) {
+      int16_t status = LR1121::beginGFSK(frequency_mhz,
+          mesh::MorseRx::ReceiverBitRateKbps, 0.6f, 4.8f, 2, 16, tcxoVoltage);
+      if (status == RADIOLIB_ERR_NONE) status = setRegulatorDCDC();
+      if (status == RADIOLIB_ERR_NONE) status = _morse_rf_switch.restore(
+          [this](uint8_t enable, const uint8_t* modes) {
+            return setDioAsRfSwitch(enable, modes[0], modes[1], modes[2],
+                modes[3], modes[4], modes[5], modes[6]);
+          });
+      if (status == RADIOLIB_ERR_NONE) status = LR1121::setRxBoostedGainMode(_rx_boosted);
+      if (status == RADIOLIB_ERR_NONE) {
+        syncWordLength = preambleDetLength = 0;
+        status = LR1121::setCRC(0);
+      }
+      return status;
+    }
 
     int16_t begin(float freq = 434.0, float bw = 125.0, uint8_t sf = 9, uint8_t cr = 7,
                   uint8_t syncWord = RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, int8_t power = 10,

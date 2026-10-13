@@ -5,6 +5,7 @@
 #include <helpers/ui/DisplayPowerSettings.h>
 #include <helpers/UsbLoggingWatchdog.h>
 #include <helpers/UsbLoggingClientActivity.h>
+#include <helpers/MorseLoopPolicy.h>
 #if MESH_PACKET_LOGGING
   #include <helpers/SerialPacketLog.h>
 #endif
@@ -331,7 +332,8 @@ void loop() {
 #endif
 
   the_mesh.loop();
-  sensors.loop();
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
+  if (!morse_timing) sensors.loop();
 #ifdef DISPLAY_CLASS
   if (display_ready) ui_task.loop();
 #endif
@@ -348,6 +350,7 @@ void loop() {
   external_watchdog.loop();
 #endif
   bool can_power_save = the_mesh.getNodePrefs()->powersaving_enabled
+      && !morse_timing
       && !board.isUsbDataConnected()
       && !mesh::isUsbLoggingWatchdogArmed()
       && !mesh::wireless::control().pending();
@@ -372,7 +375,7 @@ void loop() {
 #endif
   }
 #if defined(ESP32_PLATFORM)
-  if (!can_power_save && the_mesh.getNodePrefs()->powersaving_enabled) {
+  if (!morse_timing && !can_power_save && the_mesh.getNodePrefs()->powersaving_enabled) {
     delay(1); // Keep USB and the button wake interval serviced while idle.
   }
 #endif

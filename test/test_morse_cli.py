@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Compile exact shared Morse CLI and checked persistent settings with faults."""
+from pathlib import Path
+import unittest
+import zlib
+import re
+from test_morse_tx import compile_run, portable_radio_header
+from test_radio_receive_contract import method
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class MorseCLITests(unittest.TestCase):
+    def test_exact_shared_handler_strict_arguments_bounded_replies_and_rollback(self):
+        code = (ROOT / "test/fixtures/morse_cli.cpp").read_text(encoding="ascii")
+        fs_mock = (ROOT / "test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h").read_text(encoding="ascii")
+        compile_run(self, code, flags=("-Wno-unused-parameter",),
+                    headers={"Dispatcher.h": portable_radio_header(), "helpers/IdentityStore.h": fs_mock})
+
+    def test_exact_receive_cli_timed_sessions_retained_paging_and_recovery(self):
+        code = (ROOT / "test/fixtures/morse_cli.cpp").read_text(encoding="ascii").split("int main() {", 1)[0]
+        code += (ROOT / "test/fixtures/morse_rx_cli.cpp").read_text(encoding="ascii")
+        fs_mock = (ROOT / "test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h").read_text(encoding="ascii")
+        compile_run(self, code, flags=("-Wno-unused-parameter",),
+                    headers={"Dispatcher.h": portable_radio_header(), "helpers/IdentityStore.h": fs_mock})
+
+    def test_hil_only_trace_ring_sparse_edges_paging_and_reflected_prefix_canary(self):
+        code = (ROOT / "test/fixtures/morse_cli.cpp").read_text(encoding="ascii").split("int main() {", 1)[0]
+        code += (ROOT / "test/fixtures/morse_trace_cli.cpp").read_text(encoding="ascii")
+        fs_mock = (ROOT / "test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h").read_text(encoding="ascii")
+        for hil in (0, 1):
+            with self.subTest(hil=hil):
+                compile_run(self, code, flags=("-Wno-unused-parameter", f"-DMESH_MORSE_HIL={hil}"),
+                            headers={"Dispatcher.h": portable_radio_header(), "helpers/IdentityStore.h": fs_mock})
+
+    def test_actual_common_dispatch_reserves_reflected_prefix_for_bulk_capture_pages(self):
+        common = (ROOT / "src/helpers/CommonCLI.cpp").read_text(encoding="utf-8")
+        dispatch = re.search(r"if \(mesh::handleMorseCommand\(_callbacks->getProfileRadio\(\),"
+                             r"\s*command,\s*reply,\s*[^\n]+\)\) return;", common)
+        self.assertIsNotNone(dispatch, "the real CommonCLI Morse dispatch is required")
+        code = (ROOT / "test/fixtures/morse_cli.cpp").read_text(encoding="ascii").split("int main() {", 1)[0]
+        code += (ROOT / "test/fixtures/morse_reply_prefix.cpp").read_text(encoding="ascii").replace(
+            "@COMMON_MORSE_CALL@", dispatch.group(0))
+        fs_mock = (ROOT / "test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h").read_text(encoding="ascii")
+        compile_run(self, code, flags=("-Wno-unused-parameter",),
+                    headers={"Dispatcher.h": portable_radio_header(), "helpers/IdentityStore.h": fs_mock})
+
+    def test_actual_settings_codec_boot_recovery_and_checked_writers_on_all_backends(self):
+        fs_mock = (ROOT / "test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h").read_text(encoding="ascii")
+        fs_mock = fs_mock.replace("bool fail_write = false;", "bool fail_write = false; bool fail_presence = false;\n  std::vector<std::string> fail_read_paths;")
+        fs_mock = fs_mock.replace("if (*mode == 'r' && fail_read_open) return {};",
+            "if (*mode == 'r' && (fail_read_open || std::find(fail_read_paths.begin(), fail_read_paths.end(), path) != fail_read_paths.end())) return {};")
+        presence = ("#pragma once\nnamespace mesh { template <typename FS> bool filePresence(FS* fs, "
+                    "const char* path, bool& present) { if (!fs || fs->fail_presence) return false; "
+                    "present = fs->exists(path); return true; } }\n")
+        transaction = (ROOT / "src/helpers/ContactFileTransaction.h").read_text(encoding="ascii").replace(
+            '#include "IdentityStore.h"', '#include <helpers/IdentityStore.h>')
+        headers = {
+            "helpers/IdentityStore.h": fs_mock,
+            "FilePresence.h": presence,
+            "AtomicFileWriter.h": (ROOT / "src/helpers/AtomicFileWriter.h").read_text(encoding="ascii"),
+            "ContactFileTransaction.h": transaction,
+            "PersistentStoreFormat.h": (ROOT / "src/helpers/PersistentStoreFormat.h").read_text(encoding="ascii"),
+        }
+        prefix = b"MC\x01\x19" + (902100).to_bytes(4, "little")
+        golden = prefix + (zlib.crc32(prefix) ^ 0xffffffff).to_bytes(4, "little")
+        main = (ROOT / "test/fixtures/morse_settings.cpp").read_text(encoding="ascii").replace(
+            "@DEFAULT_IMAGE@", ",".join(str(byte) for byte in golden))
+        code = (ROOT / "src/helpers/MorseSettings.cpp").read_text(encoding="ascii").replace(
+            '#include "MorseSettings.h"', '#include <helpers/MorseSettings.h>') + "\n" + main
+        for platform in ("NRF52_PLATFORM", "STM32_PLATFORM", "ESP32_PLATFORM", "RP2040_PLATFORM"):
+            with self.subTest(platform=platform):
+                compile_run(self, code, flags=("-D" + platform, "-DATOMIC_FILE_WRITER_IMPLEMENTATION",
+                                              "-Wno-sign-compare"), headers=headers)
+
+    def test_actual_companion_binary_webconfig_and_common_cli_fem_guards(self):
+        companion = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="ascii")
+        common = (ROOT / "src/helpers/CommonCLI.cpp").read_text(encoding="ascii")
+        code = (ROOT / "test/fixtures/morse_fem_guard.cpp").read_text(encoding="ascii")
+        code = code.replace("@COMPANION_METHODS@", "\n".join(method(companion, signature) for signature in (
+            "bool MyMesh::applyAndSaveFemRxGain(", "bool MyMesh::applyAndSaveFemTxGain(")))
+        branches = "\nelse ".join(method(common, signature) for signature in (
+            'if (memcmp(config, "radio.fem.rxgain ", 17) == 0)',
+            'if (memcmp(config, "radio.fem.txgain ", 17) == 0)'))
+        compile_run(self, code.replace("@COMMON_BRANCHES@", branches))
+
+
+if __name__ == "__main__":
+    unittest.main()

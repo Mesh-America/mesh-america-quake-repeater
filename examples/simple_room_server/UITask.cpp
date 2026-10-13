@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include <helpers/MorseLoopPolicy.h>
 #include "target.h"
 #include <Arduino.h>
 #include <helpers/UsbLogging.h>
@@ -495,6 +496,7 @@ void UITask::toggleDisplay(const char* source) {
 #endif
 
 void UITask::loop() {
+  const bool morse_timing = mesh::morseTimingActive(the_mesh.getProfileRadio());
   if (_display->servicePower(board.isExternalPowered() || board.isUsbHostConnected())) {
     resetRadioProfileDisplayPage();
     _next_refresh = 0;
@@ -582,7 +584,7 @@ void UITask::loop() {
   }
 #endif
 
-  if (_display->isOn()) {
+  if (!morse_timing && _display->isOn()) {
     // Apply a live orientation change before drawing, including the first frame
     // after a preference was changed while the panel was blanked.
     applyDisplayFlip();

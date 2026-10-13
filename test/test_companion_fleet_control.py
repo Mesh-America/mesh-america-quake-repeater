@@ -130,6 +130,7 @@ struct Clock { uint32_t now = mesh::FleetCommand::MinEpoch + 1000;
   uint32_t getCurrentTime() const { return now; } };
 class MyMesh : public mesh::Mesh {
  public:
+  struct NoMorseReply { void copy(const void*, const void*) {} } _morse_reply;
   mesh::LocalIdentity self_id;
   Clock clock;
   ChannelDetails channels[MAX_GROUP_CHANNELS];
@@ -1237,7 +1238,7 @@ class CompanionFleetControlTests(unittest.TestCase):
         prefix = function[:function.index("#if COMPANION_FEATURE_READER")]
         fleet_start = function.rindex("#if MESH_ENABLE_FLEET_CONTROL", 0,
                                       function.index('if (!strncmp(command, "fleet", 5)'))
-        fleet_end = function.index("  if (_radio_profiles.handle", fleet_start)
+        fleet_end = function.index("  if (mesh::handleMorseReplyCommand", fleet_start)
         # Keep the actual compile guard as well as its complete branch so
         # compact profiles prove that none of the fleet dependencies survive.
         cls.production = prefix + function[fleet_start:fleet_end] + "\n  return false;\n}\n"

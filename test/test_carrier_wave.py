@@ -14,43 +14,95 @@ HARNESS = r'''
 #include <helpers/radiolib/RadioInterruptEvents.h>
 #include <cstdio>
 #include <initializer_list>
+#include <new>
+#include <helpers/MorseRx.h>
 #define STATE_IDLE 0
 #define STATE_RX 1
 #define STATE_TX_WAIT 3
 #define RADIOLIB_ERR_NONE 0
 #define RADIOLIB_ERR_INVALID_OUTPUT_POWER -1
+#define RADIOLIB_ERR_INVALID_FREQUENCY -2
+#define RADIOLIB_ERR_UNKNOWN -16
 #define SX127X_CURRENT_LIMIT 120
 #define LORA_TX_POWER 17
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 static void setFlag() {}
 struct Board {
   bool awake=false; unsigned before=0, after=0;
+  bool frequency_ok=true; unsigned frequency_prepares=0;
+  bool prepareRadioFrequency(float) { ++frequency_prepares; return frequency_ok; }
   void setRadioTestActive(bool value) { awake=value; }
   void onBeforeTransmit() { ++before; }
   void onAfterTransmit() { ++after; }
 };
 struct Chip {
   int start_result=0, stop_result=0, fsk_result=0, power_result=0, limit_result=0;
+  int standby_result=0, frequency_result=0, irq_result=0, ramp_result=0, rx_result=0;
+  int warm_standby_result=0; unsigned warm_standby_calls=0;
+  uint8_t last_standby_mode=0; bool standbyXOSC=false;
+  uint32_t tx_latency=0, standby_latency=0;
   int power=17, initial_fsk_power=0, current_limit=60;
+  int ramp_time=4;
+  unsigned ramp_calls=0, ramp_power_calls=0;
   unsigned starts=0, stops=0, standby_calls=0, fsk_starts=0;
+  unsigned raw_rx_starts=0;
+  unsigned admission_order=0,last_receive_order=0;
+  unsigned morse_ramp_calls=0;
   float frequency=0, deviation=5;
   bool carrier=false, fsk=false, ook=true, rfo=false;
+  int startReceive() { last_receive_order=++admission_order; ++raw_rx_starts; return rx_result; }
+  int startReceive(uint32_t timeout,uint32_t flags,uint32_t mask,size_t length) {
+    assert(timeout==0xffffffU && !flags && !mask && !length); return startReceive();
+  }
+  int receiveDirect() { return startReceive(); }
   void (*callback)()=setFlag;
-  int standby() { ++standby_calls; carrier=false; return 0; }
+  int standby() {
+    ++standby_calls; g_mock_millis+=standby_latency;
+    if (!standby_result) carrier=false;
+    return standby_result;
+  }
+  int standby(uint8_t mode) {
+    ++warm_standby_calls; last_standby_mode=mode;
+    return warm_standby_result ? warm_standby_result : standby();
+  }
+  int setFrequency(float value) { frequency=value; return frequency_result; }
   int beginFSK(float freq, float, float dev, float, int8_t dbm, uint16_t, bool enable_ook) {
     ++fsk_starts; fsk=true; carrier=false; frequency=freq; deviation=dev;
     initial_fsk_power=power=dbm; ook=enable_ook; current_limit=60;
     return fsk_result;
   }
   int setCurrentLimit(int value) { current_limit=value; return limit_result; }
+  int setMorsePaRamp() { ++morse_ramp_calls; return ramp_result; }
+  int setPaRampTime(uint8_t ramp) {
+    ++ramp_calls;
+    if (!ramp_result) ramp_time=ramp;
+    return ramp_result;
+  }
+  int setTxParams(int8_t value, uint8_t ramp) {
+    const int result=setOutputPower(value);
+    if (!result) ramp_time=ramp;
+    return result;
+  }
   int setOutputPower(int8_t value, bool force_rfo=false) {
     standby(); if (power_result) return power_result;
-    power=value; rfo=force_rfo; return 0;
+    power=value; rfo=force_rfo; ramp_time=4; return 0;
   }
-  int clearIrqFlags(uint32_t) { return 0; }
+  int setOutputPower(int8_t value, bool force_rfo, uint16_t ramp) {
+    ++ramp_power_calls;
+    const int result=setOutputPower(value,force_rfo);
+    if (!result) ramp_time=ramp;
+    return result;
+  }
+  int setOutputPower(int8_t value, int ramp) {
+    ++ramp_power_calls;
+    const int result=setOutputPower(value,false);
+    if (!result) ramp_time=ramp;
+    return result;
+  }
+  int clearIrqFlags(uint32_t) { return irq_result; }
   void clearPacketReceivedAction() { callback=nullptr; }
   void setPacketReceivedAction(void (*fn)()) { callback=fn; }
-  int transmitDirect() { carrier=true; ++starts; return start_result; }
+  int transmitDirect() { g_mock_millis+=tx_latency; carrier=true; ++starts; return start_result; }
   int finishTransmit() { ++stops; if (!stop_result) carrier=false; return stop_result; }
 };
 using CustomSX1276=Chip;
@@ -58,14 +110,39 @@ struct RadioLibWrapper : mesh::Radio {
   uint8_t state = STATE_RX;
   RadioInterruptEvents events;
   bool hasPendingRadioInterrupt() const { return events.pending(); }
-  bool registerInterruptAction() { chip.setPacketReceivedAction(setFlag); events.claim(); return true; }
+  unsigned register_failures=0;
+  bool registerInterruptAction() {
+    if (register_failures) { --register_failures; return false; }
+    chip.setPacketReceivedAction(setFlag); events.claim(); return true;
+  }
   Chip chip; Chip* _radio=&chip;
   Board board; Board* _board=&board;
   mesh::RadioProfiles _profiles;
   bool _cw_active=false, _cw_stopping=false, _cw_board_tx=false;
   uint8_t _cw_profile=0, _cw_restore_profile=0, _active_profile=0;
   uint32_t _cw_until=0, _cw_retry_at=0, _cw_generation=0;
+  mesh::MorseTx _morse;
+  bool _morse_owned=false;
+  float _morse_frequency=mesh::MorseTx::DefaultFrequencyMHz;
+  uint8_t _morse_wpm=mesh::MorseTx::DefaultWpm;
+  uint32_t _morse_generation[2]={};
+  @MORSE_RX_FIELDS@
+  bool _morse_rx_owned=false, _morse_rx_fsk_mode=false;
+  uint8_t _morse_rx_read_errors=0;
+  bool receiver_allocation_ok=true, fail_morse_params=false;
+  float rssi=-110, morse_bandwidth=0;
+  uint32_t rssi_latency=0;
+  unsigned rssi_reads=0;
   bool _params_valid=true, _rx_ps_armed=true, _rx_hold_continuous=false;
+  bool _rx_boosted_gain_valid=false, _cur_rx_boosted_gain=false;
+  bool rx_gain_apply_ok=true, physical_rx_gain=false;
+  unsigned rx_gain_applies=0,rx_gain_order=0;
+  virtual bool applyRxBoostedGainMode(bool enabled) {
+    rx_gain_order=++chip.admission_order;
+    ++rx_gain_applies;
+    if (rx_gain_apply_ok) physical_rx_gain=enabled;
+    return rx_gain_apply_ok;
+  }
   bool _nf_calib_active=true, _profile_refresh_required=false;
   unsigned long _wd_observe_until=0;
   bool packet=false, busy=false, reset_ok=false, supported=true, deep_supported=true;
@@ -79,9 +156,12 @@ struct RadioLibWrapper : mesh::Radio {
   RadioLibWrapper() {
     g_mock_millis=100; state=STATE_RX;
     _profiles.primary.freq=909.5;
+    _profiles.primary.bw=500;
     _profiles.secondary.params.freq=911.5;
+    _profiles.secondary.params.bw=500;
     _profiles.secondary.mode=mesh::RadioProfileMode::RxTx;
   }
+  @MORSE_DESTRUCTOR@
   mesh::RadioProfiles* profiles() override { return &_profiles; }
   bool supportsCarrierWave() const override { return supported; }
   bool isCarrierWaveActive() const override { return _cw_active; }
@@ -90,19 +170,48 @@ struct RadioLibWrapper : mesh::Radio {
   mesh::RadioParamApplyResult setCarrierWave(uint8_t,uint32_t) override;
   bool stopCarrierWave();
   bool serviceCarrierWave();
+  bool serviceMorseTx();
+  bool serviceMorseRx();
+  bool supportsMorseTx() const override;
+  mesh::MorseTxResult startMorseTx(float,uint8_t,const char*) override;
+  mesh::MorseTxResult stopMorseTx() override;
+  @MORSE_STATUS@
+  @MORSE_RX_STATUS@
+#if MESH_ENABLE_MORSE_RX
+  virtual bool canAllocateMorseReceiver() const { return receiver_allocation_ok; }
+#endif
+  virtual bool applyParams(float freq,float bw,uint8_t,uint8_t) {
+    morse_bandwidth=bw;
+    return !fail_morse_params && chip.setFrequency(freq)==0;
+  }
+  virtual float getCurrentRSSI() { ++rssi_reads; g_mock_millis+=rssi_latency; return rssi; }
   bool setTxPower(int8_t dbm);
   @NATIVE_HOOKS@
+  @RX_HOOKS@
+  @RX_START_HOOKS@
+  // Explicit stand-in for a proven native-RSSI modem. Concrete production
+  // FSK preparation is executed separately; the abstract base rejects RX.
+  virtual float morseReceiverBandwidthKHz() const { return 4.8f; }
+  virtual int16_t prepareMorseReceiver(float freq) {
+    if (!board.prepareRadioFrequency(freq)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    if (!applyParams(freq,morseReceiverBandwidthKHz(),7,5)) return RADIOLIB_ERR_UNKNOWN;
+    return RADIOLIB_ERR_NONE;
+  }
   virtual bool supportsRadioDeepInit() const { return deep_supported; }
   uint8_t beginReconfigure();
   void endReconfigure(bool resume) { if (resume) startRecv(); }
   bool isChipBusy() { return busy; }
   bool isReceivingPacket() { return packet; }
   bool isInRecvMode() const override { return state==STATE_RX; }
+  bool validateProfile(const mesh::RadioProfileParams& p) const override {
+    return std::isfinite(p.freq) && p.freq >= 100 && p.freq <= 1000;
+  }
   void stopReceiveDutyCycle() { ++rtc_stops; _rx_ps_armed=false; }
   mesh::RadioParamApplyResult tuneProfile(uint8_t target) {
     ++tunes;
-    if (fail_tune) return mesh::RadioParamApplyResult::FAILED;
+    if (fail_tune || chip.frequency_result) return mesh::RadioParamApplyResult::FAILED;
     _active_profile=target; frequency=_cur_freq=_profiles.params(target).freq;
+    chip.frequency=frequency;
     return mesh::RadioParamApplyResult::APPLIED;
   }
   void startRecv() override {
@@ -113,7 +222,7 @@ struct RadioLibWrapper : mesh::Radio {
   bool restoreAfterDeepInit() {
     ++resets;
     if (reset_ok) {
-      chip.carrier=false; chip.fsk=false; chip.stop_result=0;
+      chip.carrier=false; chip.fsk=false; chip.stop_result=chip.standby_result=0;
       return applyCachedTxPower(_cur_dbm)==0;
     }
     return reset_ok;
@@ -193,6 +302,7 @@ int main() {
     RadioLibWrapper w;
     assert(w.setCarrierWave(1,100)==Result::APPLIED);
     w.chip.stop_result=-705;
+    w.chip.standby_result=-705;
     assert(w.setCarrierWave(0,0)==Result::FAILED);
     assert(w._cw_active && w._cw_stopping && w.board.awake && w.board.after==1);
     const auto attempts=w.chip.stops;
@@ -205,7 +315,11 @@ int main() {
     RadioLibWrapper w; w.setCarrierWave(0,100);
     w.fail_rx_starts=2;
     assert(w.setCarrierWave(0,0)==Result::FAILED); // never claim RX resumed
-    assert(!w._cw_active && !w.isInRecvMode());
+    assert(w._cw_active && w._cw_stopping && w.board.awake && !w.isInRecvMode());
+    advance(100); w.serviceCarrierWave();
+    assert(w._cw_active && w._cw_stopping && w.board.awake && !w.isInRecvMode());
+    advance(100); w.serviceCarrierWave();
+    assert(!w._cw_active && !w.board.awake && w.isInRecvMode());
   }
   {
     RadioLibWrapper w; w.setCarrierWave(0,100);
@@ -324,27 +438,73 @@ int main() {
 '''
 
 
-class CarrierWaveTest(unittest.TestCase):
-    def test_production_transitions_and_commands(self):
-        source = (ROOT/'src/helpers/radiolib/RadioLibWrappers.cpp').read_text()
-        signatures = ('uint8_t RadioLibWrapper::beginReconfigure(',
+def production_harness():
+    source = (ROOT/'src/helpers/radiolib/RadioLibWrappers.cpp').read_text()
+    signatures = ('uint8_t RadioLibWrapper::beginReconfigure(',
                       'bool RadioLibWrapper::setTxPower(',
                       'mesh::RadioParamApplyResult RadioLibWrapper::setCarrierWave(',
                       'uint32_t RadioLibWrapper::carrierWaveRemainingMillis(',
                       'bool RadioLibWrapper::stopCarrierWave(',
-                      'bool RadioLibWrapper::serviceCarrierWave(')
-        code = HARNESS.replace('@METHODS@', '\n'.join(method(source, s) for s in signatures))
-        header = (ROOT/'src/helpers/radiolib/RadioLibWrappers.h').read_text()
-        code = code.replace('@NATIVE_HOOKS@', '\n'.join(method(header, s) for s in (
+                      'bool RadioLibWrapper::serviceCarrierWave(',
+                      'bool RadioLibWrapper::supportsMorseTx(',
+                      'mesh::MorseTxResult RadioLibWrapper::startMorseTx(',
+                      'mesh::MorseTxResult RadioLibWrapper::stopMorseTx(',
+                      'bool RadioLibWrapper::serviceMorseTx(',
+                      'mesh::MorseRxResult RadioLibWrapper::startMorseRx(',
+                      'mesh::MorseRxResult RadioLibWrapper::stopMorseRx(',
+                      'size_t RadioLibWrapper::readMorseCapture(',
+                      'void RadioLibWrapper::clearMorseCapture(',
+                      'bool RadioLibWrapper::serviceMorseRx(')
+    def extract_transition(signature):
+        if signature == 'bool RadioLibWrapper::stopCarrierWave(':
+            # The production enabled/disabled RX branches share a closing
+            # block; bound the complete actual method instead of counting
+            # mutually exclusive preprocessor braces together.
+            start = source.index(signature)
+            end = source.index('bool RadioLibWrapper::serviceCarrierWave(',start)
+            return source[start:end].strip()
+        if signature in ('mesh::MorseRxResult RadioLibWrapper::startMorseRx(',
+                          'mesh::MorseRxResult RadioLibWrapper::stopMorseRx(',
+                          'size_t RadioLibWrapper::readMorseCapture(',
+                          'void RadioLibWrapper::clearMorseCapture('):
+            return '#if MESH_ENABLE_MORSE_RX\n'+method(source,signature)+'\n#endif'
+        return method(source,signature)
+    code = HARNESS.replace('@METHODS@', '\n'.join(extract_transition(s) for s in signatures))
+    header = (ROOT/'src/helpers/radiolib/RadioLibWrappers.h').read_text()
+    fields_start = header.rfind('#if MESH_ENABLE_MORSE_RX',0,header.index('mesh::MorseRx* _morse_rx'))
+    fields_end = header.index('  bool _morse_rx_owned',fields_start)
+    code = code.replace('@MORSE_RX_FIELDS@',header[fields_start:fields_end])
+    code = code.replace('@MORSE_DESTRUCTOR@',method(header,'~RadioLibWrapper('))
+    code = code.replace('@NATIVE_HOOKS@', '\n'.join(method(header, s) for s in (
             'virtual int16_t enterCarrierWave(', 'virtual bool restoreCarrierWaveModem(',
-            'virtual int16_t applyCachedTxPower(')))
-        sx1276 = (ROOT/'src/helpers/radiolib/CustomSX1276Wrapper.h').read_text()
-        code = code.replace('@SX1276_METHODS@', '\n'.join(method(sx1276, s) for s in (
+            'virtual int16_t applyCachedTxPower(', 'virtual int16_t prepareMorseCarrier(',
+            'virtual int16_t enterMorseCarrier(', 'virtual int16_t leaveMorseCarrier(',
+            'virtual bool validateMorseFrequency(')))
+    code = code.replace('@RX_HOOKS@', method(header, 'virtual float readMorseRssi('))
+    code = code.replace('@RX_START_HOOKS@',method(header,'virtual int16_t startMorseReceiver('))
+    code = code.replace('@MORSE_STATUS@', '\n'.join(method(header, s) for s in (
+            'bool isMorseTxActive(', 'float morseTxFrequency(', 'uint8_t morseTxWpm(',
+            'uint32_t morseTxRemainingMillis(')))
+    rx_status_start = header.rfind('#if MESH_ENABLE_MORSE_RX',0,header.index('bool isMorseRxActive('))
+    rx_status_end = header.index('  mesh::RadioProfiles* profiles()',rx_status_start)
+    rx_status = header[rx_status_start:rx_status_end].replace(
+        'bool supportsMorseRx() const override { return false; }',
+        'bool supportsMorseRx() const override { return supported && deep_supported; }')
+    code = code.replace('@MORSE_RX_STATUS@',rx_status)
+    sx1276 = (ROOT/'src/helpers/radiolib/CustomSX1276Wrapper.h').read_text()
+    code = code.replace('@SX1276_METHODS@', '\n'.join(method(sx1276, s) for s in (
             'bool supportsCarrierWave(', 'int16_t enterCarrierWave(',
-            'bool restoreCarrierWaveModem(')))
-        dac = (ROOT/'src/helpers/radiolib/DacPaSX1276Wrapper.h').read_text()
-        code = code.replace('@DAC_METHODS@', '\n'.join(method(dac, s) for s in (
+            'bool restoreCarrierWaveModem(', 'int16_t prepareMorseCarrier(',
+            'bool validateMorseFrequency(')))
+    dac = (ROOT/'src/helpers/radiolib/DacPaSX1276Wrapper.h').read_text()
+    code = code.replace('@DAC_METHODS@', '\n'.join(method(dac, s) for s in (
             'int16_t applyCachedTxPower(', 'uint8_t indexForDbm(')))
+    return code
+
+
+class CarrierWaveTest(unittest.TestCase):
+    def test_production_transitions_and_commands(self):
+        code = production_harness()
         with tempfile.TemporaryDirectory() as folder:
             cpp = Path(folder)/'cw.cpp'; exe = Path(folder)/'cw.exe'
             cpp.write_text(code)

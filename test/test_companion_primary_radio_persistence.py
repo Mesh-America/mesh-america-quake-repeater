@@ -57,14 +57,22 @@ struct Radio : mesh::Radio {
   bool isInRecvMode() const override { return true; }
 };
 struct Sensors { double node_lat=0,node_lon=0; } sensors;
+// Morse dispatch is independently executable in its own shared-handler suite;
+// this legacy fixture keeps that optional branch inactive for tuple rollback.
+namespace mesh {
+template<typename... Args> bool handleMorseReplyCommand(Args&&...) { return false; }
+template<typename... Args> bool handleMorseCommand(Args&&...) { return false; }
+}
 @COMMAND_FILTER@
 struct MyMesh : CompanionFleetFixture {
+  struct NoMorseReply {} _morse_reply;
   uint8_t self_id = 0; // Signing is unreachable in this radio-only fixture.
   CompanionNodePrefs _prefs;
   DataStore store;
   DataStore* _store=&store;
   MemoryFS profile_fs;
   Radio radio;
+  Radio* _radio=&radio;
   Clock clock;
   mesh::RadioProfileCLI _radio_profiles;
   char reply[160]={};

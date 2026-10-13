@@ -4,6 +4,8 @@
 #include "CustomSX1268.h"
 #include "RadioLibWrappers.h"
 #include "SX126xReset.h"
+#include "SX126xMorseRamp.h"
+#include "SX126xMorseReceiver.h"
 
 #ifndef USE_SX1268
 #define USE_SX1268
@@ -16,10 +18,40 @@ protected:
 public:
   ~CustomSX1268Wrapper() { unregisterInterruptAction(); }
   CustomSX1268Wrapper(CustomSX1268& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
+  bool supportsMorseTx() const override { return true; }
+  bool supportsMorseRx() const override { return MESH_ENABLE_MORSE_RX && supportsRadioDeepInit(); }
 
-  void powerOff() { _radio->standby(); _radio->sleep(); }
+  void powerOff() {
+    if (isCarrierWaveActive()) setCarrierWave(0, 0);
+    _radio->standby(); _radio->sleep();
+  }
 
 protected:
+  float morseReceiverBandwidthKHz() const override { return 4.8f; }
+  int16_t prepareMorseReceiver(float frequency_mhz) override {
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    _morse_rx_fsk_mode = true;
+    if (!prepareRadioHardReset()) return RADIOLIB_ERR_UNKNOWN;
+    const int16_t status = prepareSX126xMorseReceiver(static_cast<CustomSX1268*>(_radio), frequency_mhz);
+    return status == RADIOLIB_ERR_NONE && !_board->finishRadioHardReset()
+        ? RADIOLIB_ERR_UNKNOWN : status;
+  }
+  float readMorseRssi() override { return static_cast<CustomSX1268*>(_radio)->getMorseRssi(); }
+  bool validateMorseFrequency(float frequency_mhz) const override {
+    return frequency_mhz >= 410.0f && frequency_mhz <= 810.0f;
+  }
+  int16_t prepareMorseCarrier(float frequency_mhz) override {
+    const int16_t status = RadioLibWrapper::prepareMorseCarrier(frequency_mhz);
+    return status == RADIOLIB_ERR_NONE
+        ? setSX126xMorseRamp(static_cast<CustomSX1268*>(_radio)) : status;
+  }
+  int16_t leaveMorseCarrier() override {
+    return leaveSX126xMorseCarrier(static_cast<CustomSX1268*>(_radio));
+  }
+  bool restoreCarrierWaveModem() override {
+    return restoreSX126xPacketRamp(static_cast<CustomSX1268*>(_radio)) == RADIOLIB_ERR_NONE
+        && RadioLibWrapper::restoreCarrierWaveModem();
+  }
   bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     bool success = ((CustomSX1268 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE
         && ((CustomSX1268 *)_radio)->setSpreadingFactor(sf) == RADIOLIB_ERR_NONE
@@ -36,6 +68,7 @@ protected:
 
 public:
   bool setCodingRate(uint8_t cr) override {
+    if (isCarrierWaveActive()) return false;
     return ((CustomSX1268 *)_radio)->setCodingRate(cr) == RADIOLIB_ERR_NONE;
   }
 

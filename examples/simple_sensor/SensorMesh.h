@@ -218,10 +218,10 @@ protected:
   bool onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onControlDataRecv(mesh::Packet* packet) override;
   void onAckRecv(mesh::Packet* packet, uint32_t ack_crc) override;
-#if MESH_ENABLE_SENSOR_TRACKER
   void onSendComplete(mesh::Packet* packet) override;
   void onSendFail(mesh::Packet* packet) override;
-#endif
+  void onRadioProfileCopyQueued(mesh::Packet* packet, const mesh::Packet* original,
+                                uint8_t priority) override;
   void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
                     uint32_t timestamp, const uint8_t* app_data,
                     size_t app_data_len) override;

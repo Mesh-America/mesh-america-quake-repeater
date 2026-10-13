@@ -2,6 +2,15 @@
 #define RADIOLIB_STATIC_ONLY 1
 #include "RadioLibWrappers.h"
 #include "RadioInterruptEvents.h"
+#include <new>
+#if defined(ESP32_PLATFORM)
+#include <esp_heap_caps.h>
+#elif defined(NRF52_PLATFORM)
+#include <utility/debug.h>
+#elif defined(STM32_PLATFORM)
+#include <sys/types.h>
+extern "C" caddr_t _sbrk(int increment);
+#endif
 
 #define STATE_IDLE       0
 #define STATE_RX         1
@@ -223,6 +232,10 @@ uint32_t RadioLibWrapper::getRngSeed() {
 }
 
 bool RadioLibWrapper::setTxPower(int8_t dbm) {
+  // A CW power-meter sweep may re-key the carrier. During Morse that would
+  // turn an inter-symbol gap into RF and corrupt the text, so keep the whole
+  // message exclusive (including cleanup retries).
+  if ((_morse_owned || _morse_rx_owned) && _cw_active) return false;
   if (_cw_active) {
     if (_cw_stopping) return false;
     // Permit meter sweeps through the board's normal power/PA calibration.
@@ -992,18 +1005,23 @@ void RadioLibWrapper::checkReceiveMode(uint32_t now) {
 
 uint32_t RadioLibWrapper::carrierWaveRemainingMillis() const {
   if (!_cw_active || _cw_stopping) return 0;
+  if (_morse_owned) return morseTxRemainingMillis();
+  if (_morse_rx_owned) return morseRxRemainingMillis();
   const int32_t remaining = static_cast<int32_t>(_cw_until - millis());
   return remaining > 0 ? static_cast<uint32_t>(remaining) : 0;
 }
 
 mesh::RadioParamApplyResult RadioLibWrapper::setCarrierWave(uint8_t profile, uint32_t duration_ms) {
   using Result = mesh::RadioParamApplyResult;
+  // The shared emergency stop also covers chips exposing Morse without the
+  // older profile-CW CLI capability.
+  if (!duration_ms && (_morse_owned || _morse_rx_owned)) return stopCarrierWave() ? Result::APPLIED : Result::FAILED;
   if (!supportsCarrierWave()) return Result::FAILED;
   if (!duration_ms) return !_cw_active || stopCarrierWave() ? Result::APPLIED : Result::FAILED;
   if (profile > 1 || duration_ms > CarrierWaveMaxMillis || !_params_valid
       || !_profiles.canTransmit(profile)) return Result::FAILED;
   if (_cw_active) {
-    if (_cw_stopping || profile != _cw_profile
+    if (_morse_owned || _morse_rx_owned || _cw_stopping || profile != _cw_profile
         || _cw_generation != _profiles.generation[profile]) return Result::BUSY;
     _cw_until = static_cast<uint32_t>(millis()) + duration_ms;
     return Result::APPLIED;
@@ -1028,6 +1046,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::setCarrierWave(uint8_t profile, uin
   _wd_observe_until = 0;
   _cw_profile = profile;
   _cw_generation = _profiles.generation[profile];
+  _morse_owned = false;
   _cw_active = true;
   _cw_stopping = false;
   _board->setRadioTestActive(true);  // service the deadline even without USB
@@ -1041,14 +1060,321 @@ mesh::RadioParamApplyResult RadioLibWrapper::setCarrierWave(uint8_t profile, uin
   return Result::APPLIED;
 }
 
+bool RadioLibWrapper::supportsMorseTx() const {
+  return supportsCarrierWave();
+}
+
+mesh::MorseTxResult RadioLibWrapper::startMorseTx(float frequency_mhz,
+                                                uint8_t wpm, const char* text) {
+  using Result = mesh::MorseTxResult;
+  if (!supportsMorseTx()) return Result::Unsupported;
+  if (_cw_active) return Result::Busy;
+  const Result valid_text = mesh::MorseTx::validate(text, wpm);
+  if (valid_text != Result::Started) return valid_text;
+  if (!_params_valid || !isfinite(frequency_mhz)) return Result::InvalidFrequency;
+  // Only the carrier frequency matters here: existing LoRa SF/BW/protocol
+  // constraints must not accidentally limit an unmodulated transmission.
+  if (!validateMorseFrequency(frequency_mhz)) return Result::InvalidFrequency;
+  for (uint8_t profile = 0; profile < 2; ++profile) {
+    const auto& p = _profiles.params(profile);
+    if (mesh::morseFrequencyOverlaps(frequency_mhz, p.freq, p.bw)) return Result::Overlap;
+  }
+  const uint8_t resume = beginReconfigure();
+  if (resume > 1) return Result::Busy;
+  _cw_restore_profile = _active_profile;
+  if (_radio->standby() != RADIOLIB_ERR_NONE
+      || _radio->clearIrqFlags(UINT32_MAX) != RADIOLIB_ERR_NONE) {
+    endReconfigure(resume);
+    return Result::Failed;
+  }
+
+  // Publish ownership before the first hardware mutation; even a failed SPI
+  // command can have reached the chip, requiring a confirmed stop/restore.
+  _radio->clearPacketReceivedAction();
+  _cw_active = _morse_owned = true;
+  _cw_stopping = false;
+  _cw_profile = _active_profile;
+  _morse_generation[0] = _profiles.generation[0];
+  _morse_generation[1] = _profiles.generation[1];
+  _morse_frequency = frequency_mhz;
+  _morse_wpm = wpm;
+  _rx_ps_armed = false;
+  _rx_hold_continuous = false;
+  _nf_calib_active = false;
+  _wd_observe_until = 0;
+  state = STATE_IDLE;
+  _board->setRadioTestActive(true);
+  if (prepareMorseCarrier(frequency_mhz) != RADIOLIB_ERR_NONE) {
+    stopCarrierWave();
+    return Result::Failed;
+  }
+  _board->onBeforeTransmit();
+  _cw_board_tx = true;
+  if (enterMorseCarrier() != RADIOLIB_ERR_NONE) {
+    stopCarrierWave();
+    return Result::Failed;
+  }
+  // Start timing when the hardware command has finished, not before the
+  // one-time oscillator/modem setup. Validation above guarantees success.
+  _morse.start(text, wpm, static_cast<uint32_t>(millis()));
+  return Result::Started;
+}
+
+mesh::MorseTxResult RadioLibWrapper::stopMorseTx() {
+  if (!supportsMorseTx()) return mesh::MorseTxResult::Unsupported;
+  if (!_morse_owned) return mesh::MorseTxResult::Stopped;
+  return stopCarrierWave() ? mesh::MorseTxResult::Stopped : mesh::MorseTxResult::Failed;
+}
+
+bool RadioLibWrapper::serviceMorseTx() {
+  if (!_morse_owned || !_cw_active) return false;
+  const uint32_t now = millis();
+  if (_cw_stopping) {
+    if (static_cast<int32_t>(now - _cw_retry_at) >= 0) stopCarrierWave();
+    return true;
+  }
+  if (_morse_generation[0] != _profiles.generation[0]
+      || _morse_generation[1] != _profiles.generation[1]) {
+    stopCarrierWave();
+    return true;
+  }
+  // The public profile model is also used by board-specific integrations.
+  // Fail closed if one changes a tuple directly without bumping generation.
+  for (uint8_t profile = 0; profile < 2; ++profile) {
+    const auto& p = _profiles.params(profile);
+    if (mesh::morseFrequencyOverlaps(_morse_frequency, p.freq, p.bw)) {
+      stopCarrierWave();
+      return true;
+    }
+  }
+  const auto edge = _morse.advance(now);
+  if (edge == mesh::MorseTx::Edge::Complete || edge == mesh::MorseTx::Edge::Expired) {
+    stopCarrierWave();
+  } else if (edge == mesh::MorseTx::Edge::KeyUp) {
+    const int16_t status = leaveMorseCarrier();
+    if (_cw_board_tx) { _board->onAfterTransmit(); _cw_board_tx = false; }
+    if (status != RADIOLIB_ERR_NONE) stopCarrierWave();
+    else _morse.edgeApplied(static_cast<uint32_t>(millis()));
+  } else if (edge == mesh::MorseTx::Edge::KeyDown) {
+    _board->onBeforeTransmit();
+    _cw_board_tx = true;
+    if (enterMorseCarrier() != RADIOLIB_ERR_NONE) stopCarrierWave();
+    else _morse.edgeApplied(static_cast<uint32_t>(millis()));
+  }
+  return true;
+}
+
+#if MESH_ENABLE_MORSE_RX
+bool RadioLibWrapper::canAllocateMorseReceiver() const {
+  // This is a real, opt-in runtime reservation, never hidden in the static
+  // RAM baseline or silently borrowed from an independently running OTA.
+  size_t allocation = _morse_rx ? 0U : sizeof(mesh::MorseRx);
+#if defined(ESP32_PLATFORM)
+  size_t largest_allocation = allocation;
+#endif
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  if (!_morse_trace) {
+    allocation += sizeof(mesh::MorseRssiTrace);
+#if defined(ESP32_PLATFORM)
+    if (sizeof(mesh::MorseRssiTrace) > largest_allocation)
+      largest_allocation = sizeof(mesh::MorseRssiTrace);
+#endif
+  }
+#endif
+  // A retained transcript/trace is reused in place after preparation succeeds.
+  // Require only allocations still missing, while keeping the same reserve.
+  const size_t required = allocation + 4096U;
+#if defined(ESP32_PLATFORM)
+  return ESP.getFreeHeap() >= required
+      && (!largest_allocation
+          || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= largest_allocation);
+#elif defined(NRF52_PLATFORM)
+  const int available = dbgHeapFree();
+  return available > 0 && static_cast<size_t>(available) >= required;
+#elif defined(RP2040_PLATFORM)
+  const int available = rp2040.getFreeHeap();
+  return available > 0 && static_cast<size_t>(available) >= required;
+#elif defined(STM32_PLATFORM)
+  uint8_t stack_marker;
+  const caddr_t heap_end = _sbrk(0);
+  if (heap_end == (caddr_t)-1) return false;
+  const uintptr_t stack_address = reinterpret_cast<uintptr_t>(&stack_marker);
+  const uintptr_t heap_address = reinterpret_cast<uintptr_t>(heap_end);
+  return stack_address > heap_address && stack_address - heap_address >= required;
+#else
+  return false; // an unmeasured allocator must not consume the safety reserve
+#endif
+}
+
+mesh::MorseRxResult RadioLibWrapper::startMorseRx(float frequency_mhz,
+                                                uint8_t wpm, uint32_t duration_ms) {
+  using Result = mesh::MorseRxResult;
+  if (!supportsMorseRx()) return Result::Unsupported;
+  if (_cw_active) return Result::Busy;
+  const Result valid = mesh::MorseRx::validate(wpm, duration_ms);
+  if (valid != Result::Started) return valid;
+  if (!_params_valid || !isfinite(frequency_mhz) || !validateMorseFrequency(frequency_mhz))
+    return Result::InvalidFrequency;
+  // Passive reception cannot interfere with either packet profile. Listening
+  // on its centre is useful; only a transmitting Morse carrier needs spacing.
+  if (!canAllocateMorseReceiver()) return Result::Failed;
+  mesh::MorseRx* receiver = _morse_rx;
+  const bool allocated = receiver == nullptr;
+  if (allocated) receiver = new (std::nothrow) mesh::MorseRx;
+  if (!receiver) return Result::Failed;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  mesh::MorseRssiTrace* trace = _morse_trace;
+  const bool trace_allocated = trace == nullptr;
+  if (trace_allocated) trace = new (std::nothrow) mesh::MorseRssiTrace;
+  if (!trace) { if (allocated) delete receiver; return Result::Failed; }
+#endif
+  // Allocation/admission occurs before any hardware change. Keep a previous
+  // transcript untouched until the replacement receiver is proven running.
+  const uint8_t resume = beginReconfigure();
+  if (resume > 1) {
+    if (allocated) delete receiver;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+    if (trace_allocated) delete trace;
+#endif
+    return Result::Busy;
+  }
+  _cw_restore_profile = _active_profile;
+  if (_radio->standby() != RADIOLIB_ERR_NONE
+      || _radio->clearIrqFlags(UINT32_MAX) != RADIOLIB_ERR_NONE) {
+    if (allocated) delete receiver;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+    if (trace_allocated) delete trace;
+#endif
+    endReconfigure(resume);
+    return Result::Failed;
+  }
+  _radio->clearPacketReceivedAction();
+  _cw_active = _morse_rx_owned = true;
+  _morse_owned = _cw_stopping = false;
+  _cw_profile = _active_profile;
+  _morse_generation[0] = _profiles.generation[0];
+  _morse_generation[1] = _profiles.generation[1];
+  _rx_ps_armed = _rx_hold_continuous = _nf_calib_active = false;
+  _wd_observe_until = 0;
+  _morse_rx_read_errors = 0;
+  state = STATE_IDLE;
+  _board->setRadioTestActive(true);
+  if (prepareMorseReceiver(frequency_mhz) != RADIOLIB_ERR_NONE
+      || (_rx_boosted_gain_valid && !applyRxBoostedGainMode(_cur_rx_boosted_gain))
+      || startMorseReceiver() != RADIOLIB_ERR_NONE) {
+    if (allocated) delete receiver;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+    if (trace_allocated) delete trace;
+#endif
+    stopCarrierWave();
+    return Result::Failed;
+  }
+  const float initial_rssi = readMorseRssi();
+  if (!isfinite(initial_rssi) || initial_rssi < -180.0f || initial_rssi > 20.0f) {
+    if (allocated) delete receiver;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+    if (trace_allocated) delete trace;
+#endif
+    stopCarrierWave();
+    return Result::Failed;
+  }
+  const uint32_t now = millis();
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  receiver->setTrace(trace);
+  _morse_trace = trace;
+#endif
+  receiver->start(wpm, duration_ms, now);
+  receiver->sample(initial_rssi, now);
+  _morse_rx = receiver;
+  _morse_rx_frequency = frequency_mhz;
+  _morse_rx_next_sample = now + mesh::MorseRx::SampleIntervalMillis;
+  ++_morse_capture_generation;
+  return Result::Started;
+}
+
+mesh::MorseRxResult RadioLibWrapper::stopMorseRx() {
+  if (!supportsMorseRx()) return mesh::MorseRxResult::Unsupported;
+  if (!_morse_rx_owned) return mesh::MorseRxResult::Stopped;
+  return stopCarrierWave() ? mesh::MorseRxResult::Stopped : mesh::MorseRxResult::Failed;
+}
+
+size_t RadioLibWrapper::readMorseCapture(size_t offset, char* out, size_t capacity) const {
+  if (_morse_rx) return _morse_rx->read(offset, out, capacity);
+  if (out && capacity) out[0] = 0;
+  return 0;
+}
+
+void RadioLibWrapper::clearMorseCapture() {
+  if (isMorseRxActive()) return;
+  delete _morse_rx;
+  _morse_rx = nullptr;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  delete _morse_trace;
+  _morse_trace = nullptr;
+#endif
+  ++_morse_capture_generation;
+}
+#endif
+
+bool RadioLibWrapper::serviceMorseRx() {
+#if !MESH_ENABLE_MORSE_RX
+  return false;
+#else
+  if (!_morse_rx_owned || !_cw_active) return false;
+  const uint32_t now = millis();
+  if (_cw_stopping) {
+    if (static_cast<int32_t>(now - _cw_retry_at) >= 0) stopCarrierWave();
+    return true;
+  }
+  if (!_morse_rx || !_morse_rx->service(now)
+      || _morse_generation[0] != _profiles.generation[0]
+      || _morse_generation[1] != _profiles.generation[1]) {
+    stopCarrierWave();
+    return true;
+  }
+  if (static_cast<int32_t>(now - _morse_rx_next_sample) >= 0) {
+    const float rssi = readMorseRssi();
+    const uint32_t sampled_at = millis();
+    _morse_rx_next_sample = sampled_at + mesh::MorseRx::SampleIntervalMillis;
+    if (!isfinite(rssi) || rssi < -180.0f || rssi > 20.0f) {
+      if (++_morse_rx_read_errors >= 8) stopCarrierWave();
+    } else {
+      _morse_rx_read_errors = 0;
+      _morse_rx->sample(rssi, sampled_at);
+      if (!_morse_rx->active()) stopCarrierWave();
+    }
+  }
+  return true;
+#endif
+}
+
 bool RadioLibWrapper::stopCarrierWave() {
+  _morse.stop();
+#if MESH_ENABLE_MORSE_RX
+  if (_morse_rx_owned && _morse_rx) _morse_rx->stop(static_cast<uint32_t>(millis()));
+#endif
   _cw_stopping = true;
   // Deassert external TX even if SPI fails. SX127x must also rebuild its LoRa
   // modem after FSK direct mode before normal packet work can resume.
   const int16_t status = _radio->finishTransmit();
+  // Some RadioLib finishTransmit() implementations return after a failed IRQ
+  // clear, before their standby command. Always attempt the RF-off command.
+  const int16_t standby_status = _radio->standby();
   if (_cw_board_tx) { _board->onAfterTransmit(); _cw_board_tx = false; }
-  const bool restored = status == RADIOLIB_ERR_NONE
-      ? restoreCarrierWaveModem() : restoreAfterDeepInit();
+  bool restored;
+#if MESH_ENABLE_MORSE_RX
+  if (_morse_rx_fsk_mode) {
+    // applyParams only changes a LoRa tuple; it cannot rebuild a modem switched
+    // to GFSK. This includes failed partial preparation and cleanup retries.
+    restored = restoreAfterDeepInit();
+    if (restored) _morse_rx_fsk_mode = false;
+  } else {
+#else
+  {
+#endif
+    restored = status == RADIOLIB_ERR_NONE || standby_status == RADIOLIB_ERR_NONE
+        ? restoreCarrierWaveModem() : restoreAfterDeepInit();
+  }
   if (!restored) {
     _cw_retry_at = static_cast<uint32_t>(millis()) + 100;
     return false;  // hold normal work until stopping the carrier is confirmed
@@ -1067,11 +1393,23 @@ bool RadioLibWrapper::stopCarrierWave() {
   recalibrateNoiseFloor();
   startRecv();
   if (!isInRecvMode() && restoreAfterDeepInit()) startRecv();
+  if (!tuned || !isInRecvMode()) {
+    // A stopped carrier is not sufficient to hand ownership back if the
+    // configured packet modem/profile could not be restored. Keep the guard
+    // and watchdog wake veto until the bounded retry repairs reception.
+    _cw_active = _cw_stopping = true;
+    _cw_retry_at = static_cast<uint32_t>(millis()) + 100;
+    return false;
+  }
+  _morse_owned = false;
+  _morse_rx_owned = false;
   _board->setRadioTestActive(false);
-  return tuned && isInRecvMode();
+  return true;
 }
 
 bool RadioLibWrapper::serviceCarrierWave() {
+  if (serviceMorseRx()) return true;
+  if (serviceMorseTx()) return true;
   if (_cw_active) {
     const uint32_t now = millis();
     if ((_cw_stopping && static_cast<int32_t>(now - _cw_retry_at) >= 0)

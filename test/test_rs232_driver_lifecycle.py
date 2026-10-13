@@ -39,19 +39,41 @@ struct RS232Bridge : BridgeBase {
   int16_t _rx_pin, _tx_pin;
   uint16_t _rx_buffer_pos = 37;
   bool _rx_packet_ready = true;
+  uint16_t _tx_size = 19, _tx_pos = 3;
+  bool _tx_wire_pending = true, _tx_is_ping = true;
+  uint32_t _tx_ping_challenge = 4, _outstanding_challenge = 5;
+  uint64_t _pong_target = 6;
+  uint32_t _pong_challenge = 7;
+  bool _ping_due = false, _partial_suspend_grace = true;
   RS232Bridge(NodePrefs& prefs, HardwareSerial& serial)
       : _prefs(&prefs), _serial(&serial), _rx_pin(5), _tx_pin(6) {}
   void begin();
   void end();
+  void resetTransportState();
 };
+@RESET@
 @BEGIN@
 @END@
 int main() {
   NodePrefs prefs;
   HardwareSerial serial;
   RS232Bridge bridge(prefs, serial);
-  auto dirty_parser = [&]() { bridge._rx_buffer_pos = 37; bridge._rx_packet_ready = true; };
-  auto assert_parser_reset = [&]() { assert(bridge._rx_buffer_pos == 0 && !bridge._rx_packet_ready); };
+  auto dirty_parser = [&]() {
+    bridge._rx_buffer_pos = 37; bridge._rx_packet_ready = true;
+    bridge._tx_size = 19; bridge._tx_pos = 3;
+    bridge._tx_wire_pending = bridge._tx_is_ping = true;
+    bridge._tx_ping_challenge = 4; bridge._outstanding_challenge = 5;
+    bridge._pong_target = 6; bridge._pong_challenge = 7;
+    bridge._ping_due = false; bridge._partial_suspend_grace = true;
+  };
+  auto assert_parser_reset = [&]() {
+    assert(bridge._rx_buffer_pos == 0 && !bridge._rx_packet_ready);
+    assert(bridge._tx_size == 0 && bridge._tx_pos == 0);
+    assert(!bridge._tx_wire_pending && !bridge._tx_is_ping);
+    assert(bridge._tx_ping_challenge == 0 && bridge._outstanding_challenge == 0);
+    assert(bridge._pong_target == 0 && bridge._pong_challenge == 0);
+    assert(bridge._ping_due && !bridge._partial_suspend_grace);
+  };
   assert(!bridge.isRunning());
   serial.pins_ok = false;
   bridge.begin();
@@ -98,6 +120,7 @@ class RS232DriverLifecycleTests(unittest.TestCase):
                                .replace("BridgeBase::", "").replace(" override", ""))
         code = code.replace("@BEGIN@", extract_braced(driver, "void RS232Bridge::begin()"))
         code = code.replace("@END@", extract_braced(driver, "void RS232Bridge::end()"))
+        code = code.replace("@RESET@", extract_braced(driver, "void RS232Bridge::resetTransportState()"))
         with tempfile.TemporaryDirectory(prefix="rs232-driver-lifecycle-") as directory:
             work = Path(directory)
             source, binary = work / "main.cpp", work / "test"

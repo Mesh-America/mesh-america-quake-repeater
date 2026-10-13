@@ -88,6 +88,12 @@ struct Fleet {
 struct CLI {
   Fleet fleet;
   Profiles profiles;
+  struct NoMorseReply {
+    void complete(const void*) {}
+    void fail(const void*) {}
+    void copy(const void*, const void*) {}
+  } morse;
+  NoMorseReply& morseReply() { return morse; }
   bool enrolled = true;
   Fleet* fleetChannel() { return enrolled ? &fleet : nullptr; }
   Profiles& radioProfiles() { return profiles; }

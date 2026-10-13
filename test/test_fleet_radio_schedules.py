@@ -29,6 +29,8 @@ class Radio {public:
  static constexpr uint32_t CarrierWaveDefaultMillis=10000,CarrierWaveMaxMillis=60000;
  virtual bool supportsCarrierWave()const{return false;}
  virtual bool isCarrierWaveActive()const{return false;}
+ virtual bool isMorseRxActive()const{return false;}
+ virtual bool isMorseTxActive()const{return false;}
  virtual uint32_t carrierWaveRemainingMillis()const{return 0;}
  virtual uint8_t carrierWaveProfile()const{return 0;}
  virtual RadioParamApplyResult setCarrierWave(uint8_t,uint32_t){return RadioParamApplyResult::FAILED;}

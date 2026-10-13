@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include <helpers/MorseLoopPolicy.h>
 #include "target.h"
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
@@ -204,6 +205,7 @@ void UITask::renderCurrScreen() {
 }
 
 void UITask::loop() {
+  const bool morse_timing = mesh::morseTimingActive(activeSensorMesh().getProfileRadio());
   if (_display->servicePower(board.isExternalPowered() || board.isUsbHostConnected())) {
     resetRadioProfileDisplayPage();
     _next_refresh = 0;
@@ -239,7 +241,7 @@ void UITask::loop() {
   }
 #endif
 
-  if (_display->isOn()) {
+  if (!morse_timing && _display->isOn()) {
     if (millis() >= _next_refresh) {
       _display->startFrame();
       renderCurrScreen();

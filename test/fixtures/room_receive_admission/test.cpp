@@ -77,6 +77,8 @@ struct BaseChatMesh {
   virtual void onMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) = 0;
   void onCommandDataRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) {}
   void onCLICommandRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*, char*) {}
+  void onCLIReplyPrepared(const ContactInfo&,mesh::Packet*) {}
+  void onCLIReplyQueued(const ContactInfo&,mesh::Packet*,bool) {}
   uint8_t onContactRequest(const ContactInfo&, uint32_t, const uint8_t*, size_t, uint8_t*) { return 0; }
   void onContactResponse(const ContactInfo&, const uint8_t*, size_t) {}
   void handleReturnPathRetry(const ContactInfo&, const uint8_t*, uint8_t) {}
@@ -89,8 +91,8 @@ struct BaseChatMesh {
   void sendAckTo(const ContactInfo&, const uint8_t* bytes, size_t length = 4) {
     ++direct_acks; ack.assign(bytes, bytes + length);
   }
-  void sendFloodScoped(const ContactInfo&, mesh::Packet*, unsigned long = 0) {}
-  void sendDirect(mesh::Packet*, const uint8_t*, uint8_t, unsigned long = 0) {}
+  bool sendFloodScoped(const ContactInfo&, mesh::Packet*, unsigned long = 0) { return true; }
+  bool sendDirect(mesh::Packet*, const uint8_t*, uint8_t, unsigned long = 0) { return true; }
   void onPeerDataRecv(mesh::Packet*, uint8_t, int, const uint8_t*, uint8_t*, size_t);
 };
 enum class UIEventType { contactMessage };

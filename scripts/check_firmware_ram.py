@@ -135,11 +135,11 @@ def requirements(platform, defines, target):
         if "BLE_PIN_CODE" in defines:
             parts["bluetooth_worker_stacks"] = 5920
         if combined_rak_ethernet and "WITH_RS232_BRIDGE" in defines:
-            # The bridge owns a packet/ACK duplicate table as well as its RX
-            # frame. Its source assertion bounds the object to 2304 bytes;
-            # retain room for allocation metadata and the UART TX semaphore.
+            # The bridge owns a packet/ACK duplicate table, RX/TX frames and
+            # heartbeat state. The source assertion bounds the complete object
+            # to 2816 bytes; retain room for allocation metadata and the UART TX semaphore.
             # UART RX/TX arrays are embedded in the already-linked globals.
-            parts["uart_bridge_and_driver"] = 2560
+            parts["uart_bridge_and_driver"] = 3072
     elif platform == "ESP32_PLATFORM":
         parts["core_tasks_usb_filesystems"] = 24576
         # MQTT joins with saved runtime credentials even without a compiled SSID
@@ -153,10 +153,10 @@ def requirements(platform, defines, target):
             parts["mqtt_startup_allowance"] = mqtt["startup_allowance_bytes"]
         if "WITH_RS232_BRIDGE" in defines:
             # The UART bridge is allocated on enable, alongside WiFi/MQTT.
-            # RS232Bridge.cpp bounds its object to 2304 bytes. Reserve 2560
+            # RS232Bridge.cpp bounds its object to 2816 bytes. Reserve 3072
             # including allocation metadata, plus the unchanged 4 KiB for
             # the SDK UART task, buffers and allocator overhead.
-            parts["uart_bridge_and_driver"] = 2560 + 4096
+            parts["uart_bridge_and_driver"] = 3072 + 4096
         if "ENABLE_OTA" in defines:
             # Existing own-image/manual-source allowance is independent of
             # the generic folder leaf/output buffers counted below.

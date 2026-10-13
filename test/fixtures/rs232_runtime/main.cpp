@@ -5,6 +5,11 @@
 #include <vector>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/bridges/ESPNowBridgeFormat.h>
+#include <helpers/bridges/RS232PowerSettings.h>
+
+static uint32_t fake_millis = 100;
+static uint32_t millis() { return fake_millis; }
+struct FakeRng { void random(uint8_t* out, size_t size) { memset(out, 0x42, size); } };
 
 #define WITH_BRIDGE 1
 #define WITH_RS232_BRIDGE Serial2
@@ -31,6 +36,9 @@ template<typename T> T constrain(T value, int low, int high) {
 struct NodePrefs {
   uint8_t bridge_enabled = 0, espnow_bridge_enabled = 0, rs232_bridge_enabled = 0;
   uint16_t bridge_delay = 0;
+  uint8_t powersaving_enabled = 1, rs232_autosleep = 1;
+  uint8_t rs232_heartbeat = 1;
+  uint16_t rs232_idle_seconds = 300;
   uint8_t bridge_pkt_src = 0, bridge_uart = 0, bridge_channel = 0, bridge_format = 0;
   uint32_t bridge_baud = 0;
   char bridge_secret[32] = {};
@@ -67,6 +75,16 @@ class RS232Bridge : public AbstractBridge {
   int rx, tx;
   bool running = false;
 public:
+  using PowerAction = mesh::bridge::RS232PowerPolicy::Action;
+  mesh::bridge::RS232PowerPolicy power;
+  void setHeartbeatSession(uint64_t) {}
+  void setHeartbeatEnabled(bool) {}
+  PowerAction servicePowerPolicy(bool allowed, uint32_t idle, uint32_t now, bool force = false) {
+    return power.service(allowed && force, idle, now, running, false);
+  }
+  void completePowerAction(PowerAction action, bool success, uint32_t now) { power.complete(action, success, now); }
+  uint32_t powerWakeDelayMs(uint32_t now) const { return power.wakeDelay(now); }
+  void formatHeartbeatStatus(char* out, size_t size, uint32_t) const { snprintf(out, size, "state=active peer=unknown"); }
   inline static unsigned live = 0;
   inline static unsigned fail_starts = 0;
   unsigned loops = 0, sent = 0;
@@ -102,8 +120,6 @@ public:
 };
 
 #ifdef WITH_ESPNOW_BRIDGE
-static uint32_t fake_millis = 100;
-static uint32_t millis() { return fake_millis; }
 static bool millisHasNowPassed(uint32_t deadline) { return fake_millis >= deadline; }
 #endif
 struct FakeBoard { bool ota = false; bool isOTAUpdateRunning() const { return ota; } };
@@ -120,6 +136,7 @@ struct Callbacks {
   virtual bool isRs232BridgeRunning() const = 0;
   virtual bool setRs232BridgeState(bool) = 0;
   virtual bool restartRs232Bridge() = 0;
+  virtual void formatRs232Status(char*) = 0;
 #ifdef WITH_ESPNOW_BRIDGE
   virtual bool isEspNowBridgeRunning() = 0;
   virtual bool setEspNowBridgeState(bool) = 0;
@@ -139,6 +156,8 @@ public:
   uint32_t shared_espnow_retry_at = 0;
 #endif
   void* _mgr = nullptr;
+  FakeRng rng;
+  FakeRng* getRNG() { return &rng; }
   void* getRTCClock() { return nullptr; }
   void configureBridgeFilter(AbstractBridge*) {}
   void defaults() { @DEFAULTS@ }

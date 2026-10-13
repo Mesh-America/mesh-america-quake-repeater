@@ -9,6 +9,7 @@
 #endif
 #endif
 #include <helpers/UsbLogging.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <helpers/HilStartupTrace.h>
 #include <helpers/FileRead.h>
 #if MESH_ENABLE_FLEET_CONTROL
@@ -1524,6 +1525,7 @@ uint32_t MyMesh::getDirectRetryAttemptStepMillis() const {
 }
 
 bool MyMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash, uint8_t next_hop_hash_len) const {
+  if (_cli.morseReply().ownsReply(packet)) return false;
   if (_prefs.disable_fwd && _prefs.trace_when_repeat_off != 1 && packet
       && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE
       && packet->path_len > 0) return false;
@@ -2066,6 +2068,7 @@ MyMesh::FloodRetryBridgeState* MyMesh::floodRetryBridgeStateFor(const mesh::Pack
 }
 
 bool MyMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (_cli.morseReply().ownsReply(packet)) return false;
   if (_prefs.disable_fwd || constrain(_prefs.flood_retry_attempts, 0, 15) == 0) {
     return false;
   }
@@ -3053,7 +3056,10 @@ bool MyMesh::sendRemoteCliReply(ClientInfo* client, const uint8_t* secret,
   // Prepare before admission so Dispatcher can register its second copy;
   // the caller arms the barrier only after admission succeeds.
   const bool allow_redundant_copies = queued_packet == NULL;
-  if (!allow_redundant_copies) temp_radio_reply_barrier.prepare(packet);
+  if (!allow_redundant_copies) {
+    if (_cli.morseReply().pending()) _cli.morseReply().prepareReply(packet);
+    else temp_radio_reply_barrier.prepare(packet);
+  }
   const bool queued = sendClientReplyWithFallbackScope(
       client, packet, CLI_REPLY_DELAY_MILLIS, path_hash_size, fallback_scope,
       allow_redundant_copies);
@@ -3266,6 +3272,7 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
   }
   const uint32_t primary_mutation_before = primary_radio_mutation_generation;
   const uint32_t secondary_mutation_before = _cli.radioProfiles().replyMutationGeneration();
+  const uint32_t morse_mutation_before = _cli.morseReply().generation();
   // setperm may compact the ACL, including removal of this sender. Keep the
   // authenticated pre-command destination/path as a fallback if it is removed.
   // Command permission checks still use the live ACL entry below.
@@ -3325,10 +3332,12 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
   } else {
 #endif
     _cli.radioProfiles().beginReplyCommand();
+    _cli.morseReply().beginCommand(client->id.pub_key);
     handleCommand(deferred_cli_command.sender_timestamp, client,
                   deferred_cli_command.command, reply, client_index,
                   deferred_cli_command.path_hash_size);
     _cli.radioProfiles().endReplyCommand();
+    _cli.morseReply().endCommand();
 #if MESH_ENABLE_HOST_CLI
   }
 #endif
@@ -3340,6 +3349,7 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
   const bool arms_primary_radio = primary_radio_mutation_generation != primary_mutation_before;
   const bool arms_secondary_radio = _cli.radioProfiles().replyMutationGeneration() != secondary_mutation_before;
   const bool arms_temp_radio = arms_primary_radio || arms_secondary_radio;
+  const bool arms_morse = _cli.morseReply().generation() != morse_mutation_before;
   const char* parsed_command = deferred_cli_command.command;
   if (strlen(parsed_command) > 3 && parsed_command[2] == '|') parsed_command += 3;
   const bool private_key_backup = strncmp(parsed_command, "backup prv.key ", 15) == 0;
@@ -3348,7 +3358,7 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
   if (!private_key_backup) {
     remote_cli_reply_cache.remember(deferred_cli_command.client_pub_key,
                                     deferred_cli_command.request_id,
-                                    command_fingerprint, reply, arms_temp_radio);
+                                    command_fingerprint, reply, arms_temp_radio || arms_morse);
   }
   // Route changes made by this command must apply to its acknowledgement too.
   // Resolve the full authenticated key again: compaction may have moved it or
@@ -3362,7 +3372,8 @@ void __attribute__((noinline)) MyMesh::processDeferredCliCommand() {
       deferred_cli_command.path_hash_size,
       deferred_cli_command.sender_timestamp, reply,
       deferred_cli_reply_scoped ? &deferred_cli_reply_scope : NULL,
-      arms_temp_radio ? &queued_reply : NULL);
+      (arms_temp_radio || arms_morse) ? &queued_reply : NULL);
+  if (arms_morse) _cli.morseReply().armReply(queued_reply, reply_queued);
   if (arms_temp_radio) {
     radio_reply_secondary = arms_secondary_radio;
     if (reply_queued && queued_reply != NULL) {
@@ -4176,6 +4187,7 @@ bool MyMesh::sendRepeatersFloodText(const char* text, const TransportKey* scope,
 
 void MyMesh::onSendComplete(mesh::Packet* packet) {
   mesh::Mesh::onSendComplete(packet);
+  _cli.morseReply().complete(packet);
 #if MESH_ENABLE_FLEET_CONTROL
   if (_cli.fleetChannel()) _cli.fleetChannel()->complete(packet, _cli.radioProfiles());
 #endif
@@ -4193,11 +4205,13 @@ void MyMesh::onRadioProfileCopyQueued(mesh::Packet* packet, const mesh::Packet* 
   if (_cli.fleetChannel()) _cli.fleetChannel()->copy(packet, original);
 #endif
   temp_radio_reply_barrier.trackCopy(original, packet);
+  _cli.morseReply().copy(original, packet);
   mesh::Mesh::onRadioProfileCopyQueued(packet, original, priority);
 }
 
 void MyMesh::onSendFail(mesh::Packet* packet) {
   mesh::Mesh::onSendFail(packet);
+  _cli.morseReply().fail(packet);
 #if MESH_ENABLE_FLEET_CONTROL
   if (_cli.fleetChannel()) _cli.fleetChannel()->fail(packet, _cli.radioProfiles());
 #endif
@@ -5186,6 +5200,14 @@ uint32_t MyMesh::getPowerSaveSleepSeconds(uint32_t max_secs) const {
     sleep_secs = limitSleepToMillisTimer(next_battery_alert_check, sleep_secs);
   }
   sleep_secs = limitSleepToScheduledRadioWork(sleep_secs);
+#if defined(WITH_RS232_BRIDGE)
+  if (bridge && rs232BridgeEnabled()) {
+    // Floor the deadline, not ceil: the ESP32 timed-light-sleep API uses whole
+    // seconds and must never sleep past a UART rendezvous or cleanup retry.
+    const uint32_t bridge_sleep_secs = bridge->powerWakeDelayMs(millis()) / 1000UL;
+    if (bridge_sleep_secs < sleep_secs) sleep_secs = bridge_sleep_secs;
+  }
+#endif
   return sleep_secs;
 }
 
@@ -12250,6 +12272,16 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 
   // Compatibility path for manually defined legacy portable builds. Current
   // release builds use FULL and do not enter this branch.
+  // Keep the same permissions as the normal handoff below. In particular,
+  // RF test/Morse commands must never bypass admin checks in a legacy build.
+  if (sender && !sender->isAdmin()) {
+    bool allowed = (sender->isRegionMgr() && isRegionMgrAllowed(command))
+        || (sender->isFilterMgr() && isFilterMgrAllowed(command));
+    if (!allowed) {
+      strcpy(reply, "Err - not permitted");
+      return;
+    }
+  }
   _cli.handleCommand(sender_timestamp, command, reply);
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
   if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
@@ -13099,6 +13131,17 @@ void MyMesh::sampleTelemetryHistory() {
 #endif
 
 void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
+  if (mesh::morseTimingActive(_radio)) {
+    // RS232 heartbeat/wake servicing remains live; only optional periodic,
+    // sensor, filesystem and UI/network background work is deferred.
+#if defined(WITH_RS232_BRIDGE)
+    serviceRs232BridgePower();
+#endif
+    const uint32_t now = millis();
+    uptime_millis += now - last_millis;
+    last_millis = now;
+    return;
+  }
   if (pending_self_advert) {
     const uint32_t delay_millis = pending_self_advert_delay;
     const bool flood = pending_self_advert_flood;
@@ -13135,7 +13178,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   #endif
 #endif
 #if defined(WITH_RS232_BRIDGE)
-  if (isRs232BridgeRunning()) bridge->loop();
+  serviceRs232BridgePower();
 #elif defined(WITH_BRIDGE) && !defined(WITH_MQTT_BRIDGE) \
         && !defined(WITH_ESPNOW_BRIDGE)
   AbstractBridge* active_bridge = activeBridge();
@@ -13896,6 +13939,12 @@ bool MyMesh::hasPendingWork() const {
 #endif
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
   if (isRs232BridgeRunning()) return true;
+#endif
+#if defined(WITH_RS232_BRIDGE)
+  // A partial GPS release/claim is not a completed standby. Never allow MCU
+  // sleep while its UART ownership remains unresolved, even if end stopped RX.
+  if (active_rs232_bridge_uart != 0) return true;
+  if (bridge && rs232BridgeEnabled() && bridge->powerWakeDelayMs(millis()) == 0) return true;
 #endif
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))

@@ -1249,16 +1249,27 @@ public:
 
 #ifdef WITH_RS232_BRIDGE
   RS232Bridge* createRS232Bridge() {
+    RS232Bridge* created;
 #ifdef WITH_RS232_BRIDGE_ALT
     if (_prefs.bridge_uart == WITH_RS232_BRIDGE_ALT_UART) {
-      return new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE_ALT,
+      created = new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE_ALT,
                              WITH_RS232_BRIDGE_ALT_RX,
                              WITH_RS232_BRIDGE_ALT_TX, _mgr, getRTCClock());
-    }
+    } else
 #endif
-    return new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE,
+    {
+      created = new (std::nothrow) RS232Bridge(&_prefs, WITH_RS232_BRIDGE,
                            WITH_RS232_BRIDGE_RX, WITH_RS232_BRIDGE_TX,
                            _mgr, getRTCClock());
+    }
+    if (created) {
+      // A new physical owner gets a new control session. Soft UART standby
+      // retains this object/session; a manual off/restart does not.
+      uint64_t session = 0;
+      getRNG()->random(reinterpret_cast<uint8_t*>(&session), sizeof(session));
+      created->setHeartbeatSession(session ? session : 1);
+    }
+    return created;
   }
 
   bool beginRS232Bridge() {
@@ -1300,7 +1311,9 @@ public:
   }
 
   bool endRS232Bridge() {
+#if ENV_INCLUDE_GPS == 1
     const uint8_t released_uart = active_rs232_bridge_uart;
+#endif
     bool stopped = true;
     // A fail-closed preflight can reject this object before begin() touches
     // its UART. Adafruit nRF Uart::end() is not safe as a generic cleanup for
@@ -1335,6 +1348,47 @@ public:
     return bridge && bridge->isRunning();
   }
 
+  void serviceRs232BridgePower() {
+    if (!bridge) return;
+    // Poll only once, before evaluating liveness. The policy must still run
+    // when UART is stopped, or two sleeping peers can never rendezvous.
+    bridge->setHeartbeatEnabled(_prefs.rs232_heartbeat == 1);
+    if (bridge->isRunning()) bridge->loop();
+    if (!rs232BridgeEnabled()) return;
+    const uint32_t now = millis();
+    const RS232Bridge::PowerAction action = bridge->servicePowerPolicy(
+        (_prefs.rs232_autosleep == 1 || _prefs.rs232_autosleep == 2)
+            && _prefs.powersaving_enabled != 0
+            && _prefs.rs232_heartbeat == 1,
+        static_cast<uint32_t>(_prefs.rs232_idle_seconds) * 1000UL, now,
+        _prefs.rs232_autosleep == 2);
+    if (action == RS232Bridge::PowerAction::None) return;
+    bool success;
+    if (action == RS232Bridge::PowerAction::Suspend) {
+      // An end may stop UART but fail to release GPS ownership. The driver
+      // stays in cleanup/retry until both physical owners confirm success.
+      success = endRS232Bridge();
+    } else {
+      // A failed earlier start may have yielded GPS before UART begin failed.
+      // Release any partial ownership before trying to claim it again.
+      success = (active_rs232_bridge_uart == 0 || endRS232Bridge())
+          && beginRS232Bridge();
+    }
+    bridge->completePowerAction(action, success, millis());
+  }
+
+  void formatRs232Status(char* reply) override {
+    char heartbeat[84];
+    if (bridge) bridge->formatHeartbeatStatus(heartbeat, sizeof(heartbeat), millis());
+    else StrHelper::strncpy(heartbeat, "phase=off peer=unknown", sizeof(heartbeat));
+    snprintf(reply, 160, "saved=%s running=%s heartbeat=%s autosleep=%s idle=%us %s",
+        rs232BridgeEnabled() ? "on" : "off",
+        isRs232BridgeRunning() ? "on" : "off",
+        _prefs.rs232_heartbeat == 1 ? "on" : "off",
+        _prefs.rs232_autosleep == 2 ? "force" : _prefs.rs232_autosleep == 1 ? "on" : "off",
+        static_cast<unsigned>(_prefs.rs232_idle_seconds), heartbeat);
+  }
+
   bool setRs232BridgeState(bool enable) override {
     if (!enable) {
       const bool stopped = endRS232Bridge();
@@ -1347,7 +1401,10 @@ public:
     if (isRs232BridgeRunning()) return true;
     // Retry any tracked GPS release before constructing a new UART owner.
     if (active_rs232_bridge_uart != 0 && !endRS232Bridge()) return false;
-    if (!bridge) bridge = createRS232Bridge();
+    // Explicit enable is a fresh owner, including when soft standby retained
+    // the previous one. It must not inherit a dormant heartbeat deadline.
+    delete bridge;
+    bridge = createRS232Bridge();
     return bridge && beginRS232Bridge();
   }
 
@@ -1526,10 +1583,7 @@ public:
     }
 #endif
 #if defined(WITH_RS232_BRIDGE) && !defined(WITH_MQTT_BRIDGE)
-    if (enable && !bridge) {
-      bridge = createRS232Bridge();
-      if (!bridge) return false;
-    }
+    if (enable) return setRs232BridgeState(true);
     if (!enable) {
       const bool stopped = endRS232Bridge();
       if (stopped) {

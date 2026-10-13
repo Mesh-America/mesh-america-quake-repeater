@@ -44,6 +44,12 @@ struct Profiles {
 };
 struct CLI {
   Profiles profiles;
+  struct NoMorseReply {
+    void complete(const void*) {}
+    void fail(const void*) {}
+    void copy(const void*, const void*) {}
+  } morse;
+  NoMorseReply& morseReply() { return morse; }
   Profiles& radioProfiles() { return profiles; }
 };
 struct Manager {

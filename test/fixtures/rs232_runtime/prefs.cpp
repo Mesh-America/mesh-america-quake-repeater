@@ -56,7 +56,12 @@ int main(int argc, char** argv) {
   const size_t esp_marker_offset = channel_offset + 1;
   const size_t rs_intent_offset = initial.offset(&writer.prefs.rs232_bridge_enabled);
   const size_t rs_marker_offset = channel_offset + 3;
-  assert(initial.bytes.size() == 877 && channel_offset == 873);
+  assert(channel_offset == 873);
+#ifdef WITH_RS232_BRIDGE
+  assert(initial.bytes.size() == 877 + mesh::bridge::rs232power::PREFS_SIZE);
+#else
+  assert(initial.bytes.size() == 877);
+#endif
   assert(rs_intent_offset == channel_offset + 2);
 #ifdef ESPNOW_BRIDGE_MERGED
   assert(initial.bytes[esp_marker_offset] == 0xA1);

@@ -50,6 +50,7 @@ COMMON_QUERY_EXCEPTIONS = {
     'bridge.running': 'Live bridge state; set bridge.enabled controls intent',
     'espnow.running': 'Live ESP-NOW bridge state; set espnow.enabled controls intent',
     'rs232.running': 'Live UART bridge state; set rs232.enabled controls intent',
+    'rs232.status': 'Live heartbeat, negotiated standby and UART owner diagnostics',
     'bridge.type': 'Build-selected bridge transport',
     'password': 'Written by the password command, not set password',
     'public.key': 'Derived from identity; written through set prv.key',

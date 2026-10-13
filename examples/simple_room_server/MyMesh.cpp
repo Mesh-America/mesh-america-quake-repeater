@@ -21,6 +21,7 @@
 #include <helpers/ClientACLCLI.h>
 #include <helpers/ClientACLResponse.h>
 #include <helpers/sensors/LPPDataHelpers.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/RoomLoginAuthorization.h>
 #include <helpers/RoomTopicStore.h>
@@ -1568,6 +1569,7 @@ uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
 
 bool MyMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash,
                               uint8_t next_hop_hash_len) const {
+  if (_cli.morseReply().ownsReply(packet)) return false;
   (void)packet;
   (void)next_hop_hash;
   (void)next_hop_hash_len;
@@ -1600,6 +1602,7 @@ uint32_t MyMesh::getDirectRetryAttemptDelay(const mesh::Packet* packet, uint8_t 
 }
 
 bool MyMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (_cli.morseReply().ownsReply(packet)) return false;
   if (_prefs.disable_fwd || _prefs.flood_retry_attempts == 0) return false;
   if (packet != NULL
       && packet->flood_retry_policy == mesh::FLOOD_RETRY_POLICY_DENY) {
@@ -1947,6 +1950,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     uint8_t temp[5 + mesh::RemoteCliReplyCache::MAX_REPLY_TEXT + 1];
     temp[5] = 0;
     bool send_ack = false;
+    const uint32_t morse_mutation_before = _cli.morseReply().generation();
 
     if (flags == TXT_TYPE_PLAIN) {
       const uint8_t role = client->permissions & PERM_ACL_ROLE_MASK;
@@ -1978,9 +1982,10 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       const uint32_t command_fingerprint =
           mesh::RemoteCliReplyCache::fingerprint(text, text_len);
       const char* cached_response = NULL;
+      bool cached_authoritative_reply = false;
       const bool cached_retry = remote_cli_reply_cache.lookup(
           client->id.pub_key, request_id, command_fingerprint,
-          &cached_response);
+          &cached_response, &cached_authoritative_reply);
 
       if (sender_timestamp < client->last_timestamp && !cached_retry) {
         MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");
@@ -2010,6 +2015,10 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       if (cached_retry && !client->isAdmin() && !own_path_allowed) {
         strcpy((char*)&temp[5], "Err - admin permission required");
         temp[4] = (TXT_TYPE_CLI_DATA << 2);
+      } else if (cached_retry && cached_authoritative_reply) {
+        // Only the original exact response owns the listen barrier. Do not
+        // replay a success-looking handoff reply after failure/cancellation.
+        return;
       } else if (cached_retry) {
         MESH_DEBUG_PRINTLN("onPeerDataRecv: replaying cached remote CLI reply");
         size_t cached_len = strlen(cached_response);
@@ -2028,8 +2037,10 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
             && !handleRoomMailClientCommand(client, text, request_id, (char*)&temp[5],
                                             mesh::RemoteCliReplyCache::MAX_REPLY_TEXT + 1)) {
           if (client->isAdmin()) {
+            _cli.morseReply().beginCommand(client->id.pub_key);
             handleCommand(sender_timestamp, (char*)text, (char*)&temp[5],
                           i, packet->getPathHashSize());
+            _cli.morseReply().endCommand();
           } else {
             strcpy((char*)&temp[5], "Err - admin permission required");
           }
@@ -2038,7 +2049,8 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
         if (temp[5] == 0) strcpy((char*)&temp[5], "OK");
         remote_cli_reply_cache.remember(client->id.pub_key, request_id,
                                         command_fingerprint,
-                                        (char*)&temp[5]);
+                                        (char*)&temp[5],
+                                        _cli.morseReply().generation() != morse_mutation_before);
         temp[4] = (TXT_TYPE_CLI_DATA << 2);
       }
       // CLI_DATA replies are the result signal; no separate ACK is expected.
@@ -2088,7 +2100,16 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
 
       auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id, secret,
                                   temp, 5 + reply_text_len);
-      if (reply) {
+      if (_cli.morseReply().generation() != morse_mutation_before) {
+        // One first copy per radio profile, without alternate paths/retries
+        // that could remain queued after the listen handoff.
+        _cli.morseReply().prepareReply(reply);
+        if (reply) reply->radio_reply = true;
+        const bool queued = reply && (!mesh::Packet::isValidPathLen(client->out_path_len)
+            ? sendFloodReply(reply, delay_millis + SERVER_RESPONSE_DELAY, packet->getPathHashSize())
+            : sendDirect(reply, client->out_path, client->out_path_len, delay_millis + SERVER_RESPONSE_DELAY));
+        _cli.morseReply().armReply(reply, queued);
+      } else if (reply) {
         sendClientReply(client, reply, delay_millis + SERVER_RESPONSE_DELAY,
                          packet->getPathHashSize());
       }
@@ -2264,24 +2285,31 @@ void MyMesh::onGroupPacketRecv(mesh::Packet* packet) {
   _clock_sync.observeGroupPacket(packet);
 }
 
-#if MESH_ENABLE_FLEET_CONTROL
 void MyMesh::onSendComplete(mesh::Packet* packet) {
   mesh::Mesh::onSendComplete(packet);
+  _cli.morseReply().complete(packet);
+#if MESH_ENABLE_FLEET_CONTROL
   if (_cli.fleetChannel()) _cli.fleetChannel()->complete(packet, _cli.radioProfiles());
+#endif
 }
 
 void MyMesh::onSendFail(mesh::Packet* packet) {
   mesh::Mesh::onSendFail(packet);
+  _cli.morseReply().fail(packet);
+#if MESH_ENABLE_FLEET_CONTROL
   if (_cli.fleetChannel()) _cli.fleetChannel()->fail(packet, _cli.radioProfiles());
+#endif
 }
 
 void MyMesh::onRadioProfileCopyQueued(mesh::Packet* packet,
                                      const mesh::Packet* original,
                                      uint8_t priority) {
   mesh::Mesh::onRadioProfileCopyQueued(packet, original, priority);
+  _cli.morseReply().copy(original, packet);
+#if MESH_ENABLE_FLEET_CONTROL
   if (_cli.fleetChannel()) _cli.fleetChannel()->copy(packet, original);
-}
 #endif
+}
 
 #if defined(WITH_MQTT_NEIGHBORS)
 
@@ -3846,6 +3874,9 @@ void MyMesh::loop() {
   servicePendingSerialOutput();
 #endif
   _cli.loop();
+  // Keep the radio and command/reply queues responsive while a Morse session
+  // owns RF. Deferred periodic work retains its deadlines and resumes after.
+  if (mesh::morseTimingActive(_radio)) return;
 #if MESH_ENABLE_FLEET_CONTROL
   if (_cli.fleetChannel()) {
     _cli.fleetChannel()->service(*this, _cli.radioProfiles(), _prefs.node_name,

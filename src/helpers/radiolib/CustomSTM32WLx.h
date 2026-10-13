@@ -1,6 +1,8 @@
 #pragma once
 
 #include <RadioLib.h>
+#include <math.h>
+#include "SX126xMorseRssi.h"
 
 class CustomSTM32WLx : public STM32WLx {
   uint32_t _preambleMillis = 66;
@@ -10,6 +12,14 @@ class CustomSTM32WLx : public STM32WLx {
 
   public:
     CustomSTM32WLx(STM32WLx_Module *mod) : STM32WLx(mod) { }
+    int16_t setMorseFastRssi() {
+      return setSX126xMorseRssiWindow(this);
+    }
+    float getMorseRssi() {
+      uint8_t raw = 0;
+      const int16_t status = this->getMod()->SPIreadStream(RADIOLIB_SX126X_CMD_GET_RSSI_INST, &raw, 1);
+      return status == RADIOLIB_ERR_NONE ? raw * -0.5f : NAN;
+    }
 
     int16_t startReceive() override {
       // include the PREAMBLE_DETECTED irq bit in reported flags

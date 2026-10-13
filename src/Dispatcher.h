@@ -6,6 +6,8 @@
 #include <Utils.h>
 #include <RadioProfiles.h>
 #include <helpers/MeshtextConfig.h>
+#include <helpers/MorseTx.h>
+#include <helpers/MorseRx.h>
 #ifndef RADIO_LIVENESS_SOFT_ONLY
   #include <helpers/RadioLivenessTracker.h>
 #endif
@@ -42,6 +44,47 @@ public:
   virtual bool isCarrierWaveActive() const { return false; }
   virtual uint8_t carrierWaveProfile() const { return 0; }
   virtual uint32_t carrierWaveRemainingMillis() const { return 0; }
+  virtual bool supportsMorseTx() const { return false; }
+  virtual MorseTxResult startMorseTx(float frequency_mhz, uint8_t wpm, const char* text) {
+    (void)frequency_mhz; (void)wpm; (void)text;
+    return MorseTxResult::Unsupported;
+  }
+  virtual MorseTxResult stopMorseTx() { return MorseTxResult::Unsupported; }
+  virtual bool isMorseTxActive() const { return false; }
+  virtual float morseTxFrequency() const { return MorseTx::DefaultFrequencyMHz; }
+  virtual uint8_t morseTxWpm() const { return MorseTx::DefaultWpm; }
+  virtual uint32_t morseTxRemainingMillis() const { return 0; }
+  virtual bool supportsMorseRx() const { return false; }
+  virtual MorseRxResult startMorseRx(float frequency_mhz, uint8_t wpm, uint32_t duration_ms) {
+    (void)frequency_mhz; (void)wpm; (void)duration_ms;
+    return MorseRxResult::Unsupported;
+  }
+  virtual MorseRxResult stopMorseRx() { return MorseRxResult::Unsupported; }
+  virtual bool isMorseRxActive() const { return false; }
+  virtual bool morseRxRecovering() const { return false; }
+  virtual bool morseRxLearning() const { return false; }
+  virtual float morseRxFrequency() const { return MorseTx::DefaultFrequencyMHz; }
+  virtual float morseRxBandwidthKHz() const { return 0; }
+  virtual uint32_t morseRxRemainingMillis() const { return 0; }
+  virtual uint32_t morseCaptureGeneration() const { return 0; }
+  virtual bool morseRxDiagnostics(MorseRxDiagnostics& out) const { out = {}; return false; }
+  virtual size_t morseCaptureLength() const { return 0; }
+  virtual bool morseCaptureTruncated() const { return false; }
+  virtual const char* morseCaptureText() const { return ""; }
+  virtual size_t readMorseCapture(size_t offset, char* out, size_t capacity) const {
+    (void)offset;
+    if (out && capacity) out[0] = 0;
+    return 0;
+  }
+  virtual void clearMorseCapture() { }
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  virtual size_t morseTraceLength() const { return 0; }
+  virtual uint32_t morseTraceTotal() const { return 0; }
+  virtual bool morseTraceTruncated() const { return false; }
+  virtual bool readMorseTrace(size_t offset, MorseRssiTraceEntry& out) const {
+    (void)offset; (void)out; return false;
+  }
+#endif
   virtual void begin() { }
   virtual RadioProfiles* profiles() { return nullptr; }
   virtual const RadioProfiles* profiles() const { return nullptr; }

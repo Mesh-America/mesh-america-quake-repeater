@@ -294,6 +294,7 @@ struct Utils {
 class MyMesh {
 public:
   bool _terminal_mode = false, _terminal_usb_silent = false;
+  bool _terminal_morse_atomic = false;
   Stream* _terminal_output = nullptr;
   struct { const char* node_name = "USB regression"; } _prefs;
   struct { uint8_t pub_key[PUB_KEY_SIZE] = {}; } self_id;

@@ -1,5 +1,6 @@
 #include "UITask.h"
 #include <helpers/TxtDataHelpers.h>
+#include <helpers/MorseLoopPolicy.h>
 #if defined(NRF52_POWER_MANAGEMENT)
 #include <helpers/NRF52VoltagePolicy.h>
 #endif
@@ -2267,6 +2268,7 @@ bool UITask::isButtonGesturePending() const {
 }
 
 void UITask::loop() {
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
   serviceWiFiToggleButton();
   servicePairingState();
 
@@ -2456,13 +2458,13 @@ void UITask::loop() {
   if (buzzer.isPlaying())  buzzer.loop();
 #endif
 
-  if (curr) curr->poll();
+  if (!morse_timing && curr) curr->poll();
 #if COMPANION_FEATURE_READER
-  if (reader && curr != reader) reader->poll();
+  if (!morse_timing && reader && curr != reader) reader->poll();
 #endif
 
   if (_display != NULL && _display->isOn()) {
-    if (millis() >= _next_refresh && curr && !isButtonGesturePending()) {
+    if (!morse_timing && millis() >= _next_refresh && curr && !isButtonGesturePending()) {
       _display->startFrame();
       int delay_millis = curr->render(*_display);
       renderPairingBanner();

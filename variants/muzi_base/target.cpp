@@ -132,6 +132,9 @@ bool radio_init() {
   radio.setRxBoostedGainMode(RX_BOOSTED_GAIN);
   #endif
 
+  // Preserve this board's TCXO and DIO RF routing during full modem recovery.
+  radio_driver.setDeepInitCallback(radio_init);
+
   return true;  // success
 #else  // USE_SX1262
   // CustomSX1262::std_init() configures the SPI pins, runs begin() with the

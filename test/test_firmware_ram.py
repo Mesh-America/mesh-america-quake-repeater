@@ -195,8 +195,8 @@ class FirmwareRamTest(unittest.TestCase):
         combined = ram.requirements("ESP32_PLATFORM", {
             **defines, "WITH_RS232_BRIDGE": "Serial2", "RS232_BRIDGE_MERGED": 1,
         }, "v3_repeater")
-        self.assertEqual(combined["required_heap_bytes"] - mqtt["required_heap_bytes"], 2560 + 4096)
-        self.assertEqual(combined["components"]["uart_bridge_and_driver"], 2560 + 4096)
+        self.assertEqual(combined["required_heap_bytes"] - mqtt["required_heap_bytes"], 3072 + 4096)
+        self.assertEqual(combined["components"]["uart_bridge_and_driver"], 3072 + 4096)
         # A selectable alternate port does not create two UART owners.
         alternate = ram.requirements("ESP32_PLATFORM", {
             **defines, "WITH_RS232_BRIDGE": "Serial2", "RS232_BRIDGE_MERGED": 1,
@@ -351,12 +351,12 @@ class FirmwareRamTest(unittest.TestCase):
             **defines, "RAK4631_COMBINED_ETHERNET": 1,
         }, "RAK_4631_repeater_unified_lora_ota")
         components = combined["components"]
-        self.assertEqual(components["uart_bridge_and_driver"], 2560)
+        self.assertEqual(components["uart_bridge_and_driver"], 3072)
         self.assertEqual(components["ethernet_or_external_ota_workspaces"], 11344)
         self.assertNotIn("ota_encoder_workspace", components)
         self.assertNotIn("ota_self_source_scratch", components)
         self.assertEqual(components["display_pixels_and_driver"], 2048)
-        self.assertEqual(combined["required_heap_bytes"] - legacy["required_heap_bytes"], 2560 - 2048)
+        self.assertEqual(combined["required_heap_bytes"] - legacy["required_heap_bytes"], 3072 - 2048)
         self.assertEqual(components["loop_and_callback_stacks"], 8192 + 3072)
         self.assertEqual(components["flood_filter_table"], 63 * 192 + 16)
         # An alternate port selects the same bridge instead of allocating two.
@@ -463,9 +463,9 @@ class FirmwareRamTest(unittest.TestCase):
         }
         full = ram.requirements("ESP32_PLATFORM", defines, "Heltec_v3_repeater_observer_mqtt")
         parts = full["components"]
-        self.assertEqual(full["required_heap_bytes"], 209184)
+        self.assertEqual(full["required_heap_bytes"], 209696)
         self.assertEqual(parts["display_pixels_and_driver"], 2048)
-        self.assertEqual(parts["uart_bridge_and_driver"], 2560 + 4096)
+        self.assertEqual(parts["uart_bridge_and_driver"], 3072 + 4096)
         self.assertEqual(parts["wireless_stacks"], 49152)
         self.assertEqual(parts["mqtt_startup_allowance"], 24576)
         self.assertEqual(parts["allocation_and_transient_margin"], 16384)
@@ -485,7 +485,7 @@ class FirmwareRamTest(unittest.TestCase):
         sources = (
             ("src/helpers/bridges/RS232Bridge.cpp", "RS232Bridge::RS232Bridge(",
              "struct RS232Bridge { unsigned char bytes[OBJECT_BYTES]; };\n",
-             ((2304, 0, True), (2305, 0, False))),
+             ((2816, 0, True), (2817, 0, False))),
             ("src/helpers/ui/SSD1306Display.cpp", "bool SSD1306Display::i2c_probe(",
              "struct SSD1306Display { unsigned char bytes[OBJECT_BYTES]; "
              "static constexpr unsigned FRAMEBUFFER_BYTES = FRAME_BYTES; };\n",

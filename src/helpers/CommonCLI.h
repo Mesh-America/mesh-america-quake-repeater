@@ -14,6 +14,7 @@
 #include <helpers/DynamicConfigSerializer.h>
 #include <helpers/RepeaterRadioTiming.h>
 #include <helpers/RadioProfileCLI.h>
+#include <helpers/MorseReplyHandoff.h>
 #include <helpers/WirelessControl.h>
 #include <helpers/FleetCommand.h>
 #if MESH_ENABLE_FLEET_CONTROL
@@ -213,6 +214,12 @@ public:
   // retain bridge_enabled as their legacy alias and mirror it on save.
   // Appended after the profile markers, never beside the legacy bridge byte.
   uint8_t rs232_bridge_enabled = 0;
+  // Default standby is negotiated by a valid heartbeat reply. Stock peers
+  // never arm it. Explicit force (2) also permits unconfirmed-link standby.
+  // Stored in a checked append-only tail, never in the legacy bridge layout.
+  uint8_t rs232_autosleep = 1;
+  uint8_t rs232_heartbeat = 1;
+  uint16_t rs232_idle_seconds = 300;
   // Appended after the ESP-NOW intent. Zero keeps the board's legacy cadence.
   uint16_t gps_sync_interval_hours = 0;
   uint8_t retry_preset = 0;
@@ -352,6 +359,11 @@ private:
       def("format", _parent->bridge_format);
       def("usb_log", _parent->usb_logging_enabled);
       def("usb_dbg", _parent->usb_debug_enabled);
+#ifdef WITH_RS232_BRIDGE
+      def("rs232_heartbeat", _parent->rs232_heartbeat);
+      def("rs232_autosleep", _parent->rs232_autosleep);
+      def("rs232_idle", _parent->rs232_idle_seconds);
+#endif
     }
 
   public:
@@ -623,6 +635,7 @@ public:
   virtual bool restartRs232Bridge() { return restartBridge(); }
   virtual bool isEspNowBridgeRunning() { return isBridgeRunning(); }
   virtual bool isRs232BridgeRunning() const { return isBridgeRunning(); }
+  virtual void formatRs232Status(char* reply) { strcpy(reply, "RS232 unavailable"); }
 
   virtual void restartBridgeSlot(int slot) {
     // Default: fall back to full restart
@@ -840,6 +853,7 @@ class CommonCLI {
   bool _common_save_succeeded = false;
   uint32_t _prefs_save_failures = 0;
   mesh::RadioProfileCLI _radio_profiles;
+  mesh::MorseReplyHandoff _morse_reply;
 #if MESH_ENABLE_FLEET_CONTROL
   mesh::FleetChannel* _fleet_channel = nullptr;  // allocate only when enrolled
   bool handleFleetCommand(const char* command, char* reply);
@@ -900,6 +914,8 @@ public:
                               uint16_t preamble);
   mesh::RadioProfileCLI& radioProfiles() { return _radio_profiles; }
   const mesh::RadioProfileCLI& radioProfiles() const { return _radio_profiles; }
+  mesh::MorseReplyHandoff& morseReply() { return _morse_reply; }
+  const mesh::MorseReplyHandoff& morseReply() const { return _morse_reply; }
 #if MESH_ENABLE_FLEET_CONTROL
   mesh::FleetChannel* fleetChannel() { return _fleet_channel; }
 #endif

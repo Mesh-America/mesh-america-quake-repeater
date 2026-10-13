@@ -149,7 +149,7 @@ class RS232RuntimeTests(unittest.TestCase):
                 for uart in (0, 1):
                     image = work / f"{origin}-{uart}.bin"
                     run(origin, "write", image, 1, 0, uart)
-                    self.assertEqual(len(image.read_bytes()), 877)
+                    self.assertEqual(len(image.read_bytes()), 887)
                     for target in ("normal", "dedicated"):
                         with self.subTest(origin=origin, target=target, uart=uart):
                             run(target, "read", image, uart, 0, uart)
@@ -208,6 +208,7 @@ class RS232RuntimeTests(unittest.TestCase):
             "AbstractBridge* activeBridge() {", "const AbstractBridge* activeBridge() const {",
             "RS232Bridge* createRS232Bridge()", "bool beginRS232Bridge()",
             "bool endRS232Bridge()", "bool rs232BridgeEnabled() const",
+            "void serviceRs232BridgePower()", "void formatRs232Status(char* reply)",
             "bool isRs232BridgeRunning() const override", "bool setRs232BridgeState(bool enable)",
             "bool restartRs232Bridge()", "bool isBridgeRunning() const override",
             "bool setBridgeState(bool enable) override", "bool restartBridge() override",

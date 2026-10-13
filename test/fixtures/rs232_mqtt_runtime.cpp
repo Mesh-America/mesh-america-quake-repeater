@@ -7,6 +7,8 @@
 #include <new>
 #include <helpers/CLICommandUtils.h>
 #include <helpers/bridges/ESPNowBridgeFormat.h>
+#include <helpers/bridges/RS232PowerSettings.h>
+struct FakeRng { void random(uint8_t* out, size_t size) { memset(out, 0x42, size); } };
 #define BRIDGE_MAX_BAUD 115200
 #define PUB_KEY_SIZE 32
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
@@ -24,6 +26,9 @@ struct StrHelper {
 struct NodePrefs {
   uint8_t bridge_enabled = 0, espnow_bridge_enabled = 0, rs232_bridge_enabled = 0;
   uint16_t bridge_delay = 0;
+  uint8_t powersaving_enabled = 1, rs232_autosleep = 1;
+  uint8_t rs232_heartbeat = 1;
+  uint16_t rs232_idle_seconds = 300;
   uint8_t bridge_pkt_src = 0, bridge_uart = 0, bridge_channel = 0, bridge_format = 0;
   uint32_t bridge_baud = 0;
   float freq = 915, bw = 125;
@@ -66,6 +71,16 @@ class RS232Bridge : public AbstractBridge {
   int rx, tx;
   bool running = false;
 public:
+  using PowerAction = mesh::bridge::RS232PowerPolicy::Action;
+  mesh::bridge::RS232PowerPolicy power;
+  void setHeartbeatSession(uint64_t) {}
+  void setHeartbeatEnabled(bool) {}
+  PowerAction servicePowerPolicy(bool allowed, uint32_t idle, uint32_t now, bool force = false) {
+    return power.service(allowed && force, idle, now, running, false);
+  }
+  void completePowerAction(PowerAction action, bool success, uint32_t now) { power.complete(action, success, now); }
+  uint32_t powerWakeDelayMs(uint32_t now) const { return power.wakeDelay(now); }
+  void formatHeartbeatStatus(char* out, size_t size, uint32_t) const { snprintf(out, size, "state=active peer=unknown"); }
   inline static unsigned live = 0, fail_starts = 0, fail_allocations = 0;
   static void* operator new(size_t size, const std::nothrow_t&) noexcept {
     if (fail_allocations) { --fail_allocations; return nullptr; }
@@ -179,6 +194,7 @@ struct Callbacks {
   virtual bool isRs232BridgeRunning() const = 0;
   virtual bool setRs232BridgeState(bool) = 0;
   virtual bool restartRs232Bridge() = 0;
+  virtual void formatRs232Status(char*) = 0;
   virtual bool isEspNowBridgeRunning() = 0;
   virtual bool setEspNowBridgeState(bool) = 0;
   virtual bool restartEspNowBridge() = 0;
@@ -203,6 +219,8 @@ public:
   mesh::LocalIdentity self_id;
   void* _mgr = nullptr; void* _radio = nullptr; void* _ms = nullptr;
   void* getRTCClock() { return nullptr; }
+  FakeRng rng;
+  FakeRng* getRNG() { return &rng; }
   mesh::LocalIdentity getSelfId() { return self_id; }
   const char* getFirmwareVer() { return "test"; }
   const char* getBuildDate() { return "test"; }

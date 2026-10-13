@@ -3,6 +3,7 @@
   #include <helpers/ui/SmallMessageText.h>
 #endif
 #include <helpers/TxtDataHelpers.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <helpers/ui/BluetoothPairingUiPolicy.h>
 #include <helpers/ui/RadioProfileDisplayPage.h>
 #include <helpers/ui/RadioProfileSystemStatus.h>
@@ -858,6 +859,7 @@ bool UITask::isButtonPressed() const {
 }
 
 void UITask::loop() {
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
   servicePairingState();
 
   char c = 0;
@@ -949,9 +951,9 @@ void UITask::loop() {
   if (buzzer.isPlaying())  buzzer.loop();
 #endif
 
-  if (curr) curr->poll();
+  if (!morse_timing && curr) curr->poll();
 
-  if (_display != NULL && _display->isOn()) {
+  if (!morse_timing && _display != NULL && _display->isOn()) {
         _statusBar.update(*_display,
         _node_prefs->node_name,
         _cached_batt_mv,
@@ -1018,7 +1020,7 @@ void UITask::loop() {
     next_batt_chck = millis() + 8000;
   }
 #else
-  if (_display != NULL && _display->isOn() && millis() >= next_batt_chck) {
+  if (!morse_timing && _display != NULL && _display->isOn() && millis() >= next_batt_chck) {
     _cached_batt_mv = getBattMilliVolts();
     next_batt_chck = millis() + 8000;
   }

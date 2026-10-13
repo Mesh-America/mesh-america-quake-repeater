@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from test_replay_reset_integration import extract_braced
+from test_morse_tx import portable_radio_header
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "examples/simple_repeater/MyMesh.cpp"
@@ -46,6 +47,12 @@ class RemoteCliCommandIdentityTest(unittest.TestCase):
                 "Packet::Packet()", "bool Packet::isValidPathLen(")) + "\n}\n"
         with tempfile.TemporaryDirectory(prefix="meshcore-cli-identity-") as directory:
             work = Path(directory)
+            (work / "Dispatcher.h").write_text(portable_radio_header(), encoding="utf-8")
+            identity = work / "helpers/IdentityStore.h"
+            identity.parent.mkdir()
+            identity.write_text((ROOT / "test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h").read_text(encoding="ascii"), encoding="ascii")
+            morse = (ROOT / "test/fixtures/morse_cli.cpp").read_text(encoding="ascii").split("int main() {", 1)[0]
+            (work / "production_morse.inc").write_text(morse, encoding="ascii")
             (work / "normalization.inc").write_text(generated, encoding="utf-8")
             (work / "acl_delete.inc").write_text(acl[delete_start:delete_end], encoding="utf-8")
             (work / "production.inc").write_text("\n".join(
@@ -59,7 +66,7 @@ class RemoteCliCommandIdentityTest(unittest.TestCase):
                         os.environ.get("CXX", "g++"), "-std=c++17", "-Wall", "-Wextra",
                         "-Werror", "-Wno-unused-parameter", *sanitizer,
                         f"-DMESH_ENABLE_HOST_CLI={host_enabled}",
-                        f"-I{work}", f"-I{ROOT / 'src'}", str(FIXTURE), "-o", str(binary),
+                        f"-I{work}", f"-I{ROOT / 'test/mocks'}", f"-I{ROOT / 'src'}", str(FIXTURE), "-o", str(binary),
                     ], capture_output=True, text=True, timeout=60)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     checked = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)

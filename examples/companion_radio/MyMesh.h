@@ -27,6 +27,7 @@
 
 #include "DataStore.h"
 #include <helpers/RadioProfileCLI.h>
+#include <helpers/MorseReplyHandoff.h>
 #include <helpers/MeshtextConfig.h>
 #if MESH_ENABLE_MESHTEXT_CHAT
 #include <helpers/CompanionMeshtextChannel.h>
@@ -305,10 +306,15 @@ public:
   bool isTerminalWaitingForInput() const {
     return _terminal_mode && _terminal_usb_silent;
   }
+  // The input parser publishes its real edit state for this exact owner.
+  // Silent default-ASCII ownership above is a separate protocol state.
+  void setTerminalInputEditing(const Stream& output, bool editing) {
+    if (_terminal_output == &output) _terminal_input_editing = editing;
+  }
   void handleTerminalCommand(char* command, bool reader_prompt = true,
                              mesh::ReaderTryWrite reader_try_write = nullptr);
 #if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
-  bool enterNetworkTerminalMode(Stream& output);
+  bool enterNetworkTerminalMode(Stream& output, bool atomic_output = false);
   void exitNetworkTerminalMode(Stream& output);
   bool isNetworkTerminalMode(const Stream& output) const;
   bool isAnyNetworkTerminalMode() const {
@@ -406,8 +412,12 @@ protected:
   bool sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
 #if MESH_ENABLE_FLEET_CONTROL
   bool sendFleetCommandData(mesh::GroupChannel& channel, const uint8_t* envelope, size_t length);
-  void onRadioProfileCopyQueued(mesh::Packet* packet, const mesh::Packet* original, uint8_t priority) override;
 #endif
+  void onRadioProfileCopyQueued(mesh::Packet* packet, const mesh::Packet* original, uint8_t priority) override;
+  void onSendComplete(mesh::Packet* packet) override;
+  void onSendFail(mesh::Packet* packet) override;
+  bool allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash,
+                        uint8_t next_hop_hash_len) const override;
 
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
 #if MESH_PACKET_LOGGING && !MESH_PACKET_LOGGING_COMPACT
@@ -450,6 +460,8 @@ protected:
                          const char *text) override;
   void onCLICommandRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                          const char *text, char* reply) override;
+  void onCLIReplyPrepared(const ContactInfo& from, mesh::Packet* reply) override;
+  void onCLIReplyQueued(const ContactInfo& from, mesh::Packet* reply, bool queued) override;
   bool onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                            const uint8_t *sender_prefix, const char *text) override;
   void onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
@@ -630,6 +642,7 @@ private:
   void clearTerminalTrace(uint32_t now);
   void serviceTerminalTrace();
   void serviceTerminalTrace(uint32_t now);
+  void serviceMorseTerminal();
   void sendTerminalTraceRoute(const uint8_t* route, uint8_t hash_size,
                               uint8_t hop_count, const char* target);
   void sendTerminalTrace(ContactInfo& recipient);
@@ -692,6 +705,8 @@ private:
 
   DataStore* _store;
   mesh::RadioProfileCLI _radio_profiles;
+  mesh::MorseReplyHandoff _morse_reply;
+  bool _morse_reply_admission = false;
 #if MESH_ENABLE_MESHTEXT_CHAT
   mesh::mt::Region _mt_region = mesh::mt::Region::Unset;
   uint32_t _mt_slot = 0, _mt_node = 0, _mt_packet_id = 0;
@@ -755,6 +770,8 @@ private:
 #if COMPANION_FEATURE_TEXT_TERMINAL
   bool _terminal_mode;
   bool _terminal_usb_silent = false;
+  bool _terminal_input_editing = false;
+  bool _terminal_morse_atomic = false;
   Stream* _terminal_output;
   mesh::TerminalDisplayFilter _terminal_display;
   bool _terminal_recipient_set;
@@ -774,6 +791,12 @@ private:
   unsigned long _terminal_trace_sent_at;
   unsigned long _terminal_trace_expires_at;
   char _terminal_trace_target[32];
+  Stream* _morse_terminal_owner = nullptr;
+  uint32_t _morse_terminal_generation = 0;
+  uint32_t _morse_terminal_next_at = 0;
+  uint16_t _morse_terminal_offset = 0;
+  uint8_t _morse_terminal_pending_chars = 0;
+  bool _morse_terminal_was_receiving = false;
 #endif
   bool saved_radio_apply_pending;
   bool _radio_available;

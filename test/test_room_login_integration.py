@@ -149,6 +149,17 @@ struct FakeRng {
 static uint32_t ticks = 0;
 static uint32_t millis() { return ticks; }
 struct MyMesh {
+  struct NoMorseReply {
+    uint32_t generation() const { return 0; }
+    void beginCommand(const uint8_t*) {}
+    void endCommand() {}
+    void prepareReply(const void*) {}
+    void armReply(const void*,bool) {}
+  } inactive_morse_reply;
+  struct CLI {
+    NoMorseReply* reply;
+    NoMorseReply& morseReply() { return *reply; }
+  } _cli{&inactive_morse_reply};
   FakeACL acl;
   mesh::Identity self_id{};
   PostInfo retained_posts[MAX_UNSYNCED_POSTS]{};

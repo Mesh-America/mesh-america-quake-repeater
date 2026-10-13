@@ -103,6 +103,16 @@ struct Sent {
   bool retry_enabled = false;
 };
 struct MyMesh {
+  struct CLI {
+    struct NoMorseReply {
+      uint32_t generation() const { return 0; }
+      void beginCommand(const uint8_t*) {}
+      void endCommand() {}
+      void prepareReply(const void*) {}
+      void armReply(const void*, bool) {}
+    } morse;
+    NoMorseReply& morseReply() { return morse; }
+  } _cli;
   FakeACL acl;
   mesh::Identity self_id{};
   MemoryFS policy_fs;

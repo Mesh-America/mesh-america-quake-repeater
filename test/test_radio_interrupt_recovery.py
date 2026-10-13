@@ -35,6 +35,8 @@ PRELUDE = r'''
 #define STATE_RX 1
 #define STATE_TX_WAIT 3
 #define RADIOLIB_ERR_NONE 0
+#define RADIOLIB_ERR_INVALID_FREQUENCY -2
+#define RADIOLIB_ERR_UNKNOWN -16
 #define RADIOLIB_ERR_UNSUPPORTED -2
 #define RADIOLIB_ERR_PACKET_TOO_SHORT -5
 #define RADIOLIB_ERR_SPI_CMD_TIMEOUT -77
@@ -178,10 +180,15 @@ class RadioInterruptRecoveryTests(unittest.TestCase):
 #pragma once
 #include <cstdint>
 #define RADIOLIB_ERR_NONE 0
+#define RADIOLIB_ERR_INVALID_FREQUENCY -2
+#define RADIOLIB_ERR_UNKNOWN -16
 #define RADIOLIB_NC 0xffffffff
 class PhysicalLayer {
 public:
  int setOutputPower(int8_t){return 0;}
+ int setFrequency(float){return 0;}
+ int standby(){return 0;}
+ int startReceive(){return 0;}
  int transmitDirect(){return 0;}
  int setPreambleLength(uint16_t){return 0;}
  uint8_t randomByte(){return 0;}

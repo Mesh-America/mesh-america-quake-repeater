@@ -1,6 +1,8 @@
 #pragma once
 
 #include <RadioLib.h>
+#include <math.h>
+#include "SX126xMorseRssi.h"
 
 #ifndef SX126X_TX_BUSY_TIMEOUT_MS
 #define SX126X_TX_BUSY_TIMEOUT_MS 1000UL
@@ -14,6 +16,14 @@ class CustomSX1268 : public SX1268 {
 
   public:
     CustomSX1268(Module *mod) : SX1268(mod) { }
+    int16_t setMorseFastRssi() {
+      return setSX126xMorseRssiWindow(this);
+    }
+    float getMorseRssi() {
+      uint8_t raw = 0;
+      const int16_t status = this->getMod()->SPIreadStream(RADIOLIB_SX126X_CMD_GET_RSSI_INST, &raw, 1);
+      return status == RADIOLIB_ERR_NONE ? raw * -0.5f : NAN;
+    }
 
   #ifdef RP2040_PLATFORM
     bool std_init(SPIClassRP2040* spi = NULL)

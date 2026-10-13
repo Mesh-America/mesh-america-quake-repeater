@@ -176,6 +176,10 @@ protected:
   virtual void onMessageRecv(const ContactInfo& contact, mesh::Packet* pkt, uint32_t sender_timestamp, const char *text) = 0;
   virtual void onCommandDataRecv(const ContactInfo& contact, mesh::Packet* pkt, uint32_t sender_timestamp, const char *text) = 0;
   virtual void onCLICommandRecv(const ContactInfo& contact, mesh::Packet* pkt, uint32_t sender_timestamp, const char *text, char* reply) = 0;
+  // Default-no-op admission hooks let a radio-owning maintenance operation
+  // wait for its exact encrypted CLI response without changing the protocol.
+  virtual void onCLIReplyPrepared(const ContactInfo&, mesh::Packet*) {}
+  virtual void onCLIReplyQueued(const ContactInfo&, mesh::Packet*, bool) {}
   // Return true only after retaining/delivering the room post. A false result
   // leaves the catch-up cursor unchanged and suppresses the delivery ACK.
   virtual bool onSignedMessageRecv(const ContactInfo& contact, mesh::Packet* pkt, uint32_t sender_timestamp, const uint8_t *sender_prefix, const char *text) = 0;

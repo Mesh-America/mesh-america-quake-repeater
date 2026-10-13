@@ -37,6 +37,7 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
         lifecycle = "\n".join(extract_braced(processed_header, signature) for signature in (
             "AbstractBridge* activeBridge() {", "const AbstractBridge* activeBridge() const {",
             "RS232Bridge* createRS232Bridge()", "bool beginRS232Bridge()", "bool endRS232Bridge()",
+            "void serviceRs232BridgePower()", "void formatRs232Status(char* reply)",
             "bool isBridgeRunning() const override", "bool rs232BridgeEnabled() const", "bool isRs232BridgeRunning()",
             "bool setRs232BridgeState(bool enable)", "bool restartRs232Bridge()",
             "bool startSharedEspNowBridgeIfReady()", "bool isEspNowBridgeRunning()",
@@ -135,6 +136,7 @@ class RS232MQTTRuntimeTests(unittest.TestCase):
         lifecycle = "\n".join(extract_braced(processed_header, signature) for signature in (
             "AbstractBridge* activeBridge() {", "const AbstractBridge* activeBridge() const {",
             "RS232Bridge* createRS232Bridge()", "bool beginRS232Bridge()", "bool endRS232Bridge()",
+            "void serviceRs232BridgePower()", "void formatRs232Status(char* reply)",
             "bool rs232BridgeEnabled() const", "bool isBridgeRunning() const override",
             "bool isRs232BridgeRunning()", "bool setRs232BridgeState(bool enable)",
             "bool restartRs232Bridge()", "bool isMqttBridgeRunning()", "bool requestMqttBridgeStop()",

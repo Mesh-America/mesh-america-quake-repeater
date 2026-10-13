@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include <helpers/MorseLoopPolicy.h>
 #if UI_SMALL_MESSAGE_FONT == 1
   #include <helpers/ui/SmallMessageText.h>
 #endif
@@ -707,6 +708,7 @@ void UITask::servicePairingState() {
 }
 
 void UITask::loop() {
+  const bool morse_timing = mesh::morseTimingActive(&radio_driver);
 #ifdef PIN_VIBRATION
   vibration.loop();
 #endif
@@ -731,7 +733,7 @@ void UITask::loop() {
   servicePendingShutdown();
 #endif
 
-  if (_display != NULL && _display->isOn()) {
+  if (!morse_timing && _display != NULL && _display->isOn()) {
     if (!isPairingScreenActive() && !_alert[0] && !(_origin[0] && _msg[0])
         && (millis() - ui_started_at) >= BOOT_SCREEN_MILLIS) {
       serviceRadioProfileDisplayPage();

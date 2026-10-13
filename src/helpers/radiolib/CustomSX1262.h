@@ -1,9 +1,11 @@
 #pragma once
 
 #include <RadioLib.h>
+#include <math.h>
 #include "MeshCore.h"
 #include "RXPowerSaving.h"
 #include "SX1262ProfileSwitchState.h"
+#include "SX126xMorseRssi.h"
 
 #ifndef MC_SX1262_FAST_PROFILE_SWITCH
 // CustomSX1262 targets use direct radio I/O unless a board opts out. Keep
@@ -42,6 +44,19 @@ class CustomSX1262 : public SX1262 {
 
   public:
     CustomSX1262(Module *mod) : SX1262(mod) { }
+    void invalidateMorseModemCache() {
+      _profileSwitch.invalidate();
+      _coldStandby = true;
+      _tcxoWakePending = false;
+    }
+    int16_t setMorseFastRssi() {
+      return setSX126xMorseRssiWindow(this);
+    }
+    float getMorseRssi() {
+      uint8_t raw = 0;
+      const int16_t status = this->getMod()->SPIreadStream(RADIOLIB_SX126X_CMD_GET_RSSI_INST, &raw, 1);
+      return status == RADIOLIB_ERR_NONE ? raw * -0.5f : NAN;
+    }
 
     void setProfileSwitchOptimization(bool enabled) {
       _profileSwitch.enabled = enabled;

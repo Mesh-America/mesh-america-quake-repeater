@@ -5,16 +5,58 @@
 #include "LR11x0Reset.h"
 
 class CustomLR1121Wrapper : public RadioLibWrapper {
+  using DeepInitCallback = bool (*)();
+  DeepInitCallback _deep_init = nullptr;
 public:
   ~CustomLR1121Wrapper() { unregisterInterruptAction(); }
   CustomLR1121Wrapper(CustomLR1121& radio, mesh::MainBoard& board) : RadioLibWrapper(radio, board) { }
+  bool supportsMorseTx() const override { return true; }
+  bool supportsMorseRx() const override { return MESH_ENABLE_MORSE_RX && supportsRadioDeepInit(); }
+  void setDeepInitCallback(DeepInitCallback callback) { _deep_init = callback; }
 
   void powerOff() {
+    if (isCarrierWaveActive()) setCarrierWave(0, 0);
     _radio->standby();
     _radio->sleep();
   }
 
 protected:
+  int16_t startMorseReceiver() override {
+    return static_cast<CustomLR1121*>(_radio)->LR1121::startReceive(
+        RADIOLIB_LR11X0_RX_TIMEOUT_INF, 0, 0, 0);
+  }
+  float readMorseRssi() override {
+    float rssi = NAN;
+    return static_cast<LR11x0*>(_radio)->getRssiInst(&rssi) == RADIOLIB_ERR_NONE ? rssi : NAN;
+  }
+  float morseReceiverBandwidthKHz() const override { return 4.8f; }
+  int16_t prepareMorseReceiver(float frequency_mhz) override {
+    if (!supportsRadioDeepInit()) return RADIOLIB_ERR_UNSUPPORTED;
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    _morse_rx_fsk_mode = true;
+    if (!prepareRadioHardReset()) return RADIOLIB_ERR_CHIP_NOT_FOUND;
+    const int16_t status = static_cast<CustomLR1121*>(_radio)->beginMorseReceive(frequency_mhz);
+    const bool finished = _board->finishRadioHardReset();
+    return status == RADIOLIB_ERR_NONE && !finished ? RADIOLIB_ERR_UNKNOWN : status;
+  }
+  int16_t prepareMorseCarrier(float frequency_mhz) override {
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    auto* radio = static_cast<CustomLR1121*>(_radio);
+    const int16_t status = radio->setFrequency(frequency_mhz);
+    return status == RADIOLIB_ERR_NONE
+        ? radio->setOutputPower(_dbm_valid ? _cur_dbm : LORA_TX_POWER, false, 304) : status;
+  }
+  bool restoreCarrierWaveModem() override {
+    if (_morse_rx_fsk_mode) {
+      const bool restored = restoreAfterDeepInit();
+      if (restored) _morse_rx_fsk_mode = false;
+      return restored;
+    }
+    auto* radio = static_cast<CustomLR1121*>(_radio);
+    if (!_board->prepareRadioFrequency(_cur_freq)
+        || radio->setFrequency(_cur_freq) != RADIOLIB_ERR_NONE) return false;
+    return radio->setOutputPower(_dbm_valid ? _cur_dbm : LORA_TX_POWER) == RADIOLIB_ERR_NONE;
+  }
   bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     if (((CustomLR1121 *)_radio)->setFrequency(freq) != RADIOLIB_ERR_NONE
         || ((CustomLR1121 *)_radio)->setSpreadingFactor(sf) != RADIOLIB_ERR_NONE
@@ -56,6 +98,13 @@ public:
   uint8_t getSpreadingFactor() const override { return ((CustomLR1121 *)_radio)->getSpreadingFactor(); }
 
 protected:
+  bool radioDeepInit() override {
+    return _deep_init && prepareRadioHardReset() && _deep_init()
+        && _board->finishRadioHardReset();
+  }
+  bool supportsRadioDeepInit() const override {
+    return _deep_init && supportsRadioHardResetPath();
+  }
   bool applyRxBoostedGainMode(bool en) override {
     return ((CustomLR1121 *)_radio)->setRxBoostedGainMode(en) == RADIOLIB_ERR_NONE;
   }

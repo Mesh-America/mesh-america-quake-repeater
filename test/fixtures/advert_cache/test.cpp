@@ -8,6 +8,9 @@ namespace mesh { struct Utils {
     dest[2*length]=0;
   }
 }; }
+// Advert jobs are tested with Morse idle; actual Morse deferral is covered by
+// test_morse_loop_policy.py and the production role-loop extraction fixtures.
+namespace mesh { template<class Radio> bool morseTimingActive(const Radio*) { return false; } }
 struct ContactInfo {};
 class MyMesh;
 using DataStoreHost = MyMesh;
@@ -62,6 +65,7 @@ class MyMesh {
 public:
   DataStore* _store;
   Clock* _ms;
+  RadioDriver* _radio=&radio_driver;
   bool _advert_write_next=true;
   unsigned long dirty_contacts_expiry=0;
   uint8_t dirty_contacts_failures=0;

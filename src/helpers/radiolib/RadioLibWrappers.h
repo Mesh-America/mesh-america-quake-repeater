@@ -109,8 +109,28 @@ protected:
   bool _cw_board_tx = false;
   uint8_t _cw_profile = 0, _cw_restore_profile = 0;
   uint32_t _cw_until = 0, _cw_retry_at = 0, _cw_generation = 0;
+  mesh::MorseTx _morse;
+  bool _morse_owned = false;
+  float _morse_frequency = mesh::MorseTx::DefaultFrequencyMHz;
+  uint8_t _morse_wpm = mesh::MorseTx::DefaultWpm;
+  uint32_t _morse_generation[2] = {};
+  // Allocate the bounded capture only on explicit RX admission. Permanently
+  // reserving 4096 characters would break small nRF52 Companion RAM budgets.
+#if MESH_ENABLE_MORSE_RX
+  mesh::MorseRx* _morse_rx = nullptr;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  mesh::MorseRssiTrace* _morse_trace = nullptr;
+#endif
+  float _morse_rx_frequency = mesh::MorseTx::DefaultFrequencyMHz;
+  uint32_t _morse_rx_next_sample = 0, _morse_capture_generation = 0;
+#endif
+  bool _morse_rx_owned = false;
+  bool _morse_rx_fsk_mode = false;
+  uint8_t _morse_rx_read_errors = 0;
   bool stopCarrierWave();
   bool serviceCarrierWave();
+  bool serviceMorseTx();
+  bool serviceMorseRx();
   mesh::RadioParamApplyResult tuneProfile(uint8_t profile);
   void serviceProfileScan();
 
@@ -213,6 +233,32 @@ protected:
   }
   virtual bool applyRxBoostedGainMode(bool) { return false; }
   virtual int16_t enterCarrierWave() { return _radio->transmitDirect(); }
+  virtual bool validateMorseFrequency(float frequency_mhz) const {
+    return isfinite(frequency_mhz) && frequency_mhz >= 150.0f && frequency_mhz <= 960.0f;
+  }
+  // Configure the oscillator/modem once, before the first mark. Subsequent
+  // marks only re-enter direct TX; in particular SX127x must not rebuild FSK
+  // between dots. The cached LoRa tuple is deliberately left untouched.
+  virtual int16_t prepareMorseCarrier(float frequency_mhz) {
+    if (!_board->prepareRadioFrequency(frequency_mhz)) return RADIOLIB_ERR_INVALID_FREQUENCY;
+    int16_t result = _radio->setFrequency(frequency_mhz);
+    if (result == RADIOLIB_ERR_NONE && _dbm_valid) result = applyCachedTxPower(_cur_dbm);
+    return result;
+  }
+  virtual int16_t enterMorseCarrier() { return _radio->transmitDirect(); }
+  virtual int16_t leaveMorseCarrier() { return _radio->standby(); }
+  virtual float morseReceiverBandwidthKHz() const { return 0.0f; }
+  virtual int16_t prepareMorseReceiver(float frequency_mhz) {
+    (void)frequency_mhz;
+    // A native, fully restorable continuous-RSSI modem hook is required.
+    // LoRa's symbol detector is not a proven CW envelope receiver.
+    return RADIOLIB_ERR_UNKNOWN;
+  }
+  virtual int16_t startMorseReceiver() { return _radio->startReceive(); }
+  virtual float readMorseRssi() { return getCurrentRSSI(); }
+#if MESH_ENABLE_MORSE_RX
+  virtual bool canAllocateMorseReceiver() const;
+#endif
   // Native-CW radios keep their modem. Reapply cached power in case a meter
   // sweep failed halfway through; SX127x also rebuilds its LoRa configuration.
   virtual bool restoreCarrierWaveModem() {
@@ -254,10 +300,17 @@ protected:
           _cad_scan_timeout_override_ms = 0;
         }
 
-  // Concrete wrappers detach their callbacks before base destruction. Keep
-  // this destructor trivial so compact targets do not need a base vtable; a
-  // protected lifetime also rejects deletion through a borrowed base pointer.
-  ~RadioLibWrapper() = default;
+  // Concrete wrappers detach their callbacks before base destruction. A
+  // protected nonvirtual lifetime rejects deletion through a borrowed base
+  // pointer while releasing any retained, explicitly allocated RX capture.
+  ~RadioLibWrapper() {
+#if MESH_ENABLE_MORSE_RX
+    delete _morse_rx;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+    delete _morse_trace;
+#endif
+#endif
+  }
 
 public:
   void begin() override;
@@ -265,6 +318,44 @@ public:
   bool isCarrierWaveActive() const override { return _cw_active; }
   uint8_t carrierWaveProfile() const override { return _cw_profile; }
   uint32_t carrierWaveRemainingMillis() const override;
+  bool supportsMorseTx() const override;
+  mesh::MorseTxResult startMorseTx(float frequency_mhz, uint8_t wpm, const char* text) override;
+  mesh::MorseTxResult stopMorseTx() override;
+  bool isMorseTxActive() const override { return _morse_owned && _cw_active; }
+  float morseTxFrequency() const override { return _morse_frequency; }
+  uint8_t morseTxWpm() const override { return _morse_wpm; }
+  uint32_t morseTxRemainingMillis() const override { return _morse.remainingMillis(millis()); }
+#if MESH_ENABLE_MORSE_RX
+  bool supportsMorseRx() const override { return false; }
+  mesh::MorseRxResult startMorseRx(float frequency_mhz, uint8_t wpm, uint32_t duration_ms) override;
+  mesh::MorseRxResult stopMorseRx() override;
+  bool isMorseRxActive() const override { return _morse_rx_owned && _cw_active; }
+  bool morseRxRecovering() const override { return isMorseRxActive() && _cw_stopping; }
+  bool morseRxLearning() const override { return isMorseRxActive() && _morse_rx && _morse_rx->learning(millis()); }
+  float morseRxFrequency() const override { return _morse_rx_frequency; }
+  float morseRxBandwidthKHz() const override { return morseReceiverBandwidthKHz(); }
+  uint32_t morseRxRemainingMillis() const override { return _morse_rx ? _morse_rx->remainingMillis(millis()) : 0; }
+  uint32_t morseCaptureGeneration() const override { return _morse_capture_generation; }
+  bool morseRxDiagnostics(mesh::MorseRxDiagnostics& out) const override {
+    if (!_morse_rx) { out = {}; return false; }
+    _morse_rx->diagnostics(out);
+    out.read_errors = _morse_rx_read_errors;
+    return true;
+  }
+  size_t morseCaptureLength() const override { return _morse_rx ? _morse_rx->length() : 0; }
+  bool morseCaptureTruncated() const override { return _morse_rx && _morse_rx->truncated(); }
+  const char* morseCaptureText() const override { return _morse_rx ? _morse_rx->text() : ""; }
+  size_t readMorseCapture(size_t offset, char* out, size_t capacity) const override;
+  void clearMorseCapture() override;
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+  size_t morseTraceLength() const override { return _morse_trace ? _morse_trace->length() : 0; }
+  uint32_t morseTraceTotal() const override { return _morse_trace ? _morse_trace->total() : 0; }
+  bool morseTraceTruncated() const override { return _morse_trace && _morse_trace->truncated(); }
+  bool readMorseTrace(size_t offset, mesh::MorseRssiTraceEntry& out) const override {
+    return _morse_trace && _morse_trace->read(offset, out);
+  }
+#endif
+#endif
   mesh::RadioProfiles* profiles() override { return &_profiles; }
   const mesh::RadioProfiles* profiles() const override { return &_profiles; }
   bool validateProfile(const mesh::RadioProfileParams& params) const override;

@@ -163,7 +163,12 @@ public:
   FakeTrigger alert1, alert2;
   FakeTrigger* alert_tasks[4] = {&alert1, &alert2};
   int num_alert_tasks = 2;
-  struct CLI { bool active = false; bool hasActiveUserGpioTimer() const { return active; } } _cli;
+  struct CLI {
+    struct NoMorseReply { void complete(const void*) {} void fail(const void*) {} } morse;
+    NoMorseReply& morseReply() { return morse; }
+    bool active = false;
+    bool hasActiveUserGpioTimer() const { return active; }
+  } _cli;
   struct ClockSync { unsigned observed = 0;
     void observeAcceptedFlood(const mesh::Packet*) { ++observed; } } _clock_sync;
   uint32_t set_radio_at = 0, revert_radio_at = 0;

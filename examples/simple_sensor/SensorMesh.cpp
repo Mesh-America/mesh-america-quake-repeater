@@ -8,6 +8,7 @@
 #include <helpers/RoutingPolicy.h>
 #include <helpers/radiolib/RXPowerSaving.h>
 #include <helpers/sensors/LPPDataHelpers.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <helpers/UsbLogging.h>
 #if defined(ENABLE_OTA)
 #include <helpers/ota/OtaContext.h>
@@ -442,6 +443,7 @@ uint32_t SensorMesh::getDirectRetransmitDelay(const mesh::Packet* packet) {
 
 bool SensorMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash,
                                   uint8_t next_hop_hash_len) const {
+  if (_cli.morseReply().ownsReply(packet)) return false;
 #if MESH_ENABLE_SENSOR_TRACKER
   if (tracker_pending && packet != NULL) {
     uint8_t hash[MAX_HASH_SIZE];
@@ -481,6 +483,7 @@ uint32_t SensorMesh::getDirectRetryAttemptDelay(const mesh::Packet* packet, uint
 }
 
 bool SensorMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (_cli.morseReply().ownsReply(packet)) return false;
   if (packet != NULL && packet->flood_retry_policy == mesh::FLOOD_RETRY_POLICY_DENY) return false;
   if (_prefs.disable_fwd || _prefs.flood_retry_attempts == 0) return false;
   return packet == NULL || packet->getPayloadType() != PAYLOAD_TYPE_ADVERT
@@ -1018,8 +1021,11 @@ void SensorMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_i
         char *command = (char *) &data[5];
         char *reply = (char *) &temp[5];
         *reply = 0;
+        const uint32_t morse_mutation_before = _cli.morseReply().generation();
+        _cli.morseReply().beginCommand(from->id.pub_key);
         handleCommand(sender_timestamp, command, reply, i,
                       packet->getPathHashSize());
+        _cli.morseReply().endCommand();
 
         int text_len = strlen(reply);
         if (text_len > 0) {
@@ -1032,13 +1038,20 @@ void SensorMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_i
           temp[4] = (TXT_TYPE_CLI_DATA << 2);
 
           auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, from->id, secret, temp, 5 + text_len);
+          const bool arms_morse = _cli.morseReply().generation() != morse_mutation_before;
+          if (arms_morse) {
+            _cli.morseReply().prepareReply(reply);
+            if (reply) reply->radio_reply = true;
+          }
+          bool queued = false;
           if (reply) {
             if (!mesh::Packet::isValidPathLen(from->out_path_len)) {
-              sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
+              queued = sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
             } else {
-              sendDirect(reply, from->out_path, from->out_path_len, CLI_REPLY_DELAY_MILLIS);
+              queued = sendDirect(reply, from->out_path, from->out_path_len, CLI_REPLY_DELAY_MILLIS);
             }
           }
+          if (arms_morse) _cli.morseReply().armReply(reply, queued);
         }
       } else {
         MESH_DEBUG_PRINTLN("onPeerDataRecv: unsupported text type received: flags=%02x", (uint32_t)flags);
@@ -1059,6 +1072,24 @@ bool SensorMesh::handleIncomingMsg(ClientInfo& from, uint32_t timestamp, uint8_t
   }
   #endif
   return false;
+}
+
+#if !MESH_ENABLE_SENSOR_TRACKER
+void SensorMesh::onSendComplete(mesh::Packet* packet) {
+  mesh::Mesh::onSendComplete(packet);
+  _cli.morseReply().complete(packet);
+}
+
+void SensorMesh::onSendFail(mesh::Packet* packet) {
+  mesh::Mesh::onSendFail(packet);
+  _cli.morseReply().fail(packet);
+}
+#endif
+
+void SensorMesh::onRadioProfileCopyQueued(mesh::Packet* packet,
+                                         const mesh::Packet* original, uint8_t priority) {
+  _cli.morseReply().copy(original, packet);
+  mesh::Mesh::onRadioProfileCopyQueued(packet, original, priority);
 }
 
 #define CTL_TYPE_NODE_DISCOVER_REQ   0x80
@@ -1437,10 +1468,13 @@ bool  SensorMesh::getGPS(uint8_t channel, float& lat, float& lon, float& alt) {
 
 void SensorMesh::loop() {
 #if MESH_ENABLE_SENSOR_TRACKER
-  if (tracker.enabled && trackerNeedsRadio()) wakeTrackerRadio();
+  if (!mesh::morseTimingActive(_radio) && tracker.enabled && trackerNeedsRadio()) wakeTrackerRadio();
 #endif
   _cli.loop();
   mesh::Mesh::loop();
+  // Do not consume sensor/advert/write deadlines during timed Morse capture.
+  // USB command service and the physical radio continue on every pass.
+  if (mesh::morseTimingActive(_radio)) return;
   _clock_sync.loop();
 #if MESH_ENABLE_SENSOR_TRACKER
   serviceTracker();

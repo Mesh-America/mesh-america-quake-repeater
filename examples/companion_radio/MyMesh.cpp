@@ -1,5 +1,7 @@
 #include <helpers/ui/DisplayPowerSettings.h>
 #include <helpers/BatteryChargeCLI.h>
+#include <helpers/MorseCLI.h>
+#include <helpers/MorseLoopPolicy.h>
 #include <helpers/ui/StartupScreen.h>
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
@@ -1795,6 +1797,7 @@ void MyMesh::onGroupPacketRecv(mesh::Packet* packet) {
 #endif
 
 bool MyMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (_morse_reply.ownsReply(packet)) return false;
   if (packet == NULL || _prefs.flood_retry_attempts == 0) return false;
   // A companion may retry its own advert once, using the core's deliberately
   // slow origin-advert delay. Do not add retries while relaying a neighbour's
@@ -1850,11 +1853,31 @@ bool MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
   }
 }
 
-#if MESH_ENABLE_FLEET_CONTROL
 void MyMesh::onRadioProfileCopyQueued(mesh::Packet* packet, const mesh::Packet* original, uint8_t priority) {
   mesh::Mesh::onRadioProfileCopyQueued(packet, original, priority);
+  _morse_reply.copy(original, packet);
+#if MESH_ENABLE_FLEET_CONTROL
   if (original && original == _fleet_admission_original) _fleet_admission_copy = packet;
+#endif
 }
+
+void MyMesh::onSendComplete(mesh::Packet* packet) {
+  mesh::Mesh::onSendComplete(packet);
+  _morse_reply.complete(packet);
+}
+
+void MyMesh::onSendFail(mesh::Packet* packet) {
+  mesh::Mesh::onSendFail(packet);
+  _morse_reply.fail(packet);
+}
+
+bool MyMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash,
+                              uint8_t next_hop_hash_len) const {
+  return !_morse_reply.ownsReply(packet)
+      && mesh::Mesh::allowDirectRetry(packet, next_hop_hash, next_hop_hash_len);
+}
+
+#if MESH_ENABLE_FLEET_CONTROL
 
 bool MyMesh::sendFleetCommandData(mesh::GroupChannel& channel, const uint8_t* envelope, size_t length) {
   if (!envelope || !length || length > mesh::FleetCommand::MaxEnvelopeLength) return false;
@@ -2023,13 +2046,31 @@ void MyMesh::onCLICommandRecv(const ContactInfo &from, mesh::Packet *pkt, uint32
                                const char *text, char* reply) {
   markConnectionActive(from); // in case this is from a server, and we have a connection
   if (from.isRemoteCLIAllowed()) {
+    const uint32_t before = _morse_reply.generation();
+    _morse_reply.beginCommand(from.id.pub_key);
     // A timestamp received over the radio must never grant local-console access.
     if (!handleCommand(text, sender_timestamp ? sender_timestamp : 1, reply)) {
       strcat(reply, "Unknown command");   // reply may have cmd prefix from 'text'
     }
+    _morse_reply.endCommand();
+    _morse_reply_admission = _morse_reply.generation() != before;
   } else {
     queueMessage(from, TXT_TYPE_CLI_COMMAND, pkt, sender_timestamp, NULL, 0, text);
   }
+}
+
+void MyMesh::onCLIReplyPrepared(const ContactInfo& from, mesh::Packet* reply) {
+  if (!_morse_reply_admission || !_morse_reply.pending()
+      || memcmp(from.id.pub_key, _morse_reply.actor(), PUB_KEY_SIZE) != 0) return;
+  _morse_reply.prepareReply(reply);
+  if (reply) reply->radio_reply = true;
+}
+
+void MyMesh::onCLIReplyQueued(const ContactInfo& from, mesh::Packet* reply, bool queued) {
+  if (!_morse_reply_admission) return;
+  if (memcmp(from.id.pub_key, _morse_reply.actor(), PUB_KEY_SIZE) == 0)
+    _morse_reply.armReply(reply, queued);
+  _morse_reply_admission = false;
 }
 
 bool MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
@@ -2780,6 +2821,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
   initializeOfflineQueue();
   BaseChatMesh::begin();
   _radio_profiles.begin(_store->getPrimaryFS(), _radio, getRTCClock());
+  mesh::loadMorseSettings(_store->getPrimaryFS());
 #if defined(ENABLE_OTA)
   mesh::ota::beginSpeedConfig(_store->getPrimaryFS());
 #endif
@@ -3961,6 +4003,8 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
       snprintf(reply, reply_size,
                "Error: use set radio.fem.rxgain on|off");
+    } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+      snprintf(reply, reply_size, "Error: stop Morse before changing LoRa FEM gain");
     } else if (!board.canControlLoRaFemLna()) {
       snprintf(reply, reply_size, "Error: unsupported");
     } else if (!applyAndSaveFemRxGain(strcmp(value, "on") == 0)) {
@@ -3990,6 +4034,8 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
       snprintf(reply, reply_size,
                "Error: use set radio.fem.txgain on|off");
+    } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+      snprintf(reply, reply_size, "Error: stop Morse before changing LoRa FEM gain");
     } else if (!board.canControlLoRaFemPaGain()) {
       snprintf(reply, reply_size, "%s", board.isLoRaFemPaGainEnabled()
           ? "Error: TX PA is fixed on; use set tx to adjust power"
@@ -5250,6 +5296,8 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     bool enabled;
     if (!wcParseBool(value, enabled)) {
       strcpy(reply, "Error: must be on or off");
+    } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+      strcpy(reply, "Error: stop Morse before changing LoRa FEM gain");
     } else if (!board.canControlLoRaFemLna()) {
       strcpy(reply, "Error: unsupported");
     } else if (!applyAndSaveFemRxGain(enabled)) {
@@ -5263,6 +5311,8 @@ void MyMesh::execCommand(char* cmd, char* reply) {
     bool enabled;
     if (!wcParseBool(value, enabled)) {
       strcpy(reply, "Error: must be on or off");
+    } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+      strcpy(reply, "Error: stop Morse before changing LoRa FEM gain");
     } else if (!board.canControlLoRaFemPaGain()) {
       strcpy(reply, "Error: unsupported");
     } else if (!applyAndSaveFemTxGain(enabled)) {
@@ -7929,6 +7979,9 @@ MyMesh::RadioSettingResult MyMesh::applyAndSaveTxPower(int8_t power) {
 }
 
 bool MyMesh::applyAndSaveFemRxGain(bool enabled) {
+  // Binary Companion setters and WebConfig also enter through this helper.
+  // Do not alter an external FEM while the Morse transmitter owns it.
+  if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) return false;
   if (!board.canControlLoRaFemLna()) return false;
 
   const bool previous_hardware = board.isLoRaFemLnaEnabled();
@@ -7951,6 +8004,7 @@ bool MyMesh::applyAndSaveFemRxGain(bool enabled) {
 }
 
 bool MyMesh::applyAndSaveFemTxGain(bool enabled) {
+  if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) return false;
   if (!board.canControlLoRaFemPaGain()) return false;
   const bool previous_hardware = board.isLoRaFemPaGainEnabled();
   const uint8_t previous_pref = _prefs.radio_fem_txgain;
@@ -8666,6 +8720,10 @@ void MyMesh::resetTerminalSession() {
 #if COMPANION_FEATURE_READER
   mesh::cancelReaderCommand();
 #endif
+  _terminal_input_editing = false;
+  _morse_terminal_owner = nullptr;
+  _morse_terminal_pending_chars = 0;
+  _morse_terminal_was_receiving = false;
   _terminal_recipient_set = false;
   memset(_terminal_recipient_key, 0, sizeof(_terminal_recipient_key));
   clearTerminalLogin();
@@ -8677,6 +8735,76 @@ void MyMesh::resetTerminalSession() {
   // Binary Companion interface, but remove its old text-terminal ownership.
   for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
     expected_ack_table[i].terminal_origin = false;
+  }
+}
+
+void MyMesh::serviceMorseTerminal() {
+  // Only an explicitly owned ASCII terminal receives spontaneous text.
+  // Never use terminalOutput()'s Serial fallback or append to BLE/USB frames.
+  if (!_radio || !hasTerminalOutput()) {
+    _morse_terminal_owner = nullptr;
+    _morse_terminal_pending_chars = 0;
+    _morse_terminal_was_receiving = false;
+    return;
+  }
+  // A temporarily silent/paused terminal still owns its cursor. Resuming
+  // must not replay the capture or reset a pending partial line.
+  if (!_terminal_morse_atomic || isTerminalWaitingForInput()
+      || _terminal_input_editing || _terminal_output->available() > 0
+      || _terminal_login_pending || _terminal_trace_pending
+      || _terminal_command.isPending()) return;
+  // The existing USB facade owns all queued suffixes, including replies and
+  // echo. Never append progress in the middle of an earlier text producer.
+  if (_terminal_mode && _terminal_output == &mesh::usbTerminalPort()
+      && mesh::hasPendingUsbTerminalOutput()) return;
+  const bool receiving = _radio->isMorseRxActive();
+  const uint32_t generation = _radio->morseCaptureGeneration();
+  const size_t total = _radio->morseCaptureLength();
+  const uint32_t now = _ms->getMillis();
+  if (_morse_terminal_owner != _terminal_output || _morse_terminal_generation != generation) {
+    _morse_terminal_owner = _terminal_output;
+    _morse_terminal_generation = generation;
+    _morse_terminal_offset = receiving ? 0 : total;
+    _morse_terminal_pending_chars = 0;
+    _morse_terminal_was_receiving = receiving;
+    _morse_terminal_next_at = now;
+  }
+  if (receiving) _morse_terminal_was_receiving = true;
+  if (!_morse_terminal_was_receiving) return;
+  if (!_morse_terminal_pending_chars) {
+    if (_morse_terminal_offset >= total) {
+      if (!receiving) _morse_terminal_was_receiving = false;
+      return;
+    }
+    if (int32_t(now - _morse_terminal_next_at) < 0) return;
+    const size_t pending = total - _morse_terminal_offset;
+    _morse_terminal_pending_chars = pending < 48 ? pending : 48;
+  }
+  // Admit one complete record to an explicitly atomic stream. Its existing
+  // queue handles hardware short writes in chronological order with replies;
+  // Morse never retains an application-level suffix that can overtake input.
+  char text[49], line[80];
+  const size_t copied = _radio->readMorseCapture(_morse_terminal_offset, text,
+      size_t(_morse_terminal_pending_chars) + 1);
+  if (copied != _morse_terminal_pending_chars) {
+    _morse_terminal_pending_chars = 0;
+    return;
+  }
+  const int length = snprintf(line, sizeof(line), "\r\n[Morse RX] %s\r\n> ", text);
+  if (length <= 0 || size_t(length) >= sizeof(line)) return;
+  const int available = _terminal_output->availableForWrite();
+  if (available < length) return;
+  const size_t written = _terminal_output->write(
+      reinterpret_cast<const uint8_t*>(line), length);
+  if (written == size_t(length)) {
+    _morse_terminal_offset += _morse_terminal_pending_chars;
+    _morse_terminal_pending_chars = 0;
+    _morse_terminal_next_at = now + 250;
+  } else if (written) {
+    // A stream that violates its atomic admission contract is no longer safe
+    // for unsolicited progress. Keep the full capture available via CLI.
+    _terminal_morse_atomic = false;
+    _morse_terminal_pending_chars = 0;
   }
 }
 
@@ -8703,6 +8831,12 @@ void MyMesh::enterTerminalMode(bool show_banner) {
   _terminal_mode = true;
   _terminal_usb_silent = !show_banner;
   _terminal_output = &mesh::usbTerminalPort();
+#if MESH_ESP32_TINYUSB_NONBLOCKING \
+    || (defined(NRF52_PLATFORM) && (defined(ENABLE_USB_INTERFACE) || defined(USE_TINYUSB)))
+  _terminal_morse_atomic = true;
+#else
+  _terminal_morse_atomic = false;
+#endif
   resetTerminalSession();
   if (show_banner) printTerminalBanner(true);
 }
@@ -8710,14 +8844,16 @@ void MyMesh::enterTerminalMode(bool show_banner) {
 void MyMesh::exitTerminalMode() {
   _terminal_mode = false;
   _terminal_usb_silent = false;
+  _terminal_morse_atomic = false;
   resetTerminalSession();
   if (_terminal_output == &mesh::usbTerminalPort()) _terminal_output = NULL;
 }
 
 #if COMPANION_FEATURE_NETWORK_TERMINAL || defined(WITH_WEBCONFIG)
-bool MyMesh::enterNetworkTerminalMode(Stream& output) {
+bool MyMesh::enterNetworkTerminalMode(Stream& output, bool atomic_output) {
   if (_terminal_mode || (_terminal_output != NULL && _terminal_output != &output)) return false;
   _terminal_output = &output;
+  _terminal_morse_atomic = atomic_output;
   resetTerminalSession();
   printTerminalBanner(false);
   return true;
@@ -8726,6 +8862,7 @@ bool MyMesh::enterNetworkTerminalMode(Stream& output) {
 void MyMesh::exitNetworkTerminalMode(Stream& output) {
   if (_terminal_mode || _terminal_output != &output) return;
   resetTerminalSession();
+  _terminal_morse_atomic = false;
   _terminal_output = NULL;
 }
 
@@ -9782,6 +9919,8 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
       while (*value == ' ' || *value == '\t') value++;
       if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
         terminalOutput().print("  ERROR: use set radio.fem.rxgain <on|off>\r\n");
+      } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+        terminalOutput().print("  ERROR: stop Morse before changing LoRa FEM gain\r\n");
       } else if (!board.canControlLoRaFemLna()) {
         terminalOutput().print("  ERROR: FEM RX gain control is unsupported on this board\r\n");
       } else if (!applyAndSaveFemRxGain(strcmp(value, "on") == 0)) {
@@ -9796,6 +9935,8 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
       while (*value == ' ' || *value == '\t') value++;
       if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
         terminalOutput().print("  ERROR: use set radio.fem.txgain <on|off>\r\n");
+      } else if (_radio && (_radio->isMorseTxActive() || _radio->isMorseRxActive())) {
+        terminalOutput().print("  ERROR: stop Morse before changing LoRa FEM gain\r\n");
       } else if (!board.canControlLoRaFemPaGain()) {
         terminalOutput().print(board.isLoRaFemPaGainEnabled()
             ? "  ERROR: TX PA is fixed on; use set tx to adjust power\r\n"
@@ -10312,6 +10453,9 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
   }
 
 #endif
+  if (mesh::handleMorseReplyCommand(_morse_reply, _radio, command, reply,
+                                    reply_capacity, millis())) return true;
+  if (mesh::handleMorseCommand(_radio, command, reply, reply_capacity)) return true;
   if (_radio_profiles.handle(command, reply, reply_capacity, sender_timestamp != 0)) return true;
   if (!strncmp(command, "set tempradio ", 14)) command += 4;
   if (!strcmp(command, "get tempradio")) command += 4;
@@ -10900,6 +11044,14 @@ void MyMesh::checkSerialInterface() {
 }
 
 void MyMesh::loop() {
+#if MESH_ENABLE_MORSE_RX
+  if (_morse_reply.pending()) {
+    const ContactInfo* actor = lookupContactByPubKey(_morse_reply.actor(), PUB_KEY_SIZE);
+    const auto& settings = mesh::morseSettings();
+    _morse_reply.service(_radio, millis(), actor && actor->isRemoteCLIAllowed(),
+        mesh::morseSettingsUsable(), settings.frequency_khz, settings.wpm);
+  }
+#endif
 #if COMPANION_FEATURE_NOTIFICATIONS
   _notifications.loop(millis(), _serial->isConnected());
 #if defined(PIN_USER_BTN) && defined(USER_BTN_PRESSED)
@@ -10909,14 +11061,14 @@ void MyMesh::loop() {
 #endif
 #endif
 
-  _radio_profiles.loop();
+  if (!mesh::morseTimingActive(_radio)) _radio_profiles.loop();
 #if MESH_ENABLE_MESHTEXT_CHAT
   refreshMeshtextProfile();
 #endif
 #if defined(WITH_MQTT_BRIDGE) && defined(ESP32_PLATFORM) && defined(WIFI_SSID)
   if (_mqtt_bridge) _mqtt_bridge->servicePendingClockCorrection();
 #endif
-  if (_scheduled_reboot_at != 0
+  if (!mesh::morseTimingActive(_radio) && _scheduled_reboot_at != 0
       && (_scheduled_reboot_at == _ms->getMillis()
           || millisHasNowPassed(_scheduled_reboot_at))) {
     _scheduled_reboot_at = 0;
@@ -10928,7 +11080,7 @@ void MyMesh::loop() {
     return;
   }
 #if COMPANION_FEATURE_TEMP_RADIO
-  serviceTempRadio();
+  if (!mesh::morseTimingActive(_radio)) serviceTempRadio();
 #endif
 #if defined(OTA_SHARED_COMPANION_QUEUE)
   mesh::ota::ota_release_context_if_idle(isAnyTempRadioActive() || _temp_radio_set_at != 0);
@@ -10941,19 +11093,20 @@ void MyMesh::loop() {
 #endif
   BaseChatMesh::loop();
 #ifdef COMPANION_MESH_CLOCK_SYNC
-  _clock_sync.loop();
+  if (!mesh::morseTimingActive(_radio)) _clock_sync.loop();
 #endif
 #if COMPANION_FEATURE_TEXT_TERMINAL
   serviceTerminalLogin();
   serviceTerminalCommand();
   serviceTerminalTrace();
+  serviceMorseTerminal();
 #endif
   servicePendingSerialReply();
 #if COMPANION_FEATURE_READER
   mesh::serviceReaderCommand();
 #endif
   serviceBinaryTraceReply();
-  serviceSigningSession();
+  if (!mesh::morseTimingActive(_radio)) serviceSigningSession();
   if (!command_radio_apply_pending && saved_radio_apply_pending && !hasOutbound()
 #if COMPANION_FEATURE_TEMP_RADIO
       && !_temp_radio_applied && _temp_radio_set_at == 0
@@ -11006,7 +11159,7 @@ void MyMesh::loop() {
   servicePersistence();
 #else
   // is there are pending dirty contacts write needed?
-  if (isContactWriteDue()) {
+  if (!mesh::morseTimingActive(_radio) && isContactWriteDue()) {
     const bool success = _store->serviceContactWrites(this, save_filter);
     if (!success) {
       scheduleContactWriteRetry();
@@ -11036,6 +11189,7 @@ void MyMesh::loop() {
 
 #if defined(ESP32_PLATFORM)
 void MyMesh::servicePersistence() {
+  if (mesh::morseTimingActive(_radio)) return;
   // Advert crypto runs before serial service. Defer its cache I/O until here,
   // and alternate with due contact work so neither job can starve the other.
   // Only one persistence job is serviced in a loop pass.

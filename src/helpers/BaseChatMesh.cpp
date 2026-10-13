@@ -419,14 +419,17 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
         temp[4] = (TXT_TYPE_CLI_DATA << 2);
 
         auto reply_pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, from.id, secret, temp, 5 + text_len);
+        onCLIReplyPrepared(from, reply_pkt);
+        bool queued = false;
         if (reply_pkt) {
           if (from.out_path_len == OUT_PATH_UNKNOWN) {
-            sendFloodScoped(from, reply_pkt, CLI_REPLY_DELAY_MILLIS);
+            queued = sendFloodScoped(from, reply_pkt, CLI_REPLY_DELAY_MILLIS);
           } else {
-            sendDirect(reply_pkt, from.getPath(), from.out_path_len, CLI_REPLY_DELAY_MILLIS);
+            queued = sendDirect(reply_pkt, from.getPath(), from.out_path_len, CLI_REPLY_DELAY_MILLIS);
           }
         }
-      }
+        onCLIReplyQueued(from, reply_pkt, queued);
+      } else onCLIReplyQueued(from, nullptr, false);
     } else if (flags == TXT_TYPE_SIGNED_PLAIN) {
       if (len < 9) return; // timestamp, flags and complete author prefix
       const uint32_t previous_sync_since = from.sync_since;

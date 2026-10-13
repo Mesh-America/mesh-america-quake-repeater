@@ -33,6 +33,8 @@ HARNESS = r'''
 #include <helpers/AbstractBridge.h>
 #include <atomic>
 #include <cassert>
+#include <vector>
+#include <helpers/bridges/RS232Heartbeat.h>
 #define BRIDGE_DEBUG_PRINTLN(...) ((void)0)
 #define PUB_KEY_SIZE 32
 #define PAYLOAD_TYPE_ADVERT 4
@@ -65,7 +67,7 @@ struct Manager {
  void free(mesh::Packet*) {++freed;}
  void queueInbound(mesh::Packet*,unsigned) {++queued;}
 };
-struct Prefs {unsigned bridge_delay=10;};
+struct Prefs {unsigned bridge_delay=10;unsigned bridge_baud=115200;};
 struct BridgeBase : AbstractBridge {
  bool _initialized=true;
  Seen _seen_packets;
@@ -79,9 +81,27 @@ struct BridgeBase : AbstractBridge {
  void handleReceivedPacket(mesh::Packet*);
  uint16_t fletcher16(const uint8_t*,size_t) {return 0;}
 };
-struct Serial {unsigned writes=0;size_t write(const uint8_t*,size_t length) {++writes;return length;}};
+struct Serial {
+ unsigned writes=0;
+ size_t limit=300;
+ int capacity=300;
+ std::vector<uint8_t> bytes;
+ int availableForWrite() {return capacity;}
+ size_t write(const uint8_t* source,size_t length) {
+   ++writes;
+   if(length>limit)length=limit;
+   bytes.insert(bytes.end(),source,source+length);
+   return length;
+ }
+};
 struct RS232Bridge : BridgeBase {
  Serial serial; Serial* _serial=&serial;
+ uint8_t _tx_buffer[MAX_SERIAL_PACKET_SIZE] = {};
+ uint16_t _tx_size=0,_tx_pos=0;
+ uint32_t _tx_wire_until=0,_tx_ping_challenge=0;
+ uint32_t _outstanding_challenge=0,_outstanding_since=0;
+ bool _tx_wire_pending=false,_tx_is_ping=false;
+ void drainTransmit(uint32_t,bool blocking=false);
  void sendPacket(mesh::Packet*) override;
 };
 struct ESPNowBridge : BridgeBase {
@@ -128,6 +148,37 @@ int main() {
  assert(inbound.manager.queued==1 && inbound._seen_packets.marks==1);
  assert(serial.serial.writes==1 && espnow.queued==2 && mqtt.queued==2);
  assert(serial._seen_packets.marks==1 && espnow._seen_packets.marks==2);
+ // Exercise the actual production pending-write path, not a fake drain helper:
+ // a denied frame never enters the owned queue; an accepted partial frame is
+ // retained byte-for-byte and later data cannot interleave into its wire bytes.
+ RS232Bridge backed_up;
+ backed_up.setPacketFilter(filter,&allowed);
+ backed_up.serial.limit=3;
+ backed_up.sendPacket(&p);
+ assert(backed_up._tx_size==38 && backed_up._tx_pos==3);
+ assert(backed_up._seen_packets.marks==1);
+ backed_up.sendPacket(&p);
+ assert(backed_up._tx_size==38 && backed_up._tx_pos==6);
+ assert(backed_up._seen_packets.marks==1);
+ allowed=false;
+ backed_up.sendPacket(&p);
+ assert(backed_up._tx_pos==6 && backed_up.serial.bytes.size()==6);
+ allowed=true;
+ backed_up.serial.limit=300;
+ backed_up.drainTransmit(millis());
+ assert(backed_up._tx_size==0 && backed_up.serial.bytes.size()==38);
+ assert(backed_up.serial.bytes[0]==0xab && backed_up.serial.bytes[1]==0xcd);
+ assert(backed_up.serial.bytes[2]==0 && backed_up.serial.bytes[3]==32);
+ assert(memcmp(backed_up.serial.bytes.data()+4,p.payload,32)==0);
+ // A small hardware FIFO is ordinary backpressure, not a failed data write.
+ // Data keeps the legacy blocking acceptance behavior, even though heartbeat
+ // loop service uses availableForWrite() and never blocks.
+ RS232Bridge small_fifo;
+ small_fifo.serial.capacity=3;
+ small_fifo.sendPacket(&p);
+ small_fifo.sendPacket(&p);
+ assert(small_fifo._tx_size==0 && small_fifo.serial.bytes.size()==76);
+ assert(small_fifo._seen_packets.marks==2 && small_fifo.serial.writes==2);
  // Once teardown is requested, neither RX nor TX admits more queue work,
  // even while the bridge remains initialized until the worker acknowledges.
  mqtt._stop_requested=true;
@@ -181,7 +232,7 @@ int main() {
         methods = []
         for name, signatures in {
             'BridgeBase': ['void BridgeBase::handleReceivedPacket('],
-            'RS232Bridge': ['void RS232Bridge::sendPacket('],
+            'RS232Bridge': ['void RS232Bridge::drainTransmit(', 'void RS232Bridge::sendPacket('],
             'ESPNowBridge': ['void ESPNowBridge::sendPacket('],
             'MQTTBridge': ['void MQTTBridge::sendPacket(', 'void MQTTBridge::onPacketReceived('],
         }.items():

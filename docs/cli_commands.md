@@ -14,6 +14,26 @@ Chat remains plain text; NodeInfo is sent only when that command is requested.
 See [carrier-wave RF checks](carrier_wave.md) for `cw on [seconds]`,
 `cw2 on [seconds]`, and stopping a carrier with `off`.
 
+For keyed Morse TX, use `morse send TEST DE N0CALL` and `morse stop`.
+Defaults are **902.100 MHz and 25 WPM**; `set morse.freq <MHz>` and
+`set morse.wpm <1–60>` save separate frequency/speed settings.
+Small-flash STM32 production builds retain Morse TX but do not include Morse
+RX by default; listen/read/stats/clear return an unsupported-RX error there.
+`get morse` shows status. See [TX-only Morse messages](carrier_wave.md#tx-only-morse-messages)
+for supported characters, limits, overlap checks and the temporary pause in
+packet reception. Nothing transmits automatically.
+
+For timed Morse RX, use `morse listen <minutes>` (fractions allowed, 1 second
+through 5 minutes). `morse stop` ends TX or RX. All roles retain the bounded
+capture in RAM for `morse read [offset]`; follow each page's `next` value until
+`next=END`. `morse clear` removes it when idle. A new successful session or
+reboot replaces/removes the capture. Full Companion ASCII terminals show
+decoded progress; binary clients request it through the CLI, without adding
+unidentified text to authenticated channel/chat messages. Normal LoRa is paused
+during listening, so a remote administrator must wait for the selected session
+to end before reading the capture over LoRa. See [timed reception](carrier_wave.md#timed-morse-reception-and-retained-captures)
+for arming time, real chip bandwidths and truncation behavior.
+
 For copy/paste on/off recipes and the differences from Full Companion, see
 [feature switches by role](role_feature_switches.md). The
 [USB web console](https://flasher.meshcore.io/console) opens the default ASCII
@@ -2370,6 +2390,8 @@ on battery. `set powersaving on` still enables sensor/GPS power-saving policies;
 the CPU continues normal idle yielding while keeping the console available.
 A running MQTT, RS232 or ESP-NOW bridge keeps infrastructure awake even when
 `get powersaving` reports `on`; that readback alone does not prove MCU sleep.
+Negotiated RS232 standby can stop an unresponsive UART owner without changing
+its saved enabled flag; see `rs232.autosleep` below. Other sleep blockers still apply.
 Adding UART wake alone would still discard the characters that trigger wake,
 so it cannot preserve an unmodified web console's first command. See the
 [ESP-IDF UART wake documentation](https://docs.espressif.com/projects/esp-idf/en/v4.4.7/esp32s3/api-reference/system/sleep_modes.html#uart-wakeup-light-sleep-only).
@@ -4850,6 +4872,72 @@ Full MQTT repeaters with RS-232 expose three independent transports. Use
 RS-232. `bridge.baud` and `bridge.uart` change only UART configuration, without
 restarting MQTT or ESP-NOW. The new UART mode starts off when upgrading old
 MQTT preferences and retains explicit settings across reboots.
+
+---
+
+#### RS232 heartbeat and automatic standby
+
+Available on repeater builds with an RS232 bridge. This is a UART-local control
+exchange, not an advert or a LoRa packet. Room builds without RS232 are unaffected.
+
+**Usage:**
+
+- `get rs232.status`
+- `get rs232.heartbeat`
+- `set rs232.heartbeat on|off`
+- `get rs232.autosleep`
+- `set rs232.autosleep on|off|force`
+- `get rs232.idle`
+- `set rs232.idle <seconds>` (60 through 3600; default 300)
+
+Heartbeat and negotiated automatic standby are **on by default**, including
+upgrades. An active UART pings every 30 seconds (52 bytes per ping).
+Stock bridges ignore that traffic and still receive the original data frames;
+they are not automatically put to sleep: standby is armed only after a fresh
+heartbeat reply proves support. Fresh, session/challenge-matched replies
+prove a bidirectional peer;
+ordinary valid incoming data can keep a legacy link awake but cannot prove
+heartbeat support. The status separates saved intent, actual UART state,
+standby/probe phase, and confirmed versus legacy/unknown peer liveness.
+
+Enable on both updated peers:
+
+```text
+set rs232.enabled on
+set rs232.heartbeat on
+set powersaving on
+set rs232.idle 300
+set rs232.autosleep on
+get rs232.status
+```
+
+With heartbeat, autosleep, and global powersaving all on and the peer's heartbeat
+support confirmed, when no peer responds for the idle interval the UART is soft-stopped while
+`rs232.enabled` stays `on`. It wakes after 30 seconds for a 2-second probe;
+every eighth probe listens for 40 seconds. That longer window spans the other
+side's sleep interval, so two sleeping updated peers can reconnect without
+manual intervention (normally within about five minutes with working wiring
+and timely loop servicing). Healthy peers remain running; this is dead-link
+power saving, not an idle-data duty cycle.
+
+Stock receivers ignore these control frames; they are deliberately invalid
+zero-length stock frames with an ASCII-only remainder. They do not allocate a
+mesh packet or enter LoRa forwarding. Stock peers do **not** answer heartbeats,
+so default negotiated standby never arms on a stock-only link. Valid legacy
+data after heartbeat replies cease also disarms negotiated standby, allowing
+a replacement stock peer to stay awake. Use `set rs232.autosleep force` only
+to sleep an absent/unconfirmed UART peer; this explicitly bypasses stock
+protection and can miss one-off stock packets.
+If a previously confirmed updated peer is silently replaced with stock while
+the local UART is already sleeping, its first packet can be missed before
+replacement is detected. Set autosleep off before that change, or restart the
+local bridge to clear the old negotiated session.
+While the UART is stopped it cannot receive a wake byte; mesh traffic
+during standby is not queued for later UART delivery. Turning autosleep or
+global powersaving off resumes the saved-enabled UART; `rs232.enabled off`
+remains an explicit off and never automatically wakes.
+`rs232.heartbeat off` stops initiating heartbeats and prevents standby. An
+updated active peer can still answer a valid incoming ping in passive mode.
 
 ---
 
