@@ -2,6 +2,7 @@
 from itertools import product
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -200,7 +201,17 @@ class CompanionIdentityCliTests(unittest.TestCase):
                          r'static_cast<size_t>\(1 \+ rlen\)')
         self.assertNotIn('_serial->writeFrame(out_frame, 1 + rlen);', framed)
         local = method(source, 'bool MyMesh::handleLocalControlCommand(')
-        branch = local[:local.index('  if (handleTxRoutingCommand(')]
+        identity_branch = '  if (strcmp(command, "get public.key") == 0)'
+        start = local.index(identity_branch)
+        branch = method(local, identity_branch)
+        # Other commands before this branch may legitimately have board gates
+        # and setters. Check only this read-only branch, while also rejecting
+        # a feature gate which wraps it from outside its own braces.
+        guard_depth = 0
+        for directive in re.findall(
+                r'^\s*#\s*(if|ifdef|ifndef|endif)\b', local[:start], re.MULTILINE):
+            guard_depth += -1 if directive == 'endif' else 1
+        self.assertEqual(guard_depth, 0, 'Public-key query has an enclosing feature gate')
         self.assertIn('strcmp(command, "get public.key") == 0', branch)
         self.assertNotIn('#if', branch)  # Not gated by private export or logging.
         self.assertNotIn('prv_key', branch)
