@@ -318,6 +318,16 @@ static bool serialGPSFlag = false;
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>
 static SFE_UBLOX_GNSS ublox_GNSS;
 
+static bool configureRakUbloxReceiver() {
+  // Retain the receiver's supported constellation defaults/BBR selection.
+  // ZOE-M8Q cannot run GPS/Galileo/GLONASS/BeiDou all at once, and blindly
+  // enabling every constellation ignores CFG-GNSS constraints/errata. Only
+  // require the transport and cadence we actually consume after a cold wake.
+  // Do not repeatedly write receiver nonvolatile storage on wake.
+  return ublox_GNSS.setI2COutput(COM_TYPE_UBX)
+      && ublox_GNSS.setMeasurementRate(1000);
+}
+
 #ifndef RAK_UART_GPS_PROBE_TIMEOUT_MS
 #define RAK_UART_GPS_PROBE_TIMEOUT_MS 1200UL
 #endif
@@ -334,13 +344,21 @@ static void setRakGpsControl(uint8_t pin, bool shared_power_rail,
                              bool enabled) {
   pinMode(pin, OUTPUT);
   if (shared_power_rail) {
-    // WB_IO2 controls every 3V3_S peripheral, not just the GPS. It must never
-    // be dropped as a GPS power-saving operation.
+    // Discovery cannot drop this shared rail. The manager's frozen ownership
+    // policy, not a provider's enable pin, handles later GPS-only shutdown.
     digitalWrite(pin, HIGH);
     return;
   }
   const uint8_t active = rakGpsControlActiveLevel();
   digitalWrite(pin, enabled ? active : static_cast<uint8_t>(!active));
+}
+
+static void stopRakGpsUart() {
+  Serial1.end();
+  // UARTE teardown disconnects PSEL but does not restore GPIO configuration.
+  // Remove output drive and pulls so serial pads cannot back-power an off GPS.
+  pinMode(PIN_GPS_TX, INPUT);
+  pinMode(PIN_GPS_RX, INPUT);
 }
 
 static bool serialHasValidGpsSentence(Stream& serial, uint32_t timeout_ms) {
@@ -956,6 +974,10 @@ static const size_t SENSOR_TABLE_SIZE = (sizeof(SENSOR_TABLE) / sizeof(SENSOR_TA
 
 bool EnvironmentSensorManager::begin() {
   _active_sensor_count = 0;
+#if defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG)
+  _wisblock_power.setDiscoveryActive(true);
+  applyWisBlockRailPower();
+#endif
 
   #if ENV_INCLUDE_GPS
   #ifdef RAK_WISBLOCK_GPS
@@ -973,7 +995,7 @@ bool EnvironmentSensorManager::begin() {
     #ifdef NRF52_PLATFORM
   if (!isValidNrfI2cPinPair(ENV_PIN_SDA, ENV_PIN_SCL)) {
     MESH_DEBUG_PRINTLN("Second I2C skipped: invalid SDA/SCL pin pair");
-    return true;
+    return finishSensorDiscovery();
   }
   Wire1.setPins(static_cast<uint8_t>(ENV_PIN_SDA),
                 static_cast<uint8_t>(ENV_PIN_SCL));
@@ -987,13 +1009,13 @@ bool EnvironmentSensorManager::begin() {
 
   // Avoid touching a shared I2C bus when no environmental drivers were built.
   if (SENSOR_TABLE_SIZE == 0) {
-    return true;
+    return finishSensorDiscovery();
   }
 
   if (!ensureI2cBusReleased(TELEM_WIRE)) {
     MESH_DEBUG_PRINTLN(
         "I2C discovery skipped: bus pins unavailable or SDA/SCL remained low");
-    return true;
+    return finishSensorDiscovery();
   }
 
   // Probe only unique addresses compiled into this image before invoking any
@@ -1054,7 +1076,7 @@ bool EnvironmentSensorManager::begin() {
     }
   }
 
-  return true;
+  return finishSensorDiscovery();
 }
 
 // ============================================================
@@ -1069,6 +1091,10 @@ bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, Cayen
   #if ENV_INCLUDE_GPS
   queryGpsTelemetry(requester_permissions, telemetry);
   #endif
+
+#if defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG)
+  if (!_wisblock_power.railEnabled()) return true;
+#endif
 
   if (requester_permissions & TELEM_PERM_ENVIRONMENT) {
     for (int i = 0; i < _active_sensor_count; i++) {
@@ -1095,6 +1121,9 @@ uint8_t EnvironmentSensorManager::getVoltageSensorChannels(
 
 uint8_t EnvironmentSensorManager::queryVoltageSensors(
     VoltageSensorReading readings[], uint8_t capacity) {
+#if defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG)
+  if (!_wisblock_power.railEnabled()) return 0;
+#endif
   uint8_t count = 0;
   for (int i = 0; i < _active_sensor_count && count < capacity; i++) {
     const ActiveSensor& sensor = _active_sensors[i];
@@ -1149,17 +1178,6 @@ bool EnvironmentSensorManager::setSettingValue(const char* name, const char* val
     gps_discovery_preference_known = true;
 #endif
     bool enabled = strcmp(value, "0") != 0;
-#if defined(RAK_WISBLOCK_GPS) && defined(FORCE_GPS_ALIVE)
-    // A UART L76K cannot remove power from the shared 3V3_S rail. "Off" stops
-    // parsing and releases the MCU UART, but the still-powered receiver keeps
-    // driving its TX pin. It therefore does not make that pin safe for an
-    // external UART bridge.
-    if (serialGPSFlag) {
-      _location->setGPSPowerSaving(false);
-      setGpsTelemetryUserEnabled(enabled);
-      return true;
-    }
-#endif
     bool was_active = gps_active;
     _location->setGPSPowerSaving(enabled && powersaving_enabled);
     setGpsTelemetryUserEnabled(enabled);
@@ -1183,17 +1201,6 @@ void EnvironmentSensorManager::setPowerSavingEnabled(bool enabled) {
     return;
   }
   bool gps_user_enabled = isGpsTelemetryUserEnabled();
-#if defined(RAK_WISBLOCK_GPS) && defined(FORCE_GPS_ALIVE)
-  if (serialGPSFlag) {
-    _location->setGPSPowerSaving(false);
-    if (gps_user_enabled) {
-      if (!gps_active) start_gps();
-    } else if (gps_active) {
-      stop_gps();
-    }
-    return;
-  }
-#endif
   _location->setGPSPowerSaving(enabled && gps_user_enabled);
   if (!gps_user_enabled) return;
 
@@ -1327,6 +1334,67 @@ void EnvironmentSensorManager::initBasicGPS() {
 #endif
 }
 
+bool EnvironmentSensorManager::supportsSharedPeripheralMode() const {
+#if defined(RAK_4631) && !defined(RAK_WISMESH_TAG)
+  return true;
+#else
+  return false;
+#endif
+}
+
+#if defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG)
+void EnvironmentSensorManager::applyWisBlockRailPower() {
+  pinMode(WB_IO2, OUTPUT);
+  digitalWrite(WB_IO2, _wisblock_power.railEnabled() ? HIGH : LOW);
+}
+
+uint8_t EnvironmentSensorManager::detectWisBlockStorageHolds() {
+  uint8_t holds = 0;
+#if defined(OTA_RAK_AUTO_STORE)
+  uint32_t rak_id = 0, w25_id = 0;
+  const uint8_t selected = mesh::ota::OtaStoreQspiNrf52::autoDetect();
+  mesh::ota::OtaStoreQspiNrf52::autoProbeIds(rak_id, w25_id);
+  // Unsupported but responding NOR parts must not lose their supply either.
+  // All-zero/all-one reads are the probe's absent-chip values.
+  if (selected != 0 || (rak_id != 0 && rak_id != 0xFFFFFFUL)
+      || (w25_id != 0 && w25_id != 0xFFFFFFUL)) {
+    holds |= mesh::gps::ExternalStorage;
+  }
+#elif defined(OTA_QSPI_SHARED_WISBLOCK_SPI) || defined(OTA_SD_STORE)
+  holds |= mesh::gps::ExternalStorage;
+#endif
+  return holds;
+}
+#endif
+
+void EnvironmentSensorManager::configureSharedPeripheralMode(bool shared) {
+#if defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG)
+  // Called once after boot discovery and validated preference loading. Live
+  // setters only save the next-boot choice; they never revoke active owners.
+  if (!_wisblock_power.configure(shared ? mesh::gps::WisBlockPeripheralMode::Shared
+                                      : mesh::gps::WisBlockPeripheralMode::GpsOnly,
+                                 detectWisBlockStorageHolds())) return;
+  _wisblock_power.setGpsActive(gps_active);
+  // Companion loads preferences before sensor discovery, whereas repeaters
+  // load them afterwards. Only finishSensorDiscovery releases that interlock.
+  applyWisBlockRailPower();
+#else
+  (void)shared;
+#endif
+}
+
+bool EnvironmentSensorManager::isGpsPowered() const {
+#ifdef RAK_WISBLOCK_GPS
+#if defined(PIN_GPS_EN) && PIN_GPS_EN >= 0
+  return digitalRead(PIN_GPS_EN) == rakGpsControlActiveLevel();
+#else
+  return digitalRead(WB_IO2) == HIGH;
+#endif
+#else
+  return SensorManager::isGpsPowered();
+#endif
+}
+
 // gps code for rak might be moved to MicroNMEALoactionProvider
 // or make a new location provider ...
 #ifdef RAK_WISBLOCK_GPS
@@ -1382,27 +1450,21 @@ void EnvironmentSensorManager::rakGPSInit() {
 #endif
 
   if (gpsIsAwake(gps_control_pin, shared_power_rail)) {
-    _location->setPinEn(gps_control_pin);
+    // WB_IO2 is not an independently owned GPS pin. A provider must never
+    // lower it during reset/begin/stop behind the shared-power policy's back.
+    _location->setPinEn(shared_power_rail ? -1 : gps_control_pin);
+    if (i2cGPSFlag) stopRakGpsUart();
   } else {
     MESH_DEBUG_PRINTLN("No GPS found");
     gps_active = false;
     gps_detected = false;
-    Serial1.end();
+    stopRakGpsUart();
     return;
   }
 
-#ifdef FORCE_GPS_ALIVE
-  if (i2cGPSFlag) {
-    // The u-blox receiver can sleep while the shared rail remains available.
-    stop_gps();
-  } else if (serialGPSFlag) {
-    // The UART L76K cannot be isolated from the RAK3401 radio power rail.
-    setGpsTelemetryUserEnabled(true);
-  }
-#else
-  // Now that GPS is found and set up, set it to sleep for the initial state.
-  stop_gps();
-#endif
+  // Keep discovery power available for the remaining slot probes. Loading the
+  // saved mode and GPS preference later performs the initial stop, without
+  // ever manufacturing a GPS-on preference from a successful UART probe.
 }
 
 bool EnvironmentSensorManager::gpsIsAwake(uint8_t ioPin,
@@ -1467,17 +1529,9 @@ bool EnvironmentSensorManager::gpsIsAwake(uint8_t ioPin,
   // After two successful non-INA manufacturer reads, use the u-blox-specific
   // probe. No software can make two physical devices at one address safe.
   if (probe_i2c_gps
-      && ublox_GNSS.begin(Wire, gps_i2c_address) == true) {
+      && ublox_GNSS.begin(Wire, gps_i2c_address) == true
+      && configureRakUbloxReceiver()) {
     MESH_DEBUG_PRINTLN("RAK12500 GPS init correctly with pin %i", ioPin);
-    ublox_GNSS.setI2COutput(COM_TYPE_UBX);
-    ublox_GNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
-    ublox_GNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_GALILEO);
-    ublox_GNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_GLONASS);
-    ublox_GNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_SBAS);
-    ublox_GNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_BEIDOU);
-    ublox_GNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_IMES);
-    ublox_GNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_QZSS);
-    ublox_GNSS.setMeasurementRate(1000);
     ublox_GNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT);
     gpsResetPin = ioPin;
     i2cGPSFlag = true;
@@ -1506,6 +1560,40 @@ void EnvironmentSensorManager::armGpsPowerSavingCycle() {
 
 void EnvironmentSensorManager::start_gps() {
   if (gps_active || gps_serial_transport_blocked) return;
+#ifdef RAK_WISBLOCK_GPS
+  const bool was_powered = isGpsPowered();
+  _wisblock_power.setGpsActive(true);
+  applyWisBlockRailPower();
+#if defined(PIN_GPS_EN) && PIN_GPS_EN >= 0
+  setRakGpsControl(PIN_GPS_EN, false, true);
+#endif
+  // Supply first, UART second. A cold receiver must settle before its bus or
+  // serial transport is used, including a wake after full GPS-only shutdown.
+  if (!was_powered) delay(500);
+  if (i2cGPSFlag) {
+    if (!was_powered) {
+      if (!ensureI2cBusReleased(&Wire)
+          || !ublox_GNSS.begin(Wire, TELEM_RAK12500_ADDRESS)
+          || !configureRakUbloxReceiver()) {
+        // Do not spin on a failed cold wake on every mesh loop. Keep saved
+        // intent, fail this receiver closed, and allow rediscovery on reboot.
+        gps_detected = false;
+        _wisblock_power.setGpsActive(false);
+        applyWisBlockRailPower();
+#if defined(PIN_GPS_EN) && PIN_GPS_EN >= 0
+        setRakGpsControl(PIN_GPS_EN, false, false);
+#endif
+        _location->stopTimeSync();
+        MESH_DEBUG_PRINTLN("RAK12500 cold wake failed; GPS rediscovery needs reboot");
+        return;
+      }
+    } else {
+      // Shared mode retains the historical u-blox internal PSM. This is not
+      // a promise of full rail shutdown, nor does it silence a UART receiver.
+      ublox_GNSS.powerSaveMode(false);
+    }
+  }
+#endif
   if (gps_serial_transport) {
     Serial1.setPins(PIN_GPS_TX, PIN_GPS_RX);
 #ifdef GPS_BAUD_RATE
@@ -1516,13 +1604,7 @@ void EnvironmentSensorManager::start_gps() {
   }
   gps_active = true;
 #ifdef RAK_WISBLOCK_GPS
-#ifdef FORCE_GPS_ALIVE
-  // The UART L76K has no power-save command. Keep the shared rail enabled;
-  // an I2C u-blox receiver can also be explicitly returned to full power.
-  if (i2cGPSFlag) ublox_GNSS.powerSaveMode(false);
-#else
-  setRakGpsControl(gpsResetPin, false, true);
-#endif
+  _location->clearPositionFix();
 #else
   _location->begin();
   _location->reset();
@@ -1546,18 +1628,17 @@ void EnvironmentSensorManager::stop_gps() {
   }
 
 #ifdef RAK_WISBLOCK_GPS
-#ifdef FORCE_GPS_ALIVE
-  // Keep the shared rail alive for the RAK3401 radio FEM. The I2C u-blox can
-  // still enter its internal power-save mode. Ending Serial1 stops the MCU
-  // parser, but a UART L76K remains powered and continues driving its TX pin.
-  if (i2cGPSFlag) {
-    ublox_GNSS.powerSaveMode(true);
-  } else if (serialGPSFlag) {
-    Serial1.end();
-  }
+  // End the MCU UART before removing receiver power, never the reverse.
+  if (serialGPSFlag) stopRakGpsUart();
+  _wisblock_power.setGpsActive(false);
+#if defined(PIN_GPS_EN) && PIN_GPS_EN >= 0
+  setRakGpsControl(PIN_GPS_EN, false, false);
 #else
-  setRakGpsControl(gpsResetPin, false, false);
+  if (i2cGPSFlag && _wisblock_power.railEnabled()) {
+    ublox_GNSS.powerSaveMode(true);
+  }
 #endif
+  applyWisBlockRailPower();
 #else
   _location->stop();
 #endif
@@ -1603,11 +1684,10 @@ bool EnvironmentSensorManager::gpsSerialTransportMayConflict(
 bool EnvironmentSensorManager::gpsSerialTransportCanYield(uint8_t uart) const {
 #if ENV_INCLUDE_GPS
   if (!gpsUsesSerialUart(uart)) return false;
-#if defined(RAK_WISBLOCK_GPS) && defined(FORCE_GPS_ALIVE)
-  // RAK12501 exposes no independently controlled standby/power pin. WB_IO2 is
-  // the shared 3V3_S rail and must remain high, so its L76K keeps transmitting
-  // NMEA after Serial1.end(). Two TX drivers on UART1 would electrically
-  // contend; require UART2 or physical removal/isolation of this GPS instead.
+#if defined(RAK_WISBLOCK_GPS) && !(defined(PIN_GPS_EN) && PIN_GPS_EN >= 0)
+  // WB_IO2 is not independent isolation even in GPS-only mode: a bridge or
+  // future GPS request can repower the same rail. Reserve UART1 to avoid two
+  // TX drivers; use UART2 or a physically independent GPS enable instead.
   return false;
 #elif defined(RAK_WISBLOCK_GPS)
   // This profile is allowed to remove power with its validated GPS control.
@@ -1637,7 +1717,9 @@ bool EnvironmentSensorManager::setGpsSerialTransportBlocked(uint8_t uart,
     if (gps_discovery_pending) _location->stop();
 #endif
     if (gps_active) stop_gps();
+#ifndef RAK_WISBLOCK_GPS
     Serial1.end();
+#endif
   } else {
     gps_serial_transport_blocked = false;
 #if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && !defined(RAK_WISBLOCK_GPS)
@@ -1722,6 +1804,9 @@ void EnvironmentSensorManager::loop() {
   }
   #endif
   #if ENV_INCLUDE_BME680_BSEC
+#if defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG)
+  if (!_wisblock_power.railEnabled()) return;
+#endif
   if (bsec_active && bsec_iaq.run()) {
     uint8_t prev_accuracy = bsec_accuracy;
     bsec_temperature  = bsec_iaq.temperature;

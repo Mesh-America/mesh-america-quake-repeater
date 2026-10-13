@@ -459,6 +459,8 @@ jobs:
           python3 -B test/test_esp32_gps_discovery.py -v
           python3 -B test/test_gps_sync_interval.py -v
           python3 -B test/test_gps_sync_preferences.py -v
+          python3 -B test/test_rak_gps_power.py -v
+          python3 -B test/test_peripheral_mode_prefs.py -v
           python3 -B test/test_t1000e_sensor_power.py -v
           python3 -B test/test_sensor_battery_alerts.py -v
           python3 -B test/test_sensor_subscriptions.py -v

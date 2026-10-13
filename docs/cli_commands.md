@@ -4715,12 +4715,51 @@ clear recent.repeater
 
 **Note:** These command names are shared with GPS-capable Companion builds.
 Companion reports `on` or `off`; infrastructure includes receiver details:
-- `off` when the GPS hardware is disabled
-- `on, {active|deactivated}, {fix|no fix}, {sat count} sats` when the GPS hardware is enabled
+- `off, {powered|unpowered}` when GPS is manually disabled
+- `on, {powered|unpowered}, {fix|no fix}, {sat count} sats` when GPS is enabled
+
+`powered` describes the supply, not proof that the receiver is tracking or
+asleep. Shared-power hardware can remain powered while GPS processing is off.
 
 On repeaters, `gps off` cancels any acquisition already in progress. A later
 authorized location-telemetry request may wake the receiver, but only until its
-first valid fix is cached; the receiver then powers down again.
+first valid fix is cached; GPS processing then stops again. Whether its supply
+can also turn off depends on the board's power policy below.
+
+---
+
+#### RAK4631 shared peripheral power
+
+**Usage:**
+
+```text
+get peripherals.mode
+set peripherals.mode gps-only
+set peripherals.mode shared
+reboot
+```
+
+**Default:** `gps-only` on RAK4631. The saved mode takes effect only after
+reboot; setting it does not switch power immediately. `get peripherals.mode`
+reports the saved choice, which may differ from the current boot's mode.
+
+- `gps-only`: when no protected power owner exists, GPS-off and GPS sleep can
+  turn off the shared WisBlock `3V3_S` supply. Select this only when other
+  attached peripherals do not need that supply.
+- `shared`: keeps `3V3_S` powered for other peripherals. Save this mode and
+  reboot when using other WisBlock modules; firmware does not infer this choice
+  from an I2C scan.
+
+Ethernet/PoE builds and detected external NOR storage automatically keep the
+rail on, even in `gps-only` mode or when the network service is disabled.
+RAK3401 permanently protects the same rail because its radio frontend needs
+it; `peripherals.mode` is a RAK4631 setting, not an override of that protection.
+
+On a powered shared rail, RAK12501/L76K cannot be independently switched off:
+GPS-off stops MCU parsing, not physical GNSS operation. Other receivers may use
+internal power-saving commands, but `shared` does not promise physical sleep.
+UART1 bridge ownership remains protected; changing this mode does not grant
+permission to connect two transmitters to the GPS UART.
 
 ---
 

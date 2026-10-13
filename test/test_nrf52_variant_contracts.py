@@ -259,18 +259,35 @@ class Nrf52VariantContractsTest(unittest.TestCase):
         self.assertIn("strap INA3221 A0 to SCL for 0x43", recipe)
         self.assertIn("-DTELEM_INA3221_ADDRESS=0x43", recipe)
 
-    def test_rak4631_shared_sensor_rail_stays_enabled(self) -> None:
+    def test_rak4631_shared_sensor_rail_is_owned_by_boot_policy(self) -> None:
         recipe = (ROOT / "variants/rak4631/platformio.ini").read_text()
+        rak3401_recipe = (ROOT / "variants/rak3401/platformio.ini").read_text()
         board = (ROOT / "variants/rak4631/RAK4631Board.cpp").read_text()
-        sensors = (
-            ROOT / "src/helpers/sensors/EnvironmentSensorManager.cpp"
+        sensor_header = (
+            ROOT / "src/helpers/sensors/EnvironmentSensorManager.h"
         ).read_text()
+        policy = (
+            ROOT / "src/helpers/sensors/WisBlockSharedPowerPolicy.h"
+        ).read_text()
+        prefs = (ROOT / "src/helpers/PeripheralModePrefs.h").read_text()
 
-        self.assertRegex(recipe, r"-D\s+FORCE_GPS_ALIVE\b")
+        for current_recipe in (recipe, rak3401_recipe):
+            self.assertNotRegex(current_recipe, r"-D\s+FORCE_GPS_ALIVE\b")
+        self.assertIn("peripherals.mode defaults to gps-only", recipe)
         self.assertIn("pinMode(WB_IO2, OUTPUT)", board)
         self.assertIn("digitalWrite(WB_IO2, HIGH)", board)
-        self.assertIn("setRakGpsControl(ioPin, shared_power_rail, true)", sensors)
-        self.assertIn("setRakGpsControl(ioPin, shared_power_rail, false)", sensors)
+        self.assertIn("WisBlockSharedPowerPolicy _wisblock_power", sensor_header)
+        self.assertIn("_state(DiscoveryActive)", policy)
+        self.assertIn("GpsOnly = 0", policy)
+        self.assertIn("Shared = 1", policy)
+        self.assertIn("#if defined(RAK_3401)", policy)
+        self.assertIn("| RadioPower", policy)
+        self.assertIn("defined(ETHERNET_ENABLED)", policy)
+        self.assertIn("| EthernetPower", policy)
+        self.assertIn("ExternalStorage =", policy)
+        self.assertIn("get peripherals.mode", prefs)
+        self.assertIn("set peripherals.mode", prefs)
+        self.assertIn("saved; reboot to apply", prefs)
 
     def test_rak4631_ethernet_does_not_suppress_shared_rail_gps(self) -> None:
         recipe = (ROOT / "variants/rak4631/platformio.ini").read_text()
@@ -362,17 +379,17 @@ class Nrf52VariantContractsTest(unittest.TestCase):
         self.assertIn(
             "return uart == 1 && gps_detected && gps_serial_transport", sensors
         )
-        self.assertIn(
-            "#if defined(RAK_WISBLOCK_GPS) && defined(FORCE_GPS_ALIVE)",
-            can_yield,
+        shared_rail_guard = (
+            "#if defined(RAK_WISBLOCK_GPS) "
+            "&& !(defined(PIN_GPS_EN) && PIN_GPS_EN >= 0)"
         )
-        forced_rak = can_yield[
-            can_yield.index(
-                "#if defined(RAK_WISBLOCK_GPS) && defined(FORCE_GPS_ALIVE)"
-            ):
-            can_yield.index("#elif defined(RAK_WISBLOCK_GPS)")
+        self.assertIn(shared_rail_guard, can_yield)
+        shared_rak = can_yield[
+            can_yield.index(shared_rail_guard):
+            can_yield.index("#endif", can_yield.index(shared_rail_guard))
         ]
-        self.assertIn("return false;", forced_rak)
+        self.assertIn("return false;", shared_rak)
+        self.assertNotIn("FORCE_GPS_ALIVE", can_yield)
         refusal = block.index(
             "if (blocked && !gpsSerialTransportCanYield(uart)) return false;"
         )

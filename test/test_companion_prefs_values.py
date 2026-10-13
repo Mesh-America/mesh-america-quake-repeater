@@ -185,11 +185,12 @@ class CompanionPrefsValuesTests(unittest.TestCase):
             r'^\s*(?:float|char|u?int(?:8|16|32)_t)\s+([A-Za-z_][A-Za-z_0-9]*)',
             prefix, re.M)
         self.assertEqual(declarations[0], 'airtime_factor')
-        self.assertEqual(declarations[-1], 'lost_reply')
+        self.assertEqual(declarations[-2:], ['lost_reply', 'peripherals_shared'])
         optional = {
             'fan_mode': 'TBEAM_1W', 'fan_lo': 'TBEAM_1W', 'fan_hi': 'TBEAM_1W',
             'wifi_ssid': 'defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)',
             'wifi_pwd': 'defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)',
+            'peripherals_shared': 'RAK_4631',
         }
 
         def fields(template):

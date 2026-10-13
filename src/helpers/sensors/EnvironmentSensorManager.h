@@ -3,6 +3,9 @@
 #include <Mesh.h>
 #include <helpers/SensorManager.h>
 #include <helpers/sensors/LocationProvider.h>
+#if defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG)
+#include "WisBlockSharedPowerPolicy.h"
+#endif
 
 class EnvironmentSensorManager : public SensorManager {
 protected:
@@ -24,6 +27,28 @@ protected:
   bool     gps_active = false;
   bool     gps_serial_transport = false;
   bool     gps_serial_transport_blocked = false;
+#if defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG)
+  mesh::gps::WisBlockSharedPowerPolicy _wisblock_power;
+  bool _wisblock_discovery_completed = false;
+  void applyWisBlockRailPower();
+  uint8_t detectWisBlockStorageHolds();
+#endif
+  bool finishSensorDiscovery() {
+#if defined(RAK_BOARD) && !defined(RAK_WISMESH_TAG)
+#if ENV_INCLUDE_GPS
+    // A repeated probe must not override the loaded manual preference or an
+    // established telemetry demand. Initial boot waits for preference load.
+    if (_wisblock_discovery_completed && _wisblock_power.isConfigured() && gps_active
+        && !isGpsTelemetryUserEnabled()
+        && !gpsTelemetryReceiverRequired(millis())) stop_gps();
+#endif
+    _wisblock_power.setGpsActive(gps_active);
+    _wisblock_discovery_completed = true;
+    _wisblock_power.setDiscoveryActive(false);
+    applyWisBlockRailPower();
+#endif
+    return true;
+  }
 
   #if ENV_INCLUDE_GPS
   #if (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) \
@@ -75,6 +100,9 @@ public:
   const char* getSettingValue(int i) const override;
   bool setSettingValue(const char* name, const char* value) override;
   void setPowerSavingEnabled(bool enabled) override;
+  bool supportsSharedPeripheralMode() const override;
+  void configureSharedPeripheralMode(bool shared) override;
+  bool isGpsPowered() const override;
   bool gpsUsesSerialUart(uint8_t uart) const override;
   bool gpsSerialTransportMayConflict(uint8_t uart) const override;
   bool gpsSerialTransportCanYield(uint8_t uart) const override;

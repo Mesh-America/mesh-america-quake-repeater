@@ -162,6 +162,13 @@ public:
     return false;
   }
   virtual LocationProvider* getLocationProvider() { return NULL; }
+  // WisBlock slot power is a boot-time choice, separate from logical GPS on/off.
+  virtual bool supportsSharedPeripheralMode() const { return false; }
+  virtual void configureSharedPeripheralMode(bool shared) { (void)shared; }
+  virtual bool isGpsPowered() const {
+    LocationProvider* location = const_cast<SensorManager*>(this)->getLocationProvider();
+    return location != NULL && location->isEnabled();
+  }
   virtual void setPowerSavingEnabled(bool enabled) { powersaving_enabled = enabled; }
   // Runtime bridges may temporarily own the UART used by a GPS receiver. A
   // sensor manager that actually detected a GPS on that UART overrides these

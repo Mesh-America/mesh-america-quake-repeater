@@ -399,7 +399,8 @@ class CooperativeGpsDiscoveryTests(unittest.TestCase):
                 with self.subTest(defines=defines):
                     result = subprocess.run([self.compiler, "-E", "-P", "-x", "c++",
                         "-DENV_INCLUDE_GPS=1", *["-D" + value for value in defines],
-                        "-I" + str(work), str(cpp)], text=True, capture_output=True, timeout=10)
+                        "-I" + str(work), "-I" + str(ROOT / "src/helpers/sensors"),
+                        str(cpp)], text=True, capture_output=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual("gps_discovery_pending" in result.stdout, expected)
 

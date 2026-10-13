@@ -4,6 +4,9 @@
 #include <new>
 #include "DataStore.h"
 #include "PrefsStorageLayout.h"
+#if defined(RAK_4631)
+#include <helpers/PeripheralModePrefs.h>
+#endif
 #include <helpers/FileRead.h>
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/LazyPersistence.h>
@@ -1104,6 +1107,9 @@ bool DataStore::loadPrefsInt(const char *filename,
     loaded_prefs.usb_debug_enabled = 0;
     // Old images cannot opt in using an unrelated runtime preference value.
     loaded_prefs.lost_reply = 0;
+#if defined(RAK_4631)
+    loaded_prefs.peripherals_shared = 0;
+#endif
     double loaded_lat = node_lat;
     double loaded_lon = node_lon;
     // The original image ended after ble_pin at byte 84. Later releases only
@@ -1197,6 +1203,11 @@ bool DataStore::loadPrefsInt(const char *filename,
         break;
       }
     }
+#if defined(RAK_4631)
+    // Only the RAK4631 publishes this footer. Other targets retain their
+    // exact existing image sizes, including the compact STM32 wire table.
+    known_size = known_size || prefs_size == 236 + mesh::peripherals::FooterSize;
+#endif
     if (prefs_size < MIN_PREFS_SIZE || !known_size) {
       file.close();
       return false;
@@ -1348,6 +1359,14 @@ bool DataStore::loadPrefsInt(const char *filename,
     readOptionalField(&loaded_prefs.usb_debug_enabled,
                       sizeof(loaded_prefs.usb_debug_enabled));
     readOptionalField(&loaded_prefs.lost_reply, sizeof(loaded_prefs.lost_reply));
+#if defined(RAK_4631)
+    if (file.available() != 0) {
+      uint8_t peripheral_footer[mesh::peripherals::FooterSize] = {};
+      success = success && readField(peripheral_footer, sizeof(peripheral_footer))
+          && mesh::peripherals::decodeFooter(peripheral_footer,
+              sizeof(peripheral_footer), loaded_prefs.peripherals_shared);
+    }
+#endif
 #endif
 
     // Any bytes left over form only part of a historically appended field.
@@ -1543,6 +1562,11 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
     memcpy(tail + 6, &_prefs.gps_sync_interval_hours,
         sizeof(_prefs.gps_sync_interval_hours));
     success = success && writeField(tail, sizeof(tail));
+#if defined(RAK_4631)
+    uint8_t peripheral_footer[mesh::peripherals::FooterSize];
+    mesh::peripherals::encodeFooter(peripheral_footer, _prefs.peripherals_shared);
+    success = success && writeField(peripheral_footer, sizeof(peripheral_footer));
+#endif
 
 #if defined(STM32_PLATFORM)
     success = success && image_length == sizeof(image)

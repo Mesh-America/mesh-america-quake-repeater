@@ -278,6 +278,10 @@ public:
   uint8_t flood_retry_group_max_path = 0; // PAYLOAD_TYPE_GRP_DATA retry path gate; 0xFF = use only the general gate
   uint8_t rx_watchdog_enabled = mesh::RepeaterRadioTiming::DEFAULT_RX_WATCHDOG_ENABLED;
   uint8_t system_watchdog_enabled = 0; // nRF52 main-loop hardware watchdog (boolean; default on)
+#if defined(RAK_4631)
+  // Checked append-only file footer; never shifts existing preference offsets.
+  uint8_t peripherals_shared = 0; // 0=GPS-only, 1=shared; applied only at boot
+#endif
 
 private:
   class RadioPrefs : public CommonRadioPrefs {

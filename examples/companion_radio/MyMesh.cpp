@@ -2,6 +2,9 @@
 #include <helpers/BatteryChargeCLI.h>
 #include <helpers/MorseCLI.h>
 #include <helpers/MorseLoopPolicy.h>
+#if defined(RAK_4631)
+#include <helpers/PeripheralModePrefs.h>
+#endif
 #include <helpers/ui/StartupScreen.h>
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
@@ -2758,6 +2761,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.gps_enabled = 0;       // GPS disabled by default
   _prefs.gps_interval = 0;      // Use the default 1-second fix-processing interval
   _prefs.gps_sync_interval_hours = 0; // Retain the board's default time-sync cadence
+#if defined(RAK_4631)
+  _prefs.peripherals_shared = 0; // A genuinely fresh missing image is GPS-only.
+#endif
   _prefs.autoadd_config = DEFAULT_AUTOADD_CONFIG;
   _prefs.path_hash_mode = DEFAULT_PATH_HASH_MODE;
 #ifdef RADIO_FEM_TXGAIN
@@ -2934,6 +2940,12 @@ void MyMesh::begin(bool has_display, bool radio_available,
   // load persisted prefs
   const bool prefs_ready =
       _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
+#if defined(RAK_4631)
+  // Only a verified image (or a fresh missing file) may permit GPS-only power.
+  // A failed load never replaces a stored shared policy with an unsafe cut.
+  if (!prefs_ready) _prefs.peripherals_shared = 1;
+  sensors.configureSharedPeripheralMode(_prefs.peripherals_shared != 0);
+#endif
 
 #if defined(NRF52_PLATFORM)
   // A volatile primary filesystem is the final recovery mode after the
@@ -3654,6 +3666,19 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
                                        size_t reply_size) {
   if (!command || !reply || reply_size == 0) return false;
   while (*command == ' ') command++;
+#if defined(RAK_4631)
+  // This helper is also reached only after normal remote-admin admission.
+  if (mesh::peripherals::handleCommand(_prefs.peripherals_shared, command,
+          reply, reply_size, sensors.supportsSharedPeripheralMode(),
+          [this]() { return savePrefs(); })) return true;
+#else
+  if (strcmp(command, "get peripherals.mode") == 0
+      || (strncmp(command, "set peripherals.mode", 20) == 0
+          && (command[20] == 0 || command[20] == ' ' || command[20] == '\t'))) {
+    snprintf(reply, reply_size, "Error: unsupported");
+    return true;
+  }
+#endif
 
   if (strcmp(command, "get public.key") == 0) {
     char public_key_hex[PUB_KEY_SIZE * 2 + 1];

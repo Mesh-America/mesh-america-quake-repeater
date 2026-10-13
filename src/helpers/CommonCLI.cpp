@@ -7,6 +7,9 @@
 #include <helpers/BatteryChargeCLI.h>
 #include <helpers/MorseCLI.h>
 #include <helpers/MorseLoopPolicy.h>
+#if defined(RAK_4631)
+#include <helpers/PeripheralModePrefs.h>
+#endif
 #include "CLICommandUtils.h"
 #ifdef WITH_RS232_BRIDGE
 #include "bridges/RS232PowerSettings.h"
@@ -811,6 +814,9 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
 #endif
   _prefs->bridge_format = mesh::bridge::ESPNOW_FORMAT_WRAPPED;
   _prefs->gps_sync_interval_hours = 0;
+#if defined(RAK_4631)
+  _prefs->peripherals_shared = 0;
+#endif
 
 #ifdef WITH_MQTT_BRIDGE
   bool node_prefs_needs_migration = false;
@@ -1017,6 +1023,10 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   if (loaded) syncOtaConfigFromPrefs();   // persisted OTA policy/keys -> OtaContext (else keep safe defaults)
 #endif
   mesh::hilStartupTrace("prefs_apply_begin");
+#if defined(RAK_4631)
+  // Boot-time only. Later CLI saves must not cut a live peripheral/flash rail.
+  _sensors->configureSharedPeripheralMode(_prefs->peripherals_shared != 0);
+#endif
 #if MESH_USB_LOGGING_AVAILABLE
   mesh::setUsbDebugEnabled(_prefs->usb_debug_enabled != 0);
   mesh::setUsbLoggingEnabled(_prefs->usb_logging_enabled != 0);
@@ -1057,6 +1067,10 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
   _prefs->gps_sync_interval_hours = 0;
   _prefs->ota_channel = 0;
   _prefs->rs232_bridge_enabled = 0;
+#if defined(RAK_4631)
+  // Failure to read an existing policy cannot authorize a shared-rail cut.
+  _prefs->peripherals_shared = 1;
+#endif
 #ifdef WITH_RS232_BRIDGE
   _prefs->rs232_heartbeat = 1;
   _prefs->rs232_autosleep = 1;
@@ -1753,6 +1767,10 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
                                  &_prefs->rx_ps_rx_us,
                                  &_prefs->rx_ps_sleep_us); // retune level-based timings to the loaded SF/BW
 
+    // Read the footer independently of optional legacy UART tails/profile.
+#if defined(RAK_4631)
+    _prefs->peripherals_shared = mesh::peripherals::readCommonMode(file);
+#endif
     file.close();
   }
 }
@@ -1917,6 +1935,11 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
                                       prefs->rs232_autosleep,
                                       prefs->rs232_idle_seconds);
   WRITE_COMMON_PREFS_BYTES(power_tail, sizeof(power_tail));
+#endif
+#if defined(RAK_4631)
+  uint8_t peripheral_footer[mesh::peripherals::FooterSize];
+  mesh::peripherals::encodeFooter(peripheral_footer, prefs->peripherals_shared);
+  WRITE_COMMON_PREFS_BYTES(peripheral_footer, sizeof(peripheral_footer));
 #endif
 
 #undef WRITE_COMMON_PREFS_BYTES
@@ -2109,6 +2132,11 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
                                         _prefs->rs232_autosleep,
                                         _prefs->rs232_idle_seconds);
     file.write(power_tail, sizeof(power_tail));
+#endif
+#if defined(RAK_4631)
+    uint8_t peripheral_footer[mesh::peripherals::FooterSize];
+    mesh::peripherals::encodeFooter(peripheral_footer, _prefs->peripherals_shared);
+    file.write(peripheral_footer, sizeof(peripheral_footer));
 #endif
 
     _common_save_succeeded = file.commit();
@@ -3451,7 +3479,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "gps", 3) == 0) {
       LocationProvider * l = _sensors->getLocationProvider();
       if (l != NULL) {
-        bool enabled = l->isEnabled(); // is EN pin on ?
+        bool enabled = _sensors->isGpsPowered(); // physical rail/enable policy
         bool fix = l->isValid();       // has fix ?
         int sats = l->satellitesCount();
         const char* gps_setting = _sensors->getSettingByKey("gps");
@@ -3737,6 +3765,17 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
 
 void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+#if defined(RAK_4631)
+  if (mesh::peripherals::handleCommand(_prefs->peripherals_shared, command,
+          reply, 160, _sensors->supportsSharedPeripheralMode(),
+          [this]() { return trySavePrefs(); })) return;
+#else
+  if (strncmp(config, "peripherals.mode", 16) == 0
+      && (config[16] == 0 || config[16] == ' ' || config[16] == '\t')) {
+    strcpy(reply, "Error: unsupported");
+    return;
+  }
+#endif
   if (strncmp(config, "repeat.trace", 12) == 0
       && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
     if (strcmp(_callbacks->getRole(), "repeater") != 0) {
@@ -5280,6 +5319,16 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 
 void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
+#if defined(RAK_4631)
+  if (mesh::peripherals::handleCommand(_prefs->peripherals_shared, command,
+          reply, 160, _sensors->supportsSharedPeripheralMode(),
+          [this]() { return trySavePrefs(); })) return;
+#else
+  if (strcmp(config, "peripherals.mode") == 0) {
+    strcpy(reply, "Error: unsupported");
+    return;
+  }
+#endif
   if (strncmp(config, "repeat.trace", 12) == 0
       && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
     if (strcmp(_callbacks->getRole(), "repeater") != 0) {

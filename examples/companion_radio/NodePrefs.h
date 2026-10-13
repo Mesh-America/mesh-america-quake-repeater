@@ -117,6 +117,10 @@ public:
   uint8_t usb_debug_enabled = 0;
   // Appended opt-in private-message response: 0=off, 1=no, 2=yes.
   uint8_t lost_reply = 0;
+#if defined(RAK_4631)
+  // A checked footer follows every existing on-flash field, never an insertion.
+  uint8_t peripherals_shared = 0; // applied at boot, not on a live CLI save
+#endif
 
 private:
   class RadioPrefs : public CommonRadioPrefs {
@@ -255,10 +259,15 @@ public:
   // untouched, and leave a normally constructed snapshot's adapters local.
   bool copyPersistedValuesFrom(const CompanionNodePrefs& source) {
     if (&source == this) return true;
+#if defined(RAK_4631)
+    const auto& last_value = peripherals_shared;
+#else
+    const auto& last_value = lost_reply;
+#endif
     static_assert(sizeof(lost_reply) == sizeof(uint8_t),
                   "The published lost reply preference is one byte");
     const uintptr_t first = reinterpret_cast<uintptr_t>(&airtime_factor);
-    const uintptr_t last = reinterpret_cast<uintptr_t>(&lost_reply);
+    const uintptr_t last = reinterpret_cast<uintptr_t>(&last_value);
     if (last < first
         || last - first > sizeof(*this) - sizeof(lost_reply)) {
       return false;
@@ -269,8 +278,13 @@ public:
       const uintptr_t object = reinterpret_cast<uintptr_t>(&values);
       const uintptr_t begin =
           reinterpret_cast<uintptr_t>(&values.airtime_factor);
-      const uintptr_t end =
-          reinterpret_cast<uintptr_t>(&values.lost_reply);
+      const uintptr_t end = reinterpret_cast<uintptr_t>(
+#if defined(RAK_4631)
+          &values.peripherals_shared
+#else
+          &values.lost_reply
+#endif
+      );
       const uintptr_t radio_begin = reinterpret_cast<uintptr_t>(&values.radio);
       const uintptr_t custom_begin = reinterpret_cast<uintptr_t>(&values.custom);
       // Subtractions happen only after the corresponding ordering checks.

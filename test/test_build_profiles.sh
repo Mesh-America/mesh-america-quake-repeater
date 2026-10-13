@@ -429,7 +429,13 @@ for env_name in (
 
 rak_usb = "RAK_3401_companion_radio_usb"
 require(rak_usb, "build_flags", "RAK_BOARD")
-require(rak_usb, "build_flags", "FORCE_GPS_ALIVE")
+require(rak_usb, "build_flags", "RAK_3401")
+require(rak_usb, "build_flags", "PIN_GPS_EN=-1")
+reject(rak_usb, "build_flags", "FORCE_GPS_ALIVE")
+for env_name in ("RAK_4631_companion_radio_usb", "RAK_4631_repeater"):
+    require(env_name, "build_flags", "RAK_4631")
+    require(env_name, "build_flags", "PIN_GPS_EN=-1")
+    reject(env_name, "build_flags", "FORCE_GPS_ALIVE")
 '
 
 # Every qualified ESP32 Companion layout publishes one Full image even when

@@ -122,10 +122,13 @@ class CompanionSettingsPersistenceContractTests(unittest.TestCase):
             "bool copyPersistedValuesFrom(const CompanionNodePrefs& source)",
         )
         self.assertIn("reinterpret_cast<uintptr_t>(&airtime_factor)", copy)
-        # The appended lost-reply byte is the last persisted value. Both
-        # snapshots must stop there before either runtime adapter begins.
-        self.assertIn("reinterpret_cast<uintptr_t>(&lost_reply)", copy)
-        self.assertIn("reinterpret_cast<uintptr_t>(&values.lost_reply)", copy)
+        # RAK4631 appends its peripheral-mode byte; every other target stops
+        # at lost-reply. Neither endpoint may include a runtime adapter.
+        self.assertIn("const auto& last_value = peripherals_shared;", copy)
+        self.assertIn("const auto& last_value = lost_reply;", copy)
+        self.assertIn("reinterpret_cast<uintptr_t>(&last_value)", copy)
+        self.assertIn("&values.peripherals_shared", copy)
+        self.assertIn("&values.lost_reply", copy)
         self.assertIn("+ sizeof(lost_reply)", copy)
         self.assertIn("end - begin == size - sizeof(values.lost_reply)", copy)
         self.assertIn("reinterpret_cast<uintptr_t>(&values.radio)", copy)
