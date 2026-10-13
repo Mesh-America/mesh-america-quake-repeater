@@ -181,13 +181,21 @@ int main() {
         # handling and local-console gate, against the real Reader handler.
         handler = handler[:handler.index("#if defined(NRF52_POWER_MANAGEMENT)")]
         handler += "  return false;\n}\n"
+        predicate = extract_braced(source, "static bool isCompanionReaderRequest(")
         harness = r'''
 #include <Arduino.h>
 #include <helpers/CompanionReader.h>
 #include <cassert>
 #include <cstring>
 #include <string>
+struct Radio { bool active = false; };
+namespace mesh {
+bool morseTimingActive(const Radio* radio) { return radio && radio->active; }
+}
+@PREDICATE@
 struct MyMesh {
+  Radio radio;
+  Radio* _radio = &radio;
   bool handleCommand(const char*, uint32_t, char*);
 };
 @HANDLER@
@@ -212,8 +220,19 @@ int main() {
   assert(!mesh.handleCommand("get reader 3:16", 123, out.reply));
   assert(!mesh.handleCommand("AA|get reader 3:16", 123, out.reply));
   assert(!mesh.handleCommand("get name", 0, out.reply));
+  // Block synchronous 2 KiB decompression before it can stall Morse sampling,
+  // including tagged bounded replies. Ordinary readers resume unchanged.
+  mesh.radio.active = true;
+  assert(mesh.handleCommand("E5|get reader 21:17 2", 0, out.reply));
+  assert(std::string(out.reply) == "E5|Error: Reader unavailable during Morse");
+  assert(strlen(out.reply) < sizeof(out.reply) && out.after == 0xaabbccdd);
+  assert(!mesh.handleCommand("get name", 0, out.reply));
+  assert(!mesh.handleCommand("get reader 3:16", 123, out.reply));
+  mesh.radio.active = false;
+  assert(mesh.handleCommand("F6|get reader 3:16", 0, out.reply));
+  assert(std::string(out.reply).find("F6|Reader 3:16 (WEB)\n") == 0);
 }
-'''.replace("@HANDLER@", handler)
+'''.replace("@HANDLER@", handler).replace("@PREDICATE@", predicate)
         with tempfile.TemporaryDirectory(prefix="meshcore-reader-dispatch-") as directory:
             directory = Path(directory)
             generated = directory / "dispatch.cpp"
@@ -249,6 +268,114 @@ int main() {
                                       str(FIXTURE / "test_reader_screen.cpp"), str(ROOT / "src/helpers/CompanionReader.cpp"),
                                       str(obj), "-o", str(binary)])
                     self.run_checked([str(binary)])
+
+    def test_actual_reader_stream_pauses_and_decode_entrypoints_reject_during_morse(self):
+        cc, cxx = shutil.which("gcc"), shutil.which("g++")
+        if not cc or not cxx:
+            self.skipTest("host GCC and G++ required")
+        source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="utf-8")
+        predicate = extract_braced(source, "static bool isCompanionReaderRequest(")
+
+        def reader_block(method, marker):
+            body = extract_braced(source, method)
+            position = body.index(marker)
+            start = body.rfind("#if COMPANION_FEATURE_READER", 0, position)
+            return body[start:body.index("#endif", position) + len("#endif")]
+
+        terminal = reader_block("void MyMesh::handleTerminalCommand(", "mesh::handleReaderCommand(")
+        rescue = reader_block("void MyMesh::checkCLIRescueCmd()", "mesh::handleReaderCommand(cli_command, output)")
+        service = reader_block("void MyMesh::loop()", "mesh::serviceReaderCommand();")
+        harness = r'''
+#include <Arduino.h>
+#include <helpers/CompanionReader.h>
+#include <cassert>
+#include <cstring>
+#include <string>
+struct Radio { bool active = false; };
+namespace mesh {
+bool morseTimingActive(const Radio* radio) { return radio && radio->active; }
+}
+@PREDICATE@
+struct MyMesh {
+  Radio radio;
+  Radio* _radio = &radio;
+  Stream output;
+  unsigned ordinary = 0;
+  Stream& terminalOutput() { return output; }
+  void terminalCommand(const char* command, bool reader_prompt = true,
+                       mesh::ReaderTryWrite reader_try_write = nullptr) {
+@TERMINAL@
+    ++ordinary;
+  }
+  void rescueCommand(const char* cli_command) {
+    Stream& output = this->output;
+@RESCUE@
+    { ++ordinary; }
+  }
+  void loopReader() {
+@SERVICE@
+  }
+};
+int main() {
+  assert(isCompanionReaderRequest("  GET\tREADER 3:16 2"));
+  assert(isCompanionReaderRequest("get reader"));
+  assert(!isCompanionReaderRequest("get readership"));
+  assert(!isCompanionReaderRequest("morse stop"));
+  assert(!isCompanionReaderRequest(nullptr));
+  MyMesh mesh;
+  mesh.terminalCommand("get reader 3:16");
+  assert(mesh::readerCommandActive(&mesh.output));
+  mesh.loopReader(); // A real chapter header is partially/fully admitted.
+  const auto before = mesh.output.text;
+  const auto writes = mesh.output.writes;
+  mesh.radio.active = true;
+  for (int n = 0; n < 1000; ++n) mesh.loopReader();
+  assert(mesh.output.text == before && mesh.output.writes == writes);
+  assert(mesh::readerCommandActive(&mesh.output)); // Pausing retains the cursor.
+  mesh.radio.active = false;
+  for (int n = 0; mesh::readerCommandActive(); ++n) {
+    assert(n < 1000); mesh.loopReader();
+  }
+  assert(mesh.output.text.find("eternal life.") != std::string::npos);
+  assert(mesh.output.text.find("Reader 3:16", mesh.output.text.find("Reader 3:16") + 1) == std::string::npos);
+  assert(mesh.output.text.size() > before.size());
+
+  mesh.terminalCommand("get reader 3:16");
+  assert(mesh::readerCommandActive());
+  mesh.radio.active = true; mesh.output.text.clear();
+  mesh.terminalCommand("get reader 21:17 2"); // Synchronous page must not inflate.
+  assert(mesh.output.text == "  ERROR: Reader unavailable during Morse\r\n");
+  assert(!mesh::readerCommandActive());
+  mesh.output.text.clear(); mesh.rescueCommand("get reader 3:16 1");
+  assert(mesh.output.text == "  ERROR: Reader unavailable during Morse\r\n");
+  assert(!mesh::readerCommandActive());
+  mesh.output.text.clear(); mesh.terminalCommand("morse stop");
+  mesh.rescueCommand("morse stop");
+  assert(mesh.ordinary == 2 && mesh.output.text.empty()); // Stop/input still dispatch.
+
+  mesh.radio.active = false;
+  mesh.rescueCommand("get reader 3:16");
+  assert(mesh::readerCommandActive());
+  for (int n = 0; mesh::readerCommandActive(); ++n) {
+    assert(n < 1000); mesh.loopReader();
+  }
+  assert(mesh.output.text.find("eternal life.") != std::string::npos);
+}
+'''.replace("@PREDICATE@", predicate).replace("@TERMINAL@", terminal).replace("@RESCUE@", rescue).replace("@SERVICE@", service)
+        with tempfile.TemporaryDirectory(prefix="meshcore-reader-morse-") as directory:
+            directory = Path(directory)
+            generated = directory / "interlock.cpp"
+            generated.write_text(harness)
+            for platform in ("ESP32_PLATFORM", "NRF52_PLATFORM"):
+                flags = [f"-D{platform}=1", "-DCOMPANION_RADIO_FULL=1", "-DENABLE_USB_INTERFACE=1"]
+                obj, binary = directory / "tinf.o", directory / "interlock.exe"
+                self.run_checked([cc, "-std=c11", "-Os", *flags, "-c",
+                                  str(ROOT / "src/helpers/ota/OtaTinf.c"), "-o", str(obj)])
+                self.run_checked([cxx, "-std=c++17", "-Os", "-Wall", "-Wextra", "-Werror",
+                                  *flags, "-I" + str(ROOT / "src"), "-I" + str(FIXTURE),
+                                  str(generated), str(ROOT / "src/helpers/CompanionReader.cpp"),
+                                  str(obj), "-o", str(binary)])
+                self.run_checked([str(binary)])
 
     def test_reader_button_routing_and_profile_gate(self):
         ui = (ROOT / "examples/companion_radio/ui-new/UITask.cpp").read_text(encoding="utf-8")

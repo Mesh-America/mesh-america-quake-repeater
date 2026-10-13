@@ -27,8 +27,9 @@ For timed Morse RX, use `morse listen <minutes>` (fractions allowed, 1 second
 through 5 minutes). `morse stop` ends TX or RX. All roles retain the bounded
 capture in RAM for `morse read [offset]`; follow each page's `next` value until
 `next=END`. `morse clear` removes it when idle. A new successful session or
-reboot replaces/removes the capture. Full Companion ASCII terminals show
-decoded progress; binary clients request it through the CLI, without adding
+reboot replaces/removes the capture. Buffered USB/browser Full Companion ASCII
+terminals show decoded progress; other terminals and binary clients request it
+through the CLI, without adding
 unidentified text to authenticated channel/chat messages. Normal LoRa is paused
 during listening, so a remote administrator must wait for the selected session
 to end before reading the capture over LoRa. See [timed reception](carrier_wave.md#timed-morse-reception-and-retained-captures)

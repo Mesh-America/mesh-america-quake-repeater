@@ -341,6 +341,7 @@ jobs:
           python3 -B test/test_morse_auth.py -v
           python3 -B test/test_morse_reply_handoff.py -v
           python3 -B test/test_morse_remote.py -v
+          python3 -B test/test_morse_hil_safety.py -v
           python3 -B test/test_morse_loop_policy.py -v
           python3 -B test/test_morse_terminal_input.py -v
           python3 -B test/test_radio_profile_cli.py

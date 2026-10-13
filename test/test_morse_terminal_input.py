@@ -76,7 +76,8 @@ struct Clock { uint32_t getMillis() const { return g_mock_millis; } };
         code = code.replace("terminal=true; waiting=!banner;", "terminal=true; waiting=!banner; _terminal_mode=true; _terminal_output=&::terminal; _terminal_morse_atomic=true; _terminal_input_editing=false;")
         code = code.replace("terminal=false; waiting=false;", "terminal=false; waiting=false; _terminal_mode=false; _terminal_output=nullptr; _terminal_morse_atomic=false;")
         code = code.replace("void handleTerminalCommand(char* command) { commands.emplace_back(command); }", r'''
-  void handleTerminalCommand(char* command) {
+  void handleTerminalCommand(char* command, bool=true,
+      size_t (*)(Stream&,const uint8_t*,size_t)=nullptr) {
     commands.emplace_back(command);
     if(!strcmp(command,"morse stop")) { radio.receiving=false; ++stops; }
     usbTerminalOutput().print("  -> OK - Morse stopped\r\n");

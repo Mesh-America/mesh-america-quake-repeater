@@ -224,7 +224,13 @@ int main() {
         source = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="utf-8")
         code = (ROOT / "test/fixtures/morse_rx_terminal.cpp").read_text(encoding="ascii").replace(
             "@TERMINAL@", method(source, "void MyMesh::serviceMorseTerminal("))
-        compile_run(self, code)
+        for reader in (0, 1):
+            with self.subTest(reader_enabled=bool(reader)):
+                compile_run(self, code, flags=(f"-DCOMPANION_FEATURE_READER={reader}",))
+        regressed = code.replace("  if (mesh::readerCommandActive(_terminal_output)) return;\n", "")
+        self.assertNotEqual(code, regressed)
+        with self.assertRaisesRegex(AssertionError, "Assertion|assert"):
+            compile_run(self, regressed, flags=("-DCOMPANION_FEATURE_READER=1",))
         loop = method(source, "void MyMesh::loop(")
         self.assertIn("serviceMorseTerminal();", loop)
         self.assertNotIn("serviceMorseTerminal();", method(source, "void MyMesh::sendTerminalTraceRoute("))

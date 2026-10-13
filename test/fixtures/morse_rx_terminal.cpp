@@ -23,6 +23,8 @@ namespace mesh {
 Stream usb_terminal;
 Stream& usbTerminalPort() { return usb_terminal; }
 bool hasPendingUsbTerminalOutput() { return false; }
+Stream* active_reader_output = nullptr;
+bool readerCommandActive(const Stream* output) { return output == active_reader_output; }
 }
 struct Radio {
   bool receiving = true;
@@ -72,6 +74,23 @@ static size_t occurrences(const std::string& haystack, const std::string& needle
   return count;
 }
 int main() {
+#if COMPANION_FEATURE_READER
+  {
+    MyMesh m; Stream terminal, other; m._terminal_output = &terminal;
+    m.radio.capture = "SOS"; terminal.available_write = 0;
+    m.serviceMorseTerminal();
+    assert(m._morse_terminal_pending_chars == 3);
+    mesh::active_reader_output = &terminal; terminal.available_write = 128;
+    m.radio.capture += " HELP";
+    for (int i = 0; i < 10; ++i) { m.clock.now += 250; m.serviceMorseTerminal(); }
+    assert(terminal.output.empty() && m._morse_terminal_offset == 0);
+    assert(m._morse_terminal_pending_chars == 3);
+    mesh::active_reader_output = &other; // only the exact output owner blocks progress
+    drain(m);
+    assert(terminal.output == "\r\n[Morse RX] SOS\r\n> \r\n[Morse RX]  HELP\r\n> ");
+    mesh::active_reader_output = nullptr;
+  }
+#endif
   {
     MyMesh m; Stream terminal, binary;
     m.radio.capture = "SOS";

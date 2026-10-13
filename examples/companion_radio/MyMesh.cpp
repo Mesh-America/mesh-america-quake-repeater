@@ -51,6 +51,16 @@
 #include "helpers/radiolib/RxBoostedGainDefaults.h"
 #include "helpers/radiolib/CadTiming.h"
 
+#if COMPANION_FEATURE_READER
+static bool isCompanionReaderRequest(const char* command) {
+  if (!command) return false;
+  mesh::bible::skipSpace(command);
+  if (!mesh::bible::token(command, "get")) return false;
+  mesh::bible::skipSpace(command);
+  return mesh::bible::token(command, "reader");
+}
+#endif
+
 #if defined(MESHCORE_EXTRAFS_HIL) \
     && (!defined(NRF52_PLATFORM) || !defined(EXTRAFS) || defined(QSPIFLASH))
 #error "MESHCORE_EXTRAFS_HIL requires an nRF52 internal ExtraFS build"
@@ -8753,6 +8763,11 @@ void MyMesh::serviceMorseTerminal() {
       || _terminal_input_editing || _terminal_output->available() > 0
       || _terminal_login_pending || _terminal_trace_pending
       || _terminal_command.isPending()) return;
+#if COMPANION_FEATURE_READER
+  // A chapter cursor owns its entire logical output, including pauses under
+  // backpressure. Progress must not split a header, verse or final prompt.
+  if (mesh::readerCommandActive(_terminal_output)) return;
+#endif
   // The existing USB facade owns all queued suffixes, including replies and
   // echo. Never append progress in the middle of an earlier text producer.
   if (_terminal_mode && _terminal_output == &mesh::usbTerminalPort()
@@ -9485,6 +9500,11 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
   mesh::cli::normalizeCommandVerb(command);
 
 #if COMPANION_FEATURE_READER
+  if (mesh::morseTimingActive(_radio) && isCompanionReaderRequest(command)) {
+    mesh::cancelReaderCommand();
+    terminalOutput().print("  ERROR: Reader unavailable during Morse\r\n");
+    return;
+  }
   if (mesh::handleReaderCommand(command, terminalOutput(), reader_prompt,
                                 reader_try_write)) return;
 #endif
@@ -10340,6 +10360,11 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
   }
 
 #if COMPANION_FEATURE_READER
+  if (sender_timestamp == 0 && mesh::morseTimingActive(_radio)
+      && isCompanionReaderRequest(command)) {
+    snprintf(reply, reply_capacity, "Error: Reader unavailable during Morse");
+    return true;
+  }
   if (sender_timestamp == 0
       && mesh::handleReaderReply(command, reply, reply_capacity)) return true;
 #endif
@@ -10765,7 +10790,10 @@ complete_line:
   {
     reply_buf[0] = 0;
 #if COMPANION_FEATURE_READER
-    if (mesh::handleReaderCommand(cli_command, output)) {
+    if (mesh::morseTimingActive(_radio) && isCompanionReaderRequest(cli_command)) {
+      mesh::cancelReaderCommand();
+      output.print("  ERROR: Reader unavailable during Morse\r\n");
+    } else if (mesh::handleReaderCommand(cli_command, output)) {
       // USB rescue streams chapters/ranges cooperatively like the terminal.
     } else
 #endif
@@ -11103,7 +11131,9 @@ void MyMesh::loop() {
 #endif
   servicePendingSerialReply();
 #if COMPANION_FEATURE_READER
-  mesh::serviceReaderCommand();
+  // Every verse chunk reinflates its 2 KiB flash block. Retain the cursor but
+  // defer that optional decode/output work until envelope timing is finished.
+  if (!mesh::morseTimingActive(_radio)) mesh::serviceReaderCommand();
 #endif
   serviceBinaryTraceReply();
   if (!mesh::morseTimingActive(_radio)) serviceSigningSession();

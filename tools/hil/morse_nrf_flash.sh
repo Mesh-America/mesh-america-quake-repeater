@@ -24,6 +24,7 @@ morse_assert_unowned() {
   }
 }
 python3 "$(dirname "$bench_inventory")/verified_nrf_flash.py" \
+  --application-only \
   --inventory "$bench_inventory" --serial "$bench_serial" --board "$bench_board" \
   --artifact "$bench_image" --port "$bench_port"
 morse_assert_unowned "$bench_port"

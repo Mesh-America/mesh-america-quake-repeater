@@ -259,7 +259,7 @@ def main():
     results = {"frequency_mhz": args.cw_frequency, "packet_radio": PACKET_RADIO,
                "requested_chip_power_dbm": -9,
                "partner": args.partner, "direction": args.direction,
-               "scope": "Actual production applications on this pair, not all radio families.",
+               "scope": "Experimental HIL applications on this pair; not production speed qualification or all radio families.",
                "trials": [], "finished": False}
     devices = {}
     original_gain = None
