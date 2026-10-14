@@ -140,6 +140,10 @@ void NanoG2UltraSensorManager::setPowerSavingEnabled(bool enabled) {
   if (powersaving_enabled == enabled) return;
   powersaving_enabled = enabled;
 
+  if (isTrackerGpsModeEnabled()) {
+    _location->setGPSPowerSaving(false);
+    return;
+  }
   bool gps_user_enabled = isGpsTelemetryUserEnabled();
   _location->setGPSPowerSaving(enabled && gps_user_enabled);
   if (!gps_user_enabled) return;

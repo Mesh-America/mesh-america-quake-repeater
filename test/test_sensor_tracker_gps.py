@@ -160,15 +160,38 @@ void ownershipAndRestore(){
  assert(!s.beginTrackerGpsAcquisition());
 }
 template<class Sensors>void derivedPowerPreference(){
- now_ms=1;Sensors s;s.user(true);s.setTrackerGpsModeEnabled(true);
- s.setPowerSavingEnabled(true);assert(!s.active&&!s.provider.getGPSPowerSaving());
- assert(s.beginTrackerGpsAcquisition());
- s.setPowerSavingEnabled(false);assert(s.active&&!s.provider.getGPSPowerSaving());
- s.user(false);assert(s.active); // current window remains owned by tracker
- s.fix();s.finishClock();assert(!s.active);
- s.setTrackerGpsModeEnabled(false);assert(!s.active&&!s.userEnabled());
- s.user(true);assert(s.active);s.setPowerSavingEnabled(true);
- assert(s.provider.getGPSPowerSaving()); // normal mode still uses its power cycle
+ for(bool initial:{false,true})for(bool manual:{false,true})
+ for(bool acquiring:{false,true})for(bool requested:{false,true}){
+  now_ms=1;Sensors s;s.user(manual);s.setPowerSavingEnabled(initial);
+  s.setTrackerGpsModeEnabled(true);assert(!s.active&&!s.provider.getGPSPowerSaving());
+  if(acquiring)assert(s.beginTrackerGpsAcquisition());
+  const unsigned starts=s.starts,stops=s.stops;
+  // Both transitions, and an unchanged value, must preserve the tracker's
+  // exclusive window regardless of the saved manual GPS preference.
+  for(bool value:{requested,!requested,requested,requested}){
+   s.setPowerSavingEnabled(value);
+   assert(s.powersaving_enabled==value&&!s.provider.getGPSPowerSaving());
+   assert(s.active==acquiring&&s.isTrackerGpsAcquisitionPending()==acquiring);
+   assert(s.starts==starts&&s.stops==stops);
+  }
+  s.user(!manual);assert(s.active==acquiring);
+  s.user(manual);assert(s.active==acquiring&&s.userEnabled()==manual);
+  // Leaving either an idle or interrupted window restores only the saved
+  // ordinary preference, using the final selected device-power policy.
+  s.setTrackerGpsModeEnabled(false);
+  assert(s.active==manual&&!s.isTrackerGpsAcquisitionPending());
+  assert(s.provider.getGPSPowerSaving()==(requested&&manual));
+ }
+ now_ms=1;Sensors normal;normal.user(true);
+ normal.setPowerSavingEnabled(true);
+ assert(normal.active&&normal.provider.getGPSPowerSaving());
+ normal.hardwareStop();normal.setPowerSavingEnabled(false);
+ assert(normal.active&&!normal.provider.getGPSPowerSaving());
+ normal.setPowerSavingEnabled(true);
+ assert(normal.active&&normal.provider.getGPSPowerSaving());
+ normal.user(false);assert(!normal.active);
+ normal.setPowerSavingEnabled(false);normal.setPowerSavingEnabled(true);
+ assert(!normal.active&&!normal.provider.getGPSPowerSaving());
 }
 void fifoBound(){
  Uart uart;MicroNMEALocationProvider provider(uart);
@@ -321,6 +344,32 @@ class SensorTrackerGpsTest(unittest.TestCase):
                 environment, "void EnvironmentSensorManager::setPowerSavingEnabled("))
     def test_fresh_acquisition_time_bound_transport_and_preferences(self):
         self.compile_run(self.harness(), sources=("src/helpers/SensorManager.cpp",))
+
+    def test_all_custom_manager_power_preferences_preserve_tracker_ownership(self):
+        harness = self.harness().split("int main(){", 1)[0]
+        for variant, manager in (
+            ("heltec_tracker", "HWTSensorManager"),
+            ("heltec_mesh_solar", "SolarSensorManager"),
+            ("meshadventurer", "MASensorManager"),
+            ("nano_g2_ultra", "NanoG2UltraSensorManager"),
+            ("thinknode_m1", "ThinkNodeM1SensorManager"),
+            ("meshtracker_x1", "MeshTrackerX1SensorManager"),
+        ):
+            with self.subTest(variant=variant):
+                source = (ROOT / "variants" / variant / "target.cpp").read_text()
+                setter = extract_braced(source, f"void {manager}::setPowerSavingEnabled(")
+                # Reuse only the counted hardware boundary. The declaration
+                # supplies both historical provider names; the setter and
+                # tracker ownership/state machine remain actual production.
+                declaration = f'''class {manager}:public T1000SensorManager {{
+public:
+ LocationProvider* _location=&provider;
+ void setPowerSavingEnabled(bool enabled)override;
+}};
+'''
+                self.compile_run(harness + declaration + setter +
+                    f"\nint main(){{derivedPowerPreference<{manager}>();}}\n",
+                    sources=("src/helpers/SensorManager.cpp",))
 
     def test_missing_freshness_and_timeout_negative_controls(self):
         source = (ROOT / "src/helpers/SensorManager.cpp").read_text()
