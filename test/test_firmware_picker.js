@@ -2127,6 +2127,94 @@ assert.strictEqual(JSON.stringify(feedbackCatalog), feedbackSnapshot);
 assert.deepStrictEqual(simpleFilters, {...feedbackFilters, hardwareFamily: 'Heltec_v3'});
 console.log('same-image selectors skip redundant steps while distinct profiles and install routes stay explicit');
 
+// Board-specific help belongs to exact qualified results, never to a broad
+// family filter or an unrelated role which happens to share the board name.
+const boardText = profile => picker.boardNotes(profile).join('\n');
+const boardProfile = target => currentCatalog.profiles.find(profile => profile.target === target);
+assert.deepStrictEqual(picker.boardNotes(null), []);
+assert.deepStrictEqual(picker.boardNotes({}), []);
+for (const board of ['RAK_3401', 'RAK_4631']) {
+  for (const policy of ['full', 'reduced']) {
+    const profile = boardProfile(board + '_repeater_unified_lora_ota-' + policy);
+    assert(profile);
+    const before = JSON.stringify(profile);
+    const notes = boardText(profile);
+    assert(notes.includes('storage automatically'));
+    assert(notes.includes('sensor drivers, not a storage module'));
+    assert(notes.includes('Internal flash accepts in-place deltas only'));
+    assert(notes.includes('matching OTAFIX bootloader'));
+    if (board === 'RAK_4631') {
+      assert(notes.includes('UART2') && notes.includes('UART1') && notes.includes('W25'));
+      assert(notes.includes('Legacy GPS-free Serial1') && notes.includes('Ethernet'));
+    } else {
+      assert(!notes.includes('UART') && !notes.includes('Ethernet'));
+    }
+    assert.strictEqual(JSON.stringify(profile), before, 'boardNotes must not mutate release metadata');
+    for (const change of [
+      {controls: undefined}, {ota: 'none'}, {sensorProfile: undefined},
+      {hardware: 'RAK_4631_ethernet'}, {role: 'companion'},
+      {controls: {...profile.controls, platform: 'ESP32_PLATFORM'}},
+      {controls: {...profile.controls, updateRequirements: undefined}},
+      {controls: {...profile.controls, updateRequirements: {lora: {storage: 'external_only'}}}},
+    ]) {
+      assert.deepStrictEqual(picker.boardNotes({...profile, ...change}), [],
+        'Unqualified adaptive-storage metadata must not create a storage promise');
+    }
+  }
+}
+const boardRak = boardProfile('RAK_4631_repeater_unified_lora_ota-full');
+assert(!boardText({...boardRak, controls: {...boardRak.controls, rs232: false}}).includes('UART2'));
+assert(!boardText({...boardRak, controls: {...boardRak.controls, gps: false}}).includes('UART2'));
+const boardLegacy = rakPartialCatalog.profiles.find(profile => profile.target === rakBridgeBase + '-reduced');
+assert(boardText(boardLegacy).includes('legacy GPS-free Serial1'));
+assert(!boardText(boardLegacy).includes('storage automatically'));
+assert.deepStrictEqual(picker.boardNotes({...boardLegacy,
+  controls: {...boardLegacy.controls, gps: true}}), []);
+const boardEthernet = boardProfile('RAK_4631_repeater_ethernet-full');
+assert(boardText(boardEthernet).includes('separate RAK4631 Ethernet hardware image'));
+assert(!boardText(boardEthernet).includes('storage automatically'));
+assert(!boardText(boardEthernet).includes('Use UART2'));
+for (const [profile, selected] of [[tloraNormalProfile, 'UART/RS-232 choice'],
+                                [tloraObserverProfile, 'MQTT observer choice']]) {
+  assert(boardText(profile).includes('two RAM-safe Full images'));
+  assert(boardText(profile).includes(selected));
+  for (const change of [{controls: undefined}, {feature: 'standard'},
+    {controls: {...profile.controls, espnowBridge: false}},
+    {controls: {...profile.controls, rs232: true, mqtt: true}},
+    {target: profile.target.replace('V2_1_1_6', 'V2_0'), hardware: 'LilyGo_TLora_V2_0'}]) {
+    assert.deepStrictEqual(picker.boardNotes({...profile, ...change}), []);
+  }
+}
+assert(boardText(boardProfile('LilyGo_TLora_V2_1_1_6_repeater-full-logging'))
+  .includes('UART/RS-232 choice'), 'Current UART-only logging recipe must retain the RAM warning');
+for (const profile of tripleCatalog.profiles) {
+  assert(boardText(profile).includes('independent RS-232 and ESP-NOW'));
+  assert.deepStrictEqual(picker.boardNotes({...profile,
+    controls: {...profile.controls, rs232: false}}), []);
+}
+for (const profile of currentCatalog.profiles.filter(profile =>
+  /^heltec_v4(?:_[a-z0-9]+)*_companion_radio_full/i.test(profile.target))) {
+  assert(boardText(profile).includes('Full Companion is LoRa-primary'), profile.target);
+  assert(!boardText(profile).includes('can bridge to ESP-NOW'));
+  assert.deepStrictEqual(picker.boardNotes({...profile, controls: undefined}), []);
+  assert.deepStrictEqual(picker.boardNotes({...profile,
+    controls: {...profile.controls, primaryEspnow: true}}), []);
+}
+const boardV4Gateway = boardProfile('heltec_v4_repeater-full-usb-wifi');
+assert(boardText(boardV4Gateway).includes('can bridge to ESP-NOW'));
+assert.deepStrictEqual(picker.boardNotes({...boardV4Gateway,
+  controls: {...boardV4Gateway.controls, espnowBridge: false}}), []);
+assert.deepStrictEqual(picker.boardNotes({...boardV4Gateway, role: 'companion'}), []);
+assert(boardText(wio).includes('flash-capacity exception'));
+assert(boardText(picker.parseTargetProfile('wio-e5_repeater')).includes('separate ordinary repeater'));
+for (const target of ['wio-e5_companion_radio_usb', 'wio-e5-mini_companion_radio_usb',
+  'wio-e5-mini_repeater', 'wio-e5-dev_repeater', 'RAK_4631_companion_radio_full',
+  'RAK_3401_sensor', 't1000e_companion_radio_full', 'heltec_v4_companion_radio_usb']) {
+  assert.deepStrictEqual(picker.boardNotes(picker.parseTargetProfile(target)), [], target);
+}
+assert.deepStrictEqual(picker.boardNotes({...wio, controls: {platform: 'ESP32_PLATFORM'}}), []);
+console.log('exact-board notes qualify adaptive storage, UART wiring, RAM splits and gateway roles');
+
 // Logging choices remain available beneath the download. Linked choices
 // preselect their exact commands; an unselected logging mode shows off steps.
 for (const logging of ['none', 'usb', 'wifi', 'both']) {
@@ -2178,6 +2266,24 @@ global.document = {
   createTextNode: text => new RuntimeElement('#text', text),
 };
 try {
+  const boardContainer = new RuntimeElement('section');
+  picker.renderProfileCard(boardContainer, boardRak, boardRak.files[0], 'uf2', {}, {});
+  const boardCard = boardContainer.children[0];
+  const boardDetails = boardCard.children.find(node => node.className === 'firmware-picker-board-notes');
+  assert(boardDetails && boardDetails.tagName === 'DETAILS');
+  assert.strictEqual(!!boardDetails.open, false, 'Board notes start collapsed');
+  assert.strictEqual(boardDetails.children[0].tagName, 'SUMMARY');
+  assert.strictEqual(boardDetails.children[0].textContent, 'Board notes');
+  assert(boardCard.children.indexOf(boardDetails) > boardCard.children.findIndex(node =>
+    node.className === 'firmware-picker-actions'), 'Exact download actions stay ahead of board notes');
+  assert(boardCard.children.indexOf(boardDetails) < boardCard.children.findIndex(node =>
+    node.className === 'firmware-picker-steps'), 'Board notes precede installation steps');
+  assert.strictEqual(boardDetails.children.filter(node => node.tagName === 'P').length,
+    picker.boardNotes(boardRak).length);
+  const noNotesContainer = new RuntimeElement('section');
+  picker.renderProfileCard(noNotesContainer, companionEsp32, companionEsp32.files[0], 'bin', {}, {});
+  assert(!noNotesContainer.children[0].children.some(node =>
+    node.className === 'firmware-picker-board-notes'), 'Unaffected boards must not get an empty notes panel');
   const card = new RuntimeElement('article');
   const changes = [];
   picker.renderRuntimeDirections(card, observer, {logging: 'wifi'}, {

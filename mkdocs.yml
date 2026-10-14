@@ -120,7 +120,7 @@ extra_css:
   - _stylesheets/notification_builder.css?v=20261006-channel9
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.css
   - _stylesheets/extra.css
-  - _stylesheets/firmware_picker.css?v=20261001-feedback-1
+  - _stylesheets/firmware_picker.css?v=20261013-pick-first-1
   - _stylesheets/telemetry_decoder.css
   - _stylesheets/management_decoder.css
   - _stylesheets/filter_tool.css
@@ -131,7 +131,7 @@ extra_javascript:
   - _javascript/hosted_doc_links.js?v=20261007-1
   - _javascript/notification_builder.js?v=20261006-channel9
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.js
-  - _javascript/firmware_picker.js?v=20261012-short-picker-1
+  - _javascript/firmware_picker.js?v=20261013-board-notes-1
   - _javascript/telemetry_decoder.js?v=20261007-hosted-form
   - _javascript/management_decoder.js
   - _javascript/filter_tool.js?v=20261002-hashbytes-2plus
