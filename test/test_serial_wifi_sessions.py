@@ -65,25 +65,26 @@ class SerialWifiSessionTests(unittest.TestCase):
         if compiler is None:
             self.skipTest("a host C++17 compiler is required")
         with tempfile.TemporaryDirectory(prefix="meshcore-wifi-sessions-") as directory:
-            binary = Path(directory) / "wifi-sessions.exe"
-            compiled = subprocess.run(
-                [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                 *SANITIZER_FLAGS,
-                 f"-I{FIXTURE / 'mocks'}", f"-I{ROOT / 'src'}",
-                 str(FIXTURE / "test.cpp"),
-                 str(ROOT / "src/helpers/wifi/SerialWifiInterface.cpp"),
-                 "-o", str(binary)],
-                capture_output=True, text=True, timeout=60,
-            )
-            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
-            for scenario, description in enumerate(SCENARIOS):
-                with self.subTest(scenario=description):
-                    checked = subprocess.run(
-                        [str(binary), str(scenario)], capture_output=True,
-                        text=True, timeout=10,
-                    )
-                    self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
-                    self.assertIn(f"PASS: Wi-Fi session scenario {scenario}", checked.stdout)
+            for platform, flags in (("generic", []), ("esp32", ["-DESP32=1"])):
+                binary = Path(directory) / f"wifi-sessions-{platform}.exe"
+                compiled = subprocess.run(
+                    [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                     *SANITIZER_FLAGS, *flags,
+                     f"-I{FIXTURE / 'mocks'}", f"-I{ROOT / 'src'}",
+                     str(FIXTURE / "test.cpp"),
+                     str(ROOT / "src/helpers/wifi/SerialWifiInterface.cpp"),
+                     "-o", str(binary)],
+                    capture_output=True, text=True, timeout=60,
+                )
+                self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+                for scenario, description in enumerate(SCENARIOS):
+                    with self.subTest(platform=platform, scenario=description):
+                        checked = subprocess.run(
+                            [str(binary), str(scenario)], capture_output=True,
+                            text=True, timeout=10,
+                        )
+                        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                        self.assertIn(f"PASS: Wi-Fi session scenario {scenario}", checked.stdout)
 
 
 if __name__ == "__main__":

@@ -432,7 +432,7 @@ request. `reg=1` confirms the interface is registered for Companion commands.
 `client=1` means a TCP client is connected. `acc`, `rx`, and `tx` count accepted
 clients, complete received frames, and complete transmitted frames since boot;
 the value after `/` is the last frame's hexadecimal opcode. `fail`, `err`, and
-`retry` show listener failures, the last socket error, and seconds until retry.
+`retry` show listener failures, the last listener-start socket error, and seconds until retry.
 `drop` gives the last client-disconnect reason. These counters contain no
 message contents or credentials. An open listener does not prove a router or
 guest-network firewall permits access from the phone.
@@ -441,6 +441,15 @@ Listener retries wait 1, 2, 4, 8, 16, then at most 30 seconds. They do not
 reconnect WiFi, interrupt BLE/WebConfig/OTA, replace a healthy app connection,
 or re-enable explicitly disabled WiFi. `get display.wifi` includes `tcp=1`
 only when the listener is actually open; `services=1` alone is not proof.
+
+The ESP32 TCP transport services input even while radio logs or other outgoing
+frames are pending, so unsolicited traffic cannot starve the app handshake.
+Socket sends are non-blocking. A client that makes no outbound progress for
+10 seconds while data is pending is disconnected (`drop=tx-timeout`), without
+blocking the other transports. `drop=tx-error` identifies a fatal send error.
+Commands wait when all reply slots hold delivery-required data, rather than
+executing with nowhere to return their reply. A partly sent frame stays pinned
+until it finishes; input and output remain separate TCP streams.
 
 See [local maintenance commands](terminal_chat_cli.md#local-maintenance-commands)
 for the complete access rules. WiFi-only Companions accept

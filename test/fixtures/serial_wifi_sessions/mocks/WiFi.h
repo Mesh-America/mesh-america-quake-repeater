@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -48,10 +49,25 @@ struct WiFiClass {
 
 inline WiFiClass WiFi;
 
+struct MockSocket;
+namespace MockTcp {
+inline int next_descriptor = 3;
+inline std::map<int, std::weak_ptr<MockSocket>> sockets;
+inline void (*sdk_write_hook)(uint32_t) = nullptr;
+}
+
 struct MockSocket {
   IPAddress address;
   bool connected = true;
+  int descriptor = MockTcp::next_descriptor++;
+  int descriptor_override = -2;
   size_t write_limit = 0;
+  size_t sdk_write_calls = 0;
+  uint32_t sdk_write_block_ms = 0;
+  size_t send_calls = 0;
+  int last_send_flags = 0;
+  int send_error = 0;
+  std::deque<int> send_results;
   size_t read_limit = std::numeric_limits<size_t>::max();
   size_t read_count = 0;
   std::vector<uint8_t> sent;
@@ -63,11 +79,18 @@ class WiFiClient {
   std::shared_ptr<MockSocket> _socket;
 public:
   WiFiClient() = default;
-  explicit WiFiClient(std::shared_ptr<MockSocket> socket) : _socket(socket) {}
+  explicit WiFiClient(std::shared_ptr<MockSocket> socket) : _socket(socket) {
+    MockTcp::sockets[_socket->descriptor] = _socket;
+  }
   explicit operator bool() { return _socket && _socket->connected; }
   // Match the pinned ESP32 SDK's non-const connected() signature. This catches
   // const transport accessors that accidentally rely on a const-only fake.
   bool connected() { return _socket && _socket->connected; }
+  // Public SDK 2.x/3.x API; no test-only access to a protected socket handle.
+  virtual int fd() const {
+    if (!_socket) return -1;
+    return _socket->descriptor_override == -2 ? _socket->descriptor : _socket->descriptor_override;
+  }
   void stop() { if (_socket) _socket->connected = false; }
   IPAddress remoteIP() const { return _socket ? _socket->address : IPAddress(); }
   int available() { return connected() ? int(_socket->received.size()) : 0; }
@@ -84,6 +107,8 @@ public:
   size_t readBytes(uint8_t* dest, size_t size) { return read(dest, size); }
   size_t write(const uint8_t* src, size_t size) {
     if (!connected()) return 0;
+    ++_socket->sdk_write_calls;
+    if (MockTcp::sdk_write_hook) MockTcp::sdk_write_hook(_socket->sdk_write_block_ms);
     const size_t written = std::min(size, _socket->write_limit);
     _socket->sent.insert(_socket->sent.end(), src, src + written);
     return written;
@@ -108,6 +133,9 @@ public:
     listener_lost = false;
     incoming.clear();
     WiFi = WiFiClass{};
+    MockTcp::sockets.clear();
+    MockTcp::next_descriptor = 3;
+    MockTcp::sdk_write_hook = nullptr;
   }
   void begin(int port) {
     ++begin_calls;

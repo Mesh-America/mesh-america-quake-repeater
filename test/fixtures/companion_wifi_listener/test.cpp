@@ -1,5 +1,6 @@
 #include <helpers/wifi/SerialWifiInterface.h>
 #include <helpers/MultiSerialInterface.h>
+#include <lwip/sockets.h>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -14,13 +15,27 @@ using Bytes = std::vector<uint8_t>;
 static const IPAddress A(192, 168, 1, 20);
 static const IPAddress B(192, 168, 1, 30);
 
+static Bytes framed(std::initializer_list<Bytes> frames) {
+  Bytes result;
+  for (const auto& frame : frames) {
+    result.insert(result.end(), {'>', uint8_t(frame.size()), uint8_t(frame.size() >> 8)});
+    result.insert(result.end(), frame.begin(), frame.end());
+  }
+  return result;
+}
+
 struct Fixture {
   SerialWifiInterface transport;
   uint8_t input[MAX_FRAME_SIZE] = {};
   int cancellations = 0;
+  MultiSerialInterface* manager = nullptr;
+  bool pending_operation = false;
   Fixture() {
     transport.setSessionChangedCallback([](void* context) {
-      ++static_cast<Fixture*>(context)->cancellations;
+      auto& f = *static_cast<Fixture*>(context);
+      ++f.cancellations;
+      f.pending_operation = false;
+      if (f.manager) f.manager->forgetReplyRouteForDisconnected(&f.transport);
     }, this);
   }
   ~Fixture() { transport.end(); }
@@ -32,6 +47,13 @@ struct Fixture {
     WiFiServer::incoming.push_back(WiFiClient(socket));
     tick();
     return socket;
+  }
+  void enqueue(const Bytes& data) {
+    assert(transport.writeFrame(data.data(), data.size()) == data.size());
+  }
+  void drain(const Socket& socket) {
+    socket->write_limit = std::numeric_limits<size_t>::max();
+    for (int i = 0; i < 20; ++i) tick();
   }
 };
 
@@ -341,6 +363,244 @@ int main(int argc, char** argv) {
     assert(!f.start());
     f.tick();
     assert(!f.transport.getStatus().addressReady && WiFiServer::begin_calls == 0);
+  } else if (scenario == 28 || scenario == 31 || scenario == 32 || scenario == 33) {
+    assert(f.start());
+    auto socket = f.connect(A);
+    f.enqueue(Bytes{0x80, 0xa1});
+    if (scenario == 28) socket->write_limit = std::numeric_limits<size_t>::max();
+    if (scenario == 32) socket->send_error = EAGAIN;
+    if (scenario == 33) socket->send_error = EINTR;
+    if (scenario == 31) {
+      socket->sdk_write_block_ms = 10000;
+      MockTcp::sdk_write_hook = [](uint32_t delay) { mock_millis += delay; };
+    }
+    socket->received = {'<', 2, 0, 0x16, 3};
+    const auto before = mock_millis;
+    assert(f.tick() == 2 && f.input[0] == 0x16 && f.input[1] == 3);
+    assert(mock_millis == before && socket->sdk_write_calls == 0 && socket->send_calls == 1);
+    assert(socket->last_send_flags & MSG_DONTWAIT);
+    assert(socket->connected && f.cancellations == 0);
+    if (scenario != 28) {
+      assert(socket->sent.empty() && f.transport.hasPendingIO());
+      socket->send_error = 0;
+      f.drain(socket);
+      assert((socket->sent == framed({Bytes{0x80, 0xa1}})));
+    }
+  } else if (scenario == 29) {
+    assert(f.start());
+    auto socket = f.connect(A);
+    for (int poll = 0; poll < 100; ++poll) {
+      const Bytes push{0x88, uint8_t(poll)};
+      // Production permits shedding best-effort radio logs when saturated.
+      f.transport.writeFrame(push.data(), push.size());
+      socket->received = {'<', 2, 0, 0x16, 3};
+      assert(f.tick() == 2 && f.input[0] == 0x16 && f.input[1] == 3);
+      ++mock_millis;
+    }
+    auto status = f.transport.getStatus();
+    assert(status.validFrames == 100 && status.acceptedClients == 1);
+    assert(socket->sdk_write_calls == 0 && socket->send_calls == 100);
+    assert(status.clientConnected && f.cancellations == 0 && f.transport.hasPendingIO());
+  } else if (scenario == 30) {
+    assert(f.start());
+    auto socket = f.connect(A);
+    const Bytes first{0x80, 0xa1}, second{0x88, 0xb1}, info{0x0d, 0x31, 0x32};
+    f.enqueue(first); f.enqueue(second);
+    socket->write_limit = 1;
+    socket->received = {'<', 2, 0, 0x16, 3};
+    assert(f.tick() == 2 && socket->sent == Bytes{'>'});
+    assert(f.transport.getStatus().txFrames == 0);
+    f.enqueue(info);
+    f.drain(socket);
+    assert(socket->sent == framed({first, info, second}));
+    assert(f.transport.getStatus().txFrames == 3 && f.transport.getStatus().validFrames == 1);
+  } else if (scenario == 34 || scenario == 35 || scenario == 42) {
+    assert(f.start());
+    auto socket = f.connect(A);
+    MultiSerialInterface manager;
+    f.manager = &manager;
+    assert(manager.addInterface(InterfaceType::WiFi, &f.transport)); manager.enable();
+    socket->received = {'<', 2, 0, 0x16, 3};
+    assert(manager.checkRecvFrame(f.input) == 2); manager.lockReplyRoute();
+    f.pending_operation = true;
+    const Bytes reply{0x0d, 0x31, 0x32};
+    assert(manager.writeFrame(reply.data(), reply.size()) == reply.size());
+    socket->write_limit = 2; f.tick();
+    assert(socket->sent.size() == 2);
+    if (scenario == 34 || scenario == 42) socket->send_error = EPIPE;
+    else socket->descriptor_override = -1;
+    socket->received = {'<', 2, 0, 0x16, 3};
+    assert(f.tick() == 0);
+    assert(!socket->connected && f.cancellations == 1 && !f.pending_operation);
+    assert(!manager.isReplyRouteAvailable(&f.transport));
+    assert(f.transport.getStatus().lastDisconnectReason == SerialWifiInterface::DisconnectReason::TxError);
+    assert(socket->read_count == 5); // Fatal TX must not execute the next command.
+    f.transport.loop(); assert(f.cancellations == 1);
+    f.manager = nullptr;
+    if (scenario == 42) {
+      auto other = f.connect(B, Bytes{'<', 2, 0, 0x16, 3});
+      const Bytes other_reply{0x0d, 0x41}; f.enqueue(other_reply); f.drain(other);
+      assert(other->sent == framed({other_reply}));
+    }
+    auto returned = f.connect(A); f.drain(returned);
+    assert(returned->sent == framed({reply}));
+  } else if (scenario == 36 || scenario == 37) {
+    assert(f.start());
+    auto socket = f.connect(A);
+    if (scenario == 37) mock_millis = UINT32_MAX - 5000;
+    const Bytes reply{0x0d, 0x51}; f.enqueue(reply); f.tick();
+    mock_millis += 9999; f.tick();
+    assert(socket->connected && f.cancellations == 0);
+    ++mock_millis; f.tick();
+    assert(!socket->connected && f.cancellations == 1);
+    assert(f.transport.getStatus().lastDisconnectReason == SerialWifiInterface::DisconnectReason::TxTimeout);
+    auto returned = f.connect(A); f.drain(returned);
+    assert(returned->sent == framed({reply}));
+  } else if (scenario == 38) {
+    assert(f.start());
+    auto socket = f.connect(A); f.enqueue(Bytes{0x0d, 0x51}); f.tick();
+    mock_millis += 9999; socket->write_limit = 1; f.tick();
+    assert(socket->connected && socket->sent.size() == 1);
+    socket->write_limit = 0;
+    mock_millis += 9999; f.tick();
+    assert(socket->connected && f.cancellations == 0);
+    ++mock_millis; f.tick();
+    assert(!socket->connected && f.cancellations == 1);
+    assert(f.transport.getStatus().lastDisconnectReason == SerialWifiInterface::DisconnectReason::TxTimeout);
+  } else if (scenario == 39) {
+    assert(f.start());
+    auto socket = f.connect(A); f.enqueue(Bytes{0x0d, 0x51}); f.drain(socket);
+    mock_millis += 60000; f.transport.loop();
+    assert(socket->connected && f.cancellations == 0);
+    socket->write_limit = 0; f.enqueue(Bytes{0x01, 0x61}); f.tick();
+    mock_millis += 9999; f.tick();
+    assert(socket->connected);
+    ++mock_millis; f.tick();
+    assert(!socket->connected && f.cancellations == 1);
+  } else if (scenario == 40) {
+    assert(f.start());
+    auto socket = f.connect(A); f.enqueue(Bytes{0x88, 0x51});
+    socket->received = {'<', 2}; f.tick();
+    mock_millis += 4999; f.tick();
+    assert(socket->connected);
+    ++mock_millis; f.transport.loop();
+    assert(!socket->connected && f.cancellations == 1);
+    assert(f.transport.getStatus().lastDisconnectReason == SerialWifiInterface::DisconnectReason::FrameTimeout);
+  } else if (scenario == 41) {
+    assert(f.start());
+    auto old = f.connect(A); const Bytes reply{0x0d, 0x51}; f.enqueue(reply); f.tick();
+    mock_millis += 9999;
+    auto next = f.connect(A);
+    assert(!old->connected && next->connected && f.cancellations == 0);
+    mock_millis += 9999; f.transport.loop();
+    assert(next->connected && f.cancellations == 0);
+    f.drain(next); assert(next->sent == framed({reply}));
+  } else if (scenario == 43) {
+    assert(f.start());
+    auto socket = f.connect(A); f.enqueue(Bytes{0x0d, 0x51});
+    socket->send_error = EWOULDBLOCK; socket->received = {'<', 2, 0, 0x16, 3};
+    assert(f.tick() == 2 && socket->connected && f.cancellations == 0);
+    socket->send_error = ECONNRESET; assert(f.tick() == 0);
+    assert(!socket->connected && f.cancellations == 1);
+    assert(f.transport.getStatus().lastDisconnectReason == SerialWifiInterface::DisconnectReason::TxError);
+  } else if (scenario == 44) {
+    assert(f.start());
+    auto socket = f.connect(A);
+    for (int i = 0; i < 4; ++i) f.enqueue(Bytes{0x01, uint8_t(i)});
+    socket->received = {'<', 2, 0, 0x16, 3};
+    assert(f.tick() == 0 && socket->read_count == 0 && f.transport.getStatus().validFrames == 0);
+    socket->write_limit = 2; assert(f.tick() == 0 && socket->read_count == 0);
+    socket->write_limit = std::numeric_limits<size_t>::max();
+    assert(f.tick() == 2 && f.input[0] == 0x16 && f.input[1] == 3);
+    f.enqueue(Bytes{0x0d, 0x51});
+    f.drain(socket);
+    assert((socket->sent == framed({Bytes{0x01, 0}, Bytes{0x01, 1}, Bytes{0x01, 2}, Bytes{0x01, 3}, Bytes{0x0d, 0x51}})));
+  } else if (scenario == 45) {
+    assert(f.start());
+    auto socket = f.connect(A);
+    const Bytes best{0x88, 0x41}; f.enqueue(best);
+    for (int i = 0; i < 3; ++i) f.enqueue(Bytes{0x01, uint8_t(i)});
+    socket->received = {'<', 2, 0, 0x16, 3};
+    assert(f.tick() == 2);
+    f.enqueue(Bytes{0x0d, 0x51}); f.drain(socket);
+    assert((socket->sent == framed({Bytes{0x01, 0}, Bytes{0x01, 1}, Bytes{0x01, 2}, Bytes{0x0d, 0x51}})));
+  } else if (scenario == 46) {
+    assert(f.start());
+    auto socket = f.connect(A); const Bytes best{0x88, 0x41}; f.enqueue(best);
+    socket->write_limit = 1; f.tick();
+    assert(socket->sent == Bytes{'>'});
+    for (int i = 0; i < 3; ++i) f.enqueue(Bytes{0x01, uint8_t(i)});
+    socket->write_limit = 0; socket->received = {'<', 2, 0, 0x16, 3};
+    assert(f.tick() == 0 && socket->read_count == 0);
+    socket->write_limit = std::numeric_limits<size_t>::max();
+    assert(f.tick() == 2); f.enqueue(Bytes{0x0d, 0x51}); f.drain(socket);
+    assert((socket->sent == framed({best, Bytes{0x01, 0}, Bytes{0x01, 1}, Bytes{0x01, 2}, Bytes{0x0d, 0x51}})));
+  } else if (scenario == 47) {
+    assert(f.start());
+    auto socket = f.connect(A, Bytes{'<', 2, 0, 0x16});
+    assert(socket->read_count == 3 && f.transport.hasReceivedFrameHeader());
+    for (int i = 0; i < 4; ++i) f.enqueue(Bytes{0x01, uint8_t(i)});
+    socket->received.push_back(3); assert(f.tick() == 0);
+    mock_millis += 6000; f.transport.loop();
+    assert(socket->connected && f.cancellations == 0 && f.transport.hasReceivedFrameHeader());
+    socket->write_limit = std::numeric_limits<size_t>::max();
+    assert(f.tick() == 2 && f.input[0] == 0x16 && f.input[1] == 3);
+    assert(socket->connected && f.cancellations == 0);
+  } else if (scenario == 48) {
+    assert(f.start());
+    auto socket = f.connect(A); const Bytes reply{0x0d, 0x51, 0x52};
+    f.enqueue(reply); socket->write_limit = 1; f.tick();
+    struct HoldingInterface : BaseSerialInterface {
+      bool input = true;
+      void enable() override {}
+      void disable() override {}
+      bool isEnabled() const override { return true; }
+      bool isConnected() const override { return true; }
+      bool isReadBusy() const override { return false; }
+      bool isWriteBusy() const override { return false; }
+      size_t writeFrame(const uint8_t[], size_t size) override { return size; }
+      size_t checkRecvFrame(uint8_t dest[]) override {
+        if (!input) return 0;
+        input = false; dest[0] = 0x04; return 1;
+      }
+    } other;
+    MultiSerialInterface manager;
+    assert(manager.addInterface(InterfaceType::WiFi, &f.transport));
+    assert(manager.addInterface(InterfaceType::USB, &other)); manager.enable();
+    assert(manager.checkRecvFrame(f.input) == 1 && f.input[0] == 0x04);
+    manager.lockReplyRoute();
+    const size_t sent = socket->sent.size(), sends = socket->send_calls;
+    for (int i = 0; i < 20; ++i) {
+      mock_millis += 1000; manager.loop();
+      assert(manager.checkRecvFrame(f.input) == 0);
+    }
+    assert(socket->connected && f.cancellations == 0);
+    assert(socket->sent.size() == sent && socket->send_calls == sends);
+    manager.unlockReplyRoute(); socket->write_limit = std::numeric_limits<size_t>::max();
+    manager.checkRecvFrame(f.input);
+    assert(socket->connected && f.cancellations == 0 && socket->sent == framed({reply}));
+  } else if (scenario == 49 || scenario == 51) {
+    assert(f.start());
+    if (scenario == 51) mock_millis = UINT32_MAX - 3000;
+    auto socket = f.connect(A, Bytes{'<', 2, 0, 0x16});
+    mock_millis += 4000;
+    for (int i = 0; i < 4; ++i) f.enqueue(Bytes{0x01, uint8_t(i)});
+    f.tick(); mock_millis += 6000; f.transport.loop();
+    assert(socket->connected && f.cancellations == 0 && f.transport.hasReceivedFrameHeader());
+    socket->write_limit = std::numeric_limits<size_t>::max(); f.tick(); // Frees a reply slot, but body is incomplete.
+    mock_millis += 999; f.tick();
+    assert(socket->connected && f.cancellations == 0);
+    ++mock_millis; f.transport.loop();
+    assert(!socket->connected && f.cancellations == 1);
+    assert(f.transport.getStatus().lastDisconnectReason == SerialWifiInterface::DisconnectReason::FrameTimeout);
+  } else if (scenario == 50) {
+    assert(f.start());
+    auto socket = f.connect(A, Bytes{'<', 2, 0, 0x16});
+    mock_millis += 5000;
+    for (int i = 0; i < 4; ++i) f.enqueue(Bytes{0x01, uint8_t(i)});
+    f.transport.loop();
+    assert(!socket->connected && f.cancellations == 1);
+    assert(f.transport.getStatus().lastDisconnectReason == SerialWifiInterface::DisconnectReason::FrameTimeout);
   } else {
     assert(false && "unknown scenario");
   }

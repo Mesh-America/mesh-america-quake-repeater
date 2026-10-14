@@ -2,12 +2,18 @@
 #include "../CompanionFrameQueue.h"
 #include <WiFi.h>
 #include <errno.h>
+#if defined(ESP32)
+#include <lwip/sockets.h>
+#endif
 
 static constexpr uint32_t WIFI_FRAME_TIMEOUT_MS = 5000;
+static constexpr uint32_t WIFI_TX_STALL_TIMEOUT_MS = 10000;
 
 void SerialWifiInterface::clearBuffers() {
   held_queue_len = send_queue_len = 0;
   send_offset = 0;
+  tx_waiting = false;
+  tx_last_progress = 0;
   queue_has_ip = false;
   held_since = 0;
   memset(held_queue, 0, sizeof(held_queue));
@@ -27,9 +33,10 @@ void SerialWifiInterface::loop() {
   // Use enable intent, not isEnabled(): an unavailable listener must recover
   // even though MultiSerialInterface correctly declines to dispatch into it.
   if (_isEnabled && listener_requested) serviceListener(now);
+  updateReceiveCapacityPause(now);
   if (deviceConnected && !client.connected()) {
     disconnectClient(true, DisconnectReason::PeerClosed);
-  } else if (deviceConnected && receive_pending
+  } else if (deviceConnected && receive_pending && !receive_capacity_paused
       && (uint32_t)(now - receive_started) >= WIFI_FRAME_TIMEOUT_MS) {
     disconnectClient(true, DisconnectReason::FrameTimeout);
   }
@@ -42,6 +49,8 @@ void SerialWifiInterface::disconnectClient(bool cancel_session,
   if (client) client.stop();
   resetReceivedFrameHeader();
   send_offset = 0; // A reconnect must replay the whole frame, never its suffix.
+  tx_waiting = false;
+  tx_last_progress = 0;
   if (was_connected) {
     ++disconnect_count;
     last_disconnect_reason = reason;
@@ -243,6 +252,8 @@ const char* SerialWifiInterface::disconnectReasonName(DisconnectReason reason) {
     case DisconnectReason::Replaced: return "replaced";
     case DisconnectReason::Disabled: return "disabled";
     case DisconnectReason::Ended: return "ended";
+    case DisconnectReason::TxError: return "tx-error";
+    case DisconnectReason::TxTimeout: return "tx-timeout";
   }
   return "unknown";
 }
@@ -264,6 +275,7 @@ size_t SerialWifiInterface::writeFrame(const uint8_t src[], size_t len) {
       return 0;
     }
     send_queue_len = tail_len + pinned;
+    updateReceiveCapacityPause((uint32_t)millis());
     return len;
   }
   return 0;
@@ -281,11 +293,46 @@ bool SerialWifiInterface::hasReceivedFrameHeader() {
   return received_frame_header.type != 0 && received_frame_header.length != 0;
 }
 
+bool SerialWifiInterface::responseCapacityAvailable() const {
+  if (send_queue_len < FRAME_QUEUE_SIZE) return true;
+  // A command's reply can displace an unsent best-effort push, never a
+  // delivery-required reply or the partly transmitted front frame.
+  for (int i = send_offset != 0 ? 1 : 0; i < send_queue_len; ++i) {
+    if (!mesh::companionFrameRequiresDelivery(send_queue[i].buf,
+                                              send_queue[i].len)) return true;
+  }
+  return false;
+}
+
+void SerialWifiInterface::updateReceiveCapacityPause(uint32_t now) {
+  if (!receive_pending) {
+    receive_capacity_paused = false;
+    receive_capacity_paused_at = 0;
+    return;
+  }
+  const bool pause = deviceConnected && !responseCapacityAvailable();
+  if (pause && !receive_capacity_paused) {
+    // A reply-capacity change cannot retroactively forgive a deadline which
+    // already expired while RX was runnable.
+    if ((uint32_t)(now - receive_started) >= WIFI_FRAME_TIMEOUT_MS) return;
+    receive_capacity_paused = true;
+    receive_capacity_paused_at = now;
+  } else if (!pause && receive_capacity_paused) {
+    // Preserve the framing budget already spent, excluding time for which
+    // this transport intentionally withheld RX to make room for its reply.
+    receive_started += (uint32_t)(now - receive_capacity_paused_at);
+    receive_capacity_paused = false;
+    receive_capacity_paused_at = 0;
+  }
+}
+
 void SerialWifiInterface::resetReceivedFrameHeader() {
   received_frame_header.type = 0;
   received_frame_header.length = 0;
   receive_pending = false;
   receive_started = 0;
+  receive_capacity_paused = false;
+  receive_capacity_paused_at = 0;
 }
 
 size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
@@ -327,23 +374,54 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
     }
   }
 
-  if (deviceConnected) {
-    if (send_queue_len > 0) {   // first, check send queue
-      
-      _last_write = millis();
-      int len = send_queue[0].len;
+  if (deviceConnected && send_queue_len > 0) {
+    _last_write = millis();
+    const uint32_t tx_now = (uint32_t)_last_write;
+    if (!tx_waiting) {
+      tx_waiting = true;
+      tx_last_progress = tx_now;
+    }
+    int len = send_queue[0].len;
 
-      uint8_t pkt[3 + MAX_FRAME_SIZE]; // serial-compatible framing
-      pkt[0] = '>';
-      pkt[1] = (len & 0xFF);  // LSB
-      pkt[2] = (len >> 8);    // MSB
-      memcpy(&pkt[3], send_queue[0].buf, send_queue[0].len);
-      const size_t total = 3U + len;
-      const size_t remaining = total - send_offset;
-      const size_t written = client.write(pkt + send_offset, remaining);
-      send_offset += written < remaining ? written : remaining;
-      if (send_offset < total) return 0;
+    uint8_t pkt[3 + MAX_FRAME_SIZE]; // serial-compatible framing
+    pkt[0] = '>';
+    pkt[1] = (len & 0xFF);  // LSB
+    pkt[2] = (len >> 8);    // MSB
+    memcpy(&pkt[3], send_queue[0].buf, send_queue[0].len);
+    const size_t total = 3U + len;
+    const size_t remaining = total - send_offset;
+    size_t written = 0;
+#if defined(ESP32)
+    // WiFiClient::write retries ten one-second select waits and restarts that
+    // budget after partial progress. One nonblocking send bounds this poll
+    // and leaves both incoming commands and other transports runnable.
+    const int result = ::send(client.fd(), pkt + send_offset, remaining,
+                              MSG_DONTWAIT);
+    if (result > 0) {
+      written = static_cast<size_t>(result);
+    } else if (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK
+               && errno != EINTR) {
+      disconnectClient(true, DisconnectReason::TxError);
+      return 0;
+    }
+#else
+    written = client.write(pkt + send_offset, remaining);
+#endif
+    if (written > 0) {
+      tx_last_progress = (uint32_t)millis();
+    } else if ((uint32_t)((uint32_t)millis() - tx_last_progress)
+               >= WIFI_TX_STALL_TIMEOUT_MS) {
+      // A locked stream on another transport may omit WiFi's polling for a
+      // while. Try its socket before declaring a stall: a writable client
+      // can resume after that scheduler gap without an artificial timeout.
+      disconnectClient(true, DisconnectReason::TxTimeout);
+      return 0;
+    }
+    send_offset += written < remaining ? written : remaining;
+    if (send_offset == total) {
       send_offset = 0;
+      tx_waiting = false;
+      tx_last_progress = 0;
       ++tx_frames;
       last_tx_opcode = send_queue[0].buf[0];
       send_queue_len--;
@@ -351,41 +429,45 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
         send_queue[i] = send_queue[i + 1];
       }
       memset(&send_queue[send_queue_len], 0, sizeof(send_queue[send_queue_len]));
-    } else {
-
-      if (!receive_pending && client.available() > 0) {
-        receive_pending = true;
-        receive_started = (uint32_t)millis();
-      }
-      if (!hasReceivedFrameHeader()) {
-        if (client.available() < 3) return 0;
-        uint8_t header[3];
-        if (client.readBytes(header, sizeof(header)) != sizeof(header)) {
-          disconnectClient(true, DisconnectReason::ShortHeader);
-          return 0;
-        }
-        received_frame_header.type = header[0];
-        received_frame_header.length = uint16_t(header[1]) | (uint16_t(header[2]) << 8);
-        // Validate before waiting for any payload. Closing an invalid stream
-        // avoids unbounded discard loops and interpreting its tail as commands.
-        if (received_frame_header.type != '<' || received_frame_header.length == 0
-            || received_frame_header.length > MAX_FRAME_SIZE) {
-          disconnectClient(true, DisconnectReason::InvalidHeader);
-          return 0;
-        }
-      }
-      const size_t frame_length = received_frame_header.length;
-      if (client.available() < (int)frame_length) return 0;
-      if (dest == nullptr || client.readBytes(dest, frame_length) != frame_length) {
-        disconnectClient(true, DisconnectReason::ShortPayload);
-        return 0; // Never dispatch a truncated command, even after a short read.
-      }
-      resetReceivedFrameHeader();
-      ++valid_frames;
-      last_opcode = dest[0];
-      return frame_length;
-      
     }
+  }
+  // Sending a queued push or just part of a frame must not postpone the
+  // client's device-query/app-start indefinitely. Poll at most one incoming
+  // frame independently of the single outgoing attempt above.
+  updateReceiveCapacityPause((uint32_t)millis());
+  if (deviceConnected) {
+    if (!responseCapacityAvailable()) return 0;
+    if (!receive_pending && client.available() > 0) {
+      receive_pending = true;
+      receive_started = (uint32_t)millis();
+    }
+    if (!hasReceivedFrameHeader()) {
+      if (client.available() < 3) return 0;
+      uint8_t header[3];
+      if (client.readBytes(header, sizeof(header)) != sizeof(header)) {
+        disconnectClient(true, DisconnectReason::ShortHeader);
+        return 0;
+      }
+      received_frame_header.type = header[0];
+      received_frame_header.length = uint16_t(header[1]) | (uint16_t(header[2]) << 8);
+      // Validate before waiting for any payload. Closing an invalid stream
+      // avoids unbounded discard loops and interpreting its tail as commands.
+      if (received_frame_header.type != '<' || received_frame_header.length == 0
+          || received_frame_header.length > MAX_FRAME_SIZE) {
+        disconnectClient(true, DisconnectReason::InvalidHeader);
+        return 0;
+      }
+    }
+    const size_t frame_length = received_frame_header.length;
+    if (client.available() < (int)frame_length) return 0;
+    if (dest == nullptr || client.readBytes(dest, frame_length) != frame_length) {
+      disconnectClient(true, DisconnectReason::ShortPayload);
+      return 0; // Never dispatch a truncated command, even after a short read.
+    }
+    resetReceivedFrameHeader();
+    ++valid_frames;
+    last_opcode = dest[0];
+    return frame_length;
   }
 
   return 0;

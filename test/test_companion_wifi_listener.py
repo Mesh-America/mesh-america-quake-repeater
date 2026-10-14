@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,30 @@ SCENARIOS = (
     "MultiSerial services unavailable transport so it can recover before dispatch",
     "failed listener repair retains an accepted client and queued data",
     "stale AP address never starts a listener while AP mode is disabled",
+    "queued radio push cannot hide an already complete DEVICE_QUERY",
+    "continuous unsolicited pushes cannot starve 100 incoming handshakes",
+    "partial TX cannot block RX or let a new response corrupt its pinned frame",
+    "zero TX never calls the blocking SDK writer or blocks incoming DEVICE_QUERY",
+    "EAGAIN retains TX and still dispatches complete incoming commands",
+    "EINTR retains TX and still dispatches complete incoming commands",
+    "fatal EPIPE cancels the route once and replays the complete frame on reconnect",
+    "invalid public socket descriptor cancels the route without consuming input",
+    "TX no-progress deadline fires at ten seconds and permits same-IP queue replay",
+    "TX no-progress deadline survives millis rollover",
+    "positive byte progress resets the TX deadline but zero writes do not",
+    "completed TX and a later new frame have independent stall deadlines",
+    "partial inbound frame still expires when outbound traffic is stalled",
+    "same-IP live takeover resets stalled TX and preserves complete replies",
+    "peer takeover after TX error receives none of the old client replies",
+    "ECONNRESET is fatal while EWOULDBLOCK remains temporary",
+    "full required queue defers incoming command until its reply can be admitted",
+    "unpinned best-effort queue item permits a higher priority handshake reply",
+    "only pinned best-effort frame cannot be evicted to admit a handshake reply",
+    "deliberate reply-capacity wait does not expire a partial inbound frame",
+    "another transport lock cannot cause a false timeout on a writable WiFi client",
+    "reply-capacity pause preserves the remaining inbound timeout budget",
+    "new queue pressure cannot retroactively forgive an expired inbound frame",
+    "reply-capacity timeout pause survives millis rollover",
 )
 
 
@@ -74,6 +99,40 @@ class CompanionWiFiListenerTests(unittest.TestCase):
                     )
                     self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
                     self.assertIn(f"PASS: Wi-Fi listener scenario {scenario}", checked.stdout)
+
+    def test_actual_device_query_response_survives_continuous_radio_pushes(self):
+        compiler = os.environ.get("CXX") or shutil.which("g++") or shutil.which("clang++")
+        if compiler is None:
+            self.skipTest("a host C++17 compiler is required")
+        mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="utf-8")
+        header = (ROOT / "examples/companion_radio/MyMesh.h").read_text(encoding="utf-8")
+        query = extract_braced(mesh, "if (cmd_frame[0] == CMD_DEVICE_QUERY && len >= 2)")
+        helpers = (ROOT / "src/helpers/TxtDataHelpers.cpp").read_text(encoding="utf-8")
+        copy = extract_braced(helpers, "void StrHelper::strzcpy(")
+        constants = []
+        for name, source in (("CMD_DEVICE_QUERY", mesh), ("RESP_CODE_DEVICE_INFO", mesh),
+                             ("FIRMWARE_VER_CODE", header)):
+            match = re.search(r"^#define\s+" + name + r"\s+(\d+)\b", source, re.MULTILINE)
+            self.assertIsNotNone(match, name)
+            constants.append(f"#define {name} {match.group(1)}")
+        fixture = (ROOT / "test/fixtures/companion_wifi_listener/handshake.cpp").read_text()
+        fixture = fixture.replace("@CONSTANTS@", "\n".join(constants))
+        fixture = fixture.replace("@DEVICE_QUERY@", query).replace("@COPY@", copy)
+        with tempfile.TemporaryDirectory(prefix="meshcore-wifi-handshake-") as directory:
+            work = Path(directory)
+            source = work / "handshake.cpp"
+            source.write_text(fixture, encoding="utf-8")
+            binary = work / "handshake.exe"
+            compiled = subprocess.run(
+                [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 *SANITIZERS, "-DESP32=1", f"-I{MOCKS}", f"-I{ROOT / 'src'}",
+                 str(source), str(ROOT / "src/helpers/wifi/SerialWifiInterface.cpp"),
+                 "-o", str(binary)], capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            checked = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            self.assertIn("PASS: actual DEVICE_QUERY reply under 100 radio-push polls", checked.stdout)
 
     def test_production_cli_and_display_formatter_are_bounded_and_observable(self):
         compiler = os.environ.get("CXX") or shutil.which("g++") or shutil.which("clang++")

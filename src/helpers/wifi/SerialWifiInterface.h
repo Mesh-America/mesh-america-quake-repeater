@@ -10,7 +10,7 @@ public:
   enum class StartError : uint8_t { None, InvalidPort, StartFailed };
   enum class DisconnectReason : uint8_t {
     None, PeerClosed, FrameTimeout, InvalidHeader, ShortHeader, ShortPayload,
-    Replaced, Disabled, Ended
+    Replaced, Disabled, Ended, TxError, TxTimeout
   };
   struct Status {
     State state;
@@ -60,6 +60,8 @@ private:
   uint8_t last_opcode = 0;
   uint32_t tx_frames = 0;
   uint8_t last_tx_opcode = 0;
+  bool tx_waiting = false;
+  uint32_t tx_last_progress = 0;
   uint32_t disconnect_count = 0;
   DisconnectReason last_disconnect_reason = DisconnectReason::None;
 
@@ -89,6 +91,8 @@ private:
   size_t send_offset = 0;
   uint32_t receive_started = 0;
   bool receive_pending = false;
+  bool receive_capacity_paused = false;
+  uint32_t receive_capacity_paused_at = 0;
   void (*session_changed)(void*) = nullptr;
   void* session_context = nullptr;
 
@@ -99,6 +103,8 @@ private:
   bool addressReady();
   bool serviceListener(uint32_t now);
   void stopListener(DisconnectReason reason);
+  bool responseCapacityAvailable() const;
+  void updateReceiveCapacityPause(uint32_t now);
 
 protected:
 
