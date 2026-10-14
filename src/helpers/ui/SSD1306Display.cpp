@@ -39,6 +39,17 @@ bool SSD1306Display::begin() {
   if (started) {
     _panel_ready = true;
     applyRotation();
+  } else {
+    _panel_ready = false;
+    if (_peripher_power) {
+#if PIN_OLED_RESET >= 0
+      digitalWrite(PIN_OLED_RESET, LOW);
+#endif
+      // begin() owns one claim even when it was already on, or turnOn()
+      // reached it after a previous failure. Other peripheral owners remain.
+      _peripher_power->release();
+    }
+    _isOn = false;
   }
   return started;
 }
@@ -79,9 +90,11 @@ void SSD1306Display::setFlipped(bool flipped) {
 
 void SSD1306Display::turnOn() {
   if (!_isOn) {
-    if (_peripher_power) _peripher_power->claim();
-    _isOn = true;  // set before begin() to prevent double claim
-    if (_peripher_power) begin();  // re-init display after power was cut
+    if (_peripher_power || !_panel_ready) {
+      if (!begin()) return;  // begin owns and rolls back its claim on failure
+    } else {
+      _isOn = true;  // A continuously powered, initialized panel needs no reset.
+    }
   }
   display.ssd1306_command(SSD1306_DISPLAYON);
 }
