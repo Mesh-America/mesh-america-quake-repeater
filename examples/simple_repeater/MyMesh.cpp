@@ -42,6 +42,7 @@
 #include <helpers/FloodFilterPolicy.h>
 #include <helpers/FloodRuleCLI.h>
 #include <helpers/LazyPersistence.h>
+#include <helpers/PowerManagementUtils.h>
 #include <helpers/RegionNameUtils.h>
 #if MESH_PACKET_LOGGING
 #include <helpers/SerialPacketLog.h>
@@ -5149,12 +5150,12 @@ uint32_t MyMesh::limitSleepToMillisTimer(unsigned long timestamp, uint32_t sleep
   if (!timestamp || sleep_secs == 0) {
     return sleep_secs;
   }
-  unsigned long now = millis();
-  if ((long)(now - timestamp) >= 0) {
+  const uint32_t now = millis();
+  if ((int32_t)(now - (uint32_t)timestamp) >= 0) {
     return 0;
   }
-  unsigned long remaining_ms = timestamp - now;
-  uint32_t remaining_secs = (remaining_ms + 999UL) / 1000UL;
+  const uint32_t remaining_ms = (uint32_t)timestamp - now;
+  uint32_t remaining_secs = mesh::power::powerSaveSleepSeconds(remaining_ms);
   return remaining_secs < sleep_secs ? remaining_secs : sleep_secs;
 }
 
@@ -5184,12 +5185,12 @@ uint32_t MyMesh::getPowerSaveSleepSeconds(uint32_t max_secs) const {
   uint32_t sleep_secs = max_secs;
   uint32_t queue_delay_ms;
   if (getNextQueueWakeDelay(queue_delay_ms)) {
-    uint32_t queue_delay_secs = (queue_delay_ms + 999UL) / 1000UL;
+    uint32_t queue_delay_secs = mesh::power::powerSaveSleepSeconds(queue_delay_ms);
     if (queue_delay_secs < sleep_secs) sleep_secs = queue_delay_secs;
   }
   uint32_t retry_delay_ms;
   if (getNextRetryWakeDelay(retry_delay_ms)) {
-    uint32_t retry_delay_secs = (retry_delay_ms + 999UL) / 1000UL;
+    uint32_t retry_delay_secs = mesh::power::powerSaveSleepSeconds(retry_delay_ms);
     if (retry_delay_secs < sleep_secs) sleep_secs = retry_delay_secs;
   }
   sleep_secs = limitSleepToMillisTimer(next_flood_advert, sleep_secs);

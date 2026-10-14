@@ -265,6 +265,7 @@ jobs:
           python3 -B test/test_sensor_tracker_client.py -v
           python3 -B test/test_sensor_tracker_gps.py -v
           python3 -B test/test_sensor_tracker_sleep.py -v
+          python3 -B test/test_power_saving_deadlines.py -v
 
       - name: Verify Companion contact and channel TX routing
         run: |

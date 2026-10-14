@@ -24,6 +24,7 @@ FIXTURE = r'''
 #include <cstring>
 #include <new>
 #include <helpers/WebConfigBatch.h>
+#include <helpers/PowerManagementUtils.h>
 #include <helpers/WiFiNetworkPowerPolicy.h>
 #include <helpers/WirelessControl.h>
 uint32_t now = 0;

@@ -18,6 +18,7 @@ HARNESS = r'''
 #include <cstring>
 #include <new>
 #include <limits>
+#include <helpers/PowerManagementUtils.h>
 #define WITH_BRIDGE 1
 #define WITH_RS232_BRIDGE Serial2
 #define WITH_RS232_BRIDGE_UART 2
@@ -310,7 +311,7 @@ class RS232HeartbeatOwnerTests(unittest.TestCase):
                         flags.append("-DWITH_MQTT_BRIDGE=1")
                     built = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                         "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
-                        *flags, str(cpp), "-o", str(binary)], capture_output=True, text=True, timeout=60)
+                        *flags, "-I", str(ROOT / "src"), str(cpp), "-o", str(binary)], capture_output=True, text=True, timeout=60)
                     self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
                     checked = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
                     self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)

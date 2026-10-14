@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEADLINES = r'''
 #include <Arduino.h>
 #include <cassert>
+#include <helpers/PowerManagementUtils.h>
 #define SENSOR_READ_INTERVAL_SECS 60
 bool logging=false;
 namespace mesh {bool isUsbLoggingWatchdogArmed(){return logging;}}
@@ -98,13 +99,18 @@ int main(){
                  &radio_driver.calibration,&s.queue_due,&s.retry_due}){
   *due=true;assert(s.hasPendingWork()&&s.getPowerSaveSleepSeconds(30)==0);*due=false;
  }
- s.queue_delay_set=true;s.queue_delay=2500;assert(s.getPowerSaveSleepSeconds(30)==3);
+ #if defined(NRF52_PLATFORM) || defined(RP2040_PLATFORM) || defined(STM32_PLATFORM)
+ constexpr unsigned queue_idle=3,retry_idle=2;
+ #else
+ constexpr unsigned queue_idle=2,retry_idle=1;
+ #endif
+ s.queue_delay_set=true;s.queue_delay=2500;assert(s.getPowerSaveSleepSeconds(30)==queue_idle);
 #if MESH_ENABLE_SENSOR_TRACKER
  assert(s.trackerNeedsRadio());
 #endif
  s.queue_delay_set=false;s.retry_delay_set=true;s.retry_delay=1500;
- assert(s.getPowerSaveSleepSeconds(30)==2);s.retry_delay_set=false;
- s.dirty_contacts_expiry=now_ms+1001;assert(s.getPowerSaveSleepSeconds(30)==2);
+ assert(s.getPowerSaveSleepSeconds(30)==retry_idle);s.retry_delay_set=false;
+ s.dirty_contacts_expiry=now_ms+1001;assert(s.getPowerSaveSleepSeconds(30)==retry_idle);
  s.dirty_contacts_expiry=0;s.last_read_time=45;
  assert(s.getPowerSaveSleepSeconds(30)==5);s.last_read_time=40;
  assert(s.hasPendingWork()&&s.getPowerSaveSleepSeconds(30)==0);
@@ -245,7 +251,7 @@ class SensorTrackerSleepTest(unittest.TestCase):
                 "-Wno-unused-parameter", "-Wno-unused-function", "-Wno-unused-variable",
                 *(["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                    "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else []),
-                *[f"-D{define}" for define in defines], "-I", str(path),
+                *[f"-D{define}" for define in defines], "-I", str(path), "-I", str(ROOT / "src"),
                 str(cpp), "-o", str(binary),
             ], capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -261,9 +267,10 @@ class SensorTrackerSleepTest(unittest.TestCase):
         methods += "\n#if MESH_ENABLE_SENSOR_TRACKER\n" + extract_braced(
             tracker, "bool SensorMesh::trackerNeedsRadio(") + "\n#endif\n"
         for enabled in (0, 1):
-            with self.subTest(enabled=enabled):
-                self.compile_run(DEADLINES.replace("@METHODS@", methods),
-                                 (f"MESH_ENABLE_SENSOR_TRACKER={enabled}",))
+            for platform in ((), ("NRF52_PLATFORM=1",)):
+                with self.subTest(enabled=enabled, platform=platform):
+                    self.compile_run(DEADLINES.replace("@METHODS@", methods),
+                                     (f"MESH_ENABLE_SENSOR_TRACKER={enabled}", *platform))
 
     def test_actual_main_timer_allocation_queue_failure_and_platform_paths(self):
         main = (ROOT / "examples/simple_sensor/main.cpp").read_text()

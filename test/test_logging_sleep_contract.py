@@ -26,6 +26,7 @@ HARNESS = r'''
 #include <cstdint>
 #include <stdexcept>
 #include <iostream>
+#include <helpers/PowerManagementUtils.h>
 #define WITH_BRIDGE 1
 struct AbstractBridge { virtual bool isRunning() const = 0; };
 struct MQTTBridge : AbstractBridge {
@@ -153,7 +154,7 @@ class LoggingSleepContractTest(unittest.TestCase):
                                    .replace("@METHODS@", methods))
                     built = subprocess.run([
                         os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
-                        str(cpp), "-o", str(binary),
+                        "-I", str(ROOT / "src"), str(cpp), "-o", str(binary),
                     ], capture_output=True, text=True)
                     self.assertEqual(built.returncode, 0, built.stderr)
                     result = subprocess.run([str(binary)], capture_output=True, text=True)

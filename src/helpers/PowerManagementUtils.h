@@ -5,6 +5,18 @@
 namespace mesh {
 namespace power {
 
+inline uint32_t powerSaveSleepSeconds(uint32_t delay_ms) {
+  const uint32_t seconds = delay_ms / 1000UL;
+#if defined(NRF52_PLATFORM) || defined(RP2040_PLATFORM) || defined(STM32_PLATFORM)
+  // These boards ignore seconds and idle until an interrupt. Keep sub-second
+  // idle eligible; periodic clock interrupts service the remaining deadline.
+  return seconds + (delay_ms % 1000UL != 0);
+#else
+  // Timed sleepers must wake before a deadline, not round past its last fraction.
+  return seconds;
+#endif
+}
+
 inline uint16_t medianVoltage(uint16_t a, uint16_t b, uint16_t c) {
   if (a > b) { uint16_t t = a; a = b; b = t; }
   if (b > c) { uint16_t t = b; b = c; c = t; }

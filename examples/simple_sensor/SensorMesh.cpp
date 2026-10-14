@@ -5,6 +5,7 @@
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/ClientPathPersistence.h>
 #include <helpers/LazyPersistence.h>
+#include <helpers/PowerManagementUtils.h>
 #include <helpers/RoutingPolicy.h>
 #include <helpers/radiolib/RXPowerSaving.h>
 #include <helpers/sensors/LPPDataHelpers.h>
@@ -1676,10 +1677,12 @@ uint32_t SensorMesh::limitSleepToMillisTimer(unsigned long timestamp,
                                               uint32_t sleep_secs) const {
   if (!timestamp || sleep_secs == 0) return sleep_secs;
 
-  unsigned long now = millis();
-  if ((long)(now - timestamp) >= 0) return 0;
+  const uint32_t now = millis();
+  if ((int32_t)(now - (uint32_t)timestamp) >= 0) return 0;
 
-  uint32_t remaining_secs = (timestamp - now + 999UL) / 1000UL;
+  // Keep the millis arithmetic 32-bit, including on native test hosts.
+  const uint32_t remaining_ms = (uint32_t)timestamp - now;
+  uint32_t remaining_secs = mesh::power::powerSaveSleepSeconds(remaining_ms);
   return remaining_secs < sleep_secs ? remaining_secs : sleep_secs;
 }
 
@@ -1725,11 +1728,11 @@ uint32_t SensorMesh::getPowerSaveSleepSeconds(uint32_t max_secs) const {
 #endif
   uint32_t wake_delay_ms;
   if (getNextQueueWakeDelay(wake_delay_ms)) {
-    uint32_t wake_delay_secs = (wake_delay_ms + 999UL) / 1000UL;
+    uint32_t wake_delay_secs = mesh::power::powerSaveSleepSeconds(wake_delay_ms);
     if (wake_delay_secs < sleep_secs) sleep_secs = wake_delay_secs;
   }
   if (getNextRetryWakeDelay(wake_delay_ms)) {
-    uint32_t wake_delay_secs = (wake_delay_ms + 999UL) / 1000UL;
+    uint32_t wake_delay_secs = mesh::power::powerSaveSleepSeconds(wake_delay_ms);
     if (wake_delay_secs < sleep_secs) sleep_secs = wake_delay_secs;
   }
 
