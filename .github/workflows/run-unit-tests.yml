@@ -222,6 +222,7 @@ jobs:
           python3 -B test/test_rs232_runtime.py -v
           python3 -B test/test_rs232_mqtt_runtime.py -v
           python3 -B test/test_rs232_driver_lifecycle.py -v
+          python3 -B test/test_rs232_nrf_uart_lifecycle.py -v
           python3 -B test/test_rs232_heartbeat.py -v
           python3 -B test/test_rs232_heartbeat_owner.py -v
           python3 -B test/test_rs232_power_settings.py -v
