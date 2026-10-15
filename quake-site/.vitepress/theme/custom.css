@@ -100,6 +100,69 @@
   max-width: 320px;
 }
 
+/* The hero emblem shakes like a small earthquake, the same short, fast, jarring tremor as the flasher's
+   welcome page: about half a second, a few pixels, every 30 seconds, pivoting at its base. Only for visitors
+   who have not asked for reduced motion; the nav logo and favicon stay still. */
+@media (prefers-reduced-motion: no-preference) {
+  .VPHero .image-src {
+    transform-origin: 50% 100%;
+    animation: emblem-quake 30s linear 0.5s infinite;
+  }
+  @keyframes emblem-quake {
+    0% {
+      transform: translate(0px, 0px) rotate(0deg);
+    }
+    0.117% {
+      transform: translate(-5px, 1px) rotate(-0.5deg);
+    }
+    0.233% {
+      transform: translate(5px, -1px) rotate(0.5deg);
+    }
+    0.35% {
+      transform: translate(-5px, 2px) rotate(-0.6deg);
+    }
+    0.467% {
+      transform: translate(4px, -2px) rotate(0.5deg);
+    }
+    0.583% {
+      transform: translate(-5px, 1px) rotate(-0.5deg);
+    }
+    0.7% {
+      transform: translate(4px, -1px) rotate(0.4deg);
+    }
+    0.817% {
+      transform: translate(-4px, 2px) rotate(-0.4deg);
+    }
+    0.933% {
+      transform: translate(4px, -1px) rotate(0.4deg);
+    }
+    1.05% {
+      transform: translate(-3px, 1px) rotate(-0.3deg);
+    }
+    1.167% {
+      transform: translate(3px, -1px) rotate(0.3deg);
+    }
+    1.283% {
+      transform: translate(-2px, 1px) rotate(-0.2deg);
+    }
+    1.4% {
+      transform: translate(2px, 0px) rotate(0.2deg);
+    }
+    1.517% {
+      transform: translate(-1px, 0px) rotate(-0.1deg);
+    }
+    1.633% {
+      transform: translate(1px, 0px) rotate(0.1deg);
+    }
+    1.75% {
+      transform: translate(0px, 0px) rotate(0deg);
+    }
+    100% {
+      transform: translate(0, 0) rotate(0);
+    }
+  }
+}
+
 /* Feature cards: tinted icon tile, lift on hover. */
 .VPFeature {
   border: 1px solid var(--border-default);
