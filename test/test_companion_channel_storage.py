@@ -62,7 +62,8 @@ static void* allocateChannelSnapshot(size_t size) {
             implementation += method(store, "bool DataStore::formatFileSystem()") + "\n"
         (work / "store_under_test.h").write_text(implementation)
         (work / "channel_admission_under_test.h").write_text(
-            method(mesh, "bool MyMesh::canMutateContacts() const"))
+            method(mesh, "bool MyMesh::canMutateContacts() const").replace(
+                "MyMesh::canMutateContacts", "ChannelAdmission::canMutateContacts", 1))
 
         fixture = (ROOT / ("test/fixtures/contact_cache/test_contact_cache.cpp" if is_cached
                            else "test/fixtures/companion_uncached_storage/test.cpp"))

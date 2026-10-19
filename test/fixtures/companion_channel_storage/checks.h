@@ -56,10 +56,10 @@ static void initializeContacts(ChannelFixture& f) {
   f.host.channels.push_back(defaults);
 }
 
-class MyMesh {
+class ChannelAdmission {
   DataStore* _store;
 public:
-  explicit MyMesh(DataStore& store) : _store(&store) {}
+  explicit ChannelAdmission(DataStore& store) : _store(&store) {}
   bool canMutateContacts() const;
 };
 #include "channel_admission_under_test.h"
@@ -99,7 +99,7 @@ static void channel_faults_do_not_poison_contacts() {
 #if defined(NRF52_PLATFORM)
     fail_channel_metadata = false;
 #endif
-    MyMesh admission(f.store);
+    ChannelAdmission admission(f.store);
     uint8_t path[64];
     if (fault == 8) {
       assert(f.store.hasIncompleteContactLoad() && !admission.canMutateContacts());
