@@ -266,7 +266,7 @@ static void test_required_reply_backpressure_services_tx_before_rx() {
   assert(interface.checkRecvFrame(received) == 0);
   assert(interface.isReadBusy() && transmitted.empty());
   test_millis += 61;
-  assert(interface.isWriteBusy()); // Capacity, not just the 60 ms TX throttle.
+  assert(interface.isWriteBusy()); // Capacity also blocks while TX is ready.
   assert(interface.checkRecvFrame(received) == 0);
   assert(interface.isReadBusy() && transmitted.empty());
 
