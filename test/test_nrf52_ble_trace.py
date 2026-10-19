@@ -27,6 +27,9 @@ void meshBleTraceState(char* reply, size_t capacity) {
 void meshBleTraceIdentity(char* reply, size_t capacity) {
   snprintf(reply,capacity,"> identity");
 }
+void meshBleTraceAdvertising(char* reply, size_t capacity) {
+  snprintf(reply,capacity,"> advertising");
+}
 int main() {
   char reply[160];
   assert(!meshBleTraceCommand("get radio",reply,sizeof(reply)));
@@ -49,6 +52,11 @@ int main() {
     assert(meshBleTraceCommand(command,reply,sizeof(reply)));
     assert(!strcmp(reply,"> identity"));
   }
+  for (const char* command : {"get bluetooth.trace.advertising", "get ble.trace.advertising"}) {
+    assert(meshBleTraceCommand(command,reply,sizeof(reply)));
+    assert(!strcmp(reply,"> advertising"));
+  }
+  assert(!meshBleTraceCommand("get ble.trace.advertising extra",reply,sizeof(reply)));
   meshBleTraceDispatchEnter(0x10,0);
   assert(mesh_ble_trace.dispatch_event.load()==0x10);
   meshBleTraceDispatchExit(0x10,0);
@@ -141,6 +149,71 @@ int main() {
 }
 '''.replace("@IMPLEMENTATION@", implementation))
             binary = work / "identity"
+            compiled = subprocess.run([
+                "c++", "-std=c++17", "-O2", "-flto", "-Wall", "-Wextra", "-Werror",
+                "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+                "-fno-pie", "-no-pie", str(cpp), "-o", str(binary),
+            ], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_real_advertising_query_reads_public_payloads_with_31_byte_bounds(self):
+        source = (ROOT / "src/helpers/nrf52/SerialBLEInterface.cpp").read_text()
+        start = source.index("void meshBleTraceAdvertising(")
+        implementation = source[start:source.index("\n}\n", start) + 3]
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            cpp = work / "advertising.cpp"
+            cpp.write_text(r'''
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+static void* instance;
+struct BLEAdvertisingData {
+  uint8_t length = 0;
+  uint8_t bytes[31] = {};
+  uint8_t count() { return length; }
+  uint8_t* getData() { return bytes; }
+};
+static struct { BLEAdvertisingData Advertising, ScanResponse; } Bluefruit;
+@IMPLEMENTATION@
+int main() {
+  char reply[172];
+  meshBleTraceAdvertising(reply, sizeof(reply));
+  assert(!strcmp(reply, "> Bluetooth not initialized"));
+  instance = reply;
+  const uint8_t advertising[] = {2, 1, 6, 2, 10, 4};
+  memcpy(Bluefruit.Advertising.bytes, advertising, sizeof(advertising));
+  Bluefruit.Advertising.length = sizeof(advertising);
+  // This is the copied advertising payload, independent of the GAP getter.
+  const uint8_t scan[] = {5, 9, 'R', 0, 0xc3, 0xa9};
+  memcpy(Bluefruit.ScanResponse.bytes, scan, sizeof(scan));
+  Bluefruit.ScanResponse.length = sizeof(scan);
+  meshBleTraceAdvertising(reply, sizeof(reply));
+  assert(!strcmp(reply, "> adv_len=6,adv_hex=020106020a04,scan_len=6,scan_hex=05095200c3a9"));
+  for (unsigned i = 0; i < 31; ++i) {
+    Bluefruit.Advertising.bytes[i] = i;
+    Bluefruit.ScanResponse.bytes[i] = 255 - i;
+  }
+  Bluefruit.Advertising.length = Bluefruit.ScanResponse.length = 255;
+  meshBleTraceAdvertising(reply, sizeof(reply));
+  assert(strlen(reply) < sizeof(reply) - 1);
+  const char* adv_hex = strstr(reply, "adv_hex=") + 8;
+  const char* scan_hex = strstr(reply, "scan_hex=") + 9;
+  assert(strchr(adv_hex, ',') - adv_hex == 62 && strlen(scan_hex) == 62);
+  assert(!strncmp(reply, "> adv_len=255,", 14));
+  assert(strstr(reply, ",scan_len=255,"));
+  char tiny[3] = {};
+  meshBleTraceAdvertising(tiny, sizeof(tiny));
+  assert(tiny[2] == 0);
+  char untouched = 'X';
+  meshBleTraceAdvertising(&untouched, 0);
+  assert(untouched == 'X');
+}
+'''.replace("@IMPLEMENTATION@", implementation))
+            binary = work / "advertising"
             compiled = subprocess.run([
                 "c++", "-std=c++17", "-O2", "-flto", "-Wall", "-Wextra", "-Werror",
                 "-fsanitize=address,undefined", "-fno-omit-frame-pointer",

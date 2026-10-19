@@ -31,6 +31,7 @@ struct MeshBleTraceBuffer {
 extern "C" { extern MeshBleTraceBuffer mesh_ble_trace; }
 void meshBleTraceState(char* reply, size_t capacity);
 void meshBleTraceIdentity(char* reply, size_t capacity);
+void meshBleTraceAdvertising(char* reply, size_t capacity);
 static inline void meshBleTraceMax(std::atomic<uint32_t>& value, uint32_t sample) {
   uint32_t old = value.load(std::memory_order_relaxed);
   while (sample > old && !value.compare_exchange_weak(old, sample,
@@ -78,6 +79,11 @@ static inline void meshBleTraceDispatchExit(uint32_t event, uint32_t handle) {
 }
 static inline bool meshBleTraceCommand(const char* command, char* reply,
                                        size_t capacity) {
+  if (!strcmp(command, "get bluetooth.trace.advertising")
+      || !strcmp(command, "get ble.trace.advertising")) {
+    meshBleTraceAdvertising(reply, capacity);
+    return true;
+  }
   if (!strcmp(command, "get bluetooth.trace.identity")
       || !strcmp(command, "get ble.trace.identity")) {
     meshBleTraceIdentity(reply, capacity);

@@ -94,6 +94,33 @@ void meshBleTraceIdentity(char* reply, size_t capacity) {
       name_hex, (unsigned)Bluefruit.Advertising.count(),
       (unsigned)Bluefruit.ScanResponse.count());
 }
+
+void meshBleTraceAdvertising(char* reply, size_t capacity) {
+  if (!instance) {
+    snprintf(reply, capacity, "> Bluetooth not initialized");
+    return;
+  }
+  // Legacy advertising/scan-response bytes are public. Read the configured
+  // payloads themselves: the GAP name getter cannot prove what addName copied.
+  // Retain a hard 31-byte bound even if an invalid count is ever observed.
+  const auto encode = [](BLEAdvertisingData& payload, char* output) -> unsigned {
+    static const char hex[] = "0123456789abcdef";
+    const unsigned count = payload.count();
+    const uint8_t* bytes = payload.getData();
+    const unsigned copied = bytes ? (count < 31u ? count : 31u) : 0u;
+    for (unsigned i = 0; i < copied; ++i) {
+      output[2 * i] = hex[bytes[i] >> 4];
+      output[2 * i + 1] = hex[bytes[i] & 15];
+    }
+    output[2 * copied] = 0;
+    return count;
+  };
+  char advertising_hex[63], scan_hex[63];
+  const unsigned advertising_length = encode(Bluefruit.Advertising, advertising_hex);
+  const unsigned scan_length = encode(Bluefruit.ScanResponse, scan_hex);
+  snprintf(reply, capacity, "> adv_len=%u,adv_hex=%s,scan_len=%u,scan_hex=%s",
+      advertising_length, advertising_hex, scan_length, scan_hex);
+}
 #endif
 
 static bool formatDeviceName(char* dest, size_t capacity,
