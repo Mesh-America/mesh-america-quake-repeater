@@ -52,6 +52,48 @@ void meshBleTraceState(char* reply, size_t capacity) {
   if (instance) instance->formatDebugState(reply, capacity);
   else snprintf(reply, capacity, "> Bluetooth not initialized");
 }
+
+void meshBleTraceIdentity(char* reply, size_t capacity) {
+  if (!instance) {
+    snprintf(reply, capacity, "> Bluetooth not initialized");
+    return;
+  }
+  ble_gap_addr_t address = {};
+  const uint32_t address_status = sd_ble_gap_addr_get(&address);
+  // Read the real GAP name rather than the application's saved preferences.
+  // The SDK returns a non-NUL-terminated byte string and the complete length,
+  // even when it only copies the supplied buffer's bounded prefix.
+  uint8_t name[32] = {};
+  uint16_t name_length = sizeof(name);
+  const uint32_t name_status = sd_ble_gap_device_name_get(name, &name_length);
+  // The global SVC ABI guard protects these calls under LTO. Also retain the
+  // explicit output reload barrier used by the other diagnostic SDK queries.
+  __asm__ __volatile__("" ::: "memory");
+  static const char hex[] = "0123456789abcdef";
+  char address_hex[13] = {};
+  if (address_status == NRF_SUCCESS) {
+    for (size_t i = 0; i < sizeof(address.addr); ++i) {
+      const uint8_t byte = address.addr[sizeof(address.addr) - 1 - i];
+      address_hex[2 * i] = hex[byte >> 4];
+      address_hex[2 * i + 1] = hex[byte & 15];
+    }
+  }
+  char name_hex[2 * sizeof(name) + 1] = {};
+  if (name_status == NRF_SUCCESS) {
+    const size_t copied = name_length < sizeof(name) ? name_length : sizeof(name);
+    for (size_t i = 0; i < copied; ++i) {
+      name_hex[2 * i] = hex[name[i] >> 4];
+      name_hex[2 * i + 1] = hex[name[i] & 15];
+    }
+  }
+  snprintf(reply, capacity,
+      "> a=%lu,t=%u,mac=%s,n=%lu,len=%u,hex=%s,adv=%u,scan=%u",
+      (unsigned long)address_status,
+      address_status == NRF_SUCCESS ? (unsigned)address.addr_type : 255u,
+      address_hex, (unsigned long)name_status, (unsigned)name_length,
+      name_hex, (unsigned)Bluefruit.Advertising.count(),
+      (unsigned)Bluefruit.ScanResponse.count());
+}
 #endif
 
 static bool formatDeviceName(char* dest, size_t capacity,
