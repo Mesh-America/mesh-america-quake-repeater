@@ -27,6 +27,7 @@ HARNESS = r'''
 #include <utility>
 #include <vector>
 #include <helpers/ContactListOrder.h>
+#include <helpers/SmallTableSort.h>
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 @INDEX_TYPES@
 struct ContactInfo {

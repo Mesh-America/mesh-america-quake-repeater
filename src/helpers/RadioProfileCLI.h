@@ -92,7 +92,9 @@ class RadioProfileCLI {
   bool secondaryRuntimeBusy() const;
   void noteSecondaryManualChange();
   void formatConfig(char* reply, size_t capacity, const RadioProfileConfig& config,
-                    bool temporary, uint32_t remaining_ms, bool automatic = false) const;
+                    bool temporary, uint32_t remaining_ms, bool automatic = false,
+                    const Schedule* schedule = nullptr) const;
+  void appendSecondaryWarnings(char* reply, size_t capacity, const RadioProfiles& preview) const;
  public:
   void begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool infrastructure_replies = false);
   void loop();

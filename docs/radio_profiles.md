@@ -33,6 +33,30 @@ get radio2.status
 The tuple is **frequency in MHz, bandwidth in kHz, spreading factor, coding-rate
 denominator, mode, optional preamble in symbols**. `5` means coding rate 4/5.
 
+When setting a saved, temporary or scheduled second profile, the response warns
+if its occupied bandwidth overlaps the primary channel or comes within **6 kHz
+of either edge**. This check uses both channel bandwidths, regardless of SF or
+coding rate. The change still applies. The warning also appears when reading
+the second profile, including while the switching timing self-test is pending.
+
+The warning suggests a nearby center frequency with the same bandwidth, SF and
+coding rate that clears the buffer. It chooses the nearest whole-kHz frequency
+on the requested side of the primary channel (above for identical centers),
+checks the radio's supported frequency range, and tries the other side if
+needed. The suggestion is not applied automatically.
+
+For example, with `radio` at **910.525 MHz / 62.5 kHz**, a second 62.5 kHz
+profile at 910.550 MHz produces:
+
+```text
+WARN radio2 overlaps radio1 (6kHz guard); try 910.594MHz
+```
+
+The center spacing must exceed `(primary bandwidth + second bandwidth) / 2 +
+6 kHz`; touching that boundary also warns. Frequency comparisons use the stored
+RF centers rounded to the nearest Hz. This is a channel-spacing aid; choose
+the suggested frequency only when it also suits the network and local band plan.
+
 | Mode | Receive on profile 2 | Transmit on profile 2 |
 | --- | --- | --- |
 | `rx` | Yes | Only infrastructure replies explicitly configured with `tx.reply ... force` |

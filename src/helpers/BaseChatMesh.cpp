@@ -1,5 +1,6 @@
 #include <helpers/BaseChatMesh.h>
 #include <helpers/ContactListOrder.h>
+#include <helpers/SmallTableSort.h>
 #include <helpers/RemoteCliRequest.h>
 #include <helpers/RemoteCliTimeout.h>
 #include <Utils.h>
@@ -1068,8 +1069,8 @@ void BaseChatMesh::scanRecentContacts(int last_n, ContactVisitor* visitor) {
     sort_array[i] = i;
   }
   table = contacts; // pass via global *sigh* :-(
-  qsort(sort_array, num_contacts, sizeof(sort_array[0]),
-        cmp_contact_list_order);
+  mesh::sortSmallTable(sort_array, num_contacts, sizeof(sort_array[0]),
+                       cmp_contact_list_order);
 
   if (last_n == 0) {
     last_n = num_contacts;   // scan ALL

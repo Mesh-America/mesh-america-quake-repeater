@@ -39,6 +39,7 @@
 #include <helpers/LazyPersistence.h>
 #include <helpers/StorageLayout.h>
 #include <helpers/StatsFormatHelper.h>
+#include <helpers/SmallTableSort.h>
 #include <helpers/UsbAsciiBinarySwitch.h>
 #include <helpers/UsbLogging.h>
 #if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
@@ -956,7 +957,7 @@ static int sort_by_recent(const void *a, const void *b) {
 
 int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
   if (max_num > ADVERT_PATH_TABLE_SIZE) max_num = ADVERT_PATH_TABLE_SIZE;
-  qsort(advert_paths, ADVERT_PATH_TABLE_SIZE, sizeof(advert_paths[0]), sort_by_recent);
+  mesh::sortSmallTable(advert_paths, ADVERT_PATH_TABLE_SIZE, sizeof(advert_paths[0]), sort_by_recent);
 
   for (int i = 0; i < max_num; i++) {
     dest[i] = advert_paths[i];

@@ -35,6 +35,7 @@ HARNESS = r'''
 #include <vector>
 #include <sys/stat.h>
 #include <helpers/FilePresence.h>
+#include <helpers/PersistentStoreFormat.h>
 
 struct State {
   bool present = false, directory = false, metadata_error = false;

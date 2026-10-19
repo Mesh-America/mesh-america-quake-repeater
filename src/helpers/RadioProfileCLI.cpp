@@ -10,10 +10,24 @@
 #include "radiolib/HilTxFrequencyGuard.h"
 #include <Arduino.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 
 namespace mesh {
 namespace {
+// Keep bounded response appends out of each formatter's call site. This
+// shares their length/bounds/varargs setup on flash-constrained boards.
+void appendReply(char* reply, size_t capacity, const char* format, ...)
+    __attribute__((format(printf, 3, 4)));
+void appendReply(char* reply, size_t capacity, const char* format, ...) {
+  if (!capacity) return;
+  const size_t used = strlen(reply);
+  if (used >= capacity) return;
+  va_list args;
+  va_start(args, format);
+  vsnprintf(reply + used, capacity - used, format, args);
+  va_end(args);
+}
 constexpr size_t ImageSize = 24;
 const char* const ImagePath = "/radio_profiles";
 const char* const BackupPath = "/radio_profiles.bak";
@@ -54,6 +68,20 @@ bool validReplySetting(uint8_t value) {
 uint32_t remainingMillis(uint32_t end, uint32_t now) {
   const int32_t remaining = (int32_t)(end - now);
   return remaining > 0 ? (uint32_t)remaining : 0;
+}
+uint32_t frequencyHz(float mhz) {
+  return uint32_t(double(mhz) * 1000000.0 + 0.5);
+}
+uint32_t secondaryClearanceHz(const RadioProfiles& profiles) {
+  // Frequencies are MHz, bandwidths are kHz. Expand radio1's occupied
+  // bandwidth by 6 kHz on each side; SF and coding rate do not affect it.
+  return uint32_t((double(profiles.primary.bw) + double(profiles.secondary.params.bw))
+                 * 500.0 + 6000.5);
+}
+bool secondaryOverlaps(uint32_t primary_hz, float secondary_mhz, uint32_t clearance_hz) {
+  const uint32_t secondary_hz = frequencyHz(secondary_mhz);
+  return (primary_hz > secondary_hz ? primary_hz - secondary_hz : secondary_hz - primary_hz)
+         <= clearance_hz;
 }
 }
 
@@ -600,8 +628,7 @@ bool RadioProfileCLI::parseSuffix(const char* input, unsigned fields, char* lega
 
 void RadioProfileCLI::appendPreamble(char* reply, size_t capacity, uint8_t profile) const {
   if (!capacity || !radio_ || !radio_->profiles()) return;
-  const size_t used = strlen(reply);
-  if (used < capacity) snprintf(reply + used, capacity - used, ",preamble=%u",
+  appendReply(reply, capacity, ",preamble=%u",
                                (unsigned)radio_->profilePreamble(profile));
   appendChirpWarning(reply, capacity, *radio_->profiles());
 }
@@ -612,8 +639,7 @@ void RadioProfileCLI::appendSavedPreamble(char* reply, size_t capacity, uint8_t 
   preview.primary.sf = sf; preview.primary.bw = bw;
   preview.primary.preamble = primary_preamble_;
   if (preview.primary != radio_->profiles()->primary) preview.resetSwitchTest();
-  const size_t used = strlen(reply);
-  if (used < capacity) snprintf(reply + used, capacity - used, ",preamble=%u%s",
+  appendReply(reply, capacity, ",preamble=%u%s",
       preview.preamble(0, rxPowerSavingPreambleForParams(sf, bw)), primary_preamble_ ? "" : " (auto)");
   appendChirpWarning(reply, capacity, preview);
 }
@@ -627,51 +653,88 @@ void RadioProfileCLI::appendPrimaryChirpWarning(char* reply, size_t capacity, ui
   appendChirpWarning(reply, capacity, preview);
 }
 
+void RadioProfileCLI::appendSecondaryWarnings(char* reply, size_t capacity,
+                                              const RadioProfiles& preview) const {
+  if (!capacity) return;
+  if (preview.enabled() && RadioProfiles::valid(preview.primary)
+      && RadioProfiles::valid(preview.secondary.params)) {
+    const uint32_t primary_hz = frequencyHz(preview.primary.freq);
+    const uint32_t clearance_hz = secondaryClearanceHz(preview);
+    if (secondaryOverlaps(primary_hz, preview.secondary.params.freq, clearance_hz)) {
+      appendReply(reply, capacity,
+          "; WARN radio2 overlaps radio1 (6kHz guard)");
+      const bool prefer_upper = preview.secondary.params.freq >= preview.primary.freq;
+      // Suggest the nearest whole-kHz center outside the guarded interval on
+      // the requested side. Verify the float round-trip and the radio's own
+      // frequency limits; fall back to the other side near a band limit.
+      for (unsigned side = 0; side < 2; ++side) {
+        const bool upper = prefer_upper != bool(side);
+        uint32_t khz = upper ? (primary_hz + clearance_hz) / 1000 + 1
+                             : (primary_hz - clearance_hz - 1) / 1000;
+        auto suggested = preview.secondary.params;
+        char frequency_text[12];
+        bool clear = false;
+        for (unsigned step = 0; step < 2; ++step) {
+          snprintf(frequency_text, sizeof(frequency_text), "%lu.%03lu",
+              (unsigned long)(khz / 1000), (unsigned long)(khz % 1000));
+          // Validate the exact displayed token through the command parser:
+          // its float rounding can differ from double-to-float conversion.
+          if (!cli::parseDecimalStrict(frequency_text, suggested.freq)) break;
+          clear = !secondaryOverlaps(primary_hz, suggested.freq, clearance_hz);
+          if (clear) break;
+          if (upper) ++khz; else --khz;
+        }
+        if (clear && radio_->validateProfile(suggested)) {
+          appendReply(reply, capacity,
+              "; try %sMHz", frequency_text);
+          break;
+        }
+      }
+    }
+  }
+  // The overlap warning must be visible even while retune timing is pending.
+  appendChirpWarning(reply, capacity, preview);
+}
+
 void RadioProfileCLI::appendChirpWarning(char* reply, size_t capacity, const RadioProfiles& preview) {
   if (!capacity || !preview.enabled()) return;
   if (!preview.recommendationReady()) {
-    const size_t used = strlen(reply);
-    if (used < capacity) snprintf(reply + used, capacity - used,
+    appendReply(reply, capacity,
         "; timing self-test pending; wait=%lus",
         (unsigned long)((preview.recommendationRemainingMs(millis()) + 999) / 1000));
     return;
   }
   const auto timing = preview.chirpTiming();
   if (!timing.valid) return;
-  size_t used = strlen(reply);
   const bool over_a = timing.preamble[0] > RadioProfiles::MaxAutomaticPreamble;
   const bool over_b = timing.preamble[1] > RadioProfiles::MaxAutomaticPreamble;
-  if (used < capacity && (over_a || over_b))
-    snprintf(reply + used, capacity - used, "; WARN need >%u: %s",
+  if (over_a || over_b)
+    appendReply(reply, capacity, "; WARN need >%u: %s",
              unsigned(RadioProfiles::MaxAutomaticPreamble),
              over_a && over_b ? "radio,radio2" : over_a ? "radio" : "radio2");
-  used = strlen(reply);
   const bool short_a = preview.primary.preamble && preview.primary.preamble < timing.preamble[0];
   const bool short_b = preview.secondary.params.preamble && preview.secondary.params.preamble < timing.preamble[1];
   const bool a = timing.preamble[0] > 32 || short_a, b = timing.preamble[1] > 32 || short_b;
-  if (used < capacity) {
-    if (a && b) snprintf(reply + used, capacity - used, "; WARN recommended preamble: radio=%.0f,radio2=%.0f",
-                         timing.preamble[0], timing.preamble[1]);
-    else if (a || b) snprintf(reply + used, capacity - used, "; WARN recommended preamble: %s=%.0f",
-                              a ? "radio" : "radio2", timing.preamble[a ? 0 : 1]);
-  }
-  used = strlen(reply);
-  if (used < capacity && (short_a || short_b))
-    snprintf(reply + used, capacity - used, "; short override: %s",
+  if (a && b) appendReply(reply, capacity, "; WARN recommended preamble: radio=%.0f,radio2=%.0f",
+                       timing.preamble[0], timing.preamble[1]);
+  else if (a || b) appendReply(reply, capacity, "; WARN recommended preamble: %s=%.0f",
+                            a ? "radio" : "radio2", timing.preamble[a ? 0 : 1]);
+  if (short_a || short_b)
+    appendReply(reply, capacity, "; short override: %s",
              short_a && short_b ? "radio,radio2" : short_a ? "radio" : "radio2");
   // Preamble-bearing acknowledgements and getters share this formatter. Only
   // report the measured allowance for the same calibrated profile pair; a new
   // pair still has to activate and complete its self-test after the first ACK.
   // Dedicated timing/status getters already include this value under their
   // existing switch/budget labels.
-  used = strlen(reply);
-  if (used < capacity && !strstr(reply, "switch=") && !strstr(reply, "budget="))
-    snprintf(reply + used, capacity - used, "; switch=%luus",
+  if (!strstr(reply, "switch=") && !strstr(reply, "budget="))
+    appendReply(reply, capacity, "; switch=%luus",
              (unsigned long)preview.switchBudgetUs());
 }
 
 void RadioProfileCLI::formatConfig(char* reply, size_t capacity, const RadioProfileConfig& config,
-                                   bool temporary, uint32_t remaining, bool automatic) const {
+                                   bool temporary, uint32_t remaining, bool automatic,
+                                   const Schedule* schedule) const {
   if (config.mode == RadioProfileMode::Off) { snprintf(reply, capacity, "> off"); return; }
   RadioProfiles preview = *radio_->profiles();
   preview.setSecondary(config, temporary);
@@ -679,14 +742,16 @@ void RadioProfileCLI::formatConfig(char* reply, size_t capacity, const RadioProf
   snprintf(reply, capacity, "> %.3f,%.3f,%u,%u,%s,%u%s%s", config.params.freq, config.params.bw,
            config.params.sf, config.params.cr, modeName(config.mode), preamble,
            config.params.preamble ? "" : " (auto)", automatic ? "; auto-owned" : "");
-  if (temporary) {
+  if (schedule) {
+    appendReply(reply, capacity, "; @%lu-%lu",
+        (unsigned long)schedule->start, (unsigned long)schedule->end);
+  } else if (temporary) {
     uint32_t minutes = (remaining + 59999UL) / 60000UL;
-    const size_t used = strlen(reply);
-    if (used < capacity) snprintf(reply + used, capacity - used, "; %lud%luh%lum (%lu min) left",
+    appendReply(reply, capacity, "; %lud%luh%lum (%lu min) left",
         (unsigned long)(minutes / 1440), (unsigned long)(minutes / 60 % 24),
         (unsigned long)(minutes % 60), (unsigned long)minutes);
   }
-  appendChirpWarning(reply, capacity, preview);
+  appendSecondaryWarnings(reply, capacity, preview);
 }
 
 bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, bool remote_origin) {
@@ -777,8 +842,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
           t.listen_us[0] / t.symbol_us[0], t.listen_us[1] / t.symbol_us[1],
           t.preamble[0], t.preamble[1], (unsigned long)t.switch_us,
           (unsigned long)t.loop_us, t.loop_us ? " (estimate)" : "");
-      size_t used = strlen(reply);
-      if (used < capacity) snprintf(reply + used, capacity - used, "; test=%u/%u,%u/%u%s",
+      appendReply(reply, capacity, "; test=%u/%u,%u/%u%s",
           p.switch_test_samples[0], RadioProfiles::SwitchTestSamplesPerDirection,
           p.switch_test_samples[1], RadioProfiles::SwitchTestSamplesPerDirection,
           p.switchTestReady() ? " ready" : " pending");
@@ -824,8 +888,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
         (unsigned long)p.switches, (unsigned long)p.switch_failures,
         (unsigned long)p.longest_switch_us, radio_->profilePreamble(0), radio_->profilePreamble(1));
     if (p.enabled()) {
-      size_t used = strlen(reply);
-      if (used < capacity) snprintf(reply + used, capacity - used, "; test=%u/%u,%u/%u%s budget=%luus",
+      appendReply(reply, capacity, "; test=%u/%u,%u/%u%s budget=%luus",
           p.switch_test_samples[0], RadioProfiles::SwitchTestSamplesPerDirection,
           p.switch_test_samples[1], RadioProfiles::SwitchTestSamplesPerDirection,
           p.recommendationReady() ? " ready" : " pending", (unsigned long)p.switchBudgetUs());
@@ -920,17 +983,14 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     if (!index) {
       snprintf(reply, capacity, "> slots: ");
       for (unsigned i = 0; i < 4; ++i) if (schedules_[first+i].active) {
-        const size_t used = strlen(reply);
-        if (used < capacity) snprintf(reply + used, capacity-used, "%u@%lu ", i+1, (unsigned long)schedules_[first+i].start);
+        appendReply(reply, capacity, "%u@%lu ", i+1, (unsigned long)schedules_[first+i].start);
       }
       return true;
     }
     const auto& s = schedules_[first+index-1];
     if (!s.active) snprintf(reply, capacity, "> off");
     else {
-      formatConfig(reply, capacity, s.config, s.temporary, remainingMillis(s.end_ms, millis()));
-      const size_t used = strlen(reply);
-      if (used < capacity) snprintf(reply+used, capacity-used, "; @%lu-%lu", (unsigned long)s.start, (unsigned long)s.end);
+      formatConfig(reply, capacity, s.config, s.temporary, remainingMillis(s.end_ms, millis()), false, &s);
     }
     return true;
   }
@@ -996,7 +1056,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
       noteSecondaryManualChange(); publish();
 #endif
       snprintf(reply, capacity, "OK - %s %u queued, preamble=%u", key, i+1, preview.preamble(1, 32));
-      appendChirpWarning(reply, capacity, preview); return true;
+      appendSecondaryWarnings(reply, capacity, preview); return true;
     }
     snprintf(reply, capacity, "Error: all four schedule slots occupied"); return true;
   }
@@ -1030,7 +1090,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     snprintf(reply, capacity, "OK - radio2 %s%s; preamble=%u", modeName(config.mode),
         remote_command_ ? " pending after reply" : "", preview.preamble(1, 32));
   } else snprintf(reply, capacity, "Error: settings could not be saved");
-  if (!strncmp(reply, "OK", 2)) appendChirpWarning(reply, capacity, preview);
+  if (!strncmp(reply, "OK", 2)) appendSecondaryWarnings(reply, capacity, preview);
   return true;
 }
 
