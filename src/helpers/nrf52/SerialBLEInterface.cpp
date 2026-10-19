@@ -1033,6 +1033,10 @@ size_t SerialBLEInterface::writeBleUartFrame(const Frame& frame) {
 
   const uint16_t mtu = conn->getMtu();
   if (mtu <= 3) return 0;
+#if defined(MESH_NRF52_BLE_TRACE) && MESH_NRF52_BLE_TRACE
+  // Record only public framing metadata, never characteristic payload data.
+  meshBleTrace(0xf036, handle, frame.buf[0] | (frame.len << 8), mtu);
+#endif
 
   // BLEUart::write() reports either the full requested length or zero, even
   // when its internal multi-notification loop queued an earlier fragment
@@ -1292,6 +1296,14 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     serviceTxRecovery(check_now);
     return 0;
   }
+
+  // Restored bonded subscriptions can be enabled while the client is still
+  // discovering services and negotiating its MTU. An unsolicited push at the
+  // default MTU can exhaust the notification slots partway through a frame.
+  // The independent UART RX callback (or explicit mOTA activation) establishes
+  // application readiness. Keep queued frames and their TX watchdog idle until
+  // then; the secured-link no-data timer still bounds an abandoned connection.
+  if (!_companionDataSeen.load(std::memory_order_acquire)) return 0;
 
   if (send_queue_len > 0) {
     if (!isConnected()) {

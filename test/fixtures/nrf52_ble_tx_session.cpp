@@ -63,6 +63,8 @@ static struct {
   unsigned connected() const { assert(!critical_depth); return 1; }
 } Bluefruit;
 
+struct SerialBLEInterface;
+static SerialBLEInterface* instance;
 struct SerialBLEInterface {
   struct Frame { uint8_t len = 0; uint8_t buf[MAX_FRAME_SIZE] = {}; };
   using RxQueueGuard = Guard;
@@ -71,6 +73,7 @@ struct SerialBLEInterface {
   uint8_t send_queue_len = 0;
   Frame send_queue[FRAME_QUEUE_SIZE];
   std::atomic<bool> _tx_reset_pending{false};
+  std::atomic<bool> _companionDataSeen{true};
   uint32_t _send_queue_generation = 0;
   uint16_t _tx_recovery_handle = BLE_CONN_HANDLE_INVALID;
   uint32_t _tx_recovery_generation = 0;
@@ -81,14 +84,26 @@ struct SerialBLEInterface {
   mesh::BleDisconnectRecovery _tx_disconnect_recovery;
   SecuritySessionTimer _companion_start_timer;
   SecuritySessionTimer _security_timer;
+  struct MotaStream {
+    bool active = false;
+    void setActive(bool value) { active = value; }
+  } _mota_stream;
   bool _peer_address_valid = true;
   struct Uart {
     struct Chunk { uint16_t handle; std::vector<uint8_t> bytes; };
     std::vector<Chunk> chunks;
+    std::vector<uint8_t> rx_bytes;
     std::function<void()> after_write;
     unsigned attempts = 0, fail_on_attempt = 0;
     bool notifyEnabled(uint16_t) const { assert(!critical_depth); return true; }
-    void flush() { assert(!critical_depth); }
+    void flush() { assert(!critical_depth); rx_bytes.clear(); }
+    int available() const { assert(!critical_depth); return rx_bytes.size(); }
+    int read(uint8_t* destination, size_t length) {
+      assert(!critical_depth && length <= rx_bytes.size());
+      std::memcpy(destination, rx_bytes.data(), length);
+      rx_bytes.erase(rx_bytes.begin(), rx_bytes.begin() + length);
+      return length;
+    }
     size_t write(uint16_t handle, const uint8_t* data, size_t length) {
       assert(!critical_depth);
       if (++attempts == fail_on_attempt) return 0;
@@ -101,7 +116,7 @@ struct SerialBLEInterface {
       return length;
     }
   } bleuart;
-  SerialBLEInterface() { open(1); }
+  SerialBLEInterface() { instance = this; open(1); }
   void open(uint16_t handle) {
     _conn_handle = handle;
     recv_queue.setEnabled(true);
@@ -127,12 +142,79 @@ struct SerialBLEInterface {
   bool hasRequiredReplyCapacity() const;
   size_t writeFrame(const uint8_t*, size_t);
   size_t checkRecvFrame(uint8_t*);
+  static void onBleUartRX(uint16_t);
+  void setMotaStreamActive(bool);
   void recoverStalledTx(const char*, uint16_t = BLE_CONN_HANDLE_INVALID, uint32_t = 0);
   bool isConnected() const;
   bool isWriteBusy() const;
   bool hasPendingIO() const;
 };
 @METHODS@
+
+static void application_start() {
+  for (bool required : {false, true}) {
+    SerialBLEInterface port;
+    const size_t requests = disconnect_requests.size();
+    now_ms = 100;
+    Bluefruit.connection.mtu = 23;
+    port._companionDataSeen.store(false);
+    port._companion_start_timer.start(now_ms);
+    uint8_t frame[75] = {uint8_t(required ? 0x87 : 0x88)};
+    uint8_t received[MAX_FRAME_SIZE] = {};
+    port.bleuart.fail_on_attempt = 4; // Three default-MTU slots accept 60 bytes.
+    assert(port.writeFrame(frame, sizeof(frame)) == sizeof(frame));
+    for (uint32_t elapsed : {0U, 250U, 10001U}) {
+      now_ms = 100 + elapsed;
+      assert(port.checkRecvFrame(received) == 0);
+      assert(port.bleuart.chunks.empty() && !port.bleuart.attempts);
+      assert(port.send_queue_len == 1 && !port._last_retry_attempt);
+      assert(!port._tx_stall_watchdog.active() && !port._tx_disconnect_recovery.pending());
+      assert(port._companion_start_timer.pending());
+      assert(disconnect_requests.size() == requests);
+    }
+    // Even a terminal's first newline opens the gate through the real RX
+    // callback, independently of checkRecvFrame's application-task polling.
+    Bluefruit.connection.mtu = 247;
+    port.bleuart.rx_bytes = {'\n'};
+    SerialBLEInterface::onBleUartRX(1);
+    assert(port._companionDataSeen && !port._companion_start_timer.pending());
+    assert(port.checkRecvFrame(received) == 1 && received[0] == '\n');
+    assert(port.send_queue_len == 0 && port.bleuart.chunks.size() == 1);
+    assert(port.bleuart.chunks[0].bytes == std::vector<uint8_t>(frame, frame + sizeof(frame)));
+    assert(disconnect_requests.size() == requests);
+  }
+  // A Full Companion's explicit mOTA activation establishes readiness without
+  // requiring a Nordic UART command, retaining the separate mOTA transport.
+  SerialBLEInterface port;
+  port._companionDataSeen.store(false);
+  port._companion_start_timer.start(now_ms);
+  const uint8_t frame[] = {0x83};
+  uint8_t received[MAX_FRAME_SIZE] = {};
+  assert(port.writeFrame(frame, sizeof(frame)) == sizeof(frame));
+  assert(port.checkRecvFrame(received) == 0 && port.bleuart.chunks.empty());
+  port.setMotaStreamActive(true);
+  assert(port._mota_stream.active && port._companionDataSeen);
+  assert(!port._companion_start_timer.pending());
+  assert(port.checkRecvFrame(received) == 0 && port.send_queue_len == 0);
+  assert(port.bleuart.chunks.size() == 1);
+  Bluefruit.connection.mtu = 23;
+}
+
+static void previous_prestart_partial() {
+  SerialBLEInterface port;
+  const size_t requests = disconnect_requests.size();
+  Bluefruit.connection.mtu = 23;
+  port._companionDataSeen.store(false);
+  uint8_t frame[75] = {0x88}, received[MAX_FRAME_SIZE] = {};
+  port.bleuart.fail_on_attempt = 4;
+  assert(port.writeFrame(frame, sizeof(frame)) == sizeof(frame));
+  assert(port.checkRecvFrame(received) == 0);
+  assert(port.bleuart.chunks.size() == 3);
+  size_t accepted = 0;
+  for (const auto& chunk : port.bleuart.chunks) accepted += chunk.bytes.size();
+  assert(accepted == 60 && port._tx_disconnect_recovery.pending());
+  assert(disconnect_requests.size() == requests + 1);
+}
 
 static void enqueue_reset() {
   SerialBLEInterface port;
@@ -255,6 +337,8 @@ int main(int argc, char** argv) {
   assert(argc == 2);
   if (!std::strcmp(argv[1], "enqueue")) enqueue_reset();
   else if (!std::strcmp(argv[1], "connection")) connection_changes();
+  else if (!std::strcmp(argv[1], "application-start")) application_start();
+  else if (!std::strcmp(argv[1], "prestart-partial")) previous_prestart_partial();
   else {
     enqueue_reset(); callback_ownership(); connection_changes(); old_queue_and_recovery();
     recovery_connection_changes();

@@ -10,6 +10,7 @@ import unittest
 from cpp_source import body
 
 ROOT = Path(__file__).resolve().parents[1]
+START_GATE = "  if (!_companionDataSeen.load(std::memory_order_acquire)) return 0;\n"
 LEGACY_CLEAR = r'''
 void SerialBLEInterface::clearBuffers() {
   send_queue_len = 0;
@@ -53,14 +54,21 @@ class Nrf52BleTxSessionTests(unittest.TestCase):
             "bool SerialBLEInterface::servicePendingTxReset()", "void SerialBLEInterface::shiftSendQueueLeft()",
             "size_t SerialBLEInterface::writeBleUartFrame(", "bool SerialBLEInterface::hasRequiredReplyCapacity() const",
             "size_t SerialBLEInterface::writeFrame(", "size_t SerialBLEInterface::checkRecvFrame(",
+            "void SerialBLEInterface::onBleUartRX(",
             "void SerialBLEInterface::recoverStalledTx(", "void SerialBLEInterface::serviceTxRecovery(",
             "bool SerialBLEInterface::isConnected() const",
             "bool SerialBLEInterface::isWriteBusy() const", "bool SerialBLEInterface::hasPendingIO() const")
         methods = "\n".join(body(source, signature) for signature in signatures)
+        header = (ROOT / "src/helpers/nrf52/SerialBLEInterface.h").read_text()
+        methods += "\n" + body(header, "void setMotaStreamActive(bool active)").replace(
+            "void setMotaStreamActive(", "void SerialBLEInterface::setMotaStreamActive(", 1)
+        if methods.count(START_GATE) != 1:
+            raise AssertionError("Expected exactly one production application-start gate")
         variants = {"production": methods,
                     "legacy_enqueue": methods.replace(body(source, signatures[0]), LEGACY_CLEAR).replace(
                         body(source, "size_t SerialBLEInterface::writeFrame("), LEGACY_ENQUEUE),
-                    "legacy_write": methods.replace(body(source, "size_t SerialBLEInterface::writeBleUartFrame("), LEGACY_WRITE)}
+                    "legacy_write": methods.replace(body(source, "size_t SerialBLEInterface::writeBleUartFrame("), LEGACY_WRITE),
+                    "legacy_start": methods.replace(START_GATE, "", 1)}
         fixture = (ROOT / "test/fixtures/nrf52_ble_tx_session.cpp").read_text(encoding="ascii")
         cls.work = tempfile.TemporaryDirectory(prefix="meshcore-ble-tx-session-")
         cls.binaries = {}
@@ -98,6 +106,17 @@ class Nrf52BleTxSessionTests(unittest.TestCase):
                 result = self.run_case(variant, scenario)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(assertion, result.stderr)
+
+    def test_early_bonded_notifications_wait_for_uart_or_mota_application_start(self):
+        result = self.run_case("production", "application-start")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_previous_start_path_reproduces_partial_sixty_byte_notification(self):
+        result = self.run_case("legacy_start", "prestart-partial")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_case("legacy_start", "application-start")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bleuart.chunks.empty()", result.stderr)
 
 
 if __name__ == "__main__":

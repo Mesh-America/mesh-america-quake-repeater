@@ -42,6 +42,7 @@ struct SerialBLEInterface {
   Frame send_queue[FRAME_QUEUE_SIZE];
   uint16_t _conn_handle = 1;
   std::atomic<bool> _tx_reset_pending{false};
+  std::atomic<bool> _companionDataSeen{true};
   uint32_t _send_queue_generation = 0;
   uint16_t _tx_recovery_handle = BLE_CONN_HANDLE_INVALID;
   uint32_t _tx_recovery_generation = 0;
