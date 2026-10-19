@@ -230,6 +230,11 @@ mesh::ContactPathStorage& testPathStorage() {
                     "Packet::Packet()", "int Packet::getRawLength() const",
                     "bool Packet::isValidPathLen(", "size_t Packet::writePath(",
                     "uint8_t Packet::copyPath(")) + "\n}\n")
+            companion = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
+            text_helpers = (ROOT / "src/helpers/TxtDataHelpers.cpp").read_text()
+            (temp / "contact_frame_under_test.h").write_text(
+                method(text_helpers, "void StrHelper::strzcpy(") + "\n" +
+                method(companion, "bool MyMesh::writeContactRespFrame("))
             chat = (ROOT / "src/helpers/BaseChatMesh.cpp").read_text()
             mesh = (ROOT / "src/Mesh.cpp").read_text()
             (temp / "send_under_test.h").write_text(

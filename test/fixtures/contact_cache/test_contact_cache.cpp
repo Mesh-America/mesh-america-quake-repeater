@@ -2,8 +2,10 @@
 
 #define FILESYSTEM FakeFilesystem
 #include <helpers/ContactInfo.h>
+#include <helpers/BaseSerialInterface.h>
 #include <helpers/ContactSecretCache.h>
 #include <helpers/ContactFileTransaction.h>
+#include <helpers/TxtDataHelpers.h>
 #if !defined(NRF52_PLATFORM)
 #include <helpers/FileRead.h>
 #endif
@@ -270,6 +272,46 @@ Path route(unsigned index) {
   return path;
 }
 
+// Compile the production contact response serializer against the actual
+// ContactInfo/path pool, with only its transport replaced by a byte sink.
+struct ContactFrameSink : BaseSerialInterface {
+  std::vector<uint8_t> frame;
+  void enable() override {}
+  void disable() override {}
+  bool isEnabled() const override { return true; }
+  bool isConnected() const override { return true; }
+  bool isReadBusy() const override { return false; }
+  bool isWriteBusy() const override { return false; }
+  size_t checkRecvFrame(uint8_t[]) override { return 0; }
+  size_t writeFrame(const uint8_t bytes[], size_t size) override {
+    frame.assign(bytes, bytes + size);
+    return size;
+  }
+};
+struct MyMesh {
+  uint8_t out_frame[176] = {};
+  BaseSerialInterface* _serial;
+  bool writeContactRespFrame(uint8_t, const ContactInfo&, BaseSerialInterface* = nullptr);
+};
+#include "contact_frame_under_test.h"
+
+static std::vector<uint8_t> expected_contact_frame(const uint8_t* record) {
+  std::vector<uint8_t> frame{3};
+  const auto append = [&](size_t offset, size_t size) {
+    frame.insert(frame.end(), record + offset, record + offset + size);
+  };
+  append(0, 32); // public key
+  append(64, 2); // type and flags
+  append(71, 1); // encoded path length
+  append(76, 64); // all path bytes, including any unused tail
+  append(32, 32); // name
+  append(72, 4); // advertisement timestamp
+  append(144, 8); // coordinates
+  append(140, 4); // modification timestamp
+  assert(frame.size() == 148);
+  return frame;
+}
+
 struct Fixture {
   Host host;
   DataStore store{host};
@@ -303,6 +345,116 @@ struct Fixture {
     assert(actual && memcmp(actual, expected.data(), 64) == 0);
   }
 };
+
+static void restored_zero_paths_need_no_flash_or_resident_entries() {
+  Fixture f(40); // More than the 16 resident path byte arrays.
+  auto& stored = SPIFFS.files.at("/contacts3");
+  for (size_t i = 0; i < 40; ++i) {
+    uint8_t* record = stored.data() + i * mesh::storage::CONTACT_RECORD_SIZE;
+    memset(record + 76, 0, 64);
+    // Empty bytes do not imply any particular route-length semantics.
+    record[71] = i % 3 == 0 ? OUT_PATH_UNKNOWN : i % 3 == 1 ? 0 : 63;
+  }
+  const auto original = stored;
+  f.host.contacts.clear();
+  f.store.loadContacts(&f.host);
+  assert(f.host.contacts.size() == 40);
+  assert(f.store.saveContacts(&f.host, cachedContactFilter));
+  f.host.contacts.clear();
+  f.store.loadContacts(&f.host); // The same guarantee after an actual save/reload.
+  assert(f.host.contacts.size() == 40);
+
+  ContactFrameSink sink;
+  MyMesh app{{}, &sink};
+  const unsigned reads = SPIFFS.reads, opens = SPIFFS.opens;
+  SPIFFS.fail_read = "/contacts3";
+  for (unsigned pass = 0; pass < 2; ++pass) {
+    for (size_t i = 0; i < f.host.contacts.size(); ++i) {
+      const auto& contact = f.host.contacts[i];
+      assert(contact.path_ref.handle() == 0);
+      const uint8_t* path = contact.getPath();
+      assert(path && memcmp(path, Path{}.data(), 64) == 0);
+      uint8_t record[mesh::storage::CONTACT_RECORD_SIZE];
+      assert(serializeContactRecord(contact, record));
+      const uint8_t* expected = original.data() + i * sizeof(record);
+      assert(memcmp(record, expected, sizeof(record)) == 0);
+      assert(app.writeContactRespFrame(3, contact, pass ? &sink : nullptr));
+      assert(sink.frame == expected_contact_frame(expected));
+    }
+  }
+  assert(SPIFFS.reads == reads && SPIFFS.opens == opens);
+  assert(!f.store.contactRecoveryPending());
+  SPIFFS.fail_read.clear();
+
+  // Snapshots retain their exact value when the live contact switches between
+  // zero and nonzero paths, even across publication and a subsequent reload.
+  ContactInfo zero_snapshot = f.host.contacts[0];
+  const Path changed = route(701);
+  assert(f.host.contacts[0].setRawPath(changed.data()));
+  ContactInfo nonzero_snapshot = f.host.contacts[0];
+  const uint16_t retained = nonzero_snapshot.path_ref.handle();
+  assert(retained != 0);
+  ContactInfo rebound = nonzero_snapshot;
+  assert(rebound.path_ref.bind(0, Path{}.data()));
+  assert(rebound.path_ref.handle() == 0);
+  assert(!nonzero_snapshot.path_ref.bind(mesh::ContactPathStorage::NONE, Path{}.data()));
+  assert(nonzero_snapshot.path_ref.handle() == retained);
+  assert(f.host.contacts[0].setRawPath(Path{}.data()));
+  assert(f.store.saveContacts(&f.host, cachedContactFilter));
+  f.host.contacts.clear();
+  f.store.loadContacts(&f.host);
+  Path path;
+  assert(zero_snapshot.copyPathTo(path.data()) && path == Path{});
+  assert(nonzero_snapshot.copyPathTo(path.data()) && path == changed);
+  assert(rebound.copyPathTo(path.data()) && path == Path{});
+  assert(f.host.contacts[0].copyPathTo(path.data()) && path == Path{});
+}
+
+static void restored_nonzero_tails_and_handle_limits_remain_exact() {
+  Fixture f(2);
+  auto& records = SPIFFS.files.at("/contacts3");
+  for (size_t i = 0; i < 2; ++i) {
+    uint8_t* record = records.data() + i * mesh::storage::CONTACT_RECORD_SIZE;
+    memset(record + 76, 0, 64);
+    record[76 + 63] = 0xa7;
+    record[71] = i == 0 ? 0 : OUT_PATH_UNKNOWN;
+  }
+  const auto original = records;
+  f.host.contacts.clear();
+  f.store.loadContacts(&f.host);
+  assert(f.host.contacts.size() == 2);
+  ContactFrameSink sink;
+  MyMesh app{{}, &sink};
+  for (size_t i = 0; i < 2; ++i) {
+    const auto& contact = f.host.contacts[i];
+    assert(contact.path_ref.handle() != 0);
+    const unsigned reads = SPIFFS.reads;
+    assert(app.writeContactRespFrame(3, contact));
+    assert(SPIFFS.reads == reads + 1); // Nonzero cold paths still use the backend.
+    assert(sink.frame == expected_contact_frame(
+        original.data() + i * mesh::storage::CONTACT_RECORD_SIZE));
+  }
+
+  // Zero values consume no handle even under actual handle exhaustion; an
+  // invalid source continues to fail before the zero-value optimization.
+  mesh::ContactPathPool<20> pool;
+  std::vector<uint16_t> handles;
+  for (unsigned i = 0; i < 20; ++i) {
+    uint16_t handle = pool.bind(i, route(i).data());
+    assert(handle != 0 && handle != mesh::ContactPathStorage::NONE);
+    handles.push_back(handle);
+  }
+  assert(pool.bind(0, route(0).data()) == mesh::ContactPathStorage::NONE);
+  assert(pool.bind(0, Path{}.data()) == 0);
+  assert(pool.bind(mesh::ContactPathStorage::NONE, Path{}.data()) ==
+      mesh::ContactPathStorage::NONE);
+  Path empty;
+  assert(pool.read(0, empty.data()) && empty == Path{});
+  const uint8_t* view = pool.view(0);
+  assert(view && memcmp(view, empty.data(), 64) == 0);
+  for (uint16_t handle : handles) pool.release(handle);
+  assert(pool.bind(0, route(0).data()) != mesh::ContactPathStorage::NONE);
+}
 
 static void raw_read_recovery_preserves_accepted_ram_state() {
   for (bool paged : {false, true}) {
@@ -1540,6 +1692,8 @@ static void deferred_cleanup_publishes_actual_cached_handles() {
 #endif
 
 int main() {
+  restored_zero_paths_need_no_flash_or_resident_entries();
+  restored_nonzero_tails_and_handle_limits_remain_exact();
   raw_read_recovery_preserves_accepted_ram_state();
   raw_read_recovery_falls_back_on_persistent_io_or_checksum_failure();
   strong_recovery_faults_cannot_be_downgraded_by_raw_reads();

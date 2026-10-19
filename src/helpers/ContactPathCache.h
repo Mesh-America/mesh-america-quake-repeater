@@ -173,6 +173,12 @@ public:
   void attach(ContactPathBackend* backend) override { _backend = backend; }
   uint16_t bind(uint16_t location, const uint8_t path[64]) override {
     if (location == NONE) return NONE;
+    // The bytes are already available during reload. Keep an exactly empty
+    // path as the immutable zero value instead of rereading it from flash
+    // for every contact response. Unused nonzero tail bytes still matter.
+    bool empty = true;
+    for (size_t i = 0; i < 64; ++i) empty = empty && path[i] == 0;
+    if (empty) return 0;
     const uint16_t h = allocate();
     if (h != NONE) {
       _slots[h - 1].location = location;
