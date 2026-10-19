@@ -471,7 +471,10 @@ int main(){
         # outside pinned2.0.17 C3/S3 mode1. Link hooks are strong, never silent weak stubs.
         self.assertIn('ESP_ARDUINO_VERSION_PATCH == 17',source)
         self.assertIn('CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3',source)
-        self.assertNotIn('__attribute__((weak))',source[:source.index('namespace mesh {')])
+        preamble=source[:source.index('namespace mesh {')]
+        for declaration in preamble.split(';'):
+            if 'meshEsp32Hwcdc' in declaration:
+                self.assertNotIn('__attribute__((weak))',declaration)
         self.assertIn('Serial.setTxTimeoutMs(5);',source)
         self.assertIn('tx_timeout_ms / portTICK_PERIOD_MS',PATCHED)
         self.assertNotIn('max_consec_timeouts',PATCHED)

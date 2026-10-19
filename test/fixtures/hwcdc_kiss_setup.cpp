@@ -1,5 +1,6 @@
 // The runner inserts the production KISS setup and backend selection.
 #include <Arduino.h>
+#include <helpers/RegulatorMode.h>
 #include <helpers/UsbLogging.h>
 #include <cassert>
 #include <string>
@@ -55,6 +56,10 @@ struct Board {
     assert(!usb_logging && !usb_debug);
 #endif
     calls.push_back("board.begin");
+  }
+  bool applyMcuRegulator(mesh::power::RegulatorMode mode) {
+    assert(mode == mesh::power::RegulatorMode::Default);
+    return false;
   }
   void reboot() { assert(false); }
   void onBootComplete() { calls.push_back("boot.complete"); }
