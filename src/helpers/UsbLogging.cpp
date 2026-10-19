@@ -1836,6 +1836,21 @@ bool isUsbLoggingTransportRecoveryPending() {
 
 }  // namespace mesh
 
+#if defined(NRF52_PLATFORM)
+// The framework's LOG_LV1/PRINTF path otherwise writes straight to Serial,
+// bypassing both the saved debug setting and Full Companion's separate CDC1.
+// The private core retarget calls this only for its default USB logger.
+extern "C" size_t meshNrf52FrameworkDebugWrite(const void* data, size_t size) {
+  if (data == nullptr || size == 0) return 0;
+  // Diagnostics are best effort. Consume disabled/backpressured records so
+  // libc never retries them later in a different protocol/host session.
+  if (!isInISR()) {
+    (void)mesh::usbDebugPort().write(static_cast<const uint8_t*>(data), size);
+  }
+  return size;
+}
+#endif
+
 #if MESH_ESP32_HWCDC_SESSION_GUARD
 // Capture startup at the actual hardware reset, not when the finite framework
 // event queue eventually delivers it. A delayed initial enumeration event
