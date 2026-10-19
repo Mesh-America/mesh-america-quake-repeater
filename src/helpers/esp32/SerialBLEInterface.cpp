@@ -538,11 +538,20 @@ uint32_t SerialBLEInterface::onPassKeyDisplay() {
 }
 
 void SerialBLEInterface::onAuthenticationComplete(NimBLEConnInfo& info) {
+  if (pServer == NULL || pServer->getConnectedCount() == 0
+      || info.getConnHandle() != last_conn_id) return;
   if (info.isEncrypted() && info.isAuthenticated() && info.isBonded()) {
+    const bool first_authentication = !deviceConnected;
     deviceConnected = true;
     mesh::companion::BluetoothPeerIdentity peer;
     bluetoothPeerFromNimbleAddress(*info.getIdAddress().getBase(), peer);
     noteSuccessfulConnection(peer);
+    if (first_authentication) {
+      // Ask once per authenticated link for 15-30 ms connection events. The
+      // central chooses the actual interval; never renegotiate on every send.
+      // Keep peripheral latency zero so active sync does not skip events.
+      pServer->updateConnParams(info.getConnHandle(), 12, 24, 0, 400);
+    }
   } else {
     BLEDevice::deleteBond(info.getIdAddress());
     deviceConnected = false;
@@ -985,9 +994,12 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
 #error "MESH_HIL_BLE_INTERVAL_MS must be in 7..60 milliseconds"
 #endif
 #define BLE_WRITE_MIN_INTERVAL MESH_HIL_BLE_INTERVAL_MS
+#elif defined(MESH_USE_NIMBLE_ARDUINO)
+// Modern NimBLE returns queue acceptance synchronously, so failed sends retain
+// their frame and accepted sends cannot be duplicated by a late status callback.
+#define BLE_WRITE_MIN_INTERVAL 7
 #else
-// Preserve the shipped pacing until a separate lab image has measured a safe
-// replacement. One value governs admission and both successful/failed sends.
+// Preserve legacy NimBLE/Bluedroid pacing, whose status callbacks are async.
 #define BLE_WRITE_MIN_INTERVAL 60
 #endif
 

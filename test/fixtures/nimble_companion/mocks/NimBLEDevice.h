@@ -62,6 +62,10 @@ inline bool bonding = false, mitm = false, sc = false;
 inline std::vector<std::vector<uint8_t>> transmitted;
 inline unsigned disconnects = 0;
 inline unsigned notification_attempts = 0;
+struct ConnectionUpdate {
+  uint16_t handle, minimum, maximum, latency, timeout;
+};
+inline std::vector<ConnectionUpdate> connection_updates;
 }
 inline int ble_gap_wl_set(const ble_addr_t* peers, uint8_t count) {
   assert(count == 1);
@@ -125,6 +129,10 @@ struct NimBLEServer {
   bool start() { return true; }
   uint8_t getConnectedCount() const { return connected; }
   uint16_t getPeerMTU(uint16_t) const { return fake_nimble::mtu; }
+  void updateConnParams(uint16_t handle, uint16_t minimum, uint16_t maximum,
+                        uint16_t latency, uint16_t timeout) const {
+    fake_nimble::connection_updates.push_back({handle, minimum, maximum, latency, timeout});
+  }
   bool disconnect(uint16_t) const { ++fake_nimble::disconnects; return true; }
   NimBLEAdvertising* getAdvertising() { return &advertising; }
   NimBLEService* createService(const char*) {
