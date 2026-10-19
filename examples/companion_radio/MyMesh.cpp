@@ -7474,20 +7474,21 @@ void MyMesh::handleCmdFrame(size_t len) {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG); // invalid stats sub-type
     }
   } else if (cmd_frame[0] == CMD_FACTORY_RESET && len >= 6 && memcmp(&cmd_frame[1], "reset", 5) == 0) {
-    if (_serial) {
-      MESH_DEBUG_PRINTLN("Factory reset: disabling serial interface to prevent reconnects (BLE/WiFi)");
-      _serial->disable(); // Phone app disconnects before we can send OK frame so it's safe here
-    }
-#if MESH_ENABLE_TX_BEACONS
-    suspendBeacons();
-#endif
+    BaseSerialInterface* const reply_route = _serial->captureReplyRoute();
+    // Formatting is synchronous in the command-dispatch loop. Keep the
+    // requesting transport available if storage rejects/fails the erase.
     bool success = _store->formatFileSystem();
     if (success) {
+#if MESH_ENABLE_TX_BEACONS
+      suspendBeacons();
+#endif
+      MESH_DEBUG_PRINTLN("Factory reset: disabling interfaces before reboot");
+      _serial->disable();
       writeOKFrame();
       delay(1000);
       board.reboot();  // doesn't return
     } else {
-      writeErrFrame(ERR_CODE_FILE_IO_ERROR);
+      writeErrFrame(ERR_CODE_FILE_IO_ERROR, reply_route);
     }
   } else if (cmd_frame[0] == CMD_SET_FLOOD_SCOPE_KEY && len >= 2 && cmd_frame[1] == 0) {
     if (len >= 2 + 16) {

@@ -4,6 +4,7 @@
 
 #include "OtaByteIO.h"
 #include "OtaFlashLayout_nrf52.h"
+#include <helpers/nrf52/QspiFlashWake.h>
 #include "hal/nrf_gpio.h"
 #include "hal/nrf_qspi.h"
 #include "nrf.h"
@@ -235,47 +236,6 @@ static void release_rak3401_radio_bus() {
 }
 #endif
 
-static void wake_qspi_flash_before_activate(const nrf_qspi_pins_t& pins) {
-  // nRF52840 TASKS_ACTIVATE communicates with the NOR before CINSTR is
-  // available. A flash put to sleep by our preceding 0xB9 ignores that
-  // activation traffic, so issue the only command it accepts (0xAB) with a
-  // short mode-0 GPIO transaction first. IO2/WP# and IO3/HOLD# stay high.
-  nrf_gpio_pin_clear(pins.sck_pin);
-  nrf_gpio_pin_set(pins.csn_pin);
-  nrf_gpio_pin_set(pins.io0_pin);
-  if (pins.io2_pin != NRF_QSPI_PIN_NOT_CONNECTED) nrf_gpio_pin_set(pins.io2_pin);
-  if (pins.io3_pin != NRF_QSPI_PIN_NOT_CONNECTED) nrf_gpio_pin_set(pins.io3_pin);
-
-  nrf_gpio_cfg(pins.sck_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-               NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  nrf_gpio_cfg(pins.csn_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-               NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  nrf_gpio_cfg(pins.io0_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-               NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  nrf_gpio_cfg(pins.io1_pin, NRF_GPIO_PIN_DIR_INPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-               NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  if (pins.io2_pin != NRF_QSPI_PIN_NOT_CONNECTED)
-    nrf_gpio_cfg(pins.io2_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-                 NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-  if (pins.io3_pin != NRF_QSPI_PIN_NOT_CONNECTED)
-    nrf_gpio_cfg(pins.io3_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-                 NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_NOSENSE);
-
-  delayMicroseconds(1);
-  nrf_gpio_pin_clear(pins.csn_pin);
-  delayMicroseconds(1);
-  for (uint8_t bit = 0; bit < 8u; bit++) {
-    nrf_gpio_pin_write(pins.io0_pin, mota_qspi_release_from_dpd_bit(bit));
-    delayMicroseconds(1);
-    nrf_gpio_pin_set(pins.sck_pin);
-    delayMicroseconds(1);
-    nrf_gpio_pin_clear(pins.sck_pin);
-    delayMicroseconds(1);
-  }
-  nrf_gpio_pin_set(pins.csn_pin);
-  delayMicroseconds(MOTA_QSPI_DPD_WAKE_GUARD_US);
-}
-
 #if defined(OTA_RAK_AUTO_STORE)
 static uint8_t gpio_spi_byte(const nrf_qspi_pins_t& pins, uint8_t out) {
   uint8_t in = 0;
@@ -299,7 +259,7 @@ static uint32_t probe_nor(uint8_t cs) {
   };
   // A previous reset may have left the NOR in deep power-down. This GPIO
   // wake precedes the nRF QSPI ACTIVATE for the same reason as ensureFlash().
-  wake_qspi_flash_before_activate(pins);
+  mesh::nrf52::wakeQspiFlashBeforeActivate(pins);
   // The wake helper leaves GPIO input buffers disconnected for QSPI handoff.
   // This bit-banged JEDEC read instead samples IO1 through GPIO->IN, which
   // requires the MISO input buffer to be connected.
@@ -552,7 +512,7 @@ bool OtaStoreQspiNrf52::ensureFlash() {
   // successful RDSR prove WIP clear, every failure path must retain power and
   // hold CS# high instead of sending B9 or cutting the flash rail.
   _memory_operation_pending = true;
-  wake_qspi_flash_before_activate(pins);
+  mesh::nrf52::wakeQspiFlashBeforeActivate(pins);
   configure_qspi_gpio(pins);
   nrf_qspi_pins_set(NRF_QSPI, &pins);
 

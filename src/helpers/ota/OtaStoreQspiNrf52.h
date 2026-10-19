@@ -42,6 +42,8 @@
   #endif
 #endif
 
+#include "../nrf52/QspiFlashWakePolicy.h"
+
 namespace mesh {
 namespace ota {
 
@@ -52,8 +54,10 @@ namespace ota {
 static const uint32_t MOTA_QSPI_DPD_ENTRY_GUARD_US = 50u;
 
 // Release-from-deep-power-down latency is as high as 45 us on supported NOR.
-static const uint32_t MOTA_QSPI_DPD_WAKE_GUARD_US = 50u;
-static const uint8_t MOTA_QSPI_RELEASE_FROM_DPD_OPCODE = 0xABu;
+static const uint32_t MOTA_QSPI_DPD_WAKE_GUARD_US =
+    mesh::nrf52::QSPI_DPD_WAKE_GUARD_US;
+static const uint8_t MOTA_QSPI_RELEASE_FROM_DPD_OPCODE =
+    mesh::nrf52::QSPI_RELEASE_FROM_DPD_OPCODE;
 
 // TASKS_ACTIVATE initiates traffic with the external memory. A NOR in deep
 // power-down ignores that traffic and the nRF QSPI peripheral can wait forever
@@ -61,8 +65,7 @@ static const uint8_t MOTA_QSPI_RELEASE_FROM_DPD_OPCODE = 0xABu;
 // owns the pins. Keep the bit order host-testable instead of open-coding it in
 // the hardware-only path.
 inline bool mota_qspi_release_from_dpd_bit(uint8_t bit_index) {
-  return bit_index < 8u &&
-         ((MOTA_QSPI_RELEASE_FROM_DPD_OPCODE >> (7u - bit_index)) & 1u) != 0;
+  return mesh::nrf52::qspiReleaseFromDeepPowerDownBit(bit_index);
 }
 
 // The nRF QSPI READY event only says that a program/erase command and its

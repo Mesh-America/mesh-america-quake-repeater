@@ -230,6 +230,7 @@ static bool isNetworkTerminalActive();
   #endif
   #if defined(QSPIFLASH)
     #include <CustomLFS_QSPIFlash.h>
+    #include <helpers/nrf52/QspiFlashWake.h>
     DataStore store(InternalFS, QSPIFlash, rtc_clock);
   #else
     #if defined(EXTRAFS)
@@ -3689,6 +3690,16 @@ void setup() {
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   #if defined(QSPIFLASH)
+    #if defined(XIAO_NRF52)
+    // The external NOR can remain asleep across an MCU/DFU reset. Wake it
+    // before CustomLFS activates QSPI, without changing any stored bytes.
+    const nrf_qspi_pins_t qspi_pins = {
+      (uint8_t)g_ADigitalPinMap[PIN_QSPI_SCK], (uint8_t)g_ADigitalPinMap[PIN_QSPI_CS],
+      (uint8_t)g_ADigitalPinMap[PIN_QSPI_IO0], (uint8_t)g_ADigitalPinMap[PIN_QSPI_IO1],
+      (uint8_t)g_ADigitalPinMap[PIN_QSPI_IO2], (uint8_t)g_ADigitalPinMap[PIN_QSPI_IO3]
+    };
+    mesh::nrf52::wakeQspiFlashBeforeActivate(qspi_pins);
+    #endif
     if (!QSPIFlash.begin()) {
       // debug output might not be available at this point, might be too early. maybe should fall back to InternalFS here?
       MESH_DEBUG_PRINTLN("CustomLFS_QSPIFlash: failed to initialize");

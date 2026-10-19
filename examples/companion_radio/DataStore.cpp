@@ -795,6 +795,16 @@ bool DataStore::removeFile(FILESYSTEM* fs, const char* filename) {
 }
 
 bool DataStore::formatFileSystem() {
+#if defined(NRF52_PLATFORM) && defined(QSPIFLASH)
+  // An explicit erase must cover every configured store. A quarantined QSPI
+  // chip may still hold authoritative contacts/channels, and its disabled
+  // peripheral cannot safely be formatted through the configured pointer.
+  // Refuse before changing primary storage or any in-memory recovery state.
+  if (_configuredFsExtra != nullptr && _fsExtra != _configuredFsExtra) {
+    MESH_DEBUG_PRINTLN("DataStore: erase refused while QSPI storage is unavailable");
+    return false;
+  }
+#endif
 #if defined(ESP32_PLATFORM)
   // A failed format keeps the latest accepted RAM packets available to retry.
   _advert_write.pause();
