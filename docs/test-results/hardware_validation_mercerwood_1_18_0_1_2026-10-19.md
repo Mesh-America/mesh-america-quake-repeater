@@ -8,14 +8,14 @@ Source: `4e4f27a25a720c52ca0f5381b5e5834d75532cc6`
 Version: `v1.18.0.1-halo-keymind-cascade-dev-4e4f27a2`
 
 Builds: 13/13 targets, 15/15 profiles PASS. The two Reduced OTA profiles are compile-only; repeater hardware status uses Full OTA installation proof.
-Expected radios: 13; USB radios observed: 12. USB enumeration does not establish physical presence or absence. Build success does not mean all 13 radios passed hardware testing.
+Expected radios: 13. The earlier 10-second inventory observed 12 distinct USB identities. Tag was observed separately after its later recovery; no fresh fleet-wide count is claimed. USB enumeration does not establish physical presence or absence. Build success does not mean all 13 radios passed hardware testing.
 
 | Board | Build | Flash | USB | BLE | RF | Bootloader |
 | --- | --- | --- | --- | --- | --- | --- |
 | Heltec V4.3 | PASS | PASS | PASS | PASS | unknown | n/a |
 | RAK 3401 | PASS | PASS | runtime only PASS | n/a | n/a | C2 baseline PASS |
 | LilyGo T-Deck | PASS | PASS | PASS | PASS | PASS | n/a |
-| RAK WisMesh Tag | PASS | not enumerated | not enumerated | not enumerated | not enumerated | not enumerated |
+| RAK WisMesh Tag | PASS | PASS | PASS | PASS | PASS | C2 baseline PASS |
 | Heltec MeshPocket | PASS | PASS | PASS | PASS | PASS | C2 baseline PASS |
 | SenseCAP Indicator | PASS | PASS | PASS | PASS | PASS | n/a |
 | RAK 4631 | PASS | PASS | PASS | PASS | PASS | C2 baseline PASS |
@@ -27,14 +27,18 @@ Expected radios: 13; USB radios observed: 12. USB enumeration does not establish
 | Heltec MeshTower SD | PASS | PASS | runtime only PASS | n/a | n/a | C2 baseline PASS |
 
 Repeater rows cover Full OTA application/runtime verification only. Their runtime-only USB entries do not claim Companion 100/10, BLE or RF qualification.
-C2 bootloader entries describe earlier source-qualified installation evidence, separately from current application results.
+C2 bootloader entries describe source-qualified installation evidence, including the later Tag recovery, separately from application results. All 8 required profiles now have installation evidence; this is not an installed-flash CRC readback.
 
-- Some expected radios were not enumerated in the selected USB inventory; this does not establish physical absence.
 - T1000-E BLE remains unresolved until a completed current-source test passes.
 - Heltec V4.3 had earlier USB/BLE passes, but later RF setup repeatedly rejected non-ASCII data before channels, leases or datagrams. Current transport behavior remains unresolved; RF qualification is pending.
 - Seeed XIAO ESP32-S3 had earlier USB/BLE passes, but later RF setup repeatedly rejected non-ASCII data before channels, leases or datagrams. Current transport behavior remains unresolved; RF qualification is pending.
 - XIAO nRF52 application transfer succeeded, but stable normal runtime and its USB/BLE/RF qualification remain unresolved.
-- RAK WisMesh Tag is not USB-enumerated; its normal application and C2 bootloader campaign remain pending.
+
+Tag recovery is a later, separate result. Its earlier non-enumeration remains in the JSON history. Before recovery, USB descriptor error -110 persisted across cable and port changes, while T1000-E enumerated on Tag's former connection. These observations did not establish a root cause.
+
+A physically correlated application-only Legacy BLE transfer was accepted without writing the bootloader or SoftDevice; that phase did not establish the original USB or FICR identity. A subsequent USB read matched the original serial and clean normal Full 4e runtime. Exact C2 bootloader and matching normal Full application USB DFU then both completed, with the public UF2 version `TEST_0x02040BFF` verified. Package manifest CRC `DE20EBCB` was validated before transfer; no live installed-manifest CRC measurement is claimed.
+
+Tag then passed 100 persistent USB query cycles, 10 reopen checks, owned-contact cleanup and warm reboot, and radio2 warning/suggestion trials. Its three 30-second BLE sessions matched the USB public identity and full version, retained clean core flags and ended disconnected. One zero-hop DEV datagram passed in each direction with the RAK hub; owned channels were cleared and radio leases restored.
 
 The V3's first 15-second discovery trial failed. Its separate 25-second scan trial is PASS; the earlier failure remains part of the record.
 
@@ -46,9 +50,9 @@ Seeed XIAO nRF52: The normal HEAD application transfer succeeded, but normal HEA
 
 The measured V3 92-contact refresh median was 3.347882 s at 32.560 kbit/s, versus 6.191396 s at 17.606 kbit/s for the earlier firmware. These are protocol throughput measurements on one V3/Linux connection, not BLE PHY rates or phone/full-app refresh claims. [Measured results](https://mikecarper.github.io/MeshCore/test-results/companion_ble_refresh_2026-10-19/).
 
-The inventory observed 12 distinct USB identities during a 10-second read-only window, including the cycling XIAO nRF52. This does not mean 12 stable ports.
+The historical inventory observed 12 distinct USB identities during a 10-second read-only window, including the cycling XIAO nRF52. This does not mean 12 stable ports. It preceded the separate later Tag recovery and has not been replaced by a fresh fleet-wide inventory.
 
-This is a partial campaign report: 9/11 Companion USB qualifications, 8/11 BLE qualifications and 6 two-way RF links (7 boards including the RAK hub) passed. The full campaign is incomplete.
+This is a partial campaign report: 10/11 Companion USB qualifications, 9/11 BLE qualifications and 7 two-way RF links (8 boards including the RAK hub) passed. The full campaign is incomplete.
 
 USB qualification used 100 persistent query cycles and 10 reopen checks, owned-contact CRUD and warm reboot, plus RX-only radio2 overlap-warning and three-decimal frequency-suggestion trials. BLE passes required three 30-second sessions. RF passes required exact two-way zero-hop DEV datagrams and owned-channel/radio-lease cleanup; they do not qualify text delivery, range, cold boot, phone interoperability or every firmware feature.
 
