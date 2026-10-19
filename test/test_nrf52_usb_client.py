@@ -31,6 +31,7 @@ HARNESS = r'''
 static bool mounted = true, dtr[2] = {false, false}, dfu = false;
 static uint32_t now_ms = 100, rx_count = 0, tx_count = 0;
 static unsigned rx_flushes = 0, tx_clears = 0, log_edges = 0;
+static unsigned clean_resets = 0;
 // Model the endpoint separately from the software FIFO. A FIFO clear must
 // leave an armed packet intact; only a real detach + enumeration retires it.
 static bool armed_in[2] = {false, false}, attached = true;
@@ -66,7 +67,8 @@ static uint32_t tud_cdc_n_write(uint8_t, const void*, uint32_t size) {
 struct cdc_line_coding_t { uint32_t bit_rate; };
 static uint32_t baud = 115200;
 static void tud_cdc_get_line_coding(cdc_line_coding_t* coding) { coding->bit_rate = baud; }
-static void TinyUSB_Port_EnterDFU() { dfu = true; }
+extern "C" void meshRegulatorCleanReset() { ++clean_resets; }
+static void TinyUSB_Port_EnterDFU() { assert(clean_resets == 1); dfu = true; }
 namespace mesh {
 static std::atomic<bool> usb_logging_tx_waiting{false};
 #if defined(USE_TINYUSB)
@@ -196,9 +198,10 @@ int main() {
   rx_count = 4;
   assert(mesh::isUsbCompanionClientConnected());
   rx_count = 0;
+  assert(clean_resets == 0);
   baud = 1200;
   line(false);
-  assert(dfu);
+  assert(dfu && clean_resets == 1);
 }
 '''
 
