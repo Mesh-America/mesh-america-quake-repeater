@@ -815,6 +815,7 @@ jobs:
         run: |
           python3 -B test/test_common_usb_debug.py
           python3 -B test/test_companion_usb_logging.py
+          python3 -B test/test_nrf52_framework_logging.py
           python3 -B test/test_usb_logging_watchdog.py
           python3 -B test/test_usb_watchdog_event.py
           python3 -B test/test_usb_logging_client_activity.py
