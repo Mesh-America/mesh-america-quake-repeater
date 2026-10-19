@@ -455,7 +455,7 @@ class ProfileScanTest(unittest.TestCase):
 
     def test_warm_oscillator_is_not_used_before_tcxo_reinitialization(self):
         source=(ROOT/'src/helpers/radiolib/CustomSX1262.h').read_text()
-        begin=method(source,'int16_t begin(')
+        begin=method(source,'int16_t begin(float')
         harness=r'''
 #include <cassert>
 #include <cstdint>
