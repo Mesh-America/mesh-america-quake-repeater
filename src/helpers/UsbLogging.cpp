@@ -548,6 +548,11 @@ static void serviceEsp32HwcdcTxKickExclusive(void*) {
 #endif
       ) {
     esp32_hwcdc_tx_kick_pending.store(false, std::memory_order_release);
+#if MESH_HWCDC_PINNED_TX_BACKPORT
+    // The final FIFO ACK posts no TX event unless another payload is staged.
+    // Its empty proof must also finish a lone write or a dropped TX event.
+    noteUsbLoggingTxComplete();
+#endif
     return;
   }
   if (!Serial.isPlugged()) return;

@@ -12,6 +12,7 @@ from test_serial_wifi_sessions import SANITIZER_FLAGS
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "test/fixtures/usb_logging_watchdog"
 SIGNATURES = (
+    "void noteUsbLoggingTxComplete()",
     "static bool canAccessEsp32Hwcdc(void*)",
     "static void serviceEsp32HwcdcTxKickExclusive(",
     "static void serviceEsp32HwcdcTxKick()",
@@ -23,7 +24,6 @@ SIGNATURES = (
     "bool isUsbLoggingTransportRecoveryPending()",
     "bool takeUsbTerminalSessionReset()",
     "bool tryCompleteUsbTerminalSessionReset()",
-    "void noteUsbLoggingTxComplete()",
     "static void handleEsp32HwcdcEvent(",
 )
 

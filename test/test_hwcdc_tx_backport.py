@@ -359,6 +359,7 @@ int main(){
     def test_executed_logging_kick_purge_observation_and_new_reset_epoch(self):
         source=(ROOT/'src/helpers/UsbLogging.cpp').read_text()
         functions='\n'.join(body(source,s) for s in [
+            'static void noteUsbLoggingTxComplete()',
             'static void handleEsp32HwcdcEvent(',
             'static void serviceEsp32HwcdcTxKickExclusive(',
             'static void purgeEsp32HwcdcQueues(',
@@ -368,6 +369,7 @@ int main(){
         prefix=self.harness()[:self.harness().index('int main(){')]
         extra=r'''
 #include <helpers/UsbAsciiBinarySwitch.h>
+#include <helpers/UsbLoggingWatchdogPolicy.h>
 #define MESH_ESP32_HWCDC_SESSION_GUARD 1
 #define MESH_HWCDC_PINNED_TX_BACKPORT 1
 #define portENTER_CRITICAL(m) portENTER_CRITICAL_SAFE(m)
@@ -383,8 +385,8 @@ static bool detachEsp32HwcdcPads(){bool prior=pads_enabled;pads_enabled=false;pl
 static void restoreEsp32HwcdcPads(bool enabled){pads_enabled=enabled;plugged=enabled;if(at_restore){auto f=at_restore;at_restore=nullptr;f();}}
 static void setPlatformDebugOutputEnabled(bool){}
 static bool isUsbDebugLoggingEnabled(){return false;}
+static bool isUsbLoggingEnabled(){return true;}
 static void clearUsbLoggingClientActivity(){}
-static void noteUsbLoggingTxComplete(){}
 static std::atomic<uint32_t> esp32_hwcdc_access_generation{0},esp32_hwcdc_allowed_generation{0};
 static std::atomic<uint32_t> esp32_hwcdc_bus_reset_generation{0};
 static mesh::UsbSelfResetBurstGuard esp32_hwcdc_self_reset_guard;
@@ -408,9 +410,38 @@ struct SerialMock {
 } Serial;
 struct Exclusive {bool busy=false;bool tryRunExclusive(void(*f)(void*),void*opaque){if(busy)return false;f(opaque);return true;}} guarded_esp32_hwcdc_port;
 struct Esp32HwcdcPurgeResult{bool tx_empty=false;};
-struct UsbLoggingObservation{uint32_t tx_progress=0;bool supported=false,host_connected=false,reader_connected=false,pending=false;};
+using mesh::UsbLoggingObservation;
 @FUNCTIONS@
 int main(){
+ // TX events describe staging, not the final ACK. A single short payload
+ // produces one event; the ACK which empties the FIFO produces none. Also
+ // qualify the same completion when the finite framework queue drops events.
+ for(bool deliver_event : {true,false}) {
+  reset();plugged=true;usb_logging_tx_progress.store(0);
+  usb_logging_tx_waiting.store(true);esp32_hwcdc_tx_kick_pending.store(true);
+  esp32_hwcdc_tx_primed.store(false);
+  ring.data.push_back({1,2,3});pulse();assert(event_lengths.size()==1);
+  if(deliver_event)handleEsp32HwcdcEvent(nullptr,0,ARDUINO_HW_CDC_TX_EVENT,nullptr);
+  assert(!usb_logging_tx_progress.load()&&observeUsbLoggingTransport().pending);
+  mesh::UsbLoggingWatchdogPolicy policy;policy.begin(0,0);
+  assert(policy.update(0,true,observeUsbLoggingTransport())==mesh::UsbLoggingWatchdogPolicy::Action::None);
+  serviceEsp32HwcdcTxKickExclusive(nullptr);
+  assert(!usb_logging_tx_progress.load()&&usb_logging_tx_waiting.load());
+  if(!deliver_event) {
+   assert(policy.update(30000,true,observeUsbLoggingTransport())==mesh::UsbLoggingWatchdogPolicy::Action::None);
+   assert(policy.stalled()); // A still-unacknowledged FIFO remains a real stall.
+  }
+  pulse();assert(event_lengths.size()==1&&!meshEsp32HwcdcTxPending());
+  serviceEsp32HwcdcTxKickExclusive(nullptr);
+  assert(!usb_logging_tx_waiting.load()&&"final ACK must clear the waiting latch without another TX event");
+  assert(usb_logging_tx_progress.load()==1&&!observeUsbLoggingTransport().pending);
+  serviceEsp32HwcdcTxKickExclusive(nullptr);assert(usb_logging_tx_progress.load()==1);
+  for(uint32_t now : {30001U,600001U}) {
+   assert(policy.update(now,true,observeUsbLoggingTransport())==mesh::UsbLoggingWatchdogPolicy::Action::None);
+   assert(!policy.stalled());
+  }
+ }
+
  // Ring capacity alone cannot stop a kick or mark a pending suffix/FIFO empty.
  reset();plugged=true;ring.data.push_back({1,2,3,4});pulse(2);
  assert(Serial.availableForWrite()==4096 && mesh_hwcdc_tx_stash_len==2);
@@ -451,6 +482,12 @@ int main(){
 }
 '''.replace('@FUNCTIONS@',functions)
         self.compile_run(prefix+extra)
+        # The pre-fix kick observed an empty transport without publishing its
+        # real ACK. The same actual-ISR timeline must reject that behavior.
+        completion=body(source,'static void serviceEsp32HwcdcTxKickExclusive(')
+        missing_ack=completion.replace('    noteUsbLoggingTxComplete();\n','',1)
+        self.assertNotEqual(missing_ack,completion)
+        self.compile_run(prefix+extra.replace(completion,missing_ack),expect_success=False)
         # Negative control: a stale cleanup's unconditional resume violates the
         # same-epoch assertion despite all software queues being emptied.
         bad=functions.replace('if (esp32_hwcdc_cleanup_generation\n      == esp32_hwcdc_access_generation.load(std::memory_order_acquire)) {',
