@@ -147,10 +147,34 @@ static void startup_outlier_spikes_and_late_arming_changes() {
   }
 }
 
+static void invalid_power_never_enters_the_model() {
+  Receiver r;
+  r.level(-126, 520);
+  mesh::MorseRxDiagnostics before, after;
+  r.rx.diagnostics(before);
+  for (float invalid : {NAN, INFINITY, -INFINITY, -180.01f, 20.01f})
+    r.level(invalid, 2);
+  r.rx.diagnostics(after);
+  assert(after.samples == before.samples && after.last_dbm == before.last_dbm);
+  assert(after.minimum_dbm == before.minimum_dbm && after.maximum_dbm == before.maximum_dbm);
+  assert(after.noise_dbm == before.noise_dbm && !r.rx.keyed());
+  r.level(-119, 48);
+  r.level(-126, 400);
+  r.rx.stop(r.now);
+  assert(std::strcmp(r.rx.text(), "E ") == 0);
+
+  Receiver bounds;
+  bounds.level(-180, 2);
+  bounds.level(20, 2);
+  bounds.rx.diagnostics(after);
+  assert(after.samples == 2 && after.minimum_dbm == -180 && after.maximum_dbm == 20);
+}
+
 int main() {
   learned_noise_cannot_prekey_a_real_dot();
   recurrent_learned_excursions_stay_quiet_until_expiry();
   weak_cw_is_relative_to_the_observed_environment();
   startup_outlier_spikes_and_late_arming_changes();
+  invalid_power_never_enters_the_model();
   std::puts("actual adaptive quiet checks passed");
 }

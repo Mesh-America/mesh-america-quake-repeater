@@ -178,7 +178,7 @@ public:
     _last_sample_at = now;
     _max_sample_gap_ms = 0;
     _last_rssi = _minimum_rssi = _maximum_rssi = NAN;
-    _have_noise = _candidate_valid = _keyed = _floor_settled = false;
+    _have_noise = _candidate = _candidate_valid = _keyed = _floor_settled = false;
     _active = true;
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
     if (_trace) _trace->clear();
@@ -255,7 +255,7 @@ public:
   }
 
   void sample(float rssi_dbm, uint32_t now) {
-    if (!service(now) || !isfinite(rssi_dbm) || rssi_dbm < -180.0f || rssi_dbm > 20.0f) return;
+    if (!service(now) || !(rssi_dbm >= -180.0f && rssi_dbm <= 20.0f)) return;
     _last_rssi = rssi_dbm;
     const uint32_t sample_gap = static_cast<uint32_t>(now - _last_sample_at);
     const float filter_gap = sample_gap > 10U ? 10U : sample_gap;
