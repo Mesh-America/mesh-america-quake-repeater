@@ -48,3 +48,7 @@ T1000-E feature qualification or qualification of the other campaign boards.
 Historical battery and wall-power passes belong to their original builds.
 [Safe evidence summary](t1000_usb_bluetooth_priority_2026-10-20.safe.json)
 records the current source and artifact bindings.
+
+Later accepted measurements are recorded in the [2026-10-20 fleet
+qualification](hardware_validation_mercerwood_1_18_0_1_2026-10-20.md).
+Results and failures above retain their original firmware sources.

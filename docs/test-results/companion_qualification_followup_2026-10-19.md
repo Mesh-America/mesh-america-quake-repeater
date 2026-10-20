@@ -57,3 +57,7 @@ Original histories remain in [the earlier campaign report](hardware_validation_m
 The unit-test workflow passed all 12 jobs for source `51538f03`: [GitHub run](https://github.com/mikecarper/MeshCore/actions/runs/39350014767).
 
 Later selected-board evidence, the T1000 bootloader button correction and the final Full Companion USB/BLE results are recorded in [the diagnosis follow-up](companion_qualification_f807_followup_2026-10-19.md). The T1000 BLE and XIAO nRF52 failures remain open.
+
+Later accepted measurements are recorded in the [2026-10-20 fleet
+qualification](hardware_validation_mercerwood_1_18_0_1_2026-10-20.md).
+Results and failures above retain their original firmware sources.
