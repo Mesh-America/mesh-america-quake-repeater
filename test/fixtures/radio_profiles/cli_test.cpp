@@ -503,6 +503,41 @@ static void spectrumOverlap() {
 }
 
 int main(int argc, char** argv) {
+  static_assert(uint8_t(mesh::RadioCrossMode::Auto)==0 && uint8_t(mesh::RadioCrossMode::On)==1
+      && uint8_t(mesh::RadioCrossMode::Off)==2, "saved crossover encoding must remain compatible");
+  {
+    Fixture fresh;
+    assert(fresh.radio.p.cross==mesh::RadioCrossMode::Off && !fresh.radio.p.canCross());
+    assert(!strcmp(fresh.cmd("get radio2.cross"),"> off") && fresh.fs.files.empty());
+    for(const char* mode:{"auto","on","off"}) {
+      char command[40];snprintf(command,sizeof(command),"set radio2.cross %s",mode);fresh.cmd(command);
+      const auto expected=!strcmp(mode,"auto")?mesh::RadioCrossMode::Auto
+          : !strcmp(mode,"on")?mesh::RadioCrossMode::On:mesh::RadioCrossMode::Off;
+      assert(fresh.fs.files["/radio_profiles"][18]==uint8_t(expected));
+      Radio reboot;mesh::RadioProfileCLI restored;restored.begin(&fresh.fs,&reboot,&fresh.clock);
+      assert(reboot.p.cross==expected);
+      restored.handle("get radio2.cross",fresh.reply);
+      char reply[16];snprintf(reply,sizeof(reply),"> %s",mode);assert(!strcmp(fresh.reply,reply));
+    }
+    fresh.cmd("set radio2.cross on");fresh.fs.files.clear();
+    fresh.cli.begin(&fresh.fs,&fresh.radio,&fresh.clock);
+    assert(fresh.radio.p.cross==mesh::RadioCrossMode::Off);
+    assert(!strcmp(fresh.cmd("get radio2.cross"),"> off"));
+  }
+  for(bool semantic:{false,true}) {
+    Fixture invalid;invalid.cmd("set radio2.cross auto");
+    auto& image=invalid.fs.files["/radio_profiles"];
+    if(semantic) {
+      image[18]=255;
+      uint32_t crc=0xffffffffU;
+      for(size_t i=0;i<20;++i) {crc^=image[i];for(unsigned bit=0;bit<8;++bit)crc=(crc>>1)^((crc&1)?0xedb88320U:0);}
+      memcpy(image.data()+20,&crc,4);
+    } else image[0]^=1;
+    Radio radio;radio.p.cross=mesh::RadioCrossMode::On;
+    mesh::RadioProfileCLI restored;restored.begin(&invalid.fs,&radio,&invalid.clock);
+    assert(radio.p.cross==mesh::RadioCrossMode::Off);
+    restored.handle("get radio2.cross",invalid.reply);assert(!strcmp(invalid.reply,"> off"));
+  }
   if (argc == 2) {
     if (!strcmp(argv[1], "permanent_order")) permanentScheduleOrder();
     else if (!strcmp(argv[1], "temporary_boundary")) adjacentTemporarySchedules();
@@ -647,7 +682,7 @@ int main(int argc, char** argv) {
   {
     Fixture f;
     assert(!strcmp(f.cmd("get radio2"),"> off"));
-    assert(!strcmp(f.cmd("get radio2.cross"),"> auto"));
+    assert(!strcmp(f.cmd("get radio2.cross"),"> off"));
     assert(strstr(f.cmd("set radio2 910.5,500,7,5,rxtx"),"timing self-test pending"));
     assert(!f.radio.p.enabled()); f.advance(2000); assert(f.radio.p.enabled());
     assert(strstr(f.cmd("get radio2.timing"),"self-test pending"));

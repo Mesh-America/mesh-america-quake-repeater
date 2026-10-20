@@ -71,7 +71,7 @@ class RadioProfiles {
   RadioProfileConfig secondary;
   bool primary_temporary = false;
   bool secondary_temporary = false;
-  RadioCrossMode cross = RadioCrossMode::Auto;
+  RadioCrossMode cross = RadioCrossMode::Off;
   // Infrastructure opts into BOTH at startup; Companions keep their own
   // contact/channel policy. Force applies only to locally generated replies.
   uint8_t reply_tx = RADIO_TX_AUTO;

@@ -26,7 +26,7 @@ class RadioProfileCLI {
   RadioProfileConfig temporary_;
   RadioProfileConfig pending_temporary_;
   uint16_t primary_preamble_ = 0;
-  RadioCrossMode cross_ = RadioCrossMode::Auto;
+  RadioCrossMode cross_ = RadioCrossMode::Off;
   uint8_t reply_setting_ = 0;  // reserved image byte: 0 = role default
   bool infrastructure_replies_ = false;
   // Saved Off can be an explicit veto, rather than an unused secondary slot.

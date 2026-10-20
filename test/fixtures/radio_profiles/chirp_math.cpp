@@ -22,6 +22,8 @@ static void checkSafePreamble(unsigned sf, float bw, uint16_t symbols) {
   assert(Profiles::safePreamble(p, symbols) == originalSafePreamble(p, symbols));
 }
 int main() {
+  Profiles fresh;
+  assert(fresh.cross==mesh::RadioCrossMode::Off && !fresh.canCross());
   // Sharing the read-only validation table must preserve every supported
   // value and the strict float tolerance on both sides of its boundary.
   for (float bw : {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f,

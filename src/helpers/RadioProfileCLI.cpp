@@ -213,6 +213,7 @@ bool RadioProfileCLI::commitSavedImage(const char* path) {
 void RadioProfileCLI::begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool infrastructure_replies) {
   fs_ = fs; radio_ = radio; rtc_ = rtc; last_ms_ = millis();
   hold_ = false;
+  cross_ = RadioCrossMode::Off;
   recoverable_corrupt_store_ = false;
   manual_secondary_ = false;
   secondary_intent_generation_ = 0;
@@ -222,6 +223,7 @@ void RadioProfileCLI::begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool in
 #endif
   infrastructure_replies_ = infrastructure_replies;
   if (radio_ && radio_->profiles()) {
+    radio_->profiles()->cross = cross_;
     radio_->profiles()->reply_tx = infrastructure_replies ? RADIO_TX_BOTH : RADIO_TX_AUTO;
     radio_->profiles()->reply_force = false;
   }
@@ -270,7 +272,7 @@ void RadioProfileCLI::begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool in
     // structurally valid backup exists; that backup is the last known-good
     // radio-profile image and must remain available for manual recovery.
     const ImageReadResult backup_image = readImage(BackupPath, bytes, sizeof(bytes));
-    hold_ = true; saved_ = {}; primary_preamble_ = 0; cross_ = RadioCrossMode::Auto;
+    hold_ = true; saved_ = {}; primary_preamble_ = 0; cross_ = RadioCrossMode::Off;
     recoverable_corrupt_store_ = backup_image != ImageReadResult::Valid
         && backup_image != ImageReadResult::Unreadable;
     reply_setting_ = 0;  // reject the entire image, including its reply override

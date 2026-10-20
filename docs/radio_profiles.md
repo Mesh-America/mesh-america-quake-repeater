@@ -189,8 +189,8 @@ messages between the two profiles. `TX=a,b` reports primary and secondary
 transmit counts. Crossing also applies to OTA traffic.
 
 The crossing setting is saved and remains enabled after the temporary session
-ends or the node reboots. Run `set radio2.cross auto` to restore the default
-isolation between permanent and temporary profiles. The firmware picker's
+ends or the node reboots. Run `set radio2.cross off` to restore the default
+isolation between profiles. The firmware picker's
 Companion tempradio2 instructions include both choices and the status commands.
 
 ## Companion TX routing by contact or channel
@@ -806,7 +806,7 @@ set radio2.cross on
 set radio2.cross off
 ```
 
-| Active primary | Active secondary | `auto` (default) | `on` | `off` |
+| Active primary | Active secondary | `auto` | `on` | `off` (default) |
 | --- | --- | --- | --- | --- |
 | `radio` | `radio2` | Cross | Cross | Isolated |
 | `tempradio` | `tempradio2` | Cross | Cross | Isolated |
@@ -815,6 +815,9 @@ set radio2.cross off
 
 This table describes MeshCore profiles. A Meshtext secondary profile is
 always isolated, including with `radio2.cross on`.
+
+New configurations default to `off`. An explicitly saved `auto`, `on`, or `off`
+setting is preserved across firmware updates and reboots.
 
 These are the global rules used by Companion targets set to `auto`; an explicit
 contact/channel choice above overrides crossing for its own outbound packets.

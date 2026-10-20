@@ -1118,6 +1118,13 @@ assert.strictEqual(rakCommands.find(s => s.title.startsWith('RS232')).actions[0]
 assert(commands(rakCommands).includes('set gps on'));
 assert(!rakCommands.some(s => s.title === 'MQTT broker connections'));
 const indicator = picker.runtimeDirections(findControlled('SenseCapIndicator-LoRa_companion_radio_full'), {});
+const isolation = picker.runtimeDirections(Object.assign({},
+  findControlled('SenseCapIndicator-LoRa_companion_radio_full'),
+  {releaseFamily: 'v1.17.1.6-halo-keymind-cascade-dev-test'}), {})
+  .find(section => section.title === 'Companion tempradio2: transmit on both');
+assert(isolation);
+assert.deepStrictEqual(isolation.actions.find(action => action.label === 'Default isolation').commands,
+  ['set radio2.cross off']);
 assert(commands(indicator).includes('set companion.transport ble'));
 assert(!indicator.some(s => s.title.startsWith('MQTT')));
 // Never apply old hardware capabilities to another release, or to an unknown

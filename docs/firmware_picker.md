@@ -438,7 +438,7 @@ set radio2.cross on
 
 This copies new messages to both `radio` and `tempradio2`. The setting is saved,
 outlasts the temporary session and reboot, and also allows OTA traffic to cross
-profiles. **Default isolation** copies `set radio2.cross auto`; **Check** shows
+profiles. **Default isolation** copies `set radio2.cross off`; **Check** shows
 the temporary profile, crossing policy and per-profile transmit counters.
 See the [two-profile setup guide](radio_profiles.md#companion-messages-on-both-profiles).
 
