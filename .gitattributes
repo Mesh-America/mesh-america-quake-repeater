@@ -17,3 +17,6 @@ tools/hil/sf5_250*.json -text whitespace=cr-at-eol
 
 # Preserve the pinned upstream FS/newlib fixtures byte-for-byte.
 test/fixtures/esp32_file_buffer/* -text whitespace=-blank-at-eol,-blank-at-eof
+
+# Preserve the pinned upstream QSPI fixtures and their source fingerprints.
+test/fixtures/customlfs_qspi_dma/* -text whitespace=-blank-at-eol,-blank-at-eof

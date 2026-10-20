@@ -468,6 +468,7 @@ jobs:
           python3 -B test/test_companion_channel_storage.py -v
           python3 -B test/test_nrf52_extrafs_contract.py -v
           python3 -B test/test_xiao_qspi_recovery.py -v
+          python3 -B test/test_nrf52_qspi_dma_fix.py -v
           python3 -B test/test_xiao_identity_recovery.py -v
           python3 -B test/test_companion_ota_config.py -v
           python3 -B test/test_ota_identity_policy.py -v
