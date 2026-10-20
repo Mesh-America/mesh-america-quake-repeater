@@ -155,7 +155,7 @@ class CommonRadioPersistenceTest(unittest.TestCase):
             'bool CommonCLI::savePrimaryRadioParams('))
         serializer = 'template<typename Writer>\n' + extract_braced(source, 'static bool writeCommonPrefsImage(')
         tail = extract_braced(source, 'if (file.available() >= (int)sizeof(_prefs->bridge_format))')
-        code = HARNESS.replace('@FIELDS@',fields).replace('@METHODS@',methods)
+        code = HARNESS.replace('@FIELDS@',fields).replace('@METHODS@',("\n#include <stddef.h>\ntemplate<typename Writer>\n" + extract_braced(source, "static void writeCommonRetryPrefs(") + "\n" + methods))
         code = code.replace('@SERIALIZER@',serializer).replace('@TAIL@',tail)
         sanitizer_flags = [] if os.name == 'nt' else [
             '-fsanitize=address,undefined', '-fno-sanitize-recover=all',

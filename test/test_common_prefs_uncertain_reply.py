@@ -58,7 +58,7 @@ def actual_harness():
         'SERIALIZER': 'template<typename Writer>\n' + extract_braced(
             source, 'static bool writeCommonPrefsImage('),
         'STORE': extract_braced(source, 'class CommonPrefsFileStore'),
-        'METHODS': methods,
+        'METHODS': ("\n#include <stddef.h>\ntemplate<typename Writer>\n" + extract_braced(source, "static void writeCommonRetryPrefs(") + "\n" + methods),
         'SET_DEBUG': extract_braced(source, 'if (strncmp(config, "usb.debug", 9)'),
         'SET_MASTER': extract_braced(source, 'if (strncmp(config, "usb.logging", 11)'),
         'GET_DEBUG': extract_braced(source, 'if (strcmp(config, "usb.debug") == 0)'),

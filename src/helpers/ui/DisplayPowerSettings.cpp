@@ -4,8 +4,9 @@
 
 namespace mesh { namespace ui {
 namespace {
-FILESYSTEM* settings_fs = nullptr;
 bool pairing_available = false;
+#ifdef MESHCORE_HAS_REAL_DISPLAY
+FILESYSTEM* settings_fs = nullptr;
 const char* const path = "/display_prefs";
 const char* const backup = "/display_prefs.bak";
 const char* const temporary = "/display_prefs.tmp";
@@ -78,15 +79,21 @@ bool savePrefs(const DisplayPowerPrefs& prefs) {
   settings_fs->remove(backup);
   return true;
 }
+#endif  // MESHCORE_HAS_REAL_DISPLAY
 }
 
 bool loadDisplayPowerSettings(FILESYSTEM* fs, bool pairing_supported, bool wake_on_boot) {
+#ifdef MESHCORE_HAS_REAL_DISPLAY
   settings_fs = fs;
+#else
+  (void)fs;
+#endif
   pairing_available = pairing_supported;
   DisplayPowerPrefs prefs;
   prefs.wake_on_boot = wake_on_boot;
   if (pairing_supported) prefs.battery.mode = prefs.usb.mode = DisplayMode::ButtonPairing;
   displayPowerPrefs() = prefs;
+#ifdef MESHCORE_HAS_REAL_DISPLAY
   if (!fs) return false;
   bool loaded = readPrefs(path, prefs);
   if (!loaded && readPrefs(backup, prefs)) {
@@ -101,6 +108,11 @@ bool loadDisplayPowerSettings(FILESYSTEM* fs, bool pairing_supported, bool wake_
   }
   displayPowerPrefs() = prefs;
   return true;
+#else
+  // Headless commands already report unsupported. Preserve runtime defaults
+  // without retaining or touching a display-only persistent store.
+  return false;
+#endif
 }
 bool displayPairingSupported() { return pairing_available; }
 
@@ -111,11 +123,29 @@ void migrateLegacyDisplayTimeout(uint16_t seconds) {
   if (seconds) prefs.battery.seconds = prefs.usb.seconds = seconds;
   // Keep the old behavior in memory even if flash is temporarily unavailable.
   displayPowerPrefs() = prefs;
+#ifdef MESHCORE_HAS_REAL_DISPLAY
   savePrefs(prefs);
+#endif
 }
 
 bool handleDisplayPowerCommand(const char* command, char* reply, size_t reply_size,
                                bool inbox_supported) {
+#ifndef MESHCORE_HAS_REAL_DISPLAY
+  (void)inbox_supported;
+  if ((command[0] != 'g' && command[0] != 's')
+      || strncmp(command + 1, "et display.", 11) != 0) return false;
+  const char* key = command + 12;
+  const bool usb = strncmp(key, "usb.", 4) == 0;
+  if (usb) key += 4;
+  size_t length;
+  if (strncmp(key, "mode", 4) == 0) length = 4;
+  else if (strncmp(key, "timeout", 7) == 0) length = 7;
+  else if (!usb && strncmp(key, "inbox", 5) == 0) length = 5;
+  else return false;
+  if (key[length] && key[length] != ' ') return false;
+  snprintf(reply, reply_size, "Error: display unsupported");
+  return true;
+#else
   const bool get = strncmp(command, "get ", 4) == 0;
   const bool set = strncmp(command, "set ", 4) == 0;
   if (!get && !set) return false;
@@ -129,11 +159,6 @@ bool handleDisplayPowerCommand(const char* command, char* reply, size_t reply_si
     }
   }
   if (index < 0) return false;
-#ifndef MESHCORE_HAS_REAL_DISPLAY
-  (void)inbox_supported;
-  snprintf(reply, reply_size, "Error: display unsupported");
-  return true;
-#else
   auto candidate = displayPowerPrefs();
   auto& profile = index < 2 ? candidate.battery : candidate.usb;
   const char* value = key + strlen(keys[index]);

@@ -15,93 +15,91 @@ FILESYSTEM* settings_fs = nullptr;
 const char* const path = "/leds_v1";
 const char* const backup = "/leds_v1.bak";
 
-void encode(bool on, uint8_t (&data)[8]) {
-  const uint8_t value = on ? 1 : 0;
-  const uint8_t image[] = {'L', 'E', 'D', 1, value,
-                          static_cast<uint8_t>(value ^ 0xff), 0, 0};
-  memcpy(data, image, sizeof(data));
-}
+const uint8_t images[2][8] = {
+    {'L', 'E', 'D', 1, 0, 0xff, 0, 0},
+    {'L', 'E', 'D', 1, 1, 0xfe, 0, 0}};
 
-bool readSetting(const char* name, bool& on) {
-  if (!settings_fs) return false;
+// Return the saved value, or -1 for an absent or invalid image. Comparing the
+// two canonical images shares the write format without a second encoder.
+int readSetting(const char* name) {
+  if (!settings_fs) return -1;
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   File file(*settings_fs);
-  if (!file.open(name, FILE_O_READ)) return false;
+  if (!file.open(name, FILE_O_READ)) return -1;
 #else
   File file = settings_fs->open(name, "r");
-  if (!file) return false;
+  if (!file) return -1;
 #endif
-  uint8_t data[8], expected[8];
+  uint8_t data[8];
   const bool complete = file.size() == sizeof(data)
       && file.read(data, sizeof(data)) == sizeof(data);
   file.close();
-  if (!complete || data[4] > 1) return false;
-  encode(data[4] != 0, expected);
-  if (memcmp(data, expected, sizeof(data)) != 0) return false;
-  on = data[4] != 0;
-  return true;
+  if (!complete || data[4] > 1
+      || memcmp(data, images[data[4]], sizeof(data)) != 0) return -1;
+  return data[4];
 }
 
 bool saveSetting(bool on) {
   if (!settings_fs) return false;
-  uint8_t data[8];
-  encode(on, data);
+  const uint8_t* data = images[on ? 1 : 0];
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   AtomicFileWriter file(settings_fs, path);
 #else
   ContactFileTransaction file(settings_fs, path);
 #endif
-  if (!file || file.write(data, sizeof(data)) != sizeof(data) || !file.commit())
+  if (!file || file.write(data, sizeof(images[0])) != sizeof(images[0]) || !file.commit())
     return false;
-  bool checked = !on;
-  return readSetting(path, checked) && checked == on;
+  return readSetting(path) == int(on);
 }
 } // namespace
 
 void beginSettings(MainBoard& board, FILESYSTEM* fs) {
   main_board = &board;
   settings_fs = fs;
-  bool on = true;
-  if (!readSetting(path, on) && readSetting(backup, on)) {
+  int setting = readSetting(path);
+  if (setting < 0 && (setting = readSetting(backup)) >= 0) {
     // Recover the rename gap without discarding the last complete preference.
     if ((!fs->exists(path) || fs->remove(path)) && fs->rename(backup, path)) {
-      bool checked = !on;
-      if (!readSetting(path, checked) || checked != on) settings_fs = nullptr;
+      if (readSetting(path) != setting) settings_fs = nullptr;
     } else {
       settings_fs = nullptr;
     }
   }
-  setEnabled(on);
+  setEnabled(setting != 0);
   board.applyLedPolicy();
   applyStatusPolicy();
 }
 
+// Keep the uncommon filesystem transaction out of the large STM32 CLI
+// dispatcher, while retaining ordinary inlining choices elsewhere.
+#if defined(STM32_PLATFORM)
+__attribute__((noinline))
+#endif
 bool handleCommand(const char* command, char* reply, size_t capacity) {
   if (!command || !reply || capacity == 0) return false;
-  const bool get = strncmp(command, "get ", 4) == 0;
-  const bool set = strncmp(command, "set ", 4) == 0;
-  if ((!get && !set) || strncmp(command + 4, "leds", 4) != 0) return false;
+  const bool get = command[0] == 'g';
+  if ((!get && command[0] != 's')
+      || strncmp(command + 1, "et leds", 7) != 0) return false;
   const char* value = command + 8;
   if (*value && *value != ' ' && *value != '\t') return false;
+  const char* message;
   if (get) {
-    if (*value) snprintf(reply, capacity, "Error: usage get leds");
-    else snprintf(reply, capacity, "> %s", enabled() ? "on" : "off");
-    return true;
+    message = *value ? "Error: usage get leds" : enabled() ? "> on" : "> off";
+  } else {
+    while (*value == ' ' || *value == '\t') ++value;
+    const bool on = strcmp(value, "on") == 0;
+    if (!on && strcmp(value, "off") != 0) {
+      message = "Error: usage set leds on|off";
+    } else if (!main_board || !saveSetting(on)) {
+      message = "Error: LED setting save unconfirmed; reboot may differ";
+    } else {
+      setEnabled(on);
+      main_board->applyLedPolicy();
+      applyStatusPolicy();
+      message = "OK";
+    }
   }
-  while (*value == ' ' || *value == '\t') ++value;
-  if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-    snprintf(reply, capacity, "Error: usage set leds on|off");
-    return true;
-  }
-  const bool on = strcmp(value, "on") == 0;
-  if (!main_board || !saveSetting(on)) {
-    snprintf(reply, capacity, "Error: LED setting save unconfirmed; reboot may differ");
-    return true;
-  }
-  setEnabled(on);
-  main_board->applyLedPolicy();
-  applyStatusPolicy();
-  snprintf(reply, capacity, "OK");
+  snprintf(reply, capacity, "%s", message);
   return true;
 }
 } } // namespace mesh::leds

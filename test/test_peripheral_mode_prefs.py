@@ -80,7 +80,7 @@ def common_code():
         "FIELDS": fields, "CONSTANTS": constants, "HELPERS": helpers,
         "LEGACY": extract_braced(header, "struct LegacyObserverTail") + ";",
         "SERIALIZER": "template<typename Writer>\n" + extract_braced(source, "static bool writeCommonPrefsImage("),
-        "STORE": extract_braced(source, "class CommonPrefsFileStore"), "METHODS": methods,
+        "STORE": extract_braced(source, "class CommonPrefsFileStore"), "METHODS": ("\n#include <stddef.h>\ntemplate<typename Writer>\n" + extract_braced(source, "static void writeCommonRetryPrefs(") + "\n" + methods),
         "DYNAMIC": extract_braced(header, "class BridgePrefs :"),
         "SET_DEBUG": "", "SET_MASTER": "", "GET_DEBUG": "", "GET_MASTER": "",
     }.items():

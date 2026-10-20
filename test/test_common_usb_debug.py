@@ -318,7 +318,7 @@ class CommonUsbDebugTest(unittest.TestCase):
             'SERIALIZER': 'template<typename Writer>\n' + extract_braced(
                 source, 'static bool writeCommonPrefsImage('),
             'STORE': extract_braced(source, 'class CommonPrefsFileStore'),
-            'METHODS': methods,
+            'METHODS': ("\n#include <stddef.h>\ntemplate<typename Writer>\n" + extract_braced(source, "static void writeCommonRetryPrefs(") + "\n" + methods),
             'DYNAMIC': extract_braced(header, 'class BridgePrefs :'),
             'SET_DEBUG': extract_braced(source, 'if (strncmp(config, "usb.debug", 9)'),
             'SET_MASTER': extract_braced(source, 'if (strncmp(config, "usb.logging", 11)'),

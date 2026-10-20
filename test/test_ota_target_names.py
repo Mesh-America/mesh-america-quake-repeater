@@ -124,7 +124,7 @@ class OtaTargetNameTest(unittest.TestCase):
 
     def test_rak_full_lookup_fails_closed_without_heap_and_keeps_every_name(self):
         flags = ["-DOTA_TARGET_NAME_FRONT_CODED=1", "-DOTA_RAK15002_SD_STORE=1", "-DCOMPANION_RADIO_FULL=1"]
-        data, offsets, lengths, firsts = gen_targets.compressed_name_chunks(
+        data, offsets, lengths, firsts = gen_targets.grouped_name_chunks(
             self.rows, gen_targets.RAK_FULL_NAME_DECODE_CHUNK_SIZE)
         ordinary = gen_targets.compressed_name_chunks(self.rows)
         self.assertGreater(len(ordinary[0]) - len(data), 1500)
@@ -133,6 +133,76 @@ class OtaTargetNameTest(unittest.TestCase):
         self.assertEqual(offsets[-1], len(data))
         self.assertEqual(self.compile_and_lookup(flags + ["-DOTA_TEST_MALLOC_FAIL=1"],
                                                 [self.rows[0][0], 0]), ["?", "?"])
+
+    def grouped_roundtrip(self, rows, chunk_size=4096):
+        data, offsets, lengths, firsts = gen_targets.grouped_name_chunks(rows, chunk_size)
+        names = []
+        for group, length in enumerate(lengths):
+            raw = zlib.decompress(data[offsets[group]:offsets[group + 1]], -15)
+            self.assertEqual(len(raw), length)
+            self.assertLessEqual(length, chunk_size)
+            count, dictionary_bytes = raw[0], int.from_bytes(raw[1:3], "little")
+            dictionary_end = 3 + dictionary_bytes
+            dictionary = raw[3:dictionary_end].split(b"\0")
+            self.assertEqual(dictionary[-1], b"")
+            self.assertEqual(len(dictionary) - 1, count)
+            position, previous, row = dictionary_end, b"", firsts[group]
+            while row < firsts[group + 1]:
+                prefix = raw[position]
+                self.assertLessEqual(prefix, len(previous))
+                end = raw.index(0, position + 1)
+                previous = previous[:prefix] + raw[position + 1:end]
+                aliases = raw[end + 1]
+                self.assertGreater(aliases, 0)
+                position = end + 2
+                for index in raw[position:position + aliases]:
+                    self.assertLess(index, count)
+                    names.append((previous + dictionary[index]).decode("utf-8"))
+                position += aliases; row += aliases
+            self.assertEqual(row, firsts[group + 1])
+            self.assertEqual(position, len(raw))
+        self.assertEqual(names, [name for _, name in rows])
+        return data, lengths
+
+    def test_rak_full_grouped_roles_keep_all_names_in_same_scratch_and_save_flash(self):
+        data, lengths = self.grouped_roundtrip(self.rows)
+        previous = gen_targets.compressed_name_chunks(self.rows, 4096)
+        self.assertGreater(len(previous[0]) - len(data), 1000)
+        self.assertLessEqual(max(lengths), 4096)
+        # Unusual/legacy names stay complete; larger future inventories restart
+        # board prefixes and carry a complete suffix dictionary in each chunk.
+        future = gen_targets.target_rows(
+            [f"board_{i:04d}_{role}" for i in range(700)
+             for role in ("repeater", "companion_radio_usb", "room_server")]
+            + ["legacy_without_role", "odd_BOARD_repeatr", "case_Companion_ble"])
+        _, chunks = self.grouped_roundtrip(future)
+        self.assertGreater(len(chunks), 1)
+
+    def test_grouped_decoder_rejects_bad_dictionary_prefix_count_and_role_index(self):
+        from zopfli_compress import raw_deflate_compress
+        rows = gen_targets.target_rows(["hello"])
+        header = gen_targets.generate_header(rows)
+        data, offsets, lengths, firsts = gen_targets.grouped_name_chunks(rows)
+        raw = zlib.decompress(data, -15)
+        invalid = []
+        for offset, value in ((0, 0), (1, 255), (3, 88), (4, 255), (-2, 0), (-1, 255)):
+            changed = bytearray(raw); changed[offset] = value; invalid.append(bytes(changed))
+        invalid.append(raw[:-1])
+        for changed in invalid:
+            stream = raw_deflate_compress(changed, numiterations=1000)
+            altered = re.sub(
+                r"(static const uint8_t NAMES\[\] = \{).*?(\n  \};)",
+                lambda match: match[1] + "\n    " + ", ".join(f"0x{byte:02x}" for byte in stream) + "," + match[2],
+                header, count=1, flags=re.S)
+            altered = re.sub(
+                r"(static const uint16_t OFFSETS\[\] = \{).*?(\n  \};)",
+                lambda match: match[1] + f"\n    0, {len(stream)}," + match[2], altered, count=1, flags=re.S)
+            altered = re.sub(
+                r"(static const uint16_t RAW_LENGTHS\[\] = \{).*?(\n  \};)",
+                lambda match: match[1] + f"\n    {len(changed)}," + match[2], altered, count=1, flags=re.S)
+            with self.subTest(raw=changed.hex()):
+                flags = ["-DOTA_TARGET_NAME_FRONT_CODED=1", "-DOTA_RAK15002_SD_STORE=1", "-DCOMPANION_RADIO_FULL=1"]
+                self.assertEqual(self.compile_and_lookup(flags, [rows[0][0]], altered), ["?"])
 
     def test_rak_full_fingerprint_collisions_verify_the_entire_target_id(self):
         flags = ["-DOTA_TARGET_NAME_FRONT_CODED=1", "-DOTA_RAK15002_SD_STORE=1", "-DCOMPANION_RADIO_FULL=1"]
@@ -198,6 +268,8 @@ class OtaTargetNameTest(unittest.TestCase):
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
                     gen_targets.compressed_name_chunks([(1, name)])
+                with self.assertRaises(ValueError):
+                    gen_targets.grouped_name_chunks([(1, name)])
 
 
 if __name__ == "__main__":

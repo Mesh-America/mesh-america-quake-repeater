@@ -8,3 +8,10 @@
 namespace mesh { namespace power {
 inline bool handleRegulatorCommand(const char*, char*, size_t) { return false; }
 }}
+
+// LED persistence has its own executable coverage in test_led_settings.py.
+// These command-dispatch fixtures likewise leave unrelated LED commands to
+// that subsystem instead of requiring a board/filesystem implementation.
+namespace mesh { namespace leds {
+inline bool handleCommand(const char*, char*, size_t) { return false; }
+}}

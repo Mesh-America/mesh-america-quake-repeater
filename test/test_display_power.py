@@ -28,14 +28,17 @@ struct File {
 struct FakeFS {
   std::map<std::string, std::vector<uint8_t>> files;
   bool fail_write = false, fail_publish = false;
-  bool exists(const char* name) { return files.count(name); }
-  bool remove(const char* name) { files.erase(name); return true; }
+  unsigned calls = 0;
+  bool exists(const char* name) { ++calls; return files.count(name); }
+  bool remove(const char* name) { ++calls; files.erase(name); return true; }
   bool rename(const char* from, const char* to) {
+    ++calls;
     if (fail_publish && std::string(from) == "/display_prefs.tmp") return false;
     if (!exists(from) || exists(to)) return false;
     files[to] = files[from]; files.erase(from); return true;
   }
   File open(const char* name, const char* mode, bool = false) {
+    ++calls;
     if (*mode == 'w') files[name].clear();
     if (!exists(name)) return {};
     return File{this, name};
@@ -326,6 +329,61 @@ int main() {
 '''
 
 
+HEADLESS_TEST = r'''
+#include <cassert>
+#include <helpers/ui/DisplayPowerSettings.h>
+using namespace mesh::ui;
+int main() {
+  FakeFS fs;
+  fs.files["/display_prefs"] = {'D', 'P', 2, 5, 42, 0, 1, 57, 0, 2, 0, 0};
+  fs.files["/display_prefs.bak"] = {'b', 'a', 'c', 'k', 'u', 'p'};
+  fs.files["/display_prefs.tmp"] = {'t', 'e', 'm', 'p'};
+  const auto original = fs.files;
+  for (bool pairing : {false, true}) for (bool wake : {false, true}) {
+    displayPowerPrefs().battery = {DisplayMode::Off, 123};
+    displayPowerPrefs().usb = {DisplayMode::On, 456};
+    displayPowerPrefs().inbox = DisplayInboxMode::Unread;
+    assert(!loadDisplayPowerSettings(&fs, pairing, wake));
+    const auto& prefs = displayPowerPrefs();
+    const auto mode = pairing ? DisplayMode::ButtonPairing : DisplayMode::Button;
+    assert(prefs.battery.mode == mode && prefs.usb.mode == mode);
+    assert(prefs.battery.seconds == 15 && prefs.usb.seconds == 15);
+    assert(prefs.inbox == DisplayInboxMode::History && prefs.wake_on_boot == wake);
+    assert(displayPairingSupported() == pairing);
+    for (const char* key : {"display.mode", "display.timeout", "display.usb.mode",
+                            "display.usb.timeout", "display.inbox"}) {
+      for (const char* prefix : {"get ", "set "}) for (const char* suffix : {"", " off", " typo"}) {
+        char reply[160] = {};
+        const std::string text = std::string(prefix) + key + suffix;
+        assert(handleDisplayPowerCommand(text.c_str(), reply, sizeof(reply), true));
+        assert(std::string(reply) == "Error: display unsupported");
+      }
+    }
+    char reply[32] = "untouched";
+    assert(!handleDisplayPowerCommand("get display.model", reply, sizeof(reply)));
+    assert(std::string(reply) == "untouched");
+    char bounded[3] = {'x', 'y', 'z'};
+    assert(handleDisplayPowerCommand("get display.mode", bounded, 1));
+    assert(bounded[0] == 0 && bounded[1] == 'y' && bounded[2] == 'z');
+    migrateLegacyDisplayTimeout(0);
+    assert(displayPowerPrefs().battery.mode == DisplayMode::On);
+    assert(displayPowerPrefs().usb.mode == DisplayMode::On);
+    migrateLegacyDisplayTimeout(42);
+    assert(displayPowerPrefs().battery.mode == DisplayMode::Automatic);
+    assert(displayPowerPrefs().usb.mode == DisplayMode::Automatic);
+    assert(displayPowerPrefs().battery.seconds == 42 && displayPowerPrefs().usb.seconds == 42);
+    assert(displayPowerPrefs().wake_on_boot == wake && displayPairingSupported() == pairing);
+    migrateLegacyDisplayTimeout(3601);
+    assert(displayPowerPrefs().battery.seconds == 42 && displayPowerPrefs().usb.seconds == 42);
+    assert(fs.calls == 0 && fs.files == original);
+    assert(!loadDisplayPowerSettings(nullptr, pairing, wake));
+    assert(displayPowerPrefs().battery.mode == mode && displayPowerPrefs().wake_on_boot == wake);
+    assert(fs.calls == 0 && fs.files == original);
+  }
+}
+'''
+
+
 class DisplayPowerTest(unittest.TestCase):
     def test_companion_boot_wake_is_transport_and_layout_independent(self):
         mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
@@ -343,6 +401,27 @@ class DisplayPowerTest(unittest.TestCase):
                 self.assertIn("_display->servicePower(", ui[start:end])
         infrastructure = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
         self.assertIn("loadDisplayPowerSettings(fs, false);", infrastructure)
+
+    def test_headless_defaults_commands_and_legacy_migration_do_not_touch_files(self):
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler, "host C++ compiler required")
+        with tempfile.TemporaryDirectory(prefix="mesh-headless-display-test-") as name:
+            work = Path(name)
+            (work / "helpers").mkdir()
+            (work / "helpers/IdentityStore.h").write_text(FS_STUB)
+            (work / "test.cpp").write_text(HEADLESS_TEST)
+            for label, definitions in (("absent", ()), ("null", ("-DDISPLAY_CLASS=NullDisplayDriver",))):
+                with self.subTest(display=label):
+                    executable = work / (label + ".exe")
+                    result = subprocess.run([
+                        compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                        *definitions, "-I" + str(work), "-I" + str(ROOT / "src"),
+                        str(work / "test.cpp"), str(ROOT / "src/helpers/ui/DisplayPowerSettings.cpp"),
+                        "-o", str(executable),
+                    ], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_policy_and_persistent_commands(self):
         compiler = shutil.which("g++") or shutil.which("clang++")

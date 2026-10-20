@@ -216,7 +216,7 @@ def production_harness(source, header):
         'SERIALIZER': 'template<typename Writer>\n' + extract_braced(
             source, 'static bool writeCommonPrefsImage('),
         'STORE': extract_braced(source, 'class CommonPrefsFileStore'),
-        'METHODS': methods,
+        'METHODS': ("\n#include <stddef.h>\ntemplate<typename Writer>\n" + extract_braced(source, "static void writeCommonRetryPrefs(") + "\n" + methods),
         'DYNAMIC': extract_braced(header, 'class RepeatPrefs :'),
         'SET_DEBUG': extract_braced(setter, branch), 'SET_MASTER': '',
         'GET_DEBUG': extract_braced(getter, branch), 'GET_MASTER': '',

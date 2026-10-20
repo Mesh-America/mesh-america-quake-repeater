@@ -1977,6 +1977,75 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
 }
 #endif
 
+// This canonical retry/flood span contains no padding. Guard every boundary
+// before replacing its field writes with one bounded LittleFS transaction write.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+template <typename Writer>
+static void writeCommonRetryPrefs(Writer& writer, NodePrefs* prefs) {
+  static_assert(offsetof(NodePrefs, direct_retry_attempts) == offsetof(NodePrefs, retry_preset)
+      + sizeof(prefs->retry_preset), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_base_ms) == offsetof(NodePrefs, direct_retry_attempts)
+      + sizeof(prefs->direct_retry_attempts), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_step_ms) == offsetof(NodePrefs, direct_retry_base_ms)
+      + sizeof(prefs->direct_retry_base_ms), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_snr_margin_x4) == offsetof(NodePrefs, direct_retry_step_ms)
+      + sizeof(prefs->direct_retry_step_ms), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr4_snr_x4) == offsetof(NodePrefs, direct_retry_snr_margin_x4)
+      + sizeof(prefs->direct_retry_snr_margin_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr5_snr_x4) == offsetof(NodePrefs, direct_retry_cr4_snr_x4)
+      + sizeof(prefs->direct_retry_cr4_snr_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr7_snr_x4) == offsetof(NodePrefs, direct_retry_cr5_snr_x4)
+      + sizeof(prefs->direct_retry_cr5_snr_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr8_snr_x4) == offsetof(NodePrefs, direct_retry_cr7_snr_x4)
+      + sizeof(prefs->direct_retry_cr7_snr_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_enabled) == offsetof(NodePrefs, direct_retry_cr8_snr_x4)
+      + sizeof(prefs->direct_retry_cr8_snr_x4), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_cr_enabled) == offsetof(NodePrefs, direct_retry_enabled)
+      + sizeof(prefs->direct_retry_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_prefs_magic) == offsetof(NodePrefs, direct_retry_cr_enabled)
+      + sizeof(prefs->direct_retry_cr_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_attempts) == offsetof(NodePrefs, direct_retry_prefs_magic)
+      + sizeof(prefs->direct_retry_prefs_magic), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_max_path) == offsetof(NodePrefs, flood_retry_attempts)
+      + sizeof(prefs->flood_retry_attempts), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_prefixes) == offsetof(NodePrefs, flood_retry_max_path)
+      + sizeof(prefs->flood_retry_max_path), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_bridge_enabled) == offsetof(NodePrefs, flood_retry_prefixes)
+      + sizeof(prefs->flood_retry_prefixes), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_bridge_buckets) == offsetof(NodePrefs, flood_retry_bridge_enabled)
+      + sizeof(prefs->flood_retry_bridge_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_ignore_prefixes) == offsetof(NodePrefs, flood_retry_bridge_buckets)
+      + sizeof(prefs->flood_retry_bridge_buckets), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_retry_advert_enabled) == offsetof(NodePrefs, flood_retry_ignore_prefixes)
+      + sizeof(prefs->flood_retry_ignore_prefixes), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, battery_alert_enabled) == offsetof(NodePrefs, flood_retry_advert_enabled)
+      + sizeof(prefs->flood_retry_advert_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, battery_alert_low_percent) == offsetof(NodePrefs, battery_alert_enabled)
+      + sizeof(prefs->battery_alert_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, battery_alert_critical_percent) == offsetof(NodePrefs, battery_alert_low_percent)
+      + sizeof(prefs->battery_alert_low_percent), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, direct_retry_recent_enabled) == offsetof(NodePrefs, battery_alert_critical_percent)
+      + sizeof(prefs->battery_alert_critical_percent), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_channel_data_enabled) == offsetof(NodePrefs, direct_retry_recent_enabled)
+      + sizeof(prefs->direct_retry_recent_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, legacy_flood_channel_block_max_hops) == offsetof(NodePrefs, flood_channel_data_enabled)
+      + sizeof(prefs->flood_channel_data_enabled), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, flood_channel_data_max_hops) == offsetof(NodePrefs, legacy_flood_channel_block_max_hops)
+      + sizeof(prefs->legacy_flood_channel_block_max_hops), "Common preference retry tail has padding or changed order");
+  static_assert(offsetof(NodePrefs, telemetry_access) == offsetof(NodePrefs, flood_channel_data_max_hops)
+      + sizeof(prefs->flood_channel_data_max_hops), "Common preference retry tail has padding or changed order");
+  constexpr size_t first = offsetof(NodePrefs, retry_preset);
+  constexpr size_t size = offsetof(NodePrefs, telemetry_access)
+      + sizeof(prefs->telemetry_access) - first;
+  writer.write(reinterpret_cast<const uint8_t*>(prefs) + first, size);
+}
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
 void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
   const PrefsSaveRouting::Plan plan = PrefsSaveRouting::planFor(scope);
   if (plan.common) {
@@ -2066,34 +2135,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     file.write((uint8_t *)&_prefs->cad_enabled, sizeof(_prefs->cad_enabled));                       // 294
     // next: 295
     markDirectRetryPrefsValid(_prefs);
-    file.write((uint8_t *)&_prefs->retry_preset, sizeof(_prefs->retry_preset));                     // 295
-    file.write((uint8_t *)&_prefs->direct_retry_attempts, sizeof(_prefs->direct_retry_attempts));   // 296
-    file.write((uint8_t *)&_prefs->direct_retry_base_ms, sizeof(_prefs->direct_retry_base_ms));     // 297
-    file.write((uint8_t *)&_prefs->direct_retry_step_ms, sizeof(_prefs->direct_retry_step_ms));     // 299
-    file.write((uint8_t *)&_prefs->direct_retry_snr_margin_x4, sizeof(_prefs->direct_retry_snr_margin_x4)); // 301
-    file.write((uint8_t *)&_prefs->direct_retry_cr4_snr_x4, sizeof(_prefs->direct_retry_cr4_snr_x4)); // 303
-    file.write((uint8_t *)&_prefs->direct_retry_cr5_snr_x4, sizeof(_prefs->direct_retry_cr5_snr_x4)); // 304
-    file.write((uint8_t *)&_prefs->direct_retry_cr7_snr_x4, sizeof(_prefs->direct_retry_cr7_snr_x4)); // 305
-    file.write((uint8_t *)&_prefs->direct_retry_cr8_snr_x4, sizeof(_prefs->direct_retry_cr8_snr_x4)); // 306
-    file.write((uint8_t *)&_prefs->direct_retry_enabled, sizeof(_prefs->direct_retry_enabled));       // 307
-    file.write((uint8_t *)&_prefs->direct_retry_cr_enabled, sizeof(_prefs->direct_retry_cr_enabled)); // 308
-    file.write((uint8_t *)&_prefs->direct_retry_prefs_magic, sizeof(_prefs->direct_retry_prefs_magic)); // 309
-    file.write((uint8_t *)&_prefs->flood_retry_attempts, sizeof(_prefs->flood_retry_attempts));       // 311
-    file.write((uint8_t *)&_prefs->flood_retry_max_path, sizeof(_prefs->flood_retry_max_path));       // 312
-    file.write((uint8_t *)&_prefs->flood_retry_prefixes[0][0], sizeof(_prefs->flood_retry_prefixes)); // 313
-    file.write((uint8_t *)&_prefs->flood_retry_bridge_enabled, sizeof(_prefs->flood_retry_bridge_enabled));
-    file.write((uint8_t *)&_prefs->flood_retry_bridge_buckets[0][0][0], sizeof(_prefs->flood_retry_bridge_buckets));
-    file.write((uint8_t *)&_prefs->flood_retry_ignore_prefixes[0][0], sizeof(_prefs->flood_retry_ignore_prefixes));
-    file.write((uint8_t *)&_prefs->flood_retry_advert_enabled, sizeof(_prefs->flood_retry_advert_enabled));
-    file.write((uint8_t *)&_prefs->battery_alert_enabled, sizeof(_prefs->battery_alert_enabled));
-    file.write((uint8_t *)&_prefs->battery_alert_low_percent, sizeof(_prefs->battery_alert_low_percent));
-    file.write((uint8_t *)&_prefs->battery_alert_critical_percent, sizeof(_prefs->battery_alert_critical_percent));
-    file.write((uint8_t *)&_prefs->direct_retry_recent_enabled, sizeof(_prefs->direct_retry_recent_enabled));
-    file.write((uint8_t *)&_prefs->flood_channel_data_enabled, sizeof(_prefs->flood_channel_data_enabled));
-    file.write((uint8_t *)&_prefs->legacy_flood_channel_block_max_hops,
-               sizeof(_prefs->legacy_flood_channel_block_max_hops));
-    file.write((uint8_t *)&_prefs->flood_channel_data_max_hops, sizeof(_prefs->flood_channel_data_max_hops));
-    file.write((uint8_t *)&_prefs->telemetry_access, sizeof(_prefs->telemetry_access));             // 674
+    writeCommonRetryPrefs(file, _prefs); // Same canonical retry/flood bytes; no file-format change.
 #if defined(ENABLE_OTA)
     file.write((uint8_t *)&_prefs->ota_autofetch, sizeof(_prefs->ota_autofetch));                   // 675
     file.write((uint8_t *)&_prefs->ota_autoinstall, sizeof(_prefs->ota_autoinstall));               // 676
