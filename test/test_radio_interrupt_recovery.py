@@ -103,7 +103,7 @@ struct Board {
 };
 struct RadioLibWrapper {
  uint8_t state=STATE_RX, _interrupt_slot=0xff, _irq_probe_failures=0;
- bool _loop_event_pending=false, _cw_active=false;
+ bool _loop_event_pending=false, _cw_active=false, _profile_repair_required=false;
  bool _rx_ps_armed=false, _rx_hold_continuous=false, _rx_ps_enabled=false;
  bool _rx_ps_continuous_fallback=false, _nf_calib_active=false;
  float _last_snr=0, _last_rssi=0;
@@ -239,8 +239,9 @@ int main(){
     def source(self):
         wrapper = (ROOT / "src/helpers/radiolib/RadioLibWrappers.cpp").read_text()
         custom = (ROOT / "src/helpers/radiolib/CustomLR2021.h").read_text()
+        owners = wrapper.index("static RadioLibWrapper* radio_interrupt_owners")
         callbacks = wrapper[wrapper.index("#define RADIO_INTERRUPT_INTERNAL_"):
-                            wrapper.index("// The Adafruit nRF52")]
+                            wrapper.index(";", owners) + 1]
         callbacks += "\n" + wrapper[wrapper.index("static\n#if defined(ESP8266)"):
                                       wrapper.index("bool RadioLibWrapper::registerInterruptAction()")]
         names = [("bool", "registerInterruptAction"), ("void", "unregisterInterruptAction"),
@@ -278,6 +279,9 @@ int main(){
  a->chip.callback();assert(a->hasPendingRadioInterrupt()&&!b->hasPendingRadioInterrupt());
  a->requestRestartRecv();assert(a->state==STATE_IDLE&&a->hasPendingRadioInterrupt());
  assert(!a->startSendRaw(bytes,4));assert(a->chip.tx_starts==0);
+ a->_profile_repair_required=true;
+ assert(a->recvRaw(bytes,sizeof(bytes))==0&&a->hasPendingRadioInterrupt()&&a->n_recv==0);
+ a->_profile_repair_required=false;
  assert(a->recvRaw(bytes,sizeof(bytes))==4&&a->n_recv==1);
  b->chip.callback();assert(b->hasPendingRadioInterrupt()&&!a->hasPendingRadioInterrupt());
  assert(b->registerInterruptAction()&&!b->hasPendingRadioInterrupt());
