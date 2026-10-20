@@ -44,9 +44,11 @@ The V3's first 15-second discovery trial failed. Its separate 25-second scan tri
 
 T1000-E's initial batch BLE trial failed. The explicit later retry is FAIL. The initial failure remains part of the record.
 
-Seeed XIAO nRF52 completed the application transfer; recovery failed normal runtime verification. The failed recovery phase and original batch outcomes remain in the JSON trial history.
+Seeed XIAO nRF52 completed the normal application transfer, but normal runtime was not verified within the required 75-second window. The failed recovery phase and original batch outcomes remain in the JSON trial history. Bootloader baseline evidence is reported separately.
 
-Seeed XIAO nRF52: The normal HEAD application transfer succeeded, but normal HEAD runtime was not verified within the required 75-second window. Runtime qualification remains incomplete. Bootloader baseline evidence is reported separately.
+A later XIAO recovery attempt observed runtime CDC windows of 27-151 ms. One guarded serial open was attempted, but its completion was uncertain, no explicit DTR-low operation was reached, and exact DFU was not observed during the following 45 seconds. The startup diagnostic was not installed. After the user moved the USB plug, a 20-second inventory and separate 180-second sysfs watch did not observe the original XIAO identity; the new connection repeatedly reported USB descriptor/address error -71. The other 12 USB identities were present in a separate snapshot, and the Pi reported `throttled=0x0`. These observations do not identify a cable, power, firmware or bootloader root cause. A separate 25-second BLE scan found no XIAO DFU advertisement. Recovery requires a stable connection to the original device before another firmware transfer.
+
+[Source hardening](https://github.com/mikecarper/MeshCore/commit/40b6ef8fe28548f5e2a6e4227d55d0abfa3f3e01) prevents fresh XIAO identity generation from reading an unavailable radio and defers saved-radio settings retries until hardware is available. Eight focused host tests and the XIAO Full and legacy BLE builds passed. The new Full package retains all verified capabilities and is staged on the Pi, but has not been installed. These software checks do not resolve the USB enumeration cause or change the hardware qualification counts above.
 
 The measured V3 92-contact refresh median was 3.347882 s at 32.560 kbit/s, versus 6.191396 s at 17.606 kbit/s for the earlier firmware. These are protocol throughput measurements on one V3/Linux connection, not BLE PHY rates or phone/full-app refresh claims. [Measured results](https://mikecarper.github.io/MeshCore/test-results/companion_ble_refresh_2026-10-19/).
 
