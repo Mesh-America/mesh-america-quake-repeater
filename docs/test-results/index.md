@@ -43,6 +43,7 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Companion, USB, BLE, and display
 
+- [Mercerwood Companion qualification follow-up, 2026-10-19](companion_qualification_followup_2026-10-19.md)
 - [ESP32 management password hardware check, 2026-10-19](esp32_management_password_2026-10-19.md)
 - [Companion lost-status replies](companion_lost_reply.md)
 - [Sensor dog tracker checks](sensor_dog_tracker.md)

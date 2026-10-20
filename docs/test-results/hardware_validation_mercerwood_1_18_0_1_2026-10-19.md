@@ -4,6 +4,8 @@
 
 # Mercerwood Full firmware testing, 2026-10-19
 
+Later Companion results are recorded in the [qualification follow-up](companion_qualification_followup_2026-10-19.md). The records below retain the earlier campaign snapshot.
+
 Source: `4e4f27a25a720c52ca0f5381b5e5834d75532cc6`
 Version: `v1.18.0.1-halo-keymind-cascade-dev-4e4f27a2`
 
