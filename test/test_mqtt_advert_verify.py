@@ -30,6 +30,7 @@ class MqttAdvertVerifyTests(unittest.TestCase):
         method = extract_braced(source, "void MQTTBridge::onPacketReceived(")
         compile_run(r'''
 #include <cassert>
+#include <atomic>
 #include <initializer_list>
 #include <cstdint>
 #include <cstring>
@@ -60,14 +61,13 @@ struct MQTTBridge {
   struct Obs { bool mqtt_packets_enabled=true, mqtt_rx_enabled=true, mqtt_advert_verify=false; } obs;
   Obs* _obs=&obs;
   bool _initialized=true, type_allowed=true, scope_allowed=true;
-  struct Stop { bool value=false; bool load(int)const{return value;} } _stop_requested;
+  struct Stop { bool value=false; bool load(std::memory_order)const{return value;} } _stop_requested;
   unsigned _filtered_packets=0, _bad_sig_adverts=0, queued=0;
   bool shouldQueuePacketType(unsigned, bool& filtered) { filtered=!type_allowed; return type_allowed; }
   bool allowsPacket(mesh::Packet*) { return scope_allowed; }
   void queuePacket(mesh::Packet*,bool tx){assert(!tx);++queued;}
   void onPacketReceived(mesh::Packet*);
 };
-namespace std { constexpr int memory_order_acquire=0; }
 ''' + method + r'''
 int main() {
   MQTTBridge bridge; mesh::Packet packet;
