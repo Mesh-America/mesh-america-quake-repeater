@@ -183,6 +183,26 @@ class CustomLR1110 : public LR1110 {
       return LR1110::setCodingRate(cr, longInterleave);
     }
 
+    // Ordinary packet setters revoke the acknowledged continuous-RX tuple,
+    // including failed writes. A later hop must rebuild normal RX first.
+    int16_t setCRC(uint8_t len, uint32_t initial = 0x00001D0FUL,
+                   uint32_t polynomial = 0x00001021UL, bool inverted = true) {
+      _profileSwitch.invalidate();
+      return LR1110::setCRC(len, initial, polynomial, inverted);
+    }
+    int16_t implicitHeader(size_t len) {
+      _profileSwitch.invalidate();
+      return LR1110::implicitHeader(len);
+    }
+    int16_t explicitHeader() {
+      _profileSwitch.invalidate();
+      return LR1110::explicitHeader();
+    }
+    int16_t invertIQ(bool enabled) override {
+      _profileSwitch.invalidate();
+      return LR1110::invertIQ(enabled);
+    }
+
     // Protocol changes are outside the acknowledged fast-RX context. Use
     // checked RadioLib setters so cached packet fields and hardware agree,
     // including after a partial failure and a later MeshCore restoration.
