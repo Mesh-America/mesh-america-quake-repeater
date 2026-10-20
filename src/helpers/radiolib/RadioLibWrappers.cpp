@@ -491,18 +491,16 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
 }
 
 bool RadioLibWrapper::validateProfile(const mesh::RadioProfileParams& p) const {
+#if MESH_RADIO_PROFILE_CHIP != 1110 && MESH_RADIO_PROFILE_CHIP != 1121 && MESH_RADIO_PROFILE_CHIP != 2021 && MESH_RADIO_PROFILE_CHIP != 68 && MESH_RADIO_PROFILE_CHIP != 1272
+  if (!mesh::RadioProfiles::valid(p, false)) return false;
+#else
   if (!mesh::RadioProfiles::valid(p)) return false;
+#endif
   if (p.protocol == mesh::RadioProfileProtocol::Meshtext && !supportsMeshtext()) return false;
 #if MESH_ENABLE_ETHERNET_WIRE
   if (p.protocol == mesh::RadioProfileProtocol::Ethernet && !supportsEthernetTunnel()) return false;
 #else
   if (p.protocol == mesh::RadioProfileProtocol::Ethernet) return false;
-#endif
-#if MESH_RADIO_PROFILE_CHIP != 1110 && MESH_RADIO_PROFILE_CHIP != 1121 && MESH_RADIO_PROFILE_CHIP != 2021 && MESH_RADIO_PROFILE_CHIP != 68 && MESH_RADIO_PROFILE_CHIP != 1272
-  static constexpr float bandwidths[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125, 250, 500};
-  bool supported = false;
-  for (float bw : bandwidths) if (fabsf(p.bw - bw) < 0.01f) supported = true;
-  if (!supported) return false;
 #endif
 #if MESH_RADIO_PROFILE_CHIP == 1276
   return p.freq >= 137 && p.freq <= 1020 && p.sf >= 7 && p.bw <= 500;
@@ -675,9 +673,8 @@ uint32_t RadioLibWrapper::getBeaconAirtime(const mesh::RadioProfileParams& p, in
 #endif
       ? 1 : 0;
   // Round the small integer bit/block ratio without floating-point division.
-  const int numerator = 8 * length - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16;
-  const int denominator = 4 * (p.sf - 2 * de);
-  const int coded = numerator > 0 ? (numerator + denominator - 1) / denominator : 0;
+  const int denominator = p.sf - 2 * de;
+  const int coded = (2 * length + (p.sf <= 6 ? 8 : 10) - 2 * de) / denominator;
   const double payload = 8 + coded * p.cr;
   return static_cast<uint32_t>(ceil((preamble + (p.sf <= 6 ? 6.25 : 4.25) + payload)
                                   * symbol / 1000.0));
@@ -1016,9 +1013,8 @@ uint32_t RadioLibWrapper::getProfileAirtime(uint8_t profile, int len, uint8_t cr
 #endif
       ? 1 : 0;
   // Round the small integer bit/block ratio without floating-point division.
-  const int numerator = 8 * len - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16;
-  const int denominator = 4 * (p.sf - 2 * de);
-  const int coded = numerator > 0 ? (numerator + denominator - 1) / denominator : 0;
+  const int denominator = p.sf - 2 * de;
+  const int coded = (2 * len + (p.sf <= 6 ? 8 : 10) - 2 * de) / denominator;
   const double payload_symbols = 8 + coded * cr;
   const double suffix = p.sf <= 6 ? 6.25 : 4.25;
   const double airtime = ceil((profilePreamble(profile) + suffix + payload_symbols) * symbol / 1000.0);
