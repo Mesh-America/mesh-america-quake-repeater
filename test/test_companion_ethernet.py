@@ -76,7 +76,14 @@ int main() {
   assert(!validSettings(value));
   encodeSettings(bytes,value); assert(!decodeSettings(bytes,sizeof(bytes),loaded));
   value=configured();
-  for(float bad : {0.f,149.f,2501.f,std::numeric_limits<float>::infinity(),
+  // The portable image accepts the shared radio range. The live wrapper
+  // separately enforces chip-specific bands before applying a tuple.
+  for(float good : {137.f,149.f,2500.f}) {
+    value.radio.freq=good; assert(validSettings(value));
+    encodeSettings(bytes,value); assert(decodeSettings(bytes,sizeof(bytes),loaded));
+    assert(loaded.radio==value.radio);
+  }
+  for(float bad : {0.f,136.999f,2500.001f,std::numeric_limits<float>::infinity(),
                   std::numeric_limits<float>::quiet_NaN()}) {
     value.radio.freq=bad; assert(!validSettings(value));
     encodeSettings(bytes,value); assert(!decodeSettings(bytes,sizeof(bytes),loaded));
