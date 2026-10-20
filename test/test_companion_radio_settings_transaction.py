@@ -289,6 +289,12 @@ int main() {
   assert(!m.hasPendingWork()); // A source flag alone must not keep it awake.
   m.store._contact_recovery=0;
   m.saved_radio_apply_pending=true;
+  m._radio_available=false;
+  assert(!m.hasPendingWork()); // Absent hardware cannot service the saved intent.
+  m.radio_apply_retry_at=now_ms;
+  assert(!m.hasPendingWork()); // An overdue retry must not spin in recovery mode.
+  m._radio_available=true;
+  m.radio_apply_retry_at=0;
   assert(m.hasPendingWork());
   m.radio_apply_retry_at=now_ms+10;
   assert(!m.hasPendingWork());

@@ -11529,6 +11529,7 @@ void MyMesh::loop() {
   serviceBinaryTraceReply();
   if (!mesh::morseTimingActive(_radio)) serviceSigningSession();
   if (!command_radio_apply_pending && saved_radio_apply_pending && !hasOutbound()
+      && _radio_available
 #if COMPANION_FEATURE_TEMP_RADIO
       && !_temp_radio_applied && _temp_radio_set_at == 0
       && _temp_radio_revert_at == 0
@@ -11717,7 +11718,7 @@ mesh::powerdiag::Mask MyMesh::pendingWorkReason() const {
   if (sign_data != NULL) return mask(Reason::Mesh);
   if (hasQueuedWorkDue()) return mask(Reason::Queue);
   if (hasRetryWorkDue()) return mask(Reason::Retry);
-  if (saved_radio_apply_pending
+  if (saved_radio_apply_pending && _radio_available
 #if COMPANION_FEATURE_TEMP_RADIO
           // Match loop()'s restore gate: a lease-blocked rollback is not
           // runnable work. The lease's own timers below wake it when due.
