@@ -17,8 +17,14 @@ public:
   void begin();
 
 #if defined(LED_GREEN)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    digitalWrite(LED_GREEN, mesh::leds::enabled() ? HIGH : LOW);
+    if (!mesh::leds::enabled()) digitalWrite(LED_RED, LOW);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(LED_RED, HIGH);
+    if (mesh::leds::enabled()) digitalWrite(LED_RED, HIGH);
   }
   void onAfterTransmit() override {
     digitalWrite(LED_RED, LOW);

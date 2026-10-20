@@ -78,7 +78,7 @@ public:
 
     // set led on and wait for button release before poweroff
     #ifdef LED_PIN
-    digitalWrite(LED_PIN, HIGH);
+    if (mesh::leds::enabled()) digitalWrite(LED_PIN, HIGH);
     #endif
     #ifdef BUTTON_PIN
     while(digitalRead(BUTTON_PIN));

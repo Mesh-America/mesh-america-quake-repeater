@@ -37,7 +37,7 @@ void HeltecV4R8Board::begin() {
 }
 
 void HeltecV4R8Board::onBeforeTransmit(void) {
-  digitalWrite(P_LORA_TX_LED, HIGH);
+  if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);
   loRaFEMControl.setTxModeEnable();
 }
 

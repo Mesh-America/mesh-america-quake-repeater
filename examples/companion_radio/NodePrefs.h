@@ -49,8 +49,12 @@ public:
   float rx_delay_base = 0;
   uint32_t ble_pin = 0;
   uint8_t advert_loc_policy = 0;
-  uint8_t buzzer_quiet = 0;
+  uint8_t buzzer_quiet = 1;
   uint8_t gps_enabled = 0;       // GPS enabled flag (0=disabled, 1=enabled)
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  // Uses existing alignment space; stored in the reserved wire byte at 79.
+  uint8_t leds_quiet = 0;
+#endif
   uint32_t gps_interval = 0;     // seconds; 0 uses the 1-second default
   uint8_t autoadd_config = 0;    // bitmask for auto-add contacts config
   uint8_t rx_boosted_gain = 0;   // SX126x RX boosted gain mode

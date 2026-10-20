@@ -40,7 +40,7 @@ class UITask : public AbstractUITask {
   GenericVibration vibration;
 #endif
   uint32_t _next_refresh;
-  CompanionNodePrefs* _node_prefs;
+  CompanionNodePrefs* _node_prefs = nullptr;
   char _alert[80];
   uint32_t _alert_expiry;
   unsigned long _pairing_screen_until;
@@ -137,6 +137,7 @@ public:
   void notificationVibration(bool on) override;
   void notificationMelody(const char* text) override;
   void notificationScreen(int8_t mode) override;
+  void syncAlertPreferences() override;
   void loop() override;
 
   void shutdown(bool restart = false);

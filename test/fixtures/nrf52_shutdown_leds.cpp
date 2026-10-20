@@ -31,6 +31,7 @@
 #define pdMS_TO_TICKS(ms) (ms)
 
 #include <helpers/nrf52/ShutdownLeds.h>
+#include <helpers/LedPolicy.h>
 
 std::vector<Event> events;
 int levels[PINS_COUNT];

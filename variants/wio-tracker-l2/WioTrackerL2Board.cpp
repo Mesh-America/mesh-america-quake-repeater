@@ -146,7 +146,7 @@ void WioTrackerL2Board::setLed(bool on) {
   // P10 doubles as GNSS wakeup and idles HIGH; blink = brief LOW pulses so
   // the GPS never sees a sustained low level
   if (expander_ok) {
-    expWritePin(EXP_PIN_USER_LED, !on);
+    expWritePin(EXP_PIN_USER_LED, !(on && mesh::leds::enabled()));
   }
 }
 

@@ -24,6 +24,7 @@ RGB = "defined(PIN_STATUS_LED_R) && defined(PIN_STATUS_LED_G) && defined(PIN_STA
 HARNESS = r'''
 #pragma once
 #include <helpers/CompanionNotificationPolicy.h>
+#include <helpers/LedPolicy.h>
 #include <cstdint>
 #include <cstring>
 inline unsigned levels[64] = {}, analog_writes[64] = {}, digital_writes[64] = {}, mode_writes[64] = {};
@@ -133,7 +134,7 @@ class NotificationLedOwnershipTest(unittest.TestCase):
             checked = subprocess.run([str(binary)], capture_output=True, text=True, timeout=20)
             print(f"\n[{name}]\n" + checked.stdout + checked.stderr, flush=True)
             self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
-            expected_scenarios = 10 if expected_rgb or expected_mono else 4
+            expected_scenarios = 11 if expected_rgb or expected_mono else 4
             self.assertEqual(checked.stdout.count("PASS:"), expected_scenarios, checked.stdout)
             self.assertRegex(checked.stdout, rf"{expected_scenarios} scenarios, [0-9]+ checks, 0 failures")
 

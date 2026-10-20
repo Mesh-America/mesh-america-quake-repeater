@@ -71,6 +71,7 @@ struct UITask {
   unsigned battery_reads = 0, shutdowns = 0, profile_services = 0;
   char _alert[80] = {}, _origin[80] = {}, _msg[80] = {};
   void servicePairingState() {}
+  void syncAlertPreferences() {}
   void serviceWiFiToggleButton() {}
   bool isPairingScreenActive() const { return false; }
   bool isButtonGesturePending() const { return gesture_pending; }

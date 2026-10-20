@@ -13,7 +13,7 @@ void WioWM1110Board::begin() {
   pinMode(LED_RED, OUTPUT);
   pinMode(SENSOR_POWER_PIN, OUTPUT);
 
-  digitalWrite(LED_GREEN, HIGH);
+  digitalWrite(LED_GREEN, mesh::leds::enabled() ? HIGH : LOW);
   digitalWrite(LED_RED, LOW);
   digitalWrite(SENSOR_POWER_PIN, LOW);
 

@@ -49,6 +49,9 @@ public:
 
   void onBeforeTransmit() override { setLed(true); }
   void onAfterTransmit() override { setLed(false); }
+  void applyLedPolicy() override {
+    if (!mesh::leds::enabled()) setLed(false);
+  }
 
   // Mesh/user LED lives on the IO expander, not a GPIO
   void setLed(bool on);

@@ -27,7 +27,7 @@ public:
   bool isVibrating();
   void stop();        // stop vibration immediately
   void pulse(bool on); // continuous RTP amplitude for scheduled ms pulses
-  void quiet(bool q) { _quiet = q; }
+  void quiet(bool q) { if (q) stop(); _quiet = q; }
   bool isQuiet() const { return _quiet; }
 
 private:

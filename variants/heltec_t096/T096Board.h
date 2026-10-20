@@ -25,6 +25,7 @@ public:
   void attachDynamicPrefs(KeyValueStore* prefs);
   bool handleCommand(const char* command, uint32_t sender_timestamp, char* reply) override;
 
+  void applyLedPolicy() override;
   void onBeforeTransmit(void) override;
   void onAfterTransmit(void) override;
   uint16_t getBattMilliVolts() override;

@@ -19,8 +19,12 @@ public:
 
   void attachDynamicPrefs(KeyValueStore* prefs) { (void)prefs; }  // no-op
 
+  void applyLedPolicy() override {
+    if (!mesh::leds::enabled()) digitalWrite(LED_BUILTIN, LOW);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(LED_BUILTIN, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(LED_BUILTIN, HIGH);   // turn TX LED on
   }
 
   void onAfterTransmit() override {

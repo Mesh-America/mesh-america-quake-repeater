@@ -12,8 +12,13 @@ public:
   void begin();
 
 #if defined(P_LORA_TX_LED)
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED on
     #if defined(LED_BLUE)
        // turn off that annoying blue LED before transmitting
        digitalWrite(LED_BLUE, HIGH);

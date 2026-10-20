@@ -68,6 +68,7 @@ public:
   virtual void notificationVibration(bool on) { (void)on; }
   virtual void notificationMelody(const char* text) { (void)text; }
   virtual void notificationScreen(int8_t mode) { (void)mode; }
+  virtual void syncAlertPreferences() {}
   void setShutdownGuard(UIShutdownGuard* guard) { _shutdownGuard = guard; }
   void setHasConnection(bool connected) { _connected = connected; }
   bool hasConnection() const { return _interfaceManager->isConnected(); }

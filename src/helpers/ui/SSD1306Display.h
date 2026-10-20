@@ -6,6 +6,9 @@
 #define SSD1306_NO_SPLASH
 #include <Adafruit_SSD1306.h>
 #include <helpers/RefCountedDigitalPin.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+#include "AutoOLEDBackend.h"
+#endif
 
 #ifndef PIN_OLED_RESET
   #define PIN_OLED_RESET        21 // Reset pin # (or -1 if sharing Arduino reset pin)
@@ -21,7 +24,11 @@ public:
   static constexpr int16_t PANEL_HEIGHT = 64;
   static constexpr size_t FRAMEBUFFER_BYTES = PANEL_WIDTH * ((PANEL_HEIGHT + 7) / 8);
 private:
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+  AutoOLEDBackend display;
+#else
   Adafruit_SSD1306 display;
+#endif
   bool _isOn;
   bool _panel_ready = false;
   bool _flipped = false;

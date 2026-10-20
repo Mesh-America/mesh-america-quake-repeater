@@ -58,8 +58,13 @@ void T1Board::begin() {
   delay(1);
 }
 
+void T1Board::applyLedPolicy() {
+  NRF52Board::applyLedPolicy();
+  if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, !LED_STATE_ON);
+}
+
 void T1Board::onBeforeTransmit() {
-  digitalWrite(P_LORA_TX_LED, LED_STATE_ON);
+  if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LED_STATE_ON);
 }
 
 void T1Board::onAfterTransmit() {

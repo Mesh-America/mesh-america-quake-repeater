@@ -77,7 +77,7 @@ void DRV2605Vibration::stop() {
 
 void DRV2605Vibration::pulse(bool on) {
   if (!_ready) return;
-  if (!on) {
+  if (!on || _quiet) {
     stop();
     return;
   }

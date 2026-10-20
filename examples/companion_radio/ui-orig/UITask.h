@@ -32,7 +32,7 @@ class UITask : public AbstractUITask {
   GenericVibration vibration;
 #endif
   uint32_t _next_refresh;
-  CompanionNodePrefs* _node_prefs;
+  CompanionNodePrefs* _node_prefs = nullptr;
   char _version_info[32];
   char _origin[62];
 #if UI_SMALL_MESSAGE_FONT == 1
@@ -125,6 +125,7 @@ public:
   void notificationVibration(bool on) override;
   void notificationMelody(const char* text) override;
   void notificationScreen(int8_t mode) override;
+  void syncAlertPreferences() override;
   void loop() override;
 #ifdef MESH_BUTTON_AUDIO_HIL
   bool handleButtonAudioTest(const char* command, char* reply, size_t size) override;

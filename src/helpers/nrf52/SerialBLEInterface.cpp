@@ -4,6 +4,7 @@
 #include "SoftDeviceState.h"
 #include "SleepCycleState.h"
 #include "BleDebugTrace.h"
+#include "BluetoothLed.h"
 #include <stdio.h>
 #include <string.h>
 #include "ble_gap.h"
@@ -836,11 +837,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   char charpin[20];
   snprintf(charpin, sizeof(charpin), "%lu", (unsigned long)pin_code);
   
-#ifdef DISABLE_BLE_LED
-  // Opt out of Bluefruit's automatic LED control without changing the normal
-  // board/library default or the application's own LED handling.
-  Bluefruit.autoConnLed(false);
-#endif
+  mesh_nrf52::applyBluetoothLedPolicy();
   // Configure individual connection values rather than the all-or-nothing
   // Bluefruit preset. Defaults are identical to BANDWIDTH_MAX; constrained
   // board profiles can lower event/buffer reservations without shrinking the
@@ -875,6 +872,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
     return false;
   }
 
+  mesh_nrf52::bluetoothLedStarted();
   if (clear_bonds) Bluefruit.Periph.clearBonds();
 
   if (custom_address != nullptr) {

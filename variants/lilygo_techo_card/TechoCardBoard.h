@@ -20,6 +20,7 @@ public:
   TechoCardBoard() : NRF52Board("TECHO_OTA") {}
   void begin();
   uint16_t getBattMilliVolts() override;
+  void applyLedPolicy() override;
   void onBeforeTransmit(void) override;
   void onAfterTransmit(void) override;
 

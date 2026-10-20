@@ -43,7 +43,7 @@ class UITask : public AbstractUITask {
   unsigned long _pairing_screen_until;
   bool _deferred_msg_preview;
   bool _startup_complete = false;
-  CompanionNodePrefs* _node_prefs;
+  CompanionNodePrefs* _node_prefs = nullptr;
   char _alert[80];
   uint32_t _alert_expiry;
   int _msgcount;
@@ -200,6 +200,7 @@ public:
   void notificationVibration(bool on) override;
   void notificationMelody(const char* text) override;
   void notificationScreen(int8_t mode) override;
+  void syncAlertPreferences() override;
   void loop() override;
 
   void shutdown(bool restart = false);

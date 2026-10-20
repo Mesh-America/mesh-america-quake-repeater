@@ -7,6 +7,7 @@
 #include "helpers/BatteryChargeSupport.h"
 #include "helpers/RegulatorMode.h"
 #include "helpers/PowerSavingDiagnostics.h"
+#include "helpers/LedPolicy.h"
 #if defined(ARDUINO) && (defined(RP2040_PLATFORM) || defined(STM32_PLATFORM))
 #include <Arduino.h>
 #endif
@@ -145,6 +146,8 @@ public:
   virtual const char* getManufacturerName() const = 0;
   virtual void onBeforeTransmit() { }
   virtual void onAfterTransmit() { }
+  // Update only indicator outputs; transmit hooks may also control RF hardware.
+  virtual void applyLedPolicy() { }
   virtual void reboot() = 0;
   MESH_REGULATOR_VIRTUAL uint8_t mcuRegulatorModes() const { return 0; }
   MESH_REGULATOR_VIRTUAL power::RegulatorMode defaultMcuRegulatorMode() const {

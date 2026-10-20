@@ -13,13 +13,17 @@ public:
   void begin();
 
   #ifdef P_LORA_TX_LED
-    void onBeforeTransmit() override{
-      digitalWrite(P_LORA_TX_LED, LOW); // turn TX LED on - invert pin for SX1276
-    }
+  void applyLedPolicy() override {
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);
+  }
 
-    void onAfterTransmit() override{
-      digitalWrite(P_LORA_TX_LED, HIGH); // turn TX LED off - invert pin for SX1276
-    }
+  void onBeforeTransmit() override{
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW); // turn TX LED on - invert pin for SX1276
+  }
+
+  void onAfterTransmit() override{
+    digitalWrite(P_LORA_TX_LED, HIGH); // turn TX LED off - invert pin for SX1276
+  }
   #endif
 
   uint16_t getBattMilliVolts() {

@@ -1059,6 +1059,19 @@ set display.rotation 270
 The values are clockwise degrees. `0` clears the override and restores the
 board's compiled default. Unsupported display drivers return an error.
 
+RAK4631 and RAK3401 images detect SSD1306 or SH1106 OLED controllers when
+initializing the screen. This lets the same RAK4631 image serve WisMesh Pocket
+v2 and v3. Both retain rotation support and use one 1 KiB framebuffer.
+
+Detection checks the configured `DISPLAY_ADDRESS` (default `0x3C`). Only
+repeated SH1106 status readings select that controller; ambiguous responses
+keep SSD1306, preserving compatibility with older RAK1921 panels. For panels
+that cannot identify themselves, build with `OLED_CONTROLLER_OVERRIDE=1`
+(SSD1306) or `=2` (SH1106); `=0` restores automatic detection.
+
+See [the Pocket v3 issue](https://github.com/meshcore-dev/MeshCore/issues/3296)
+and [the RAK1921 detection caveat](https://github.com/meshtastic/firmware/pull/11265).
+
 ---
 
 ## Show touchscreen touch areas
@@ -1957,6 +1970,52 @@ the verified pin assignments, startup fixes, and saved amplifier settings.
 **Note:** Advertised names can use up to 23 bytes when location is included and 31 bytes otherwise. Emoji and Unicode characters may take more than one byte. Names that exceed the available advert space are truncated at a valid UTF-8 code point boundary.
 
 ---
+
+#### Turn Companion sound and vibration on or off
+
+`get buzzer` and `set buzzer on|off` control the Companion's buzzer. Devices
+with a vibration motor also support `get vibration` and `set vibration on|off`.
+Changes take effect immediately, are saved across reboots, and produce no
+confirmation tone. Muting an output stops an alert already playing.
+
+Fresh settings default to **sound off** and **vibration on**. Existing saved
+choices are retained. The same preferences are used by the device buttons and
+UI. Unsupported hardware reports an error.
+
+These are the device mute controls. Programmable `notify.sound` and
+`notify.vibration` rules also respect them; an enabled rule cannot bypass a
+muted output. The notification output masks still select which alert outputs
+a rule may use. Explicit button mute/unmute confirmations retain their existing
+behavior.
+
+Adapted from [upstream PR #3603](https://github.com/meshcore-dev/MeshCore/pull/3603).
+
+#### Turn indicator LEDs on or off
+
+```text
+get leds
+set leds off
+set leds on
+```
+
+Available in Companion, repeater, room-server, and sensor firmware. The setting
+is saved across reboots and defaults to `on`. `off` suppresses software-controlled
+transmit, Bluetooth, status, and notification LEDs. `on` restores their normal
+behavior; it does not leave every LED lit. A build with `DISABLE_BLE_LED` keeps
+the Bluetooth indicator disabled.
+
+Supported outputs include ordinary and inverted GPIO LEDs, addressable RGB LEDs,
+and board-controlled expander LEDs on nRF52, ESP32, RP2040, and STM32 boards.
+Screen backlights and manually controlled torches keep their own controls.
+Power and charging LEDs wired directly to a charger cannot be switched off by
+firmware. Bootloader and early startup indicators may still appear before the
+saved setting is loaded.
+
+This extends the SenseCAP Solar LED switch from
+[upstream PR #3605](https://github.com/meshcore-dev/MeshCore/pull/3605).
+With LEDs enabled, RAK-family Companions blink their Bluetooth LED while
+advertising and leave it off once connected, following
+[upstream PR #2694](https://github.com/meshcore-dev/MeshCore/pull/2694).
 
 #### Turn WiFi, ESP-NOW, or all 2.4 GHz services on or off
 

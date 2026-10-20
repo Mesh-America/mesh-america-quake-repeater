@@ -152,6 +152,8 @@ int main() {
   auto count=events.size();
   vibration.trigger();assert(events.size()==count); // cooldown suppresses wake
   vibration.quiet(true);
+  assert(standby() && !vibration.isVibrating());
+  count=events.size();
   vibration.trigger(true);assert(events.size()==count);
   vibration.stop();assert(standby() && !vibration.isVibrating());
   assert(hardware.registers[DRV2605_REG_GO]==0 && hardware.registers[2]==0);
@@ -216,7 +218,7 @@ class Drv2605PowerTests(unittest.TestCase):
             source = source.replace("(drv.readRegister8(DRV2605_REG_GO) & 1) == 0",
                                     "(drv.readRegister8(DRV2605_REG_GO) & 1) != 0")
         elif mutation == "no-pulse-off":
-            source = source.replace("if (!on) {", "if (false && !on) {")
+            source = source.replace("if (!on || _quiet) {", "if (false && !on) {")
         elif mutation == "poll-idle":
             source = source.replace("if (!_ready || !_effect_active) return;",
                                     "if (!_ready) return;")

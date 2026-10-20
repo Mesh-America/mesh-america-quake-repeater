@@ -13,6 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 RTOS = r'''
 #pragma once
 #include <cstdint>
+#define PINS_COUNT 64
+#define LED_STATE_ON 1
+#define LED_BLUE 12
+#define OUTPUT 1
+inline int digitalPinToPinName(int pin) { return pin; }
+inline void digitalWrite(int, int) {}
+inline void pinMode(int, int) {}
 using BaseType_t = int;
 using UBaseType_t = unsigned;
 using TaskHandle_t = void*;
@@ -89,6 +96,7 @@ extern "C" BaseType_t __real_xTaskCreate(TaskFunction_t, const char* name,
   return pdPASS;
 }
 struct Settings {
+  bool isRunning() const { return false; }
   template<class... T> void clearBonds(T...) {}
   template<class... T> void setMITM(T...) {}
   template<class... T> void setPIN(T...) {}
@@ -132,8 +140,13 @@ struct BluefruitStub {
   }
   void setTxPower(int) {}
   void setName(const char*) {}
+  void autoConnLed(bool) {}
+  void _setConnLed(bool) {}
+  void _startConnLed() {}
+  unsigned connected() const { return 0; }
   template<class T> void setEventCallback(T) {}
 } Bluefruit;
+#include <helpers/nrf52/BluetoothLed.h>
 struct Service {
   int id;
   int begin() { return fail_service == id ? 1 : ERROR_NONE; }
@@ -251,6 +264,7 @@ class Nrf52BleStartupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="meshcore-ble-start-") as temp:
             temp = Path(temp)
             (temp / "Arduino.h").write_text(RTOS)
+            (temp / "bluefruit.h").write_text("#pragma once\n")
             for name in ("FreeRTOS.h", "task.h"):
                 (temp / name).write_text('#include "Arduino.h"\n')
             cpp = temp / "startup.cpp"
