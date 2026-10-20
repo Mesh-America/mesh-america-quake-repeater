@@ -2105,6 +2105,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text,
 }
 
 void UITask::userLedHandler() {
+  if (!mesh::leds::enabled()) return;
   if (_notification_led_owned || !(_notification_outputs & mesh::notify::Led)) return;
 #ifdef PIN_STATUS_LED
   const uint32_t cur_time = millis();

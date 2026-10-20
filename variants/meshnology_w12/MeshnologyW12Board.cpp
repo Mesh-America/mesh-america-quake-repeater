@@ -29,8 +29,12 @@ void MeshnologyW12Board::begin() {
     }
   }
 
+  void MeshnologyW12Board::applyLedPolicy() {
+    if (!mesh::leds::enabled()) neopixelWrite(NEOPIXEL_LED, 0, 0, 0);
+  }
+
   void MeshnologyW12Board::onBeforeTransmit(void) {
-    neopixelWrite(NEOPIXEL_LED, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS);   // turn TX neopixel on (White)
+    if (mesh::leds::enabled()) neopixelWrite(NEOPIXEL_LED, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS);   // turn TX neopixel on (White)
   }
 
   void MeshnologyW12Board::onAfterTransmit(void) {

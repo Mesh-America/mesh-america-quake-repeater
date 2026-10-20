@@ -22,6 +22,7 @@ public:
   MeshnologyW12Board() : periph_power(PIN_VEXT_EN, PIN_VEXT_EN_ACTIVE) { }
 
   void begin();
+  void applyLedPolicy() override;
   void onBeforeTransmit(void) override;
   void onAfterTransmit(void) override;
   void enterDeepSleep(uint32_t secs, int pin_wake_btn = -1);

@@ -20,6 +20,7 @@ void MyMesh::pulse(mesh::notify::Output output,bool on,int8_t pin) {
   } else if(output==mesh::notify::Vibration) {
     if(_ui)_ui->notificationVibration(on);
   } else if(output==mesh::notify::Led) {
+    on = on && mesh::leds::enabled();
 #if defined(PIN_STATUS_LED_R) && defined(PIN_STATUS_LED_G) && defined(PIN_STATUS_LED_B)
     analogWrite(PIN_STATUS_LED_R,on?255:0);
     analogWrite(PIN_STATUS_LED_G,on?90:0);

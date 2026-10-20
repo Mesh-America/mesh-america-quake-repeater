@@ -451,6 +451,7 @@ void UITask::renderCurrScreen() {
 
 #ifdef STATUS_LED_RGB
 static void statusLedWrite(uint8_t r, uint8_t g, uint8_t b) {
+  if (!mesh::leds::enabled()) r = g = b = 0;
   analogWrite(PIN_STATUS_LED_R, r);
   analogWrite(PIN_STATUS_LED_G, g);
   analogWrite(PIN_STATUS_LED_B, b);
@@ -470,6 +471,7 @@ static void statusLedWheel(uint8_t pos) {   // smooth hue sweep, 0..255
 #endif
 
 void UITask::userLedHandler() {
+  if (!mesh::leds::enabled()) return;
   if (_notification_led_owned || !(_notification_outputs & mesh::notify::Led)) return;
 #ifdef STATUS_LED_RGB
   enum class FlourishState : uint8_t { Unseen, Boot, Message, Idle };

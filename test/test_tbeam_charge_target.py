@@ -231,6 +231,7 @@ MOCK_SDK = r'''
 #pragma once
 #include <cassert>
 #include <cstdint>
+#include <helpers/LedPolicy.h>
 #include <map>
 #include <string>
 #include <vector>
@@ -291,6 +292,7 @@ public:
   int startup_reason = 0;
   virtual ~ESP32Board() {}
   void begin() {}
+  virtual void applyLedPolicy() {}
   virtual void onBeforeTransmit() {}
   virtual void onAfterTransmit() {}
   virtual bool getBatteryChargeTarget(uint16_t&) { return false; }
@@ -305,6 +307,7 @@ constexpr int XPOWERS_DCDC2 = 0, XPOWERS_DCDC3 = 0, XPOWERS_DCDC4 = 0;
 constexpr int XPOWERS_DCDC5 = 0, XPOWERS_ALDO1 = 0, XPOWERS_ALDO2 = 0;
 constexpr int XPOWERS_ALDO3 = 0, XPOWERS_ALDO4 = 0, XPOWERS_BLDO1 = 0;
 constexpr int XPOWERS_BLDO2 = 0, XPOWERS_VBACKUP = 0, XPOWERS_CHG_LED_CTRL_CHG = 0;
+constexpr int XPOWERS_CHG_LED_OFF = 1;
 constexpr int XPOWERS_DLDO1 = 0, XPOWERS_DLDO2 = 0;
 constexpr int XPOWERS_AXP2101_DCDC4_VOL2_MAX = 0, XPOWERS_AXP192_ALL_IRQ = 0;
 constexpr int XPOWERS_AXP2101_ALL_IRQ = 0, XPOWERS_AXP192_CHG_CUR_450MA = 0;

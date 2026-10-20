@@ -16,6 +16,7 @@ public:
 
   HeltecTowerV2Board() : NRF52Board("TOWER_V2_OTA") {}
   void begin();
+  void applyLedPolicy() override;
   void onBeforeTransmit() override;
   void onAfterTransmit() override;
   uint16_t getBattMilliVolts() override;

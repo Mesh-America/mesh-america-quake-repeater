@@ -61,6 +61,7 @@ public:
       {}
   virtual void begin();
   void loop() override;
+  void applyLedPolicy() override;
   // Feed the hardware main-loop watchdog. The first call starts it, so normal
   // setup (including filesystem mount and radio initialization) is not timed.
   // A loop blocked forever in SoftDevice-backed flash I/O will stop feeding it

@@ -56,7 +56,7 @@ void HeltecRC32Board::powerOff() {
 }
 
 void HeltecRC32Board::onBeforeTransmit() {
-  digitalWrite(P_LORA_TX_LED, HIGH);
+  if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);
 }
 
 void HeltecRC32Board::onAfterTransmit() {

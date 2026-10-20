@@ -60,8 +60,13 @@ void HeltecTowerV2Board::begin() {
   loRaFEMControl.init();
 }
 
+void HeltecTowerV2Board::applyLedPolicy() {
+  NRF52Board::applyLedPolicy();
+  if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, !LED_STATE_ON);
+}
+
 void HeltecTowerV2Board::onBeforeTransmit() {
-  digitalWrite(P_LORA_TX_LED, LED_STATE_ON);
+  if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LED_STATE_ON);
   loRaFEMControl.setTxModeEnable();
 }
 

@@ -114,9 +114,11 @@ inline TwoWire Wire;
 ESP_BOARD = r'''
 #pragma once
 #include <Arduino.h>
+#include <helpers/LedPolicy.h>
 class ESP32Board {
 public:
  virtual void begin() {}
+ virtual void applyLedPolicy() {}
  virtual uint16_t getBattMilliVolts() { return 0; }
  virtual const char* getManufacturerName() const { return "host"; }
  virtual void onBeforeTransmit() {}

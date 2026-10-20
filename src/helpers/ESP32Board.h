@@ -271,9 +271,18 @@ public:
   uint8_t getStartupReason() const override { return startup_reason; }
   bool isUserGpioAvailable(uint8_t pin) const override;
 
+  void applyLedPolicy() override {
+    if (mesh::leds::enabled()) return;
+#if defined(P_LORA_TX_LED)
+    digitalWrite(P_LORA_TX_LED, LOW);
+#elif defined(P_LORA_TX_NEOPIXEL_LED)
+    neopixelWrite(P_LORA_TX_NEOPIXEL_LED, 0, 0, 0);
+#endif
+  }
+
 #if defined(P_LORA_TX_LED)
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
   }
   void onAfterTransmit() override {
     digitalWrite(P_LORA_TX_LED, LOW);   // turn TX LED off
@@ -282,7 +291,9 @@ public:
   #define NEOPIXEL_BRIGHTNESS    64  // white brightness (max 255)
 
   void onBeforeTransmit() override {
-    neopixelWrite(P_LORA_TX_NEOPIXEL_LED, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS);   // turn TX neopixel on (White)
+    if (mesh::leds::enabled()) {
+      neopixelWrite(P_LORA_TX_NEOPIXEL_LED, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS);   // turn TX neopixel on (White)
+    }
   }
   void onAfterTransmit() override {
     neopixelWrite(P_LORA_TX_NEOPIXEL_LED, 0, 0, 0);   // turn TX neopixel off

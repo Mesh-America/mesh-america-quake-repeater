@@ -56,8 +56,13 @@ void T096Board::begin() {
   delay(1);
 }
 
+void T096Board::applyLedPolicy() {
+  NRF52Board::applyLedPolicy();
+  if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+}
+
 void T096Board::onBeforeTransmit() {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
     loRaFEMControl.setTxModeEnable();
 }
 

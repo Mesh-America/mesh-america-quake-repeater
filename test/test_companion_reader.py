@@ -272,6 +272,7 @@ struct Radio { bool active = false; };
 namespace mesh {
 bool morseTimingActive(const Radio* radio) { return radio && radio->active; }
 namespace power { bool handleRegulatorCommand(const char*,char*,size_t) { return false; } }
+namespace leds { bool handleCommand(const char*,char*,size_t) { return false; } }
 }
 @PREDICATE@
 struct MyMesh {

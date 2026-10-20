@@ -27,7 +27,7 @@ void HeltecTrackerV2Board::begin() {
   }
 
   void HeltecTrackerV2Board::onBeforeTransmit(void) {
-    digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
     loRaFEMControl.setTxModeEnable();
   }
 

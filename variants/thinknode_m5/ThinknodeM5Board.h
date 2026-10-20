@@ -15,8 +15,12 @@ public:
   uint16_t getBattMilliVolts() override;
   const char* getManufacturerName() const override ;
 
+  void applyLedPolicy() override {
+    if (!mesh::leds::enabled()) expander.digitalWrite(EXP_PIN_LED, LOW);
+  }
+
   void onBeforeTransmit() override {
-    expander.digitalWrite(EXP_PIN_LED, HIGH);   // turn TX LED on
+    if (mesh::leds::enabled()) expander.digitalWrite(EXP_PIN_LED, HIGH);   // turn TX LED on
   }
   void onAfterTransmit() override {
     expander.digitalWrite(EXP_PIN_LED, LOW);   // turn TX LED off

@@ -1958,6 +1958,33 @@ the verified pin assignments, startup fixes, and saved amplifier settings.
 
 ---
 
+#### Turn indicator LEDs on or off
+
+```text
+get leds
+set leds off
+set leds on
+```
+
+Available in Companion, repeater, room-server, and sensor firmware. The setting
+is saved across reboots and defaults to `on`. `off` suppresses software-controlled
+transmit, Bluetooth, status, and notification LEDs. `on` restores their normal
+behavior; it does not leave every LED lit. A build with `DISABLE_BLE_LED` keeps
+the Bluetooth indicator disabled.
+
+Supported outputs include ordinary and inverted GPIO LEDs, addressable RGB LEDs,
+and board-controlled expander LEDs on nRF52, ESP32, RP2040, and STM32 boards.
+Screen backlights and manually controlled torches keep their own controls.
+Power and charging LEDs wired directly to a charger cannot be switched off by
+firmware. Bootloader and early startup indicators may still appear before the
+saved setting is loaded.
+
+This extends the SenseCAP Solar LED switch from
+[upstream PR #3605](https://github.com/meshcore-dev/MeshCore/pull/3605).
+With LEDs enabled, RAK-family Companions blink their Bluetooth LED while
+advertising and leave it off once connected, following
+[upstream PR #2694](https://github.com/meshcore-dev/MeshCore/pull/2694).
+
 #### Turn WiFi, ESP-NOW, or all 2.4 GHz services on or off
 
 ```text

@@ -30,12 +30,14 @@ inline uint32_t analogReadMilliVolts(int) { return 830; }
 BASE_BOARD = r'''
 #pragma once
 #include <Arduino.h>
+#include <helpers/LedPolicy.h>
 class ESP32Board {
 protected:
   uint8_t startup_reason = 0;
 public:
   void begin() {}
   virtual ~ESP32Board() = default;
+  virtual void applyLedPolicy() {}
   virtual void onBeforeTransmit() {}
   virtual void onAfterTransmit() {}
   virtual void powerOff() {}

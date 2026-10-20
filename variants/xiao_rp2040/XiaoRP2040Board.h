@@ -34,7 +34,11 @@ public:
   void attachDynamicPrefs(KeyValueStore* prefs) { (void)prefs; }  // no-op
 
 #ifdef P_LORA_TX_LED
-  void onBeforeTransmit() override { digitalWrite(P_LORA_TX_LED, HIGH); }
+  void applyLedPolicy() override {
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LOW);
+  }
+
+  void onBeforeTransmit() override { if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, HIGH); }
   void onAfterTransmit() override { digitalWrite(P_LORA_TX_LED, LOW); }
 #endif
 

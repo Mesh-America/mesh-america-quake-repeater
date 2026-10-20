@@ -208,6 +208,25 @@ int main() {
     checkGuard(node, false);
   });
 
+  run("board-led-policy-overrides-alerts-and-heartbeat", [] {
+    MyMesh node;
+    mesh::leds::setEnabled(false);
+    command(node, "set notify.led all 50,50");
+    command(node, "notify.test all", "OK - alert test started");
+    expectLed(false);
+    checkGuard(node, false);
+    seedUiRgb();
+    expectLed(false);
+    node._notifications.loop(1050, false);
+    node._notifications.loop(1100, false);
+    mesh::leds::setEnabled(true);
+    node.syncNotifications();
+    checkGuard(node, true);
+    node.pulse(mesh::notify::Led, true, -1);
+    expectLed(true);
+    node.pulse(mesh::notify::Led, false, -1);
+  });
+
   run("disabled-feature-restores-ui-policy", [] {
     MyMesh node;
     startAlert(node);

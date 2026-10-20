@@ -1,4 +1,5 @@
 #include <helpers/RegulatorSettings.h>
+#include <helpers/LedSettings.h>
 #include "SensorMesh.h"
 #include <math.h>
 #include <helpers/IdentityGeneration.h>
@@ -167,6 +168,7 @@ void setup() {
 #if defined(NRF52_PLATFORM)
   if (volatile_primary_fs) regulator_prefs_fs = nullptr;
 #endif
+  mesh::leds::beginSettings(board, regulator_prefs_fs);
   if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
     MESH_DEBUG_PRINTLN("Regulator selection could not be applied");
   }

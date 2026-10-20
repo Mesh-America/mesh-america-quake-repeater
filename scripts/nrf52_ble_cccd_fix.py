@@ -155,6 +155,49 @@ def patched_trace_source(source):
 ''')
 
 
+def patched_led_source(source):
+    """A queued advertising blink must not relight a disabled indicator."""
+    source = source.replace("\r\n", "\n")
+    old = """  (void) xTimer;
+  digitalToggle(LED_BLUE);
+"""
+    new = """  (void) xTimer;
+  // MeshCore saved LED policy also covers already queued timer callbacks.
+  if (LED_BLUE < 0 || (uint32_t)LED_BLUE >= PINS_COUNT) return;
+  if (digitalPinToPinName(LED_BLUE) == 0xff) return;
+#ifdef DISABLE_BLE_LED
+  const bool enabled = false;
+#elif defined(RAK_BOARD) && defined(BLE_PIN_CODE)
+  const bool enabled = mesh::leds::enabled() && !Bluefruit.connected();
+#else
+  const bool enabled = mesh::leds::enabled();
+#endif
+  if (enabled) digitalToggle(LED_BLUE);
+  else digitalWrite(LED_BLUE, !LED_STATE_ON);
+"""
+    include = '#include "bluefruit.h"\n'
+    policy_include = '#include <helpers/LedPolicy.h>\n'
+    old_connected = "    digitalWrite(LED_BLUE, on_off ? LED_STATE_ON : (1-LED_STATE_ON) );"
+    new_connected = """    // RAK Companions blink while advertising, then go dark when connected.
+#if defined(DISABLE_BLE_LED) || (defined(RAK_BOARD) && defined(BLE_PIN_CODE))
+    on_off = false;
+#else
+    on_off = on_off && mesh::leds::enabled();
+#endif
+    if (LED_BLUE >= 0 && (uint32_t)LED_BLUE < PINS_COUNT
+        && digitalPinToPinName(LED_BLUE) != 0xff)
+      digitalWrite(LED_BLUE, on_off ? LED_STATE_ON : (1-LED_STATE_ON));"""
+    if (new in source and new_connected in source
+            and policy_include in source and old not in source
+            and old_connected not in source):
+        return source
+    if (source.count(old) != 1 or source.count(include) != 1
+            or source.count(old_connected) != 1):
+        raise RuntimeError("nRF52 BLE LED policy: unrecognized timer callback")
+    return source.replace(old, new).replace(old_connected, new_connected).replace(
+        include, include + policy_include)
+
+
 def replace_framework_source(build_env, node):
     source = Path(node.srcnode().get_abspath())
     if source.name not in ("BLEGatt.cpp", "BLEConnection.cpp", "bluefruit.cpp") or source.parent.name != "src":
@@ -166,6 +209,8 @@ def replace_framework_source(build_env, node):
         patched = patched_connection_source(original)
     else:
         patched = patched_bluefruit_source(original)
+        patched = patched_led_source(patched)
+        build_env.AppendUnique(CPPPATH=[build_env.subst("$PROJECT_DIR/src")])
         if "MESH_NRF52_BLE_TRACE" in str(build_env.get("CPPDEFINES", [])):
             patched = patched_trace_source(patched)
             build_env.AppendUnique(CPPPATH=[build_env.subst("$PROJECT_DIR/src")])

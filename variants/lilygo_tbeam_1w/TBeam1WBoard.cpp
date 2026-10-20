@@ -84,8 +84,12 @@ void TBeam1WBoard::powerCycleRadio() {
                      power_off_level, digitalRead(SX126X_POWER_EN));
 }
 
+void TBeam1WBoard::applyLedPolicy() {
+  if (!mesh::leds::enabled()) digitalWrite(LED_PIN, LOW);
+}
+
 void TBeam1WBoard::onBeforeTransmit() {
-  digitalWrite(LED_PIN, HIGH);  // TX LED on
+  if (mesh::leds::enabled()) digitalWrite(LED_PIN, HIGH);  // TX LED on
   portENTER_CRITICAL(&_fan_mux);
   _tx_active = true;
   if (_mode == FAN_AUTO && !_stopped) {

@@ -1,4 +1,5 @@
 #include <helpers/RegulatorSettings.h>
+#include <helpers/LedSettings.h>
 #include <helpers/ui/DisplayPowerSettings.h>
 #include <helpers/BatteryChargeCLI.h>
 #include <helpers/MorseCLI.h>
@@ -10725,6 +10726,7 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
   }
 
   if (mesh::power::handleRegulatorCommand(command, reply, reply_capacity)) return true;
+  if (mesh::leds::handleCommand(command, reply, reply_capacity)) return true;
 
 #if COMPANION_FEATURE_READER
   if (sender_timestamp == 0 && mesh::morseTimingActive(_radio)

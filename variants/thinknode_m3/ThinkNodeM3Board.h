@@ -19,8 +19,13 @@ public:
   uint16_t getBattMilliVolts() override;
 
 #ifdef P_LORA_TX_LED
+  void applyLedPolicy() override {
+    NRF52Board::applyLedPolicy();
+    if (!mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, !LED_STATE_ON);
+  }
+
   void onBeforeTransmit() override {
-    digitalWrite(P_LORA_TX_LED, LED_STATE_ON);  // turn TX LED on
+    if (mesh::leds::enabled()) digitalWrite(P_LORA_TX_LED, LED_STATE_ON);  // turn TX LED on
   }
   void onAfterTransmit() override {
     digitalWrite(P_LORA_TX_LED, !LED_STATE_ON); // turn TX LED off

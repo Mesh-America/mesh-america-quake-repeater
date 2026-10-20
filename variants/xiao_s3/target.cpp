@@ -24,7 +24,8 @@ EnvironmentSensorManager sensors;
 bool radio_init() {
   fallback_clock.begin();
   rtc_clock.begin(Wire);
-  pinMode(21, INPUT);
+  digitalWrite(PIN_STATUS_LED, !LED_STATE_ON);
+  pinMode(PIN_STATUS_LED, OUTPUT);
   pinMode(48, OUTPUT);
 
   #if defined(P_LORA_SCLK)

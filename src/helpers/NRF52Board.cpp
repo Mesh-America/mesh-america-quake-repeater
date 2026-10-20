@@ -6,6 +6,7 @@
 #include "nrf52/SoftDeviceState.h"
 #include "nrf52/SleepCycleState.h"
 #include "nrf52/ShutdownLeds.h"
+#include "nrf52/BluetoothLed.h"
 #include <target.h>
 #include "UserGpioPinPolicy.h"
 #include "PowerSavingDiagnostics.h"
@@ -261,6 +262,10 @@ bool NRF52Board::applyMcuRegulator(mesh::power::RegulatorMode mode) {
   }
   cpu_regulator_mode = mode;
   return true;
+}
+
+void NRF52Board::applyLedPolicy() {
+  mesh_nrf52::applyBluetoothLedPolicy();
 }
 
 void NRF52Board::loop() {
@@ -959,10 +964,12 @@ bool NRF52Board::startOTAUpdate(const char *id, char reply[], bool force_ap) {
     // Even a failed begin can leave SoftDevice enabled partway through SDK
     // startup. Require a fresh authoritative query before the next sleep.
     mesh_nrf52::sleepCycleState().invalidate();
+    mesh_nrf52::applyBluetoothLedPolicy();
     if (!Bluefruit.begin(1, 0)) {
       return false;
     }
     ota_ble_started = true;
+    mesh_nrf52::bluetoothLedStarted();
 
     // To be consistent OTA DFU should be added first if it exists
     bledfu.begin();

@@ -1,4 +1,5 @@
 #include <helpers/RegulatorSettings.h>
+#include <helpers/LedSettings.h>
 #include <Arduino.h>   // needed for PlatformIO
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
@@ -3634,6 +3635,7 @@ void setup() {
   if (!mesh::storage::internalPrimaryFilesystemReady(primary_fs_boot)
       || store.isVolatilePrimaryFS()) regulator_prefs_fs = nullptr;
 #endif
+  mesh::leds::beginSettings(board, regulator_prefs_fs);
   if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
     MESH_DEBUG_PRINTLN("Regulator selection could not be applied");
   }
