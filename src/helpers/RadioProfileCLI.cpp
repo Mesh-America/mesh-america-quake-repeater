@@ -222,12 +222,13 @@ void RadioProfileCLI::begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool in
   owns_secondary_runtime_ = external_secondary_override_ = false;
 #endif
   infrastructure_replies_ = infrastructure_replies;
-  if (radio_ && radio_->profiles()) {
-    radio_->profiles()->cross = cross_;
-    radio_->profiles()->reply_tx = infrastructure_replies ? RADIO_TX_BOTH : RADIO_TX_AUTO;
-    radio_->profiles()->reply_force = false;
+  auto* profiles = radio_ ? radio_->profiles() : nullptr;
+  if (profiles) {
+    profiles->cross = cross_;
+    profiles->reply_tx = infrastructure_replies ? RADIO_TX_BOTH : RADIO_TX_AUTO;
+    profiles->reply_force = false;
   }
-  if (!fs_ || !radio_ || !radio_->profiles()) return;
+  if (!fs_ || !profiles) return;
   uint8_t bytes[ImageSize];
   const ImageReadResult primary_image = readImage(ImagePath, bytes, sizeof(bytes));
   bool loaded = primary_image == ImageReadResult::Valid;
@@ -293,19 +294,21 @@ bool RadioProfileCLI::savePrimaryPreamble(uint16_t symbols) {
 }
 
 bool RadioProfileCLI::acceptsPrimary(float freq, float bw, uint8_t sf, uint8_t cr, uint16_t preamble) const {
-  if (!radio_ || !radio_->profiles()) return preamble == 0;
-  auto preview = *radio_->profiles();
+  const auto* profiles = radio_ ? radio_->profiles() : nullptr;
+  if (!profiles) return preamble == 0;
+  auto preview = *profiles;
   auto& p = preview.primary;
   p.freq = freq; p.bw = bw; p.sf = sf; p.cr = cr; p.preamble = preamble;
   return radio_->validateProfile(p) && preview.automaticPreambleFits();
 }
 
 void RadioProfileCLI::publish() {
-  if (!radio_ || !radio_->profiles()) return;
-  radio_->profiles()->cross = cross_;
-  radio_->profiles()->reply_tx = infrastructure_replies_
+  auto* profiles = radio_ ? radio_->profiles() : nullptr;
+  if (!profiles) return;
+  profiles->cross = cross_;
+  profiles->reply_tx = infrastructure_replies_
       ? (validReplySetting(reply_setting_) ? reply_setting_ & 7 : RADIO_TX_BOTH) : RADIO_TX_AUTO;
-  radio_->profiles()->reply_force = infrastructure_replies_
+  profiles->reply_force = infrastructure_replies_
       && validReplySetting(reply_setting_) && (reply_setting_ & 8);
 #if MESH_ENABLE_MESHTEXT_CHAT || MESH_ENABLE_ETHERNET_TUNNEL
   protectExternalSecondary();
@@ -324,12 +327,12 @@ void RadioProfileCLI::publish() {
     if (secondary_protocol_ == RadioProfileProtocol::Meshtext) config.params.preamble = 16;
   }
 #endif
-  radio_->profiles()->setSecondary(config, temp_active_);
+  profiles->setSecondary(config, temp_active_);
 #if MESH_ENABLE_MESHTEXT_CHAT || MESH_ENABLE_ETHERNET_TUNNEL
   owns_secondary_runtime_ = auto_secondary_requested_ || secondary_protocol_overlay_;
   if (owns_secondary_runtime_) {
     owned_secondary_snapshot_ = config;
-    owned_secondary_generation_ = radio_->profiles()->generation[1];
+    owned_secondary_generation_ = profiles->generation[1];
   }
 #endif
 }
@@ -362,9 +365,11 @@ bool RadioProfileCLI::secondaryRuntimeBusy() const {
 #if MESH_ENABLE_MESHTEXT_CHAT || MESH_ENABLE_ETHERNET_TUNNEL
   if (external_secondary_override_ || !runtimeSecondaryUnchanged()) return true;
 #endif
-  return !fs_ || !radio_ || !radio_->profiles() || hold_ || temp_pending_ || temp_active_
+  if (!fs_ || !radio_) return true;
+  const auto* profiles = radio_->profiles();
+  return !profiles || hold_ || temp_pending_ || temp_active_
       || publish_pending_ || hasReplyMutation() || hasSecondarySchedule()
-      || radio_->profiles()->primary_temporary || radio_->profiles()->secondary_temporary;
+      || profiles->primary_temporary || profiles->secondary_temporary;
 }
 
 void RadioProfileCLI::noteSecondaryManualChange() {
@@ -636,11 +641,13 @@ void RadioProfileCLI::appendPreamble(char* reply, size_t capacity, uint8_t profi
 }
 
 void RadioProfileCLI::appendSavedPreamble(char* reply, size_t capacity, uint8_t sf, float bw) const {
-  if (!capacity || !radio_ || !radio_->profiles()) return;
-  auto preview = *radio_->profiles();
+  if (!capacity || !radio_) return;
+  const auto* profiles = radio_->profiles();
+  if (!profiles) return;
+  auto preview = *profiles;
   preview.primary.sf = sf; preview.primary.bw = bw;
   preview.primary.preamble = primary_preamble_;
-  if (preview.primary != radio_->profiles()->primary) preview.resetSwitchTest();
+  if (preview.primary != profiles->primary) preview.resetSwitchTest();
   appendReply(reply, capacity, ",preamble=%u%s",
       preview.preamble(0, rxPowerSavingPreambleForParams(sf, bw)), primary_preamble_ ? "" : " (auto)");
   appendChirpWarning(reply, capacity, preview);
@@ -648,10 +655,11 @@ void RadioProfileCLI::appendSavedPreamble(char* reply, size_t capacity, uint8_t 
 
 void RadioProfileCLI::appendPrimaryChirpWarning(char* reply, size_t capacity, uint8_t sf, float bw,
                                                uint16_t preamble) const {
-  if (!radio_ || !radio_->profiles()) return;
-  auto preview = *radio_->profiles();
+  const auto* profiles = radio_ ? radio_->profiles() : nullptr;
+  if (!profiles) return;
+  auto preview = *profiles;
   preview.primary.sf = sf; preview.primary.bw = bw; preview.primary.preamble = preamble;
-  if (preview.primary != radio_->profiles()->primary) preview.resetSwitchTest();
+  if (preview.primary != profiles->primary) preview.resetSwitchTest();
   appendChirpWarning(reply, capacity, preview);
 }
 
