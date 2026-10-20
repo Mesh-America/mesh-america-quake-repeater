@@ -98,6 +98,9 @@ int main() {
     DataStore image_store;
     assert(image_store.savePrefs(saved, 47.125, -122.25));
     auto image = image_store.fs.files["/new_prefs"];
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+    assert(image[79] == saved.leds_quiet);
+#endif
     // The frozen reference remains authoritative only for the historical
     // prefix. Checked new-footer behavior has dedicated persistence tests.
     image.resize(image.size()-mesh::companion::traffic::FooterSize);
@@ -158,6 +161,9 @@ int main() {
         }
         if(got)legacy.tx_media=legacy.tx_ssh=mesh::RADIO_TX_AUTO;
         equalValues(actual, legacy);
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+        if (got) assert(actual.leds_quiet == disk[79]);
+#endif
         assert(!memcmp(&lat, &legacy_lat, sizeof(lat)));
         assert(!memcmp(&lon, &legacy_lon, sizeof(lon)));
         assert(actual_store.fs.files["/new_prefs"] == disk);
@@ -187,6 +193,15 @@ class CompanionPrefsValuesTests(unittest.TestCase):
         # is the authority for all old/torn images and read failure traces.
         legacy = (ROOT / 'test/fixtures/companion_prefs_storage/legacy_loader.inc').read_text()
         self.assertNotIn('copyPersistedValuesFrom', legacy)
+        # The headless Mini assigns the existing reserved byte at 79 to LED
+        # policy. Keep the independent scalar read and every failure boundary;
+        # only this target stores its value instead of discarding it as padding.
+        reserved_byte = '    readField(pad, 1);'
+        self.assertEqual(legacy.count(reserved_byte), 1)
+        legacy = legacy.replace(reserved_byte,
+            '#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)\n'
+            '    readField(&loaded_prefs.leds_quiet, 1);\n'
+            '#else\n' + reserved_byte + '\n#endif')
         # Keep the frozen scalar prefix independent of the new GNU table.
         # The RAK-only checked tail was published later; add it explicitly
         # to this test-local reference without rewriting the frozen fixture.
@@ -227,6 +242,7 @@ class CompanionPrefsValuesTests(unittest.TestCase):
             'wifi_ssid': 'defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)',
             'wifi_pwd': 'defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)',
             'peripherals_shared': 'RAK_4631',
+            'leds_quiet': 'WIO_E5_MINI_HEADLESS_COMPANION_UI',
         }
 
         def fields(template):
@@ -281,7 +297,8 @@ inline char* utoa(unsigned int value,char* output,int base){
             (work / 'helpers/IdentityStore.h').write_text(fs)
             cpp = work / 'test.cpp'
             cpp.write_text(code + tests)
-            for platform in ('STM32_PLATFORM', 'NRF52_PLATFORM', 'NRF52_PLATFORM,RAK_4631', 'ESP32_PLATFORM', 'RP2040_PLATFORM',
+            for platform in ('STM32_PLATFORM', 'STM32_PLATFORM,WIO_E5_MINI_HEADLESS_COMPANION_UI',
+                             'NRF52_PLATFORM', 'NRF52_PLATFORM,RAK_4631', 'ESP32_PLATFORM', 'RP2040_PLATFORM',
                              'ESP32_PLATFORM,TBEAM_1W', 'RP2040_PLATFORM,ENABLE_WIFI_INTERFACE'):
                 with self.subTest(platform=platform):
                     binary = work / 'test'

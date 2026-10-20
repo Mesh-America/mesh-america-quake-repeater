@@ -126,15 +126,71 @@ class Nrf52SleepEventTests(unittest.TestCase):
     def test_enabled_crypto_owner_and_other_pending_irqs_are_preserved(self):
         self.run_case("irq_owner")
 
-    def test_all_sleeping_roles_prepare_before_any_work_or_policy_check(self):
-        entry = "\nvoid loop() {\n#if defined(NRF52_PLATFORM)\n  board.prepareSleepCycle();\n#endif\n"
+    def test_all_sleeping_roles_prepare_after_transitions_before_work(self):
+        preparation = "#if defined(NRF52_PLATFORM)\n  board.prepareSleepCycle();\n#endif\n"
+        priority = ("#if defined(BLE_PIN_CODE)\n"
+                    "  serviceCompanionUsbBluetoothPriority();\n#endif\n")
         for role in ("simple_repeater", "simple_room_server", "simple_sensor",
                      "companion_radio"):
             with self.subTest(role=role):
                 source = (ROOT / "examples" / role / "main.cpp").read_text(encoding="ascii")
                 actual = body(source, "\nvoid loop() {")
+                # Companion's transport transition may resume/start BLE and
+                # invalidate the prior cache. Query SDK state after it, with
+                # no other loop work before this single preparation.
+                entry = "\nvoid loop() {\n" + (priority if role == "companion_radio" else "") + preparation
                 self.assertTrue(actual.startswith(entry))
                 self.assertEqual(actual.count("board.prepareSleepCycle();"), 1)
+
+    def test_companion_transition_precedes_the_authoritative_sdk_snapshot(self):
+        source = (ROOT / "examples/companion_radio/main.cpp").read_text(encoding="ascii")
+        actual = body(source, "\nvoid loop() {")
+        end = actual.index("#endif\n", actual.index("board.prepareSleepCycle();")) + len("#endif\n")
+        entry = actual[:end].replace("void loop()", "static void companionLoopEntry()", 1) + "}\n"
+        harness = r'''
+#define BLE_PIN_CODE 1
+#define NRF52_PLATFORM 1
+static NRF52Board board;
+static bool next_softdevice;
+static unsigned priority_calls = 0, queries_before_entry;
+static void serviceCompanionUsbBluetoothPriority() {
+  ++priority_calls;
+  assert(state_queries == queries_before_entry);
+  mesh_nrf52::sleepCycleState().invalidate();
+  softdevice_enabled = next_softdevice;
+}
+@ENTRY@
+int main(int argc, char** argv) {
+  assert(argc == 2);
+  next_softdevice = !std::strcmp(argv[1], "enabled");
+  softdevice_enabled = !next_softdevice;
+  board.prepareSleepCycle(); // A cached snapshot from before the transition.
+  queries_before_entry = state_queries;
+  companionLoopEntry();
+  assert(priority_calls == 1 && state_queries == queries_before_entry + 1);
+  mesh_nrf52::SleepCycleSnapshot snapshot;
+  assert(mesh_nrf52::sleepCycleState().snapshot(snapshot));
+  assert(snapshot.softdevice_enabled == next_softdevice);
+  const unsigned before_sleep = state_queries;
+  board.sleep(0);
+  assert(state_queries == before_sleep && real_sleeps == 1);
+}
+'''
+        # Keep the production cache, board preparation and sleep methods; only
+        # model the transport transition's invalidation/SoftDevice effects.
+        fixture = self.cycle_source.replace("int main(", "void fixtureMain(", 1)
+        good = self.compile_cycle("companion-entry", fixture + harness.replace("@ENTRY@", entry))
+        late_entry = entry.replace("  serviceCompanionUsbBluetoothPriority();\n", "", 1).replace(
+            "  board.prepareSleepCycle();\n",
+            "  board.prepareSleepCycle();\n  serviceCompanionUsbBluetoothPriority();\n", 1)
+        late = self.compile_cycle("companion-late-transition", fixture + harness.replace("@ENTRY@", late_entry))
+        for mode in ("enabled", "disabled"):
+            with self.subTest(mode=mode):
+                result = subprocess.run([str(good), mode], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                result = subprocess.run([str(late), mode], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Assertion", result.stderr)
 
     def test_actual_cache_single_attempt_stale_publication_errors_and_recovery(self):
         self.run_cycle_case("cache")

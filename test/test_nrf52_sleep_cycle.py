@@ -272,15 +272,83 @@ int main() {
         self.execute(code)
 
     def test_every_application_bluefruit_attempt_invalidates_before_call(self):
-        for filename, call in (
-            ("src/helpers/NRF52Board.cpp", "if (!Bluefruit.begin(1, 0))"),
-            ("src/helpers/nrf52/SerialBLEInterface.cpp", "if (!Bluefruit.begin())"),
+        for filename, signature, call in (
+            ("src/helpers/NRF52Board.cpp", "bool NRF52Board::startOTAUpdate(",
+             "if (!Bluefruit.begin(1, 0))"),
+            ("src/helpers/nrf52/SerialBLEInterface.cpp", "bool SerialBLEInterface::begin(",
+             "if (!Bluefruit.begin())"),
         ):
             with self.subTest(filename=filename):
                 source = (ROOT / filename).read_text(encoding="ascii")
-                at = source.index(call)
-                self.assertTrue(source[:at].rstrip().endswith(
-                    "mesh_nrf52::sleepCycleState().invalidate();"))
+                startup = extract_braced(source, signature)
+                self.assertEqual(startup.count(call), 1)
+                at = startup.index(call)
+                prelude = startup[startup.index("Bluefruit.configPrphConn("):at]
+                invalidate = "mesh_nrf52::sleepCycleState().invalidate();"
+                without_invalidation = prelude.replace(invalidate, "")
+                # Execute the real configuration/startup prelude, allowing LED
+                # setup between invalidation and begin. Observe the cache at
+                # begin itself, including when startup partially enables SD
+                # and then returns failure.
+                variants = (
+                    (prelude, "", True),
+                    (without_invalidation, "", False),
+                    (without_invalidation, invalidate, False),
+                    (prelude + "\nauto fresh = mesh_nrf52::sleepCycleState().begin();\n"
+                     "mesh_nrf52::sleepCycleState().publish(fresh, false, 42);", "", False),
+                )
+                attempts = []
+                for index, (before, after, expected) in enumerate(variants):
+                    attempts.append("static bool attempt_%d() {\n%s\n"
+                                    "const bool started = %s;\n%s\nreturn started;\n}" %
+                                    (index, before, call[len("if (!"):-1], after))
+                cases = ",\n".join("{attempt_%d, %s}" % (index, str(expected).lower())
+                                     for index, (_, _, expected) in enumerate(variants))
+                self.execute(r'''
+#include <cassert>
+#include <initializer_list>
+#include <helpers/nrf52/SleepCycleState.h>
+constexpr int BLE_GATT_ATT_MTU_DEFAULT = 23, BLE_GAP_EVENT_LENGTH_MIN = 3;
+constexpr int COMPANION_BLE_PRPH_MTU = 247, COMPANION_BLE_PRPH_EVENT_LENGTH = 100;
+constexpr int COMPANION_BLE_PRPH_HVN_QUEUE = 3, COMPANION_BLE_PRPH_WRCMD_QUEUE = 1;
+static bool begin_succeeds, actual_sd, invalidated_at_begin;
+static uint32_t before_start;
+struct BluefruitStub {
+  unsigned starts = 0;
+  void configPrphConn(int, int, int, int) {}
+  template<class... Args> bool begin(Args...) {
+    ++starts;
+    auto& state = mesh_nrf52::sleepCycleState();
+    mesh_nrf52::SleepCycleSnapshot snapshot;
+    invalidated_at_begin = !state.current(before_start) && !state.snapshot(snapshot);
+    actual_sd = true; // A failed begin can still partially enable SoftDevice.
+    return begin_succeeds;
+  }
+} Bluefruit;
+namespace mesh_nrf52 { void applyBluetoothLedPolicy() {} }
+@ATTEMPTS@
+int main() {
+  struct Case { bool (*attempt)(); bool invalidates_before_begin; };
+  const Case cases[] = {@CASES@};
+  for (const auto& test : cases) {
+    for (bool succeeds : {false, true}) {
+      auto& state = mesh_nrf52::sleepCycleState();
+      before_start = state.begin();
+      assert(state.publish(before_start, false, 42));
+      mesh_nrf52::SleepCycleSnapshot snapshot;
+      assert(state.snapshot(snapshot) && !snapshot.softdevice_enabled);
+      begin_succeeds = succeeds; actual_sd = false;
+      const auto starts = Bluefruit.starts;
+      assert(test.attempt() == succeeds);
+      assert(Bluefruit.starts == starts + 1 && actual_sd);
+      assert(invalidated_at_begin == test.invalidates_before_begin);
+      if (test.invalidates_before_begin) {
+        assert(!state.current(before_start) && !state.snapshot(snapshot));
+      }
+    }
+  }
+}
+'''.replace("@ATTEMPTS@", "\n".join(attempts)).replace("@CASES@", cases))
         board = (ROOT / "src/helpers/NRF52Board.cpp").read_text(encoding="ascii")
         late = extract_braced(board, "void NRF52Board::sleep(uint32_t secs)")
         self.assertNotIn("softdeviceIsEnabled", late)
