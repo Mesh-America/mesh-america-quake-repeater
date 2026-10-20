@@ -95,6 +95,72 @@ void meshBleTraceIdentity(char* reply, size_t capacity) {
       (unsigned)Bluefruit.ScanResponse.count());
 }
 
+void meshBleTraceStack(char* reply, size_t capacity) {
+  uint8_t enabled = 0;
+  if (!instance || mesh_nrf52::softdeviceIsEnabled(enabled) != NRF_SUCCESS || !enabled) {
+    snprintf(reply, capacity, "> Bluetooth not initialized");
+    return;
+  }
+  // Query the running stack: a build's SDK setting or bootloader version
+  // label alone cannot prove which SoftDevice firmware is installed.
+  ble_version_t version = {};
+  const uint32_t status = sd_ble_version_get(&version);
+  __asm__ __volatile__("" ::: "memory");
+  if (status != NRF_SUCCESS) {
+    snprintf(reply, capacity, "> status=%lu", (unsigned long)status);
+    return;
+  }
+  snprintf(reply, capacity, "> status=0,link_layer=%u,company=%u,fwid=0x%04x",
+      (unsigned)version.version_number, (unsigned)version.company_id,
+      (unsigned)version.subversion_number);
+}
+
+void meshBleTraceAdvertiser(char* reply, size_t capacity) {
+  uint8_t enabled = 0;
+  if (!instance || mesh_nrf52::softdeviceIsEnabled(enabled) != NRF_SUCCESS || !enabled) {
+    snprintf(reply, capacity, "> Bluetooth not initialized");
+    return;
+  }
+  // Query the SoftDevice rather than Bluefruit's cached running flag. Its
+  // advertising handle is private; bounded read-only enumeration avoids
+  // assuming its value or depending on the framework's object layout.
+  unsigned active = 0, idle = 0, invalid = 0;
+  unsigned first_handle = BLE_GAP_ADV_SET_HANDLE_NOT_SET;
+  uint32_t unexpected = NRF_SUCCESS;
+  ble_gap_addr_t first_address = {};
+  for (unsigned handle = 0; handle < BLE_GAP_ADV_SET_HANDLE_NOT_SET; ++handle) {
+    ble_gap_addr_t address = {};
+    const uint32_t status = sd_ble_gap_adv_addr_get((uint8_t)handle, &address);
+    __asm__ __volatile__("" ::: "memory");
+    if (status == NRF_SUCCESS) {
+      if (!active) {
+        first_handle = handle;
+        first_address = address;
+      }
+      ++active;
+    } else if (status == NRF_ERROR_INVALID_STATE) {
+      ++idle;
+    } else if (status == BLE_ERROR_INVALID_ADV_HANDLE) {
+      ++invalid;
+    } else {
+      unexpected = status;
+      break;
+    }
+  }
+  ble_gap_privacy_params_t privacy = {};
+  const uint32_t privacy_status = sd_ble_gap_privacy_get(&privacy);
+  __asm__ __volatile__("" ::: "memory");
+  snprintf(reply, capacity,
+      "> cached=%u,active=%u,idle=%u,invalid=%u,error=%lu,h=%u,t=%u,mac=%02x%02x%02x%02x%02x%02x,privacy_status=%lu,privacy=%u,cycle=%u",
+      (unsigned)Bluefruit.Advertising.isRunning(), active, idle, invalid,
+      (unsigned long)unexpected, first_handle, (unsigned)first_address.addr_type,
+      first_address.addr[5], first_address.addr[4], first_address.addr[3],
+      first_address.addr[2], first_address.addr[1], first_address.addr[0],
+      (unsigned long)privacy_status,
+      privacy_status == NRF_SUCCESS ? (unsigned)privacy.privacy_mode : 0u,
+      privacy_status == NRF_SUCCESS ? (unsigned)privacy.private_addr_cycle_s : 0u);
+}
+
 void meshBleTraceAdvertising(char* reply, size_t capacity) {
   if (!instance) {
     snprintf(reply, capacity, "> Bluetooth not initialized");
