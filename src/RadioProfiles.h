@@ -147,13 +147,13 @@ class RadioProfiles {
     return profile == 1 ? secondary.params : primary;
   }
   static bool valid(const RadioProfileParams& p) {
-    if (!isfinite(p.freq) || !isfinite(p.bw) || p.freq < 150 || p.freq > 2500
+    if (!isfinite(p.freq) || !isfinite(p.bw) || p.freq < 137 || p.freq > 2500
         || p.sf < 5 || p.sf > 12 || p.cr < 5 || p.cr > 8
         || (p.protocol != RadioProfileProtocol::MeshCore && p.protocol != RadioProfileProtocol::Meshtext
             && p.protocol != RadioProfileProtocol::Ethernet)
         || (p.preamble != 0 && (p.preamble < 8 || p.preamble > MaxPreamble))) return false;
-    static constexpr float bandwidths[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f,
-                               62.5f, 125, 250, 500, 1000, 812.5f, 1625};
+    static constexpr float bandwidths[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.67f, 41.7f,
+                               62.5f, 83.34f, 101.56f, 125, 203.125f, 250, 406.25f, 500, 812.5f, 1000, 1625};
     for (float bw : bandwidths) if (fabsf(p.bw - bw) < 0.01f) return true;
     return false;
   }

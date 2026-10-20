@@ -618,6 +618,7 @@ jobs:
           test_sx1262_modem_cache test_esp32_retune_priority test_tdeck_spi_clock_timing
           test_radio_chirp_math
           test_lr1110_profile_switch test_lr1110_packet_setter_cache
+          test_radio_profile_validation_backport
 
       - name: Verify radio lab collectors and compiled experiment contracts
         run: |

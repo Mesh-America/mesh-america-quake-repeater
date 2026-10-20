@@ -465,22 +465,40 @@ bool RadioLibWrapper::validateProfile(const mesh::RadioProfileParams& p) const {
 #else
   if (p.protocol == mesh::RadioProfileProtocol::Ethernet) return false;
 #endif
+#if MESH_RADIO_PROFILE_CHIP != 1110 && MESH_RADIO_PROFILE_CHIP != 1121 && MESH_RADIO_PROFILE_CHIP != 2021 && MESH_RADIO_PROFILE_CHIP != 68 && MESH_RADIO_PROFILE_CHIP != 1272
+  static constexpr float bandwidths[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125, 250, 500};
+  bool supported = false;
+  for (float bw : bandwidths) if (fabsf(p.bw - bw) < 0.01f) supported = true;
+  if (!supported) return false;
+#endif
 #if MESH_RADIO_PROFILE_CHIP == 1276
   return p.freq >= 137 && p.freq <= 1020 && p.sf >= 7 && p.bw <= 500;
 #elif MESH_RADIO_PROFILE_CHIP == 1272
-  return p.freq >= 860 && p.freq <= 1020 && p.sf >= 7 && p.bw >= 125 && p.bw <= 500;
+  return p.freq >= 860 && p.freq <= 1020 && p.sf >= 7
+      && (p.bw == 125 || p.bw == 250 || p.bw == 500);
 #elif MESH_RADIO_PROFILE_CHIP == 68
   return p.freq >= 150 && p.freq <= 960
       && ((p.bw == 125 && p.sf <= 9) || (p.bw == 250 && p.sf <= 10)
           || (p.bw == 500 && p.sf <= 11));
 #elif MESH_RADIO_PROFILE_CHIP == 2021
-  return (p.freq <= 1090 || p.freq >= 1900) && p.bw >= 31.25 && p.bw <= 1000;
+  static constexpr float bandwidths[] = {31.25f, 41.67f, 41.7f, 62.5f, 83.34f, 101.56f,
+                                        125, 203.125f, 250, 406.25f, 500, 812.5f, 1000};
+  bool supported = false;
+  for (float bw : bandwidths) if (fabsf(p.bw - bw) < 0.01f) supported = true;
+  return ((p.freq >= 150 && p.freq <= 1090) || (p.freq >= 1900 && p.freq <= 2200)
+      || (p.freq >= 2400 && p.freq <= 2500)) && supported;
 #elif MESH_RADIO_PROFILE_CHIP == 1110
-  return p.freq <= 960 && p.bw >= 62.5 && p.bw <= 500;
+  return p.freq >= 150 && p.freq <= 960
+      && (p.bw == 62.5 || p.bw == 125 || p.bw == 250 || p.bw == 500);
+#elif MESH_RADIO_PROFILE_CHIP == 1121
+  return ((p.freq >= 150 && p.freq <= 960) || (p.freq >= 1900 && p.freq <= 2200)
+      || (p.freq >= 2400 && p.freq <= 2500))
+      && (p.bw == 62.5 || p.bw == 125 || p.bw == 250 || p.bw == 500
+          || (p.freq >= 1900 && (p.bw == 203.125f || p.bw == 406.25f || p.bw == 812.5f)));
 #elif MESH_RADIO_PROFILE_CHIP == 1268
   return p.freq >= 410 && p.freq <= 810 && p.bw <= 500;
 #else
-  return p.freq <= 960 && p.bw <= 500;
+  return p.freq >= 150 && p.freq <= 960 && p.bw <= 500;
 #endif
 }
 
@@ -613,7 +631,11 @@ uint32_t RadioLibWrapper::getBeaconAirtime(const mesh::RadioProfileParams& p, in
       ? 16 : (p.preamble ? p.preamble : 32);
   if (!mesh::RadioProfiles::safePreamble(p, preamble)) return 0;
   const double symbol = mesh::RadioProfiles::symbolUs(p);
-  const int de = symbol >= 16000 ? 1 : 0;
+  const int de = symbol >= 16000
+#if MESH_RADIO_PROFILE_CHIP == 1121
+      || (p.freq > 1000 && p.sf > 10)
+#endif
+      ? 1 : 0;
   const double coded = ceil((8.0 * length - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16)
       / (4 * (p.sf - 2 * de)));
   const double payload = 8 + (coded > 0 ? coded * p.cr : 0);
@@ -935,17 +957,31 @@ bool RadioLibWrapper::getProfileIdleDelay(uint32_t& delay_ms) const {
 }
 
 uint32_t RadioLibWrapper::getProfileAirtime(uint8_t profile, int len, uint8_t cr) {
+  if (profile > 1 || len < 0 || len > MAX_TRANS_UNIT) return 0;
   if (!_profiles.enabled() && profile == 0 && cr == 0) return getEstAirtimeFor(len);
   const auto& p = _profiles.params(profile);
+  if (!validateProfile(p)) return 0;
   const double symbol = mesh::RadioProfiles::symbolUs(p);
   if (symbol <= 0 || len < 0) return 0;
   if (cr < 5 || cr > 8) cr = p.cr;
-  const int de = symbol >= 16000 ? 1 : 0;
+  const int de = symbol >= 16000
+#if MESH_RADIO_PROFILE_CHIP == 1121
+      // RadioLib 7.8.1 forces SX128x-compatible LDRO for high-band SF11/12.
+      || (p.freq > 1000 && p.sf > 10)
+#endif
+      ? 1 : 0;
   const double coded = ceil((8.0 * len - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16)
       / (4 * (p.sf - 2 * de)));
   const double payload_symbols = 8 + (coded > 0 ? coded * cr : 0);
   const double suffix = p.sf <= 6 ? 6.25 : 4.25;
-  return (uint32_t)ceil((profilePreamble(profile) + suffix + payload_symbols) * symbol / 1000.0);
+  const double airtime = ceil((profilePreamble(profile) + suffix + payload_symbols) * symbol / 1000.0);
+  const uint32_t rounded = airtime > UINT32_MAX ? UINT32_MAX : uint32_t(airtime);
+#if MESH_RADIO_PROFILE_CHIP == 1110 || MESH_RADIO_PROFILE_CHIP == 1121
+  // Preserve these wrappers' operational floor even for an inactive tuple.
+  return rounded < 200 ? 200 : rounded;
+#else
+  return rounded;
+#endif
 }
 
 bool RadioLibWrapper::setParams(float freq, float bw, uint8_t sf, uint8_t cr,
