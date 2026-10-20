@@ -174,7 +174,6 @@ public:
     _until = now + duration_ms;
     _nominal_unit = MorseTx::unitMillis(wpm);
     _unit_q5 = uint16_t(uint32_t(_nominal_unit) * UnitScale);
-    _noise = _signal = _quiet_peak = 0;
     _samples = 0;
     _last_sample_at = now;
     _max_sample_gap_ms = 0;
@@ -288,12 +287,13 @@ public:
     const float span = _signal - _noise;
     float rise = span * 0.5f;
     if (rise < 6.0f) rise = 6.0f;
-    float threshold = _noise + rise - (_keyed ? 3.0f : 0.0f);
+    float threshold = _noise + rise;
     // The mean/valley alone forgets the quiet excursions observed while
     // arming. Retain their filtered upper envelope across marks and valleys;
     // a quiet receiver still has the ordinary six-dB acquisition margin.
-    const float quiet_threshold = _quiet_peak + (_keyed ? 3.0f : 6.0f);
+    const float quiet_threshold = _quiet_peak + 6.0f;
     if (threshold < quiet_threshold) threshold = quiet_threshold;
+    if (_keyed) threshold -= 3.0f;
     // Before the first confirmed OFF, some receivers still report a stale
     // pre-carrier floor. Allow for a provisional floor shift without a hard
     // signal-span discontinuity. This margin is a tested startup heuristic,
