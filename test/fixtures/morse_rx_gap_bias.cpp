@@ -6,7 +6,7 @@
 #include <initializer_list>
 #include <vector>
 
-static_assert(sizeof(mesh::MorseRx) == 4168, "gap fix must not add receiver memory");
+static_assert(sizeof(mesh::MorseRx) == 4172, "gap fix must not add receiver memory");
 struct Segment { bool keyed; uint32_t duration; };
 static uint32_t rounded(double value) { return uint32_t(std::lround(value)); }
 

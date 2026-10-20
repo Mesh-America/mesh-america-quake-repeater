@@ -11,7 +11,7 @@ class MorseRxTimingTests(unittest.TestCase):
     def test_actual_q5_drift_classification_bounds_fractional_gaps_rollover_and_size(self):
         code = (ROOT / "test/fixtures/morse_rx_timing.cpp").read_text(encoding="ascii")
         output = compile_run(self, code, flags=("-DMESH_MORSE_MAX_WPM=240", "-DMESH_MORSE_HIL=0"))
-        self.assertIn("Q5 timing checks passed; MorseRx size: 4168 bytes", output)
+        self.assertIn("Q5 timing checks passed; MorseRx size: 4172 bytes", output)
 
     def test_hil_fast_off_keeps_the_same_fractional_timing_and_allocation_layout(self):
         code = (ROOT / "test/fixtures/morse_rx_timing.cpp").read_text(encoding="ascii")

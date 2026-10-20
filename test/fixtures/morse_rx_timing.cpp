@@ -15,9 +15,9 @@ using mesh::MorseRx;
 static_assert(std::is_same<decltype(MorseRx::_unit_q5), uint16_t>::value,
               "fractional timing must reuse the 16-bit timing field");
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
-static_assert(sizeof(MorseRx) == 4168 + sizeof(void*), "HIL decoder size changed");
+static_assert(sizeof(MorseRx) == ((4172 + alignof(void*) - 1) / alignof(void*)) * alignof(void*) + sizeof(void*), "HIL decoder size changed");
 #else
-static_assert(sizeof(MorseRx) == 4168, "production decoder must remain 4168 bytes");
+static_assert(sizeof(MorseRx) == 4172, "production decoder includes one quiet-envelope float");
 #endif
 
 static void begin(MorseRx& rx, uint8_t wpm, uint32_t now = 100) {

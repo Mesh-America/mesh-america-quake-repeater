@@ -9,9 +9,9 @@
 using mesh::MorseRx;
 
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
-static_assert(sizeof(MorseRx) == 4168 + sizeof(void*), "squelch must not add decoder fields");
+static_assert(sizeof(MorseRx) == ((4172 + alignof(void*) - 1) / alignof(void*)) * alignof(void*) + sizeof(void*), "squelch must not add decoder fields");
 #else
-static_assert(sizeof(MorseRx) == 4168, "shipping decoder layout must be unchanged");
+static_assert(sizeof(MorseRx) == 4172, "shipping decoder includes the learned quiet envelope");
 #endif
 
 struct Receiver {

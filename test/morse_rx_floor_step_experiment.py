@@ -59,8 +59,6 @@ def legacy_estimator(original):
         header=header.replace("    if (rise < 6.0f) rise = 6.0f;",
                               "    if (rise < 6.0f) rise = 6.0f;\n    if (rise > 24.0f) rise = 24.0f;")
     header = header.replace("    if (_keyed && threshold < _signal - 5.0f) threshold = _signal - 5.0f;\n", "")
-    header = header.replace("float threshold = _noise + rise - (_keyed ? 3.0f : 0.0f);",
-                            "const float threshold = _noise + rise - (_keyed ? 3.0f : 0.0f);")
     header = header.replace("if (_keyed && raw_keyed && rssi_dbm > _noise + 6.0f)",
                             "if (_keyed && rssi_dbm > _noise + 6.0f)")
     header = header.replace("      _signal = rssi_dbm;\n", "", 1)

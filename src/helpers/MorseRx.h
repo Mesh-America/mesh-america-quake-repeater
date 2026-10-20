@@ -174,7 +174,7 @@ public:
     _until = now + duration_ms;
     _nominal_unit = MorseTx::unitMillis(wpm);
     _unit_q5 = uint16_t(uint32_t(_nominal_unit) * UnitScale);
-    _noise = _signal = 0;
+    _noise = _signal = _quiet_peak = 0;
     _samples = 0;
     _last_sample_at = now;
     _max_sample_gap_ms = 0;
@@ -258,17 +258,29 @@ public:
   void sample(float rssi_dbm, uint32_t now) {
     if (!service(now) || !isfinite(rssi_dbm) || rssi_dbm < -180.0f || rssi_dbm > 20.0f) return;
     _last_rssi = rssi_dbm;
+    const uint32_t sample_gap = static_cast<uint32_t>(now - _last_sample_at);
+    const float filter_gap = sample_gap > 10U ? 10U : sample_gap;
     _last_sample_at = now;
     if (!_samples || rssi_dbm < _minimum_rssi) _minimum_rssi = rssi_dbm;
     if (!_samples || rssi_dbm > _maximum_rssi) _maximum_rssi = rssi_dbm;
     ++_samples;
     if (!_have_noise) {
       _have_noise = true;
-      _noise = rssi_dbm;
+      _noise = _quiet_peak = rssi_dbm;
       _signal = rssi_dbm + 12.0f;
     }
     if (learning(now)) {
-      _noise += (rssi_dbm - _noise) * 0.05f;
+      // Discard the initial receiver-settling measurements, then retain
+      // sustained quiet peaks rather than a raw first sample or a spike.
+      const bool settling = static_cast<uint32_t>(now - _started) < 50U;
+      if (settling) {
+        _noise = rssi_dbm;
+        if (rssi_dbm < _quiet_peak) _quiet_peak = rssi_dbm;
+      }
+      else _noise += (rssi_dbm - _noise) * 0.025f * filter_gap;
+      if (settling || rssi_dbm <= _quiet_peak) _candidate = false;
+      else if (!_candidate) { _candidate = true; _candidate_at = now; }
+      else if (static_cast<uint32_t>(now - _candidate_at) >= 5U) _quiet_peak = rssi_dbm;
       _signal = _noise + 12.0f;
       return;
     }
@@ -277,6 +289,11 @@ public:
     float rise = span * 0.5f;
     if (rise < 6.0f) rise = 6.0f;
     float threshold = _noise + rise - (_keyed ? 3.0f : 0.0f);
+    // The mean/valley alone forgets the quiet excursions observed while
+    // arming. Retain their filtered upper envelope across marks and valleys;
+    // a quiet receiver still has the ordinary six-dB acquisition margin.
+    const float quiet_threshold = _quiet_peak + (_keyed ? 3.0f : 6.0f);
+    if (threshold < quiet_threshold) threshold = quiet_threshold;
     // Before the first confirmed OFF, some receivers still report a stale
     // pre-carrier floor. Allow for a provisional floor shift without a hard
     // signal-span discontinuity. This margin is a tested startup heuristic,
@@ -306,6 +323,14 @@ public:
       // valley. Keep the next rise anchored to the subsequently learned floor,
       // not to a transient shoulder left by the previous strong mark.
       _signal = _noise + 12.0f;
+      // Only established quiet may train this envelope. An OFF edge can
+      // still be on a strong mark's decay shoulder, and short symbol gaps
+      // must not train a threshold which hides the following weaker mark.
+      if (static_cast<uint32_t>(now - _last_edge) >= 200U) {
+        _quiet_peak += (rssi_dbm - _quiet_peak)
+            * (rssi_dbm > _quiet_peak ? 0.025f : 0.00005f)
+            * filter_gap;
+      }
     }
     // Never adapt the mark estimate down toward quiet during OFF debounce:
     // doing so moves its own threshold before the falling edge can commit.
@@ -370,7 +395,7 @@ private:
                 "fractional Morse timing must fit its existing 16-bit field");
   char _capture[CaptureCapacity + 1] = {};
   uint32_t _started = 0, _until = 0, _last_edge = 0, _candidate_at = 0;
-  float _noise = 0, _signal = 0;
+  float _noise = 0, _signal = 0, _quiet_peak = 0;
   float _last_rssi = NAN, _minimum_rssi = NAN, _maximum_rssi = NAN;
   uint32_t _samples = 0;
   uint32_t _last_sample_at = 0, _max_sample_gap_ms = 0;
