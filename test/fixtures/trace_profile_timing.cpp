@@ -18,6 +18,7 @@
 class RadioLibWrapper {
 public:
   mesh::RadioProfiles _profiles;
+  bool validateProfile(const mesh::RadioProfileParams& p) const { return mesh::RadioProfiles::valid(p); }
   uint16_t profilePreamble(uint8_t profile) { return _profiles.preamble(profile, 32); }
   uint32_t getEstAirtimeFor(int) { return 77; }
   uint32_t getProfileAirtime(uint8_t, int, uint8_t = 0);

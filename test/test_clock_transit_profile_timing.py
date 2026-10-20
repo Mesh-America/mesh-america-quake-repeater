@@ -32,6 +32,7 @@ HARNESS = r'''
 class RadioLibWrapper {
 public:
   mesh::RadioProfiles _profiles;
+  bool validateProfile(const mesh::RadioProfileParams& p) const { return mesh::RadioProfiles::valid(p); }
   uint16_t profilePreamble(uint8_t profile) {
     return _profiles.preamble(profile, 32);
   }

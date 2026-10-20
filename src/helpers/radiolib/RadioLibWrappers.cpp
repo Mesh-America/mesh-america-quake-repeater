@@ -674,9 +674,11 @@ uint32_t RadioLibWrapper::getBeaconAirtime(const mesh::RadioProfileParams& p, in
       || (p.freq > 1000 && p.sf > 10)
 #endif
       ? 1 : 0;
-  const double coded = ceil((8.0 * length - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16)
-      / (4 * (p.sf - 2 * de)));
-  const double payload = 8 + (coded > 0 ? coded * p.cr : 0);
+  // Round the small integer bit/block ratio without floating-point division.
+  const int numerator = 8 * length - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16;
+  const int denominator = 4 * (p.sf - 2 * de);
+  const int coded = numerator > 0 ? (numerator + denominator - 1) / denominator : 0;
+  const double payload = 8 + coded * p.cr;
   return static_cast<uint32_t>(ceil((preamble + (p.sf <= 6 ? 6.25 : 4.25) + payload)
                                   * symbol / 1000.0));
 }
@@ -1013,9 +1015,11 @@ uint32_t RadioLibWrapper::getProfileAirtime(uint8_t profile, int len, uint8_t cr
       || (p.freq > 1000 && p.sf > 10)
 #endif
       ? 1 : 0;
-  const double coded = ceil((8.0 * len - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16)
-      / (4 * (p.sf - 2 * de)));
-  const double payload_symbols = 8 + (coded > 0 ? coded * cr : 0);
+  // Round the small integer bit/block ratio without floating-point division.
+  const int numerator = 8 * len - 4 * p.sf + (p.sf <= 6 ? 20 : 28) + 16;
+  const int denominator = 4 * (p.sf - 2 * de);
+  const int coded = numerator > 0 ? (numerator + denominator - 1) / denominator : 0;
+  const double payload_symbols = 8 + coded * cr;
   const double suffix = p.sf <= 6 ? 6.25 : 4.25;
   const double airtime = ceil((profilePreamble(profile) + suffix + payload_symbols) * symbol / 1000.0);
   const uint32_t rounded = airtime > UINT32_MAX ? UINT32_MAX : uint32_t(airtime);

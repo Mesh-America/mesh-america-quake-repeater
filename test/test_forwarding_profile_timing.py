@@ -155,9 +155,11 @@ class ForwardingProfileTimingTests(unittest.TestCase):
 #include <cassert>
 #include <cstdio>
 #include <RadioProfiles.h>
+#include <Packet.h>
 class RadioLibWrapper {
 public:
   mesh::RadioProfiles _profiles;
+  bool validateProfile(const mesh::RadioProfileParams& p) const { return mesh::RadioProfiles::valid(p); }
   unsigned legacy_calls = 0;
   uint32_t getEstAirtimeFor(int length) { ++legacy_calls; return uint32_t(17 * length + 3); }
   uint16_t profilePreamble(uint8_t profile) { return _profiles.params(profile).preamble; }
