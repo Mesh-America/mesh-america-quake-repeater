@@ -12,10 +12,11 @@ struct Clock : mesh::RTCClock {
 };
 struct Radio : mesh::Radio {
   mesh::RadioProfiles p;
+  float minimum_frequency = 137;
   Radio() { p.primary.freq=909.5; p.primary.bw=62.5; p.primary.sf=7; p.primary.cr=5; }
   mesh::RadioProfiles* profiles() override { return &p; }
   const mesh::RadioProfiles* profiles() const override { return &p; }
-  bool validateProfile(const mesh::RadioProfileParams& v) const override { return mesh::RadioProfiles::valid(v) && v.bw<=500; }
+  bool validateProfile(const mesh::RadioProfileParams& v) const override { return mesh::RadioProfiles::valid(v) && v.freq>=minimum_frequency && v.bw<=500; }
   uint16_t profilePreamble(uint8_t profile) const override { return p.preamble(profile, 32); }
   int recvRaw(uint8_t*,int) override { return 0; }
   uint32_t getEstAirtimeFor(int) override { return 10; }
@@ -337,13 +338,16 @@ static void spectrumOverlap() {
     f.cmd("set radio2 909.540,31.25,8,7,rx");
     assert(strstr(f.reply, "; try 909.585MHz"));
   }
-  {
+  for (float minimum : {137.0f, 150.0f}) {
     Fixture f;
-    f.radio.p.primary.freq = 150.01f; f.radio.p.primary.bw = 31.25f;
-    f.cmd("set radio2 150.001,31.25,8,7,rx");
-    const float frequency = suggestedSpectrumFrequency(f.reply);
-    assert(frequency > f.radio.p.primary.freq); // lower suggestion violates 150 MHz limit
+    // Cover the shared parser limit and a stricter physical-radio limit.
+    f.radio.minimum_frequency = minimum;
+    f.radio.p.primary.freq = minimum + 0.01f; f.radio.p.primary.bw = 31.25f;
     char command[100];
+    snprintf(command, sizeof(command), "set radio2 %.3f,31.25,8,7,rx", minimum + 0.001f);
+    f.cmd(command);
+    const float frequency = suggestedSpectrumFrequency(f.reply);
+    assert(frequency > f.radio.p.primary.freq); // lower suggestion violates radio limit
     snprintf(command, sizeof(command), "set radio2 %.3f,31.25,8,7,rx", frequency);
     expectSpectrumWarning(f.cmd(command), false);
   }
