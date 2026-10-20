@@ -11,7 +11,8 @@ from test_radio_receive_contract import method
 ROOT = Path(__file__).resolve().parents[1]
 
 # Published field order and sizes, independent of the implementation's emitter
-# and the class's in-memory member order or padding. None represents zero pad.
+# and the class's in-memory member order or padding. None represents reserved
+# padding; compact Wio Companion claims the single byte at wire offset 79.
 WIRE_FIELDS = (
     ('airtime_factor', 4), ('node_name', 32), (None, 4),
     ('@lat', 8), ('@lon', 8), ('freq', 4), ('sf', 1), ('cr', 1),
@@ -147,17 +148,32 @@ int main() {
 #endif
     DataStore reference;
     assert(reference.savePrefsLegacy(prefs, 47.125, -122.25));
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+    // The compact target claims exactly the former reserved byte. Its frozen
+    // predecessor still emits zero there; every other byte stays identical.
+    auto historical = store.fs.files.at("/new_prefs");
+    assert(historical[79] == prefs.leds_quiet);
+    historical[79] = 0;
+    assert(reference.fs.files.at("/new_prefs") == historical);
+#else
     assert(reference.fs.files.at("/new_prefs") == store.fs.files.at("/new_prefs"));
+#endif
     ++comparisons;
   }
 
   CompanionNodePrefs original;
+  assert(original.buzzer_quiet == 1 && original.vibe_quiet == 0);
   assert(original.lost_reply == 0);
   assert(original.tx_media == mesh::RADIO_TX_AUTO && original.tx_ssh == mesh::RADIO_TX_AUTO);
   strcpy(original.node_name, "durable image");
   original.freq = 915.25f; original.ble_pin = 123456;
   original.bluetooth_enabled = 1; original.usb_debug_enabled = 1;
   original.gps_sync_interval_hours = 336;
+  original.buzzer_quiet = 0; original.vibe_quiet = 1;
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  assert(original.leds_quiet == 0);
+  original.leds_quiet = 1;
+#endif
   original.lost_reply = 2;
   original.tx_media = mesh::RADIO_TX_SECONDARY;
   original.tx_ssh = mesh::RADIO_TX_OFF;
@@ -199,6 +215,11 @@ int main() {
     double lat = 1, lon = 2;
     assert(reboot.loadPrefsInt("/new_prefs", live, lat, lon));
     assert(live.lost_reply == 0 && live.ble_pin == original.ble_pin);
+    assert(live.buzzer_quiet == (length >= 85 ? 0 : 1));
+    assert(live.vibe_quiet == (length >= 143 ? 1 : 0));
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+    assert(live.leds_quiet == 1);
+#endif
     assert(live.tx_media==mesh::RADIO_TX_AUTO&&live.tx_ssh==mesh::RADIO_TX_AUTO);
     assert(live.freq == original.freq && !strcmp(live.node_name, original.node_name));
     assert(lat == 47.125 && lon == -122.25);
@@ -232,6 +253,8 @@ int main() {
     assert(reboot.loadPrefsInt("/new_prefs", live, lat, lon) == expected);
     if (expected) {
       assert(live.freq == original.freq);
+      assert(live.buzzer_quiet == (length >= 85 ? 0 : 1));
+      assert(live.vibe_quiet == (length >= 143 ? 1 : 0));
       assert(live.lost_reply == (length >= historical_size ? 2 : 0));
       assert(live.tx_media == (length == before.size() ? mesh::RADIO_TX_SECONDARY : mesh::RADIO_TX_AUTO));
       assert(live.tx_ssh == (length == before.size() ? mesh::RADIO_TX_OFF : mesh::RADIO_TX_AUTO));
@@ -291,7 +314,74 @@ int main() {
   changed.freq = 910.5f; changed.usb_debug_enabled = 0;
   changed.gps_sync_interval_hours = 24;
   changed.lost_reply = 1;
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  changed.leds_quiet = 0;
+#endif
   const auto after = golden(changed, 42.25, -121.125);
+
+  // Saved choices remain independent of the new fresh-install defaults.
+  for (unsigned sound_quiet = 0; sound_quiet < 2; ++sound_quiet) {
+    for (unsigned vibration_quiet = 0; vibration_quiet < 2; ++vibration_quiet) {
+      CompanionNodePrefs saved;
+      assert(saved.copyPersistedValuesFrom(original));
+      saved.buzzer_quiet = sound_quiet;
+      saved.vibe_quiet = vibration_quiet;
+      DataStore writer;
+      assert(writer.savePrefs(saved, 47.125, -122.25));
+      const auto disk = writer.fs.files.at("/new_prefs");
+      assert(disk[84] == sound_quiet && disk[142] == vibration_quiet);
+      CompanionNodePrefs reboot;
+      reboot.buzzer_quiet = !sound_quiet;
+      reboot.vibe_quiet = !vibration_quiet;
+      double lat = 0, lon = 0;
+      assert(writer.loadPrefsInt("/new_prefs", reboot, lat, lon));
+      assert(reboot.buzzer_quiet == sound_quiet);
+      assert(reboot.vibe_quiet == vibration_quiet);
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+      assert(disk[79] == 1 && reboot.leds_quiet == 1);
+#endif
+      assert(writer.fs.files.at("/new_prefs") == disk);
+      ++comparisons;
+    }
+  }
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  // The reserved byte is part of the atomic image, at its original offset.
+  // Old firmware emitted zero; raw invalid encodings are clamped by startup.
+  for (unsigned quiet : {0u, 1u, 2u, 255u}) {
+    CompanionNodePrefs saved;
+    assert(saved.copyPersistedValuesFrom(original));
+    saved.leds_quiet = quiet;
+    DataStore writer;
+    assert(writer.savePrefs(saved, 47.125, -122.25));
+    const auto disk = writer.fs.files.at("/new_prefs");
+    assert(disk.size() == before.size() && disk[79] == quiet);
+    auto expected = before; expected[79] = quiet;
+    assert(disk == expected);
+    CompanionNodePrefs reboot;
+    reboot.leds_quiet = !quiet;
+    double lat = 0, lon = 0;
+    assert(writer.loadPrefsInt("/new_prefs", reboot, lat, lon));
+    assert(reboot.leds_quiet == quiet);
+    assert(reboot.buzzer_quiet == 0 && reboot.vibe_quiet == 1);
+    assert(writer.fs.files.at("/new_prefs") == disk);
+    ++comparisons;
+  }
+  for (size_t length : {size_t(84), historical_size}) {
+    auto historical = before;
+    historical[79] = 0;
+    historical.resize(length);
+    DataStore old;
+    old.fs.files["/new_prefs"] = historical;
+    CompanionNodePrefs live;
+    live.leds_quiet = 1;
+    double lat = 0, lon = 0;
+    assert(old.loadPrefsInt("/new_prefs", live, lat, lon));
+    assert(live.leds_quiet == 0); // Old reserved zero restores default-on LEDs.
+    assert(live.ble_pin == original.ble_pin && live.freq == original.freq);
+    assert(old.fs.files.at("/new_prefs") == historical);
+    ++comparisons;
+  }
+#endif
 
   // Every possible short write and readback, including every tail byte,
   // must preserve the old durable image. STM32 issues only one image write;
@@ -424,7 +514,14 @@ int main() {
 def field_code(rows, seed=False):
     result = []
     for name, size in rows:
-        if name == 'tz_offset':
+        if name is None and size == 1:
+            result.append('#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)')
+            result.append('fill(&prefs.leds_quiet, sizeof(prefs.leds_quiet));' if seed
+                          else 'append(&prefs.leds_quiet, 1);')
+            if not seed:
+                result.append('#else\nbytes.push_back(0);')
+            result.append('#endif')
+        elif name == 'tz_offset':
             if seed:
                 result.append('prefs.tz_offset = float(int(random % 27) - 12);')
             else:
@@ -530,7 +627,8 @@ inline char* utoa(unsigned int value,char* output,int base){
             (work / 'helpers/IdentityStore.h').write_text(fs)
             cpp = work / 'test.cpp'
             cpp.write_text(code + tests)
-            for platform in ('STM32_PLATFORM', 'NRF52_PLATFORM', 'NRF52_PLATFORM,RAK_4631', 'ESP32_PLATFORM',
+            for platform in ('STM32_PLATFORM', 'STM32_PLATFORM,WIO_E5_MINI_HEADLESS_COMPANION_UI',
+                             'NRF52_PLATFORM', 'NRF52_PLATFORM,RAK_4631', 'ESP32_PLATFORM',
                              'RP2040_PLATFORM', 'ESP32_PLATFORM,TBEAM_1W',
                              'RP2040_PLATFORM,ENABLE_WIFI_INTERFACE'):
                 with self.subTest(platform=platform):

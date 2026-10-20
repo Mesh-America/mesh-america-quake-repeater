@@ -971,7 +971,14 @@ jobs:
           python3 -B test/test_ui_startup_windows.py -v
           node test/test_notification_builder.js
           python3 -B test/test_notification_settings.py
+          python3 -B test/test_companion_alert_control.py -v
+          python3 -B test/test_companion_compact_led_control.py -v
+          python3 -B test/test_companion_alert_drivers.py -v
           python3 -B test/test_notification_led_ownership.py -v
+          python3 -B test/test_led_settings.py -v
+          python3 -B test/test_board_led_policy.py -v
+          python3 -B test/test_status_led_policy.py -v
+          python3 -B test/test_nrf52_led_policy.py -v
           python3 -B test/test_mono_led_rollover.py -v
           python3 -B test/test_backlight_poll_rollover.py -v
           python3 -B test/test_rgb_led_rollover.py -v

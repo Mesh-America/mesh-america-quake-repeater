@@ -1958,6 +1958,25 @@ the verified pin assignments, startup fixes, and saved amplifier settings.
 
 ---
 
+#### Turn Companion sound and vibration on or off
+
+`get buzzer` and `set buzzer on|off` control the Companion's buzzer. Devices
+with a vibration motor also support `get vibration` and `set vibration on|off`.
+Changes take effect immediately, are saved across reboots, and produce no
+confirmation tone. Muting an output stops an alert already playing.
+
+Fresh settings default to **sound off** and **vibration on**. Existing saved
+choices are retained. The same preferences are used by the device buttons and
+UI. Unsupported hardware reports an error.
+
+These are the device mute controls. Programmable `notify.sound` and
+`notify.vibration` rules also respect them; an enabled rule cannot bypass a
+muted output. The notification output masks still select which alert outputs
+a rule may use. Explicit button mute/unmute confirmations retain their existing
+behavior.
+
+Adapted from [upstream PR #3603](https://github.com/meshcore-dev/MeshCore/pull/3603).
+
 #### Turn indicator LEDs on or off
 
 ```text

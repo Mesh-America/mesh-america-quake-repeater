@@ -67,7 +67,11 @@ static constexpr PrefField PREF_FIELDS[] = {
   PREF_FIELD(advert_loc_policy, 1),
   PREF_FIELD(multi_acks, 1),
   PREF_FIELD(path_hash_mode, 1),
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  PREF_FIELD(leds_quiet, 1),
+#else
   prefSpecial<PrefsPad, 1>(),
+#endif
   PREF_FIELD(ble_pin, 4),
   PREF_FIELD(buzzer_quiet, 1),
   PREF_FIELD(gps_enabled, 1),

@@ -48,16 +48,14 @@ static mesh::audio::VoiceClip buttonVoiceClip(ButtonVoicePrompt prompt) {
 #endif
 
 void genericBuzzer::begin() {
-//    Serial.print("DBG: Setting up buzzer on pin ");
-//    Serial.println(PIN_BUZZER);
-    #ifdef PIN_BUZZER_EN
-      pinMode(PIN_BUZZER_EN, OUTPUT);
-      digitalWrite(PIN_BUZZER_EN, HIGH);
-    #endif
-
-    quiet(false);
+    digitalWrite(PIN_BUZZER, LOW);
     pinMode(PIN_BUZZER, OUTPUT);
-    digitalWrite(PIN_BUZZER, LOW); // need to pull low by default to avoid extreme power draw
+#ifdef PIN_BUZZER_EN
+    digitalWrite(PIN_BUZZER_EN, LOW);
+    pinMode(PIN_BUZZER_EN, OUTPUT);
+#endif
+    // Start muted until the UI applies the saved preference.
+    quiet(_is_quiet);
 }
 
 void genericBuzzer::play(const char *melody) {
@@ -79,6 +77,8 @@ void genericBuzzer::play(const char *melody) {
 }
 
 void genericBuzzer::playNotification(const char* melody) {
+    // Muted background alerts must not interrupt an explicit button prompt.
+    if (_is_quiet) return;
     stop();
 #ifdef PIN_BUZZER_EN
     digitalWrite(PIN_BUZZER_EN, HIGH);

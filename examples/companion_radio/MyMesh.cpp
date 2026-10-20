@@ -294,7 +294,7 @@ static bool save_filter(const ContactInfo& c);
 #define DEFAULT_AUTOADD_CONFIG 0
 #endif
 #ifndef DEFAULT_BUZZER_QUIET
-#define DEFAULT_BUZZER_QUIET 0
+#define DEFAULT_BUZZER_QUIET 1
 #endif
 #ifndef DEFAULT_CAD_ENABLED
 // Preserve the tuned Companion behavior that preceded the runtime setting.
@@ -2833,6 +2833,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.manual_add_contacts = DEFAULT_MANUAL_ADD_CONTACTS;
   _prefs.tx_power_dbm = LORA_TX_POWER;
   _prefs.buzzer_quiet = DEFAULT_BUZZER_QUIET ? 1 : 0;
+  _prefs.vibe_quiet = 0;
   _prefs.gps_enabled = 0;       // GPS disabled by default
   _prefs.gps_interval = 0;      // Use the default 1-second fix-processing interval
   _prefs.gps_sync_interval_hours = 0; // Retain the board's default time-sync cadence
@@ -3320,6 +3321,13 @@ void MyMesh::begin(bool has_display, bool radio_available,
 
 void MyMesh::configureRadioFromPrefs() {
   board.attachDynamicPrefs(_prefs.getCustom());
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  // The reserved preference byte keeps the existing image and filesystem size.
+  _prefs.leds_quiet = _prefs.leds_quiet == 1 ? 1 : 0;
+  mesh::leds::setEnabled(!_prefs.leds_quiet);
+  board.applyLedPolicy();
+  mesh::leds::applyStatusPolicy();
+#endif
 
   if (!_radio_available) {
     saved_radio_apply_pending = false;
@@ -10315,17 +10323,17 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
     terminalOutput().print(
         "Commands:\r\n"
         "  stats-core / stats-radio / stats-radio-diag / stats-packets\r\n"
-        "  get prv.key (when private key export is enabled)\r\n"
+        "  get prv.key (if export enabled)\r\n"
 #if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
         "  password <new-password> (shared setup WiFi, WebConfig and WiFi OTA)\r\n"
         "  get password (management password status)\r\n"
 #else
-        "  get password (this role has no admin password)\r\n"
+        "  get password (no admin password)\r\n"
 #endif
-        "  erase (erase stored settings and identity)\r\n"
+        "  erase (settings and identity)\r\n"
         "  board\r\n"
-        "  version\r\n");
-    terminalOutput().print("  get storage.layout\r\n");
+        "  version\r\n"
+        "  get storage.layout\r\n");
 #if MESH_ENABLE_TX_BEACONS
     terminalOutput().print("  get beacon [slot] / set beacon <slot> <meshcore|meshtext> ...\r\n"
         "  delete beacon <slot|all> / set beacon.interval <12|24|36|48> (default 24h)\r\n");
@@ -10363,58 +10371,52 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
     terminalOutput().print("  get eth / set eth on|off (physical RAK13800; default off, this boot)\r\n"
         "  get sdcard [free] / ota cache [on|off] (RAK15002; mutually exclusive with Ethernet)\r\n");
 #endif
-    terminalOutput().print("  get pwrmgt.bootreason\r\n");
+    terminalOutput().print("  get pwrmgt.bootreason\r\n"
 #if COMPANION_FEATURE_MEMORY_DIAGNOSTICS
-    terminalOutput().print("  memory\r\n");
+        "  memory\r\n"
 #endif
-    terminalOutput().print("  get display.rotation\r\n");
+        "  get/set display.rotation <0|90|180|270>\r\n"
+#ifdef PIN_BUZZER
+        "  get/set buzzer on|off\r\n"
+#endif
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+        "  get/set vibration on|off\r\n"
+#endif
   #if COMPANION_FEATURE_NOTIFICATIONS
-    terminalOutput().print("  get notify / get notify.rules / get notify.gpio.pins\r\n");
-    terminalOutput().print("  set notify.{sound|vibration|led|screen|gpio} on|off\r\n");
-    terminalOutput().print("  set notify.<output> <all|contact:key|room:key|channel:slot> <pattern>\r\n");
-    terminalOutput().print("  set notify.remote <contact:key|room:key> on|off (!notify, max 15s, no GPIO)\r\n");
-    terminalOutput().print("  notify.test <target> / notify.stop / notify.delete <target>\r\n");
+        "  get notify / get notify.rules / get notify.gpio.pins\r\n"
+        "  set notify.{sound|vibration|led|screen|gpio} on|off\r\n"
+        "  set notify.<output> <all|contact:key|room:key|channel:slot> <pattern>\r\n"
+        "  set notify.remote <contact:key|room:key> on|off (!notify, max 15s, no GPIO)\r\n"
+        "  notify.test <target> / notify.stop / notify.delete <target>\r\n"
   #endif
-    terminalOutput().print(
-        "  get display.inbox\r\n"
-        "  set display.inbox <history|pending|unread>\r\n"
-        "  set display.rotation <0|90|180|270>\r\n"
-        "  get display.touch\r\n"
-        "  set display.touch <on|off> (this boot only)\r\n"
-        "  get public.key\r\n");
-    terminalOutput().print(
+        "  get/set display.inbox <history|pending|unread>\r\n"
+        "  get/set display.touch <on|off> (this boot)\r\n"
+        "  get public.key\r\n"
         "  set {name|lat|lon|freq|tx|af} {value}\r\n"
         "  get wifi|espnow|2.4ghz\r\n"
         "  set wifi|espnow on|off [force] (force only with off)\r\n"
         "  set 2.4ghz on [all|force]|off [force] (this boot)\r\n"
-        "  get bluetooth.name\r\n"
-        "  set bluetooth.name <name|default>\r\n");
+        "  get/set bluetooth.name <name|default>\r\n"
 #if defined(BLE_PIN_CODE)
-    terminalOutput().print("  get bluetooth (alias: get ble)\r\n");
-    terminalOutput().print("  set bluetooth <on|off> [force] (saved; force only with off)\r\n");
-    terminalOutput().print("  get bluetooth.mac\r\n");
-    terminalOutput().print(
-        "  set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>\r\n");
-    terminalOutput().print("  get bluetooth.stealth\r\n");
-    terminalOutput().print("  set bluetooth.stealth on|off\r\n");
+        "  get bluetooth (alias: get ble)\r\n"
+        "  set bluetooth <on|off> [force] (saved; force only with off)\r\n"
+        "  get bluetooth.mac\r\n"
+        "  set bluetooth.mac <address|random|random-every-boot|random-after-connect|default>\r\n"
+        "  get/set bluetooth.stealth on|off\r\n"
 #endif
 #if MESH_ENABLE_LOST_REPLY
-    terminalOutput().print("  get lost.reply\r\n" "  set lost.reply <off|no|yes>\r\n");
+        "  get/set lost.reply <off|no|yes>\r\n"
 #endif
-    terminalOutput().print("  set pin <0-999999>\r\n" "  powersaving [on|off]\r\n");
+        "  set pin <0-999999>\r\n" "  powersaving [on|off]\r\n"
 #if MESH_USB_LOGGING_AVAILABLE
-    terminalOutput().print(
-        "  get usb.logging\r\n"
-        "  set usb.logging <on|off|stream> [reboot]\r\n"
-        "  get usb.debug\r\n"
-        "  set usb.debug <on|off>\r\n"
+        "  get/set usb.logging <on|off|stream> [reboot]\r\n"
+        "  get/set usb.debug <on|off>\r\n"
 #if MESH_USB_CONSOLE_COOPERATIVE
-        "  get usb.watchdog\r\n"
         "  get usb.watchdog.last\r\n"
-        "  set usb.watchdog <off|on|auto> (saved; default auto)\r\n"
+        "  get/set usb.watchdog <off|on|auto> (saved; default auto)\r\n"
+#endif
 #endif
         );
-#endif
 #if defined(ESP32) && defined(WIFI_SSID)
 #if defined(COMPANION_RADIO_FULL)
     terminalOutput().print("  start ota [ap] (WiFi firmware update on port 8080)\r\n");
@@ -10447,23 +10449,15 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
     terminalOutput().print("  get espnow.channel\r\n");
     terminalOutput().print("  set espnow.channel <1-13>\r\n");
 #endif
-    // Keep identical help text in bounded chunks. Fewer virtual Print calls
-    // leave room for USB controls on small-flash boards without cutting CLI.
+    // Concise help and grouped Print calls preserve small-board flash space.
     terminalOutput().print(
-        "  get radio.rxps\r\n"
         "  get radio.rxps.config\r\n"
-        "  set radio.rxps <off|on|level 1-10 [preamble 16|32]|rx_us sleep_us>\r\n"
-        "  get radio.cad\r\n"
-        "  set radio.cad <on|off>\r\n"
-        "  set radio.cad timings <scan_ms|auto> <retry_ms|auto> <max_ms|auto>\r\n");
-    terminalOutput().print(
-        "  get radio.rxgain\r\n"
-        "  set radio.rxgain <on|off>\r\n"
-        "  get radio.fem.rxgain\r\n"
-        "  set radio.fem.rxgain <on|off>\r\n"
-        "  get radio.fem.txgain\r\n"
-        "  set radio.fem.txgain <on|off>\r\n");
-    terminalOutput().print(
+        "  get/set radio.rxps <off|on|level 1-10 [preamble 16|32]|rx_us sleep_us>\r\n"
+        "  get/set radio.cad <on|off>\r\n"
+        "  set radio.cad timings <scan_ms|auto> <retry_ms|auto> <max_ms|auto>\r\n"
+        "  get/set radio.rxgain <on|off>\r\n"
+        "  get/set radio.fem.rxgain <on|off>\r\n"
+        "  get/set radio.fem.txgain <on|off>\r\n"
         "  get/set flood.retry.count <0-15>\r\n"
         "  get/set flood.retry.path <0-63|off>\r\n"
         "  get/set flood.retry.group.path <0-63|off>\r\n"
@@ -10475,13 +10469,13 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
     terminalOutput().print(
         "  list [n]\r\n"
         "  show [adverts|channels|emergency] [on|off]\r\n"
-        "  to [recipient name or prefix]\r\n"
-        "  path [direct|clear|hops separated by spaces or commas]\r\n"
+        "  to [name|prefix]\r\n"
+        "  path [direct|clear|hop,...]\r\n"
         "  send <text>\r\n"
         "  login <admin-password>\r\n"
         "  cmd <remote-command>\r\n");
     terminalOutput().print(
-        "  trace [recipient name or prefix]\r\n"
+        "  trace [name|prefix]\r\n"
         "  trace path <1|2|4> <prefixes...>\r\n"
         "  advert\r\n"
         "  reset path\r\n"
@@ -10508,7 +10502,7 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
     if (_terminal_mode) {
       terminalOutput().print("  +++MESHCORE-TERM-STOP\r\n");
     } else {
-      terminalOutput().print("  disconnect (closes the network terminal)\r\n");
+      terminalOutput().print("  disconnect (network terminal)\r\n");
     }
   } else if (handleCommand(command, 0, local_reply)) {
     // Fill the same safe shared-command surface for getters (`get name`,
@@ -10726,7 +10720,14 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
   }
 
   if (mesh::power::handleRegulatorCommand(command, reply, reply_capacity)) return true;
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  if (handleCompactLedCommand(command, reply, reply_capacity)) return true;
+#else
   if (mesh::leds::handleCommand(command, reply, reply_capacity)) return true;
+#endif
+#if defined(PIN_BUZZER) || defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+  if (handleAlertCommand(command, reply, reply_capacity)) return true;
+#endif
 
 #if COMPANION_FEATURE_READER
   if (sender_timestamp == 0 && mesh::morseTimingActive(_radio)

@@ -1965,6 +1965,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
 
 #if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.begin();
+  vibration.quiet(_node_prefs->vibe_quiet);
 #endif
 
   ui_started_at = millis();
@@ -2051,7 +2052,7 @@ if (_notification_outputs & mesh::notify::Sound) switch(t){
 }
 #endif
 
-#ifdef PIN_VIBRATION
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   // Trigger vibration for all UI events except none
   if ((_notification_outputs & mesh::notify::Vibration) && t != UIEventType::none) {
     vibration.trigger();
@@ -2276,7 +2277,20 @@ bool UITask::isButtonGesturePending() const {
 #endif
 }
 
+void UITask::syncAlertPreferences() {
+  if (!_node_prefs) return;
+#ifdef PIN_BUZZER
+  if (buzzer.isQuiet() != bool(_node_prefs->buzzer_quiet))
+    buzzer.quiet(_node_prefs->buzzer_quiet);
+#endif
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+  if (vibration.isQuiet() != bool(_node_prefs->vibe_quiet))
+    vibration.quiet(_node_prefs->vibe_quiet);
+#endif
+}
+
 void UITask::loop() {
+  syncAlertPreferences();
   // Observe startup expiry even while display/Morse/input defers rendering.
   if (!_startup_complete && static_cast<uint32_t>(millis() - ui_started_at) >= 8000u) {
     _startup_complete = true;
@@ -2730,7 +2744,7 @@ uint8_t UITask::notificationCapabilities() const {
 }
 void UITask::notificationMelody(const char* text) {
 #ifdef PIN_BUZZER
-  if (text) buzzer.playNotification(text); else buzzer.stop();
+  if (text) buzzer.playNotification(text); else buzzer.stopNotification();
 #endif
 }
 void UITask::notificationScreen(int8_t mode) {
@@ -2739,10 +2753,7 @@ void UITask::notificationScreen(int8_t mode) {
   _next_refresh = millis();
 }
 void UITask::notificationVibration(bool on) {
-#ifdef HAS_DRV2605
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.pulse(on);
-#elif defined(PIN_VIBRATION)
-  vibration.stop();
-  digitalWrite(PIN_VIBRATION, on ? HIGH : LOW);
 #endif
 }

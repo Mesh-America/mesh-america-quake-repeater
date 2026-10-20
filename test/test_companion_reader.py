@@ -278,6 +278,7 @@ namespace leds { bool handleCommand(const char*,char*,size_t) { return false; } 
 struct MyMesh {
   Radio radio;
   Radio* _radio = &radio;
+  bool handleAlertCommand(const char*, char*, size_t) { return false; }
   bool handleCommand(const char*, uint32_t, char*);
 };
 @HANDLER@

@@ -51,6 +51,8 @@ bool contactPathPresence(FILESYSTEM* fs,const char* path,bool& present){
 int main(int argc,char** argv){
  const int scenario=argc>1?atoi(argv[1]):0;
  DataStore store;CompanionNodePrefs original;
+ assert(original.buzzer_quiet==1&&original.vibe_quiet==0);
+ original.buzzer_quiet=0;original.vibe_quiet=1;
  strcpy(original.node_name,"durable node");original.freq=910.525f;
  original.ble_pin=876543;original.bluetooth_stealth_mode=2;
  original.gps_interval=123;original.sf=7;original.cr=7;original.bw=62.5f;
@@ -103,6 +105,7 @@ int main(int argc,char** argv){
    CompanionNodePrefs loaded;double lat=0,lon=0;
    assert(store.loadPrefs(loaded,lat,lon));
    assert(loaded.freq==changed.freq&&loaded.ble_pin==original.ble_pin);
+   assert(loaded.buzzer_quiet==0&&loaded.vibe_quiet==1);
    assert(loaded.tx_delay_factor==1.25f&&loaded.direct_tx_delay_factor==0.75f);
    assert(loaded.interference_threshold==8&&loaded.agc_reset_interval==15&&loaded.tz_offset==-7);
    assert(loaded.flood_retry_attempts==4&&loaded.flood_retry_max_path==3);
@@ -153,6 +156,7 @@ int main(int argc,char** argv){
    }
    DataStore fresh;CompanionNodePrefs defaults;double lat=0,lon=0;
    assert(fresh.loadPrefs(defaults,lat,lon));
+   assert(defaults.buzzer_quiet==1&&defaults.vibe_quiet==0);
    assert(defaults.wifi_enabled==0); // Fresh installs never enable WiFi implicitly.
    assert(fresh.savePrefs(defaults,lat,lon));
  } else if(scenario==2){

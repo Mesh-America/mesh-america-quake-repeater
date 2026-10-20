@@ -295,6 +295,10 @@ public:
   void setNotificationOutputMute(mesh::notify::Output, bool) {}
   #endif
   bool handleNotificationCommand(const char* command, char* reply, size_t size);
+  bool handleAlertCommand(const char* command, char* reply, size_t size);
+#if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
+  bool handleCompactLedCommand(const char* command, char* reply, size_t size);
+#endif
 #if defined(STM32_PLATFORM)
   // Keep this large dispatcher separate from contact streaming on flash-
   // constrained STM32 targets; merging their branches increases code size.

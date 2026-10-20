@@ -40,7 +40,7 @@ int main(){
    {ButtonVoicePrompt::AlertsSilent,alertsSilentClip,nullptr},
 #endif
  };
- genericBuzzer buzzer;buzzer.begin();
+ genericBuzzer buzzer;buzzer.begin();buzzer.quiet(false);
  auto finish=[&]{
    assert(!registers.ENABLE);
    rtttl::finish();buzzer.loop();
@@ -548,7 +548,7 @@ NOTIFICATION_STOPS = r'''
 #include <helpers/ui/buzzer.cpp>
 uint32_t now_ms=0;
 int main(){
- genericBuzzer buzzer;buzzer.begin();
+ genericBuzzer buzzer;buzzer.begin();buzzer.quiet(false);
  buzzer.playNotification("ordinary:d=4,o=5,b=120:c");
  assert(buzzer.isPlaying()&&rtttl::isPlaying());
  buzzer.stopNotification();assert(!buzzer.isPlaying()&&!rtttl::isPlaying());
@@ -591,10 +591,12 @@ int main(){
  buzzer.quiet(true);
 #endif
  buzzer.playNotification("ordinary:d=4,o=5,b=120:c");
+ assert(!buzzer.isPlaying()&&buzzer.isQuiet()&&pin_states[PIN_BUZZER_EN]==LOW);
+ buzzer.quiet(false);
+ buzzer.playNotification("ordinary:d=4,o=5,b=120:c");
  assert(buzzer.isPlaying()&&pin_states[PIN_BUZZER_EN]==HIGH);
  buzzer.stopNotification();
- assert(!buzzer.isPlaying()&&!rtttl::isPlaying()&&buzzer.isQuiet());
- assert(pin_states[PIN_BUZZER_EN]==LOW);
+ assert(!buzzer.isPlaying()&&!rtttl::isPlaying()&&!buzzer.isQuiet());
 }
 '''
 

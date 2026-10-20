@@ -3635,7 +3635,9 @@ void setup() {
   if (!mesh::storage::internalPrimaryFilesystemReady(primary_fs_boot)
       || store.isVolatilePrimaryFS()) regulator_prefs_fs = nullptr;
 #endif
+#if !defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
   mesh::leds::beginSettings(board, regulator_prefs_fs);
+#endif
   if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
     MESH_DEBUG_PRINTLN("Regulator selection could not be applied");
   }

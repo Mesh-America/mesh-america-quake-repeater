@@ -124,11 +124,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, CompanionNode
   buzzer.startup();
 #endif
 
-#ifdef HAS_DRV2605
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.begin();
   vibration.quiet(_node_prefs->vibe_quiet);
-#elif defined(PIN_VIBRATION)
-  vibration.begin();
 #endif
 
   // Initialize digital button if available
@@ -719,13 +717,26 @@ void UITask::servicePairingState() {
   }
 }
 
+void UITask::syncAlertPreferences() {
+  if (!_node_prefs) return;
+#ifdef PIN_BUZZER
+  if (buzzer.isQuiet() != bool(_node_prefs->buzzer_quiet))
+    buzzer.quiet(_node_prefs->buzzer_quiet);
+#endif
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
+  if (vibration.isQuiet() != bool(_node_prefs->vibe_quiet))
+    vibration.quiet(_node_prefs->vibe_quiet);
+#endif
+}
+
 void UITask::loop() {
+  syncAlertPreferences();
   // Observe startup expiry before button callbacks and optional rendering.
   if (!_startup_complete && static_cast<uint32_t>(millis() - ui_started_at) >= 8000u) {
     _startup_complete = true;
   }
   const bool morse_timing = mesh::morseTimingActive(&radio_driver);
-#ifdef PIN_VIBRATION
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
   vibration.loop();
 #endif
   servicePairingState();
@@ -1132,18 +1143,14 @@ void UITask::notificationScreen(int8_t mode) {
   _need_refresh = true;
 }
 void UITask::notificationVibration(bool on) {
-#ifdef HAS_DRV2605
+#if defined(PIN_VIBRATION) || defined(HAS_DRV2605)
 #if defined(PIN_BUZZER) && MESH_GPS_VOICE
-  // The saved physical alert mode stays authoritative even if the separate
-  // notification-mask write fails. Off callbacks must still stop the driver.
+  // Keep the committed physical mode authoritative if a mask save failed.
   if (on && _node_prefs && _node_prefs->vibe_quiet) {
     vibration.stop();
     return;
   }
 #endif
   vibration.pulse(on);
-#elif defined(PIN_VIBRATION)
-  vibration.stop();
-  digitalWrite(PIN_VIBRATION, on ? HIGH : LOW);
 #endif
 }
