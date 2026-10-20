@@ -144,8 +144,21 @@ assert 'strcmp(command, "get companion.transport") == 0' in local
 assert 'strncmp(command, "set companion.transport", 23) == 0' in local
 assert '"OK - companion transport %s saved; reboot required"' in local
 assert '"Error: failed to save companion transport"' in local
-assert 'terminalOutput().print("  get companion.transport\\r\\n")' in mesh
-assert 'terminalOutput().print("  set companion.transport <wifi|ble>\\r\\n")' in mesh
+help_start = mesh.index('  } else if (strcmp(command, "help") == 0) {')
+help_end = mesh.index('  } else if (handleCommand(command, 0, local_reply))', help_start)
+help_body = mesh[help_start:help_end]
+# Help uses one selected terminal reference while each native USB write stays
+# bounded. Keep both policy-specific commands on that same selected stream.
+help_output = re.search(r"auto& (\w+) = terminalOutput\(\);", help_body)
+assert help_output
+help_transport = re.search(
+    r"#if defined\(COMPANION_EXCLUSIVE_WIFI_BLE\)(.*?)#endif",
+    help_body,
+    re.DOTALL,
+)
+assert help_transport
+for text in ("  get companion.transport\\r\\n", "  set companion.transport <wifi|ble>\\r\\n"):
+    assert f'{help_output[1]}.print("{text}")' in help_transport[1]
 assert "WebUI unavailable while Bluetooth transport is active" in mesh
 
 

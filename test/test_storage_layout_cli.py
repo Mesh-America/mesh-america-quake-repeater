@@ -140,10 +140,14 @@ int main() {
                 re.DOTALL,
             ),
         )
-        self.assertIn(
-            'terminalOutput().print("  get storage.layout\\r\\n");',
-            companion,
+        help_start = companion.index('  } else if (strcmp(command, "help") == 0) {')
+        help_end = companion.index(
+            '  } else if (handleCommand(command, 0, local_reply))', help_start
         )
+        help_body = companion[help_start:help_end]
+        self.assertRegex(help_body, r"auto& \w+ = terminalOutput\(\);")
+        # This line may share a bounded help chunk with adjacent commands.
+        self.assertIn('"  get storage.layout\\r\\n"', help_body)
 
         # ESP-IDF discovery and every platform-specific result live only in the
         # shared formatter; neither role owns a second copy.

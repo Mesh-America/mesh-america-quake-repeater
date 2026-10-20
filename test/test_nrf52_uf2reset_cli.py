@@ -2,6 +2,7 @@
 """Pin local UF2 reset support across every nRF52 text CLI family."""
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +36,18 @@ assert "sender_timestamp == 0" in common
 
 assert "sender_timestamp == 0 && mesh::cli::isUf2ResetCommand(command)" in companion
 assert "board.rebootToUf2Bootloader()" in companion
-assert 'terminalOutput().println("  uf2reset");' in companion
+help_start = companion.index('  } else if (strcmp(command, "help") == 0) {')
+help_end = companion.index('  } else if (handleCommand(command, 0, local_reply))', help_start)
+help_body = companion[help_start:help_end]
+help_output = re.search(r"auto& (\w+) = terminalOutput\(\);", help_body)
+assert help_output
+# Bounded help writes use the cached selected stream; UF2 help stays nRF-only.
+assert re.search(
+    r"#if defined\(NRF52_PLATFORM\)\s+"
+    + re.escape(f'{help_output[1]}.println("  uf2reset");')
+    + r"\s+#endif",
+    help_body,
+)
 
 assert "mesh::cli::isUf2ResetCommand(command)" in chat
 assert "board.rebootToUf2Bootloader()" in chat
