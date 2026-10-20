@@ -1,0 +1,43 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/companion_qualification_f807_followup_2026-10-19/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
+# Mercerwood Companion diagnosis follow-up, 2026-10-19
+
+Overall status: **FAIL, incomplete**. Across the selected measured sources, **1/2 Companions PASS, 1 FAIL**. RAK 4631 passed USB, BLE and two-way LoRa at f807. T1000-E passed latest normal Full USB but remains **FAIL** because BLE has not qualified. XIAO nRF52 remains a carried-forward failure.
+
+Both selected boards first returned to Full `f80751354ffc530461e87109ced4f575d3950a52`. T1000 subsequently received normal Full `42f7df082fc4c7362ecd5c18c8644ab25b51b9e9`, version `v1.18.0.1-halo-keymind-cascade-dev-42f7df08`, after the corrected bootloader. Its ZIP SHA-256 is `7fac141e40183ada315f70b296583eaf854fd819c76fbd896a1f0f2e4a405e5b`. Checks ran on October 20 UTC during the October 19 local campaign.
+
+| Companion | Source | USB | BLE | LoRa | Overall |
+| --- | --- | --- | --- | --- | --- |
+| RAK 4631 | f8075135 | PASS | PASS | PASS | PASS |
+| Seeed T1000-E | 42f7df08 | PASS | FAIL | not requalified; f807 passed | FAIL |
+| Seeed XIAO nRF52 | prior failure retained | FAIL | not qualified | not qualified | FAIL retained |
+
+This is a selected-board follow-up, not a 13-radio fleet qualification. Repeaters were outside scope. Earlier mixed-source results remain in [the previous follow-up](companion_qualification_followup_2026-10-19.md).
+
+Before the bootloader comparison, each f807 USB run passed 100 query cycles, 10 reopens, radio2 checks, owned-contact CRUD, persistence through warm reboot and contact cleanup. Each closed 18/18 ports with clean final core flags and zero stable binary prefix discards or invalid lengths. ASCII setup and intentional reboot recovery remain separate transition evidence.
+
+RAK BLE passed three 30-second sessions with USB-bound identity, board, full version, NUS services and getters verified. Uptime advanced, flags stayed clean and each session disconnected. LoRa passed an exact zero-hop DEV datagram in each direction between RAK and T1000, with packet-counter checks, owned-channel cleanup and restored radio leases. These finite checks do not establish phone interoperability, range or text delivery.
+
+T1000's original f807 BLE run failed current-advertisement identity binding with zero sessions. A later 90-second Pi follow-up also completed none despite Bluetooth enabled, stealth off and clean USB core flags. The unpaired BlueZ cache retained `T1000-BLE-PROBE` while USB verified normal f807 and its configured MeshCore name. Cached naming may affect filtering without a current scan response; it proves neither the BLE cause nor a duplicate address or working connection.
+
+Minimal BLE-only, payload/timing, clock-request, transmit-power and LFRC images were diagnostic probes, not Full acceptance. The LFRC probe used an explicit RC configuration and valid vectors; this does not establish a defective crystal or justify changing production clocks. Advertising/HFXO readbacks do not measure RF accuracy or prove over-air packets.
+
+The official upstream `companion-v1.18.0` T1000 BLE reference had matching ZIP/UF2 application bytes, base `0x27000` and SoftDevice requirement `0x0123`. Its bounded Pi scan did not find the required current advertisement. Phone visibility was insufficiently bound to name/time. This application-only experiment retained the same bootloader/SoftDevice and cannot isolate them. Normal Full was restored. Reference ZIP SHA-256: `79e53c2ce13521ccda5db3621a68f79728d2f241c3a8345e4107b7ae6b5a374d`.
+
+Installed S140 7.3.0 readback CRC `733639BD` matched the package bytes, also identical to Seeed's recovery package SoftDevice. That checks the covered image, not RF operation. C2 installation preceded a historical secured diagnostic link that never completed full BLE qualification.
+
+A separate DFU defect was corrected in bootloader `c0c421184a3cf1ca66b40b055101f20b8c587e26`: active-high P0.06 had been configured pull-up/active-low, with RESET/P0.18 treated as another button. The correction adds qualified three-second hold/USB-first recovery while retaining explicit-request latency and other boards' two-button behavior. Eleven actual-function host tests, 13 DFU-entry checks and T1000/T096/T114 cross-builds passed. See [candidate PR #1](https://github.com/mikecarper/Adafruit_nRF52_Bootloader_OTAFIX/pull/1) and [upstream polarity evidence](https://github.com/meshtastic/Adafruit_nRF52_Bootloader_OTAFIX/commit/0f415c3ee26816ad52a7587b3d6cdd30547987ec).
+
+The reviewed combined bootloader transfer returned 0, but its installer stopped when the MSC disk was unavailable. That failed workflow remains failed. Later exact-device public INFO verified model `Seeed T1000-E for Meshtastic`, Board-ID `nRF52840-T1000-E-v1` and version `TEST_0x02040C01`. Package CRC `6BA4D206` was validated offline; installed CRC was not exposed. Combined ZIP SHA-256: `8db09e6b7f253b1e54aae754220f0d1053d369c07bff299a26b384233de6e234`.
+
+Separate f807 application programming and its adapter command both returned 0. An independent USB check passed 15 queries/two reopens, closed 5/5 ports and verified normal f807, the same public identity, clean framing and zero core errors. With the corrected bootloader and same f807, an explicit-address 90-second BLE attempt still failed advertisement binding with zero sessions. No BLE fix or bootloader cause is established.
+
+Final normal Full 42f7df08 installation succeeded. Its fresh USB run passed 100 queries, 10 reopens, owned-contact CRUD/cleanup, warm reboot and radio2 checks, with 18/18 ports closed, zero stable framing rejects and clean core flags. Its normal 25-second BLE discovery still failed with zero sessions. LoRa was not requalified at 42f7df08; the earlier f807 RF pass remains source-bound.
+
+Combined serial delivery avoided legacy UF2 scratch `0xE0000..0xEA000`, which overlaps internal ExtraFS. Its staging and f807 restore remain below ExtraFS. No filesystem-preservation claim replaces runtime checks.
+
+A subsequent 90-second scan by the independently verified Bluetooth address also failed to reach a connection on normal Full `42f7df08`. The requested physical battery restart was still unconfirmed, so this is not battery-only evidence.
+
+Cold boot, physical battery-only BLE, complete phone/feature testing and fleet qualification remain untested. Longer USB-powered scans are not battery tests. [Safe JSON](companion_qualification_f807_followup_2026-10-19.safe.json) retains source bindings, workflow distinctions and evidence digests without device secrets or raw addresses.

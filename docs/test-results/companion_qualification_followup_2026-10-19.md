@@ -55,3 +55,5 @@ Original histories remain in [the earlier campaign report](hardware_validation_m
 [Machine-readable results](companion_qualification_followup_2026-10-19.safe.json) contain source-bound board records and SHA-256 evidence digests.
 
 The unit-test workflow passed all 12 jobs for source `51538f03`: [GitHub run](https://github.com/mikecarper/MeshCore/actions/runs/39350014767).
+
+Later selected-board evidence, the T1000 bootloader button correction and the final Full Companion USB/BLE results are recorded in [the diagnosis follow-up](companion_qualification_f807_followup_2026-10-19.md). The T1000 BLE and XIAO nRF52 failures remain open.
