@@ -1059,6 +1059,19 @@ set display.rotation 270
 The values are clockwise degrees. `0` clears the override and restores the
 board's compiled default. Unsupported display drivers return an error.
 
+RAK4631 and RAK3401 images detect SSD1306 or SH1106 OLED controllers when
+initializing the screen. This lets the same RAK4631 image serve WisMesh Pocket
+v2 and v3. Both retain rotation support and use one 1 KiB framebuffer.
+
+Detection checks the configured `DISPLAY_ADDRESS` (default `0x3C`). Only
+repeated SH1106 status readings select that controller; ambiguous responses
+keep SSD1306, preserving compatibility with older RAK1921 panels. For panels
+that cannot identify themselves, build with `OLED_CONTROLLER_OVERRIDE=1`
+(SSD1306) or `=2` (SH1106); `=0` restores automatic detection.
+
+See [the Pocket v3 issue](https://github.com/meshcore-dev/MeshCore/issues/3296)
+and [the RAK1921 detection caveat](https://github.com/meshtastic/firmware/pull/11265).
+
 ---
 
 ## Show touchscreen touch areas
