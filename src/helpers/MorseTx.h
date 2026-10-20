@@ -125,15 +125,14 @@ public:
     // A single flash-resident ASCII table avoids a punctuation switch/jump
     // table and keeps the complete alphabet on compact targets. Zero entries
     // remain unsupported; lowercase still uses its uppercase ITU code.
-    static const uint8_t codes[] = {
-      107,82,0,137,0,40,94,54,109,0,42,115,97,85,50, // ! through /
-      63,47,39,35,33,32,48,56,60,62,                // 0 through 9
-      120,106,0,49,0,76,90,                        // : through @
-      5,24,26,12,2,18,14,16,4,23,13,20,7,6,15,22,29,10,8,3,9,17,11,25,27,28,
-      0,0,0,0,77                                  // [ through _
-    };
     const uint8_t index = uint8_t(uint8_t(character) - uint8_t('!'));
-    return index < sizeof(codes) ? codes[index] : 0;
+    return index < CodeCount ? codeTable()[index] : 0;
+  }
+
+  static char characterFor(uint8_t code) {
+    for (uint8_t index = 0; index < CodeCount; ++index)
+      if (code && codeTable()[index] == code) return char('!' + index);
+    return '?';
   }
 
   static uint8_t symbolCount(uint8_t code) {
@@ -157,14 +156,13 @@ public:
     for (; length <= MaxTextLength && text[length]; ++length) {
       const char character = text[length];
       if (character == ' ') { if (have_character) have_space = true; continue; }
-      const uint8_t code = codeFor(character);
+      uint8_t code = codeFor(character);
       if (!code) return MorseTxResult::InvalidText;
       if (have_character) units += have_space ? 7 : 3;
-      const uint8_t count = symbolCount(code);
-      for (uint8_t bit = count; bit; --bit) {
-        units += (code & (1U << (bit - 1))) ? 3 : 1;
-        if (bit > 1) ++units;
-      }
+      // Each symbol contributes its mark plus one unit of following space.
+      // Remove the final space; the leading sentinel is not a Morse symbol.
+      do { units += (code & 1U) ? 4 : 2; code >>= 1; } while (code > 1);
+      --units;
       have_character = true;
       have_space = false;
     }
@@ -294,6 +292,17 @@ public:
   }
 
 private:
+  static constexpr uint8_t CodeCount = '_' - '!' + 1;
+  static const uint8_t* codeTable() {
+    static const uint8_t codes[CodeCount] = {
+      107,82,0,137,0,40,94,54,109,0,42,115,97,85,50, // ! through /
+      63,47,39,35,33,32,48,56,60,62,                // 0 through 9
+      120,106,0,49,0,76,90,                        // : through @
+      5,24,26,12,2,18,14,16,4,23,13,20,7,6,15,22,29,10,8,3,9,17,11,25,27,28,
+      0,0,0,0,77                                  // [ through _
+    };
+    return codes;
+  }
   char _text[MaxTextLength + 1] = {};
   uint32_t _next = 0, _hard_end = 0, _remaining = 0;
   uint16_t _unit = 0, _phase_ms = 0;

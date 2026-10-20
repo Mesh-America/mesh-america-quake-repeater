@@ -8,6 +8,12 @@
 namespace mesh {
 namespace cli {
 
+// Share fixed error prefixes without duplicating their bytes in each message.
+// Formatting keeps the same termination and truncation as other CLI replies.
+inline void formatError(char* reply, size_t capacity, const char* message) {
+  snprintf(reply, capacity, "Error: %s", message);
+}
+
 enum class StandaloneWiFiKey : uint8_t {
   None = 0,
   SSID,

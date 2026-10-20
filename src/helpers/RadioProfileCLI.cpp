@@ -792,14 +792,14 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
   const bool scan = !strcmp(key, "radio2.scan");
   const bool timing = !strcmp(key, "radio2.timing") || !strcmp(key, "radio.timing");
   if (!base && !temporary && !scheduled && !crossing && !replies && !status && !scan && !timing) return false;
-  if (!radio_ || !radio_->profiles()) { snprintf(reply, capacity, "Error: radio profiles unsupported"); return true; }
+  if (!radio_ || !radio_->profiles()) { cli::formatError(reply, capacity, "radio profiles unsupported"); return true; }
   if (command == text && *args && verb == Get && (temporary || base)) verb = Set;
   if (remote_origin && !remote_command_
       && (((base || temporary) && verb == Set) || (scheduled_temp && verb == Delete))) {
-    snprintf(reply, capacity, "Error: this role requires local USB for radio2 changes"); return true;
+    cli::formatError(reply, capacity, "this role requires local USB for radio2 changes"); return true;
   }
   if (hasReplyMutation() && verb != Get) {
-    snprintf(reply, capacity, "Error: radio acknowledgement pending"); return true;
+    cli::formatError(reply, capacity, "radio acknowledgement pending"); return true;
   }
   if (replies) {
     const auto* p = radio_->profiles();
@@ -820,14 +820,14 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     if (verb != Set || length >= sizeof(mode) || !parseRadioTxPolicy(mode, policy)
         || (*suffix && !force)
         || (force && policy != RADIO_TX_BOTH && policy != RADIO_TX_SECONDARY)) {
-      snprintf(reply, capacity, "Error: use get/set tx.reply auto|radio|radio2|both|off [force for radio2/both]");
+      cli::formatError(reply, capacity, "use get/set tx.reply auto|radio|radio2|both|off [force for radio2/both]");
       return true;
     }
     const uint8_t previous = reply_setting_;
     reply_setting_ = 0xb0 | policy | (force ? 8 : 0);
     if (!save(saved_, primary_preamble_, cross_)) {
       reply_setting_ = previous;
-      snprintf(reply, capacity, "Error: settings could not be saved");
+      cli::formatError(reply, capacity, "settings could not be saved");
     } else {
       publish();
       snprintf(reply, capacity, "OK - tx.reply=%s%s", radioTxPolicyName(policy), force ? " force" : "");
@@ -835,7 +835,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     return true;
   }
   if (timing) {
-    if (verb != Get || *args) { snprintf(reply, capacity, "Error: radio timing is read-only"); return true; }
+    if (verb != Get || *args) { cli::formatError(reply, capacity, "radio timing is read-only"); return true; }
     const auto& p = *radio_->profiles();
     const auto t = p.chirpTiming();
     if (!p.enabled()) snprintf(reply, capacity, "> off");
@@ -846,7 +846,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
         (unsigned long)((p.recommendationRemainingMs(millis()) + 999) / 1000),
         (unsigned long)p.switchBudgetUs(),
         radio_->profilePreamble(0), radio_->profilePreamble(1));
-    else if (!t.valid) snprintf(reply, capacity, "Error: timing unavailable");
+    else if (!t.valid) cli::formatError(reply, capacity, "timing unavailable");
     else {
       snprintf(reply, capacity, "> chirps=%.2f,%.2f; need=%.0f,%.0f; switch=%luus; loop=%luus%s",
           t.listen_us[0] / t.symbol_us[0], t.listen_us[1] / t.symbol_us[1],
@@ -866,12 +866,12 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     } else if (verb == Set && (!strcmp(args, "auto") || !strcmp(args, "on") || !strcmp(args, "off"))) {
       auto mode = !strcmp(args, "auto") ? RadioCrossMode::Auto : !strcmp(args, "on") ? RadioCrossMode::On : RadioCrossMode::Off;
       if (save(saved_, primary_preamble_, mode)) { cross_ = mode; publish(); snprintf(reply, capacity, "OK"); }
-      else snprintf(reply, capacity, "Error: settings could not be saved");
-    } else snprintf(reply, capacity, "Error: use get/set radio2.cross [auto|on|off]");
+      else cli::formatError(reply, capacity, "settings could not be saved");
+    } else cli::formatError(reply, capacity, "use get/set radio2.cross [auto|on|off]");
     return true;
   }
   if (scan) {
-    if (verb != Get || *args) { snprintf(reply, capacity, "Error: radio2.scan is read-only"); return true; }
+    if (verb != Get || *args) { cli::formatError(reply, capacity, "radio2.scan is read-only"); return true; }
     const auto& p = *radio_->profiles();
     if (!p.enabled()) snprintf(reply, capacity, "> off");
     else {
@@ -885,7 +885,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     return true;
   }
   if (status) {
-    if (verb != Get || *args) { snprintf(reply, capacity, "Error: radio2.status is read-only"); return true; }
+    if (verb != Get || *args) { cli::formatError(reply, capacity, "radio2.status is read-only"); return true; }
     if (hasReplyMutation()) {
       snprintf(reply, capacity, "> radio2 change pending %s; previous channel retained",
           remote_delivered_ ? "storage commit (retrying)" : "reply transmission");
@@ -929,11 +929,11 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     if (remote_command_ || temp_pending_ || temp_active_ || hasSecondarySchedule()
         || hasReplyMutation() || publish_pending_ || radio_->profiles()->primary_temporary
         || radio_->profiles()->secondary_temporary) {
-      snprintf(reply, capacity, "Error: automatic radio2 requires no pending change, lease or schedule");
+      cli::formatError(reply, capacity, "automatic radio2 requires no pending change, lease or schedule");
       return true;
     }
     if (!save({}, primary_preamble_, cross_, 0)) {
-      snprintf(reply, capacity, "Error: settings could not be saved"); return true;
+      cli::formatError(reply, capacity, "settings could not be saved"); return true;
     }
     noteSecondaryManualChange();
     saved_ = {}; manual_secondary_ = false;
@@ -946,7 +946,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
   if ((base || temporary) && verb == Set && !strcmp(args, "off")) {
     if (base && !(remote_command_ ? prepareSavedImage(ReplyPath, {}, primary_preamble_, cross_, true)
                                  : save({}, primary_preamble_, cross_, true))) {
-      snprintf(reply, capacity, "Error: settings could not be saved"); return true;
+      cli::formatError(reply, capacity, "settings could not be saved"); return true;
     }
     if (remote_command_) {
       stageRemoteMutation(base ? RemoteMutation::Off : RemoteMutation::TempOff);
@@ -965,7 +965,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
   if (scheduled && (verb == Get || verb == Delete)) {
     uint32_t index = 0;
     if (*args && strcmp(args, "all") && (!cli::parseUnsignedIntegerStrict(args, index) || index < 1 || index > 4)) {
-      snprintf(reply, capacity, "Error: slot must be 1-4 or all"); return true;
+      cli::formatError(reply, capacity, "slot must be 1-4 or all"); return true;
     }
     const unsigned first = scheduled_temp ? 4 : 0;
     if (verb == Delete) {
@@ -1004,9 +1004,9 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     }
     return true;
   }
-  if (verb != Set) { snprintf(reply, capacity, "Error: invalid radio2 command"); return true; }
+  if (verb != Set) { cli::formatError(reply, capacity, "invalid radio2 command"); return true; }
   char local[140];
-  if (strlen(args) >= sizeof(local)) { snprintf(reply, capacity, "Error: params too long"); return true; }
+  if (strlen(args) >= sizeof(local)) { cli::formatError(reply, capacity, "params too long"); return true; }
   strcpy(local, args);
   char* parts[8];
   const unsigned count = split(local, parts, 8);
@@ -1033,7 +1033,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
   if (scheduled) {
     if (!epoch || start <= epoch || (uint64_t)(start-epoch) * 1000 > 0x7fffffffULL
         || (scheduled_temp && (end <= start || (uint64_t)(end-epoch) * 1000 > 0x7fffffffULL))) {
-      snprintf(reply, capacity, "Error: future UTC start/end required, within 24 days"); return true;
+      cli::formatError(reply, capacity, "future UTC start/end required, within 24 days"); return true;
     }
     if (scheduled_temp) {
       const uint64_t pending_left = temp_pending_
@@ -1041,10 +1041,10 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
           : 0;
       const uint64_t session_left = pending_left > temp_remaining_ms_ ? pending_left : temp_remaining_ms_;
       if ((temp_active_ || temp_pending_) && (uint64_t)(start-epoch)*1000 < session_left) {
-        snprintf(reply, capacity, "Error: temporary schedule overlaps active session"); return true;
+        cli::formatError(reply, capacity, "temporary schedule overlaps active session"); return true;
       }
       for (const auto& s : schedules_) if (s.active && s.temporary && start < s.end && end > s.start) {
-        snprintf(reply, capacity, "Error: temporary schedules overlap"); return true;
+        cli::formatError(reply, capacity, "temporary schedules overlap"); return true;
       }
     }
     const unsigned first = scheduled_temp ? 4 : 0;
@@ -1059,7 +1059,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
 #if MESH_ENABLE_FLEET_CONTROL
       if (remote_command_) {
         if (!stageRemoteSchedule(i, s)) {
-          snprintf(reply, capacity, "Error: radio acknowledgement pending"); return true;
+          cli::formatError(reply, capacity, "radio acknowledgement pending"); return true;
         }
       } else { schedules_[first+i] = s; noteSecondaryManualChange(); publish(); }
 #else
@@ -1068,11 +1068,11 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
       snprintf(reply, capacity, "OK - %s %u queued, preamble=%u", key, i+1, preview.preamble(1, 32));
       appendSecondaryWarnings(reply, capacity, preview); return true;
     }
-    snprintf(reply, capacity, "Error: all four schedule slots occupied"); return true;
+    cli::formatError(reply, capacity, "all four schedule slots occupied"); return true;
   }
   if (temporary) {
     for (const auto& s : schedules_) if (s.active && s.temporary) {
-      snprintf(reply, capacity, "Error: clear tempradioat2 schedules first"); return true;
+      cli::formatError(reply, capacity, "clear tempradioat2 schedules first"); return true;
     }
     if (remote_command_) stageRemoteMutation(RemoteMutation::Temporary, config, minutes * 60000UL);
     else {
@@ -1099,7 +1099,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     }
     snprintf(reply, capacity, "OK - radio2 %s%s; preamble=%u", modeName(config.mode),
         remote_command_ ? " pending after reply" : "", preview.preamble(1, 32));
-  } else snprintf(reply, capacity, "Error: settings could not be saved");
+  } else cli::formatError(reply, capacity, "settings could not be saved");
   if (!strncmp(reply, "OK", 2)) appendSecondaryWarnings(reply, capacity, preview);
   return true;
 }

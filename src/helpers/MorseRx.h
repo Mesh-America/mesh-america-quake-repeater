@@ -435,14 +435,7 @@ private:
   void flushLetter() {
     if (!_symbols && !_bad_pattern) return;
     char decoded = '?';
-    if (!_bad_pattern) {
-      for (char c = '!'; c <= 'Z'; ++c) {
-        const uint8_t code = MorseTx::codeFor(c);
-        if (code && code == _code) { decoded = c; break; }
-      }
-      // The printable loop ends at Z; '_' is also an ITU punctuation code.
-      if (MorseTx::codeFor('_') == _code) decoded = '_';
-    }
+    if (!_bad_pattern) decoded = MorseTx::characterFor(_code);
     append(decoded);
     _code = 1;
     _symbols = 0;
