@@ -26,7 +26,7 @@ static uint64_t elapsed_us;
 uint32_t micros() { return (uint32_t)elapsed_us; }
 static bool profile_clock_active=false;
 void syncProfileClock(bool dual_profile) { profile_clock_active=dual_profile; }
-uint32_t profileTimestamp(bool) { return micros(); }
+uint32_t profileTimestamp(bool dual) { syncProfileClock(dual); return micros(); }
 uint32_t profileElapsedUs(uint32_t since, uint32_t now, bool) { return now - since; }
 uint32_t millis() { return (uint32_t)(elapsed_us / 1000); }
 struct Chip { bool standbyXOSC=false; int standby() { return 0; } };

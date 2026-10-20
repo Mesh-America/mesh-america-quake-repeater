@@ -56,12 +56,13 @@ static RadioInterruptEvents radio_interrupt_events[RADIO_INTERRUPT_SLOT_COUNT];
 static RadioLibWrapper* radio_interrupt_owners[RADIO_INTERRUPT_SLOT_COUNT] = {};
 
 
-// The Adafruit nRF52 core's micros() falls back to 1024 Hz RTOS ticks when
-// DWT is disabled. A sub-millisecond retune then appears to take exactly
-// 977 us (or 1953 us across two ticks), making the learned switch allowance
-// and scan dwell inaccurate. On nRF52, RTC2 provides a 32768 Hz profile clock
-// without changing micros() globally or holding the high-frequency clock on.
-// Keep it stopped in the ordinary single-profile mode.
+// Extend the 24-bit RTC counter on each loop poll. A valid explicit preamble
+// can require a visit longer than its 512-second hardware wrap period.
+#if defined(NRF52_PLATFORM)
+static uint32_t profile_clock_raw = 0;
+static uint32_t profile_clock_ticks = 0;
+#endif
+
 static void syncProfileClock(bool dual_profile) {
 #if defined(NRF52_PLATFORM)
   static bool active = false;
@@ -69,7 +70,10 @@ static void syncProfileClock(bool dual_profile) {
   if (dual_profile) {
     NRF_RTC2->TASKS_STOP = 1;
     NRF_RTC2->PRESCALER = 0;
-    NRF_RTC2->TASKS_CLEAR = 1;
+    // Keep the retained hardware count: an asynchronous clear could otherwise
+    // look like a wrap before its first poll.
+    profile_clock_raw = NRF_RTC2->COUNTER & 0x00ffffffUL;
+    profile_clock_ticks = 0;
     NRF_RTC2->TASKS_START = 1;
   } else {
     NRF_RTC2->TASKS_STOP = 1;
@@ -83,7 +87,12 @@ static void syncProfileClock(bool dual_profile) {
 static uint32_t profileTimestamp(bool dual_profile) {
   syncProfileClock(dual_profile);
 #if defined(NRF52_PLATFORM)
-  if (dual_profile) return NRF_RTC2->COUNTER;
+  if (dual_profile) {
+    const uint32_t raw = NRF_RTC2->COUNTER & 0x00ffffffUL;
+    profile_clock_ticks += (raw - profile_clock_raw) & 0x00ffffffUL;
+    profile_clock_raw = raw;
+    return profile_clock_ticks;
+  }
 #endif
   return micros();
 }
@@ -91,10 +100,9 @@ static uint32_t profileTimestamp(bool dual_profile) {
 static uint32_t profileElapsedUs(uint32_t since, uint32_t now, bool dual_profile) {
 #if defined(NRF52_PLATFORM)
   if (!dual_profile) return now - since;
-  // RTC2 is 24-bit and wraps every 512 seconds. Active scanning samples it
-  // many times per second; a freshly configured profile gets a new visit stamp.
-  const uint32_t ticks = (now - since) & 0x00ffffffUL;
-  return static_cast<uint32_t>((uint64_t(ticks) * 15625 + 511) >> 9);
+  const uint32_t ticks = now - since;
+  const uint64_t elapsed = (uint64_t(ticks) * 15625 + 511) >> 9;
+  return elapsed > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(elapsed);
 #else
   (void) dual_profile;
   return now - since;
@@ -177,7 +185,7 @@ void RadioLibWrapper::begin() {
 #if MESH_ENABLE_TX_BEACONS
   if (_beacon_owned) return;
 #endif
-  syncProfileClock(_profiles.enabled());
+  (void)profileTimestamp(_profiles.enabled());
 #ifdef USE_CC310_HW_CRYPTO
   // Initialize CryptoCell once from normal task context. The session helper
   // still initializes lazily if an earlier crypto operation runs first.
@@ -800,7 +808,7 @@ void RadioLibWrapper::serviceProfileScan() {
 #if defined(NRF52_PLATFORM)
   _profile_idle_visit_ticks = 0; // Every deferred/restarted scan fails closed.
 #endif
-  syncProfileClock(_profiles.enabled());
+  (void)profileTimestamp(_profiles.enabled());
   if (_cw_active) return;
   if (!_params_valid || (_profile_retry_at && (int32_t)(millis() - _profile_retry_at) < 0)) return;
   _profile_retry_at = 0;
@@ -942,7 +950,11 @@ bool RadioLibWrapper::getProfileIdleDelay(uint32_t& delay_ms) const {
 #if MESH_ENABLE_MORSE_RX
   if (_morse_rx_owned) return false;
 #endif
-  const uint32_t elapsed = (NRF_RTC2->COUNTER - _profile_idle_stamp) & 0x00ffffffUL;
+  // Use the extended domain without mutating the clock in this final sleep
+  // check. The scanner already sampled it before publishing this idle proof.
+  const uint32_t stamp = profile_clock_ticks
+      + ((NRF_RTC2->COUNTER - profile_clock_raw) & 0x00ffffffUL);
+  const uint32_t elapsed = stamp - _profile_idle_stamp;
   // RTC1 wakes the ready sketch task at 1024 Hz (32 RTC2 ticks). Retain
   // another 16 ticks (488 us) for return-to-loop work, validated on RAK3401.
   // Short visits poll; neither a new timer nor RF duty cycling is needed.
@@ -1868,7 +1880,7 @@ void RadioLibWrapper::loop() {
 #if MESH_ENABLE_TX_BEACONS
   if (_beacon_owned) return;
 #endif
-  syncProfileClock(_profiles.enabled());
+  (void)profileTimestamp(_profiles.enabled());
 #if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
   if (serviceCarrierWave()) return;
 #endif

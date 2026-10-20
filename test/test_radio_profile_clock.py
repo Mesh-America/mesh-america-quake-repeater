@@ -8,9 +8,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "src/helpers/radiolib/RadioLibWrappers.cpp").read_text()
-CLOCK = "static void syncProfileClock(bool dual_profile) {" + SOURCE.split(
-    "static void syncProfileClock(bool dual_profile) {", 1
-)[1].split("\nstatic\n#if defined(ESP8266)", 1)[0]
+CLOCK = SOURCE[SOURCE.index("// Extend the 24-bit RTC counter"):].split(
+    "\nstatic\n#if defined(ESP8266)", 1)[0]
 
 HARNESS = r'''
 #include <cassert>
@@ -28,22 +27,40 @@ int main() {
   assert(profileElapsedUs(12, 42, false) == 30);
 #if defined(NRF52_PLATFORM)
   rtc.COUNTER = 100;
-  assert(profileTimestamp(true) == 100);
+  assert(profileTimestamp(true) == 0);
   assert(rtc.TASKS_STOP == 1 && rtc.PRESCALER == 0);
-  assert(rtc.TASKS_CLEAR == 1 && rtc.TASKS_START == 1);
+  assert(rtc.TASKS_CLEAR == 0 && rtc.TASKS_START == 1);
   rtc.TASKS_CLEAR = rtc.TASKS_START = rtc.TASKS_STOP = 0;
-  assert(profileTimestamp(true) == 100);
+  assert(profileTimestamp(true) == 0);
   assert(rtc.TASKS_CLEAR == 0 && rtc.TASKS_START == 0 && rtc.TASKS_STOP == 0);
   assert(profileElapsedUs(0, 32768, true) == 1000000);
-  assert(profileElapsedUs(0x00fffff0, 0x10, true) == 977);
+  assert(profileElapsedUs(0xfffffff0, 0x10, true) == 977);
+  uint32_t stamp=0;
+  for(unsigned second=1;second<=532;++second) {
+    rtc.COUNTER=(rtc.COUNTER+32768)&0x00ffffffUL;
+    stamp=profileTimestamp(true);
+    assert(stamp==second*32768UL);
+    assert(profileElapsedUs(0,stamp,true)==second*1000000UL);
+  }
+  assert(stamp>0x00ffffffUL); // A valid visit can exceed the hardware period.
+  assert(profileElapsedUs(0,UINT32_MAX,true)==UINT32_MAX);
   syncProfileClock(false);
   assert(rtc.TASKS_STOP == 1 && profileTimestamp(false) == 1234);
   rtc.TASKS_CLEAR = rtc.TASKS_START = rtc.TASKS_STOP = 0;
   syncProfileClock(false);
   assert(rtc.TASKS_CLEAR == 0 && rtc.TASKS_START == 0 && rtc.TASKS_STOP == 0);
   rtc.COUNTER = 200;
-  assert(profileTimestamp(true) == 200);
-  assert(rtc.TASKS_CLEAR == 1 && rtc.TASKS_START == 1);
+  assert(profileTimestamp(true) == 0);
+  assert(rtc.TASKS_CLEAR == 0 && rtc.TASKS_START == 1);
+  for(unsigned chunk=0;chunk<511;++chunk) {
+    rtc.COUNTER=(rtc.COUNTER+256UL*32768)&0x00ffffffUL;
+    profileTimestamp(true);
+  }
+  rtc.COUNTER=(rtc.COUNTER+255UL*32768)&0x00ffffffUL;
+  const auto before=profileTimestamp(true);assert(before==0xffff8000UL);
+  rtc.COUNTER=(rtc.COUNTER+32768)&0x00ffffffUL;
+  const auto wrapped=profileTimestamp(true);assert(wrapped==0);
+  assert(profileElapsedUs(before,wrapped,true)==1000000UL);
 #else
   assert(profileTimestamp(true) == 1234);
   assert(profileElapsedUs(12, 42, true) == 30);

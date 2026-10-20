@@ -18,6 +18,7 @@ HARNESS = r'''
 #define MESH_ENABLE_MORSE_RX 1
 struct Rtc { uint32_t COUNTER = 200; } rtc;
 #define NRF_RTC2 (&rtc)
+uint32_t profile_clock_raw=0, profile_clock_ticks=0;
 struct NRF52Board {
   static bool ready;
   static bool canIdleRadioProfile() { return ready; }
@@ -54,6 +55,13 @@ int main() {
   assert(!w.getProfileIdleDelay(delay) && delay==0);
 #else
   assert(w.getProfileIdleDelay(delay) && delay==26);
+  // Identical raw RTC values after a full hardware wrap must not resurrect
+  // an old idle proof. Both stamps use the software-extended tick domain.
+  profile_clock_ticks=0x01000000UL;
+  assert(!w.getProfileIdleDelay(delay));
+  w._profile_visit_stamp=w._profile_idle_stamp=0x01000064UL;
+  assert(w.getProfileIdleDelay(delay) && delay==26);
+  profile_clock_ticks=0;w=RadioLibWrapper();
   // Exact early-wake boundary, rounding, already expired, and RTC wrap.
   for (uint32_t remaining=0; remaining<=48; ++remaining) {
     rtc.COUNTER=100+1000-remaining;
@@ -63,7 +71,7 @@ int main() {
   assert(w.getProfileIdleDelay(delay) && delay==1);
   rtc.COUNTER=1101;
   assert(!w.getProfileIdleDelay(delay));
-  w._profile_visit_stamp=w._profile_idle_stamp=0x00fffff0;
+  w._profile_visit_stamp=w._profile_idle_stamp=0xfffffff0;
   rtc.COUNTER=0x10;
   assert(w.getProfileIdleDelay(delay) && delay==29);
   w=RadioLibWrapper(); rtc.COUNTER=200;
