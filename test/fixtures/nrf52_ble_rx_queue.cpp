@@ -114,7 +114,12 @@ static bool cccd_written_this_connection = false;
 static struct { std::atomic<bool> valid{false}; } cccd_ram_cache;
 static void captureCccdDeferred(uint16_t, ble_gap_addr_t*) {}
 template <typename... Args> static bool ada_callback(Args...) { return true; }
-static uint32_t sd_ble_gap_disconnect(uint16_t, uint8_t) { return NRF_SUCCESS; }
+static std::vector<std::pair<uint16_t, uint8_t>> disconnect_requests;
+static uint32_t sd_ble_gap_disconnect(uint16_t handle, uint8_t reason) {
+  assert(!critical_depth);
+  disconnect_requests.emplace_back(handle, reason);
+  return NRF_SUCCESS;
+}
 static uint32_t sd_ble_gap_conn_param_update(uint16_t, const void*) { return NRF_SUCCESS; }
 static uint32_t millis() { return 100; }
 
@@ -146,6 +151,7 @@ struct SerialBLEInterface {
   ble_gap_addr_t _peer_address;
   bool _peer_address_valid = false, _bond_removed_for_connection = false;
   bool _bonded_only = false, _isDeviceConnected = false;
+  bool _isEnabled = true;
   uint16_t _conn_handle = BLE_CONN_HANDLE_INVALID;
   unsigned removed_bonds = 0, bonded_recoveries = 0;
   bool connected = true;
@@ -204,6 +210,7 @@ struct SerialBLEInterface {
     ++bonded_recoveries;
   }
   void clearBuffers();
+  void disconnect();
   void resetTxState();
   bool servicePendingTxReset();
   static void onBLEEvent(ble_evt_t*);
@@ -476,9 +483,37 @@ static void production_connection_events_preserve_disconnect_cleanup() {
   assert(link.recv_queue.snapshot(7, generation));
 }
 
+static void late_connect_after_disable_is_disconnected() {
+  SerialBLEInterface link;
+  instance = &link;
+  link._isEnabled = false;
+  link.recv_queue.setEnabled(false);
+  // The physical event and deferred callback may already be queued when USB
+  // priority disables Bluetooth. It must not leave an occupied hidden link.
+  ble_evt_t event;
+  event.header.evt_id = BLE_GAP_EVT_CONNECTED;
+  SerialBLEInterface::onBLEEvent(&event);
+  const size_t requests_before = disconnect_requests.size();
+  SerialBLEInterface::onConnect(7);
+  assert(disconnect_requests.size() == requests_before + 1);
+  assert(disconnect_requests.back().first == 7);
+  assert(disconnect_requests.back().second == BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+  assert(!link._security_timer.pending() && !link._companion_start_timer.pending());
+  assert(!link._isDeviceConnected && !link._pairingRequestPending);
+  link.recv_queue.secure(7);
+  uint32_t generation;
+  assert(!link.recv_queue.snapshot(7, generation));
+  assert(link.removed_bonds == 0 && link.bonded_recoveries == 0);
+  // Keep the actual handle until the confirmed disconnect cleans it up.
+  assert(link._conn_handle == 7);
+  SerialBLEInterface::onDisconnect(7, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+  assert(link._conn_handle == BLE_CONN_HANDLE_INVALID);
+}
+
 int main() {
   ring_order_capacity_and_interleaved_copy();
   session_reset_and_stale_handles();
   callback_read_reset_and_reconnect();
   production_connection_events_preserve_disconnect_cleanup();
+  late_connect_after_disable_is_disconnected();
 }

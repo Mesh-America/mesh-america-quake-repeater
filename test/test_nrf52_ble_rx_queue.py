@@ -32,6 +32,7 @@ class Nrf52BleRxQueueTests(unittest.TestCase):
                       "static bool isBondAuthenticationFailure(",
                       "void SerialBLEInterface::onBLEEvent(",
                       "void SerialBLEInterface::onConnect(",
+                      "void SerialBLEInterface::disconnect()",
                       "void SerialBLEInterface::onDisconnect(",
                       "void SerialBLEInterface::onBleUartRX(",
                       "bool SerialBLEInterface::isReadBusy() const",

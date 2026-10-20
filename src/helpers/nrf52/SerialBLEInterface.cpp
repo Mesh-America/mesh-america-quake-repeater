@@ -316,6 +316,12 @@ void SerialBLEInterface::onConnect(uint16_t connection_handle) {
     instance->_pairingRequestPending.store(false, std::memory_order_release);
     instance->_conn_handle = connection_handle;
     instance->_isDeviceConnected = false;
+    // A queued connect callback can arrive after disable() stopped advertising
+    // and sampled an invalid handle. Close that late link as well.
+    if (!instance->_isEnabled) {
+      instance->disconnect();
+      return;
+    }
     instance->_security_timer.start(millis());
     instance->_companion_start_timer.cancel();
     instance->_companionDataSeen.store(false, std::memory_order_release);
@@ -763,7 +769,7 @@ bool SerialBLEInterface::configureBondedOnlyAdvertising(
   Bluefruit.Advertising.setType(
       BLE_GAP_ADV_TYPE_CONNECTABLE_NONSCANNABLE_DIRECTED);
   Bluefruit.Advertising.setPeerAddress(native_peer);
-  Bluefruit.Advertising.restartOnDisconnect(true);
+  Bluefruit.Advertising.restartOnDisconnect(_isEnabled);
   _bonded_only = true;
   _stealth_pair_once = false;
   _advertisingSuppressed.store(false, std::memory_order_release);
@@ -1016,7 +1022,7 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   Bluefruit.Advertising.setInterval(BLE_ADV_INTERVAL_MIN, BLE_ADV_INTERVAL_MAX);
   Bluefruit.Advertising.setFastTimeout(BLE_ADV_FAST_TIMEOUT);
 
-  Bluefruit.Advertising.restartOnDisconnect(true);
+  Bluefruit.Advertising.restartOnDisconnect(_isEnabled);
 
   if (bonded_only_peer != nullptr) {
     configureBondedOnlyAdvertising(*bonded_only_peer, true);
@@ -1119,7 +1125,7 @@ void SerialBLEInterface::cancelStealthPairingTransition() {
   _advertisingSuppressed.store(false, std::memory_order_release);
   Bluefruit.Advertising.setType(
       BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
-  Bluefruit.Advertising.restartOnDisconnect(true);
+  Bluefruit.Advertising.restartOnDisconnect(_isEnabled);
   if (_isEnabled && _conn_handle == BLE_CONN_HANDLE_INVALID
       && !isAdvertising()) {
     startAdvertising("advertising failed after stealth cancellation");
@@ -1275,7 +1281,7 @@ void SerialBLEInterface::recoverStalledTx(const char* cause,
 }
 
 bool SerialBLEInterface::isValidConnection(uint16_t handle, bool requireWaitingForSecurity) const {
-  if (_conn_handle != handle) {
+  if (!_isEnabled || _conn_handle != handle) {
     return false;
   }
   BLEConnection* conn = Bluefruit.Connection(handle);

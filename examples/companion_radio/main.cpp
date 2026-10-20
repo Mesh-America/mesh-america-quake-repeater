@@ -63,6 +63,7 @@ static uint32_t _atoi(const char* sp) {
 
 // interface manager
 #include <helpers/MultiSerialInterface.h>
+#include <helpers/UsbBluetoothPriority.h>
 MultiSerialInterface interface_manager;
 
 // include bluetooth interface
@@ -2914,6 +2915,23 @@ void halt() {
     if (companion_bluetooth_start_at == 0) companion_bluetooth_start_at = 1;
   }
 
+  static void serviceCompanionUsbBluetoothPriority() {
+#if defined(T1000_E) && defined(USE_TINYUSB)
+    static mesh::UsbBluetoothPriority priority;
+    const bool inhibited = priority.update(board.isUsbHostConnected(), millis());
+    if (inhibited && !interface_manager.isBluetoothInhibited()) {
+      // Abandon only this transport's work; USB must not inherit a partially
+      // streamed Bluetooth reply when the link is disconnected.
+      the_mesh.cancelSerialResponseStream(&bluetooth_interface);
+      the_mesh.cancelSerialOperationsForRoute(&bluetooth_interface);
+    }
+    interface_manager.setBluetoothInhibited(inhibited);
+    if (inhibited) {
+      interface_manager.forgetReplyRouteForDisconnected(&bluetooth_interface);
+    }
+#endif
+  }
+
   static void startCompanionBluetooth() {
     if (companion_bluetooth_initialized) return;
     companion_bluetooth_start_at = 0;
@@ -3009,8 +3027,9 @@ void halt() {
 #endif
     companion_bluetooth_initialized = true;
     companion_bluetooth_start_failure[0] = 0;
+    serviceCompanionUsbBluetoothPriority();
     if (interface_manager.isEnabled() && the_mesh.isBluetoothEnabledPreference()) {
-      bluetooth_interface.enable();
+      interface_manager.enableBluetooth();
     }
   }
 
@@ -3236,7 +3255,9 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
   if (action == CompanionBluetoothCommand::Get) {
     snprintf(reply, reply_size, "bluetooth %s%s",
              interface_manager.isBluetoothEnabled() ? "on" : "off",
-             companion_bluetooth_off_at ? " (off pending)" : "");
+             companion_bluetooth_off_at ? " (off pending)"
+                 : interface_manager.isBluetoothInhibited()
+                     ? " (USB data connected)" : "");
     return true;
   }
   if (action == CompanionBluetoothCommand::On) {
@@ -3257,7 +3278,11 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
     }
     interface_manager.setBluetoothAutoEnable(true);
     interface_manager.enableBluetooth();
-    if (interface_manager.isBluetoothEnabled()) {
+    if (interface_manager.isBluetoothInhibited()) {
+      companion_bluetooth_off_at = 0;
+      snprintf(reply, reply_size,
+               "OK - Bluetooth on (saved); paused while USB data is connected");
+    } else if (interface_manager.isBluetoothEnabled()) {
       companion_bluetooth_off_at = 0;
       snprintf(reply, reply_size, "OK - Bluetooth on (saved)");
     } else if (the_mesh.setBluetoothEnabledPreference(previous_preference)) {
@@ -3276,6 +3301,7 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
     }
     companion_bluetooth_off_at = 0;
     interface_manager.setBluetoothAutoEnable(false);
+    disableCompanionBluetoothForCli();
     snprintf(reply, reply_size, "OK - Bluetooth already off (saved)");
     return true;
   }
@@ -3394,6 +3420,7 @@ public:
       companion_bluetooth_off_at = 0;
       if (on) interface_manager.enableBluetooth();
       else disableCompanionBluetoothForCli();
+      if (on && interface_manager.isBluetoothInhibited()) return Result::Done;
       return interface_manager.isBluetoothEnabled() == on ? Result::Done : Result::Failed;
     }
 #endif
@@ -3821,6 +3848,7 @@ void setup() {
   // Keep stack registration available for a later USB `set bluetooth on`,
   // without advertising even briefly when startup enables all interfaces.
   interface_manager.setBluetoothAutoEnable(the_mesh.isBluetoothEnabledPreference());
+  serviceCompanionUsbBluetoothPriority();
 #endif
 
 // Lock the saved transport selection before bringing up either wireless stack.
@@ -4116,6 +4144,9 @@ static bool usbLoggingRecoverySafe(void*) {
 }
 
 void loop() {
+#if defined(BLE_PIN_CODE)
+  serviceCompanionUsbBluetoothPriority();
+#endif
 #if defined(NRF52_PLATFORM)
   board.prepareSleepCycle();
 #endif

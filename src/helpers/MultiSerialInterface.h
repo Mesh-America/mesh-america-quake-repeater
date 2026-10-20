@@ -28,6 +28,8 @@ private:
 
   bool _enabled = false;
   bool _bluetooth_auto_enable = true;
+  bool _bluetooth_requested = false;
+  bool _bluetooth_inhibited = false;
   uint8_t _nextRxIndex = 0;
   RegisteredInterface _interfaces[MAX_INTERFACES] = {};
   BaseSerialInterface* _lastRxInterface = nullptr;
@@ -60,6 +62,21 @@ public:
   // The Companion's saved preference controls blanket startup/wake enables.
   // Explicit Bluetooth/wireless controls remain able to enable it temporarily.
   void setBluetoothAutoEnable(bool enabled) { _bluetooth_auto_enable = enabled; }
+
+  // A temporary transport priority must not change the saved preference or
+  // lose explicit on/off requests made while Bluetooth is unavailable.
+  bool isBluetoothInhibited() const { return _bluetooth_inhibited; }
+  void setBluetoothInhibited(bool inhibited) {
+    if (_bluetooth_inhibited == inhibited) return;
+    _bluetooth_inhibited = inhibited;
+    if (inhibited) {
+      const bool requested = _bluetooth_requested;
+      disableBluetooth();
+      _bluetooth_requested = requested;
+    } else if (_enabled && _bluetooth_requested) {
+      enableBluetooth();
+    }
+  }
 
   bool addInterface(InterfaceType type, BaseSerialInterface* iface) {
     // make sure an interface was provided
@@ -100,6 +117,8 @@ public:
   }
 
   void enableBluetooth() {
+    _bluetooth_requested = true;
+    if (_bluetooth_inhibited) return;
     if (mesh::wireless::control().blocked(mesh::wireless::Bluetooth)) return;
     for(auto iface : _interfaces){
       if(iface.instance && iface.type == InterfaceType::Bluetooth){
@@ -109,6 +128,7 @@ public:
   }
 
   void disableBluetooth() {
+    _bluetooth_requested = false;
     for(auto iface : _interfaces){
       if(iface.instance && iface.type == InterfaceType::Bluetooth){
         iface.instance->disable();
@@ -145,12 +165,15 @@ public:
   // enable all interfaces
   void enable() override {
     _enabled = true;
+    _bluetooth_requested = _bluetooth_auto_enable;
     _nextRxIndex = 0;
     _lastRxInterface = nullptr;
     _lockedReplyInterface = nullptr;
     for(auto iface : _interfaces){
       if(iface.instance){
-        if (iface.type == InterfaceType::Bluetooth && !_bluetooth_auto_enable) continue;
+        if (iface.type == InterfaceType::Bluetooth
+            && (!_bluetooth_auto_enable || _bluetooth_inhibited
+                || mesh::wireless::control().blocked(mesh::wireless::Bluetooth))) continue;
         iface.instance->enable();
       }
     }

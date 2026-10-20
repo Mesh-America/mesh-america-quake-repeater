@@ -194,6 +194,7 @@ class BluetoothPersistenceTests(unittest.TestCase):
         main = (ROOT/'examples/companion_radio/main.cpp').read_text()
         methods = '\n'.join(method(main, signature) for signature in (
             'static void scheduleCompanionBluetoothRetry(',
+            'static void serviceCompanionUsbBluetoothPriority(',
             'static void startCompanionBluetooth(',
             'static void serviceDeferredCompanionBluetooth('))
         with tempfile.TemporaryDirectory() as directory:

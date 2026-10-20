@@ -151,6 +151,7 @@ struct MotaStream {
 @FORMAT_DEVICE_NAME@
 struct SerialBLEInterface {
   @STARTUP_FIELDS@
+  bool _isEnabled = false;
   std::atomic<bool> _companionDataSeen{false};
   SecuritySessionTimer _companion_start_timer;
   std::atomic<bool> _successfulConnectionPending{false};
