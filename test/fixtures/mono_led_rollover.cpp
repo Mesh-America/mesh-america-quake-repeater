@@ -1,6 +1,7 @@
 // Full actual handlers/field initializers are injected. RGB is not configured.
 // Arduino clock and output writes are the only hardware boundaries mocked.
 #include <helpers/CompanionNotificationPolicy.h>
+#include <helpers/LedPolicy.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -86,9 +87,16 @@ int main(int argc, char** argv) {
   CHECK(argc == 2);
   active_case = argv[1];
   UITask ui;
+  CHECK(mesh::leds::enabled());
   const char* name = argv[1];
 #ifdef PIN_STATUS_LED
-  if (!std::strcmp(name, "zero")) {
+  if (!std::strcmp(name, "quiet-fresh")) {
+    mesh::leds::setEnabled(false);
+    at(ui, 0, 0, false);
+    at(ui, 0x80000000u, 0, false);
+    mesh::leds::setEnabled(true);
+    cadence(ui, 0x80000000u, LED_ON_MILLIS);
+  } else if (!std::strcmp(name, "zero")) {
     at(ui, 0, 0, false);
     cadence(ui, 1, LED_ON_MILLIS);
   } else if (!std::strcmp(name, "upper")) {

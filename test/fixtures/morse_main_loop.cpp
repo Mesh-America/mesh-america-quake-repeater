@@ -3,6 +3,7 @@
 #include <helpers/PowerManagementUtils.h>
 #include <cstdarg>
 static unsigned usb_services=0,command_services=0,transport_services=0,delays=0;
+static unsigned usb_bluetooth_priority_services=0;
 static bool usb_watchdog_armed=false,wireless_pending=false;
 bool profileIdlePreparationAllowed();
 bool profileIdleQueryAllowed();
@@ -120,6 +121,12 @@ void serviceDeferredCompanionBluetooth() { ++transport_services; }
 void serviceCompanionBluetoothIdentity() { ++transport_services; }
 void serviceCompanionBluetoothControl() { ++transport_services; }
 void serviceCompanionBluetoothName() { ++transport_services; }
+// Transport handoff has separate policy/state tests. Keep its loop boundary
+// live here, including during Morse, before the authoritative sleep snapshot.
+void serviceCompanionUsbBluetoothPriority() {
+  assert(usb_bluetooth_priority_services == board.preparations);
+  ++usb_bluetooth_priority_services;
+}
 @LOOP@
 int main() {
   assert(!mesh::morseTimingActive(nullptr));
@@ -267,5 +274,10 @@ int main() {
   assert(board.profile_preparations==profile_preparations+1 && board.sleeps==profile_sleeps+1);
 #if !ROLE_REPEATER
   assert(mesh::power::regulator_services==board.calls);
+#endif
+#if ROLE_COMPANION
+  assert(usb_bluetooth_priority_services==board.preparations);
+#else
+  assert(usb_bluetooth_priority_services==0);
 #endif
 }

@@ -45,7 +45,7 @@ struct Chip {
   int power=17, initial_fsk_power=0, current_limit=60;
   int ramp_time=4;
   unsigned ramp_calls=0, ramp_power_calls=0;
-  unsigned starts=0, stops=0, standby_calls=0, fsk_starts=0;
+  unsigned starts=0, stops=0, standby_calls=0, fsk_starts=0, standby_fail_call=0;
   unsigned raw_rx_starts=0;
   unsigned admission_order=0,last_receive_order=0;
   unsigned morse_ramp_calls=0;
@@ -59,8 +59,9 @@ struct Chip {
   void (*callback)()=setFlag;
   int standby() {
     ++standby_calls; g_mock_millis+=standby_latency;
-    if (!standby_result) carrier=false;
-    return standby_result;
+    const int result=standby_fail_call==standby_calls ? -705 : standby_result;
+    if (!result) carrier=false;
+    return result;
   }
   int standby(uint8_t mode) {
     ++warm_standby_calls; last_standby_mode=mode;

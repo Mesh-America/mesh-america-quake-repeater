@@ -566,33 +566,54 @@ int main() {
         self.run_rak_uart_probe(negative=True)
 
     def test_ble_led_optout_preserves_default_and_begin_order(self):
+        from test_nrf52_led_policy import compile_run as run_led_policy
+
         source = (ROOT / "src/helpers/nrf52/SerialBLEInterface.cpp").read_text()
         begin = extract_braced(source, "bool SerialBLEInterface::begin(")
-        block = re.search(r"#ifdef DISABLE_BLE_LED[\s\S]*?#endif", begin).group()
-        self.assertLess(begin.index(block), begin.index("Bluefruit.configPrphConn("))
-        self.assertLess(begin.index(block), begin.index("if (!Bluefruit.begin())"))
-        self.assertLess(begin.index("if (_begin_attempted)"), begin.index(block))
+        policy = "mesh_nrf52::applyBluetoothLedPolicy();"
+        self.assertEqual(begin.count(policy), 1)
+        self.assertLess(begin.index(policy), begin.index("Bluefruit.configPrphConn("))
+        self.assertLess(begin.index(policy), begin.index("if (!Bluefruit.begin())"))
+        self.assertLess(begin.index("if (_begin_attempted)"), begin.index(policy))
         harness = r'''
-#include <cassert>
-struct BluefruitMock {
- bool controlled=true;unsigned calls=0;
- void autoConnLed(bool enabled){controlled=enabled;++calls;}
-} Bluefruit;
-void configure(){
-@BLOCK@
-}
+#include <helpers/nrf52/BluetoothLed.h>
+MockBluefruit Bluefruit;
+int led_level = LED_STATE_ON, writes = 0;
 int main(){
- configure();
 #ifdef DISABLE_BLE_LED
- assert(!Bluefruit.controlled&&Bluefruit.calls==1);
+ const bool default_enabled = false;
 #else
- assert(Bluefruit.controlled&&Bluefruit.calls==0);
+ const bool default_enabled = true;
 #endif
- Bluefruit.controlled=false;configure();assert(!Bluefruit.controlled);
+ assert(mesh::leds::enabled());
+ mesh_nrf52::applyBluetoothLedPolicy();
+ assert(Bluefruit.automatic == default_enabled);
+ // Before begin(), configuring the owner must not query a connection or use
+ // the advertising timer that Bluefruit has not created yet.
+ assert(!Bluefruit.ready && Bluefruit.connection_queries == 0);
+ assert(Bluefruit.timer_starts == 0 && Bluefruit.timer_stops == 0);
+ mesh::leds::setEnabled(false);
+ mesh_nrf52::applyBluetoothLedPolicy();
+ assert(!Bluefruit.automatic && led_level == !LED_STATE_ON);
+ assert(Bluefruit.connection_queries == 0 && Bluefruit.timer_starts == 0);
+ // The shared saved policy now explicitly restores enabled LEDs; the compile
+ // time opt-out continues to override that choice.
+ mesh::leds::setEnabled(true);
+ mesh_nrf52::applyBluetoothLedPolicy();
+ assert(Bluefruit.automatic == default_enabled);
+ assert(Bluefruit.connection_queries == 0 && Bluefruit.timer_starts == 0);
+ mesh::leds::setEnabled(false);
+ Bluefruit.ready = true;
+ mesh_nrf52::bluetoothLedStarted();
+ assert(!Bluefruit.automatic && Bluefruit.timer_starts == 0);
 }
-'''.replace("@BLOCK@", block)
-        self.compile_run(harness)
-        self.compile_run(harness, ("DISABLE_BLE_LED=1",))
+'''
+        for disabled in (False, True):
+            with self.subTest(disabled=disabled):
+                defines = ["LED_BLUE=12", "LED_STATE_ON=1"]
+                if disabled:
+                    defines.append("DISABLE_BLE_LED=1")
+                run_led_policy(self, harness, defines)
 
     def test_shared_success_mark_and_rak_discovery_reset_are_wired(self):
         provider = (ROOT / "src/helpers/sensors/MicroNMEALocationProvider.h").read_text()

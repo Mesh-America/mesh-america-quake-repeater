@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <helpers/LedPolicy.h>
 
 namespace mesh { namespace notify {
 @OUTPUT_ENUM@
@@ -151,8 +152,16 @@ int main(int argc, char** argv) {
   active_case = argv[1];
   const char* name = argv[1];
   UITask ui;
+  CHECK(mesh::leds::enabled());
 #ifdef STATUS_LED_RGB
-  if (!std::strcmp(name, "boot-zero") || !std::strcmp(name, "boot-upper") ||
+  if (!std::strcmp(name, "quiet-fresh")) {
+    mesh::leds::setEnabled(false);
+    tick(ui, 0); tick(ui, 0x80000000u);
+    CHECK(writes == 0); CHECK(batt_reads == 0); CHECK(power_reads == 0);
+    CHECK(charge_reads == 0);
+    mesh::leds::setEnabled(true);
+    boot(ui, 0x80000000u);
+  } else if (!std::strcmp(name, "boot-zero") || !std::strcmp(name, "boot-upper") ||
       !std::strcmp(name, "boot-wrap") || !std::strcmp(name, "boot-zero-end")) {
     const uint32_t start = !std::strcmp(name, "boot-zero") ? 0u :
         !std::strcmp(name, "boot-upper") ? 0x80000000u :

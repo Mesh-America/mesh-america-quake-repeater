@@ -21,6 +21,12 @@ static void check(bool okay, unsigned line) {
 extern "C" void _start() {
   genericBuzzer buzzer;
   buzzer.begin();
+  CHECK(buzzer.isQuiet());
+  CHECK(buzzer.speakGps(true));
+  buzzer.loop();
+  CHECK(tone_calls == 0 && !buzzer.isPlaying() && !registers.ENABLE);
+  buzzer.quiet(false); // The UI applies its saved sound-on choice before use.
+  CHECK(!buzzer.isQuiet());
   now_ms = 0xffffffffU - 100;
   CHECK(buzzer.speakGps(true));
   buzzer.loop();

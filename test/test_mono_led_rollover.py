@@ -20,7 +20,7 @@ UIS = ('ui-orig', 'ui-new', 'ui-tiny')
 CASES = ('zero', 'upper', 'max', 'normal', 'unread', 'signed', 'wrap', 'off-wrap',
          'zero-stamp', 'message-on', 'message-off', 'owner-fresh', 'mask-fresh',
          'owner-on-long', 'owner-off-long', 'mask-on-long', 'mask-off-long',
-         'suppressed-short', 'delayed-one-phase', 'both-vetoes')
+         'suppressed-short', 'delayed-one-phase', 'both-vetoes', 'quiet-fresh')
 
 
 def harness(ui, mutation=None):
@@ -41,7 +41,12 @@ def harness(ui, mutation=None):
                                     abstract, re.MULTILINE))
     setters = '\n'.join(extract_braced(abstract, signature) for signature in (
         'void setNotificationLedOwnership(', 'void setNotificationOutputs('))
-    if mutation == 'no-owner-guard':
+    if mutation == 'no-policy-guard':
+        guard = 'if (!mesh::leds::enabled()) return;'
+        if handler.count(guard) != 1:
+            raise AssertionError('the actual board LED policy guard must be present')
+        handler = handler.replace(guard, '', 1)
+    elif mutation == 'no-owner-guard':
         guard = 'if (_notification_led_owned || !(_notification_outputs & mesh::notify::Led)) return;'
         if handler.count(guard) != 1:
             raise AssertionError('the actual ownership/output guard must be present')
@@ -67,6 +72,9 @@ class MonoLedRolloverTest(unittest.TestCase):
 
     def test_missing_ownership_guard_fails_semantic_check(self):
         self.run_variants('no-owner-guard', ('owner-fresh',), 'FAIL owner-fresh: writes == count')
+
+    def test_missing_board_policy_guard_fails_semantic_check(self):
+        self.run_variants('no-policy-guard', ('quiet-fresh',), 'FAIL quiet-fresh: writes == count')
 
     def test_early_edge_regression_is_rejected(self):
         self.run_variants('non-strict-edge', ('zero',), 'FAIL zero: writes == count')

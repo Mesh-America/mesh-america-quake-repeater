@@ -33,7 +33,7 @@ HARNESS = r'''
 uint32_t now_ms = 100;
 uint32_t millis() { return now_ms; }
 unsigned identity_calls=0, address_calls=0, begin_calls=0, enable_calls=0;
-unsigned register_calls=0, sdk_ps_calls=0;
+unsigned register_calls=0, manager_enable_calls=0, sdk_ps_calls=0;
 bool identity_ok=true, register_ok=true, begin_ok=true;
 enum class InterfaceType { Bluetooth };
 struct CompanionNodePrefs {
@@ -49,16 +49,24 @@ struct Mesh {
   uint32_t getBLEPin() { return 123456; }
   bool isBluetoothEnabledPreference() { return preference; }
 } the_mesh;
-struct {
+struct TestInterfaceManager {
+  bool enabled=true;
   bool addInterface(InterfaceType, void*) { ++register_calls; return register_ok; }
   bool removeInterface(void*) { return true; }
-  bool isEnabled() const { return true; }
+  bool isEnabled() const { return enabled; }
+  void enableBluetooth();
 } interface_manager;
 struct {
   template<typename... T> bool begin(T...) { ++begin_calls; return begin_ok; }
   void enable() { ++enable_calls; }
   const char* beginFailure() const { return "test failure"; }
 } bluetooth_interface;
+// Startup now requests Bluetooth through the manager; its transport policy
+// has a separate suite. These non-T1000 variants forward an allowed request.
+void TestInterfaceManager::enableBluetooth() {
+  ++manager_enable_calls;
+  bluetooth_interface.enable();
+}
 namespace mesh {
 struct Logger {
   template<typename... T> void printf(T...) {}
@@ -144,7 +152,9 @@ void rebootCompatibility() {
   assert(mesh::wifi::loadCompanionModeForBoot());
 }
 void resetBootCounters() {
-  identity_calls=address_calls=begin_calls=enable_calls=register_calls=0;
+  identity_calls=address_calls=begin_calls=enable_calls=register_calls=manager_enable_calls=0;
+  interface_manager.enabled=true;
+  the_mesh.preference=true;
   companion_bluetooth_initialized=false;
   companion_bluetooth_start_at=0;
 }
@@ -227,7 +237,7 @@ int main() {
   // The guard must precede identity writes, registration, SDK init and retry.
   startCompanionBluetooth();
   assert(!companion_bluetooth_initialized && !companion_bluetooth_start_at);
-  assert(!identity_calls && !address_calls && !register_calls && !begin_calls && !enable_calls);
+  assert(!identity_calls && !address_calls && !register_calls && !begin_calls && !enable_calls && !manager_enable_calls);
   assert(companion_bluetooth_start_failure[0]);
   // Even an old retry deadline cannot resurrect Bluetooth in this boot.
   companion_bluetooth_start_at=now_ms;
@@ -254,9 +264,9 @@ int main() {
   resetBootCounters();
   startCompanionBluetooth();
   assert(companion_bluetooth_initialized);
-  assert(identity_calls==1 && register_calls==1 && address_calls==1 && begin_calls==1 && enable_calls==1);
+  assert(identity_calls==1 && register_calls==1 && address_calls==1 && begin_calls==1 && enable_calls==1 && manager_enable_calls==1);
   startCompanionBluetooth(); serviceDeferredCompanionBluetooth();
-  assert(begin_calls==1); // Already initialized remains idempotent.
+  assert(begin_calls==1 && manager_enable_calls==1); // Already initialized remains idempotent.
 
 #if defined(ESP32) && defined(WIFI_SSID)
   assert(companionWiFiBluetoothActive());
@@ -286,6 +296,16 @@ int main() {
   now_ms+=4999; serviceDeferredCompanionBluetooth(); assert(identity_calls==1);
   ++now_ms; identity_ok=true; serviceDeferredCompanionBluetooth();
   assert(companion_bluetooth_initialized && identity_calls==2 && begin_calls==1);
+
+  // Initializing the stack must not bypass the manager or saved enable gate.
+  resetBootCounters(); interface_manager.enabled=false;
+  startCompanionBluetooth();
+  assert(companion_bluetooth_initialized && begin_calls==1);
+  assert(!manager_enable_calls && !enable_calls && !interface_manager.enabled);
+  resetBootCounters(); the_mesh.preference=false;
+  startCompanionBluetooth();
+  assert(companion_bluetooth_initialized && begin_calls==1);
+  assert(!manager_enable_calls && !enable_calls && !the_mesh.preference);
 }
 '''
 
@@ -295,6 +315,7 @@ class CompanionWiFiCompatibilityTest(unittest.TestCase):
         main = (ROOT / "examples/companion_radio/main.cpp").read_text()
         signatures = [
             "static void scheduleCompanionBluetoothRetry(",
+            "static void serviceCompanionUsbBluetoothPriority(",
             "static void startCompanionBluetooth(",
             "static void serviceDeferredCompanionBluetooth(",
         ]

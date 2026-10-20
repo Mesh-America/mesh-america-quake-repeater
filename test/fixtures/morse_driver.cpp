@@ -161,17 +161,34 @@ int main() {
     assert(w.stopMorseTx() == MResult::Stopped && w.chip.carrier && w.chip.starts == 1);
     assert(w.setCarrierWave(0, 0) == mesh::RadioParamApplyResult::APPLIED);
   }
+  {
+    RadioLibWrapper w;
+    w.chip.standby_result = -705;
+    // RX admission failed before Morse owns or changes the modem. The shared
+    // reconfiguration gate requires repair and defers the attempted operation.
+    assert(w.startMorseTx(902.1f, 25, "E") == MResult::Busy);
+    assert(w.chip.standby_calls == 1 && !w.chip.starts && !w.board.before);
+    assert(!w._cw_active && !w._morse_owned && !w.board.awake);
+    assert(!w.board.frequency_prepares && !w.isInRecvMode());
+    assert(w._profile_refresh_required && w._profile_repair_required);
+    w.chip.standby_result = 0;
+    assert(w.startMorseTx(902.1f, 25, "E") == MResult::Started);
+    assert(w.stopMorseTx() == MResult::Stopped);
+    fresh_receive(w);
+  }
   for (int reason = 0; reason < 5; ++reason) {
     RadioLibWrapper w;
     if (reason == 0) w.board.frequency_ok = false;
     if (reason == 1) w.chip.frequency_result = -705;
     if (reason == 2) w.chip.power_result = -705;
-    if (reason == 3) w.chip.standby_result = -705;
+    // Fail the post-admission standby, not the earlier RX admission gate.
+    if (reason == 3) w.chip.standby_fail_call = 2;
     if (reason == 4) w.chip.irq_result = -705;
     assert(w.startMorseTx(902.1f, 25, "E") == MResult::Failed);
     assert(!w.chip.starts && !w.board.before);
     if (w._cw_active) assert(w._cw_stopping && w.board.awake);
     w.board.frequency_ok = true;
+    w.chip.standby_fail_call = 0;
     w.chip.frequency_result = w.chip.power_result = w.chip.standby_result = w.chip.irq_result = 0;
     if (w._cw_active) { advance(100); w.serviceCarrierWave(); }
     assert(!w._cw_active && !w.board.awake && w.isInRecvMode());

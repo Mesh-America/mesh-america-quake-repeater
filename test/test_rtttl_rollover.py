@@ -187,10 +187,14 @@ class RuntimeTests(unittest.TestCase):
             return subprocess.run([str(binary)], capture_output=True, timeout=10).returncode
 
     def test_actual_unpatched_versions_reproduce_both_semantic_rollover_failures(self):
+        queue_lines = (FIXTURES / 'queue.cpp').read_text(encoding='ascii').splitlines()
+        rollover_check = '  CHECK(tone_calls == 2 && buzzer.isPlaying() && !registers.ENABLE);'
+        self.assertEqual(queue_lines.count(rollover_check), 1)
+        rollover_failure = queue_lines.index(rollover_check) + 1
         for version in VERSIONS:
             with self.subTest(version=version):
                 self.assertEqual(self.build_run(source_for(version), version, "regression.cpp"), 30)
-                self.assertEqual(self.build_run(source_for(version), version, "queue.cpp"), 33)
+                self.assertEqual(self.build_run(source_for(version), version, "queue.cpp"), rollover_failure)
 
     def test_patched_versions_keep_tempo_empty_stop_replacement_and_real_voice_queue(self):
         for version in VERSIONS:

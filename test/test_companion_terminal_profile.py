@@ -99,8 +99,8 @@ for help_line in ('  board\\r\\n', '  version\\r\\n',
 assert "no automatic adverts" not in help_branch
 assert re.search(
     r"#if COMPANION_FEATURE_MEMORY_DIAGNOSTICS\s+"
-    r'terminalOutput\(\)\.print\("  memory\\r\\n"\);\s+#endif',
-    terminal,
+    r'"  memory\\r\\n"\s+#endif',
+    help_branch,
 )
 
 # Terminal-specific handlers keep precedence, then both the generic `set`

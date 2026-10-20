@@ -26,6 +26,7 @@ class CompanionOtaIncludeTest(unittest.TestCase):
             directory = Path(temp)
             for header in (
                 "helpers/RegulatorSettings.h",
+                "helpers/LedSettings.h",
                 "helpers/ui/StartupScreen.h", "helpers/ui/DisplayPowerSettings.h",
                 "helpers/UsbLoggingWatchdog.h", "helpers/UsbLoggingClientActivity.h",
                 "Mesh.h", "helpers/BluetoothMac.h", "CompanionBluetooth.h",

@@ -24,7 +24,7 @@ CASES = (
     'poll-wrap-before', 'poll-wrap-after', 'poll-zero-stamp', 'poll-long',
     'poll-near-full', 'poll-read-delays', 'owner-fresh', 'mask-fresh',
     'owner-flourish-short', 'mask-flourish-long', 'owner-on-long',
-    'owner-off-long', 'mask-on-long', 'mask-off-long', 'both-vetoes',
+    'owner-off-long', 'mask-on-long', 'mask-off-long', 'both-vetoes', 'quiet-fresh',
 )
 POWER_CASES = (
     'power-cadence', 'charging', 'charged', 'charge-unread',
@@ -45,7 +45,12 @@ def harness(mutation=None):
     setters = '\n'.join(extract_braced(abstract, signature) for signature in (
         'void setNotificationLedOwnership(', 'void setNotificationOutputs('))
     handler = extract_braced(source, 'void UITask::userLedHandler()')
-    if mutation == 'no-owner-guard':
+    if mutation == 'no-policy-guard':
+        guard = 'if (!mesh::leds::enabled()) return;'
+        if handler.count(guard) != 1:
+            raise AssertionError('the actual board LED policy guard must be present')
+        handler = handler.replace(guard, '', 1)
+    elif mutation == 'no-owner-guard':
         guard = 'if (_notification_led_owned || !(_notification_outputs & mesh::notify::Led)) return;'
         if handler.count(guard) != 1:
             raise AssertionError('the actual ownership/output guard must be present')
@@ -80,6 +85,9 @@ class RgbLedRolloverTest(unittest.TestCase):
 
     def test_ownership_regression_is_rejected(self):
         self.run_variants('no-owner-guard', ('owner-fresh',), 'batt_reads == 0')
+
+    def test_board_policy_regression_is_rejected(self):
+        self.run_variants('no-policy-guard', ('quiet-fresh',), 'writes == 0')
 
     def test_captured_poll_anchor_regression_is_rejected(self):
         self.run_variants('completion-time-anchor', ('poll-read-delays',), 'batt_reads == 2')
