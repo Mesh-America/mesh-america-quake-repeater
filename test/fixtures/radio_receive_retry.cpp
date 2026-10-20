@@ -351,6 +351,19 @@ static void recoveryOwnershipAdmission() {
 
 int main(int argc, char** argv) {
   if (argc == 2) {
+    if (!strcmp(argv[1], "profile-repair")) {
+      RadioLibWrapper w; uint8_t bytes[8];
+      w._profile_repair_required=true; w.events.record(); w.radio.packet_length=1;
+      const auto arms=w.arms;
+      assert(w.recvRaw(bytes,sizeof(bytes))==0);
+      w.startRecv();
+      assert(w.radio.fifo_reads==0 && w.arms==arms && w.hasPendingRadioInterrupt());
+      // A trusted configuration refresh does not revoke old FIFO ownership.
+      w._profile_repair_required=false;
+      assert(w.recvRaw(bytes,sizeof(bytes))==1 && w.radio.fifo_reads==1);
+      std::puts("PASS: untrusted profile RX waits for repair");
+      return 0;
+    }
     assert(!strcmp(argv[1], "recovery"));
     recoveryOwnershipAdmission();
     return 0;

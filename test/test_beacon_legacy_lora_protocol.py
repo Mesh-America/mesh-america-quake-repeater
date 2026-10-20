@@ -76,6 +76,7 @@ struct RadioLibWrapper {
   PhysicalLayer* _radio;
   mesh::MainBoard* _board;
   bool _params_valid = true, _rx_ps_armed = true, _dbm_valid = false, _rx_boosted_gain_valid = false;
+  bool _profile_repair_required = false;
   int state = 1;
   float _cur_freq = 906.875f, _cur_bw = 250;
   uint8_t _cur_sf = 11, _cur_cr = 5;
@@ -136,14 +137,19 @@ static void failures_and_recovery() {
     assert(chip.sync == 0x12 && chip.crc && chip.explicit_header && !chip.iq);
     assert(chip.cached_crc && !chip.cached_implicit && !chip.cached_iq);
     wrapper._physical_protocol = Protocol::Meshtext;
+    wrapper._profile_repair_required = true;
     assert(wrapper.restoreAfterDeepInit());
+    assert(!wrapper._profile_repair_required);
     assert(chip.sync == 0x2b && chip.crc && chip.explicit_header && !chip.iq);
     assert(!wrapper._rx_ps_armed && wrapper.state == STATE_IDLE);
     chip.fail_at = fail;
+    wrapper._profile_repair_required = true;
     assert(!wrapper.restoreAfterDeepInit());
+    assert(wrapper._profile_repair_required);
     chip.fail_at = 0;
     wrapper._physical_protocol = Protocol::MeshCore;
     assert(wrapper.restoreAfterDeepInit());
+    assert(!wrapper._profile_repair_required);
     assert(chip.sync == 0x12 && chip.crc && chip.explicit_header && !chip.iq);
   }
 }

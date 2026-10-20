@@ -185,6 +185,12 @@ class RadioReceiveRetryTests(unittest.TestCase):
             self.assertIn('PASS: receive retry lifecycle', result.stdout)
             print(result.stdout, end='')
 
+    def test_failed_profile_transaction_blocks_fifo_delivery_and_rx_rearm(self):
+        with tempfile.TemporaryDirectory(prefix='meshcore-profile-repair-rx-') as folder:
+            result = self.run_probe(self.build(folder), 'profile-repair')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('PASS: untrusted profile RX waits for repair', result.stdout)
+
     def test_old_hot_poll_and_pending_calibration_veto_negative_controls(self):
         for mutation in ('unpaced', 'pending_veto', 'agc_fast'):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(

@@ -40,6 +40,7 @@ struct RadioLibWrapper {
   Chip chip; Chip* _radio = &chip;
   mesh::RadioProfiles _profiles;
   bool _params_valid=true, packet=false, busy=false, fail=false;
+  bool _profile_repair_required=false, _rx_hold_continuous=false;
   bool _rx_ps_enabled=true, _rx_ps_armed=true, _rx_ps_continuous_fallback=false;
   bool _profile_saved_rxps=false, _profile_rxps_suspended=false;
   bool _profile_standby_held=false, _saved_standby_xosc=false;

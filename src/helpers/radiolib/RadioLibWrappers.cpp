@@ -315,6 +315,21 @@ uint8_t RadioLibWrapper::beginReconfigure() {
 #endif
   if (_cw_active) return 2;
   const uint8_t base_state = state;
+  if (_profile_repair_required) {
+    // The last transaction failed after changing the chip. Its old FIFO and
+    // activity flags have no trustworthy modulation/profile ownership.
+    if (base_state == STATE_TX_WAIT || isChipBusy()) return 2;
+    claimRadioInterrupt();
+    _rx_hold_continuous = false;
+    if (_radio->standby() != RADIOLIB_ERR_NONE) {
+      state = STATE_IDLE;
+      return 3;
+    }
+    _rx_ps_armed = false;
+    claimRadioInterrupt();
+    state = STATE_IDLE;
+    return 1; // A repair must verify RX re-entry even if software was idle.
+  }
   // On SX126x/LR11xx duty-cycle RX, BUSY may remain asserted during the sleep
   // side of the cycle. Do not issue an IRQ/preamble query over SPI then; due
   // scheduled work will retry as soon as the next safe listen window opens.
@@ -324,10 +339,13 @@ uint8_t RadioLibWrapper::beginReconfigure() {
   }
 
   const bool resume_rx = base_state == STATE_RX;
-  if (_rx_ps_armed) {
-    stopReceiveDutyCycle();
-  } else if (resume_rx) {
-    _radio->standby();
+  if (_rx_ps_armed || resume_rx) {
+    if (_radio->standby() != RADIOLIB_ERR_NONE) {
+      state = STATE_IDLE;
+      _profile_refresh_required = _profile_repair_required = true;
+      return 3;
+    }
+    _rx_ps_armed = false;
   }
   // An RX completion during standby still owns its FIFO and old profile.
   // Defer reconfiguration until recvRaw consumes it, rather than rearming and
@@ -368,6 +386,7 @@ bool RadioLibWrapper::restoreAfterDeepInit() {
     restored = applyRxBoostedGainMode(_cur_rx_boosted_gain) && restored;
   }
   recalibrateNoiseFloor();
+  if (restored) _profile_repair_required = false;
   return restored;
 }
 
@@ -378,7 +397,8 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
   }
 
   uint8_t resume_rx = beginReconfigure();
-  if (resume_rx > 1) return mesh::RadioParamApplyResult::BUSY;
+  if (resume_rx > 1) return resume_rx == 2
+      ? mesh::RadioParamApplyResult::BUSY : mesh::RadioParamApplyResult::FAILED;
 
   const bool had_previous_params = _params_valid;
   const float previous_freq = _cur_freq;
@@ -418,6 +438,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
       _rx_ps_continuous_fallback = rxPowerSavingUsesContinuousFallback(
           _rx_ps_rx_us, _rx_ps_sleep_us);
     }
+    _profile_repair_required = false;
     endReconfigure(resume_rx);
     success = !resume_rx || isInRecvMode();
   }
@@ -453,8 +474,12 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
 #endif
 
     if (!restored) restored = restoreAfterDeepInit();
-    if (restored) endReconfigure(resume_rx);
-    if (!restored || (resume_rx && !isInRecvMode())) _profile_refresh_required = true;
+    if (restored) {
+      _profile_repair_required = false;
+      endReconfigure(resume_rx);
+    }
+    if (!restored || (resume_rx && !isInRecvMode()))
+      _profile_refresh_required = _profile_repair_required = true;
 
     if (!restored) {
       MESH_DEBUG_PRINTLN("RadioLibWrapper: failed to restore radio parameters after apply failure");
@@ -518,7 +543,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   if (profile > 1 || (profile == 1 && !_profiles.enabled())) return mesh::RadioParamApplyResult::FAILED;
   const auto& p = _profiles.params(profile);
   const uint16_t preamble = profilePreamble(profile);
-  if (!_profile_refresh_required && _active_profile == profile && _profile_generation == _profiles.generation[profile]
+  if (!_profile_refresh_required && !_profile_repair_required && _active_profile == profile && _profile_generation == _profiles.generation[profile]
       && _physical_preamble == preamble) return mesh::RadioParamApplyResult::APPLIED;
   if (!validateProfile(p)) return mesh::RadioParamApplyResult::FAILED;
   const bool dual_profile = _profiles.enabled();
@@ -526,8 +551,8 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   beginProfileRetune(isInRecvMode() && !_rx_ps_armed && !_rx_ps_enabled);
   const uint8_t resume = beginReconfigure();
   if (resume > 1) {
-    endProfileRetune(true);  // guard deferred before changing hardware
-    return mesh::RadioParamApplyResult::BUSY;
+    endProfileRetune(resume == 2);  // Only a BUSY guard deferred before changing hardware.
+    return resume == 2 ? mesh::RadioParamApplyResult::BUSY : mesh::RadioParamApplyResult::FAILED;
   }
   const float old_freq = _cur_freq, old_bw = _cur_bw;
   const uint8_t old_sf = _cur_sf, old_cr = _cur_cr, old_profile = _active_profile;
@@ -553,6 +578,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
     _active_profile = profile;
     _profile_generation = _profiles.generation[profile];
     _profile_refresh_required = false;
+    _profile_repair_required = false;
     endReconfigure(resume);
     applied = !resume || isInRecvMode();
   }
@@ -579,8 +605,12 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
     restored = restored && applyProtocol(old_protocol);
 #endif
     if (!restored) restored = restoreAfterDeepInit();
-    if (restored) endReconfigure(resume);
-    if (!restored || (resume && !isInRecvMode())) _profile_refresh_required = true;
+    if (restored) {
+      _profile_repair_required = false;
+      endReconfigure(resume);
+    }
+    if (!restored || (resume && !isInRecvMode()))
+      _profile_refresh_required = _profile_repair_required = true;
   }
   _profile_visit_stamp = profileTimestamp(dual_profile);
   // A profile retune re-enters RX on a different tuple. Do not read its
@@ -669,7 +699,7 @@ void RadioLibWrapper::cacheBeaconRestoreParams() {
 mesh::RadioParamApplyResult RadioLibWrapper::prepareBeaconTransmit(
     const mesh::RadioProfileParams& p, int8_t power) {
   using Result = mesh::RadioParamApplyResult;
-  if (_beacon_owned || _cw_active) return Result::BUSY;
+  if (_beacon_owned || _cw_active || _profile_repair_required) return Result::BUSY;
 #if defined(MESH_HIL_TX_FREQ_MHZ)
   _hil_beacon_tx_frequency_mhz = 0;
   if (!mesh::hilTransmitFrequencyAllowed(p.freq)) return Result::FAILED;
@@ -753,6 +783,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::restoreBeaconReceive() {
   }
   claimRadioInterrupt();
   if (restored) {
+    _profile_repair_required = false; // Full normal tuple/protocol/power/IRQ restore succeeded.
     state = STATE_IDLE;
     startRecv();
     restored = isInRecvMode();
@@ -2035,7 +2066,7 @@ void RadioLibWrapper::startRecv() {
 #if MESH_ENABLE_TX_BEACONS
   if (_beacon_owned && !_beacon_restoring) return;
 #endif
-  if (_cw_active) return;
+  if (_cw_active || _profile_repair_required) return;
   int err = startReceiveMode();
   if (err == RADIOLIB_ERR_NONE) {
     // A very short frame may complete while startReceiveMode() returns.
@@ -2190,7 +2221,7 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
 #if MESH_ENABLE_TX_BEACONS
   if (_beacon_owned) return 0;
 #endif
-  if (_cw_active || state == STATE_TX_WAIT) return 0;
+  if (_cw_active || state == STATE_TX_WAIT || _profile_repair_required) return 0;
   int len = 0;
   #if defined(USE_LR2021)
   bool receiver_stopped = false;

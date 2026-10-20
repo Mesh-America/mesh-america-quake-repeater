@@ -65,6 +65,7 @@ struct RadioLibWrapper {
   bool hasPendingRadioInterrupt() const { return events.pending(); }
   bool claimRadioInterrupt() { return events.claim(); }
   bool _cw_active = false;
+  bool _profile_repair_required = false;
   bool serviceCarrierWave() { return false; } // dedicated CW harness owns this path
   mesh::RadioProfiles _profiles;
   uint32_t _profile_visit_stamp = 0;

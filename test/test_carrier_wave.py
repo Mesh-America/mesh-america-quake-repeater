@@ -117,6 +117,7 @@ struct RadioLibWrapper : mesh::Radio {
   uint8_t state = STATE_RX;
   RadioInterruptEvents events;
   bool hasPendingRadioInterrupt() const { return events.pending(); }
+  bool claimRadioInterrupt() { return events.claim(); }
   unsigned register_failures=0;
   bool registerInterruptAction() {
     if (register_failures) { --register_failures; return false; }
@@ -148,7 +149,7 @@ struct RadioLibWrapper : mesh::Radio {
     if (rx_gain_apply_ok) physical_rx_gain=enabled;
     return rx_gain_apply_ok;
   }
-  bool _nf_calib_active=true, _profile_refresh_required=false;
+  bool _nf_calib_active=true, _profile_refresh_required=false, _profile_repair_required=false;
   unsigned long _wd_observe_until=0;
   bool packet=false, busy=false, reset_ok=false, supported=true, deep_supported=true;
   unsigned rtc_stops=0, tunes=0, rx_starts=0, calibrations=0, resets=0;
@@ -270,7 +271,7 @@ int main() {
     assert(w.setCarrierWave(profile,1250)==Result::APPLIED);
     assert(w.frequency==(profile ? 911.5f : 909.5f));
     assert(w.chip.carrier && !w.chip.callback && w.board.before==1 && w.board.awake);
-    assert(w.rtc_stops==1 && !w._rx_ps_armed && !w._nf_calib_active);
+    assert(w.chip.standby_calls==2 && !w._rx_ps_armed && !w._nf_calib_active);
     assert(w.beginReconfigure()==2);
     advance(1249); assert(w.serviceCarrierWave() && w.chip.carrier);
     advance(1); assert(w.serviceCarrierWave() && !w.chip.carrier);

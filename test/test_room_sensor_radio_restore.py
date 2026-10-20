@@ -45,6 +45,8 @@ struct Driver {
   uint8_t state = STATE_IDLE;
   bool receiving = false, pending_irq = false, busy = false, supported = true;
   bool _rx_ps_armed = false, _cw_active = false;
+  bool _profile_repair_required = false, _profile_refresh_required = false;
+  bool _rx_hold_continuous = false;
   bool _dbm_valid = true, _rx_boosted_gain_valid = false;
   int8_t _cur_dbm = 7;
   bool _cur_rx_boosted_gain = false;
@@ -53,6 +55,7 @@ struct Driver {
   std::deque<bool> gain_results;
   Chip* _radio = &chip;
   bool hasPendingRadioInterrupt() { return pending_irq; }
+  bool claimRadioInterrupt() { const bool pending = pending_irq; pending_irq = false; return pending; }
   bool isChipBusy() { return busy; }
   bool isReceivingPacket() { return receiving; }
   void stopReceiveDutyCycle() { _rx_ps_armed = false; }

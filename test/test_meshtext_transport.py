@@ -315,6 +315,7 @@ struct CustomSX1262: SX1262 {
 };
 struct RadioLibWrapper {
   CustomSX1262 chip;CustomSX1262* _radio=&chip;
+  bool _profile_repair_required=false;
   bool supported=true;
   bool supportsMeshtext() const { return supported; }
   bool _rx_ps_armed=true,_params_valid=true,_dbm_valid=false,_rx_boosted_gain_valid=false;

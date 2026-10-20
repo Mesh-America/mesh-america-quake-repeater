@@ -114,6 +114,9 @@ protected:
   bool _profile_rxps_suspended = false;
   bool _profile_saved_rxps = false;
   bool _profile_refresh_required = false;
+  // A failed parameter transaction left the physical tuple untrusted. Unlike
+  // an ordinary refresh, its FIFO and activity flags cannot identify a packet.
+  bool _profile_repair_required = false;
 #if defined(NRF52_PLATFORM)
   // Published by the scanner before the final sleep predicates. The late
   // query uses integers only: floating-point work can leave a stale FPU event.

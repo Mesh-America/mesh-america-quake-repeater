@@ -75,7 +75,7 @@ struct RadioLibWrapper {
     uint32_t _beacon_restore_at = 0, _beacon_cad_timeout = 0;
     uint8_t state = STATE_RX, _active_profile = 0;
     uint32_t _profile_generation = 1, _profile_visit_stamp = 0;
-    bool _profile_refresh_required = false;
+    bool _profile_refresh_required = false, _profile_repair_required = false;
     uint16_t _physical_preamble = 32;
     mesh::RadioProfileProtocol _physical_protocol = mesh::RadioProfileProtocol::MeshCore;
     float _cur_freq = 906, _cur_bw = 62.5;
@@ -219,27 +219,54 @@ int main() {
         assert(w.recalibrations == 0 && w.deep_calls == 0);
         ++cases;
     }
-    for (unsigned reason = 0; reason < 5; ++reason) {
+    for (unsigned reason = 0; reason < 6; ++reason) {
         RadioLibWrapper w;
         if (reason == 0) w.pending = true;
         if (reason == 1) w.packet = true;
         if (reason == 2) w.busy = true;
         if (reason == 3) w._cw_active = true;
         if (reason == 4) w.calibrating = true;
+        if (reason == 5) w._profile_repair_required = true;
         assert(w.prepareBeaconTransmit(beacon(), 10) == Result::BUSY);
         assert(!w._beacon_owned && w.applications == 0 && w.power_sets == 0);
         ++cases;
     }
-    for (unsigned failure = 0; failure < 4; ++failure) {
+    for (unsigned failure = 0; failure < 3; ++failure) {
         RadioLibWrapper w;
         if (failure == 0) w.modem.param_fail = true;
         if (failure == 1) w.protocol_fail = true;
         if (failure == 2) w.power_fail = true;
-        if (failure == 3) w.modem.standby_fail = true;
         assert(w.prepareBeaconTransmit(beacon(true), 10) == Result::FAILED && w._beacon_owned);
         w.repair_on_deep = true;
         assert(w.restoreBeaconReceive() == Result::APPLIED && !w._beacon_owned);
         assert(w.modem.freq == 906 && w.modem.protocol == mesh::RadioProfileProtocol::MeshCore && w.modem.power == 20);
+        ++cases;
+    }
+    {
+        RadioLibWrapper w;
+        w.modem.standby_fail = true;
+        assert(w.prepareBeaconTransmit(beacon(true), 10) == Result::BUSY);
+        // Refused initial standby never admits a beacon lease or mutates PA/params.
+        assert(!w._beacon_owned && w._profile_repair_required && w.state == STATE_IDLE);
+        assert(w.applications == 0 && w.power_sets == 0 && w.protocols == 0);
+        assert(w.modem.standbys == 1 && !w.board.before && !w.arms);
+        w.startRecv();
+        assert(w.arms == 0 && w.state == STATE_IDLE);
+        assert(w.prepareBeaconTransmit(beacon(), 10) == Result::BUSY && w.modem.standbys == 1);
+        w.repair_on_deep = true;
+        assert(w.restoreAfterDeepInit() && !w._profile_repair_required);
+        assert(w.prepareBeaconTransmit(beacon(true), 10) == Result::APPLIED && w._beacon_owned);
+        assert(w.restoreBeaconReceive() == Result::APPLIED && !w._beacon_owned);
+        ++cases;
+    }
+    {
+        RadioLibWrapper w;
+        assert(w.prepareBeaconTransmit(beacon(true), 10) == Result::APPLIED);
+        w._profile_repair_required = true;
+        w.deep_ok = false; // A skipped first RX arm cannot be hidden by deep recovery.
+        assert(w.restoreBeaconReceive() == Result::APPLIED && !w._beacon_owned);
+        assert(!w._profile_repair_required && w.state == STATE_RX && w.arms == 1);
+        assert(w.deep_calls == 0);
         ++cases;
     }
     for (unsigned changed = 0; changed < 2; ++changed) {
@@ -386,6 +413,10 @@ class BeaconRadioTest(unittest.TestCase):
     def test_ownership_and_snapshot_negative_controls(self):
         source = self.source()
         mutations = [
+            ("if (_beacon_owned || _cw_active || _profile_repair_required) return Result::BUSY;",
+             "if (_beacon_owned || _cw_active) return Result::BUSY;"),
+            ("_profile_repair_required = false; // Full normal tuple/protocol/power/IRQ restore succeeded.",
+             "/* omit repair retirement before ordinary RX */"),
             ("if (_beacon_owned && !_beacon_restoring) return 2;", "/* remove ownership guard */"),
             ("if (_beacon_owned && !_beacon_restoring) return;", "/* permit RX on beacon tuple */"),
             ("bool applied = _radio->standby() == RADIOLIB_ERR_NONE",
