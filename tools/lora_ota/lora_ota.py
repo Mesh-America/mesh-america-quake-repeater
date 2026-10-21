@@ -157,6 +157,9 @@ LEGACY_OTA_CACHE_ROUNDS = 2
 LEGACY_RELAY_REBOOT_MIN_REMAINING_SECONDS = 8 * 60
 TARGET_RXPS_RECOVERY_FILE = "target-rxps-settings.json"
 SOURCE_RXPS_RECOVERY_FILE = "source-rxps-settings.json"
+TARGET_TEMP_RECOVERY_FILE = "target-tempradio-cleanup.json"
+RELAY_TEMP_RECOVERY_PREFIX = "relay-tempradio-cleanup-"
+TARGET_TEMP_NORMAL_PROOF_SECONDS = 90
 MIN_MESHCLI_VERSION = (1, 6, 0)
 # Tested format-3 inspect/verify/serve support. Keep automatic repairs pinned;
 # neither a package nor a moving branch may choose code to install on the host.
@@ -7706,112 +7709,289 @@ def request_install(
 
 
 def shorten_relay_temp_windows(
-    controller: Controller,
-    args: argparse.Namespace,
+    controller: Controller, args: argparse.Namespace,
     relay_values: list[tuple[str, str]] | None = None,
     expected_public_keys: dict[str, str] | None = None,
-) -> None:
+    *, cleanup_states: dict[str, RelayTempCleanup] | None = None,
+) -> bool:
+    """Send each relative setter once; ACKs alone never establish normal return.
+
+    Production passes durable per-participant ownership. Standalone callers
+    receive only the aggregate acknowledgement result, never a return proof.
+    """
     values = args.relay_values if relay_values is None else relay_values
-    if not values:
-        return
-    command = temp_radio_command_for_minutes(args, TEMP_RADIO_RETURN_MINUTES)
-    print(
-        f"[relays] scheduling return to the normal channel in "
-        f"{TEMP_RADIO_RETURN_MINUTES} minute"
-    )
-    errors: list[str] = []
-    interrupted: KeyboardInterrupt | None = None
-    for relay_name, relay_password in values:
+    if cleanup_states is not None:
+        for key, _ in values:
+            state = cleanup_states.get(key)
+            if (state is None or (expected_public_keys is not None
+                    and expected_public_keys.get(key) != state.key)):
+                raise OtaError("relay cleanup is missing bound durable ownership")
+    errors = []
+    interrupted = None
+    acknowledged = True
+    for key, password in values:
         try:
-            try:
-                reply = controller.remote_command(
-                    relay_name,
-                    command,
-                    password=relay_password,
-                    retry=False,
-                )
-            except TransmissionError as exc:
-                # Never replay a relative lease. Prove which authenticated
-                # relay remained reachable on this tuple; its original window
-                # is still bounded if the one-minute write did not arrive.
-                actual_key = read_remote_public_key_bounded(
-                    controller,
-                    relay_name,
-                    password=relay_password,
-                )
-                expected_key = (
-                    expected_public_keys.get(relay_name)
-                    if expected_public_keys is not None
-                    else None
-                )
-                if expected_key is not None and actual_key != expected_key:
-                    raise OtaError(
-                        f"identity changed after lost cleanup reply: expected "
-                        f"{expected_key}, got {actual_key}"
-                    )
-                print(
-                    f"[relays] {relay_name} one-minute TempRadio reply was "
-                    f"lost ({exc}); exact identity reconciled the one-shot "
-                    "request, and its original lease remains bounded"
-                )
+            if cleanup_states is None:
+                ack = shorten_remote_temp_window(controller, args, key,
+                                                 password=password, label="relay")
             else:
-                require_temp_radio_reply(
-                    relay_name, reply, TEMP_RADIO_RETURN_MINUTES
-                )
+                state = cleanup_states[key]
+                state.shorten_once(controller, args)
+                ack = state.report["shorten_acknowledged"]
+            acknowledged = acknowledged and ack
         except KeyboardInterrupt as exc:
-            # Continue through the remaining independently owned relays. The
-            # interrupt is re-raised only after each has received one attempt.
-            if interrupted is None:
-                interrupted = exc
-            errors.append(f"{relay_name}: interrupted")
+            interrupted = interrupted or exc
+            errors.append(f"{key}: interrupted")
         except (OtaError, OSError) as exc:
-            errors.append(f"{relay_name}: {exc}")
+            errors.append(f"{key}: " + redact_text(str(exc), (password,)))
+    if interrupted is not None:
+        raise interrupted
     if errors:
-        detail = "; ".join(errors)
-        if interrupted is not None:
-            print(
-                "WARNING: relay cleanup continued after interruption: "
-                + detail,
-                file=sys.stderr,
-            )
-            raise interrupted
-        raise OtaError("could not shorten every relay TempRadio lease: " + detail)
+        raise OtaError("could not shorten every relay TempRadio lease: " + "; ".join(errors))
+    return acknowledged
 
 
-def shorten_target_temp_window(
-    controller: Controller,
-    args: argparse.Namespace,
-) -> None:
+def shorten_remote_temp_window(
+    controller: Controller, args: argparse.Namespace, key: str,
+    *, password: str | None = None, label: str = "destination",
+) -> bool:
+    """Attempt one relative shortening; return whether its ACK was proven.
+
+    Reachability on the temporary tuple cannot prove that a lost setter was
+    delivered. The caller retains a separate normal-return obligation either
+    way, and must not replay this duration after a missing acknowledgement.
+    """
     command = temp_radio_command_for_minutes(args, TEMP_RADIO_RETURN_MINUTES)
     print(
-        f"[destination] scheduling return to the normal channel in "
+        f"[{label}] scheduling return to the normal channel in "
         f"{TEMP_RADIO_RETURN_MINUTES} minute"
     )
     try:
-        reply = controller.remote_command(
-            args.target, command, retry=False
-        )
+        options = {"password": password} if password is not None else {}
+        reply = controller.remote_command(key, command, retry=False, **options)
     except TransmissionError as exc:
-        identity = retry_transmission_bounded(
-            lambda: controller.remote_command(
-                args.target, "ota self", retry=False
-            ),
-            f"cleanup identity reconciliation for {args.target}",
-        )
-        if re.search(r"\bbase_hash=[0-9A-Fa-f]{16}\b", identity) is None:
-            raise OtaError(
-                "destination replied after a lost cleanup request but did not "
-                "return a valid running EndF identity"
-            )
         print(
-            "[destination] one-minute TempRadio reply was lost "
-            f"({exc}); exact identity reconciled the one-shot request, and the "
-            "original lease remains bounded"
+            f"WARNING: {label} one-minute TempRadio acknowledgement was "
+            f"lost ({redact_text(str(exc), (password,) if password else ())}); shortening is unconfirmed and was not replayed. "
+            "The original long lease may remain active; exact normal-channel "
+            "identity and inactive TempRadio must still be proven.",
+            file=sys.stderr,
         )
-        return
-    require_temp_radio_reply(
-        args.target, reply, TEMP_RADIO_RETURN_MINUTES
-    )
+        return False
+    require_temp_radio_reply(key, reply, TEMP_RADIO_RETURN_MINUTES)
+    return True
+
+
+class RemoteTempCleanup:
+    """One bound participant's durable return obligation and bounded read proof."""
+
+    def __init__(self, path: Path, args: argparse.Namespace, normal_radio: RadioSettings,
+                 key: str, role: str, password: str | None = None):
+        if path.exists() or path.is_symlink():
+            raise OtaError("existing TempRadio recovery obligation must not be overwritten: " + str(path))
+        self.path = path
+        self.normal_radio = normal_radio
+        self.key, self.role, self.password = key, role, password
+        self.sensitive_values = tuple(value for value in (password, getattr(args, "password", None)) if value)
+        self.report: dict = {
+            "schema": 1,
+            "target": key,
+            "role": role,
+            "normal_source_radio": normal_radio.meshcli_value(),
+            "temporary_radio": args.temp_radio,
+            "cleanup_required": True,
+            "shorten_attempted": False,
+            "shorten_acknowledged": False,
+            "normal_proof_attempted": False,
+            "normal_return_verified": False,
+            "proof_records": [],
+        }
+        self.persist()
+
+    def redact_error(self, exc: BaseException) -> str:
+        return redact_text(str(exc), self.sensitive_values)
+
+    def _shorten(self, controller: Controller, args: argparse.Namespace) -> bool:
+        raise NotImplementedError
+
+    def persist(self) -> None:
+        write_private_recovery_file(
+            self.path, json.dumps(self.report, indent=2, sort_keys=True) + "\n"
+        )
+
+    def require_binding(self, args: argparse.Namespace) -> None:
+        expected = self.report["target"]
+        bound = (args.target == expected if self.role == "destination" else
+                 any(key == expected for key, _ in args.relay_values))
+        if (not re.fullmatch(r"[0-9A-Fa-f]{64}", expected)
+                or self.key != expected or not bound):
+            raise OtaError("normal-return proof requires the unchanged full participant key")
+
+    def shorten_once(self, controller: Controller, args: argparse.Namespace) -> None:
+        if self.report["shorten_attempted"]:
+            return
+        self.require_binding(args)
+        self.report["shorten_attempted"] = True
+        self.persist()
+        try:
+            self.report["shorten_acknowledged"] = (
+                self._shorten(controller, args) is True
+            )
+        except BaseException as exc:
+            self.report["shorten_error"] = self.redact_error(exc)
+            raise
+        finally:
+            self.persist()
+
+    def prove_normal(self, controller: Controller, args: argparse.Namespace) -> None:
+        if not self.report["cleanup_required"]:
+            return
+        if self.report["normal_proof_attempted"]:
+            raise OtaError(f"{self.role} normal return remains unproven; inspect " + str(self.path))
+        self.require_binding(args)
+        expected = self.key
+        self.report["normal_proof_attempted"] = True
+        self.persist()
+        deadline = time.monotonic() + TARGET_TEMP_NORMAL_PROOF_SECONDS
+
+        def read(command: str) -> str:
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                raise TransmissionError(f"{self.role} normal-return proof deadline expired")
+            record = {"command": command, "started_at": time.monotonic(),
+                      "operation_timeout": min(30.0, remaining)}
+            self.report["proof_records"].append(record)
+            self.persist()
+            try:
+                reply = controller.remote_command(
+                    expected, command, retry=False,
+                    **({"password": self.password} if self.password is not None else {}),
+                    reply_timeout=min(20, int(remaining)),
+                    operation_timeout=record["operation_timeout"],
+                )
+                record["reply"] = redact_text(reply, self.sensitive_values)
+                return reply
+            except BaseException as exc:
+                record["error"] = self.redact_error(exc)
+                raise
+            finally:
+                self.persist()
+
+        def proof() -> None:
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                raise TransmissionError(f"{self.role} normal-return proof deadline expired")
+            if getattr(args, "source_shares_controller", False):
+                # Binary GET_RADIO reports saved preferences on a Full
+                # Companion, even while its live TempRadio override is active.
+                record = {"command": "shared source tempradio", "started_at": time.monotonic()}
+                self.report["proof_records"].append(record)
+                self.persist()
+                try:
+                    source_status = read_source_temp_radio_status(args, deadline=deadline)
+                    record["state"] = source_status[0] if source_status is not None else "unsupported"
+                except BaseException as exc:
+                    record["error"] = self.redact_error(exc)
+                    raise
+                finally:
+                    self.persist()
+                if source_status is None:
+                    raise OtaError("shared controller live TempRadio state is unavailable")
+                if source_status[0] != "inactive":
+                    raise TransmissionError("shared controller live TempRadio remains active; saved normal settings are insufficient")
+                remaining = deadline - time.monotonic()
+                if remaining < 1:
+                    raise TransmissionError("shared controller normal-return proof deadline expired")
+            require_radio_settings(
+                controller.get_radio(timeout=min(30.0, remaining)),
+                self.normal_radio, f"{self.role} cleanup normal controller",
+            )
+            public = parse_cli_public_key(read("get public.key"), f"{self.role} cleanup")
+            if public.lower() != expected.lower():
+                raise OtaError(f"{self.role} normal-return full public key changed")
+            status = read("get tempradio").strip()
+            status = status[1:].strip() if status.startswith(">") else status
+            if status == "off":
+                return
+            parts = status.split(",")
+            try:
+                active = (len(parts) == 5
+                          and all(math.isfinite(float(x)) for x in parts)
+                          and 150 <= float(parts[0]) <= 2500
+                          and float(parts[1]) > 0
+                          and 5 <= int(parts[2]) <= 12
+                          and 5 <= int(parts[3]) <= 8
+                          and 1 <= int(parts[4]) <= 65535)
+            except ValueError:
+                active = False
+            if not active:
+                raise OtaError(f"{self.role} returned malformed TempRadio state during cleanup")
+            raise TransmissionError(f"{self.role} still reports active TempRadio; normal return is unproven")
+
+        try:
+            # A confirmed one-minute lease can remain active during the first
+            # checks. Poll only replay-safe reads within one absolute bound.
+            retry_transmission_before_deadline(
+                proof, f"{self.role} normal-return proof", deadline,
+                retry_limit=12, deadline_label=f"90-second {self.role} cleanup window",
+            )
+        except BaseException as exc:
+            self.report["normal_proof_error"] = self.redact_error(exc)
+            raise
+        else:
+            self.report.update(cleanup_required=False, normal_return_verified=True)
+            print(f"[{self.role}] exact full identity and inactive TempRadio verified on the normal channel")
+        finally:
+            self.persist()
+
+
+class TargetTempCleanup(RemoteTempCleanup):
+    def __init__(self, work_dir: Path, args: argparse.Namespace, normal_radio: RadioSettings,
+                 password: str | None = None):
+        super().__init__(work_dir / TARGET_TEMP_RECOVERY_FILE, args, normal_radio,
+                         args.target, "destination", password)
+
+    def _shorten(self, controller: Controller, args: argparse.Namespace) -> bool:
+        return shorten_target_temp_window(controller, args, password=self.password)
+
+
+class RelayTempCleanup(RemoteTempCleanup):
+    def __init__(self, work_dir: Path, args: argparse.Namespace, normal_radio: RadioSettings,
+                 key: str, password: str, expected_key: str):
+        if (not re.fullmatch(r"[0-9A-Fa-f]{64}", key)
+                or key != expected_key or not any(k == key for k, _ in args.relay_values)):
+            raise OtaError("relay cleanup requires its unchanged bound full public key")
+        super().__init__(work_dir / f"{RELAY_TEMP_RECOVERY_PREFIX}{key}.json", args,
+                         normal_radio, key, "relay", password)
+
+    def _shorten(self, controller: Controller, args: argparse.Namespace) -> bool:
+        return shorten_remote_temp_window(controller, args, self.key,
+                                          password=self.password, label="relay")
+
+
+def shorten_target_temp_window(controller: Controller, args: argparse.Namespace,
+                              *, password: str | None = None) -> bool:
+    return shorten_remote_temp_window(controller, args, args.target, password=password)
+
+
+def prove_owned_temp_cleanups(controller: Controller, args: argparse.Namespace,
+                             target: TargetTempCleanup | None,
+                             relays: dict[str, RelayTempCleanup]) -> None:
+    """Attempt each independent normal-return proof even if another fails."""
+    errors = []
+    interrupted = None
+    for state in ([target] if target is not None else []) + list(relays.values()):
+        try:
+            state.prove_normal(controller, args)
+        except KeyboardInterrupt as exc:
+            interrupted = interrupted or exc
+            errors.append(f"{state.role}: interrupted; recovery {state.path}")
+        except (OtaError, OSError) as exc:
+            errors.append(f"{state.role}: {state.redact_error(exc)}; recovery {state.path}")
+    if interrupted is not None:
+        raise interrupted
+    if errors:
+        raise OtaError("normal return remains unproven: " + "; ".join(errors))
 
 
 def shorten_source_temp_window(
@@ -9234,6 +9414,8 @@ def main(
     source_rxps_changed = False
     source_rxps_recovery_path: Path | None = None
     target_temp_owned = False
+    target_temp_cleanup: TargetTempCleanup | None = None
+    relay_temp_cleanups: dict[str, RelayTempCleanup] = {}
     target_rxps_saved: RxpsSettings | None = None
     target_rxps_changed = False
     armed_relay_values: list[tuple[str, str]] = []
@@ -9599,6 +9781,14 @@ def main(
             print(f"[legacy] relay reboot fallback eligible: "
                   f"{args.relay_reboot_normal_hops} normal-channel hops")
 
+        target_temp_cleanup = TargetTempCleanup(work_dir, args, original_radio, password=password)
+        for relay_key, relay_password in args.relay_values:
+            if relay_key in relay_temp_cleanups:
+                raise OtaError("duplicate bound relay cleanup identity")
+            relay_temp_cleanups[relay_key] = RelayTempCleanup(
+                work_dir, args, original_radio, relay_key, relay_password,
+                relay_public_keys[relay_key],
+            )
         target_temp_armed_at = time.monotonic()
         target_temp_owned = True
         if args.source_shares_controller:
@@ -9728,11 +9918,11 @@ def main(
                     "--leave-controller-radio was requested"
                 )
             else:
-                # Retire one-shot ownership before the write. If its reply is
-                # lost, reconciliation is read-only and outer cleanup must not
-                # send the relative duration a second time.
-                target_temp_owned = False
-                shorten_target_temp_window(controller, args)
+                # One-shot write ownership and the outstanding normal-return
+                # obligation are separate. A missing ACK cannot retire either
+                # the durable target recovery record or the return proof.
+                assert target_temp_cleanup is not None
+                target_temp_cleanup.shorten_once(controller, args)
                 relays_to_shorten = list(armed_relay_values)
                 armed_relay_values.clear()
                 shorten_relay_temp_windows(
@@ -9740,6 +9930,7 @@ def main(
                     args,
                     relays_to_shorten,
                     relay_public_keys,
+                    cleanup_states=relay_temp_cleanups,
                 )
             if target_rxps_changed and target_rxps_saved is not None:
                 if args.leave_controller_radio:
@@ -9770,6 +9961,10 @@ def main(
                 controller_changed = False
             restore_source_rxps_once("stage-only cleanup")
             retire_local_source_rxps_recovery()
+            if not args.leave_controller_radio:
+                assert target_temp_cleanup is not None
+                prove_owned_temp_cleanups(controller, args, target_temp_cleanup, relay_temp_cleanups)
+                target_temp_owned = False
             return 0
 
         install_confirmed = request_install(controller, args, package)
@@ -9796,6 +9991,7 @@ def main(
             args,
             relays_to_shorten,
             relay_public_keys,
+            cleanup_states=relay_temp_cleanups,
         )
 
         # Seeding already stopped before policy restoration and installation.
@@ -9829,6 +10025,9 @@ def main(
                 target.base_hash,
                 identity_reply,
             )
+            if args.leave_controller_radio:
+                assert target_temp_cleanup is not None
+                prove_owned_temp_cleanups(controller, args, target_temp_cleanup, relay_temp_cleanups)
             if target_rxps_changed and target_rxps_saved is not None:
                 restore_remote_rxps(
                     controller, args.target, target_rxps_saved
@@ -9842,6 +10041,9 @@ def main(
                 controller_changed = True
         restore_source_rxps_once("successful update cleanup")
         retire_local_source_rxps_recovery()
+        if not args.leave_controller_radio:
+            assert target_temp_cleanup is not None
+            prove_owned_temp_cleanups(controller, args, target_temp_cleanup, relay_temp_cleanups)
         return 0
     except KeyboardInterrupt:
         print("\nInterrupted; any partial target download remains resumable.", file=sys.stderr)
@@ -9858,7 +10060,8 @@ def main(
             if seeder_attempted and args.source_serial:
                 source_cli_command(args, "ota folder off", check=False)
             needs_remote_cleanup = (
-                target_temp_owned
+                (target_temp_owned and target_temp_cleanup is not None
+                 and not target_temp_cleanup.report["shorten_attempted"])
                 or bool(armed_relay_values)
                 or bool(relay_timing_settings)
             )
@@ -9901,12 +10104,11 @@ def main(
                                 file=sys.stderr,
                             )
                     if target_temp_owned and not args.leave_controller_radio:
-                        # This relative cleanup write is one-shot even when its
-                        # acknowledgement is lost; retire ownership first so a
-                        # later finally path cannot extend it again.
-                        target_temp_owned = False
+                        # Persist the one-shot attempt before sending without
+                        # dropping the independent target return obligation.
+                        assert target_temp_cleanup is not None
                         try:
-                            shorten_target_temp_window(controller, args)
+                            target_temp_cleanup.shorten_once(controller, args)
                         except (OtaError, OSError) as exc:
                             print(
                                 "WARNING: could not shorten the destination "
@@ -9925,6 +10127,7 @@ def main(
                                 args,
                                 relays_to_shorten,
                                 relay_public_keys,
+                                cleanup_states=relay_temp_cleanups,
                             )
                         except (OtaError, OSError) as exc:
                             print(
@@ -10022,6 +10225,21 @@ def main(
                         "after checking the current policy and radio channel",
                         file=sys.stderr,
                     )
+            pending_temp = ([target_temp_cleanup] if target_temp_cleanup is not None else []) + list(relay_temp_cleanups.values())
+            if any(state.report["cleanup_required"] for state in pending_temp) and not args.leave_controller_radio:
+                if controller is not None and not controller_changed and not source_temp_owned:
+                    try:
+                        prove_owned_temp_cleanups(controller, args, target_temp_cleanup, relay_temp_cleanups)
+                        target_temp_owned = False
+                    except (OtaError, OSError) as exc:
+                        print(f"CRITICAL: participant normal return is unproven: {exc}", file=sys.stderr)
+                for state in pending_temp:
+                    if state.report["cleanup_required"]:
+                        print(
+                            f"CRITICAL: restoring the controller does not prove the {state.role} returned. "
+                            "Its original long TempRadio lease may remain active; no relative cleanup setter was replayed. "
+                            f"Retained recovery obligation: {state.path}", file=sys.stderr,
+                        )
             if not source_rxps_changed:
                 try:
                     retire_local_source_rxps_recovery()

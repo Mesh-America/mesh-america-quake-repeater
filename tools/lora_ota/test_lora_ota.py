@@ -6543,7 +6543,7 @@ class ReliabilityTests(unittest.TestCase):
             [("offline", False), ("online", False)],
         )
 
-    def test_lost_relay_cleanup_reconciles_identity_without_replay(self) -> None:
+    def test_lost_relay_cleanup_does_not_claim_return_from_temporary_identity(self) -> None:
         key = "AB" * 32
 
         class Controller:
@@ -6565,11 +6565,10 @@ class ReliabilityTests(unittest.TestCase):
             relay_values=[("relay", "secret")],
             temp_values=(909.95, 250.0, 5, 5, 120),
         )
-        ota.shorten_relay_temp_windows(
-            controller,
-            args,
-            expected_public_keys={"relay": key.lower()},
+        acknowledged = ota.shorten_relay_temp_windows(
+            controller, args, expected_public_keys={"relay": key.lower()},
         )
+        self.assertFalse(acknowledged)
         relative_writes = [
             call for call in controller.calls if call[1].startswith("tempradio ")
         ]
@@ -6577,7 +6576,7 @@ class ReliabilityTests(unittest.TestCase):
             relative_writes,
             [("relay", "tempradio 909.95,250,5,5,1", False)],
         )
-        self.assertIn(("relay", "get public.key", False), controller.calls)
+        self.assertEqual(controller.calls, relative_writes)
 
     def test_managed_relay_timing_is_saved_guarded_and_restored(self) -> None:
         class Controller:

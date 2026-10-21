@@ -4,6 +4,7 @@ import argparse
 import contextlib
 from dataclasses import replace
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -328,10 +329,22 @@ class BootloaderStagingTests(unittest.TestCase):
             source_key: {"adv_name": "source", "public_key": source_key},
         }]
         normal = ota.RadioSettings(910.525, 62.5, 7, 5, False)
-        controller.get_radio.return_value = normal
+        current_radio = normal
+        cleanup_proof_radios = []
+
+        def set_radio(settings, _label):
+            nonlocal current_radio
+            current_radio = settings
+
+        controller.get_radio.side_effect = lambda **_kwargs: current_radio
+        controller.set_radio.side_effect = set_radio
 
         def remote_command(station, command, **_kwargs):
             self.assertEqual(station, destination_key)
+            if command in ("get public.key", "get tempradio"):
+                self.assertEqual(current_radio, normal)
+                cleanup_proof_radios.append(current_radio)
+                return f"> {destination_key}" if command == "get public.key" else "> off"
             replies = {
                 "ota status": "OTA | no download | target:1234ABCD",
                 "ota ls": "Updates 1",
@@ -356,7 +369,7 @@ class BootloaderStagingTests(unittest.TestCase):
                     "require_command", "require_meshcli_version", "require_bootloader_tool_support", "preflight_source_cli",
                     "ensure_source_clock_gate_safe", "ensure_controller_clock_safe",
                     "verify_with_motatool", "arm_target_temp_radio",
-                    "switch_controller_to_temp_radio", "source_cli_command",
+                    "source_cli_command",
                 ):
                     stack.enter_context(mock.patch.object(ota, name))
                 stack.enter_context(mock.patch.object(ota, "read_source_public_key_bounded", return_value=source_key))
@@ -387,8 +400,22 @@ class BootloaderStagingTests(unittest.TestCase):
             rehearsal.assert_called_once()
             seeder.start.assert_called_once()
             cleanup.assert_called_once()
-            controller.set_radio.assert_called_once_with(normal, "restore controller radio after staging")
+            temporary = ota.RadioSettings(*ota.parse_temp_radio(ota.DEFAULT_LAB_TEMP_RADIO)[:4], normal.repeat)
+            self.assertEqual(controller.set_radio.call_args_list, [
+                mock.call(temporary, "switch controller to TempRadio"),
+                mock.call(normal, "restore controller radio after staging"),
+            ])
+            saved_cleanup = json.loads((root / "work" / ota.TARGET_TEMP_RECOVERY_FILE).read_text())
+            self.assertEqual(saved_cleanup["target"], destination_key)
+            self.assertTrue(saved_cleanup["shorten_attempted"])
+            self.assertTrue(saved_cleanup["normal_return_verified"])
+            self.assertFalse(saved_cleanup["cleanup_required"])
+            self.assertEqual([item["command"] for item in saved_cleanup["proof_records"]],
+                             ["get public.key", "get tempradio"])
+            self.assertEqual(cleanup_proof_radios, [normal, normal])
             install.assert_not_called()
+            self.assertFalse(any("install" in call.args[1].split()
+                                 for call in controller.remote_command.call_args_list))
             self.assertIn(
                 mock.call(destination_key, f"ota pull {package.manifest_id} flash", retry=False),
                 controller.remote_command.call_args_list,
