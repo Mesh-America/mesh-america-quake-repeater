@@ -1,5 +1,6 @@
 
-using Workspace = SourceMerkleProof<4096, OTA_LEAVES_FRAG>;
+static constexpr uint32_t MaximumSourceBlocks = OTA_PROOFGEN_SCRATCH / 4;
+using Workspace = SourceMerkleProof<MaximumSourceBlocks, OTA_LEAVES_FRAG>;
 static_assert(sizeof(Workspace) <= 1536, "bounded allocation includes getter scratch");
 
 class LeafSource : public MotaSource {
@@ -49,6 +50,7 @@ static void grouped_equivalence() {
                          2047,2048,2049,4095,4096}) counts.push_back(count);
   size_t checked = 0;
   for (uint32_t count : counts) {
+    if (count > MaximumSourceBlocks) continue;
     LeafSource source(count);
     source.quantum = count <= 65 ? uint16_t(std::array<int, 5>{1,3,17,127,128}[count % 5]) : 127;
     Workspace workspace;
@@ -81,7 +83,8 @@ static void grouped_equivalence() {
       ++checked;
     }
   }
-  printf("PASS: byte-identical grouped proofs (%zu blocks, max4096; workspace=%zu)\n", checked, sizeof(Workspace));
+  printf("PASS: byte-identical grouped proofs (%zu blocks, max%u; workspace=%zu)\n",
+         checked, unsigned(MaximumSourceBlocks), sizeof(Workspace));
 }
 
 static void helper_faults() {
@@ -89,7 +92,7 @@ static void helper_faults() {
   Workspace workspace;
   assert(!workspace.bind(nullptr, 0, 17, 65, source.root));
   assert(!workspace.bind(&source, 0, 17, 0, source.root));
-  assert(!workspace.bind(&source, 0, 17, 4097, source.root));
+  assert(!workspace.bind(&source, 0, 17, MaximumSourceBlocks + 1, source.root));
   assert(!workspace.bind(&source, 0, UINT32_MAX, 65, source.root));
   assert(workspace.bind(&source, 0, 17, 65, source.root));
   assert(workspace.prepare() == Workspace::Step::Pending);
@@ -143,14 +146,14 @@ public:
 };
 
 static void manager_lifetimes() {
-  TrackedSource a(4096, 0x73), b(65, 0x56);
+  TrackedSource a(MaximumSourceBlocks, 0x73), b(65, 0x56);
   a.host_encoding = b.host_encoding = Source::HostEncoding::Good;
   a.fail_payload = true;
   Sent sent;
   {
     OtaManager manager; manager.begin(123, send, &sent);
     assert(manager.add_source(&a) && manager.add_source(&b));
-    assert(request(manager, a, 4095));
+    assert(request(manager, a, MaximumSourceBlocks - 1));
     assert(allocated == 0); // receiving a request never allocates a full leaf table
     sent.accept_data = sent.accept_proof = false;
     manager.serviceEgress(); // cache host-generated DATA
@@ -205,21 +208,21 @@ static void manager_lifetimes() {
     sent.accept_proof = true;
     manager.serviceEgress();
     assert(!manager.pendingServeJobs());
-    verify_v2(sent, a, 4095, true);
+    verify_v2(sent, a, MaximumSourceBlocks - 1, true);
     manager.set_clock(5000000); manager.loop();
     assert(allocated == 0); // idle timer releases the only workspace without an encoder scratch
     sent.accept_data = false;
-    assert(request(manager, a, 4095));
+    assert(request(manager, a, MaximumSourceBlocks - 1));
     fail_next = true;
     manager.serviceEgress(); manager.serviceEgress();
     assert(!manager.pendingServeJobs() && !fail_next && allocated == 0);
     a.fail_leaves = true;
-    assert(request(manager, a, 4095));
+    assert(request(manager, a, MaximumSourceBlocks - 1));
     manager.serviceEgress(); manager.serviceEgress();
     assert(!manager.pendingServeJobs());
     manager.clear_sources(); assert(allocated == 0);
     a.fail_leaves = false;
-    assert(manager.add_source(&a) && request(manager, a, 4095));
+    assert(manager.add_source(&a) && request(manager, a, MaximumSourceBlocks - 1));
     manager.serviceEgress(); manager.serviceEgress();
     assert(allocated == sizeof(Workspace));
     assert(manager.remove_source(&a)); assert(allocated == 0 && !manager.pendingServeJobs());

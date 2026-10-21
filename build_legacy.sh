@@ -2173,11 +2173,11 @@ is_rak_gps_retaining_ota_target() {
 
   if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ]; then
     case "$target_lc" in
-      rak_4631_*bridge_rs232_serial1*) return 1 ;;
+      rak_3401_*bridge_rs232_serial1*|rak_4631_*bridge_rs232_serial1*) return 1 ;;
       rak_3401_*|rak_4631_*) return 0 ;;
     esac
   fi
-  # Serial1 is the RAK12501 UART on RAK4631. The Serial1 RS-232 bridge owns
+  # Serial1 is the RAK12501 UART on RAK3401/RAK4631. The RS-232 bridge owns
   # that port instead, so its reduced profile intentionally uses the INA-only
   # recipe and must not promise or require the WisBlock GPS provider.
   case "$target_lc" in
@@ -4036,7 +4036,7 @@ apply_lora_ota_no_external_sensors_profile() {
   # costs less than 5 KiB and covers their most common external telemetry use.
   # The ordinary sibling remains fully sensor-enabled.
   # GPS availability follows the exact target recipe. In particular, the
-  # RAK4631 Serial1 RS-232 bridge intentionally omits GPS because both need the
+  # RAK3401/RAK4631 Serial1 RS-232 bridge omits GPS because both need the
   # same UART; other reduced RAK profiles below retain compatible GPS paths.
   if ! is_rak_i2c_voltage_monitor_ota_target "$env_name"; then
     omitted_sensor_flags+=" ${voltage_monitor_flags}"

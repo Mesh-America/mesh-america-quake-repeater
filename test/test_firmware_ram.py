@@ -667,7 +667,7 @@ int main() {
                 }, "board_companion_radio_full")
 
     def test_compact_tables_keep_capacity_and_reserve_active_ota_allocations(self):
-        for platform, leaf_limit in (("NRF52_PLATFORM", 4096), ("ESP32_PLATFORM", 1536),
+        for platform, leaf_limit in (("NRF52_PLATFORM", 1536), ("ESP32_PLATFORM", 1536),
                                      ("RP2040_PLATFORM", 4096), ("STM32_PLATFORM", 4096)):
             with self.subTest(platform=platform):
                 flags = {"ENABLE_OTA": 1, "MESH_CLIENT_REPEATER_ONLY": 1,
@@ -719,6 +719,30 @@ int main() {
                 for name, amount in legacy.items():
                     if name != "ota_generic_source_buffers":
                         self.assertEqual(selected[name], amount)
+
+    def test_nrf52_repeater_proofs_keep_sensor_profiles_limits_and_other_reserves(self):
+        for full_sensors in (False, True):
+            for store in ({}, {"OTA_RAK_AUTO_STORE": 1}, {"OTA_SD_STORE": 1}):
+                flags = {"ENABLE_OTA": 1, "MESH_CLIENT_REPEATER_ONLY": 1,
+                         "ENV_INCLUDE_BME680_BSEC": int(full_sensors), **store}
+                for scratch in (None, 4, 4096, 8192, 16383, 16384, 32768):
+                    if scratch is not None:
+                        flags["OTA_PROOFGEN_SCRATCH"] = scratch
+                    with self.subTest(full_sensors=full_sensors, store=store, scratch=scratch):
+                        legacy = ram.requirements("NRF52_PLATFORM", {
+                            **flags, "OTA_BOUNDED_SOURCE_PROOFS": 0}, "RAK_3401_repeater")
+                        selected = ram.requirements("NRF52_PLATFORM", flags, "RAK_3401_repeater")
+                        leaf_limit = scratch if scratch is not None else (8192 if "OTA_SD_STORE" in store else 4096)
+                        workspace = 1536 if 4 <= leaf_limit <= 16384 else leaf_limit
+                        self.assertEqual(selected["components"]["ota_generic_source_buffers"],
+                                         workspace + 2048 + 32)
+                        for name, amount in legacy["components"].items():
+                            if name != "ota_generic_source_buffers":
+                                self.assertEqual(selected["components"][name], amount)
+                        self.assertEqual(legacy["required_heap_bytes"] - selected["required_heap_bytes"],
+                                         leaf_limit - workspace)
+                        self.assertEqual(legacy["required_contiguous_bytes"],
+                                         selected["required_contiguous_bytes"])
 
     def test_combined_rak_oled_bound_does_not_change_other_display_budgets(self):
         defines = {

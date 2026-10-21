@@ -1,12 +1,12 @@
 #pragma once
 
-// Non-PSRAM Full Companions and qualified ESP32 repeaters retain the complete source
-// geometry without caching every Merkle leaf. An explicit 0 keeps the legacy
+// Non-PSRAM ESP32 Full Companions and qualified ESP32/nRF52 repeaters retain
+// the complete source geometry without caching every Merkle leaf. An explicit 0 keeps the legacy
 // cache for matched qualification builds.
 #ifndef OTA_BOUNDED_SOURCE_PROOFS
-#if defined(ESP32_PLATFORM) && \
-    ((defined(COMPANION_RADIO_FULL) && !defined(BOARD_HAS_PSRAM)) || \
-     (defined(MESH_CLIENT_REPEATER_ONLY) && MESH_CLIENT_REPEATER_ONLY)) && \
+#if ((defined(ESP32_PLATFORM) && defined(COMPANION_RADIO_FULL) && !defined(BOARD_HAS_PSRAM)) || \
+     ((defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)) && \
+      defined(MESH_CLIENT_REPEATER_ONLY) && MESH_CLIENT_REPEATER_ONLY)) && \
     (!defined(OTA_PROOFGEN_SCRATCH) || \
      (OTA_PROOFGEN_SCRATCH >= 4 && OTA_PROOFGEN_SCRATCH <= 16384))
 #define OTA_BOUNDED_SOURCE_PROOFS 1

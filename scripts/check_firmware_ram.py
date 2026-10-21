@@ -307,9 +307,9 @@ def requirements(platform, defines, target):
         leaf_limit = integer(defines, "OTA_PROOFGEN_SCRATCH",
                              16384 if platform == "ESP32_PLATFORM" else
                              8192 if "OTA_SD_STORE" in defines else 4096)
-        bounded_default = (platform == "ESP32_PLATFORM"
-                           and (("COMPANION_RADIO_FULL" in defines and "BOARD_HAS_PSRAM" not in defines)
-                                or qualified_repeater)
+        bounded_default = (((platform == "ESP32_PLATFORM" and "COMPANION_RADIO_FULL" in defines
+                             and "BOARD_HAS_PSRAM" not in defines)
+                            or (platform in {"ESP32_PLATFORM", "NRF52_PLATFORM"} and qualified_repeater))
                            and 4 <= leaf_limit <= 16384)
         bounded = integer(defines, "OTA_BOUNDED_SOURCE_PROOFS", int(bounded_default))
         if bounded not in (0, 1):

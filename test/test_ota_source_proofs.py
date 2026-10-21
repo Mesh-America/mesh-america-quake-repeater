@@ -23,29 +23,37 @@ static_assert(OTA_PROOFGEN_SCRATCH / 4 == 4095, "odd byte limit lost usable leaf
 #endif
 """
         base = [os.environ.get("CXX", "g++"), "-std=c++17", "-fsyntax-only", "-x", "c++", "-",
-                "-I", str(ROOT / "src"), "-DESP32_PLATFORM=1"]
-        for role in ("COMPANION_RADIO_FULL", "MESH_CLIENT_REPEATER_ONLY"):
+                "-I", str(ROOT / "src")]
+        for platform, role in (("ESP32_PLATFORM", "COMPANION_RADIO_FULL"),
+                               ("ESP32_PLATFORM", "MESH_CLIENT_REPEATER_ONLY"),
+                               ("NRF52_PLATFORM", "MESH_CLIENT_REPEATER_ONLY")):
             for scratch in (None, 0, 1, 3, 4, 5, 16383, 16384, 16385, 32768):
                 bounded = scratch is None or 4 <= scratch <= 16384
-                flags = [f"-D{role}=1"]
+                flags = [f"-D{platform}=1", f"-D{role}=1"]
                 if scratch is not None:
                     flags.append(f"-DOTA_PROOFGEN_SCRATCH={scratch}")
-                with self.subTest(role=role, scratch=scratch):
+                with self.subTest(platform=platform, role=role, scratch=scratch):
                     result = subprocess.run([*base, *flags, f"-DEXPECT_BOUNDED={int(bounded)}"],
                                             input=source, text=True, capture_output=True, timeout=30)
                     self.assertEqual(result.returncode, 0, result.stderr)
         # Repeater proof buffers are internal even when the board has PSRAM.
-        result = subprocess.run([*base, "-DMESH_CLIENT_REPEATER_ONLY=1",
+        result = subprocess.run([*base, "-DESP32_PLATFORM=1", "-DMESH_CLIENT_REPEATER_ONLY=1",
                                  "-DBOARD_HAS_PSRAM=1", "-DEXPECT_BOUNDED=1"],
                                 input=source, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for flags in ([], ["-DMESH_CLIENT_REPEATER_ONLY=0"],
-                      ["-DCOMPANION_RADIO_FULL=1", "-DBOARD_HAS_PSRAM=1"],
-                      ["-DMESH_CLIENT_REPEATER_ONLY=1", "-DOTA_BOUNDED_SOURCE_PROOFS=0"]):
-            with self.subTest(legacy=flags):
-                result = subprocess.run([*base, *flags, "-DEXPECT_BOUNDED=0"], input=source,
-                                        text=True, capture_output=True, timeout=30)
-                self.assertEqual(result.returncode, 0, result.stderr)
+        for platform in ("ESP32_PLATFORM", "NRF52_PLATFORM", "RP2040_PLATFORM", "STM32_PLATFORM"):
+            cases = [[], ["-DMESH_CLIENT_REPEATER_ONLY=0"],
+                     ["-DCOMPANION_RADIO_FULL=1", "-DBOARD_HAS_PSRAM=1"],
+                     ["-DMESH_CLIENT_REPEATER_ONLY=1", "-DOTA_BOUNDED_SOURCE_PROOFS=0"]]
+            if platform != "ESP32_PLATFORM":
+                cases.append(["-DCOMPANION_RADIO_FULL=1"])
+            if platform in ("RP2040_PLATFORM", "STM32_PLATFORM"):
+                cases.append(["-DMESH_CLIENT_REPEATER_ONLY=1"])
+            for flags in cases:
+                with self.subTest(platform=platform, legacy=flags):
+                    result = subprocess.run([*base, f"-D{platform}=1", *flags, "-DEXPECT_BOUNDED=0"],
+                                            input=source, text=True, capture_output=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
         for scratch in (0, 3, 16385):
             with self.subTest(forced_invalid=scratch):
                 result = subprocess.run([*base, f"-DOTA_PROOFGEN_SCRATCH={scratch}",
@@ -111,6 +119,17 @@ int main() {
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
 
     def test_grouped_equivalence_faults_and_manager_lifetimes(self):
+        self.check_grouped_equivalence(["-DESP32_PLATFORM=1", "-DCOMPANION_RADIO_FULL=1"])
+
+    def test_nrf52_full_and_reduced_profiles_keep_maximum_source_and_ownership(self):
+        for sensors in (0, 1):
+            with self.subTest(full_sensors=bool(sensors)):
+                self.check_grouped_equivalence([
+                    "-DNRF52_PLATFORM=1", "-DMESH_CLIENT_REPEATER_ONLY=1",
+                    f"-DENV_INCLUDE_BME680_BSEC={sensors}",
+                ])
+
+    def check_grouped_equivalence(self, flags):
         # Reuse the existing source/wire/allocator harness, retaining its legacy
         # tests unchanged in their own suite. Only its helpers precede this point.
         prefix = (ROOT / "test/fixtures/ota_cold_buffers/test.cpp").read_text().split(
@@ -126,7 +145,7 @@ int main() {
                 os.environ.get("CXX", "g++"), "-std=c++17", "-O1", "-Wall", "-Wextra", "-Werror",
                 "-Wno-unused-parameter", "-Wno-unused-function", "-Wno-sign-compare",
                 "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
-                "-DESP32_PLATFORM=1", "-DCOMPANION_RADIO_FULL=1",
+                *flags,
                 "-I", str(ROOT / "src"), "-I", str(ROOT / "test/mocks"), str(source),
                 *[str(ROOT / "src/helpers/ota" / name) for name in files], str(ROOT / "src/Utils.cpp"),
                 "-Wl,--wrap=malloc", "-Wl,--wrap=free", "-o", str(binary),
