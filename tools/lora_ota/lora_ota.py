@@ -1560,14 +1560,11 @@ def prepare_package(
                 "--patch-type",
                 "in-place",
             ])
-            # External staging leaves the application region available as the
-            # detools workspace. 0xC6000 is safe for both S140 v7 (app starts
-            # at 0x27000) and older v6 layouts (0x26000). Internal staging
-            # retains its deliberately smaller legacy workspace.
-            inplace_memory = args.inplace_memory or (
-                "0xC6000" if target.nrf_external else "0x98000"
-            )
-            command.extend(["--inplace-memory", inplace_memory])
+            # Let motatool size the workspace from both authenticated layout
+            # records and validate the application/staging bounds. Images
+            # without those records retain motatool's conservative fallback.
+            if args.inplace_memory is not None:
+                command.extend(["--inplace-memory", args.inplace_memory])
         if args.sign_key:
             command.extend(["--sign", str(args.sign_key.resolve())])
         result = run_checked(
@@ -7949,7 +7946,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--public-key", type=Path, help="require this signer when verifying")
     parser.add_argument(
         "--inplace-memory",
-        help="nRF52 OTAFIX workspace (auto: 0x98000 internal, 0xC6000 external SD/QSPI)",
+        help=(
+            "explicit nRF52 OTAFIX workspace override; default: motatool "
+            "authenticated-layout sizing, or its conservative legacy fallback"
+        ),
     )
     parser.add_argument(
         "--platform", choices=("esp32", "nrf52"),

@@ -8065,6 +8065,73 @@ class MotatoolIntegrationTests(unittest.TestCase):
             )
         subprocess.run([cls.motatool, "--version"], check=True, capture_output=True)
 
+    def prepare_layout_delta(
+        self, *, external: bool = False, memory: str | None = None,
+        authenticated: bool = True,
+    ) -> tuple[ota.MotaInfo, list[mock._Call]]:
+        # The real tool must size an image larger than its legacy 0x98000
+        # workspace from the EndF-authenticated geometry, including two spare
+        # detools segments. Only a small content change needs transferring.
+        layout = struct.pack(
+            "<8sBBHIII", b"mOTALay1", 1, 1 if external else 0, 24,
+            0x27000, 0xED000, 0xED000,
+        ) if authenticated else b""
+        body = b"A" * (0x99000 - 56 - len(layout)) + layout
+        base_image = firmware(body, VERSION_OLD)
+        new_image = firmware(b"B" * 32 + body[32:], VERSION_NEW)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base_path = root / "running.bin"
+            base_path.write_bytes(base_image)
+            archive_path = root / "release.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("firmware.bin", new_image)
+            args = prepare_args(archive_path, self.motatool, base_path)
+            args.inplace_memory = memory
+            work = root / "work"
+            work.mkdir()
+            with mock.patch.object(ota, "run_checked", wraps=ota.run_checked) as run:
+                _path, package, expected = ota.prepare_package(
+                    args, target(
+                        platform="nrf52", nrf_sd=external,
+                        base_hash=ota.parse_endf(base_image).body_hash,
+                        boot_codecs=1 << ota.MOTA_CODEC_IN_PLACE,
+                    ), work,
+                )
+            self.assertFalse(package.is_full)
+            self.assertEqual(package.codec_id, ota.MOTA_CODEC_IN_PLACE)
+            self.assertEqual(package.image_size, len(new_image))
+            self.assertEqual(package.base_hash, ota.parse_endf(base_image).body_hash)
+            self.assertEqual(expected, ota.parse_endf(new_image).body_hash)
+            return package, run.call_args_list
+
+    def test_authenticated_internal_layout_selects_large_workspace(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            _package, calls = self.prepare_layout_delta()
+        build = next(call.args[0] for call in calls if call.kwargs["label"] == "build mOTA")
+        self.assertNotIn("--inplace-memory", build)
+        self.assertIn("in-place memory=0x9B000", output.getvalue())
+
+    def test_authenticated_external_layout_uses_minimum_workspace(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            _package, calls = self.prepare_layout_delta(external=True)
+        build = next(call.args[0] for call in calls if call.kwargs["label"] == "build mOTA")
+        self.assertNotIn("--inplace-memory", build)
+        self.assertIn("in-place memory=0x9B000", output.getvalue())
+
+    def test_explicit_workspace_is_preserved_and_layout_checked(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            _package, calls = self.prepare_layout_delta(memory="0xA0000")
+        build = next(call.args[0] for call in calls if call.kwargs["label"] == "build mOTA")
+        self.assertEqual(build[build.index("--inplace-memory") + 1], "0xA0000")
+        self.assertIn("in-place memory=0xA0000", output.getvalue())
+        with self.assertRaisesRegex(ota.OtaError, "exceeds authenticated nRF52 workspace"):
+            self.prepare_layout_delta(memory="0xD0000")
+
+    def test_legacy_image_retains_conservative_workspace_limit(self) -> None:
+        with self.assertRaisesRegex(ota.OtaError, "legacy default memory 0x98000 is too small"):
+            self.prepare_layout_delta(authenticated=False)
+
     def test_raw_esp32_zip_becomes_full_mota(self) -> None:
         image = firmware(b"ESP32-new" * 900, VERSION_NEW)
         with tempfile.TemporaryDirectory() as directory:
