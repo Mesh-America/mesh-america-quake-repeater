@@ -38,7 +38,7 @@ struct Receiver {
 };
 
 static void speed_and_gaps() {
-  for (uint8_t speed : {1, 5, 12, 25, 40, 60}) {
+  for (uint8_t speed : {15, 20, 25, 40, 60}) {
     Receiver rx(speed); rx.warmup();
     rx.pattern("..."); rx.letter_gap();
     rx.pattern("---"); rx.letter_gap();
@@ -170,7 +170,7 @@ static void stop_and_expiry() {
     assert(!rx.decoder.service(rx.now) && !rx.decoder.active());
     assert(rx.decoder.length() == 0); // timeout cannot guess an unfinished held carrier
   }
-  for (uint8_t speed : {uint8_t(0), uint8_t(mesh::MorseTx::MaxWpm + 1)}) {
+  for (uint8_t speed : {uint8_t(0), uint8_t(1), uint8_t(14), uint8_t(mesh::MorseTx::MaxWpm + 1)}) {
     MorseRx invalid;
     assert(invalid.start(speed, 1000, 0) == mesh::MorseRxResult::InvalidSpeed);
     assert(!invalid.active());

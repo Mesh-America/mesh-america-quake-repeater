@@ -22,7 +22,7 @@ int main() {
   constexpr const char* message = "CQ DE TEST 73 SOS";
   // Rates above production's 60 WPM ceiling are explicit lab-only stress
   // vectors, including the fractional 5 ms phase quantization at 240 WPM.
-  for (uint8_t wpm : {5, 10, 15, 20, 25, 30, 40, 60, 120, 200, 240}) {
+  for (uint8_t wpm : {15, 20, 25, 30, 40, 60, 120, 200, 240}) {
     for (uint32_t cadence : {1U, 2U}) {
       for (const auto& profile : profiles) {
         assert(mesh::setMorseHilTiming(profile.timing));

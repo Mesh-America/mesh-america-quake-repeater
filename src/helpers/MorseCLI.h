@@ -25,7 +25,7 @@ inline MorseAction parseMorseAction(const char* word, size_t length) {
 
 inline const char* morseUsageError() {
 #if MESH_ENABLE_MORSE_RX
-  return "Error: use morse send <text> | listen <minutes> | read [offset] | stats | clear | stop";
+  return "Error: use morse send <text> | listen <minutes> (RX >=15 WPM) | read [offset] | stats | clear | stop";
 #else
   return "Error: use morse send <text> | stop";
 #endif
@@ -104,6 +104,7 @@ inline bool handleMorseReplyCommand(MorseReplyHandoff& handoff, Radio* radio,
   if (!handoff.remoteCommand() || !listen) return false;
   float minutes = 0;
   if (!radio || !radio->supportsMorseRx() || !morseSettingsUsable()
+      || morseSettings().wpm < MorseRx::MinWpm
       || !cli::parseDecimalStrict(argument, minutes) || minutes <= 0 || minutes > 5) return false;
   const uint32_t duration = uint32_t(minutes * 60000.0f + 0.5f);
   if (duration < 1000 || duration > 300000) return false;
@@ -159,19 +160,29 @@ inline void formatMorseCapturePage(Radio* radio, const char* argument,
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
 inline void formatMorseTracePage(Radio* radio, const char* argument,
                                 char* reply, size_t capacity) {
+#if defined(MESH_MORSE_HIL_RAW_RSSI) && MESH_MORSE_HIL_RAW_RSSI
+  if (radio->isMorseRxActive()) {
+    cli::formatError(reply, capacity, "stop Morse RX before reading raw RSSI");
+    return;
+  }
+#endif
   uint32_t offset = 0;
   if (*argument && !cli::parseUnsignedIntegerStrict(argument, offset)) {
     cli::formatError(reply, capacity, "use morse trace [retained entry offset]");
     return;
   }
   const size_t length = radio->morseTraceLength();
-  if (length > 512 || offset > length) {
+  if (length > MorseRssiTrace::Capacity || offset > length) {
     snprintf(reply, capacity, "Error: trace offset must be 0-%u", unsigned(length));
     return;
   }
   // `t` is the absolute total entry count; offset is relative to the retained
   // oldest sample. A changed t between pages identifies a moving HIL window.
+#if defined(MESH_MORSE_HIL_RAW_RSSI) && MESH_MORSE_HIL_RAW_RSSI
+  const int prefix = snprintf(reply, capacity, "> morse.hil.raw-rssi-v1 %05u/%05u t=%lu n=----- x=%u q=-0.5 ",
+#else
   const int prefix = snprintf(reply, capacity, "> %03u/%03u t=%lu n=--- x=%u ",
+#endif
       unsigned(offset), unsigned(length), (unsigned long)radio->morseTraceTotal(),
       unsigned(radio->morseTraceTruncated()));
   if (prefix < 0 || size_t(prefix) + 1 >= capacity) {
@@ -186,8 +197,13 @@ inline void formatMorseTracePage(Radio* radio, const char* argument,
       return;
     }
     char row[32];
+#if defined(MESH_MORSE_HIL_RAW_RSSI) && MESH_MORSE_HIL_RAW_RSSI
+    const int bytes = snprintf(row, sizeof(row), "%lu,%u;",
+        (unsigned long)entry.millis, unsigned(-2.0f * entry.rssi_dbm));
+#else
     const int bytes = snprintf(row, sizeof(row), "%lu,%d,%u;",
         (unsigned long)entry.millis, int(entry.rssi_dbm), unsigned(entry.flags));
+#endif
     if (bytes < 0 || size_t(bytes) >= sizeof(row) || used + size_t(bytes) >= capacity) break;
     memcpy(reply + used, row, bytes);
     used += bytes;
@@ -198,11 +214,19 @@ inline void formatMorseTracePage(Radio* radio, const char* argument,
     cli::formatError(reply, capacity, "reply buffer too small for trace entry");
     return;
   }
+#if defined(MESH_MORSE_HIL_RAW_RSSI) && MESH_MORSE_HIL_RAW_RSSI
+  char following[6];
+  if (next >= length) memcpy(following, "END  ", 6);
+  else snprintf(following, sizeof(following), "%05u", unsigned(next));
+  char* marker = strstr(reply, "n=-----");
+  if (marker) memcpy(marker + 2, following, 5);
+#else
   char following[4];
   if (next >= length) memcpy(following, "END", 4);
   else snprintf(following, sizeof(following), "%03u", unsigned(next));
   char* marker = strstr(reply, "n=---");
   if (marker) memcpy(marker + 2, following, 3);
+#endif
 }
 #endif
 #endif  // MESH_ENABLE_MORSE_RX
@@ -494,7 +518,7 @@ inline bool handleMorseCommand(Radio* radio, const char* command,
       case MorseRxResult::Overlap:
         cli::formatError(reply, capacity, "Morse frequency overlaps radio or radio2; change morse.freq"); break;
       case MorseRxResult::InvalidSpeed:
-        snprintf(reply, capacity, "Error: morse.wpm must be %u-%u", unsigned(MorseMinWpm), unsigned(MorseMaxWpm)); break;
+        snprintf(reply, capacity, "Error: Morse RX needs %u-%u WPM; set morse.wpm", unsigned(MorseRx::MinWpm), unsigned(MorseMaxWpm)); break;
       case MorseRxResult::InvalidDuration:
         cli::formatError(reply, capacity, "Morse listening must last 1-300 seconds"); break;
       default:

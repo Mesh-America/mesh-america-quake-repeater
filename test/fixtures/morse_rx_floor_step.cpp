@@ -50,7 +50,7 @@ int main() {
   receive("unchanged floor / fading",-127.5f,-34.5f,true);
   receive("floor step / fading",-104.0f,-34.5f,true);
 #ifdef MORSE_ESTIMATOR_EXTENDED
-  for (uint8_t speed : {1,25,60,120,240}) for (uint32_t cadence : {1,2}) {
+  for (uint8_t speed : {15,25,60,120,240}) for (uint32_t cadence : {1,2}) {
     receive("floor step / strong",-104.0f,-34.5f,false,speed,cadence);
     receive("floor step / moderate",-104.0f,-64.0f,false,speed,cadence);
     receive("floor step / weak6dB",-104.0f,-98.0f,false,speed,cadence);

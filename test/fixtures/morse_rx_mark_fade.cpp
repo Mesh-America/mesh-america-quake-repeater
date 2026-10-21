@@ -43,9 +43,10 @@ static void trial(const char* label,float signal,float quiet,bool vary_mark,bool
   if(signal-quiet>=6.0f) {
     assert(correct && !stuck && !false_marks);
     // The first provisional mark in this deliberately ambiguous33dB-SNR
-    // envelope can include one discarded sub-dot edge at1/60WPM. Pin that
+    // envelope can include one discarded sub-dot edge at15/60WPM. Pin that
     // precise exception; no later mark or other waveform may silently cut.
-    if(cuts) assert(!strcmp(label,"stable33SNR/12dBfade") && cuts==1 && (wpm==1 || wpm==60));
+    if(cuts) assert(!strcmp(label,"stable33SNR/12dBfade") && cuts==1
+                   && ((wpm==15 && cadence==1) || wpm==60));
   }
 #endif
   std::printf("%s %uWPM/%lums: required=%u correct=%u cuts=%lu false_marks=%lu stuck=%u text=\"%s\"\n",
@@ -60,7 +61,7 @@ int main() {
     trial("weak6dB/floorstep",-94,-100,false,false,wpm);
   }
 #ifdef MORSE_HYBRID_MATRIX
-  for(uint8_t wpm:{1,25,60,120,240}) for(uint32_t cadence:{1,2}) {
+  for(uint8_t wpm:{15,25,60,120,240}) for(uint32_t cadence:{1,2}) {
     trial("strong12dB/noisyfloor",-23,-103,true,true,wpm,cadence);
     trial("strong12dB/floorstep30",-23,-97.5f,true,true,wpm,cadence);
     trial("weak6dB/step23.5",-98,-104,false,false,wpm,cadence);

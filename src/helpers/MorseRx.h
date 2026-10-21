@@ -21,6 +21,15 @@
 #error "HIL Morse fast OFF debounce flag must be 0 or 1"
 #endif
 
+#if defined(MESH_MORSE_HIL_RAW_RSSI) && MESH_MORSE_HIL_RAW_RSSI
+#if MESH_MORSE_HIL_RAW_RSSI != 1 || !defined(ESP32_PLATFORM) \
+    || !defined(MESH_MORSE_HIL) || !MESH_MORSE_HIL \
+    || !defined(MESH_MORSE_HIL_PRODUCTION_RF) || !MESH_MORSE_HIL_PRODUCTION_RF
+#error "Raw Morse RSSI requires ESP32 production-equivalent HIL diagnostics"
+#endif
+#include "MorseRawRssiTrace.h"
+#endif
+
 namespace mesh {
 
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
@@ -53,6 +62,10 @@ struct MorseRxDiagnostics {
 };
 
 #if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+#if defined(MESH_MORSE_HIL_RAW_RSSI) && MESH_MORSE_HIL_RAW_RSSI
+using MorseRssiTraceEntry = MorseRawRssiTraceEntry;
+using MorseRssiTrace = MorseRawRssiTrace;
+#else
 struct MorseRssiTraceEntry {
   uint32_t millis;
   int8_t rssi_dbm;
@@ -124,6 +137,7 @@ private:
   bool _triggered = false, _dropped = false;
 };
 #endif
+#endif
 
 // RSSI envelope decoding, not an RF demodulator or an artificial narrow
 // filter. The real receiver supplies its instantaneous power measurements.
@@ -150,6 +164,7 @@ public:
                 "Production-equivalent HIL requires the shipping Morse receiver clock");
 #endif
   static constexpr uint32_t MinDurationMillis = 1000UL;
+  static constexpr uint8_t MinWpm = 15;
   static constexpr uint32_t MaxDurationMillis = 300000UL;
   static constexpr uint32_t NoiseLearningMillis = 500UL;
   static constexpr size_t CaptureCapacity = 4096;
@@ -160,7 +175,7 @@ public:
 #endif
 
   static MorseRxResult validate(uint8_t wpm, uint32_t duration_ms) {
-    if (!MorseTx::unitMillis(wpm)) return MorseRxResult::InvalidSpeed;
+    if (wpm < MinWpm || !MorseTx::unitMillis(wpm)) return MorseRxResult::InvalidSpeed;
     if (duration_ms < MinDurationMillis || duration_ms > MaxDurationMillis)
       return MorseRxResult::InvalidDuration;
     return MorseRxResult::Started;
@@ -256,6 +271,9 @@ public:
 
   void sample(float rssi_dbm, uint32_t now) {
     if (!service(now) || !(rssi_dbm >= -180.0f && rssi_dbm <= 20.0f)) return;
+#if defined(MESH_MORSE_HIL_RAW_RSSI) && MESH_MORSE_HIL_RAW_RSSI
+    if (_trace) _trace->sample(rssi_dbm, static_cast<uint32_t>(now - _started), 0);
+#endif
     _last_rssi = rssi_dbm;
     const uint32_t sample_gap = static_cast<uint32_t>(now - _last_sample_at);
     const float filter_gap = sample_gap > 10U ? 10U : sample_gap;
@@ -410,7 +428,8 @@ private:
 #endif
 
   void traceSample(float rssi, uint32_t now, bool raw_keyed) {
-#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL
+#if defined(MESH_MORSE_HIL) && MESH_MORSE_HIL \
+    && !(defined(MESH_MORSE_HIL_RAW_RSSI) && MESH_MORSE_HIL_RAW_RSSI)
     if (_trace) _trace->sample(rssi, static_cast<uint32_t>(now - _started),
         (raw_keyed ? 1 : 0) | (_keyed ? 2 : 0) | (_candidate_valid ? 4 : 0)
         | (learning(now) ? 8 : 0));

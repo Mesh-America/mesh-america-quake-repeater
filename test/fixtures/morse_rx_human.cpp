@@ -79,7 +79,7 @@ int main() {
     {"farnsworth_2_0", Style::WideFarnsworth}
   };
   unsigned failures = 0;
-  for (uint8_t wpm : {5, 10, 15, 20, 25, 30, 40}) {
+  for (uint8_t wpm : {15, 20, 25, 30, 40}) {
     for (uint32_t cadence : {1U, 2U}) {
       for (const auto& style : styles) {
         uint16_t learned = 0;

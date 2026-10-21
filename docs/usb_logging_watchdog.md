@@ -88,11 +88,19 @@ and the USB recovery grace periods. Tiers grow after reset authorization:
 stats outage cannot shorten a later physical fault's interval. Ten minutes
 of healthy monitored operation resets a raised tier to one hour.
 
-Native TX-completion events are the progress evidence. Queueing, purging,
+Native TX-completion events are progress evidence. On the pinned ESP32 HWCDC
+backend, an exclusive check of both the empty software queue and acknowledged
+hardware FIFO also completes a pending write: the SDK does not emit another
+TX event for the final FIFO acknowledgement. An empty software queue alone
+does not establish completion. Queueing, purging,
 reinitializing, or accepting the optional bounded minute probe is not proof
 of recovery. The watchdog never waits for a host. USB connection reports,
 especially HWCDC's host/reader flags, are SDK approximations and do not reliably
 identify an open TTY process.
+HWCDC therefore uses physical host presence with a 100 ms continuous-loss
+check rather than its unreliable open-reader heuristic. A brief status dip
+does not revoke a valid stats lease. A real USB bus reset invalidates the lease
+immediately; sustained host loss and actual TX stalls remain observable.
 
 Recovery waits for active Binary USB clients, mOTA/update owners, unsaved
 contacts, radio tests/calibration/temporary-radio operations, functional CLI

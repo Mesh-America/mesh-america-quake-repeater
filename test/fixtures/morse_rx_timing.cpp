@@ -33,7 +33,7 @@ static void mark(MorseRx& rx, uint32_t duration) {
 }
 
 static void fractional_drift_and_integer_negative_control() {
-  for (uint8_t wpm : {1, 25, 60, 120, 200, 240}) {
+  for (uint8_t wpm : {15, 25, 60, 120, 200, 240}) {
     for (int difference : {-1, 1}) {
       for (bool dash : {false, true}) {
         MorseRx rx;
@@ -76,7 +76,7 @@ static void first_ambiguous_and_warmed_borderline_marks() {
 }
 
 static void unchanged_bounds_and_checked_duration_limits() {
-  for (uint8_t wpm : {1, 25, 60, 120, 200, 240}) {
+  for (uint8_t wpm : {15, 25, 60, 120, 200, 240}) {
     MorseRx rx;
     begin(rx, wpm);
     const uint16_t nominal = rx._nominal_unit;

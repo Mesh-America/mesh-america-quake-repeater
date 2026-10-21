@@ -573,6 +573,8 @@ jobs:
           python3 -B test/test_carrier_wave.py
           python3 -B test/test_morse_tx.py -v
           python3 -B test/test_morse_rx.py -v
+          python3 -B test/test_morse_rx_min_speed.py -v
+          python3 -B test/test_morse_raw_rssi.py -v
           python3 -B test/test_morse_rx_timing.py -v
           python3 -B test/test_morse_rx_gap_bias.py -v
           python3 -B test/test_morse_rx_human.py -v
