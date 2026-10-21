@@ -8915,7 +8915,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
 
   char detail[160];
   formatFloodPacketFilterDetail(slot, detail, sizeof(detail));
-  snprintf(reply, 160, "OK - %s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
+  snprintf(reply, 160, "OK - %.154s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
 }
 #endif
 
@@ -10581,7 +10581,7 @@ void MyMesh::setFloodGroupModeration(const char* args, char* reply) {
   }
   char detail[160];
   formatFloodGroupModerationDetail(slot, detail, sizeof(detail));
-  snprintf(reply, 160, "OK - %s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
+  snprintf(reply, 160, "OK - %.154s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
 }
 
 void MyMesh::deleteFloodGroupModeration(const char* args, char* reply) {

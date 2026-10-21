@@ -132,6 +132,7 @@ namespace FloodFilterPolicy {
   enum {SCOPE_PATH_NONE=0,SCOPE_PATH_BLACKLIST=1,SCOPE_PATH_BRIDGE_BUCKET_BASE=2};
 }
 static const char FLOOD_CHANNEL_SCOPE_USAGE[]="Err - scope usage";
+static std::string moderation_detail_reply="> saved";
 struct MyMesh {
   @ENTRY@
   MockFS* _fs;
@@ -148,7 +149,7 @@ struct MyMesh {
   void setFloodGroupModeration(const char*,char*);
   void setFloodChannelScope(const char*,char*);
   uint8_t scope_path=0;bool scope_slow=false;
-  void formatFloodGroupModerationDetail(int,char* reply,size_t size) const { snprintf(reply,size,"> saved"); }
+  void formatFloodGroupModerationDetail(int,char* reply,size_t size) const { snprintf(reply,size,"%s",moderation_detail_reply.c_str()); }
 };
 namespace StrHelper { void strncpy(char* dest,const char* source,size_t size) { snprintf(dest,size,"%s",source); } }
 const uint8_t FLOOD_PUBLIC_CHANNEL_SECRET[16]={};
@@ -349,6 +350,17 @@ void cli() {
     shortform.setFloodGroupModeration(item.compact,reply);assert(!strncmp(reply,"OK",2));
     assert(first.files[target]==second.files[target]);
   }
+  // The prefix consumes five bytes. Preserve the existing154-byte detail
+  // bound, NUL termination, and caller memory for either formatter style.
+  struct GuardedReply { char text[160]; uint32_t canary=0xA5B6C7D8; } bounded;
+  for (bool prefixed : {false,true}) {
+    moderation_detail_reply=(prefixed ? "> " : "")+std::string(159,'X');
+    longform.setFloodGroupModeration(" public Alice q=9",bounded.text);
+    assert(strlen(bounded.text)==159 && !strncmp(bounded.text,"OK - ",5));
+    assert(std::string(bounded.text+5)==std::string(154,'X'));
+    assert(bounded.canary==0xA5B6C7D8);
+  }
+  moderation_detail_reply="> saved";
   const auto original=second.files[target];
   for(const char* invalid : {" public Alice q=1 rate=2/min", " public Alice rate=1/min q=2",
       " public Alice d q=2", " public Alice q=2 drop", " public Alice q=", " public Alice q=-1",

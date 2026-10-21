@@ -233,8 +233,13 @@ window.addEventListener("load",function(){
         self.assertIsNotNone(marker)
         page = source.replace(marker, prelude + marker, 1)
 
+        # Snap Chromium has a private /tmp. Keep the page and profile in the
+        # shared workspace so every supported browser can read them.
+        cache_root = ROOT / ".pio"
+        cache_root.mkdir(exist_ok=True)
         for attempt in range(2):
             with tempfile.TemporaryDirectory(prefix="meshcore-webconfig-runtime-",
+                                             dir=cache_root,
                                              ignore_cleanup_errors=True) as tmp:
                 tmp_path = Path(tmp)
                 html = tmp_path / "index.html"
@@ -265,6 +270,7 @@ window.addEventListener("load",function(){
         stderr = result.stderr.decode("utf-8", "replace")
         self.assertEqual(result.returncode, 0, stderr)
         dom = result.stdout.decode("utf-8", "replace")
+        self.assertTrue(dom, stderr)
         self.assertNotIn("data-test-error=", dom)
         return dom
 
