@@ -79,7 +79,8 @@ class ClientAclCliTest(unittest.TestCase):
             generated += extract_braced(utils, signature) + "\n"
         generated += "}\n"
         for signature in (
-            "static bool commandFamilyMatches(", "static bool isCommonManagerReadOnlyAllowed(",
+            "static bool commandFamilyMatches(", "static bool commandListMatches(",
+            "static bool isCommonManagerReadOnlyAllowed(",
             "static bool isRegionMgrAllowed(", "static bool isFilterMgrAllowed(",
         ):
             generated += extract_braced(sources["repeater"], signature) + "\n"

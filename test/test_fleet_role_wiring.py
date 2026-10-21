@@ -352,7 +352,8 @@ class FleetRoleWiringTests(unittest.TestCase):
         self.assertIsNotNone(compiler)
         repeater = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text()
         helpers = "\n".join(body(repeater, signature) for signature in (
-            "static bool commandFamilyMatches(", "static bool isCommonManagerReadOnlyAllowed(",
+            "static bool commandFamilyMatches(", "static bool commandListMatches(",
+            "static bool isCommonManagerReadOnlyAllowed(",
             "static bool isRegionMgrAllowed(", "static bool isFilterMgrAllowed(",
         ))
         handler = body(repeater, "void MyMesh::handleCommand(uint32_t sender_timestamp,")

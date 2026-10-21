@@ -130,7 +130,8 @@ class MorseAuthorizationTests(unittest.TestCase):
         # the previous unguarded production branch must fail the C++ asserts.
         handoff = handler[start:end]
         helpers = "\n".join(extract_braced(source, signature) for signature in (
-            "static bool commandFamilyMatches(", "static bool isCommonManagerReadOnlyAllowed(",
+            "static bool commandFamilyMatches(", "static bool commandListMatches(",
+            "static bool isCommonManagerReadOnlyAllowed(",
             "static bool isRegionMgrAllowed(", "static bool isFilterMgrAllowed(",
         ))
         helpers = f'#include "{(ROOT / "src/helpers/FloodCommandAliases.h").as_posix()}"\n' + helpers
