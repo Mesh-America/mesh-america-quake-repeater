@@ -23,7 +23,8 @@ public:
       while (Wire.available()) Wire.read();
       return false;
     }
-    const uint8_t first=Wire.read(), second=Wire.read();
+    const int first=Wire.read(), second=Wire.read();
+    if (first<0 || second<0) return false;
     // LTC4162 SMBus words are little endian; INA260 registers are big endian.
     value=address==0x68 ? uint16_t(first)|(uint16_t(second)<<8)
                         : (uint16_t(first)<<8)|second;

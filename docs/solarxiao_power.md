@@ -1,8 +1,8 @@
 # SolarXiao MPPT and battery controls
 
-SolarXiao firmware includes a native INA260 battery monitor and LTC4162 charger
-interface in Full and Reduced Repeater, Room Server and Companion builds. Use
-USB CLI or the role's authenticated administrator CLI over LoRa. Ship mode and
+SolarXiao Repeater firmware includes a native INA260 battery monitor and LTC4162
+charger interface in Full and Reduced builds. Use USB CLI or the authenticated
+administrator CLI over LoRa. Ship mode and
 saved-policy reset require local USB. Commands do not change RF settings.
 
 Start with:
