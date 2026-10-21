@@ -4099,9 +4099,12 @@ class SeederProcess:
 
         ``motatool serve -v`` logs each successful random-access read. A read
         at a payload block boundary means the source has reached that block's
-        response job. This is a passive progress signal: unlike remote
-        ``ota status``, reading it consumes no LoRa airtime and cannot collide
-        with the transfer it is observing.
+        response job. Compressed transport instead names the logical block;
+        its offsets are compressed-slice offsets, not package-file offsets.
+        This run serves one package at native index zero. Count each successful
+        compressed slice/retry as activity without counting its block twice.
+        These reads are passive progress, not proof of destination completion;
+        the monitor still requires the destination's exact ready-session reply.
         """
         try:
             detail = self._read_log()
@@ -4116,7 +4119,17 @@ class SeederProcess:
             package.payload_offset + index * package.block_size
             for index in range(total)
         }
-        payload_reads = [offset for offset in offsets if offset in boundaries]
+        payload_reads = [
+            (offset - package.payload_offset) // package.block_size
+            for offset in offsets if offset in boundaries
+        ]
+        for block, offset in re.findall(
+            r"\[dev\][ \t]+DEFLATE[ \t]+0[ \t]+block=([0-9]+)"
+            r"[ \t]+@([0-9]+)[ \t]+OK(?=[ \t]*(?:\r?\n|$))", detail
+        ):
+            block_index, compressed_offset = int(block), int(offset)
+            if block_index < total and compressed_offset <= 0xFFFF:
+                payload_reads.append(block_index)
         return len(set(payload_reads)), total, len(payload_reads)
 
     def stop(self) -> None:

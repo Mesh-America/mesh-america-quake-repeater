@@ -2637,6 +2637,42 @@ class DownloadSessionTests(unittest.TestCase):
         self.assertEqual(controller.commands, ["ota status"])
         self.assertEqual(seeder.calls, total)
 
+    def test_complete_compressed_source_progress_still_requires_ready_destination(self) -> None:
+        controller = self.Controller([
+            f"OTA | download: downloading 6/9 id={self.package.manifest_id} 2s",
+            f"OTA | download: ready to install 9/9 id={self.package.manifest_id} 3s",
+        ])
+        args = argparse.Namespace(
+            target="remote", transfer_timeout_minutes=1, poll_seconds=1,
+        )
+        total = (
+            self.package.payload_size + self.package.block_size - 1
+        ) // self.package.block_size
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = None
+        seeder.process = mock.Mock()
+        seeder.process.poll.return_value = None
+        detail = "".join(
+            f"[dev] DEFLATE 0 block={index} @0 OK\n" for index in range(total)
+        )
+        elapsed = [0.0]
+
+        def advance(seconds: float) -> None:
+            elapsed[0] += seconds
+
+        with (
+            mock.patch.object(Path, "read_text", return_value=detail),
+            mock.patch.object(ota.time, "monotonic", side_effect=lambda: elapsed[0]),
+            mock.patch.object(ota.time, "sleep", side_effect=advance),
+            mock.patch.object(ota, "transfer_tail_guard_seconds", return_value=0),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = ota.monitor_download(controller, args, self.package, seeder)
+        self.assertIn("ready to install", status)
+        self.assertEqual(controller.commands, ["ota status", "ota status"])
+        self.assertGreaterEqual(elapsed[0], ota.passive_progress_stall_seconds(args, self.package))
+
     def test_monitor_uses_quiet_window_when_source_log_is_unavailable(self) -> None:
         args = argparse.Namespace(
             target="remote", transfer_timeout_minutes=1, poll_seconds=1,
@@ -5447,6 +5483,57 @@ class ReliabilityTests(unittest.TestCase):
             seeder.log_path = log
             seeder.log_file = None
             self.assertEqual(seeder.payload_read_progress(package), (2, 3, 2))
+
+    def test_seeder_progress_tracks_compressed_slices_and_retries(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = None
+        detail = (
+            "[dev] DEFLATE 0 block=0 @0 OK\n"  # Length query or first slice.
+            "[dev] DEFLATE 0 block=0 @190 OK\n"
+            "[dev] DEFLATE 0 block=2 @0 OK\n"
+            "[dev] DEFLATE 0 block=2 @0 OK\n"  # Retry remains activity.
+        )
+        with mock.patch.object(Path, "read_text", return_value=detail):
+            self.assertEqual(seeder.payload_read_progress(package), (2, 3, 4))
+
+    def test_seeder_progress_merges_raw_and_compressed_logical_blocks(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = None
+        detail = (
+            f"[dev] READ 0 @{package.payload_offset} OK\n"
+            "[dev] DEFLATE 0 block=0 @0 OK\n"
+            # This compressed offset happens to equal raw block zero's file
+            # offset. The logical block field, not that offset, identifies it.
+            f"[dev] DEFLATE 0 block=2 @{package.payload_offset} OK\n"
+        )
+        with mock.patch.object(Path, "read_text", return_value=detail):
+            self.assertEqual(seeder.payload_read_progress(package), (2, 3, 3))
+
+    def test_seeder_progress_ignores_invalid_compressed_requests(self) -> None:
+        package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
+        seeder = object.__new__(ota.SeederProcess)
+        seeder.log_path = Path("serve.log")
+        seeder.log_file = None
+        detail = (
+            "[dev] DEFLATE 0 block=0 @0 ERR\n"
+            "[dev] DEFLATE 1 block=0 @0 OK\n"
+            "[dev] DEFLATE 00 block=0 @0 OK\n"
+            "[dev] DEFLATE 0 block=3 @0 OK\n"
+            "[dev] DEFLATE 0 block=-1 @0 OK\n"
+            "[dev] DEFLATE 0 block=x @0 OK\n"
+            "[dev] DEFLATE 0 block=0 @-1 OK\n"
+            "[dev] DEFLATE 0 block=0 @65536 OK\n"
+            "[dev] DEFLATE 0 block=0 @0\n"
+            "[dev] DEFLATE 0 block=0 @0 OK trailing\n"
+            "[dev] DEFLATE 0 block=0\n@0 OK\n"
+            "DEFLATE 0 block=0 @0 OK\n"
+        )
+        with mock.patch.object(Path, "read_text", return_value=detail):
+            self.assertEqual(seeder.payload_read_progress(package), (0, 3, 0))
 
     def test_seeder_progress_missing_log_keeps_all_three_counters(self) -> None:
         package = ota.parse_mota(mota_blob(firmware(b"B" * 2500, VERSION_NEW)))
