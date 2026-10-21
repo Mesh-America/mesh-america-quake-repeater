@@ -14,6 +14,34 @@ when its log identifies the physical device, firmware artifact, artifact hash,
 command result, and cold/warm boot outcome. Do not infer success from a tool's
 exit code when the tool has a documented false-success mode.
 
+## Known-failure follow-up, 2026-10-20/21 UTC
+
+The [follow-up report](hardware_validation_known_failures_1_18_0_1_2026-10-20.md)
+binds builds, host tests and hardware observations to their actual sources.
+It preserves the earlier failures and the accepted fleet results.
+
+- [x] **Current V4 Full logging-on idle/reopen:** shipping source `0b207a1ec`
+  passed case 3: 600.0913 seconds, zero idle writes, 105.3/20.5 ms post-idle
+  reply/reopen, continuous uptime and zero core errors. Watchdog recoveries
+  stayed 2 -> 2 and boot count 0 -> 0. Original settings, strict binary
+  handback, TTY/browser/stream cleanup passed. Complete application readback
+  matched the shipping image; partition table/OTA metadata were unchanged.
+- [x] **Morse receive setting floor:** configured reception now requires at
+  least 15 WPM, with default 25; TX at 1-14 WPM remains available. The operator
+  accepts false letters for now. Earlier quiet/message failures remain recorded;
+  complete-message accuracy and an absolute physical speed cutoff are not
+  inferred from setting validation.
+
+The independent eight-board nRF52 test-bootloader deployment and original-app
+handoffs are complete with documented USB concurrency and RAK secondary-data
+preservation limits. This is separate from final-source Companion qualification.
+The nRF52 testing hold is released; MeshPocket remains excluded.
+
+The current V4 differs from the physical board in the 18 October failure below.
+Its follow-up cannot establish that earlier USB disappearance's cause or erase
+the failed historical measurement. Remaining release gates keep their latest
+documented status.
+
 ## Mercerwood candidate campaign, 2026-10-18 UTC
 
 The [current hardware campaign](hardware_validation_mercerwood_1_18_0_1_2026-10-18.md)

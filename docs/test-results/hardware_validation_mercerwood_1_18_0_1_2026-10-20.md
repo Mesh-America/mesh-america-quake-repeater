@@ -23,6 +23,13 @@ Seven active nRF52 boards retain the source
 `88d39510140ce6894cf8e74b93cbd28d7387fa21` bootloader baseline; Companion
 application-only updates transferred no bootloader or SoftDevice data.
 
+That bootloader baseline describes this campaign's measurements. A subsequent
+independent deployment restored the original applications after installing an
+unpublished test bootloader on eight nRF52 boards. Its remaining USB stress
+and RAK data-preservation limits are recorded in the
+[known-failure follow-up](hardware_validation_known_failures_1_18_0_1_2026-10-20.md).
+This does not repeat or extend the source-bound qualifications below.
+
 | Board | Installed source | Required USB / BLE / RF / contacts | Overall |
 | --- | --- | --- | --- |
 | Heltec V4.3, FEM off | 0865 | USB/BLE/contacts PASS; RF retained ABF | PASS |
