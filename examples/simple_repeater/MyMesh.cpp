@@ -3514,13 +3514,34 @@ void MyMesh::onControlDataRecv(mesh::Packet* packet) {
 
     if ((filter & (1 << ADV_TYPE_REPEATER)) != 0 && _prefs.discovery_mod_timestamp >= since) {
       bool prefix_only = packet->payload[0] & 1;
-      uint8_t data[6 + PUB_KEY_SIZE];
+      uint8_t data[6 + PUB_KEY_SIZE + 12];
+      size_t length = 6 + (prefix_only ? 8 : PUB_KEY_SIZE);
       data[0] = CTL_TYPE_NODE_DISCOVER_RESP | ADV_TYPE_REPEATER;   // low 4-bits for node type
       data[1] = packet->_snr;   // let sender know the inbound SNR ( x 4)
       memcpy(&data[2], &tag, 4);     // include tag from request, for client to match to
-      memcpy(&data[6], self_id.pub_key, PUB_KEY_SIZE);
-      auto resp = createControlData(data, prefix_only ? 6 + 8 : 6 + PUB_KEY_SIZE);
+      memcpy(&data[6], self_id.pub_key, length - 6);
+      if (packet->payload[0] & 0x02) {  // optional radio2 profile, version 1
+        data[length++] = 1;
+        data[length++] = 0;
+        const auto* profiles = _radio->profiles();
+        // V1 describes a usable MeshCore profile, not a foreign radio2 owner.
+        if (profiles && (profiles->secondary.mode == mesh::RadioProfileMode::Rx
+                || profiles->secondary.mode == mesh::RadioProfileMode::RxTx)
+            && profiles->secondary.params.protocol == mesh::RadioProfileProtocol::MeshCore) {
+          const auto& secondary = profiles->secondary;
+          data[length - 1] = 1 | (static_cast<uint8_t>(secondary.mode) << 1)
+              | (profiles->secondary_temporary ? 0x08 : 0);
+          const uint32_t frequency = static_cast<uint32_t>(lroundf(secondary.params.freq * 1000.0f));
+          const uint32_t bandwidth = static_cast<uint32_t>(lroundf(secondary.params.bw * 1000.0f));
+          for (unsigned shift = 0; shift < 32; shift += 8) data[length++] = frequency >> shift;
+          for (unsigned shift = 0; shift < 32; shift += 8) data[length++] = bandwidth >> shift;
+          data[length++] = secondary.params.sf;
+          data[length++] = secondary.params.cr;
+        }
+      }
+      auto resp = createControlData(data, length);
       if (resp) {
+        resp->tx_radio = mesh::RADIO_TX_PRIMARY;
         sendZeroHop(resp, getRetransmitDelay(resp)*4);  // apply random delay (widened x4), as multiple nodes can respond to this
       }
     }

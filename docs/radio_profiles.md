@@ -68,6 +68,44 @@ If the second profile cannot transmit MeshCore, media uses the normal
 channel/global route; `set tx.media radio2` instead requires radio2 with no
 primary fallback. See [application TX routing](#companion-media-and-ssh-tx-routing).
 
+### Discover the local radio2 profile
+
+Clients can request a repeater's current MeshCore radio2 profile through public,
+zero-hop discovery. Set bit 1 (`0x02`) of the `DISCOVER_REQ` flags byte: `0x82`
+for the full public key, or `0x83` with the prefix-only bit also set. The type
+filter, tag and optional `since` fields keep their existing meanings. Omit
+`since` or send zero when requesting current settings; radio changes do not
+update the discovery timestamp.
+
+The requested `DISCOVER_RESP` appends this version-1 trailer immediately after
+the public key, at payload offset 38 (full key) or 14 (8-byte prefix):
+
+| Field | Bytes | Meaning |
+| --- | --- | --- |
+| version | 1 | `1` |
+| flags | 1 | Bit 0: configured; bits 1–2: mode (`0` off, `1` rx, `2` rxtx); bit 3: temporary; other bits zero |
+| frequency | 4 | Little-endian unsigned integer, MHz × 1000, rounded |
+| bandwidth | 4 | Little-endian unsigned integer, kHz × 1000, rounded |
+| SF | 1 | Spreading factor |
+| CR | 1 | Coding-rate denominator (`5` means 4/5) |
+
+For example, the MediaMesh preset reports frequency `911150`, bandwidth
+`250000`, SF `7`, CR `5` and flags `0x05`. An active `tempradio2` reports its
+current settings with bit 3 set. Clients use automatic preamble; the trailer
+does not carry a preamble value.
+
+When radio2 is off, unsupported, or using a foreign protocol, the trailer is
+only `[1][0]`. Full responses are therefore 50 bytes with a profile or 40 bytes
+without one; prefix-only responses are 26 or 16 bytes. Without the request bit,
+responses remain 38 or 14 bytes. A legacy responder's missing trailer means
+unsupported, not disabled. Clients should ignore unknown versions and
+incomplete trailers.
+
+Replies remain on the main radio with zero hops and share the existing limit
+of four replies per two minutes. Existing visibility controls still apply.
+Discovery is public and unauthenticated. See [control data](payloads.md#control-data)
+for the base packet fields.
+
 ### Channel spacing
 
 When setting a saved, temporary or scheduled second profile, the response warns

@@ -350,7 +350,7 @@ The data contained in the ciphertext uses the format below:
 
 | Field        | Size (bytes)    | Description                                  |
 |--------------|-----------------|----------------------------------------------|
-| flags        | 1               | 0x8 (upper 4 bits), prefix_only (lowest bit) |
+| flags        | 1               | 0x8 (upper 4 bits), prefix_only (bit 0), request radio2 profile (bit 1) |
 | type_filter  | 1               | bit for each ADV_TYPE_*                      |
 | tag          | 4               | randomly generate by sender                  |
 | since        | 4               | (optional) epoch timestamp (0 by default)    |
@@ -363,6 +363,10 @@ The data contained in the ciphertext uses the format below:
 | snr          | 1               | signed, SNR*4                              |
 | tag          | 4               | reflected back from DISCOVER_REQ           |
 | pubkey       | 8 or 32         | node's ID (or prefix)                      |
+
+Repeaters append an optional [radio2 profile trailer](radio_profiles.md#discover-the-local-radio2-profile)
+when request bit 1 is set. Without that bit, the response is unchanged. Legacy
+responders omit the trailer even when requested.
 
 
 ## Trace

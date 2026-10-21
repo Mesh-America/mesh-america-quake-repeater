@@ -18,6 +18,7 @@ class CompanionDiscoveryTests(unittest.TestCase):
 #include <cstdint>
 #include <cstring>
 #include <cstddef>
+#include <initializer_list>
 #define DISCOVERED_NODES_TABLE_SIZE 4
 #define CTL_TYPE_NODE_DISCOVER_RESP 0x90
 static uint32_t now=100;
@@ -56,6 +57,19 @@ int main(){
   mesh.disc_node_req_at=0xfffffff0;now=20;
   mesh.checkControlDataForPendingDiscovery(response,14);assert(mesh.disc_nodes_count==1);
   assert(mesh.discovered_nodes[0].name[31]==0&&mesh.discovered_nodes[0].snr_out==5.0f);
+  // Existing clients must accept both key sizes with no trailer, the two-byte
+  // off marker, or the full twelve-byte radio2 profile, retaining the prefix.
+  for(size_t length : {14U,16U,26U,38U,40U,50U}){
+    MyMesh legacy;legacy.disc_node_req_at=now;
+    uint8_t extended[50];memset(extended,0xAB,sizeof(extended));
+    memcpy(extended,response,14);
+    size_t offset=length<=26?14:38;
+    if(length>offset){extended[offset]=1;extended[offset+1]=length-offset==2?0:5;}
+    legacy.checkControlDataForPendingDiscovery(extended,length);
+    assert(legacy.disc_nodes_count==1);
+    assert(memcmp(legacy.discovered_nodes[0].pubkey_prefix,response+6,8)==0);
+    assert(legacy.discovered_nodes[0].type==2&&legacy.discovered_nodes[0].snr_out==5.0f);
+  }
   for(int i=0;i<10;i++)mesh.checkControlDataForPendingDiscovery(response,14);
   assert(mesh.disc_nodes_count==4);
   DiscoveredNode result[4];assert(mesh.getDiscoveredNodes(result,100)==4);
