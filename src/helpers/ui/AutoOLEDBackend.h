@@ -20,7 +20,8 @@ class AutoOLEDBackend : public Adafruit_SSD1306 {
 public:
   using Adafruit_SSD1306::Adafruit_SSD1306;
 
-  bool begin(uint8_t vcc, uint8_t address, bool reset, bool periphBegin) {
+  bool begin(uint8_t vcc, uint8_t address, bool reset, bool periphBegin,
+             mesh::ui::OLEDControllerMode mode = mesh::ui::defaultOLEDControllerMode()) {
     _ready = false;
     i2caddr = address;
     if (periphBegin) wire->begin();
@@ -33,16 +34,14 @@ public:
       digitalWrite(rstPin, HIGH);
     }
 
-#if defined(OLED_CONTROLLER_OVERRIDE) && OLED_CONTROLLER_OVERRIDE != 0
-    static_assert(OLED_CONTROLLER_OVERRIDE == 1 || OLED_CONTROLLER_OVERRIDE == 2,
-                  "OLED_CONTROLLER_OVERRIDE must be 0 (auto), 1 (SSD1306) or 2 (SH1106)");
-    wire->beginTransmission(address);
-    _controller = wire->endTransmission() != 0 ? mesh::ui::OLEDController::Absent
-        : OLED_CONTROLLER_OVERRIDE == 2 ? mesh::ui::OLEDController::SH1106
-                                        : mesh::ui::OLEDController::SSD1306;
-#else
-    _controller = mesh::ui::detectOLEDController(*wire, address);
-#endif
+    if (mode == mesh::ui::OLEDControllerMode::Auto) {
+      _controller = mesh::ui::detectOLEDController(*wire, address);
+    } else {
+      wire->beginTransmission(address);
+      _controller = wire->endTransmission() != 0 ? mesh::ui::OLEDController::Absent
+          : mode == mesh::ui::OLEDControllerMode::SH1106 ? mesh::ui::OLEDController::SH1106
+                                                       : mesh::ui::OLEDController::SSD1306;
+    }
     if (_controller == mesh::ui::OLEDController::Absent) return false;
     if (_controller == mesh::ui::OLEDController::SSD1306) {
       _ready = Adafruit_SSD1306::begin(vcc, address, false, false);

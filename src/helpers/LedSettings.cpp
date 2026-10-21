@@ -1,4 +1,5 @@
 #include "LedSettings.h"
+#include "CheckedSettingsFile.h"
 #include <MeshCore.h>
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
 #include <helpers/AtomicFileWriter.h>
@@ -22,18 +23,8 @@ const uint8_t images[2][8] = {
 // Return the saved value, or -1 for an absent or invalid image. Comparing the
 // two canonical images shares the write format without a second encoder.
 int readSetting(const char* name) {
-  if (!settings_fs) return -1;
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  File file(*settings_fs);
-  if (!file.open(name, FILE_O_READ)) return -1;
-#else
-  File file = settings_fs->open(name, "r");
-  if (!file) return -1;
-#endif
   uint8_t data[8];
-  const bool complete = file.size() == sizeof(data)
-      && file.read(data, sizeof(data)) == sizeof(data);
-  file.close();
+  const bool complete = storage::readFixedSettingsFile(settings_fs, name, data, sizeof(data));
   if (!complete || data[4] > 1
       || memcmp(data, images[data[4]], sizeof(data)) != 0) return -1;
   return data[4];
@@ -42,7 +33,11 @@ int readSetting(const char* name) {
 bool saveSetting(bool on) {
   if (!settings_fs) return false;
   const uint8_t* data = images[on ? 1 : 0];
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+#if defined(NRF52_PLATFORM)
+  return storage::writeCheckedSettingsFile(settings_fs, path, data, sizeof(images[0]))
+      == AtomicFileWriter::Outcome::Committed;
+#else
+#if defined(STM32_PLATFORM)
   AtomicFileWriter file(settings_fs, path);
 #else
   ContactFileTransaction file(settings_fs, path);
@@ -50,6 +45,7 @@ bool saveSetting(bool on) {
   if (!file || file.write(data, sizeof(images[0])) != sizeof(images[0]) || !file.commit())
     return false;
   return readSetting(path) == int(on);
+#endif
 }
 } // namespace
 

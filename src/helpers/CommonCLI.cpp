@@ -9,6 +9,9 @@
 #include "PowerSavingDiagnostics.h"
 #include "HilStartupTrace.h"
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
+#include <helpers/ui/OLEDControllerSettings.h>
+#endif
 #if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
     && HELTEC_TFT_RUNTIME_ROTATION == 1
 #include <helpers/ui/DisplayRotationSettings.h>
@@ -3060,6 +3063,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       return;
     }
     if (mesh::ui::handleDisplayPowerCommand(command, reply, 160)) return;
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
+    if (mesh::ui::handleOLEDControllerCommand(command, reply, 160, true)) return;
+#endif
 #if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
     && HELTEC_TFT_RUNTIME_ROTATION == 1
     if (mesh::ui::handleDisplayRotationCommand(command, reply, 160, true)) return;

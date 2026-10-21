@@ -1059,15 +1059,36 @@ set display.rotation 270
 The values are clockwise degrees. `0` clears the override and restores the
 board's compiled default. Unsupported display drivers return an error.
 
-RAK4631 and RAK3401 images detect SSD1306 or SH1106 OLED controllers when
-initializing the screen. This lets the same RAK4631 image serve WisMesh Pocket
-v2 and v3. Both retain rotation support and use one 1 KiB framebuffer.
+## Select RAK OLED controller
+
+Display-capable RAK4631 and RAK3401 images with OLED controller detection
+support a saved selection in Companion, Repeater, Room Server and Sensor roles:
+
+```text
+get display.controller
+set display.controller auto
+set display.controller ssd1306
+set display.controller sh1106
+```
+
+Choose `auto` for normal use. If a panel is shifted, wraps at its edge or is
+otherwise incorrectly detected, select its controller explicitly and restart
+the node. Changes are saved immediately and apply after restart; the current
+screen keeps its active controller until then. `get display.controller`
+reports the configured choice, active choice and whether a restart is
+needed. A custom firmware build is not needed to change this choice.
+
+Automatic detection lets the same RAK4631 image serve WisMesh Pocket v2 and
+v3. Both controllers retain rotation support and use one 1 KiB framebuffer.
 
 Detection checks the configured `DISPLAY_ADDRESS` (default `0x3C`). Only
 repeated SH1106 status readings select that controller; ambiguous responses
-keep SSD1306, preserving compatibility with older RAK1921 panels. For panels
-that cannot identify themselves, build with `OLED_CONTROLLER_OVERRIDE=1`
-(SSD1306) or `=2` (SH1106); `=0` restores automatic detection.
+keep SSD1306, preserving compatibility with older RAK1921 panels. With no
+saved choice, the default is automatic detection unless the build sets
+`OLED_CONTROLLER_OVERRIDE=1` (SSD1306) or `=2` (SH1106). This build-time
+override remains a fallback for existing custom builds. Any saved selection
+takes precedence, including `auto`, which restores detection even when that
+fallback forces a controller.
 
 See [the Pocket v3 issue](https://github.com/meshcore-dev/MeshCore/issues/3296)
 and [the RAK1921 detection caveat](https://github.com/meshtastic/firmware/pull/11265).

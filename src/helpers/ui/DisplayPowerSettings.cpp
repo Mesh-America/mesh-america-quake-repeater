@@ -1,5 +1,6 @@
 #include "DisplayPowerSettings.h"
 #include "DisplayBuildFlags.h"
+#include <helpers/CheckedSettingsFile.h>
 #include <stdio.h>
 
 namespace mesh { namespace ui {
@@ -9,7 +10,9 @@ bool pairing_available = false;
 FILESYSTEM* settings_fs = nullptr;
 const char* const path = "/display_prefs";
 const char* const backup = "/display_prefs.bak";
+#if !defined(NRF52_PLATFORM)
 const char* const temporary = "/display_prefs.tmp";
+#endif
 
 // Explicit bytes avoid compiler padding and preserve a small fixed format.
 void encode(const DisplayPowerPrefs& prefs, uint8_t (&data)[12]) {
@@ -22,18 +25,8 @@ void encode(const DisplayPowerPrefs& prefs, uint8_t (&data)[12]) {
   for (unsigned i = 0; i < 11; ++i) data[11] ^= data[i];
 }
 bool readPrefs(const char* name, DisplayPowerPrefs& prefs) {
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  File file(*settings_fs);
-  if (!file.open(name, FILE_O_READ)) return false;
-#else
-  File file = settings_fs->open(name, "r");
-  if (!file) return false;
-#endif
   uint8_t data[12], expected[12];
-  const bool complete = file.size() == sizeof(data)
-      && file.read(data, sizeof(data)) == sizeof(data);
-  file.close();
-  if (!complete) return false;
+  if (!mesh::storage::readFixedSettingsFile(settings_fs, name, data, sizeof(data))) return false;
   prefs.battery.mode = DisplayMode(data[3]);
   prefs.battery.seconds = uint16_t(data[4]) | (uint16_t(data[5]) << 8);
   prefs.usb.mode = DisplayMode(data[6]);
@@ -49,8 +42,25 @@ bool readPrefs(const char* name, DisplayPowerPrefs& prefs) {
       && validDisplayProfile(prefs.battery) && validDisplayProfile(prefs.usb)
       && uint8_t(prefs.inbox) <= uint8_t(DisplayInboxMode::Unread);
 }
+#if defined(NRF52_PLATFORM)
+// Both CLI updates and legacy migration use this transaction.
+__attribute__((noinline))
+#endif
 bool savePrefs(const DisplayPowerPrefs& prefs) {
   if (!settings_fs) return false;
+#if defined(NRF52_PLATFORM)
+  if (!validDisplayProfile(prefs.battery) || !validDisplayProfile(prefs.usb)
+      || uint8_t(prefs.inbox) > uint8_t(DisplayInboxMode::Unread)) return false;
+  uint8_t data[12];
+  encode(prefs, data);
+  // The shared transaction verifies staging and exact published bytes.
+  if (mesh::storage::writeCheckedSettingsFile(settings_fs, path, data, sizeof(data))
+      != mesh::AtomicFileWriter::Outcome::Committed) return false;
+  // Older images can leave a .bak record. Retire it only after publication
+  // of the checked display format has been verified.
+  settings_fs->remove(backup);
+  return true;
+#else
   // Preserve the previous complete file until the replacement is verified.
   settings_fs->remove(temporary);
   if (settings_fs->exists(temporary)) return false;
@@ -78,6 +88,7 @@ bool savePrefs(const DisplayPowerPrefs& prefs) {
   }
   settings_fs->remove(backup);
   return true;
+#endif
 }
 #endif  // MESHCORE_HAS_REAL_DISPLAY
 }

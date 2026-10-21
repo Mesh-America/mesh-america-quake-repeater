@@ -1,4 +1,7 @@
 #include "SSD1306Display.h"
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+#include "OLEDControllerSettings.h"
+#endif
 
 #if defined(ESP32_PLATFORM) || (defined(NRF52_PLATFORM) && defined(RAK4631_COMBINED_ETHERNET))
 // Adafruit_SSD1306::begin allocates WIDTH * ((HEIGHT + 7) / 8) once and
@@ -34,7 +37,11 @@ bool SSD1306Display::begin() {
     _isOn = true;
   }
   const bool started = display.begin(SSD1306_SWITCHCAPVCC, DISPLAY_ADDRESS,
-                                     true, false)
+                                     true, false
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+                                     , mesh::ui::oledControllerMode()
+#endif
+                                     )
       && i2c_probe(Wire, DISPLAY_ADDRESS);
   if (started) {
     _panel_ready = true;

@@ -3,6 +3,9 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+#include <helpers/ui/OLEDControllerSettings.h>
+#endif
 #include <helpers/UsbLoggingWatchdog.h>
 #include <helpers/UsbLoggingClientActivity.h>
 #include <helpers/MorseLoopPolicy.h>
@@ -3650,6 +3653,9 @@ void setup() {
   // Never open files on a primary store whose mount and RAM fallback failed.
   if (!mesh::storage::internalPrimaryFilesystemReady(primary_fs_boot)
       && !store.isVolatilePrimaryFS()) display_prefs_fs = nullptr;
+#endif
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+  mesh::ui::loadOLEDControllerSettings(regulator_prefs_fs);
 #endif
   mesh::ui::loadDisplayPowerSettings(display_prefs_fs,
 #ifdef BLE_PIN_CODE

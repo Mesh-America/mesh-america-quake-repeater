@@ -361,6 +361,34 @@ static unsigned totalRequests(const TwoWire& wire) {
 
 int main() {
   resetPins();
+  // A saved selection overrides either legacy build default. In particular,
+  // force SH1106 for ambiguous zero replies, and restore probing with Auto.
+  for (const auto mode : {mesh::ui::OLEDControllerMode::Auto,
+                          mesh::ui::OLEDControllerMode::SSD1306,
+                          mesh::ui::OLEDControllerMode::SH1106}) {
+    TwoWire wire;
+    wire.status[0x3C] = {0, 0};
+    AutoOLEDBackend display(128, 64, &wire, -1);
+    assert(display.begin(2, 0x3C, false, false, mode));
+    const bool sh = mode == mesh::ui::OLEDControllerMode::SH1106;
+    assert(display.controller() == (sh ? OLEDController::SH1106 : OLEDController::SSD1306));
+    assert(totalRequests(wire) == (mode == mesh::ui::OLEDControllerMode::Auto ? 2 : 0));
+    if (sh) verifyFrame(display, wire);
+    else {
+      display.display();
+      assert(display.base_display_calls == 1);
+    }
+  }
+  assert(active_allocations == 0);
+  {
+    TwoWire wire;
+    AutoOLEDBackend display(128, 64, &wire, -1);
+    assert(display.begin(2, 0x3C, false, false, mesh::ui::OLEDControllerMode::Auto));
+    assert(display.controller() == OLEDController::SH1106 && totalRequests(wire) == 2);
+    verifyFrame(display, wire);
+  }
+  assert(active_allocations == 0);
+  resetPins();
 #if defined(OLED_CONTROLLER_OVERRIDE) && OLED_CONTROLLER_OVERRIDE == 1
   {
     TwoWire wire;

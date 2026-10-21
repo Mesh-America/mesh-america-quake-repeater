@@ -3,6 +3,7 @@
 #include "NRF52VoltageRules.h"
 #include "NRF52VoltagePolicy.h"
 #include "PersistentStoreFormat.h"
+#include "CheckedSettingsFile.h"
 #if defined(NRF52_PLATFORM)
 #include "AtomicFileWriter.h"
 #endif
@@ -64,17 +65,7 @@ void encode(RegulatorMode mcu, RegulatorMode radio, uint8_t fallback, uint8_t (&
   storage::writeLE32(data + 8, storage::updateCRC32(0xffffffffUL, data, 8));
 }
 bool readFile(const char* name, uint8_t (&data)[12]) {
-  if (!settings_fs) return false;
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  File file(*settings_fs);
-  if (!file.open(name, FILE_O_READ)) return false;
-#else
-  File file = settings_fs->open(name, "r");
-  if (!file) return false;
-#endif
-  const bool complete = file.size() == sizeof(data)
-      && file.read(data, sizeof(data)) == sizeof(data);
-  file.close();
+  const bool complete = storage::readFixedSettingsFile(settings_fs, name, data, sizeof(data));
   return complete && memcmp(data, "REG1", 4) == 0
       && data[4] <= 2 && data[5] <= 2 && data[6] <= RECOVERY_DOMAINS
       && data[7] == 0 && storage::readLE32(data + 8)
@@ -83,17 +74,16 @@ bool readFile(const char* name, uint8_t (&data)[12]) {
 bool save(RegulatorMode mcu, RegulatorMode radio, uint8_t fallback) {
   if (!settings_fs) return false;
 #if defined(NRF52_PLATFORM)
-  uint8_t data[12], checked[12];
+  uint8_t data[12];
+  if (uint8_t(mcu) > 2 || uint8_t(radio) > 2 || fallback > RECOVERY_DOMAINS) return false;
   encode(mcu, radio, fallback, data);
   // The shared LittleFS writer already stages, flushes, checks size/CRC32C,
   // atomically publishes and verifies the public file. Reuse it rather than
   // linking a second replacement transaction into flash-constrained targets.
-  mesh::AtomicFileWriter file(settings_fs, path);
-  if (!file || file.write(data, sizeof(data)) != sizeof(data) || !file.commit()) return false;
-  // Retain the format validation and exact-byte comparison as well as the
-  // writer's independent transaction checksum. Legacy .bak files remain
-  // readable at boot and are retired only after this verified publication.
-  if (!readFile(path, checked) || memcmp(data, checked, sizeof(data)) != 0) return false;
+  if (storage::writeCheckedSettingsFile(settings_fs, path, data, sizeof(data))
+      != mesh::AtomicFileWriter::Outcome::Committed) return false;
+  // The checked writer compares the complete encoded record after commit.
+  // Retire legacy backups only after this verified publication.
   settings_fs->remove(backup);
   saved_fallback = fallback;
   return true;

@@ -5,6 +5,9 @@
 #include <helpers/IdentityGeneration.h>
 #include <helpers/ui/StartupScreen.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+#include <helpers/ui/OLEDControllerSettings.h>
+#endif
 #include <helpers/UsbLoggingWatchdog.h>
 #include <helpers/UsbLoggingClientActivity.h>
 #include <helpers/MorseLoopPolicy.h>
@@ -149,6 +152,9 @@ void setup() {
   }
 #ifdef DISPLAY_CLASS
   mesh::ui::loadDisplayPowerSettings(fs, false);
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT
+  mesh::ui::loadOLEDControllerSettings(regulator_prefs_fs);
+#endif
   mesh::ui::StartupScreen startup_screen;
   display_ready = display.begin();
   if (display_ready) {

@@ -1,6 +1,9 @@
 #include <helpers/RegulatorSettings.h>
 #include <helpers/LedSettings.h>
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
+#include <helpers/ui/OLEDControllerSettings.h>
+#endif
 #include <helpers/BatteryChargeCLI.h>
 #include <helpers/MorseCLI.h>
 #include <helpers/MorseLoopPolicy.h>
@@ -4333,6 +4336,12 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
     }
     return true;
   }
+
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
+  if (mesh::ui::handleOLEDControllerCommand(command, reply, reply_size, true)) {
+    return true;
+  }
+#endif
 
   if (strcmp(command, "get display.rotation") == 0) {
     if (_ui == NULL || !_ui->supportsDisplayRotation()) {
@@ -10388,6 +10397,9 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
         "  memory\r\n"
 #endif
         "  get/set display.rotation <0|90|180|270>\r\n"
+#if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
+        "  get/set display.controller <auto|ssd1306|sh1106> (saved; restart to apply)\r\n"
+#endif
 #ifdef PIN_BUZZER
         "  get/set buzzer on|off\r\n"
 #endif

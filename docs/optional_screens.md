@@ -24,7 +24,7 @@ add detection to an older download.
 | Heltec Wireless Tracker V1/V1.1 | The [manufacturer listing](https://old.heltec.org/project/wireless-tracker/) explicitly offers Screen Yes/No. | New display-capable images detect the ST7735 panel. Its absence releases only the display's power claim; GPS retains its own claim on the shared supply. |
 | Heltec V4 R8 Expansion Kit | The [manufacturer kit](https://heltec.org/project/v4-r8-ex/) offers front-panel configurations; its V2 expansion schematic connects the display's separate return line. | New R8 TFT images detect the panel through the documented MISO pin. Existing touch reset and backlight-only sleep/wake behavior are retained. |
 | Heltec V4/V4 R8 OLED | The [manufacturer listing](https://heltec.org/project/wifi-lora-32-v4/) offers OLED and No Display configurations. | Existing SSD1306 images already check whether the OLED responds. |
-| RAK WisBlock | The [RAK4631 kit guide](https://downloads.rakwireless.com/Meshtastic/Quick%20Start%20Guide_WisMesh%20RAK4631%20Starter%20Kit.pdf) labels the RAK1921 OLED optional. | Existing display-capable SSD1306 images already check presence. |
+| RAK WisBlock | The [RAK4631 kit guide](https://downloads.rakwireless.com/Meshtastic/Quick%20Start%20Guide_WisMesh%20RAK4631%20Starter%20Kit.pdf) labels the RAK1921 OLED optional. | Display-capable RAK4631 and RAK3401 images check presence and detect SSD1306 or SH1106 controllers. New images also provide a saved controller choice; see below. |
 | iKoka Stick and Handheld | The designer documents an [optional Stick OLED](https://github.com/ndoo/ikoka-stick-meshtastic-device#oled-display-optional) and [optional Handheld OLED](https://github.com/ndoo/ikoka-handheld-meshtastic-device#oled-display-optional). | Existing display-capable images already check presence. Handheld Companion supports the screen; currently headless infrastructure recipes remain headless. |
 | Original LilyGo T-Beam | [LilyGo](https://lilygo.cc/products/t-beam-v1-1-esp32-lora-module) offers soldered/non-soldered OLED configurations. | Existing display-capable SSD1306 images already check presence. |
 | XIAO ESP32-S3 with Wio-SX1262 | [Seeed](https://wiki.seeedstudio.com/wio_sx1262_with_xiao_esp32s3_kit/#recommended-accessories) lists the expansion board as an accessory for adding screens and sensors. | Existing display-capable Companion images already check presence. |
@@ -35,6 +35,16 @@ The older V4 TFT expansion configuration is also optional, but its current
 recipe has no verified panel readback connection. Detection is not enabled for
 that wiring. A touchscreen acknowledgement alone does not establish that the
 LCD responds. The V4 R8 TFT and older V4 TFT pin mappings are distinct.
+
+RAK4631 and RAK3401 images with OLED controller detection support
+`set display.controller auto`, `ssd1306` or `sh1106` in all display-enabled
+roles. Keep `auto` for normal use; choose the panel's controller explicitly if
+detection gives shifted or wrapped pixels. The choice is saved and applies
+after restarting the node. `get display.controller` shows the configured and
+active choices and any pending restart. With no saved choice, automatic
+detection or an existing build-time override supplies the default; saved
+`auto` takes precedence over that override. Normal controller selection does
+not require custom firmware. See the [controller commands](cli_commands.md#select-rak-oled-controller).
 
 New R8 TFT images support saved `display.rotation` values of `0`, `90`, `180`
 and `270`, including portrait/landscape dashboard changes without reflashing.

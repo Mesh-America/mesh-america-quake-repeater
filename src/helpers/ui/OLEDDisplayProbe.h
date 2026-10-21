@@ -6,6 +6,18 @@ namespace mesh { namespace ui {
 
 enum class OLEDController : uint8_t { Absent, SSD1306, SH1106 };
 
+enum class OLEDControllerMode : uint8_t { Auto, SSD1306, SH1106 };
+
+constexpr OLEDControllerMode defaultOLEDControllerMode() {
+#if defined(OLED_CONTROLLER_OVERRIDE)
+  static_assert(OLED_CONTROLLER_OVERRIDE >= 0 && OLED_CONTROLLER_OVERRIDE <= 2,
+                "OLED_CONTROLLER_OVERRIDE must be 0 (auto), 1 (SSD1306) or 2 (SH1106)");
+  return static_cast<OLEDControllerMode>(OLED_CONTROLLER_OVERRIDE);
+#else
+  return OLEDControllerMode::Auto;
+#endif
+}
+
 // Status-byte detection is used by ss_oled and Meshtastic. Only 0x08 is
 // evidence of SH1106: some RAK1921 SSD1306 panels return the ambiguous 0x00.
 // See https://github.com/meshtastic/firmware/pull/11265.

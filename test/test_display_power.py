@@ -15,44 +15,84 @@ FS_STUB = r'''
 #include <vector>
 #include <cstring>
 #include <cstdint>
+#define FILE_O_READ 1
+#define FILE_O_WRITE 2
 struct FakeFS;
 struct File {
   FakeFS* fs = nullptr;
   std::string name;
+  File() = default;
+  explicit File(FakeFS& backing) : fs(&backing) {}
+  File(FakeFS* backing, const char* path) : fs(backing), name(path) {}
   explicit operator bool() const { return fs != nullptr; }
+  bool open(const char*, int);
   size_t size() const;
   size_t read(uint8_t*, size_t);
   size_t write(const uint8_t*, size_t);
+  void flush() {}
+  bool isDirectory() const { return false; }
   void close() {}
 };
 struct FakeFS {
   std::map<std::string, std::vector<uint8_t>> files;
   bool fail_write = false, fail_publish = false;
-  unsigned calls = 0;
+  bool corrupt_write = false, fail_temp_read = false, fail_open_write = false;
+  bool false_publish = false, late_publish_error = false, fail_public_read = false;
+  bool corrupt_public = false, replace_after_validation = false, published = false;
+  unsigned calls = 0, public_reads = 0;
   bool exists(const char* name) { ++calls; return files.count(name); }
   bool remove(const char* name) { ++calls; files.erase(name); return true; }
   bool rename(const char* from, const char* to) {
     ++calls;
     if (fail_publish && std::string(from) == "/display_prefs.tmp") return false;
-    if (!exists(from) || exists(to)) return false;
-    files[to] = files[from]; files.erase(from); return true;
+    if (!exists(from)) return false;
+#if !defined(NRF52_PLATFORM)
+    if (exists(to)) return false;
+#endif
+    if (false_publish && std::string(from) == "/display_prefs.tmp") return true;
+    files[to] = files[from]; files.erase(from);
+    if (std::string(from) == "/display_prefs.tmp") {
+      published = true; public_reads = 0;
+      if (corrupt_public) files[to][0] ^= 1;
+      if (late_publish_error) return false;
+    }
+    return true;
   }
   File open(const char* name, const char* mode, bool = false) {
     ++calls;
-    if (*mode == 'w') files[name].clear();
+    if (*mode == 'w') {
+      if (fail_open_write) return {};
+      files[name].clear();
+    }
     if (!exists(name)) return {};
-    return File{this, name};
+    return File(this, name);
   }
 };
+inline bool File::open(const char* path, int mode) {
+  *this = fs->open(path, mode == FILE_O_WRITE ? "w" : "r");
+  return bool(*this);
+}
 inline size_t File::size() const { return fs->files[name].size(); }
 inline size_t File::read(uint8_t* out, size_t count) {
+  if (fs->fail_temp_read && name == "/display_prefs.tmp") return 0;
+  if (fs->published && name == "/display_prefs") {
+    if (fs->fail_public_read) return 0;
+    // Change to another valid image only after AtomicFileWriter's public
+    // verification, exercising the caller's independent exact-format readback.
+    if (++fs->public_reads == 2 && fs->replace_after_validation) {
+      auto& altered = fs->files[name];
+      altered[4] ^= 1; altered[11] ^= 1;
+    }
+  }
   const auto& bytes = fs->files[name];
   count = count < bytes.size() ? count : bytes.size();
   memcpy(out, bytes.data(), count); return count;
 }
 inline size_t File::write(const uint8_t* in, size_t count) {
-  if (fs->fail_write) return 0;
-  fs->files[name].assign(in, in + count); return count;
+  const size_t written = fs->fail_write ? count / 2 : count;
+  fs->files[name].assign(in, in + written);
+  if (fs->corrupt_write && written) fs->files[name][0] ^= 1;
+  return written;
 }
 #define FILESYSTEM FakeFS
 '''
@@ -60,6 +100,10 @@ inline size_t File::write(const uint8_t* in, size_t count) {
 TEST = r'''
 #include <cassert>
 #include <helpers/ui/DisplayPowerSettings.h>
+#if defined(NRF52_PLATFORM)
+#define ATOMIC_FILE_WRITER_IMPLEMENTATION
+#include <helpers/AtomicFileWriter.h>
+#endif
 using namespace mesh::ui;
 void policyTests() {
   for (unsigned mode = 0; mode <= 5; ++mode) {
@@ -329,6 +373,64 @@ int main() {
 '''
 
 
+NRF_ATOMIC_TESTS = r'''
+// Independent persisted bytes preserve the existing v2 disk layout.
+std::vector<uint8_t> powerRecord(uint16_t timeout) {
+  std::vector<uint8_t> data = {'D', 'P', 2, 4, uint8_t(timeout),
+      uint8_t(timeout >> 8), 4, 15, 0, 0, 0, 0};
+  for (unsigned i = 0; i < 11; ++i) data[11] ^= data[i];
+  return data;
+}
+void atomicPersistenceTests() {
+  const auto previous = powerRecord(15), candidate = powerRecord(27);
+  for (unsigned failure = 0; failure < 9; ++failure) {
+    FakeFS fs;
+    fs.files["/display_prefs"] = previous;
+    fs.files["/display_prefs.bak"] = previous;
+    assert(loadDisplayPowerSettings(&fs, true));
+    switch (failure) {
+      case 0: fs.fail_write = true; break;
+      case 1: fs.corrupt_write = true; break;
+      case 2: fs.fail_temp_read = true; break;
+      case 3: fs.fail_open_write = true; break;
+      case 4: fs.fail_publish = true; break;
+      case 5: fs.false_publish = true; break;
+      case 6: fs.fail_public_read = true; break;
+      case 7: fs.corrupt_public = true; break;
+      case 8: fs.replace_after_validation = true; break;
+    }
+    char reply[160];
+    assert(handleDisplayPowerCommand("set display.timeout 27", reply, sizeof(reply)));
+    assert(std::string(reply) == "Error: display settings save failed");
+    assert(displayPowerPrefs().battery.seconds == 15);
+    assert(fs.files.at("/display_prefs.bak") == previous);
+    assert(!fs.files.count("/display_prefs.tmp"));
+    if (failure < 6) assert(fs.files.at("/display_prefs") == previous);
+    if (failure == 6) assert(fs.files.at("/display_prefs") == candidate);
+    // A post-publication failure is not proof that the old record survived.
+    if (failure >= 7) assert(fs.files.at("/display_prefs") != previous);
+  }
+  for (bool late_error : {false, true}) {
+    FakeFS fs;
+    fs.files["/display_prefs"] = previous;
+    fs.files["/display_prefs.bak"] = previous;
+    fs.files["/display_prefs.tmp"] = {'s', 't', 'a', 'l', 'e'};
+    assert(loadDisplayPowerSettings(&fs, true));
+    fs.late_publish_error = late_error;
+    char reply[160];
+    assert(handleDisplayPowerCommand("set display.timeout 27", reply, sizeof(reply)));
+    assert(std::string(reply) == "OK");
+    assert(fs.files.at("/display_prefs") == candidate);
+    assert(!fs.files.count("/display_prefs.bak"));
+    assert(!fs.files.count("/display_prefs.tmp"));
+    assert(displayPowerPrefs().battery.seconds == 27);
+    assert(loadDisplayPowerSettings(&fs, true));
+    assert(displayPowerPrefs().battery.seconds == 27);
+  }
+}
+'''
+
+
 HEADLESS_TEST = r'''
 #include <cassert>
 #include <helpers/ui/DisplayPowerSettings.h>
@@ -437,6 +539,27 @@ class DisplayPowerTest(unittest.TestCase):
                 "-DDISPLAY_CLASS=SSD1306Display", "-I" + str(work),
                 "-I" + str(ROOT / "src"), str(work / "test.cpp"),
                 str(ROOT / "src/helpers/ui/DisplayPowerSettings.cpp"),
+                "-o", str(executable),
+            ], capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_nrf52_atomic_publication_failures_and_legacy_format(self):
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler, "host C++ compiler required")
+        with tempfile.TemporaryDirectory(prefix="mesh-nrf-display-test-") as name:
+            work = Path(name)
+            (work / "helpers").mkdir()
+            (work / "helpers/IdentityStore.h").write_text(FS_STUB, encoding="ascii")
+            code = TEST.replace("int main() {", NRF_ATOMIC_TESTS + "\nint main() {\n  atomicPersistenceTests();")
+            (work / "test.cpp").write_text(code, encoding="ascii")
+            executable = work / "nrf-display-test.exe"
+            result = subprocess.run([
+                compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                "-DNRF52_PLATFORM", "-DDISPLAY_CLASS=SSD1306Display",
+                "-I" + str(work), "-I" + str(ROOT / "src"),
+                str(work / "test.cpp"), str(ROOT / "src/helpers/ui/DisplayPowerSettings.cpp"),
                 "-o", str(executable),
             ], capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
