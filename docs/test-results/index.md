@@ -11,6 +11,7 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Radio and RF
 
+- [SolarXiao Advanced carrier profile build/host validation, 2026-10-21](solarxiao_advanced_2026-10-21.md)
 - [SolarXiao native MPPT and battery controls, 2026-10-21](solarxiao_power_2026-10-21.md)
 
 - [SolarXiao INA260 battery telemetry and carrier I2C fix, 2026-10-21](solarxiao_ina260_2026-10-21.md)
