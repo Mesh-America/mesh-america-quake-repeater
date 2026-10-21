@@ -27,6 +27,7 @@ struct ClientInfo {
 // dispatch targets must not consume any of the Morse commands below.
 namespace mesh { namespace cli {
 bool handleGuestsGet(int, const char*, char*, size_t) { return false; }
+bool handleLoginsGet(int, const char*, char*, size_t) { return false; }
 } }
 
 @MANAGER_HELPERS@
@@ -46,6 +47,7 @@ struct CommonCLI {
 struct LegacyPortable {
   CommonCLI _cli;
   int acl = 0;
+  int login_history = 0;
   bool handleGuestCommand(const char*, char*, size_t) { return false; }
   void dispatch(ClientInfo* sender, uint32_t sender_timestamp,
                 const char* command, char* reply) {

@@ -4340,6 +4340,44 @@ clears them.
 
 ---
 
+#### View repeater login attempts
+
+**Usage:**
+
+- `get logins` - first page
+- `get logins <page>` - a numbered page, starting at 1
+
+Available on repeaters through local administrative consoles, an authenticated
+remote admin session, or enrolled [signed fleet commands](fleet_management.md).
+Guests and delegated region/filter managers cannot read this list.
+
+The repeater keeps the 16 most recently attempted public keys in RAM, with the
+newest attempt first. Each row shows only the first **12 hexadecimal characters**
+of the key, the latest attempt's UTC epoch time, its result, and an attempt count.
+There are up to two rows per page. Attempts for the same full key update its
+existing row and count; the oldest key is replaced when the list is full.
+The count stops at 4,294,967,295. Two different keys can share
+the displayed prefix; their records and counts remain separate.
+
+```text
+Logins 1/1 (2)
+ABCDEF123456 n=3 last=1792600000 accepted
+123456ABCDEF n=1 last=1792599900 guests-disabled
+```
+
+Results are `accepted`, `wrong-password`, `guests-disabled`, `replay/state`, and
+`acl-unavailable`. An accepted login can be an admin, an assigned ACL client,
+or a guest. This history records
+actual login requests after packet authentication; anonymous owner, region, and
+clock requests, incomplete requests, and packets that fail authentication do not
+appear. Passwords and shared secrets are never recorded.
+
+This is recent attempt history, not a list of online users or a complete audit
+log. Pages can change as attempts arrive. A reboot clears it; `set guest off`
+does not. A zero timestamp means the clock was not set when the attempt arrived.
+
+---
+
 #### Recover a repeater's future-dated replay timestamp
 
 This is an explicit recovery operation after correcting a bad clock, not a

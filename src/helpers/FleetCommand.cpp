@@ -268,6 +268,7 @@ const CommandFamily* commandFamily(const char* key, size_t length) {
     {"radio2.cross", CommandKind::Cross},
     {"guest", CommandKind::Guest},
     {"guests", CommandKind::Guests},
+    {"logins", CommandKind::Guests},
     {"flood.channel.data", CommandKind::Setting},
     {"flood.channel.data.hops", CommandKind::Setting},
     {"flood.max", CommandKind::Setting},

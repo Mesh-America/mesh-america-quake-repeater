@@ -1,5 +1,6 @@
 #include <helpers/ClientACL.cpp>
 #include <helpers/GuestCLI.h>
+#include <helpers/LoginHistory.h>
 #include <helpers/CLICommandUtils.h>
 #include <cstdio>
 #include <cstdlib>
@@ -7,6 +8,7 @@
 #include <vector>
 
 static unsigned setting_calls = 0;
+static mesh::LoginHistory login_history;
 static bool handleGuestCommand(const char* command, char* reply, size_t capacity) {
   if (strcmp(command, "get guest") != 0 && strcmp(command, "set guest on") != 0
       && strcmp(command, "set guest off") != 0) return false;
@@ -46,6 +48,15 @@ static std::string query(const ClientACL& acl, const char* command) {
   char reply[160];
   memset(reply, '#', sizeof(reply));
   CHECK(mesh::cli::handleGuestsGet(acl, command, reply, 157));
+  CHECK(reply[157] == '#' && reply[158] == '#' && reply[159] == '#');
+  CHECK(strlen(reply) < 157);
+  return reply;
+}
+
+static std::string login_query(const char* command) {
+  char reply[160];
+  memset(reply, '#', sizeof(reply));
+  CHECK(mesh::cli::handleLoginsGet(login_history, command, reply, 157));
   CHECK(reply[157] == '#' && reply[158] == '#' && reply[159] == '#');
   CHECK(strlen(reply) < 157);
   return reply;
@@ -232,12 +243,18 @@ static void actual_dispatch_keeps_guest_controls_admin_only() {
   acl.load(&fs, self);
   auto* sender = add(acl, 0, PERM_ACL_ADMIN);
   add(acl, 1, PERM_ACL_GUEST);
+  uint8_t key[PUB_KEY_SIZE];
+  memset(key, 0xAB, sizeof(key));
+  login_history.record(key, 1234, mesh::LoginHistory::Result::GuestsDisabled);
+  CHECK(login_query("get logins") ==
+      "Logins 1/1 (1)\nABABABABABAB n=1 last=1234 guests-disabled");
   for (auto handler : guest_handlers) {
     for (unsigned permissions = 0; permissions <= 255; ++permissions) {
       sender->permissions = uint8_t(permissions);
       for (const char* input : {"get guests", "get guests 1", "xy|GET guests",
                                "xy|get guests 1", "get guest", "set guest on",
-                               "xy|set guest off"}) {
+                               "xy|set guest off", "get logins", "get logins 1",
+                               "xy|GET logins", "xy|get logins 1"}) {
         char command[40], reply[161];
         strcpy(command, input);
         memset(reply, '#', sizeof(reply));
@@ -254,6 +271,10 @@ static void actual_dispatch_keeps_guest_controls_admin_only() {
           if (strstr(input, "guests")) {
             CHECK(setting_calls == 0);
             CHECK(std::string(body) == query(acl, "get guests"));
+          } else if (strstr(input, "logins")) {
+            CHECK(setting_calls == 0);
+            CHECK(std::string(body) == login_query("get logins"));
+            CHECK(strstr(body, "ABABABABABABAB") == nullptr);
           } else {
             CHECK(setting_calls == 1);
             CHECK(strcmp(body, "guest setting handled") == 0);
@@ -262,9 +283,13 @@ static void actual_dispatch_keeps_guest_controls_admin_only() {
       }
     }
     // Physical/local command dispatch has no peer role and remains available.
-    char command[] = "get guests", reply[160] = {};
-    handler(acl, nullptr, 0, command, reply);
-    CHECK(std::string(reply) == query(acl, "get guests"));
+    for (const char* input : {"get guests", "get logins"}) {
+      char command[16], reply[160] = {};
+      strcpy(command, input);
+      handler(acl, nullptr, 0, command, reply);
+      CHECK(std::string(reply) == (strstr(input, "guests")
+          ? query(acl, "get guests") : login_query("get logins")));
+    }
   }
 }
 

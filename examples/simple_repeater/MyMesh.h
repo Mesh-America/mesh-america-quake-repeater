@@ -8,6 +8,7 @@
 #include <helpers/FloodGroupPlainText.h>
 #include <helpers/FloodRuleExtensions.h>
 #include <helpers/GuestLoginSettings.h>
+#include <helpers/LoginHistory.h>
 #if defined(ENABLE_OTA)
   #include <helpers/ota/OtaContext.h>
 #endif
@@ -383,6 +384,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
   NodePrefs _prefs;
   mesh::GuestLoginSettings guest_login;
+  mesh::LoginHistory login_history;
   bool handleGuestCommand(const char* command, char* reply, size_t capacity);
   ClientACL  acl;
   CommonCLI _cli;

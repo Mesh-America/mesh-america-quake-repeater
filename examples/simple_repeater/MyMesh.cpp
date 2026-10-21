@@ -571,6 +571,8 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
 }
 
 uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood) {
+  using LoginResult = mesh::LoginHistory::Result;
+  const uint32_t attempt_time = getRTCClock()->getCurrentTime();
   ClientInfo* existing_client =
       acl.getClient(sender.pub_key, PUB_KEY_SIZE);
   const bool admin_password =
@@ -598,8 +600,10 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
       perms = PERM_ACL_GUEST;
     } else {
 #if MESH_DEBUG
-      MESH_DEBUG_PRINTLN("Invalid password: %s", data);
+      MESH_DEBUG_PRINTLN("Login rejected: credentials or guest policy");
 #endif
+      login_history.record(sender.pub_key, attempt_time, guest_login.enabled()
+          ? LoginResult::WrongPassword : LoginResult::GuestsDisabled);
       return 0;
     }
   }
@@ -611,6 +615,7 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
           sender.pub_key, sender_timestamp, previous_timestamp, perms)) {
     MESH_DEBUG_PRINTLN(
         "Login rejected: replayed timestamp or replay state unavailable");
+    login_history.record(sender.pub_key, attempt_time, LoginResult::ReplayOrStateRejected);
     return 0;
   }
 
@@ -618,11 +623,13 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     client = acl.putClient(sender, 0);  // add to contacts (if not already known)
     if (client == NULL) {
       MESH_DEBUG_PRINTLN("Login rejected: ACL is full of protected contacts");
+      login_history.record(sender.pub_key, attempt_time, LoginResult::ACLUnavailable);
       return 0;
     }
   }
 
   MESH_DEBUG_PRINTLN("Login success!");
+  login_history.record(sender.pub_key, attempt_time, LoginResult::Accepted);
   const uint8_t previous_permissions = client->permissions;
   const bool reset_out_path = is_flood
       && client->out_path_len != OUT_PATH_FORCE_FLOOD;
@@ -12577,7 +12584,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     }
   }
   if (handleGuestCommand(command, reply, 157)
-      || mesh::cli::handleGuestsGet(acl, command, reply, 157)) return;
+      || mesh::cli::handleGuestsGet(acl, command, reply, 157)
+      || mesh::cli::handleLoginsGet(login_history, command, reply, 157)) return;
   _cli.handleCommand(sender_timestamp, command, reply);
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
   if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
@@ -12599,7 +12607,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
   }
 
   if (handleGuestCommand(command, reply, 157)
-      || mesh::cli::handleGuestsGet(acl, command, reply, 157)) return;
+      || mesh::cli::handleGuestsGet(acl, command, reply, 157)
+      || mesh::cli::handleLoginsGet(login_history, command, reply, 157)) return;
 
   if (strncmp(command, "backup prv.key", 14) == 0
       && (command[14] == 0 || command[14] == ' ')) {

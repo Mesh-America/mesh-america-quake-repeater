@@ -24,8 +24,11 @@ HARNESS = r'''
 #include <helpers/ClientPathPersistence.h>
 #include <helpers/LazyPersistence.h>
 #include <helpers/FloodCommandAliases.h>
+#include <helpers/LoginHistory.h>
 #define PUB_KEY_SIZE 32
 #define MAX_PATH_SIZE 64
+#define MAX_PACKET_PAYLOAD 184
+#define PAYLOAD_TYPE_ANON_REQ 0x07
 #define MAX_CLIENTS 16
 #define MESH_CLIENT_REPEATER_ONLY 1
 #define MESH_ENABLE_FLOOD_RULE_ENGINE 1
@@ -41,7 +44,10 @@ struct Identity {
 };
 struct Packet {
   bool direct = true;
+  uint8_t type = PAYLOAD_TYPE_ANON_REQ;
   bool isRouteDirect() const { return direct; }
+  bool isRouteFlood() const { return !direct; }
+  uint8_t getPayloadType() const { return type; }
 };
 }
 @CLIENT_INFO@;
@@ -93,6 +99,7 @@ struct RNG { void random(uint8_t* data, size_t len) { memset(data, 0xB5, len); }
 struct MyMesh {
   GuestMemoryFS fs;
   mesh::GuestLoginSettings guest_login;
+  mesh::LoginHistory login_history;
   ClientACL acl;
   Clock clock;
   RNG rng;
@@ -101,11 +108,17 @@ struct MyMesh {
   uint8_t contacts_save_failures = 0, reply_data[160]{};
   int matching_peer_indexes[MAX_CLIENTS]{};
   unsigned received = 0;
+  unsigned anonymous_requests = 0;
+  uint8_t reply_path_len = 0;
   MyMesh() { assert(guest_login.begin(&fs)); }
   Clock* getRTCClock() { return &clock; }
   RNG* getRNG() { return &rng; }
   unsigned long futureMillis(unsigned long delay) { return 10000 + delay; }
   uint8_t handleLoginReq(const mesh::Identity&, const uint8_t*, uint32_t, const uint8_t*, bool);
+  void onAnonDataRecv(mesh::Packet*, const uint8_t*, const mesh::Identity&, uint8_t*, size_t);
+  uint8_t handleAnonRegionsReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t) { ++anonymous_requests; return 0; }
+  uint8_t handleAnonOwnerReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t) { ++anonymous_requests; return 0; }
+  uint8_t handleAnonClockReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t) { ++anonymous_requests; return 0; }
   bool handleGuestCommand(const char*, char*, size_t);
   int searchPeersByHash(const uint8_t*);
   void onPeerDataRecv(mesh::Packet*, uint8_t, int, const uint8_t*, uint8_t*, size_t);
@@ -114,6 +127,7 @@ struct MyMesh {
   void dispatch(ClientInfo*, const char*, char*);
 };
 @LOGIN@
+@ANONYMOUS@
 @COMMAND@
 @SEARCH@
 @PATH@
@@ -128,6 +142,12 @@ static mesh::Identity identity(unsigned number) {
   return id;
 }
 static const uint8_t secret[PUB_KEY_SIZE] = {0xB7};
+using LoginResult = mesh::LoginHistory::Result;
+static void history(const MyMesh& mesh, unsigned id, uint32_t attempts, LoginResult result) {
+  const auto* entry = mesh.login_history.get(0);
+  assert(entry && memcmp(entry->key, identity(id).pub_key, PUB_KEY_SIZE) == 0);
+  assert(entry->timestamp == mesh.clock.now && entry->attempts == attempts && entry->result == result);
+}
 static uint8_t login(MyMesh& mesh, unsigned id, const char* password,
                      uint32_t timestamp = 100, bool flood = true) {
   guest_metadata_fs = &mesh.fs;
@@ -310,6 +330,84 @@ static void receiveAdmission() {
   assert(login(mesh, 1, "", 200, true) == 13);
   assert(guest->out_path_len == OUT_PATH_UNKNOWN && !guest->observed_path_pending);
 }
+static void loginHistoryDecisions() {
+  MyMesh mesh;
+  assert(mesh.login_history.size() == 0);
+  assert(login(mesh, 1, "") == 0);
+  assert(mesh.login_history.size() == 1);
+  history(mesh, 1, 1, LoginResult::GuestsDisabled);
+  assert(login(mesh, 1, "wrong") == 0);
+  history(mesh, 1, 2, LoginResult::GuestsDisabled);
+  command(mesh, "set guest on", "OK - guest on");
+  strcpy(mesh._prefs.guest_password, "private-guest");
+  assert(login(mesh, 1, "wrong") == 0);
+  history(mesh, 1, 3, LoginResult::WrongPassword);
+  assert(login(mesh, 1, "private-guest") == 13);
+  history(mesh, 1, 4, LoginResult::Accepted);
+  assert(login(mesh, 1, "private-guest") == 0);
+  history(mesh, 1, 5, LoginResult::ReplayOrStateRejected);
+  mesh.acl.authorize_ok = false;
+  assert(login(mesh, 2, "admin") == 0);
+  history(mesh, 2, 1, LoginResult::ReplayOrStateRejected);
+  mesh.acl.authorize_ok = true;
+  mesh.acl.allocate_ok = false;
+  assert(login(mesh, 2, "admin") == 0);
+  history(mesh, 2, 2, LoginResult::ACLUnavailable);
+  mesh.acl.allocate_ok = true;
+  assert(login(mesh, 2, "admin") == 13);
+  history(mesh, 2, 3, LoginResult::Accepted);
+  command(mesh, "set guest off", "OK - guest off");
+  assert(mesh.login_history.size() == 2); // Revoking sessions preserves attempts.
+  assert(login(mesh, 2, "wrong", 101) == 13); // Authorized ACL identity.
+  history(mesh, 2, 4, LoginResult::Accepted);
+  auto* manager = add(mesh, 3, PERM_ACL_FILTER_MGR);
+  manager->last_timestamp = 10;
+  assert(login(mesh, 3, "wrong", 101) == 13);
+  history(mesh, 3, 1, LoginResult::Accepted);
+  assert(login(mesh, 1, "private-guest", 102) == 0);
+  history(mesh, 1, 6, LoginResult::GuestsDisabled);
+  const auto before = mesh.fs.files;
+  const auto writes = mesh.fs.writes;
+  const uint32_t before_attempts = mesh.login_history.get(0)->attempts;
+  char reply[160];
+  assert(mesh::cli::handleLoginsGet(mesh.login_history, "get logins", reply, sizeof(reply)));
+  assert(!strstr(reply, "private-guest") && !strstr(reply, "admin") && !strstr(reply, "wrong"));
+  assert(mesh.fs.files == before && mesh.fs.writes == writes);
+  assert(mesh.login_history.get(0)->attempts == before_attempts);
+  MyMesh reboot;
+  assert(reboot.login_history.size() == 0); // History is deliberately volatile.
+}
+static void anonymousRequestsAreNotLogins() {
+  MyMesh mesh;
+  mesh::Packet packet;
+  uint8_t data[MAX_PACKET_PAYLOAD + 1]{};
+  const auto id = identity(1);
+  guest_metadata_fs = &mesh.fs;
+  for (uint8_t type : {ANON_REQ_TYPE_REGIONS, ANON_REQ_TYPE_OWNER, ANON_REQ_TYPE_BASIC}) {
+    data[4] = type;
+    mesh.onAnonDataRecv(&packet, secret, id, data, 6);
+    assert(mesh.login_history.size() == 0);
+  }
+  assert(mesh.anonymous_requests == 3);
+  data[4] = 0x04; // Unknown anonymous query.
+  mesh.onAnonDataRecv(&packet, secret, id, data, 6);
+  packet.direct = false;
+  data[4] = ANON_REQ_TYPE_REGIONS;
+  mesh.onAnonDataRecv(&packet, secret, id, data, 6);
+  mesh.onAnonDataRecv(nullptr, secret, id, data, 6);
+  mesh.onAnonDataRecv(&packet, secret, id, nullptr, 6);
+  for (size_t length : {size_t(0), size_t(3), size_t(MAX_PACKET_PAYLOAD)})
+    mesh.onAnonDataRecv(&packet, secret, id, data, length);
+  packet.type = 0;
+  data[4] = 0;
+  mesh.onAnonDataRecv(&packet, secret, id, data, 4);
+  assert(mesh.login_history.size() == 0);
+  packet.type = PAYLOAD_TYPE_ANON_REQ;
+  // A timestamp-only anonymous packet is the valid empty-password login form.
+  mesh.onAnonDataRecv(&packet, secret, id, data, 4);
+  history(mesh, 1, 1, LoginResult::GuestsDisabled);
+  assert(mesh.anonymous_requests == 3);
+}
 int main(int argc, char** argv) {
   assert(argc == 2);
   if (!strcmp(argv[1], "passwords")) defaultsAndPasswords();
@@ -317,6 +415,8 @@ int main(int argc, char** argv) {
   else if (!strcmp(argv[1], "revoke")) revocationAndFailures();
   else if (!strcmp(argv[1], "commands")) commandPermissions();
   else if (!strcmp(argv[1], "receive")) receiveAdmission();
+  else if (!strcmp(argv[1], "history")) loginHistoryDecisions();
+  else if (!strcmp(argv[1], "anonymous")) anonymousRequestsAreNotLogins();
   else assert(false);
   printf("repeater guest %s passed\n", argv[1]);
 }
@@ -334,7 +434,8 @@ class RepeaterGuestAccessTests(unittest.TestCase):
         acl_source = (ROOT / "src/helpers/ClientACL.cpp").read_text()
         constants = "\n".join(line for line in acl_header.splitlines()
                               if line.startswith(("#define PERM_ACL_", "#define OUT_PATH_")))
-        for name in ("FIRMWARE_VER_LEVEL", "RESP_SERVER_LOGIN_OK", "LAZY_CONTACTS_WRITE_DELAY"):
+        for name in ("FIRMWARE_VER_LEVEL", "RESP_SERVER_LOGIN_OK", "LAZY_CONTACTS_WRITE_DELAY",
+                     "ANON_REQ_TYPE_REGIONS", "ANON_REQ_TYPE_OWNER", "ANON_REQ_TYPE_BASIC"):
             constants += "\n" + re.search(r"^#define\s+" + name + r"\s+.*$", source, re.MULTILINE).group()
         manager_helpers = "\n".join(extract_braced(source, signature) for signature in (
             "static bool commandFamilyMatches(", "static bool commandListMatches(",
@@ -355,6 +456,8 @@ class RepeaterGuestAccessTests(unittest.TestCase):
         data_admission = peer[:gate_end] + "++received;\n}"
         request = extract_braced(source, "int MyMesh::handleRequest(")
         request_admission = request[:request.index("  if (reply_capacity >")] + "++received; return 1;\n}"
+        anonymous = extract_braced(source, "void MyMesh::onAnonDataRecv(")
+        anonymous = anonymous[:anonymous.index("    if (reply_len == 0) return;")] + "    (void)reply_len;\n  }\n}"
         cls.source_text = source
         replacements = {
             "@CONSTANTS@": constants,
@@ -362,6 +465,7 @@ class RepeaterGuestAccessTests(unittest.TestCase):
             "@REMOVE_GUESTS@": extract_braced(acl_source, "int ClientACL::removeGuestClients("),
             "@MANAGER_HELPERS@": manager_helpers,
             "@LOGIN@": extract_braced(source, "uint8_t MyMesh::handleLoginReq("),
+            "@ANONYMOUS@": anonymous,
             "@COMMAND@": extract_braced(source, "bool MyMesh::handleGuestCommand("),
             "@SEARCH@": extract_braced(source, "int MyMesh::searchPeersByHash("),
             "@PATH@": extract_braced(source, "bool MyMesh::onPeerPathRecv("),
@@ -411,12 +515,24 @@ class RepeaterGuestAccessTests(unittest.TestCase):
     def test_peer_request_and_path_admission(self):
         self.scenario("receive")
 
+    def test_login_history_records_actual_authorization_results(self):
+        self.scenario("history")
+
+    def test_only_login_requests_enter_history(self):
+        self.scenario("anonymous")
+
+    def test_password_bytes_are_not_logged(self):
+        login = extract_braced(self.source_text, "uint8_t MyMesh::handleLoginReq(")
+        debug_calls = re.findall(r"MESH_DEBUG_PRINTLN\([\s\S]*?\);", login)
+        self.assertFalse(any(re.search(r"\bdata\b", call) for call in debug_calls), debug_calls)
+
     def test_guest_controls_precede_portable_role_handoff(self):
         # Current FULL builds and legacy PORTABLE_MQTT_OBSERVER builds both need
         # the same saved policy and permissions, rather than a generic CLI fallback.
         body = extract_braced(self.source_text, "void MyMesh::handleCommand(uint32_t sender_timestamp,")
         self.assertEqual(body.count("handleGuestCommand(command, reply, 157)"), 2)
         self.assertEqual(body.count("mesh::cli::handleGuestsGet(acl, command, reply, 157)"), 2)
+        self.assertEqual(body.count("mesh::cli::handleLoginsGet(login_history, command, reply, 157)"), 2)
 
 
 if __name__ == "__main__":

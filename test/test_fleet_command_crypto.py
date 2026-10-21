@@ -460,14 +460,17 @@ class FleetCommandCryptoTests(unittest.TestCase):
             self.assertEqual(self.decode(envelope(command)), "reject")
 
     def test_guest_controls_and_pages_have_signed_command_boundaries(self):
-        for command in ["get guest", "set guest on", "set guest off", "get guests", "get guests 2"]:
+        for command in ["get guest", "set guest on", "set guest off", "get guests", "get guests 2",
+                        "get logins", "get logins 2"]:
             expected = envelope(command)
             self.assertEqual(self.run_tool("encode", CHANNEL.hex(), "all", NOW, NOW + 120, command),
                              expected.hex())
             self.assertEqual(self.decode(expected), f"{NOW}\n{NOW + 120}\n{command}")
         for command in ["set guest auto", "set guest off extra", "get guest on", "del guest",
                         "get guests 0", "get guests 01", "get guests 65536", "get guests.2",
-                        "set guests on", "get guests 1.secret", "get guest.password"]:
+                        "set guests on", "get guests 1.secret", "get guest.password",
+                        "set logins on", "del logins", "get logins 0", "get logins 01",
+                        "get logins 65536", "get logins.2", "get logins 1.secret"]:
             self.assertEqual(self.decode(envelope(command)), "reject")
 
     def test_scheduled_radio_commands_have_cross_language_real_signatures(self):

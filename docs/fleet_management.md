@@ -305,6 +305,7 @@ Reboot or changing enrollment discards the partial transfers.
 | Crossover | `get radio2.cross`, `set radio2.cross <auto|on|off>` |
 | Repeater guest login | `get guest`, `set guest on|off` |
 | Repeater guest sessions | `get guests [page]` |
+| Repeater login attempts | `get logins [page]` |
 | Filter rules | `get/set/del flood.filter[.n]`, `flood.rule[.n]` |
 | Path blacklist | `get/set/del flood.filter.blacklist[.n]` |
 | Channel moderation | `get/set/del flood.moderation[.n]` |
@@ -319,6 +320,16 @@ installation, reboot, and unrestricted CLI are outside fleet capability.
 Repeater guest login defaults to off. `set guest off` saves that choice and
 clears existing guest sessions immediately. Enabling it uses the existing
 guest password; this switch does not change any password or assigned ACL role.
+
+`get logins [page]` returns recent repeater login attempts, two per page, showing
+only 12-character public-key prefixes, latest UTC epoch times, results, and
+attempt counts. The 16 most recently attempted full keys are kept in RAM;
+repeated attempts update the existing key's record. Results distinguish accepted
+logins, wrong passwords, disabled guests, replay/state rejection, and unavailable
+ACL capacity. The history clears on reboot and survives `set guest off`.
+It contains no passwords or shared secrets and is not an online-user list.
+Anonymous owner, region, and clock requests and packets that fail authentication
+are excluded. Ordinary channel messages cannot read this list.
 
 `set radio2 mediamesh` saves 911.150 MHz, 250 kHz, SF7, CR 4/5, `rxtx`,
 with automatic scan-aware preamble. `mediamesh-range` uses 125 kHz instead.

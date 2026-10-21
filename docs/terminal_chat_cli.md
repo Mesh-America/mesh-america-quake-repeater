@@ -109,6 +109,7 @@ the corresponding feature:
 | `get mqttN.password`, `get mqttN.token` | Stored credentials for MQTT slot N |
 | `get acl`, `log` | Infrastructure ACL or captured packet log; these stores do not exist on Companion |
 | `get guest`, `set guest on`, `set guest off`, `get guests [page]` | Repeater guest-login control and current guest sessions |
+| `get logins [page]` | Recent repeater login attempts, with 12-character public-key prefixes |
 
 The command text is the same for direct connections. A binary Companion app
 can send `0x42` (`CMD_RUN_CLI_COMMAND`) followed by the ASCII command, without
@@ -648,6 +649,20 @@ repeater's guest entries. Each page shows one full public key and its last
 activity time in UTC epoch seconds. Guests are held in RAM, so this is a list of
 accepted sessions rather than proof that a device is currently reachable. They
 are cleared by a reboot or `set guest off` and remain separate from `get acl`.
+
+Use `cmd get logins` or `cmd get logins 2` from an admin session to inspect recent
+login attempts. The repeater retains up to 16 distinct public keys in RAM, newest
+attempt first, with up to two rows per page. Each row shows a 12-character hex
+key prefix, the latest UTC epoch time, result, and attempt count. Repeated
+attempts update the same full key's row; different keys sharing a displayed
+prefix remain separate records.
+
+Results distinguish accepted logins, wrong passwords, disabled guests,
+replay/state rejection, and unavailable ACL capacity. Only authenticated,
+complete login requests are recorded; anonymous owner, region, or clock requests
+are excluded. Passwords and shared secrets are never stored. This bounded
+history clears on reboot, survives `set guest off`, and does not show who is
+currently online. A zero timestamp means the node's clock was unset.
 
 The exact commands and permissions depend on the target firmware. `cmd` does
 not run a command on the local Companion; it sends the text over LoRa to the

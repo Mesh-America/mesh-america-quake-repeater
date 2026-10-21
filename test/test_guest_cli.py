@@ -21,9 +21,10 @@ def guest_dispatch(source):
     prefix = extract_braced(body, "if (strlen(command) > 4 && command[2] == '|')")
     dispatches = list(re.finditer(
         r"if \(handleGuestCommand\(command, reply, 157\)\s*"
-        r"\|\| mesh::cli::handleGuestsGet\(acl, command, reply, 157\)\) return;", body))
+        r"\|\| mesh::cli::handleGuestsGet\(acl, command, reply, 157\)\s*"
+        r"\|\| mesh::cli::handleLoginsGet\(login_history, command, reply, 157\)\) return;", body))
     if not dispatches:
-        raise AssertionError("guest command dispatch is absent")
+        raise AssertionError("guest/login command dispatch is absent")
     generated = '#include <helpers/FloodCommandAliases.h>\n'
     for signature in (
         "static bool commandFamilyMatches(", "static bool commandListMatches(",
