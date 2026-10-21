@@ -4280,7 +4280,7 @@ class TempRadioPreflightTests(unittest.TestCase):
             return result
 
         controller._execute = ambiguous
-        with self.assertRaisesRegex(ota.TransmissionError, "2 unambiguous"):
+        with self.assertRaisesRegex(ota.OtaError, "2 unambiguous"):
             controller.get_contact_clock(
                 "remote", self.NODE_KEYS["remote"], timeout=30
             )

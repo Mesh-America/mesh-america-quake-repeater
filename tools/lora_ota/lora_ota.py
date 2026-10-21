@@ -2249,13 +2249,19 @@ class Controller:
         clock_lines = [
             line.strip()
             for line in after.replace("\r", "").split("\n")
-            if re.fullmatch(r"[0-9]{1,10}", line.strip())
+            if re.fullmatch(r"[+-]?[0-9]+", line.strip())
         ]
-        if len(clock_lines) != 1:
+        if not clock_lines:
             raise TransmissionError(
+                f"clock query for {target} returned no epoch value"
+            )
+        if len(clock_lines) != 1:
+            raise OtaError(
                 f"clock query for {target} returned {len(clock_lines)} "
                 "unambiguous epoch values"
             )
+        if not re.fullmatch(r"[0-9]{1,10}", clock_lines[0]):
+            raise OtaError(f"clock query for {target} returned an invalid epoch value")
         epoch = int(clock_lines[0])
         if epoch <= 0 or epoch > 0xFFFFFFFF:
             raise OtaError(f"clock query for {target} returned invalid {epoch}")
@@ -6019,8 +6025,14 @@ def pin_remote_clock_forward(
     authenticated clock readback, never by adding another per-target lead.
     """
     timeout = float(TEMP_RADIO_PREFLIGHT_OPERATION_TIMEOUT_SECONDS)
-    before = sample_remote_clock(
-        controller, target, expected_public_key, timeout=timeout
+    # Retry the complete read sample, never the fixed clock write below. Each
+    # attempt owns a fresh marker and host interval, so a lost reply cannot
+    # contaminate the successful sample's RTT or schedule uncertainty.
+    before = retry_transmission_bounded(
+        lambda: sample_remote_clock(
+            controller, target, expected_public_key, timeout=timeout,
+        ),
+        f"initial clock read from {target}",
     )
     require_remote_clock_within_host_policy(before, target)
 
