@@ -7,9 +7,12 @@ saved-policy reset require local USB. Commands do not change RF settings.
 
 ## Automatic detection and manual overrides
 
-The default is `auto` when no carrier selection has been saved. Existing saved
-`mppt` or `advanced` selections remain manual overrides after an update.
-Use `set solar.board auto` to enable detection on such an installation.
+There are three power profiles: `auto`, `basic` and `mppt`. Base and Advanced
+share `basic` because their onboard power telemetry and software controls are
+the same; their different analog charger designs require no different driver.
+The default is `auto` when no carrier selection has been saved. Saved MPPT
+selections remain manual overrides, and saved Base/Advanced selections load as
+`basic`. Use `set solar.board auto` to enable detection on such an installation.
 The firmware environment, hardware/OTA identity and flash layout are unchanged.
 
 ```
@@ -43,12 +46,18 @@ Manual settings are available when the physical carrier is known:
 | Setting | Behavior |
 | --- | --- |
 | `set solar.board auto` | Verify INA260 before enabling MPPT; otherwise self-only, retrying. |
-| `set solar.board base` | Base/CN3791 capabilities, self readings, no native I2C access. |
-| `set solar.board advanced` | Advanced/BQ24650 capabilities, self readings, no native I2C access. |
+| `set solar.board basic` | Base/Advanced self battery voltage and MCU temperature; no native I2C access. |
 | `set solar.board mppt` | Enable native access without requiring INA260 detection; existing charger write identity checks still apply. |
 
-For Base or Advanced, an explicit selection reports that design's hardware
-capabilities and the live XIAO battery ADC and processor temperature.
+Legacy `base` and `advanced` command values are compatibility aliases for
+`basic`; they are not separate modes. Readbacks and help use the three canonical
+names. Existing Base/Advanced records load as `basic` without being rewritten;
+new Basic saves use the original Advanced record value, preserving the same
+self-only behavior across upgrades.
+
+For Base or Advanced, `basic` reports the common hardware capabilities and live
+XIAO battery ADC and processor temperature. It does not claim which analog
+charger is fitted.
 The existing self telemetry stays on channel 1, with voltage and temperature as
 different LPP types. It adds no invented charger flags, current, watts, battery
 NTC temperature or panel measurements. `get solar battery` aliases the self
@@ -72,9 +81,9 @@ NTC goes only to the charger, and current/voltage/MPP setpoints use hardware
 resistors, switches and a solder jumper. An OTA update cannot measure those
 signals or change those setpoints without additional hardware connections.
 
-Manual Base/Advanced mode suppresses native LTC4162/INA260 polling, register reads/writes,
+Manual Basic mode suppresses native LTC4162/INA260 polling, register reads/writes,
 replay and telemetry/history channels 2..13. `get mppt`, `set mppt ...` and
-`mppt ...` explain that the selected carrier has no digital charger interface.
+`mppt ...` explain that Basic Base/Advanced layouts have no digital charger interface.
 Pending auto mode only probes INA260 identity; it does not access the charger.
 The generic sensor scanner still reserves native addresses 0x40 and 0x68, so it
 cannot bypass that policy. Optional external sensor channels still start at 14.

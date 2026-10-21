@@ -6,8 +6,9 @@
 
 namespace mesh { namespace solar {
 namespace {
-// Complete canonical records detect bad version, length, value or complement.
+// Complete records detect bad version, length, value or complement.
 // The filesystem adapter also verifies atomic publication and public readback.
+// Value 3 is the old Base setting, accepted on read but no longer written.
 const uint8_t images[4][CarrierSelection::IMAGE_SIZE] = {
   {'S','X','B',1,0,0xff,0xa5,0x5a},
   {'S','X','B',1,1,0xfe,0xa5,0x5a},
@@ -21,12 +22,12 @@ void CarrierSelection::begin() {
   verified_mppt=false; probed=false; next_probe=0;
   if (!healthy || !store.exists()) return;
   uint8_t image[IMAGE_SIZE];
-  if (!store.load(image,sizeof(image)) || image[4]>Base
+  if (!store.load(image,sizeof(image)) || image[4]>=sizeof(images)/sizeof(images[0])
       || memcmp(image,images[image[4]],sizeof(image))) {
     healthy=false;
     return;
   }
-  type=static_cast<Type>(image[4]); saved=true;
+  type=image[4]==3?Basic:static_cast<Type>(image[4]); saved=true;
 }
 
 void CarrierSelection::service(Bus& bus,uint32_t now) {
@@ -56,11 +57,11 @@ bool CarrierSelection::handle(const char* command,char* reply,size_t capacity,
                               float battery_v,float mcu_c,bool history_available) {
   if (!command || !reply || !capacity) return false;
   if (!strcmp(command,"get solar.board")) {
-    if (!healthy) snprintf(reply,capacity,"Err - carrier selection unconfirmed; set solar.board auto|advanced|base|mppt");
+    if (!healthy) snprintf(reply,capacity,"Err - carrier selection unconfirmed; set solar.board auto|basic|mppt");
     else if (type==Auto) snprintf(reply,capacity,"> auto source=%s result=%s",saved?"saved":"default",
         verified_mppt?"mppt (INA260 ID verified)":"self-only (MPPT unconfirmed; Base/Advanced indistinguishable)");
     else snprintf(reply,capacity,"> %s source=%s (manual override)",
-                  type==Advanced?"advanced":type==Base?"base":"mppt",saved?"saved":"default");
+                  type==Basic?"basic":"mppt",saved?"saved":"default");
     return true;
   }
   if (!strncmp(command,"set solar.board",15) && (!command[15] || command[15]==' ')) {
@@ -69,18 +70,17 @@ bool CarrierSelection::handle(const char* command,char* reply,size_t capacity,
     Type requested=Auto;
     bool valid=true;
     if (!strcmp(value,"auto")) requested=Auto;
-    else if (!strcmp(value,"advanced")) requested=Advanced;
-    else if (!strcmp(value,"base")) requested=Base;
+    else if (!strcmp(value,"basic") || !strcmp(value,"advanced") || !strcmp(value,"base")) requested=Basic;
     else if (!strcmp(value,"mppt")) requested=Mppt;
     else valid=false;
     if (!valid) {
-      snprintf(reply,capacity,"Err - use set solar.board auto|advanced|base|mppt");
+      snprintf(reply,capacity,"Err - use set solar.board auto|basic|mppt");
     } else if (!select(requested)) {
       snprintf(reply,capacity,"Err - carrier save unconfirmed; native access blocked; repeat selection");
     } else if (type==Auto) {
       snprintf(reply,capacity,"OK - auto saved; verifying INA260; self ADC/MCU retained; verified MPPT reloads retained charger overrides");
-    } else if (type==Advanced || type==Base) {
-      snprintf(reply,capacity,"OK - %s saved; native LTC/INA access disabled; self ADC/MCU telemetry retained",type==Base?"Base":"Advanced");
+    } else if (type==Basic) {
+      snprintf(reply,capacity,"OK - basic (Base/Advanced) saved; native LTC/INA access disabled; self ADC/MCU telemetry retained");
     } else {
       snprintf(reply,capacity,"OK - MPPT saved; native access and retained charger overrides re-enabled");
     }
@@ -100,20 +100,17 @@ bool CarrierSelection::handle(const char* command,char* reply,size_t capacity,
         ? "> get telemetry.volt [1-7]; get telemetry.temp [1-7]; 30min samples, 7d RAM history; voltage trend does not measure charge current"
         : "Err - telemetry history is not included in this build");
   } else if (!healthy) {
-    snprintf(reply,capacity,"Err - carrier selection unconfirmed; self readings available; set solar.board auto|advanced|base|mppt");
+    snprintf(reply,capacity,"Err - carrier selection unconfirmed; self readings available; set solar.board auto|basic|mppt");
   } else if (!*key || !strcmp(key,"info")) {
     if (type==Auto) snprintf(reply,capacity,"> mode=auto source=%s %s",saved?"saved":"default",
         verified_mppt?"carrier=mppt (INA260 verified); use get mppt for LTC4162 identity/readings"
                      :"result=self-only; INA260 not verified; Base/Advanced cannot be distinguished");
-    else snprintf(reply,capacity,"> carrier=%s source=%s charger=%s; %s",
-             type==Advanced?"advanced":type==Base?"base":"mppt",saved?"configured":"default",
-             type==Advanced?"BQ24650":type==Base?"CN3791":"LTC4162",
+    else snprintf(reply,capacity,"> carrier=%s source=%s; %s",
+             type==Basic?"basic (Base/Advanced)":"mppt",saved?"configured":"default",
              type==Mppt?"use get mppt for live chip identity/readings":"ADC/MCU only; charger settings hardware-only");
   } else if (!strcmp(key,"capabilities")) {
-    const char* capabilities=type==Advanced
-        ? "> Advanced: battery ADC + MCU temp; solar V/I, battery I/W, NTC and charger flags unwired; settings hardware-only"
-        : type==Base
-        ? "> Base: battery ADC + MCU temp; CN3791 analog charger has no digital readings/settings; other power signals unwired"
+    const char* capabilities=type==Basic
+        ? "> Basic (Base/Advanced): battery ADC + MCU temp; no digital power readings/settings on these layouts"
         : nativeAllowed()
         ? "> MPPT: self ADC/MCU + INA260 V/A/W + LTC4162 readings/settings when reachable; use get mppt fields 0"
         : "> Auto: self ADC/MCU only until INA260 ID verifies MPPT; Base/Advanced have no digital identity; retrying detection";

@@ -8,8 +8,8 @@ namespace mesh { namespace solar {
 // responses leave self-only telemetry; Base and Advanced have no digital ID.
 class CarrierSelection {
 public:
-  // Preserve the original manual record values for installed selections.
-  enum Type : uint8_t { Mppt = 0, Advanced = 1, Auto = 2, Base = 3 };
+  // Legacy Advanced (1) and Base (3) records both load as Basic.
+  enum Type : uint8_t { Mppt = 0, Basic = 1, Auto = 2 };
   static constexpr size_t IMAGE_SIZE = 8;
 
 private:
@@ -27,8 +27,7 @@ public:
   void begin();
   void service(Bus& bus, uint32_t now);
   bool nativeAllowed() const { return healthy && (type == Mppt || (type == Auto && verified_mppt)); }
-  bool isAdvanced() const { return healthy && type == Advanced; }
-  bool isBase() const { return healthy && type == Base; }
+  bool isBasic() const { return healthy && type == Basic; }
   bool isAuto() const { return healthy && type == Auto; }
   bool settingsHealthy() const { return healthy; }
   bool handle(const char* command, char* reply, size_t capacity,

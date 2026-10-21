@@ -75,7 +75,7 @@ void has(const std::string& text,const char* wanted) {
   assert(text.find(wanted)!=std::string::npos);
 }
 void blocked(CarrierSelection& c) {
-  assert(!c.nativeAllowed() && !c.settingsHealthy() && !c.isAdvanced());
+  assert(!c.nativeAllowed() && !c.settingsHealthy() && !c.isBasic());
   has(cli(c,"get solar.board"),"unconfirmed");
 }
 int main(int argc,char** argv) {
@@ -83,34 +83,31 @@ int main(int argc,char** argv) {
   if(scenario=="persistence") {
     MemoryStore store;CarrierSelection c(store);
     assert(!c.nativeAllowed());c.begin();
-    assert(c.settingsHealthy() && c.isAuto() && !c.nativeAllowed() && !c.isAdvanced());
+    assert(c.settingsHealthy() && c.isAuto() && !c.nativeAllowed() && !c.isBasic());
     assert(!store.loads && !store.saves && !store.present);
     has(cli(c,"get solar.board"),"source=default");
     has(cli(c,"get solar.board"),"auto");assert(!store.saves);
-    has(cli(c,"set solar.board advanced"),"OK");
-    assert(c.isAdvanced() && !c.nativeAllowed() && store.saves==1);
+    has(cli(c,"set solar.board basic"),"OK");
+    assert(c.isBasic() && !c.nativeAllowed() && store.saves==1);
     assert(store.bytes.size()==CarrierSelection::IMAGE_SIZE);
+    assert(store.bytes[4]==1 && store.bytes[5]==0xfe);
     CarrierSelection restarted(store);restarted.begin();
-    assert(restarted.isAdvanced() && !restarted.nativeAllowed());
+    assert(restarted.isBasic() && !restarted.nativeAllowed());
     has(cli(restarted,"get solar.board"),"source=saved");
-    has(cli(restarted,"get solar info"),"BQ24650");
-    has(cli(restarted,"get solar capabilities"),"unwired");
+    has(cli(restarted,"get solar info"),"basic");
+    has(cli(restarted,"get solar capabilities"),"MCU");
     assert(store.saves==1);
     has(cli(restarted,"set solar.board mppt"),"retained charger overrides");
     CarrierSelection mppt(store);mppt.begin();
-    assert(mppt.nativeAllowed() && !mppt.isAdvanced());
+    assert(mppt.nativeAllowed() && !mppt.isBasic());
     has(cli(mppt,"get solar.board"),"mppt source=saved");
-    cli(mppt,"set solar.board base");assert(mppt.isBase() && !mppt.nativeAllowed());
-    CarrierSelection base(store);base.begin();assert(base.isBase());
-    has(cli(base,"get solar info"),"CN3791");
-    has(cli(base,"get solar capabilities"),"Base");
-    cli(base,"set solar.board auto");assert(base.isAuto() && !base.nativeAllowed());
+    cli(mppt,"set solar.board auto");assert(mppt.isAuto() && !mppt.nativeAllowed());
     CarrierSelection automatic(store);automatic.begin();
     assert(automatic.isAuto() && !automatic.nativeAllowed());
     has(cli(automatic,"get solar.board"),"source=saved");
   } else if(scenario=="invalid-records") {
     MemoryStore reference;CarrierSelection baseline(reference);baseline.begin();
-    cli(baseline,"set solar.board advanced");const auto valid=reference.bytes;
+    cli(baseline,"set solar.board basic");const auto valid=reference.bytes;
     for(size_t byte=0;byte<valid.size();++byte) {
       MemoryStore store;store.present=true;store.bytes=valid;store.bytes[byte]^=0x40;
       CarrierSelection c(store);c.begin();blocked(c);assert(!store.saves);
@@ -120,21 +117,27 @@ int main(int argc,char** argv) {
       MemoryStore store;store.present=true;store.bytes=valid;store.bytes.resize(size);
       CarrierSelection c(store);c.begin();blocked(c);assert(!store.saves);
     }
+    for(unsigned mode=4;mode<=255;++mode) {
+      MemoryStore store;store.present=true;
+      store.bytes={'S','X','B',1,uint8_t(mode),uint8_t(0xff^mode),0xa5,0x5a};
+      CarrierSelection c(store);IdentityBus bus;c.begin();blocked(c);
+      c.service(bus,0);assert(!bus.reads && !bus.writes && !store.saves);
+    }
     MemoryStore store;store.present=true;store.bytes=valid;store.fail_load=true;
     CarrierSelection c(store);c.begin();blocked(c);
-    store.fail_load=false;cli(c,"set solar.board advanced");assert(c.isAdvanced());
+    store.fail_load=false;cli(c,"set solar.board basic");assert(c.isBasic());
     store.available_now=false;c.begin();blocked(c);
     const unsigned saves=store.saves;has(cli(c,"set solar.board mppt"),"unconfirmed");
     assert(store.saves==saves);blocked(c);
-    store.available_now=true;c.begin();assert(c.isAdvanced());
+    store.available_now=true;c.begin();assert(c.isBasic());
   } else if(scenario=="save-failures") {
     for(bool published:{false,true}) {
       MemoryStore store;CarrierSelection c(store);c.begin();
       store.fail_save=true;store.publish_before_failure=published;
-      has(cli(c,"set solar.board advanced"),"native access blocked");blocked(c);
+      has(cli(c,"set solar.board basic"),"native access blocked");blocked(c);
       assert(store.present==published);
       store.fail_save=false;
-      has(cli(c,"set solar.board advanced"),"OK");assert(c.isAdvanced());
+      has(cli(c,"set solar.board basic"),"OK");assert(c.isBasic());
       store.fail_save=true;store.publish_before_failure=published;
       has(cli(c,"set solar.board mppt"),"unconfirmed");blocked(c);
       assert(store.bytes[4]==(published?0:1));
@@ -142,7 +145,7 @@ int main(int argc,char** argv) {
       cli(c,"set solar.board mppt");assert(c.nativeAllowed());
     }
   } else if(scenario=="readings-history") {
-    MemoryStore store;CarrierSelection c(store);c.begin();cli(c,"set solar.board advanced");
+    MemoryStore store;CarrierSelection c(store);c.begin();cli(c,"set solar.board basic");
     has(cli(c,"get solar readings"),"battery=3.876V MCU=27.25C");
     has(cli(c,"get solar battery"),"processor");
     has(cli(c,"get solar readings"),"self channel=1");
@@ -164,17 +167,18 @@ int main(int argc,char** argv) {
       assert(!c.handle(unrelated,reply,sizeof(reply),3.8f,25,true));
     }
     for(const char* invalid:{"set solar.board", "set solar.board unknown",
-        "set solar.board ADVANCED", "set solar.board advanced extra",
-        "set solar.board advanced ", "get solar unknown"}) {
+        "set solar.board BASIC", "set solar.board basic extra",
+        "set solar.board basic ", "get solar unknown"}) {
       has(cli(c,invalid),"Err");assert(!store.saves && c.isAuto() && !c.nativeAllowed());
     }
+    has(cli(c,"set solar.board unknown"),"auto|basic|mppt");
     assert(!c.handle(nullptr,reply,sizeof(reply),3.8f,25,true));
     assert(!c.handle("get solar",nullptr,sizeof(reply),3.8f,25,true));
     assert(!c.handle("get solar",reply,0,3.8f,25,true));
     for(const char* cmd:{"get solar", "get solar info", "get solar.board",
         "get solar capabilities", "get solar readings", "get solar battery",
-        "get solar history", "set solar.board advanced", "set solar.board mppt",
-        "set solar.board auto", "set solar.board base"}) {
+        "get solar history", "set solar.board basic", "set solar.board mppt",
+        "set solar.board auto", "set solar.board base", "set solar.board advanced"}) {
       for(size_t capacity=1;capacity<=157;++capacity) {
         std::vector<char> guarded(capacity+16,'~');
         char* out=guarded.data()+8;
@@ -191,7 +195,7 @@ int main(int argc,char** argv) {
     assert(!store.saves);has(cli(c,"get solar.board"),"auto");
     bus.online=false;const unsigned reads=bus.reads;
     c.service(bus,5000);c.service(bus,100000);assert(c.nativeAllowed() && bus.reads==reads);
-    cli(c,"set solar.board advanced");assert(!c.nativeAllowed());
+    cli(c,"set solar.board basic");assert(!c.nativeAllowed());
     c.service(bus,100001);assert(bus.reads==reads);
     cli(c,"set solar.board auto");assert(c.isAuto() && !c.nativeAllowed());
     bus.online=true;bus.device=0x227f;c.service(bus,100002);
@@ -207,7 +211,7 @@ int main(int argc,char** argv) {
       if(fault==2)bus.device=0x2260;
       if(fault==3){bus.manufacturer=0;bus.device=0;} // ACK alone is not identity.
       if(fault==4)bus.fail_reg=0xff;
-      c.service(bus,123);assert(!c.nativeAllowed() && !c.isAdvanced() && !c.isBase());
+      c.service(bus,123);assert(!c.nativeAllowed() && !c.isBasic());
       const unsigned reads=bus.reads;assert(reads>=1 && reads<=2 && !bus.writes);
       bus.online=true;bus.manufacturer=0x5449;bus.device=0x2270;bus.fail_reg=-1;
       c.service(bus,124);c.service(bus,5122);assert(bus.reads==reads && !c.nativeAllowed());
@@ -221,7 +225,7 @@ int main(int argc,char** argv) {
     bus.online=true;c.service(bus,UINT32_MAX);c.service(bus,0);c.service(bus,3998);
     assert(bus.reads==reads && !c.nativeAllowed());
     c.service(bus,3999);assert(c.nativeAllowed() && bus.reads==reads+2);
-    for(const char* mode:{"set solar.board advanced","set solar.board base","set solar.board mppt"}) {
+    for(const char* mode:{"set solar.board basic","set solar.board mppt"}) {
       cli(c,mode);const unsigned before=bus.reads;
       c.service(bus,10000);c.service(bus,0xf0000000);assert(bus.reads==before);
     }
@@ -229,14 +233,35 @@ int main(int argc,char** argv) {
     store.fail_save=true;cli(c,"set solar.board mppt");blocked(c);
     const unsigned before=bus.reads;c.service(bus,1);c.service(bus,99999);
     assert(bus.reads==before && !bus.writes);
-  } else if(scenario=="legacy-manual-records") {
-    for(uint8_t mode:{0,1}) {
+  } else if(scenario=="legacy-records-aliases") {
+    for(uint8_t mode:{0,1,2,3}) {
       MemoryStore store;store.present=true;
       store.bytes={'S','X','B',1,mode,uint8_t(0xff^mode),0xa5,0x5a};
+      const auto original=store.bytes;
       CarrierSelection c(store);IdentityBus bus;c.begin();
       assert(c.settingsHealthy() && c.nativeAllowed()==(mode==0));
-      assert(c.isAdvanced()==(mode==1) && !c.isAuto() && !c.isBase());
+      assert(c.isBasic()==(mode==1 || mode==3) && c.isAuto()==(mode==2));
+      has(cli(c,"get solar.board"),mode==0?"mppt":mode==2?"auto":"basic");
+      assert(store.bytes==original && !store.saves);
+      if(mode==2)continue;
       c.service(bus,0);c.service(bus,99999);assert(!bus.reads && !bus.writes && !store.saves);
+      assert(store.bytes==original);
+      if(mode==3) {
+        cli(c,"set solar.board basic");
+        assert(store.saves==1 && store.bytes[4]==1 && store.bytes[5]==0xfe);
+        assert(c.isBasic() && !c.nativeAllowed());
+      }
+    }
+    for(const char* alias:{"set solar.board base","set solar.board advanced","set solar.board basic"}) {
+      MemoryStore store;CarrierSelection c(store);IdentityBus bus;c.begin();
+      has(cli(c,alias),"OK");assert(c.isBasic() && !c.nativeAllowed());
+      assert(store.bytes==std::vector<uint8_t>({'S','X','B',1,1,0xfe,0xa5,0x5a}));
+      const std::string info=cli(c,"get solar info"),board=cli(c,"get solar.board");
+      has(info,"basic");has(board,"basic");
+      assert(info.find("charger=")==std::string::npos);
+      assert(board.find("base")==std::string::npos && board.find("advanced")==std::string::npos);
+      c.service(bus,0);c.service(bus,99999);assert(!bus.reads && !bus.writes);
+      CarrierSelection restart(store);restart.begin();assert(restart.isBasic());
     }
   } else assert(false);
 }
@@ -354,9 +379,9 @@ void nativeSilent(bool periodic=true) {
 }
 int main(int argc,char** argv) {
   assert(argc==2);const std::string scenario=argv[1];MockFS fs;MainBoard board;
-  if(scenario=="advanced-runtime") {
+  if(scenario=="basic-runtime") {
     beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);assert(!Wire.calls);
-    has(cli("set solar.board advanced"),"OK");nativeSilent();
+    has(cli("set solar.board basic"),"OK");nativeSilent();
     assert(fs.exists("/solar_board") && !fs.exists("/solar_power"));
     const auto calls=Wire.calls;
     has(cli("get solar readings"),"battery=3.850V MCU=26.75C");
@@ -364,22 +389,22 @@ int main(int argc,char** argv) {
     board.battery_mv=3991;board.mcu_c=-12.5f;
     has(cli("get solar battery"),"battery=3.991V MCU=-12.50C");
     assert(board.battery_reads==2 && board.temperature_reads==2);
-    has(cli("get solar info"),"BQ24650");has(cli("get solar capabilities"),"unwired");
+    has(cli("get solar info"),"basic");has(cli("get solar capabilities"),"MCU");
     has(cli("get solar history"),MESH_ENABLE_TELEMETRY_HISTORY?"30min":"not included");
     assert(board.battery_reads==2 && board.temperature_reads==2 && calls==Wire.calls);
-    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);has(cli("get solar.board"),"advanced source=saved");nativeSilent();
+    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);has(cli("get solar.board"),"basic source=saved");nativeSilent();
     board.battery_mv=0;board.mcu_c=NAN;
     has(cli("get solar readings"),"battery=unavailable MCU=unavailable");
   } else if(scenario=="invalid-runtime") {
     fs.files["/solar_board"]={'b','a','d'};beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);assert(!Wire.calls);
     nativeSilent();has(cli("get solar.board"),"unconfirmed");
     has(cli("get solar readings"),"3.850V");assert(board.battery_reads==1);
-    has(cli("set solar.board advanced"),"OK");nativeSilent();
+    has(cli("set solar.board basic"),"OK");nativeSilent();
     beginSettings(board,nullptr,MESH_ENABLE_TELEMETRY_HISTORY);nativeSilent();has(cli("get solar.board"),"unconfirmed");
     has(cli("set solar.board mppt"),"unconfirmed");nativeSilent();
     has(cli("get solar battery"),"3.850V");
   } else if(scenario=="reenable-reload") {
-    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);has(cli("set solar.board advanced"),"OK");nativeSilent();
+    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);has(cli("set solar.board basic"),"OK");nativeSilent();
     Settings overrides;overrides.defaults();overrides.masks[0x14]=2;overrides.values[0x14]=0;
     uint8_t image[Settings::IMAGE_SIZE];overrides.encode(image);
     fs.files["/solar_power"]=std::vector<uint8_t>(image,image+sizeof(image));
@@ -397,47 +422,61 @@ int main(int argc,char** argv) {
     for(unsigned i=0;i<4;++i)assert(channels[i]==i+2 && values[i].channel==i+2);
     assert(values[0].valid && fabs(values[0].voltage-13.2f)<0.001f);
     assert(channels[4]==99 && values[4].channel==99);
-    has(cli("set solar.board advanced"),"OK");nativeSilent();
+    has(cli("set solar.board basic"),"OK");nativeSilent();
     assert(fs.files["/solar_power"]==std::vector<uint8_t>(image,image+sizeof(image)));
   } else if(scenario=="selection-store-faults") {
-    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);has(cli("set solar.board advanced"),"OK");
-    const auto advanced=fs.files["/solar_board"];
+    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);has(cli("set solar.board basic"),"OK");
+    const auto basic=fs.files["/solar_board"];
     fs.fail_write=true;has(cli("set solar.board mppt"),"unconfirmed");nativeSilent();
-    assert(fs.files["/solar_board"]==advanced);fs.fail_write=false;
-    cli("set solar.board advanced");
+    assert(fs.files["/solar_board"]==basic);fs.fail_write=false;
+    cli("set solar.board basic");
     fs.fail_rename_from="/solar_board.tmp";
     has(cli("set solar.board mppt"),"unconfirmed");nativeSilent();
-    assert(fs.files["/solar_board"]==advanced);fs.fail_rename_from.clear();
-    cli("set solar.board advanced");fs.corrupt_write=true;
+    assert(fs.files["/solar_board"]==basic);fs.fail_rename_from.clear();
+    cli("set solar.board basic");fs.corrupt_write=true;
     has(cli("set solar.board mppt"),"unconfirmed");nativeSilent();
-    assert(fs.files["/solar_board"]==advanced);fs.corrupt_write=false;
-    cli("set solar.board advanced");fs.fail_read_path="/solar_board";
+    assert(fs.files["/solar_board"]==basic);fs.corrupt_write=false;
+    cli("set solar.board basic");fs.fail_read_path="/solar_board";
     has(cli("set solar.board mppt"),"unconfirmed");nativeSilent();
-    assert(fs.files["/solar_board"]!=advanced);fs.fail_read_path.clear();
-    has(cli("set solar.board advanced"),"OK");nativeSilent();
-    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);assert(selection.isAdvanced());nativeSilent();
+    assert(fs.files["/solar_board"]!=basic);fs.fail_read_path.clear();
+    has(cli("set solar.board basic"),"OK");nativeSilent();
+    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);assert(selection.isBasic());nativeSilent();
   } else if(scenario=="metadata-faults") {
     fs.fail_stat=true;
     beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
     has(cli("get solar.board"),"unconfirmed");nativeSilent();
-    has(cli("set solar.board advanced"),"OK");nativeSilent();
+    has(cli("set solar.board basic"),"OK");nativeSilent();
     beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
-    has(cli("get solar.board"),"advanced source=saved");nativeSilent();
+    has(cli("get solar.board"),"basic source=saved");nativeSilent();
     fs.fail_read_path="/solar_board";
     beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
     has(cli("get solar.board"),"unconfirmed");nativeSilent();
     fs.fail_read_path.clear();
-    has(cli("set solar.board advanced"),"OK");nativeSilent();
+    has(cli("set solar.board basic"),"OK");nativeSilent();
     fs.files["/solar_board"][0]^=1;
     beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
     has(cli("get solar.board"),"unconfirmed");nativeSilent();
-  } else if(scenario=="base-runtime") {
+  } else if(scenario=="legacy-basic-runtime") {
     beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);assert(!Wire.calls);
-    has(cli("set solar.board base"),"OK");nativeSilent();
-    has(cli("get solar info"),"CN3791");has(cli("get solar capabilities"),"Base");
-    has(cli("get solar readings"),"battery=3.850V MCU=26.75C");
-    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
-    assert(selection.isBase());nativeSilent();
+    std::string blocked_message;
+    for(const char* alias:{"set solar.board base","set solar.board advanced","set solar.board basic"}) {
+      has(cli(alias),"OK");assert(selection.isBasic());nativeSilent();
+      assert(fs.files["/solar_board"]==std::vector<uint8_t>({'S','X','B',1,1,0xfe,0xa5,0x5a}));
+      has(cli("get solar.board"),"basic source=saved");
+      has(cli("get solar info"),"basic");has(cli("get solar capabilities"),"MCU");
+      has(cli("get solar readings"),"battery=3.850V MCU=26.75C");
+      if(blocked_message.empty())blocked_message=cli("get mppt");
+      else assert(blocked_message==cli("get mppt"));
+    }
+    for(uint8_t mode:{1,3}) {
+      const std::vector<uint8_t> original={'S','X','B',1,mode,uint8_t(0xff^mode),0xa5,0x5a};
+      fs.files["/solar_board"]=original;const auto writes=fs.writes;
+      beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
+      assert(selection.isBasic() && !selection.nativeAllowed());nativeSilent();
+      has(cli("get solar.board"),"basic source=saved");
+      assert(blocked_message==cli("get mppt"));
+      assert(fs.writes==writes && fs.files["/solar_board"]==original);
+    }
   } else if(scenario=="auto-pending-replay") {
     beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
     assert(!Wire.calls && selection.isAuto() && !selection.nativeAllowed());
@@ -472,7 +511,7 @@ int main(int argc,char** argv) {
     beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
     cli("set solar.board mppt");now_ms=100;service();
     assert(selection.nativeAllowed() && Wire.calls>0 && !Wire.writes);
-    cli("set solar.board advanced");nativeSilent(false);
+    cli("set solar.board basic");nativeSilent(false);
     Settings overrides;overrides.defaults();overrides.masks[0x14]=2;overrides.values[0x14]=0;
     uint8_t image[Settings::IMAGE_SIZE];overrides.encode(image);
     fs.files["/solar_power"]=std::vector<uint8_t>(image,image+sizeof(image));
@@ -554,10 +593,10 @@ class SolarXiaoCarrierTests(unittest.TestCase):
     def test_command_boundaries_and_every_reply_capacity(self):
         self.run_scenario("selector", "parser-bounds")
 
-    def test_actual_advanced_adapter_has_no_native_io_and_live_self_readings(self):
+    def test_actual_basic_adapter_has_no_native_io_and_live_self_readings(self):
         for binary in ("adapter-history", "adapter-no-history"):
             with self.subTest(binary=binary):
-                self.run_scenario(binary, "advanced-runtime")
+                self.run_scenario(binary, "basic-runtime")
 
     def test_actual_adapter_blocks_native_io_with_unconfirmed_selection(self):
         self.run_scenario("adapter-history", "invalid-runtime")
@@ -586,11 +625,11 @@ class SolarXiaoCarrierTests(unittest.TestCase):
     def test_auto_timer_wrap_and_all_manual_or_unhealthy_modes_are_silent(self):
         self.run_scenario("selector", "auto-wrap-manual-silence")
 
-    def test_original_manual_record_bytes_keep_their_meanings(self):
-        self.run_scenario("selector", "legacy-manual-records")
+    def test_all_legacy_record_values_and_old_aliases_map_to_canonical_modes(self):
+        self.run_scenario("selector", "legacy-records-aliases")
 
-    def test_actual_base_adapter_has_no_native_io_or_invented_measurements(self):
-        self.run_scenario("adapter-history", "base-runtime")
+    def test_actual_old_aliases_and_records_share_basic_gating_without_startup_rewrite(self):
+        self.run_scenario("adapter-history", "legacy-basic-runtime")
 
     def test_actual_auto_adapter_reloads_overrides_only_after_positive_detection(self):
         self.run_scenario("adapter-history", "auto-pending-replay")

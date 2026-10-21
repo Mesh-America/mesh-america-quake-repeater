@@ -115,13 +115,11 @@ bool handleCommand(const char* command,char* reply,size_t capacity,bool local) {
   const bool mppt=(!strncmp(command,"get mppt",8) && (!command[8] || command[8]==' '))
       || !strncmp(command,"set mppt ",9) || !strncmp(command,"mppt ",5);
   if (mppt && !selection.nativeAllowed()) {
-    const char* error=selection.isAdvanced()
-        ? "Err - BQ24650 Advanced has no digital charger/INA interface; use get solar readings"
-        : selection.isBase()
-        ? "Err - CN3791 Base has no digital charger/INA interface; use get solar readings"
+    const char* error=selection.isBasic()
+        ? "Err - basic (Base/Advanced) has no digital charger/INA interface; use get solar readings"
         : selection.isAuto()
         ? "Err - auto has not verified INA260; self-only; use get solar.board or set solar.board mppt for manual override"
-        : "Err - carrier selection unconfirmed; set solar.board auto|advanced|base|mppt";
+        : "Err - carrier selection unconfirmed; set solar.board auto|basic|mppt";
     snprintf(reply,capacity,"%s",error);
     return true;
   }
