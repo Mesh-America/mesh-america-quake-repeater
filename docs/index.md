@@ -13,7 +13,7 @@ Choose firmware with the [firmware picker](firmware_picker.md). For help with a 
 
 ## Documentation
 
-- [SolarXiao Advanced/MPPT carrier profiles and battery controls](solarxiao_power.md)
+- [SolarXiao Base/Advanced/MPPT detection and battery controls](solarxiao_power.md)
 
 - [Feature switches by role](role_feature_switches.md) and [Full Companion features](full_companion_features.md)
 - [Firmware update guide](ota_user_guide.md), [easy LoRa OTA](ota_easy.md), and [scripted LoRa OTA](lora_ota_automation.md)

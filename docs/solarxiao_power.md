@@ -1,35 +1,70 @@
 # SolarXiao carrier profiles, MPPT and battery controls
 
-SolarXiao Repeater firmware supports the older BQ24650 Advanced carrier and the
-LTC4162/INA260 MPPT carrier in Full and Reduced builds. Use USB CLI or the authenticated
-administrator CLI over LoRa. Ship mode and
+SolarXiao Repeater firmware supports the CN3791 Base, older BQ24650 Advanced and
+LTC4162/INA260 MPPT carriers in Full and Reduced builds. Use USB CLI or the
+authenticated administrator CLI over LoRa. Ship mode and
 saved-policy reset require local USB. Commands do not change RF settings.
 
-## Selecting the carrier
+## Automatic detection and manual overrides
 
-Carrier selection is configured by the operator; missing I2C responses never
-identify an Advanced board. `mppt` is the default for existing installations.
+The default is `auto` when no carrier selection has been saved. Existing saved
+`mppt` or `advanced` selections remain manual overrides after an update.
+Use `set solar.board auto` to enable detection on such an installation.
 The firmware environment, hardware/OTA identity and flash layout are unchanged.
 
 ```
 get solar.board
-set solar.board advanced
+set solar.board auto
 get solar
 get solar capabilities
 get solar readings
 get solar history
 ```
 
-For the older SolarXiao 2W Advanced, choose `advanced`. This reports the BQ24650
-hardware capabilities and the live XIAO battery ADC and processor temperature.
+Auto mode checks the INA260 manufacturer's ID (`0xfe = 0x5449`) and device ID
+(`0xff & 0xfff0 = 0x2270`) at carrier address `0x40`. An address ACK alone is not
+enough: another device such as INA219 can share that address. Detection only
+reads identity registers; it does not configure/reset either chip. The first
+probe occurs in the loop after initialization, then retries every five seconds
+until a valid identity is found. A positive result identifies MPPT for these
+carrier designs and is retained until reboot or a new board selection.
+Temporary communication loss does not relabel a previously detected MPPT.
+
+Without a verified INA260, auto reports `self-only` and keeps retrying. It does
+not claim to distinguish Base from Advanced: neither has a digital identity,
+and missing responses can also mean an MPPT power/bus fault. Charger access,
+saved-override replay and native carrier telemetry stay blocked until a valid
+INA260 identity is found. XIAO self readings remain available throughout.
+The MPPT carrier's INA260 was previously read with USB power only; detection
+does not require the LTC4162 charger to respond at SOLAR/VIN.
+
+Manual settings are available when the physical carrier is known:
+
+| Setting | Behavior |
+| --- | --- |
+| `set solar.board auto` | Verify INA260 before enabling MPPT; otherwise self-only, retrying. |
+| `set solar.board base` | Base/CN3791 capabilities, self readings, no native I2C access. |
+| `set solar.board advanced` | Advanced/BQ24650 capabilities, self readings, no native I2C access. |
+| `set solar.board mppt` | Enable native access without requiring INA260 detection; existing charger write identity checks still apply. |
+
+For Base or Advanced, an explicit selection reports that design's hardware
+capabilities and the live XIAO battery ADC and processor temperature.
 The existing self telemetry stays on channel 1, with voltage and temperature as
 different LPP types. It adds no invented charger flags, current, watts, battery
 NTC temperature or panel measurements. `get solar battery` aliases the self
 readings; the MCU temperature is not a battery or charger temperature.
 If a node already reports battery voltage and MCU temperature on channel 1,
-this profile adds no further physical measurements. It adds explicit carrier
-selection and capability reporting; the voltage/temperature history commands
+this profile adds no further physical measurements. It adds carrier detection,
+manual overrides and capability reporting; the voltage/temperature history commands
 also already exist in builds that include telemetry history.
+
+The [2025 Base Standard schematic](https://github.com/wehooper4/Meshtastic-Hardware/blob/main/XaioSeries/SolarXaio/Base/Standard/Schematic_SolarXaio_Base_2025-10-23.pdf)
+uses a CN3791 analog charger with no digital interface or INA monitor. Battery
+voltage reaches the XIAO BAT input. Charge status drives an LED, and the other
+charger signals are not connected to XIAO measurement/control inputs. Base
+therefore needs no extra telemetry driver: only self battery voltage and MCU
+temperature are available, just like Advanced. Base Lite publishes a README
+but no schematic, so its exact connections are not independently qualified here.
 
 The [2025 Advanced schematic](https://github.com/wehooper4/Meshtastic-Hardware/blob/main/XaioSeries/SolarXaio/Advanced/Standard/Schematic_SolarXaio_ADV_2025-10-23.pdf)
 has no INA monitor or digital charger interface. Charger status pins drive LEDs,
@@ -37,9 +72,10 @@ NTC goes only to the charger, and current/voltage/MPP setpoints use hardware
 resistors, switches and a solder jumper. An OTA update cannot measure those
 signals or change those setpoints without additional hardware connections.
 
-Advanced mode suppresses native LTC4162/INA260 polling, register reads/writes,
+Manual Base/Advanced mode suppresses native LTC4162/INA260 polling, register reads/writes,
 replay and telemetry/history channels 2..13. `get mppt`, `set mppt ...` and
-`mppt ...` explain that the Advanced carrier has no digital charger interface.
+`mppt ...` explain that the selected carrier has no digital charger interface.
+Pending auto mode only probes INA260 identity; it does not access the charger.
 The generic sensor scanner still reserves native addresses 0x40 and 0x68, so it
 cannot bypass that policy. Optional external sensor channels still start at 14.
 Historical samples retained from a previous carrier selection describe the old
@@ -59,15 +95,24 @@ and MCU readings remain available. An explicit successful `set solar.board`
 recovers selection. With an unavailable filesystem, the selection cannot be
 saved and native access remains blocked.
 
-For the LTC4162 carrier, select `set solar.board mppt`. This re-enables native
-access and reloads any retained `/solar_power` charger overrides. Changing the
+When auto verifies MPPT or a manual MPPT selection re-enables native access,
+the firmware reloads any retained `/solar_power` charger overrides. Changing the
 carrier does not erase those overrides, change RF/PA settings, modify battery
-protection, or write charger defaults. Advanced mode is not chip autodetection.
+protection, or write charger defaults. The INA260 identity verifies the monitor;
+LTC4162 chemistry and cell-count checks still independently guard charger writes.
+
+Radio target selection remains separate. Choose the existing
+`solarxiao_30S_repeater` or `solarxiao_33S_repeater` firmware target to match the
+fitted E22 radio module. The
+published Base Standard schematic specifies M30S; the pictured 2W Advanced
+uses M33S. Charger detection cannot identify the PA variant or select its TX
+power limits.
+
 A remotely deployed node must first receive compatible firmware before these
 commands can be used. Deployment still requires its installed target and
 bootloader compatibility to be checked when it is reachable.
 
-See the [Advanced profile build/host validation](test-results/solarxiao_advanced_2026-10-21.md).
+See the [earlier manual Advanced profile validation](test-results/solarxiao_advanced_2026-10-21.md).
 This adds no measurements beyond existing self voltage/MCU temperature and has
 not been installed on the remote Advanced board.
 

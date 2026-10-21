@@ -94,7 +94,12 @@ void beginSettings(MainBoard& board,FILESYSTEM* fs,bool telemetry_history_availa
   selection.begin();
   persistence.fs=fs; controller.begin();
 }
-void service() { if (selection.nativeAllowed()) controller.service(millis()); }
+void service() {
+  const bool native_before=selection.nativeAllowed();
+  selection.service(transport,millis());
+  if (!native_before && selection.nativeAllowed()) controller.reload();
+  if (selection.nativeAllowed()) controller.service(millis());
+}
 bool handleCommand(const char* command,char* reply,size_t capacity,bool local) {
   float battery=NAN,temperature=NAN;
   if (main_board && command && (!strcmp(command,"get solar readings") || !strcmp(command,"get solar battery"))) {
@@ -110,9 +115,14 @@ bool handleCommand(const char* command,char* reply,size_t capacity,bool local) {
   const bool mppt=(!strncmp(command,"get mppt",8) && (!command[8] || command[8]==' '))
       || !strncmp(command,"set mppt ",9) || !strncmp(command,"mppt ",5);
   if (mppt && !selection.nativeAllowed()) {
-    snprintf(reply,capacity,selection.isAdvanced()
+    const char* error=selection.isAdvanced()
         ? "Err - BQ24650 Advanced has no digital charger/INA interface; use get solar readings"
-        : "Err - carrier selection unconfirmed; set solar.board advanced|mppt");
+        : selection.isBase()
+        ? "Err - CN3791 Base has no digital charger/INA interface; use get solar readings"
+        : selection.isAuto()
+        ? "Err - auto has not verified INA260; self-only; use get solar.board or set solar.board mppt for manual override"
+        : "Err - carrier selection unconfirmed; set solar.board auto|advanced|base|mppt";
+    snprintf(reply,capacity,"%s",error);
     return true;
   }
   return controller.handle(command,reply,capacity,local);

@@ -53,6 +53,19 @@ struct MemoryStore : Store {
     return !fail_save;
   }
 };
+struct IdentityBus : Bus {
+  uint16_t manufacturer=0x5449,device=0x2270;
+  bool online=true;int fail_reg=-1;
+  unsigned reads=0,writes=0;
+  std::vector<uint8_t> registers;
+  bool read(uint8_t address,uint8_t reg,uint16_t& value) override {
+    assert(address==0x40 && (reg==0xfe || reg==0xff));
+    ++reads;registers.push_back(reg);
+    if(!online || reg==fail_reg)return false;
+    value=reg==0xfe?manufacturer:device;return true;
+  }
+  bool write(uint8_t,uint8_t,uint16_t) override {++writes;assert(false);return false;}
+};
 std::string cli(CarrierSelection& c,const char* cmd,float mv=3.876f,
                 float temp=27.25f,bool history=true) {
   char reply[157]={};
@@ -70,11 +83,10 @@ int main(int argc,char** argv) {
   if(scenario=="persistence") {
     MemoryStore store;CarrierSelection c(store);
     assert(!c.nativeAllowed());c.begin();
-    assert(c.settingsHealthy() && c.nativeAllowed() && !c.isAdvanced());
+    assert(c.settingsHealthy() && c.isAuto() && !c.nativeAllowed() && !c.isAdvanced());
     assert(!store.loads && !store.saves && !store.present);
     has(cli(c,"get solar.board"),"source=default");
-    has(cli(c,"get solar.board"),"not autodetected");
-    has(cli(c,"get solar capabilities"),"INA260");assert(!store.saves);
+    has(cli(c,"get solar.board"),"auto");assert(!store.saves);
     has(cli(c,"set solar.board advanced"),"OK");
     assert(c.isAdvanced() && !c.nativeAllowed() && store.saves==1);
     assert(store.bytes.size()==CarrierSelection::IMAGE_SIZE);
@@ -88,6 +100,14 @@ int main(int argc,char** argv) {
     CarrierSelection mppt(store);mppt.begin();
     assert(mppt.nativeAllowed() && !mppt.isAdvanced());
     has(cli(mppt,"get solar.board"),"mppt source=saved");
+    cli(mppt,"set solar.board base");assert(mppt.isBase() && !mppt.nativeAllowed());
+    CarrierSelection base(store);base.begin();assert(base.isBase());
+    has(cli(base,"get solar info"),"CN3791");
+    has(cli(base,"get solar capabilities"),"Base");
+    cli(base,"set solar.board auto");assert(base.isAuto() && !base.nativeAllowed());
+    CarrierSelection automatic(store);automatic.begin();
+    assert(automatic.isAuto() && !automatic.nativeAllowed());
+    has(cli(automatic,"get solar.board"),"source=saved");
   } else if(scenario=="invalid-records") {
     MemoryStore reference;CarrierSelection baseline(reference);baseline.begin();
     cli(baseline,"set solar.board advanced");const auto valid=reference.bytes;
@@ -143,17 +163,18 @@ int main(int argc,char** argv) {
         "set solar.boardextra advanced", "get mppt", "get SOLAR", "solar"}) {
       assert(!c.handle(unrelated,reply,sizeof(reply),3.8f,25,true));
     }
-    for(const char* invalid:{"set solar.board", "set solar.board auto",
+    for(const char* invalid:{"set solar.board", "set solar.board unknown",
         "set solar.board ADVANCED", "set solar.board advanced extra",
         "set solar.board advanced ", "get solar unknown"}) {
-      has(cli(c,invalid),"Err");assert(!store.saves && c.nativeAllowed());
+      has(cli(c,invalid),"Err");assert(!store.saves && c.isAuto() && !c.nativeAllowed());
     }
     assert(!c.handle(nullptr,reply,sizeof(reply),3.8f,25,true));
     assert(!c.handle("get solar",nullptr,sizeof(reply),3.8f,25,true));
     assert(!c.handle("get solar",reply,0,3.8f,25,true));
     for(const char* cmd:{"get solar", "get solar info", "get solar.board",
         "get solar capabilities", "get solar readings", "get solar battery",
-        "get solar history", "set solar.board advanced", "set solar.board mppt"}) {
+        "get solar history", "set solar.board advanced", "set solar.board mppt",
+        "set solar.board auto", "set solar.board base"}) {
       for(size_t capacity=1;capacity<=157;++capacity) {
         std::vector<char> guarded(capacity+16,'~');
         char* out=guarded.data()+8;
@@ -161,6 +182,61 @@ int main(int argc,char** argv) {
         for(size_t i=0;i<8;++i)assert(guarded[i]=='~' && guarded[8+capacity+i]=='~');
         assert(memchr(out,0,capacity)!=nullptr);
       }
+    }
+  } else if(scenario=="auto-positive") {
+    MemoryStore store;CarrierSelection c(store);IdentityBus bus;c.begin();
+    assert(c.isAuto() && !c.nativeAllowed() && !bus.reads);
+    c.service(bus,0);assert(c.nativeAllowed() && bus.reads==2 && !bus.writes);
+    assert(bus.registers==std::vector<uint8_t>({0xfe,0xff}));
+    assert(!store.saves);has(cli(c,"get solar.board"),"auto");
+    bus.online=false;const unsigned reads=bus.reads;
+    c.service(bus,5000);c.service(bus,100000);assert(c.nativeAllowed() && bus.reads==reads);
+    cli(c,"set solar.board advanced");assert(!c.nativeAllowed());
+    c.service(bus,100001);assert(bus.reads==reads);
+    cli(c,"set solar.board auto");assert(c.isAuto() && !c.nativeAllowed());
+    bus.online=true;bus.device=0x227f;c.service(bus,100002);
+    assert(c.nativeAllowed() && bus.reads==reads+2);
+    c.begin();assert(c.isAuto() && !c.nativeAllowed());
+    has(cli(c,"get solar.board"),"source=saved");
+    c.service(bus,0xf0000000);assert(c.nativeAllowed());
+  } else if(scenario=="auto-negative-retry") {
+    for(unsigned fault=0;fault<5;++fault) {
+      MemoryStore store;CarrierSelection c(store);IdentityBus bus;c.begin();
+      if(fault==0)bus.online=false;
+      if(fault==1)bus.manufacturer=0x5448;
+      if(fault==2)bus.device=0x2260;
+      if(fault==3){bus.manufacturer=0;bus.device=0;} // ACK alone is not identity.
+      if(fault==4)bus.fail_reg=0xff;
+      c.service(bus,123);assert(!c.nativeAllowed() && !c.isAdvanced() && !c.isBase());
+      const unsigned reads=bus.reads;assert(reads>=1 && reads<=2 && !bus.writes);
+      bus.online=true;bus.manufacturer=0x5449;bus.device=0x2270;bus.fail_reg=-1;
+      c.service(bus,124);c.service(bus,5122);assert(bus.reads==reads && !c.nativeAllowed());
+      c.service(bus,5123);assert(c.nativeAllowed() && bus.reads==reads+2 && !bus.writes);
+      assert(!store.saves);
+    }
+  } else if(scenario=="auto-wrap-manual-silence") {
+    MemoryStore store;CarrierSelection c(store);IdentityBus bus;c.begin();bus.online=false;
+    const uint32_t start=UINT32_MAX-1000;c.service(bus,start);
+    assert(bus.reads>0 && !c.nativeAllowed());const unsigned reads=bus.reads;
+    bus.online=true;c.service(bus,UINT32_MAX);c.service(bus,0);c.service(bus,3998);
+    assert(bus.reads==reads && !c.nativeAllowed());
+    c.service(bus,3999);assert(c.nativeAllowed() && bus.reads==reads+2);
+    for(const char* mode:{"set solar.board advanced","set solar.board base","set solar.board mppt"}) {
+      cli(c,mode);const unsigned before=bus.reads;
+      c.service(bus,10000);c.service(bus,0xf0000000);assert(bus.reads==before);
+    }
+    cli(c,"set solar.board auto");c.begin();assert(!c.nativeAllowed());
+    store.fail_save=true;cli(c,"set solar.board mppt");blocked(c);
+    const unsigned before=bus.reads;c.service(bus,1);c.service(bus,99999);
+    assert(bus.reads==before && !bus.writes);
+  } else if(scenario=="legacy-manual-records") {
+    for(uint8_t mode:{0,1}) {
+      MemoryStore store;store.present=true;
+      store.bytes={'S','X','B',1,mode,uint8_t(0xff^mode),0xa5,0x5a};
+      CarrierSelection c(store);IdentityBus bus;c.begin();
+      assert(c.settingsHealthy() && c.nativeAllowed()==(mode==0));
+      assert(c.isAdvanced()==(mode==1) && !c.isAuto() && !c.isBase());
+      c.service(bus,0);c.service(bus,99999);assert(!bus.reads && !bus.writes && !store.saves);
     }
   } else assert(false);
 }
@@ -200,6 +276,8 @@ WIRE = r'''
 struct FakeWire {
   uint16_t charger[256]={},ina[256]={};
   unsigned calls=0,reads=0,writes=0;
+  bool online=true;
+  struct Read {uint8_t address,reg;};std::vector<Read> log;
   uint8_t address=0,reg=0;size_t cursor=0;
   std::vector<uint8_t> tx,rx;
   FakeWire() {
@@ -215,6 +293,7 @@ struct FakeWire {
   void write(uint8_t b) {tx.push_back(b);}
   int endTransmission(bool stop=true) {
     assert(!tx.empty());reg=tx[0];
+    if(!online)return 1;
     if(stop && tx.size()==3) {
       assert(address==0x68);++writes;charger[reg]=tx[1]|(uint16_t(tx[2])<<8);
     }
@@ -222,6 +301,7 @@ struct FakeWire {
   }
   int requestFrom(uint8_t a,uint8_t n) {
     assert(a==address && n==2);++reads;cursor=0;
+    log.push_back({a,reg});
     const uint16_t value=(a==0x68?charger:ina)[reg];
     rx={uint8_t(a==0x68?value:value>>8),uint8_t(a==0x68?value>>8:value)};
     return 2;
@@ -255,13 +335,13 @@ std::string cli(const char* command) {
 void has(const std::string& text,const char* wanted) {
   assert(text.find(wanted)!=std::string::npos);
 }
-void nativeSilent() {
+void nativeSilent(bool periodic=true) {
   const auto calls=Wire.calls,reads=Wire.reads,writes=Wire.writes;
   for(const char* command:{"get mppt", "get mppt info", "get mppt battery",
       "get mppt raw 0x43", "get mppt fields 0", "set mppt mppt.enabled off",
       "mppt reload", "mppt reset", "mppt bsr run", "mppt ship arm",
       "mppt alerts clear limits 65535"}) has(cli(command),"Err");
-  service();now_ms+=10000;service();
+  if(periodic){service();now_ms+=10000;service();}
   CayenneLPP lpp;addTelemetry(lpp);assert(lpp.channels.empty());
   uint8_t channels[]={99,99,99,99,99};
   SensorManager::VoltageSensorReading values[5];
@@ -351,6 +431,68 @@ int main(int argc,char** argv) {
     fs.files["/solar_board"][0]^=1;
     beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
     has(cli("get solar.board"),"unconfirmed");nativeSilent();
+  } else if(scenario=="base-runtime") {
+    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);assert(!Wire.calls);
+    has(cli("set solar.board base"),"OK");nativeSilent();
+    has(cli("get solar info"),"CN3791");has(cli("get solar capabilities"),"Base");
+    has(cli("get solar readings"),"battery=3.850V MCU=26.75C");
+    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
+    assert(selection.isBase());nativeSilent();
+  } else if(scenario=="auto-pending-replay") {
+    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
+    assert(!Wire.calls && selection.isAuto() && !selection.nativeAllowed());
+    has(cli("get solar.board"),"auto");nativeSilent(false);
+    Settings overrides;overrides.defaults();overrides.masks[0x14]=2;overrides.values[0x14]=0;
+    uint8_t image[Settings::IMAGE_SIZE];overrides.encode(image);
+    fs.files["/solar_power"]=std::vector<uint8_t>(image,image+sizeof(image));
+    Wire.ina[0xfe]=0;now_ms=100;service();
+    assert(!selection.nativeAllowed() && !Wire.writes && Wire.calls>0);
+    for(auto item:Wire.log)assert(item.address==0x40 && (item.reg==0xfe || item.reg==0xff));
+    const auto calls=Wire.calls;Wire.ina[0xfe]=0x5449;
+    now_ms=5099;service();assert(Wire.calls==calls && !Wire.writes);nativeSilent(false);
+    now_ms=5100;service();assert(selection.nativeAllowed());
+    assert(Wire.writes==1 && !(Wire.charger[0x14]&2));
+    CayenneLPP lpp;addTelemetry(lpp);assert(!lpp.channels.empty());
+    overrides.values[0x14]=2;overrides.encode(image);
+    fs.files["/solar_power"]=std::vector<uint8_t>(image,image+sizeof(image));
+    now_ms=10100;service();assert(Wire.writes==1 && !(Wire.charger[0x14]&2));
+    Wire.online=false;now_ms=15100;service();assert(selection.nativeAllowed());
+    Wire.online=true;
+    has(cli("set solar.board auto"),"OK");assert(!selection.nativeAllowed());nativeSilent(false);
+    now_ms=15101;service();assert(selection.nativeAllowed() && Wire.writes==2 && (Wire.charger[0x14]&2));
+    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
+    assert(selection.isAuto() && !selection.nativeAllowed());nativeSilent(false);
+  } else if(scenario=="auto-no-ack") {
+    Wire.online=false;beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);assert(!Wire.calls);
+    now_ms=123;service();assert(!selection.nativeAllowed() && !Wire.writes);nativeSilent(false);
+    const auto calls=Wire.calls;Wire.online=true;now_ms=5122;service();
+    assert(Wire.calls==calls && !selection.nativeAllowed());
+    now_ms=5123;service();assert(selection.nativeAllowed() && !Wire.writes);
+  } else if(scenario=="late-auto-replay") {
+    beginSettings(board,&fs,MESH_ENABLE_TELEMETRY_HISTORY);
+    cli("set solar.board mppt");now_ms=100;service();
+    assert(selection.nativeAllowed() && Wire.calls>0 && !Wire.writes);
+    cli("set solar.board advanced");nativeSilent(false);
+    Settings overrides;overrides.defaults();overrides.masks[0x14]=2;overrides.values[0x14]=0;
+    uint8_t image[Settings::IMAGE_SIZE];overrides.encode(image);
+    fs.files["/solar_power"]=std::vector<uint8_t>(image,image+sizeof(image));
+    cli("set solar.board auto");assert(!selection.nativeAllowed());
+    const uint32_t late=UINT32_MAX-1000;
+    now_ms=late;service();
+    assert(selection.nativeAllowed() && Wire.writes==1 && !(Wire.charger[0x14]&2));
+    auto calls=Wire.calls;
+    // The first replay must be immediate despite the previous low-timestamp
+    // service. Subsequent cycles must honor five seconds across millis wrap.
+    now_ms=late;service();now_ms=UINT32_MAX;service();now_ms=0;service();
+    now_ms=3998;service();assert(Wire.calls==calls && Wire.writes==1);
+    Wire.charger[0x14]|=2; // Simulate a charger reset needing policy replay.
+    service();assert(Wire.calls==calls && Wire.writes==1);
+    now_ms=3999;service();
+    assert(Wire.calls>calls && Wire.writes==2 && !(Wire.charger[0x14]&2));
+    calls=Wire.calls;now_ms=4000;service();now_ms=8998;service();
+    assert(Wire.calls==calls && Wire.writes==2);
+    now_ms=8999;service();
+    assert(Wire.calls>calls && Wire.writes==2 && !(Wire.charger[0x14]&2));
   } else assert(false);
 }
 '''
@@ -434,6 +576,30 @@ class SolarXiaoCarrierTests(unittest.TestCase):
 
     def test_metadata_errors_require_a_valid_full_record_or_block_native_access(self):
         self.run_scenario("adapter-history", "metadata-faults")
+
+    def test_auto_requires_exact_read_only_identity_and_latches_until_reselection(self):
+        self.run_scenario("selector", "auto-positive")
+
+    def test_auto_retries_missing_wrong_and_ack_only_devices_without_charger_io(self):
+        self.run_scenario("selector", "auto-negative-retry")
+
+    def test_auto_timer_wrap_and_all_manual_or_unhealthy_modes_are_silent(self):
+        self.run_scenario("selector", "auto-wrap-manual-silence")
+
+    def test_original_manual_record_bytes_keep_their_meanings(self):
+        self.run_scenario("selector", "legacy-manual-records")
+
+    def test_actual_base_adapter_has_no_native_io_or_invented_measurements(self):
+        self.run_scenario("adapter-history", "base-runtime")
+
+    def test_actual_auto_adapter_reloads_overrides_only_after_positive_detection(self):
+        self.run_scenario("adapter-history", "auto-pending-replay")
+
+    def test_actual_auto_adapter_recovers_from_an_initial_missing_device(self):
+        self.run_scenario("adapter-history", "auto-no-ack")
+
+    def test_actual_late_auto_detection_replays_immediately_and_schedules_across_wrap(self):
+        self.run_scenario("adapter-history", "late-auto-replay")
 
 
 if __name__ == "__main__":
