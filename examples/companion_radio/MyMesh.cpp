@@ -1,4 +1,5 @@
 #include <helpers/RegulatorSettings.h>
+#include <helpers/sensors/SolarXiaoPower.h>
 #include <helpers/LedSettings.h>
 #include <helpers/ui/DisplayPowerSettings.h>
 #if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
@@ -10771,6 +10772,9 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
   }
 
   if (mesh::power::handleRegulatorCommand(command, reply, reply_capacity)) return true;
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  if (mesh::solar::handleCommand(command, reply, reply_capacity, sender_timestamp == 0)) return true;
+#endif
 #if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
   if (handleCompactLedCommand(command, reply, reply_capacity)) return true;
 #else

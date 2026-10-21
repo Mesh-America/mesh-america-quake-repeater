@@ -1,4 +1,5 @@
 #include <helpers/RegulatorSettings.h>
+#include <helpers/sensors/SolarXiaoPower.h>
 #include <helpers/LedSettings.h>
 #include <Arduino.h>
 #include "CarrierTools.h"
@@ -3026,6 +3027,9 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     if (mesh::power::handleBatteryChargeCommand(*_board, command, reply, 160)) return;
 #endif
     if (mesh::power::handleRegulatorCommand(command, reply, 157)) return;
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+    if (mesh::solar::handleCommand(command, reply, 157, sender_timestamp == 0)) return;
+#endif
     if (mesh::leds::handleCommand(command, reply, 157)) return;
     if (mesh::handleUsbLoggingWatchdogCommand(command, reply, 160)) return;
     if (mesh::powerdiag::handleCommand(command, reply, 157, millis())) return;

@@ -1,4 +1,5 @@
 #include <helpers/RegulatorSettings.h>
+#include <helpers/sensors/SolarXiaoPower.h>
 #include <helpers/LedSettings.h>
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
@@ -213,6 +214,9 @@ void setup() {
   if (volatile_primary_fs) regulator_prefs_fs = nullptr;
 #endif
   mesh::leds::beginSettings(board, regulator_prefs_fs);
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  mesh::solar::beginSettings(regulator_prefs_fs);
+#endif
   if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
     MESH_DEBUG_PRINTLN("Regulator selection could not be applied");
   }
@@ -555,6 +559,9 @@ static void __attribute__((noinline)) serviceCommandInterfaces() {
   }
 
   mesh::power::serviceRegulatorSettings();
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  mesh::solar::service();
+#endif
   board.loop();   // let the board feed its watchdog, run periodic housekeeping
 
 #ifdef ETHERNET_ENABLED

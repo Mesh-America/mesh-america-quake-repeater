@@ -1,4 +1,5 @@
 #include <helpers/RegulatorSettings.h>
+#include <helpers/sensors/SolarXiaoPower.h>
 #include <helpers/LedSettings.h>
 #include <Arduino.h>   // needed for PlatformIO
 #include <helpers/ui/StartupScreen.h>
@@ -3640,6 +3641,9 @@ void setup() {
 #endif
 #if !defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
   mesh::leds::beginSettings(board, regulator_prefs_fs);
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  mesh::solar::beginSettings(regulator_prefs_fs);
+#endif
 #endif
   if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
     MESH_DEBUG_PRINTLN("Regulator selection could not be applied");
@@ -4269,6 +4273,9 @@ void loop() {
 #endif
   rtc_clock.tick();
   mesh::power::serviceRegulatorSettings();
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  mesh::solar::service();
+#endif
   board.loop();
   if (mesh::serviceUsbLoggingWatchdog(usbLoggingRecoverySafe)) board.reboot();
 #ifdef TBEAM_1W

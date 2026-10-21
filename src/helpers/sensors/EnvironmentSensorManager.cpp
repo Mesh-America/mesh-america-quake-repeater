@@ -1,4 +1,5 @@
 #include "EnvironmentSensorManager.h"
+#include "SolarXiaoPower.h"
 #include "I2CAddressClaimPolicy.h"
 #include "EnvironmentI2CConfig.h"
 #include "NmeaSentenceProbe.h"
@@ -1018,6 +1019,11 @@ bool EnvironmentSensorManager::begin() {
       continue;
     }
     const uint8_t address = static_cast<uint8_t>(configured_address);
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+    // Native carrier drivers own these addresses in Full and Reduced builds.
+    // In particular, never allow an INA219 initializer to configure the INA260.
+    if (TELEM_WIRE == &Wire && (address == 0x40 || address == 0x68)) continue;
+#endif
     if (!probed[address]) {
       probed[address] = true;
       detected[address] = i2c_probe(*TELEM_WIRE, address);
@@ -1029,6 +1035,9 @@ bool EnvironmentSensorManager::begin() {
     const SensorDef& def = SENSOR_TABLE[i];
     if (!mesh::isValidI2cPeripheralAddress(def.address)) continue;
     const uint8_t address = static_cast<uint8_t>(def.address);
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+    if (TELEM_WIRE == &Wire && (address == 0x40 || address == 0x68)) continue;
+#endif
 #ifdef RAK_WISBLOCK_GPS
     if (mesh::shouldSkipSensorAtClaimedGpsAddress(
             i2cGPSFlag, TELEM_WIRE == &Wire,
@@ -1074,6 +1083,10 @@ bool EnvironmentSensorManager::begin() {
 
 bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) {
   next_available_channel = TELEM_CHANNEL_SELF + 1;
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  next_available_channel = mesh::solar::FIRST_OPTIONAL_CHANNEL;
+  if (requester_permissions & TELEM_PERM_ENVIRONMENT) mesh::solar::addTelemetry(telemetry);
+#endif
 
   #if ENV_INCLUDE_GPS
   queryGpsTelemetry(requester_permissions, telemetry);
@@ -1096,10 +1109,15 @@ bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, Cayen
 uint8_t EnvironmentSensorManager::getVoltageSensorChannels(
     uint8_t channels[], uint8_t capacity) const {
   uint8_t count = 0;
+  uint8_t first_channel = TELEM_CHANNEL_SELF + 1;
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  count = mesh::solar::voltageChannels(channels, capacity);
+  first_channel = mesh::solar::FIRST_OPTIONAL_CHANNEL;
+#endif
   for (int i = 0; i < _active_sensor_count; i++) {
     if (_active_sensors[i].query_voltage == NULL) continue;
     if (count < capacity && channels != NULL) {
-      channels[count] = (uint8_t)(TELEM_CHANNEL_SELF + 1 + i);
+      channels[count] = (uint8_t)(first_channel + i);
     }
     count++;
   }
@@ -1112,11 +1130,16 @@ uint8_t EnvironmentSensorManager::queryVoltageSensors(
   if (!_wisblock_power.railEnabled()) return 0;
 #endif
   uint8_t count = 0;
+  uint8_t first_channel = TELEM_CHANNEL_SELF + 1;
+#if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
+  count = mesh::solar::queryVoltages(readings, capacity);
+  first_channel = mesh::solar::FIRST_OPTIONAL_CHANNEL;
+#endif
   for (int i = 0; i < _active_sensor_count && count < capacity; i++) {
     const ActiveSensor& sensor = _active_sensors[i];
     if (sensor.query_voltage == NULL) continue;
     VoltageSensorReading& reading = readings[count++];
-    reading.channel = (uint8_t)(TELEM_CHANNEL_SELF + 1 + i);
+    reading.channel = (uint8_t)(first_channel + i);
     reading.voltage = 0.0f;
     reading.valid = sensor.query_voltage(sensor.sub_channel,
                                          reading.voltage)
