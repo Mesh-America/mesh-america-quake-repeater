@@ -67,6 +67,27 @@ public:
 // Generalized repeater and room-server rows have the same named fields.
 // Defaults are omitted only when the setter reconstructs exactly that value.
 template<typename Entry>
+auto appendPath(CommandWriter& text, const Entry& entry, int)
+    -> decltype(entry.extra, void()) {
+  FloodRuleExtensions::appendPath(text, entry.extra, entry.path_hash_size,
+      entry.path_hops, entry.path, true);
+}
+template<typename Entry>
+void appendPath(CommandWriter& text, const Entry& entry, long) {
+  text.append(" p=");
+  for (unsigned hop = 0; hop < entry.path_hops; ++hop) {
+    if (hop) text.append(",");
+    for (unsigned byte = 0; byte < entry.path_hash_size; ++byte)
+      text.append("%02X", entry.path[hop * entry.path_hash_size + byte]);
+  }
+}
+template<typename Entry>
+auto appendExtras(CommandWriter& text, const Entry& entry, int)
+    -> decltype(entry.extra, void()) { FloodRuleExtensions::appendFields(text, entry.extra, true); }
+template<typename Entry>
+void appendExtras(CommandWriter&, const Entry&, long) {}
+
+template<typename Entry>
 bool formatCompact(char* out, size_t capacity, unsigned slot, const Entry& entry) {
   using namespace FloodFilterPolicy;
   CommandWriter text(out, capacity);
@@ -84,14 +105,8 @@ bool formatCompact(char* out, size_t capacity, unsigned slot, const Entry& entry
   if (entry.path_hops == 0 && entry.path_hash_size != 0)
     text.append(" pb=%s", pathHashBytesName(entry.path_hash_size));
   if (entry.match_blacklisted_path) text.append(" p=bl");
-  else if (entry.path_hops) {
-    text.append(" p=");
-    for (unsigned hop = 0; hop < entry.path_hops; hop++) {
-      if (hop) text.append(",");
-      for (unsigned byte = 0; byte < entry.path_hash_size; byte++)
-        text.append("%02X", entry.path[hop * entry.path_hash_size + byte]);
-    }
-  }
+  else if (entry.path_hops) appendPath(text, entry, 0);
+  appendExtras(text, entry, 0);
   switch (entry.incoming_scope_kind) {
     case RULE_IN_NONE: text.append(" i=n"); break;
     case RULE_IN_SCOPED: text.append(" i=s"); break;

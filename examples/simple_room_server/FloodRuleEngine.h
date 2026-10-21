@@ -10,6 +10,7 @@
 
 #include <helpers/IdentityStore.h>
 #include <helpers/RegionMap.h>
+#include <helpers/FloodRuleExtensions.h>
 
 class FloodRuleEngine {
 public:
@@ -23,7 +24,7 @@ public:
 
   FloodRuleEngine();
 
-  void begin(FILESYSTEM* fs, RegionMap* regions);
+  void begin(FILESYSTEM* fs, RegionMap* regions, mesh::RNG* rng = nullptr);
 
   uint32_t evaluate(const mesh::Packet* packet, bool temp_radio_active,
                     bool incoming_region_allowed,
@@ -73,18 +74,20 @@ private:
     char target_region_name[NAME_LEN];
     uint8_t priority;
     uint8_t transport_modes;
+    FloodRuleExtensions::Fields extra;
   };
 
-  // This table is at most 5,952 bytes. Keep it in the constructor-time heap rather
+  // This table is at most 10,416 bytes. Keep it in the constructor-time heap rather
   // than inside the global MyMesh object: classic ESP32 has a small static
   // DRAM window but substantially more internal heap at this point in boot.
   // Allocation is deliberately all-or-nothing.  A node must never fall back
   // to silently running without its configured flood rules.
-  static_assert(sizeof(Entry) <= 192,
+  static_assert(sizeof(Entry) <= 336,
                 "Update the flood-rule runtime RAM budget in check_firmware_ram.py");
   FILESYSTEM* _fs;
   RegionMap* _regions;
   Entry* _entries;
+  uint32_t _probability_seed;
 
   void seedDefaults();
   void load();

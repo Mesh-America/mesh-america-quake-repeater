@@ -206,6 +206,76 @@ int main() {
 '''
 
 class TransportFilterWiring(unittest.TestCase):
+    def test_aliases_dispatch_the_original_suffix_without_expanding_a_command_buffer(self):
+        source = (ROOT/'examples/simple_repeater/MyMesh.cpp').read_text()
+        start = source.index('  if (commandFamilyMatches(command, "get flood.channel.scope.require"))')
+        end = source.index('#if MESH_ENABLE_CLOCK_SYNC', start)
+        dispatch = source[start:end]
+        helper = method(source, 'static bool commandFamilyMatches(')
+        code = (f'#include "{(ROOT/"src/helpers/FloodCommandAliases.h").as_posix()}"\n'
+                '#include <cassert>\n#include <cstring>\n#include <initializer_list>\n') + helper + r'''
+static const char* actual_args;
+static const char* actual_action;
+#define STUB(name) static void name(const char* args,char* reply) {actual_args=args;actual_action=#name;strcpy(reply,"OK");}
+STUB(formatFloodChannelScopeRequirements)
+STUB(setFloodChannelScopeRequirement)
+STUB(deleteFloodChannelScopeRequirement)
+STUB(formatFloodChannelScopes)
+STUB(setFloodChannelScope)
+STUB(deleteFloodChannelScope)
+STUB(formatFloodPacketFilterBlacklist)
+STUB(setFloodPacketFilterBlacklist)
+STUB(deleteFloodPacketFilterBlacklist)
+STUB(deleteFloodPacketFilter)
+STUB(formatFloodGroupModeration)
+STUB(setFloodGroupModeration)
+STUB(deleteFloodGroupModeration)
+static void formatFloodPacketFilters(const char* args,char* reply,bool=false) {actual_args=args;actual_action="formatFloodPacketFilters";strcpy(reply,"OK");}
+static void setFloodPacketFilter(const char* args,char* reply,bool=false) {actual_args=args;actual_action="setFloodPacketFilter";strcpy(reply,"OK");}
+void run(const char* command,char* reply) {
+@DISPATCH@
+else strcpy(reply,"unhandled");
+}
+int main() {
+ struct Test {const char* command;const char* suffix;const char* action;};
+ for(const auto& row : {
+     Test{"get fm.2",".2","formatFloodGroupModeration"},
+     Test{"set fm.2 public Alice drop",".2 public Alice drop","setFloodGroupModeration"},
+     Test{"del fm.2",".2","deleteFloodGroupModeration"},
+     Test{"get fs.2",".2","formatFloodChannelScopes"},
+     Test{"set fs.2 public scope=local",".2 public scope=local","setFloodChannelScope"},
+     Test{"del fs.2",".2","deleteFloodChannelScope"},
+     Test{"get fsr.2",".2","formatFloodChannelScopeRequirements"},
+     Test{"set fsr.2 public",".2 public","setFloodChannelScopeRequirement"},
+     Test{"del fsr.2",".2","deleteFloodChannelScopeRequirement"},
+     Test{"get fb.2",".2","formatFloodPacketFilterBlacklist"},
+     Test{"set fb.2 AABBCC",".2 AABBCC","setFloodPacketFilterBlacklist"},
+     Test{"del fb.2",".2","deleteFloodPacketFilterBlacklist"},
+     Test{"get fr.2 n",".2 n","formatFloodPacketFilters"},
+     Test{"set fr.2 any n=Alice d",".2 any n=Alice d","setFloodPacketFilter"},
+     Test{"del fr.2",".2","deleteFloodPacketFilter"},
+     Test{"set flood.rule.2 any n=Alice d",".2 any n=Alice d","setFloodPacketFilter"}}) {
+   char reply[160]{};
+   actual_args=nullptr;actual_action=nullptr;
+   run(row.command,reply);
+   assert(!strcmp(reply,"OK") && actual_args && actual_action);
+   assert(!strcmp(actual_args,row.suffix) && !strcmp(actual_action,row.action));
+   assert(actual_args>=row.command && actual_args<=row.command+strlen(row.command));
+ }
+ for(const char* command : {"get fmore","get fsrs","get fbwifi.password","get fridge"}) {
+   char reply[160]{};run(command,reply);assert(!strcmp(reply,"unhandled"));
+ }
+}
+'''
+        code = code.replace('@DISPATCH@', dispatch)
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work/'test.cpp').write_text(code)
+            subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                '-DMESH_ENABLE_FLOOD_RULE_ENGINE=1', '-DMESH_ENABLE_FLOOD_GROUP_MODERATION=1',
+                str(work/'test.cpp'), '-o', str(work/'test')], check=True)
+            subprocess.run([str(work/'test')], check=True)
+
     def test_temporary_filter_suspension_checks_both_profiles_in_all_role_paths(self):
         repeater = (ROOT/'examples/simple_repeater/MyMesh.cpp').read_text()
         suspension = re.findall(r'entry\.suspend_on_temp_radio && (\w+)\(\)', repeater)
@@ -219,14 +289,34 @@ class TransportFilterWiring(unittest.TestCase):
         helpers = '\n'.join(method(source, signature) for signature in [
             'static bool commandFamilyMatches(', 'static bool isCommonManagerReadOnlyAllowed(',
             'static bool isRegionMgrAllowed(', 'static bool isFilterMgrAllowed('])
-        code = '#include <cstring>\n#include <cassert>\n#include <initializer_list>\n' + helpers + r'''
+        code = (f'#include "{(ROOT/"src/helpers/FloodCommandAliases.h").as_posix()}"\n'
+                '#include <cstring>\n#include <cassert>\n#include <initializer_list>\n') + helpers + r'''
 int main() {
- for (const char* cmd : {"get fr", "get fr.3", "set fr.3 any m=bc d", "del fr.3", "del fr all"}) {
+ for (const char* cmd : {"get fr", "get fr.3", "set fr.3 any m=bc d", "del fr.3", "del fr all",
+     "set fr.3 any c=public sender=^Alice$ text=BEACON len=1-80 prob=50 drop",
+     "set flood.rule.3 type=grp_txt channel=public sender=^Alice$ text=BEACON drop",
+     "set flood.rule.3 type=any route=direct path=^AABB>CCDD$ enabled=off stop"}) {
    assert(isFilterMgrAllowed(cmd) == (MESH_ENABLE_FLOOD_RULE_ENGINE != 0));
    assert(!isRegionMgrAllowed(cmd));
  }
- for (const char* cmd : {"get fridge", "set frwifi.password secret", "get wifi.password", "del frx"})
+ for (const char* cmd : {"get fridge", "set frwifi.password secret", "get wifi.password", "del frx",
+     "set frwifi.password sender=^Alice$", "set flood.rulebook type=any drop",
+     "get fleet.channel", "set fleet.controller off"})
    assert(!isFilterMgrAllowed(cmd));
+ for (const char* cmd : {"get fm", "set fm.2 public Alice drop", "del fm.2",
+     "get fb", "set fb.2 AABBCC", "del fb.2", "get fa", "get fa 2", "clear fa all"}) {
+   assert(isFilterMgrAllowed(cmd));
+   assert(!isRegionMgrAllowed(cmd));
+ }
+ for (const char* cmd : {"get fs", "set fs.2 public scope=local", "del fs.2",
+     "get fsr", "set fsr.2 public", "del fsr.2"}) {
+   assert(isRegionMgrAllowed(cmd));
+   assert(!isFilterMgrAllowed(cmd));
+ }
+ for (const char* cmd : {"get fmore", "set fss.password secret", "get fsrs", "clear failure all"}) {
+   assert(!isFilterMgrAllowed(cmd));
+   assert(!isRegionMgrAllowed(cmd));
+ }
 }
 '''
         with tempfile.TemporaryDirectory() as directory:

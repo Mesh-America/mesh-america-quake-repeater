@@ -357,7 +357,7 @@ int main() {
             "ENABLE_OTA": 1, "OTA_HEAP_CONTEXT": 1,
         }, "GEPRC_Linkflow_900_repeater")
         self.assertEqual(policy["components"]["client_table"], 32 * 320 + 16)
-        self.assertEqual(policy["components"]["flood_filter_table"], 63 * 192 + 16)
+        self.assertEqual(policy["components"]["flood_filter_table"], 63 * 336 + 16)
         self.assertEqual(policy["components"]["ota_context"], 16384 + 16)
         self.assertGreaterEqual(policy["required_contiguous_bytes"], 16384 + 16)
         reduced = ram.requirements("STM32_PLATFORM", {
@@ -589,7 +589,7 @@ int main() {
         self.assertEqual(components["display_pixels_and_driver"], 2048)
         self.assertEqual(combined["required_heap_bytes"] - legacy["required_heap_bytes"], 3072 - 2048)
         self.assertEqual(components["loop_and_callback_stacks"], 8192 + 3072)
-        self.assertEqual(components["flood_filter_table"], 63 * 192 + 16)
+        self.assertEqual(components["flood_filter_table"], 63 * 336 + 16)
         # An alternate port selects the same bridge instead of allocating two.
         alternate = ram.requirements("NRF52_PLATFORM", {
             **defines, "RAK4631_COMBINED_ETHERNET": 1,
@@ -700,7 +700,7 @@ int main() {
         alias = ram.requirements("ESP32_PLATFORM", {"MESH_CLIENT_REPEATER_ONLY": 1},
                                  "custom_companion_alias")
         self.assertEqual(alias["components"]["client_table"], 32 * 284 + 16)
-        self.assertEqual(alias["components"]["flood_filter_table"], 63 * 192 + 16)
+        self.assertEqual(alias["components"]["flood_filter_table"], 63 * 336 + 16)
         self.assertEqual(alias["components"]["neighbor_history"], 2048 * 9 + 16)
         self.assertEqual(alias["components"]["radio_packet_pool"], 10240)
 
@@ -732,13 +732,13 @@ int main() {
         }
         full = ram.requirements("ESP32_PLATFORM", defines, "Heltec_v3_repeater_observer_mqtt")
         parts = full["components"]
-        self.assertEqual(full["required_heap_bytes"], 209696)
+        self.assertEqual(full["required_heap_bytes"], 218768)
         self.assertEqual(parts["display_pixels_and_driver"], 2048)
         self.assertEqual(parts["uart_bridge_and_driver"], 3072 + 4096)
         self.assertEqual(parts["wireless_stacks"], 49152)
         self.assertEqual(parts["mqtt_startup_allowance"], 24576)
         self.assertEqual(parts["allocation_and_transient_margin"], 16384)
-        self.assertEqual(full["required_contiguous_bytes"], 18464)
+        self.assertEqual(full["required_contiguous_bytes"], 21184)
         for driver, expected in (("SH1106Display", 2048), ("SH1107Display", 4096),
                                  ("ST7735Display", 25602)):
             with self.subTest(driver=driver):
@@ -749,7 +749,7 @@ int main() {
                 self.assertEqual(other["components"], {
                     **parts, "display_pixels_and_driver": expected,
                 })
-                self.assertEqual(other["required_contiguous_bytes"], max(18464, expected))
+                self.assertEqual(other["required_contiguous_bytes"], max(21184, expected))
 
     def test_sh1106_full_mqtt_release_profile_is_linked_in_ci(self):
         workflow = (ROOT / ".github/workflows/run-unit-tests.yml").read_text()

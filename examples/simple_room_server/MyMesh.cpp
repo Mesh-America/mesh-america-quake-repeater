@@ -1738,14 +1738,10 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
                                       _prefs.flood_max_advert)) {
       return false;
     }
-#if MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE
-    if (flood_rules.shouldBlock(packet, recv_pkt_rule_match_mask,
-                                _ms->getMillis())) {
-      return false;
-    }
-#endif
   }
 #if MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE
+  if (flood_rules.shouldBlock(packet, recv_pkt_rule_match_mask,
+                              _ms->getMillis())) return false;
   if (packet->isRouteFlood()) {
     if (recv_pkt_region == NULL && !recv_pkt_regionless_scope_set) {
       MESH_DEBUG_PRINTLN(
@@ -1763,9 +1759,9 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
         return false;
       }
     }
-    flood_rules.commitRates(packet, recv_pkt_rule_match_mask,
-                            _ms->getMillis());
   }
+  flood_rules.commitRates(packet, recv_pkt_rule_match_mask,
+                          _ms->getMillis());
 #endif
   _clock_sync.observeAcceptedFlood(packet);
   return true;
@@ -1778,19 +1774,21 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
   recv_pkt_regionless_scope_set = false;
   recv_pkt_rule_match_mask = 0;
   pkt->flood_retry_policy = mesh::FLOOD_RETRY_POLICY_DEFAULT;
-  if (pkt->isRouteFlood()) {
+  {
     bool incoming_region_allowed = false;
     RegionEntry* incoming_region = NULL;
-    if (pkt->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD) {
+    if (pkt->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD
+        || pkt->getRouteType() == ROUTE_TYPE_TRANSPORT_DIRECT) {
       incoming_region = region_map.findMatch(pkt, REGION_DENY_FLOOD);
       incoming_region_allowed = incoming_region != NULL;
-    } else if (pkt->getRouteType() == ROUTE_TYPE_FLOOD) {
+    } else if (pkt->getRouteType() == ROUTE_TYPE_FLOOD
+        || pkt->getRouteType() == ROUTE_TYPE_DIRECT) {
       incoming_region_allowed =
           (region_map.getWildcard().flags & REGION_DENY_FLOOD) == 0;
     }
     recv_pkt_rule_match_mask = flood_rules.evaluate(
         pkt, isAnyTempRadioActive(), incoming_region_allowed, incoming_region);
-    if (flood_rules.hasRetryRules()) {
+    if (pkt->isRouteFlood() && flood_rules.hasRetryRules()) {
       pkt->flood_retry_policy = flood_rules.allowsRetry(
           recv_pkt_rule_match_mask)
           ? mesh::FLOOD_RETRY_POLICY_ALLOW
@@ -2648,7 +2646,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
     MESH_DEBUG_PRINTLN("Room topic unavailable; stored image preserved");
   }
 #if MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE
-  flood_rules.begin(_fs, &region_map);
+  flood_rules.begin(_fs, &region_map, getRNG());
 #endif
 
   // establish default-scope

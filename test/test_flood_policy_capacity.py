@@ -35,20 +35,21 @@ PRELUDE = r'''
 namespace mesh {
 File openFileRead(FILESYSTEM* fs, const char* path) { return fs->open(path); }
 struct Utils {
-  static void sha256(void*, size_t, const uint8_t*, size_t) {
-    assert(false && "crypto is outside these capacity fixtures");
+  static void sha256(void* out, size_t size, const uint8_t*, size_t key_size) {
+    // Cryptography has separate tests. Only the derived one-byte channel hash
+    // is required by these real storage paths; preserve the complete key.
+    assert(size == 1 && (key_size == 16 || key_size == 32));
+    std::memset(out,0,size);
   }
 };
 }
 struct RegionMap {
   static bool is_name_char(uint8_t c) { return std::isalnum(c) || c=='_' || c=='-'; }
 };
-struct StrHelper {
-  static void strzcpy(char* out, const char* in, size_t size) {
+void StrHelper::strzcpy(char* out, const char* in, size_t size) {
     if (out!=in) std::memmove(out,in,std::min(size,std::strlen(in)+1));
     if (size) out[size-1]=0;
-  }
-};
+}
 '''
 CLASS = r'''
 class MyMesh {
@@ -101,6 +102,21 @@ template<class Entry> void canonicalRule(Entry& row) {
   row.priority=7;row.stop_on_match=true;row.retry_on_match=true;
   row.rate_window_started=0xfedcba98;row.rate_window_count=17;row.rate_window_active=true;
 }
+template<class Entry> void extendedRule(Entry& row) {
+  row={};row.active=true;row.payload_type=PAYLOAD_TYPE_GRP_TXT;row.max_hops=63;
+  row.channel_key_len=16;row.channel_secret[0]=0x42;
+  std::strcpy(row.channel_name,"Weather");
+  row.path_hash_size=3;row.path_hops=4;
+  for(unsigned index=0;index<9;++index)row.path[index]=uint8_t(index+1);
+  row.drop_on_match=true;
+  row.extra.min_payload=20;row.extra.max_payload=80;row.extra.payload_set=1;
+  row.extra.route=FloodRuleExtensions::FloodRoute;
+  row.extra.probability=17;row.extra.path_position=FloodRuleExtensions::Suffix;
+  row.extra.disabled=1;
+  row.extra.path_tail[0]=10;row.extra.path_tail[1]=11;row.extra.path_tail[2]=12;
+  std::strcpy(row.extra.sender,"^(Alice|Bob) [0-9]+$");
+  std::strcpy(row.extra.text,"weather (rain|sun)");
+}
 std::vector<uint8_t> fixture(uint8_t slots, uint8_t highest) {
   MemoryFS fs;MyMesh writer(fs,slots);
   for (uint8_t index : {uint8_t(0),highest}) {
@@ -120,7 +136,51 @@ std::map<std::string,std::vector<uint8_t>> snapshot(const MemoryFS& fs) {
   for (const auto& row:fs.files) result[row.first]=*row.second;
   return result;
 }
+void extendedStorage() {
+    // Disabled high slots remain allocated and durable. They must neither be
+    // trimmed from the file nor silently discarded by smaller-capacity builds.
+    MemoryFS fs;MyMesh writer(fs,63);extendedRule(writer.storage[62]);
+    assert(writer.saveFloodPacketFilters());
+    const auto image=fs.get(FLOOD_PACKET_FILTER_FILE);
+    assert(!std::memcmp(image.data(),"FPF8",4) && image[4]==63);
+    MyMesh reader(fs,63);assert(reader.loadFloodPacketFilters());
+    assert(FloodFilterPolicy::sameRuleConfiguration(writer.storage[62],reader.storage[62]));
+    assert(reader.storage[62].active && reader.storage[62].extra.disabled);
+    assert(reader.saveFloodPacketFilters() && fs.get(FLOOD_PACKET_FILTER_FILE)==image);
+    MyMesh smaller(fs,4);assert(!smaller.loadFloodPacketFilters());
+    assert(smaller.flood_policy_capacity_limited && !smaller.saveFloodPacketFilters());
+    assert(fs.get(FLOOD_PACKET_FILTER_FILE)==image);
+    // A room server serializes the same extension and the repeater consumes it.
+    MemoryFS room_fs;FloodRuleEngine room(room_fs);extendedRule(room.storage[3]);
+    assert(room.save());assert(!std::memcmp(room_fs.get(FLOOD_PACKET_FILTER_FILE).data(),"FPF8",4));
+    MyMesh from_room(room_fs,63);assert(from_room.loadFloodPacketFilters());
+    assert(FloodRuleExtensions::sameFields(room.storage[3].extra,from_room.storage[3].extra));
+    assert(from_room.storage[3].path_hops==4 && from_room.storage[3].path_hash_size==3);
+    assert(!std::memcmp(room.storage[3].path,from_room.storage[3].path,9));
+    // No truncated FPF8 forwarding row may activate a partial policy. The
+    // optional FPS1 extension follows the rows and has separate legacy rules.
+    for(size_t length=0;length<image.size()-9;++length) {
+      MemoryFS cut;cut.put(FLOOD_PACKET_FILTER_FILE,{image.begin(),image.begin()+length});
+      MyMesh boot(cut,63);assert(boot.loadFloodPacketFilters());
+      assert(boot.seeded==1 && !boot.flood_policy_capacity_limited);
+      assert(std::none_of(boot.storage.begin(),boot.storage.end(),[](const auto& row){return row.active;}));
+    }
+    // Verify failed staging and publication still leave a complete old or new
+    // FPF8 policy recoverable, including all extended fields.
+    for(const char* fault : {"open:w:/flood_filter.tmp", "open:r:/flood_filter.tmp",
+        "rename:/flood_filter:/flood_filter.bak", "rename:/flood_filter.tmp:/flood_filter"}) {
+      MemoryFS failed;failed.put(FLOOD_PACKET_FILTER_FILE,image);
+      MyMesh saving(failed,63);assert(saving.loadFloodPacketFilters());
+      saving.storage[62].extra.probability=18;failed.faults.insert(fault);
+      assert(!saving.saveFloodPacketFilters());
+      failed.faults.clear();MyMesh reboot(failed,63);assert(reboot.loadFloodPacketFilters());
+      assert(reboot.storage[62].active && reboot.storage[62].extra.disabled);
+      assert(reboot.storage[62].extra.probability==17 || reboot.storage[62].extra.probability==18);
+      assert(!std::strcmp(reboot.storage[62].extra.sender,writer.storage[62].extra.sender));
+    }
+}
 int main() {
+  extendedStorage();
   // Canonical FPF7 bytes remain independent of the compact in-memory layout.
   // Exercise every persisted packed flag plus the addressable retry flag.
   {

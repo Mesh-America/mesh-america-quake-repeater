@@ -230,6 +230,42 @@ bool rowKey(const char* key, size_t length, const char* family) {
   return true;
 }
 
+// Regex punctuation is data only in the two content-pattern fields. Keep the
+// existing management-command character policy for every other argument.
+bool filterPatternCharactersAllowed(const char* text) {
+  while (*text) {
+    while (*text == ' ') ++text;
+    if (!*text) break;
+    const char* key = text;
+    while (*text && *text != '=' && *text != ' ') {
+      if (*text == '|' || *text == '\\') return false;
+      ++text;
+    }
+    const size_t key_length = size_t(text - key);
+    const bool pattern = keyEquals(key, key_length, "sender")
+        || keyEquals(key, key_length, "n") || keyEquals(key, key_length, "text")
+        || keyEquals(key, key_length, "x");
+    if (*text == '=') ++text;
+    const char quote = *text == '"' || *text == '\'' ? *text++ : 0;
+    bool closed = quote == 0;
+    while (*text) {
+      if (quote ? *text == quote : *text == ' ') {
+        if (quote) { ++text; closed = true; }
+        break;
+      }
+      if (*text == '|' && !pattern) return false;
+      if (*text == '\\') {
+        if (!pattern || !text[1]) return false;
+        text += 2;
+      } else {
+        ++text;
+      }
+    }
+    if (!closed || (*text && *text != ' ')) return false;
+  }
+  return true;
+}
+
 bool decimalToken(const char* text, size_t length) {
   if (!length) return false;
   bool dot = false, digit = false;
@@ -458,11 +494,12 @@ bool FleetCommand::withinRadius(int32_t center_latitude_e6, int32_t center_longi
 bool FleetCommand::commandAllowed(const char* command) {
   if (!command) return false;
   size_t length = 0;
+  bool pattern_characters = false;
   while (command[length]) {
     const unsigned char byte = command[length];
     if (++length > MaxCommandLength || byte < 0x20 || byte > 0x7e
-        || byte == ';' || byte == '|' || byte == '&' || byte == '`'
-        || byte == '\\') return false;
+        || byte == ';' || byte == '&' || byte == '`') return false;
+    pattern_characters = pattern_characters || byte == '|' || byte == '\\';
   }
   if (!length || command[0] == ' ' || command[length - 1] == ' ') return false;
   if (!strcmp(command, "clock") || !strcmp(command, "clock sync")) return true;
@@ -471,16 +508,39 @@ bool FleetCommand::commandAllowed(const char* command) {
     return boundedIntegerToken(command + 5, length - 5, UINT32_MAX, value)
         && value >= MinEpoch;
   }
-  bool get = false, set = false, del = false;
+  bool get = false, set = false, del = false, clear = false;
   if (!strncmp(command, "get ", 4)) get = true;
   else if (!strncmp(command, "set ", 4)) set = true;
   else if (!strncmp(command, "del ", 4)) del = true;
+  else if (!strncmp(command, "clear ", 6)) clear = true;
   else return false;
-  const char* key = command + 4;
+  const char* key = command + (clear ? 6 : 4);
   const char* separator = strchr(key, ' ');
   const size_t key_length = separator ? size_t(separator - key) : strlen(key);
   const char* arguments = separator ? separator + 1 : "";
   if (!key_length || (separator && (!*arguments || *arguments == ' '))) return false;
+
+  const bool filter_rows = rowKey(key, key_length, "flood.filter")
+      || rowKey(key, key_length, "flood.rule") || rowKey(key, key_length, "fr");
+  if (pattern_characters && (!set || !filter_rows
+          || !filterPatternCharactersAllowed(arguments))) return false;
+
+  if (keyEquals(key, key_length, "flood.advert") || keyEquals(key, key_length, "fa")) {
+    if (get) {
+      if (!*arguments) return true;
+      const bool detail = !strncmp(arguments, "key ", 4);
+      const char* number = arguments + (detail ? 4 : 0);
+      uint32_t value;
+      return *number >= '1' && *number <= '9'
+          && boundedIntegerToken(number, strlen(number), 65535, value);
+    }
+    if (!clear) return false;
+    if (!strcmp(arguments, "all")) return true;
+    if (strlen(arguments) != PUB_KEY_SIZE * 2) return false;
+    for (size_t i = 0; arguments[i]; ++i) if (hexDigit(arguments[i]) < 0) return false;
+    return true;
+  }
+  if (clear) return false;
 
   const bool scheduled_primary = keyEquals(key, key_length, "radioat")
       || keyEquals(key, key_length, "tempradioat");
@@ -500,13 +560,21 @@ bool FleetCommand::commandAllowed(const char* command) {
     return get ? !*arguments : set && (!strcmp(arguments, "on")
         || !strcmp(arguments, "off") || !strcmp(arguments, "auto"));
   }
-  const bool rows = rowKey(key, key_length, "flood.filter")
+  const bool rows = filter_rows
       || rowKey(key, key_length, "flood.filter.blacklist")
-      || rowKey(key, key_length, "flood.rule")
+      || rowKey(key, key_length, "fb")
       || rowKey(key, key_length, "flood.moderation")
+      || rowKey(key, key_length, "fm")
       || rowKey(key, key_length, "flood.channel.scope")
-      || rowKey(key, key_length, "flood.channel.scope.require");
-  if (rows) return get ? !*arguments
+      || rowKey(key, key_length, "fs")
+      || rowKey(key, key_length, "flood.channel.scope.require")
+      || rowKey(key, key_length, "fsr");
+  if (rows) return get ? (!*arguments || (filter_rows
+          && !keyEquals(key, key_length, "flood.filter")
+          && !keyEquals(key, key_length, "flood.rule")
+          && !keyEquals(key, key_length, "fr")
+          && (!strcmp(arguments, "sender") || !strcmp(arguments, "n")
+              || !strcmp(arguments, "text") || !strcmp(arguments, "x"))))
       : set ? *arguments != 0 : del && (!*arguments || !strcmp(arguments, "all"));
   const bool settings = keyEquals(key, key_length, "flood.channel.data")
       || keyEquals(key, key_length, "flood.channel.data.hops")

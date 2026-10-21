@@ -5,6 +5,8 @@
 #include <Mesh.h>
 #include <helpers/PacketFileLoggingConfig.h>
 #include <helpers/PowerSavingDiagnostics.h>
+#include <helpers/FloodGroupPlainText.h>
+#include <helpers/FloodRuleExtensions.h>
 #if defined(ENABLE_OTA)
   #include <helpers/ota/OtaContext.h>
 #endif
@@ -443,6 +445,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
     char target_region_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN];
     uint8_t priority;
     uint8_t transport_modes;
+    FloodRuleExtensions::Fields extra;
 #else
     bool active;
     uint8_t payload_type;
@@ -496,7 +499,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   };
   mutable FloodRetryBridgeState flood_retry_bridge_states[TOTAL_FLOOD_RETRY_SLOTS];
   FloodRetryBridgeReachability flood_retry_bridge_reachability[FLOOD_RETRY_BRIDGE_BUCKETS + 1];
-  static_assert(sizeof(FloodPacketFilterEntry) <= (MESH_ENABLE_FLOOD_RULE_ENGINE ? 192 : 40),
+  static_assert(sizeof(FloodPacketFilterEntry) <= (MESH_ENABLE_FLOOD_RULE_ENGINE ? 336 : 40),
                 "Update the flood-table runtime RAM budget in check_firmware_ram.py");
   // The rule table is the single largest member of this object. It is heap
   // allocated in the constructor (before setup(), while the heap is still
@@ -506,6 +509,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   // zero-capacity node simply forwards without rule filtering.
   FloodPacketFilterEntry* flood_packet_filters;
   uint8_t flood_packet_filter_slots;
+#if MESH_ENABLE_FLOOD_RULE_ENGINE
+  uint32_t flood_filter_probability_seed;
+#endif
   uint8_t flood_packet_filter_blacklist_count;
   uint8_t flood_packet_filter_blacklist[FLOOD_PACKET_FILTER_BLACKLIST_MAX]
                                        [FLOOD_PACKET_FILTER_PATH_ID_SIZE];
@@ -917,6 +923,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void deleteFloodChannelScopeRequirement(const char* args, char* reply);
   void loadFloodGroupModeration();
   bool saveFloodGroupModeration();
+  bool readFloodGroupModerationFile(const char* path, FloodGroupModerationEntry* entries,
+                                     bool* readable = nullptr) const;
+  bool recoverFloodGroupModeration();
   bool shouldBlockFloodGroupTextForward(const mesh::Packet* packet);
   void formatFloodGroupModeration(const char* args, char* reply) const;
   void formatFloodGroupModerationDetail(int index, char* reply, size_t reply_len) const;
@@ -924,6 +933,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void deleteFloodGroupModeration(const char* args, char* reply);
   bool decodeFloodGroupPlainText(const mesh::Packet* packet, const uint8_t* secret, uint8_t key_len,
                                  uint32_t& timestamp, char* sender, size_t sender_len) const;
+  bool decodeFloodGroupPlainTextSpan(const mesh::Packet* packet, const uint8_t* secret,
+                                     uint8_t key_len, uint8_t* buffer, size_t capacity,
+                                     mesh::FloodGroupPlainText::View& view) const;
   void loadClockSyncPrefs();
   bool saveClockSyncPrefs();
   void resetClockSyncAttempt();

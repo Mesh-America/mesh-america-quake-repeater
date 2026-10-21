@@ -377,6 +377,51 @@ class FleetCommandCryptoTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.decode(envelope(command)), "reject")
 
+    def test_filter_shorthand_uses_the_same_signed_management_envelope(self):
+        for command in ["get fr", "get fr.2", "get fr.2 n", "get flood.rule.2 text",
+                        "set fr.2 any c=public q=10 s",
+                        "del fr.2", "del fr all", "get fm", "get fs.1", "get fsr.1",
+                        "get fb", "set fm.2 public Alice drop", "set fs.2 public scope=local",
+                        "set fsr.2 public", "set fb.2 AABBCC", "del fm.2", "del fs.2",
+                        "del fsr.2", "del fb.2", "get fa", "get fa 2", "get fa key 1",
+                        "clear fa all", "clear flood.advert " + "11" * 32]:
+            with self.subTest(command=command):
+                expected = envelope(command)
+                actual = self.run_tool("encode", CHANNEL.hex(), "all", NOW, NOW + 120, command)
+                self.assertEqual(actual, expected.hex())
+                self.assertEqual(self.decode(expected), f"{NOW}\n{NOW + 120}\n{command}")
+
+        for command in ["get fridge", "get fr.secret", "get fr.1.secret", "get fr.0",
+                        "get fr.01", "get fr.256", "get fr.9999999999", "get fr.2 all",
+                        "set frwifi.password secret", "set fr.2", "del fr.2 extra",
+                        "get fmore", "get fsr.secret", "get fb.0", "set fa off",
+                        "clear fa", "clear fa 0102", "clear fa ALL", "get fa key",
+                        "get fa 0", "get fa 01", "get fa 65536", "get fa key 1 extra"]:
+            with self.subTest(command=command):
+                self.assertEqual(self.decode(envelope(command)), "reject")
+
+    def test_filter_patterns_preserve_alternation_and_escapes_without_new_command_namespaces(self):
+        for family in ["fr.4", "flood.rule.4", "flood.filter.4"]:
+            for fields in [r'sender=^(Alice|Bob)$ text=^BEACON\.[0-9]+$',
+                           r'n="^(Alice|Bob) Smith$" x="^RX in place\?"',
+                           r'n=^A\|B$ x="a\\b"']:
+                command = f"set {family} any c=public {fields} d"
+                with self.subTest(command=command):
+                    self.assertEqual(self.decode(envelope(command)), f"{NOW}\n{NOW + 120}\n{command}")
+                    self.assertEqual(self.run_tool("encode", CHANNEL.hex(), "all", NOW, NOW + 120, command),
+                                     envelope(command).hex())
+
+        for command in [r'set flood.rule.1 any c=#a|reboot d',
+                        r'set fr.1 any c=#a\reboot d', r'set fr.1 any x="a|b" c=#a|reboot d',
+                        r'set fr.1 any n="a|b"\reboot d', r'set fr.1 any n="a|b d',
+                        r'set fr.1 any n="a|b"reboot d', r'set fm.1 public a|b drop',
+                        r'set flood.channel.scope public scope=a|b',
+                        r'set fr.1 any text="a;reboot" d', r'set fr.1 any text="a&b" d',
+                        r'set fr.1 any text="a`b" d', r'get radio2|reboot',
+                        r'set flood.max a|b', r'get fr.1|reboot']:
+            with self.subTest(command=command):
+                self.assertEqual(self.decode(envelope(command)), "reject")
+
     def test_scheduled_radio_commands_have_cross_language_real_signatures(self):
         for command in [
                 "set radioat 910.5,500,5,5,+1,auto",

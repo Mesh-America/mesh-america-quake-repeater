@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FloodAdvertLimiter.h"
+#include "FloodCommandAliases.h"
 #include <Utils.h>
 #include <stdio.h>
 
@@ -17,10 +18,8 @@ inline const char* floodAdvertLimitReason(uint8_t reasons) {
 // Row numbers refer to the current filtered list, not permanent table slots.
 inline bool handleFloodAdvertGet(FloodAdvertLimiter* limiter, const char* command,
                                  char* reply, uint32_t now) {
-  static const char prefix[] = "get flood.advert";
-  const size_t prefix_len = sizeof(prefix) - 1;
-  if (strncmp(command, prefix, prefix_len) != 0) return false;
-  const char* arg = command + prefix_len;
+  const char* arg = floodCommandArguments(command, "get flood.advert");
+  if (!arg) return false;
   if (*arg && *arg != ' ' && *arg != '\t' && *arg != '\r' && *arg != '\n') return false;
   while (*arg == ' ' || *arg == '\t') ++arg;
   const bool detail = strncmp(arg, "key", 3) == 0 && (arg[3] == ' ' || arg[3] == '\t');
@@ -81,10 +80,8 @@ inline bool handleFloodAdvertGet(FloodAdvertLimiter* limiter, const char* comman
 // Dispatch only after the role's ordinary CLI authorization checks. Requiring
 // an explicit "all" avoids treating missing/malformed keys as a global reset.
 inline bool handleFloodAdvertClear(FloodAdvertLimiter* limiter, const char* command, char* reply) {
-  static const char prefix[] = "clear flood.advert";
-  const size_t prefix_len = sizeof(prefix) - 1;
-  if (strncmp(command, prefix, prefix_len) != 0) return false;
-  const char* arg = command + prefix_len;
+  const char* arg = floodCommandArguments(command, "clear flood.advert");
+  if (!arg) return false;
   if (*arg && *arg != ' ' && *arg != '\t') return false;
   while (*arg == ' ' || *arg == '\t') ++arg;
   const char* end = arg;

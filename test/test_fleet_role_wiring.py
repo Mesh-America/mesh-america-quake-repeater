@@ -363,6 +363,7 @@ class FleetRoleWiringTests(unittest.TestCase):
         common = body(management, "bool CommonCLI::handleFleetCommand(")
         boot = body(body(management, "void CommonCLI::beginManagement("),
                     "if (_callbacks->supportsFleetControl()")
+        helpers = f'#include "{(ROOT / "src/helpers/FloodCommandAliases.h").as_posix()}"\n' + helpers
         harness = AUTHORIZATION.replace("@MANAGER_HELPERS@", helpers)
         harness = harness.replace("@COMMON_FLEET@", common).replace("@MANAGER_GUARD@", guard)
         harness = harness.replace("@BOOT_FLEET@", boot)

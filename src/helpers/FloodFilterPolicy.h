@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <Packet.h>
+#include "FloodRuleExtensions.h"
 
 namespace FloodFilterPolicy {
 
@@ -53,6 +54,14 @@ enum ChannelScopeGate {
 // Compare configured fields explicitly: padding and live rate-window state
 // must never decide whether an unnumbered setter reuses an existing slot.
 template<typename Entry>
+auto sameRuleExtras(const Entry& left, const Entry& right, int)
+    -> decltype(left.extra, right.extra, bool()) {
+  return FloodRuleExtensions::sameFields(left.extra, right.extra);
+}
+template<typename Entry>
+bool sameRuleExtras(const Entry&, const Entry&, long) { return true; }
+
+template<typename Entry>
 bool sameRuleConfiguration(const Entry& left, const Entry& right) {
   return left.active == right.active
       && left.payload_type == right.payload_type
@@ -81,7 +90,8 @@ bool sameRuleConfiguration(const Entry& left, const Entry& right) {
       && left.priority == right.priority
       && left.stop_on_match == right.stop_on_match
       && left.retry_on_match == right.retry_on_match
-      && left.transport_modes == right.transport_modes;
+      && left.transport_modes == right.transport_modes
+      && sameRuleExtras(left, right, 0);
 }
 
 inline bool channelKeyLengthSupported(uint8_t key_len) {
@@ -184,10 +194,10 @@ inline bool parseRuleModes(const char* text, uint8_t& modes) {
 // These are separate admission phases. A transport rule cannot suppress
 // ordinary LoRa forwarding, nor can a radio stop rule bypass a transport deny.
 inline bool ruleModeMatches(uint8_t modes, uint8_t context,
-                            const mesh::Packet* packet) {
+                            const mesh::Packet* packet, uint8_t route = 0) {
   return packet && (modes == RULE_MODE_RADIO ? context == RULE_MODE_RADIO
       : (modes & context) != 0)
-      && (context != RULE_MODE_RADIO || packet->isRouteFlood());
+      && (route != 0 || context != RULE_MODE_RADIO || packet->isRouteFlood());
 }
 
 inline bool transportActionsSupported(uint8_t modes, bool scope_action,

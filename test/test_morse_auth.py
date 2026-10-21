@@ -133,6 +133,7 @@ class MorseAuthorizationTests(unittest.TestCase):
             "static bool commandFamilyMatches(", "static bool isCommonManagerReadOnlyAllowed(",
             "static bool isRegionMgrAllowed(", "static bool isFilterMgrAllowed(",
         ))
+        helpers = f'#include "{(ROOT / "src/helpers/FloodCommandAliases.h").as_posix()}"\n' + helpers
         code = HARNESS.replace("@MANAGER_HELPERS@", helpers).replace("@PORTABLE_HANDOFF@", handoff)
         for extended_filters in (0, 1):
             with self.subTest(extended_filters=extended_filters):

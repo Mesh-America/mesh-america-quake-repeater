@@ -24,8 +24,8 @@ static constexpr uint8_t NAME_LEN = 32, PATH_PREFIX_BYTES_MAX = 9;
 '''
 
 SCENARIOS = r'''
-static_assert(sizeof(RepeaterEntry) == 192 && sizeof(RoomEntry) == 192,
-              "63 repeater rows / 31 room rows must retain the 192-byte bound");
+static_assert(sizeof(RepeaterEntry) == 332 && sizeof(RoomEntry) == 332,
+              "extended rows retain the reviewed 332-byte RAM bound");
 static_assert(sizeof(LegacyEntry) == 40, "retain legacy STM32 rule layout");
 static_assert(alignof(RepeaterEntry) >= alignof(uint32_t));
 static_assert(alignof(RoomEntry) >= alignof(uint32_t));
@@ -95,7 +95,7 @@ template<class Entry> void exerciseConfigurationEquality() {
   assert(FloodFilterPolicy::sameRuleConfiguration(original, live));
   // Bytewise struct comparisons are forbidden: neither alignment padding nor
   // live counters identify a rule. Poison trailing padding to enforce this.
-  for (size_t offset = offsetof(Entry, transport_modes) + 1; offset < sizeof(Entry); ++offset)
+  for (size_t offset = offsetof(Entry, extra) + sizeof(live.extra); offset < sizeof(Entry); ++offset)
     reinterpret_cast<unsigned char*>(&live)[offset] = 0xa5;
   assert(FloodFilterPolicy::sameRuleConfiguration(original, live));
   // Every configured field must still distinguish two rows. Arrays include
@@ -129,6 +129,24 @@ template<class Entry> void exerciseConfigurationEquality() {
       case 23: changed.retry_on_match = true; break;
       case 24: changed.transport_modes = 2; break;
       case 25: changed.scope_name[0] = '#'; break;
+    }
+    assert(!FloodFilterPolicy::sameRuleConfiguration(original, changed));
+    assert(!FloodFilterPolicy::sameRuleConfiguration(changed, original));
+  }
+  for (unsigned field = 0; field < 11; ++field) {
+    Entry changed = original;
+    switch (field) {
+      case 0: changed.extra.min_payload = 1; break;
+      case 1: changed.extra.max_payload = 1; break;
+      case 2: changed.extra.payload_set = 1; break;
+      case 3: changed.extra.route = FloodRuleExtensions::DirectRoute; break;
+      case 4: changed.extra.probability = 30; break;
+      case 5: changed.extra.path_position = FloodRuleExtensions::Anywhere; break;
+      case 6: changed.extra.disabled = 1; break;
+      case 7: changed.extra.path_tail[2] = 1; break;
+      case 8: std::strcpy(changed.extra.sender, "Alice"); break;
+      case 9: std::strcpy(changed.extra.text, "weather"); break;
+      case 10: changed.extra.path_tail[0] = 1; break;
     }
     assert(!FloodFilterPolicy::sameRuleConfiguration(original, changed));
     assert(!FloodFilterPolicy::sameRuleConfiguration(changed, original));

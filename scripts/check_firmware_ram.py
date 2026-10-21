@@ -289,12 +289,12 @@ def requirements(platform, defines, target):
     if repeater:
         engine = integer(defines, "MESH_ENABLE_FLOOD_RULE_ENGINE", int(platform != "STM32_PLATFORM"))
         slots = integer(defines, "FLOOD_PACKET_FILTER_SLOTS", 63 if engine else 16)
-        parts["flood_filter_table"] = slots * (192 if engine else 40) + 16
+        parts["flood_filter_table"] = slots * (336 if engine else 40) + 16
     if "room_server" in target.lower() and integer(
             defines, "MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE", 0):
         # FloodRuleEngine keeps all 31 persisted rules in one startup heap
-        # allocation. Its C++ assertion pins Entry to the budgeted 192 bytes.
-        parts["room_flood_rule_table"] = 31 * 192 + 16
+        # allocation. Its C++ assertion pins Entry to the budgeted 336 bytes.
+        parts["room_flood_rule_table"] = 31 * 336 + 16
     if "ENABLE_OTA" in defines and "OTA_HEAP_CONTEXT" in defines:
         parts["ota_context"] = 16384 + 16
     if "ENABLE_OTA" in defines:

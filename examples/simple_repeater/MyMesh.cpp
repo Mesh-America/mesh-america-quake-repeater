@@ -33,6 +33,7 @@
 #include <new>       // std::nothrow (heap-allocated flood rule table)
 #include <stdlib.h>  // for qsort()
 #include <helpers/CLICommandUtils.h>
+#include <helpers/FloodCommandAliases.h>
 #if defined(NRF52_POWER_MANAGEMENT)
 #include <helpers/NRF52VoltagePolicy.h>
 #endif
@@ -192,6 +193,8 @@ static_assert(mesh::HostCliBridge::REMOTE_REPLY_MAX
 #define FLOOD_CHANNEL_SCOPE_REQUIRE_FILE "/flood_ch_req"
 #define FLOOD_CHANNEL_SCOPE_REQUIRE_TEMP_FILE "/flood_ch_req.tmp"
 #define FLOOD_GROUP_MODERATION_FILE   "/flood_grp_mod"
+#define FLOOD_GROUP_MODERATION_TEMP_FILE "/flood_grp_mod.tmp"
+#define FLOOD_GROUP_MODERATION_BACKUP_FILE "/flood_grp_mod.bak"
 #define CLOCK_SYNC_PREFS_FILE         "/clock_sync"
 #define DEFAULT_WARDRIVING_CHANNEL       "#wardriving"
 static const char FLOOD_PACKET_FILTER_USAGE[] =
@@ -1070,8 +1073,21 @@ bool MyMesh::floodChannelDataHopApplies(const mesh::Packet* packet) const {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
+  if (!packet) return false;
   if (_prefs.disable_fwd && !(_prefs.trace_when_repeat_off == 1 && packet
       && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE)) return false;
+#if !defined(PORTABLE_MQTT_OBSERVER) && MESH_ENABLE_FLOOD_RULE_ENGINE
+  uint64_t matches = recv_pkt_filter_match_mask;
+  if (packet->isRouteDirect()) {
+    const bool scoped = packet->getRouteType() == ROUTE_TYPE_TRANSPORT_DIRECT;
+    RegionEntry* incoming_region = scoped
+        ? region_map.findMatch(packet, REGION_DENY_FLOOD) : NULL;
+    const bool incoming_allowed = scoped ? incoming_region != NULL
+        : (region_map.getWildcard().flags & REGION_DENY_FLOOD) == 0;
+    matches = evaluateFloodPacketFilterMatches(packet, incoming_allowed, incoming_region);
+    if (shouldBlockFloodPacketForward(packet, matches)) return false;
+  }
+#endif
   if (packet->isRouteFlood()) {
     if (mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max,
                                       _prefs.flood_max_unscoped,
@@ -1123,7 +1139,11 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 #if MESH_ENABLE_FLOOD_GROUP_MODERATION
   if (packet->isRouteFlood() && shouldBlockFloodGroupTextForward(packet)) return false;
 #endif
+#if MESH_ENABLE_FLOOD_RULE_ENGINE
+  commitFloodPacketFilterRates(packet, matches);
+#else
   if (packet->isRouteFlood()) commitFloodPacketFilterRates(packet, recv_pkt_filter_match_mask);
+#endif
   // Normal path mode accepts clock evidence only from packets this node would
   // forward. Edge mode observes verified evidence on the receive path instead,
   // so repeat off and other forwarding filters do not hide a single upstream
@@ -3812,6 +3832,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 // OTA mesh-integration (receive/begin/loop) is centralized in mesh::Mesh - no per-example wiring.
 
 void MyMesh::begin(FILESYSTEM *fs) {
+#if MESH_ENABLE_FLOOD_RULE_ENGINE
+  flood_filter_probability_seed = getRNG()->nextInt(0, UINT32_MAX);
+#endif
   mesh::hilStartupTrace("mesh_dispatcher_begin");
   mesh::Mesh::begin();   // also starts OTA (ota_ctx().begin) for all roles
   mesh::hilStartupTrace("mesh_dispatcher_ready");
@@ -6355,7 +6378,8 @@ bool MyMesh::loadFloodPacketFilters() {
   uint8_t count = 0;
   bool success = file.read(magic, sizeof(magic)) == sizeof(magic);
   bool version_6 = success && memcmp(magic, "FPF6", sizeof(magic)) == 0;
-  bool version_7 = success && memcmp(magic, "FPF7", sizeof(magic)) == 0;
+  bool version_8 = success && memcmp(magic, "FPF8", sizeof(magic)) == 0;
+  bool version_7 = version_8 || (success && memcmp(magic, "FPF7", sizeof(magic)) == 0);
   success = (version_6 || version_7)
       && file.read(&count, sizeof(count)) == sizeof(count);
   // A wider firmware image can write inactive trailing slots. Decode them
@@ -6454,6 +6478,9 @@ bool MyMesh::loadFloodPacketFilters() {
       success = success
           && file.read(&stop_on_match, sizeof(stop_on_match))
               == sizeof(stop_on_match);
+      if (success && version_8) {
+        success = FloodRuleExtensions::readFields(file, entry.extra);
+      }
     } else {
       entry.incoming_scope_kind = scope_requires_region_match
           ? FloodFilterPolicy::RULE_IN_ALLOWED
@@ -6557,9 +6584,7 @@ bool MyMesh::loadFloodPacketFilters() {
           || entry.payload_type == PAYLOAD_TYPE_GRP_DATA;
     }
 
-    bool path_valid = FloodFilterPolicy::pathMatcherValid(
-        entry.path_hash_size, entry.path_hops,
-        entry.match_blacklisted_path);
+    bool path_valid = FloodRuleExtensions::validRuleFields(entry);
     bool action_valid = entry.drop_on_match || direct_target
         || region_target || entry.rate_limit_enabled
         || entry.stop_on_match || entry.retry_on_match;
@@ -6827,7 +6852,8 @@ bool MyMesh::isFloodChannelDataRule(
       && !entry.rate_limit_enabled
       && entry.priority == 0
       && !entry.stop_on_match
-      && !entry.retry_on_match;
+      && !entry.retry_on_match
+      && !FloodRuleExtensions::hasFields(entry.extra);
 }
 
 int MyMesh::findFloodChannelDataRule() const {
@@ -7177,10 +7203,12 @@ bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
     return true;
   };
 
-  const uint8_t magic[4] = {'F', 'P', 'F', '7'};
   const uint8_t count = FloodFilterPolicy::forwardPersistenceCount(
       flood_packet_filters, flood_packet_filter_slots,
       empty_forward_phase);
+  const bool version_8 = FloodRuleExtensions::tableUsesExtensions(
+      flood_packet_filters, count);
+  const uint8_t magic[4] = {'F', 'P', 'F', version_8 ? uint8_t('8') : uint8_t('7')};
   bool success = writeExact(magic, sizeof(magic))
       && writeExact(&count, sizeof(count));
   for (int i = 0; success && i < count; i++) {
@@ -7229,6 +7257,9 @@ bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
                       sizeof(entry.target_region_name))
         && writeExact(&entry.priority, sizeof(entry.priority))
         && writeExact(&stop_on_match, sizeof(stop_on_match));
+    if (success && version_8) {
+      success = FloodRuleExtensions::writeFields(writeExact, entry.extra);
+    }
   }
   static_assert(FLOOD_CHANNEL_SCOPE_SLOTS <= 255,
                 "FPF7 scope phase count is one byte");
@@ -7456,14 +7487,16 @@ bool MyMesh::floodPacketFilterFieldsMatch(
     bool incoming_region_allowed,
     const RegionEntry* incoming_region, uint8_t context) const {
   if (!entry.active || !FloodFilterPolicy::ruleModeMatches(
-          entry.transport_modes, context, packet)) return false;
+          entry.transport_modes, context, packet, entry.extra.route)
+      || !FloodRuleExtensions::matchesEnvelope(entry.extra, packet, context)) return false;
   if (!FloodFilterPolicy::channelKeyLengthSupported(
           entry.channel_key_len)) return false;
   if (entry.suspend_on_temp_radio && isAnyTempRadioActive()) return false;
   if (entry.match_blacklisted_path && !floodPacketFilterBlacklistMatches(packet)) {
     return false;
   }
-  if (!FloodFilterPolicy::pathStartsWith(
+  if (!FloodFilterPolicy::pathHashBytesMatch(entry.path_hash_size, packet->getPathHashSize())
+      || !FloodRuleExtensions::pathMatches(entry.extra,
           packet, entry.path_hash_size, entry.path_hops, entry.path)) {
     return false;
   }
@@ -7471,7 +7504,8 @@ bool MyMesh::floodPacketFilterFieldsMatch(
   uint8_t type = packet->getPayloadType();
   uint8_t hops = packet->getPathHashCount();
   if ((entry.payload_type != FLOOD_PACKET_FILTER_ANY_TYPE && entry.payload_type != type)
-      || hops < entry.min_hops || hops > entry.max_hops) {
+      || (packet->isRouteFlood() ? hops < entry.min_hops || hops > entry.max_hops
+          : entry.min_hops != 0 || entry.max_hops != FLOOD_PACKET_FILTER_MAX_HOPS)) {
     return false;
   }
 
@@ -7527,7 +7561,7 @@ bool MyMesh::authenticateFloodPacketFilterChannel(
 
 bool MyMesh::hasFloodPacketFilterRetryRules() const {
   for (int i = 0; i < flood_packet_filter_slots; i++) {
-    if (flood_packet_filters[i].active
+    if (flood_packet_filters[i].active && !flood_packet_filters[i].extra.disabled
         && flood_packet_filters[i].retry_on_match) return true;
   }
   return false;
@@ -7598,9 +7632,9 @@ uint64_t MyMesh::applyFloodPacketFilterStop(uint64_t match_mask) {
 uint64_t MyMesh::evaluateFloodPacketFilterMatches(
     const mesh::Packet* packet, bool incoming_region_allowed,
     const RegionEntry* incoming_region, uint8_t context) {
-  static_assert(FLOOD_PACKET_FILTER_SLOTS <= 64,
-                "flood filter match mask supports at most 64 slots");
-  if (packet == NULL || (context == FloodFilterPolicy::RULE_MODE_RADIO && !packet->isRouteFlood())) return 0;
+  static_assert(FLOOD_PACKET_FILTER_SLOTS < 64,
+                "flood filter mask reserves bit 63 for exhausted pattern work");
+  if (packet == NULL) return 0;
   bool incoming_is_scoped =
       packet->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD
       || packet->getRouteType() == ROUTE_TYPE_TRANSPORT_DIRECT;
@@ -7608,6 +7642,7 @@ uint64_t MyMesh::evaluateFloodPacketFilterMatches(
       ? packet->transport_codes[0] : 0;
   bool channel_auth_checked[FLOOD_PACKET_FILTER_SLOTS] = { false };
   bool channel_auth_valid[FLOOD_PACKET_FILTER_SLOTS] = { false };
+  uint32_t pattern_work = 131072;
   uint64_t matches = 0;
   for (int i = 0; i < flood_packet_filter_slots; i++) {
     const auto& entry = flood_packet_filters[i];
@@ -7636,7 +7671,18 @@ uint64_t MyMesh::evaluateFloodPacketFilterMatches(
       channel_auth_checked[i] = true;
       channel_auth_valid[i] = authenticated;
     }
-    if (authenticated) matches |= (uint64_t)1U << i;
+    bool budget_exceeded = false;
+    const bool content_matched = authenticated
+        && FloodRuleExtensions::matchesContent(entry.extra,
+            packet, entry.channel_secret, entry.channel_key_len, &pattern_work,
+            false, &budget_exceeded);
+    if (budget_exceeded) return uint64_t(1) << 63;
+    if (content_matched
+        && (entry.extra.probability == 0 || entry.extra.probability == 100
+            || FloodRuleExtensions::matchesProbability(
+                entry.extra, FloodRuleExtensions::probabilityRoll(
+                    packet, flood_filter_probability_seed, i, context))))
+      matches |= (uint64_t)1U << i;
   }
   return applyFloodPacketFilterStop(matches);
 }
@@ -7692,6 +7738,7 @@ bool MyMesh::applyFloodPacketFilterScope(mesh::Packet* packet,
 bool MyMesh::shouldBlockFloodPacketForward(const mesh::Packet* packet,
                                             uint64_t match_mask) const {
   if (packet == NULL) return false;
+  if (match_mask & (uint64_t(1) << 63)) return true;
   uint8_t type = packet->getPayloadType();
   uint8_t hops = packet->getPathHashCount();
 
@@ -7852,7 +7899,7 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
     return;
   }
   const auto& entry = flood_packet_filters[index];
-  if (compact) {
+  if (compact || FloodRuleExtensions::hasFields(entry.extra) || entry.path_hops > 3) {
     FloodRuleCLI::formatCompact(reply, reply_len, index + 1, entry);
     return;
   }
@@ -7951,6 +7998,28 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
   const char* selector = skipFloodFilterSpaces(args);
   if (*selector == '.') selector = skipFloodFilterSpaces(selector + 1);
   if (*selector != 0) {
+    const char* field = strchr(selector, ' ');
+    if (field) {
+      char slot_text[4];
+      const size_t length = size_t(field - selector);
+      uint8_t slot = 0;
+      if (!length || length >= sizeof(slot_text)) {
+        strcpy(reply, "Err - invalid rule slot"); return;
+      }
+      memcpy(slot_text, selector, length); slot_text[length] = 0;
+      field = skipFloodFilterSpaces(field);
+      if (!parseFloodFilterUnsigned(slot_text, flood_packet_filter_slots, slot)
+          || !slot || !flood_packet_filters[slot - 1].active) {
+        strcpy(reply, "Err - rule slot is empty");
+      } else if (floodFilterAsciiEqual(field, "n") || floodFilterAsciiEqual(field, "sender")) {
+        snprintf(reply, 160, "> %s", flood_packet_filters[slot - 1].extra.sender);
+      } else if (floodFilterAsciiEqual(field, "x") || floodFilterAsciiEqual(field, "text")) {
+        snprintf(reply, 160, "> %s", flood_packet_filters[slot - 1].extra.text);
+      } else {
+        strcpy(reply, "Err - field is sender/n or text/x");
+      }
+      return;
+    }
     uint8_t slot;
     if (!parseFloodFilterUnsigned(selector, flood_packet_filter_slots, slot) || slot == 0) {
       snprintf(reply, 160, "Err - filter slot must be 1-%d", flood_packet_filter_slots);
@@ -7987,7 +8056,7 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
       snprintf(priority, sizeof(priority), "^%u",
                (unsigned int)entry.priority);
     }
-    snprintf(item, sizeof(item), " %d=%s~%s@%s%s%s%s%s%s%s%s%s%s",
+    snprintf(item, sizeof(item), " %d=%s~%s@%s%s%s%s%s%s%s%s%s%s%s",
              i + 1, floodFilterPayloadTypeName(entry.payload_type),
              FloodFilterPolicy::ruleModeName(entry.transport_modes), hops,
              entry.match_blacklisted_path ? "?blacklist" : "",
@@ -7997,7 +8066,8 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
              entry.retry_on_match ? "~retry" : "",
              entry.scope_uses_slow_timing ? "~slow" : "",
              entry.suspend_on_temp_radio ? "~tempradio" : "",
-             i == findFloodChannelDataRule() ? "~data" : "");
+             i == findFloodChannelDataRule() ? "~data" : "",
+             entry.extra.disabled ? "~off" : "");
     size_t item_len = strlen(item);
     if (used + item_len >= 156) {
       truncated = true;
@@ -8041,6 +8111,32 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
     }
   }
   cursor = skipFloodFilterSpaces(cursor);
+  if (requested_slot >= 0) {
+    const char* state = cursor;
+    if (!strncmp(state, "enabled=", 8)) state += 8;
+    else if (!strncmp(state, "e=", 2)) state += 2;
+    if (state != cursor || !strcmp(state, "on") || !strcmp(state, "off")) {
+      uint8_t disabled;
+      if (!FloodRuleExtensions::enabledValue(state, disabled)) {
+        strcpy(reply, "Err - enabled is on or off"); return;
+      }
+      auto& entry = flood_packet_filters[requested_slot];
+      if (!entry.active) { strcpy(reply, "Err - empty filter slot"); return; }
+      const uint8_t previous = entry.extra.disabled;
+      const uint8_t previous_channel_data_slot = flood_channel_data_rule_slot;
+      entry.extra.disabled = disabled;
+      // Editing the compatibility row through fr gives it the same ordinary
+      // rule ownership as replacing that row through the full setter.
+      if (previous != disabled && requested_slot == flood_channel_data_rule_slot)
+        flood_channel_data_rule_slot = 0xFF;
+      if (previous != disabled && !saveFloodPacketFilters()) {
+        entry.extra.disabled = previous;
+        flood_channel_data_rule_slot = previous_channel_data_slot;
+        strcpy(reply, "Err - filter save unconfirmed; reboot may differ"); return;
+      }
+      strcpy(reply, disabled ? "OK - rule disabled" : "OK - rule enabled"); return;
+    }
+  }
   char params[256];
   if (strlen(cursor) >= sizeof(params)) {
     strcpy(reply, "Err - rule parameters too long");
@@ -8048,22 +8144,9 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   }
 
   strcpy(params, cursor);
-  char* tokens[18];
-  int token_count = 0;
-  char* token = params;
-  while (*token != 0) {
-    if (token_count >= 18) {
-      strcpy(reply, "Err - too many rule parameters");
-      return;
-    }
-    tokens[token_count++] = token;
-    char* separator = strchr(token, ' ');
-    if (separator == NULL) break;
-    *separator++ = 0;
-    while (*separator == ' ') separator++;
-    token = separator;
-  }
-  if (token_count == 0) {
+  char* tokens[26];
+  const int token_count = FloodRuleExtensions::tokenize(params, tokens, 26);
+  if (token_count <= 0) {
     strcpy(reply, FLOOD_PACKET_FILTER_USAGE);
     return;
   }
@@ -8117,7 +8200,12 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   bool retry_on_match = false;
   uint8_t transport_modes = FloodFilterPolicy::RULE_MODE_RADIO;
   bool mode_set = false;
+  FloodRuleExtensions::Fields extra{};
+  uint8_t extra_seen = 0;
   for (int i = 1; i < token_count; i++) {
+    const int extended = FloodRuleExtensions::parseToken(tokens[i], extra, extra_seen, reply);
+    if (extended < 0) return;
+    if (extended > 0) continue;
     if (floodFilterAsciiStartsWith(tokens[i], "mode=")
         || floodFilterAsciiStartsWith(tokens[i], "m=")) {
       if (mode_set) {
@@ -8312,6 +8400,15 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
       StrHelper::strzcpy(target_region_name, region->name,
                          sizeof(target_region_name));
       target_set = true;
+    } else if (floodFilterAsciiEqual(tokens[i], "allow")
+        || floodFilterAsciiEqual(tokens[i], "forward")
+        || floodFilterAsciiEqual(tokens[i], "a")
+        || floodFilterAsciiEqual(tokens[i], "action=allow")
+        || floodFilterAsciiEqual(tokens[i], "action=forward")) {
+      if (stop_on_match) {
+        strcpy(reply, FLOOD_PACKET_FILTER_DUPLICATE); return;
+      }
+      stop_on_match = true;
     } else if (floodFilterAsciiEqual(tokens[i], "drop")
         || floodFilterAsciiEqual(tokens[i], "d")
         || floodFilterAsciiEqual(tokens[i], "action=drop")) {
@@ -8398,6 +8495,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
       hashbytes_set = true;
     } else if (floodFilterAsciiStartsWith(tokens[i], "prefix=")
         || floodFilterAsciiStartsWith(tokens[i], "p=")
+        || floodFilterAsciiStartsWith(tokens[i], "pa=")
         || (floodFilterAsciiStartsWith(tokens[i], "path=")
             && !floodFilterAsciiEqual(tokens[i], "path=blacklist"))) {
       if (path_set) {
@@ -8405,12 +8503,11 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
         return;
       }
       const char* value = strchr(tokens[i], '=') + 1;
-      static_assert(FLOOD_PACKET_FILTER_PATH_PREFIX_BYTES_MAX
-                        == FLOOD_GROUP_MODERATION_PATH_BYTES_MAX,
-                    "rule and moderation path buffers must agree");
-      if (!parseFloodModerationPath(value, path_hash_size, path_hops,
-                                    path)) {
-        strcpy(reply, "Err - prefix is * or 1-3 comma-separated 1/2/3-byte IDs");
+      const bool legacy_prefix = floodFilterAsciiStartsWith(tokens[i], "prefix=")
+          || floodFilterAsciiStartsWith(tokens[i], "p=");
+      if (!FloodRuleExtensions::parsePath(value, path_hash_size, path_hops,
+                                    path, extra, legacy_prefix)) {
+        strcpy(reply, "Err - path is [^]ID>...[$], up to four 1/2/3-byte IDs");
         return;
       }
       path_set = true;
@@ -8503,8 +8600,13 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   candidate.stop_on_match = stop_on_match;
   candidate.retry_on_match = retry_on_match;
   candidate.transport_modes = transport_modes;
+  candidate.extra = extra;
   StrHelper::strzcpy(candidate.scope_name, scope_name,
                      sizeof(candidate.scope_name));
+  if (!FloodRuleExtensions::validRuleFields(candidate)) {
+    strcpy(reply, "Err - content needs a keyed group-text channel; scope/retry needs flood route");
+    return;
+  }
 
   int slot = requested_slot;
   if (slot < 0) {
@@ -8553,7 +8655,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
     snprintf(reply, 160, "OK - rule %d saved (details exceed reply size)", slot + 1);
     return;
   }
-  snprintf(reply, 160, "OK - %s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
+  snprintf(reply, 160, "OK - %.154s", detail[0] == '>' ? skipFloodFilterSpaces(detail + 1) : detail);
 }
 #else
 void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_len, bool compact) const {
@@ -9517,28 +9619,34 @@ void MyMesh::setFloodChannelScope(const char* args, char* reply) {
   while ((option_result =
               takeFloodModerationToken(cursor, option, sizeof(option))) == 1) {
     if (floodFilterAsciiEqual(option, "tx=slow")
-        || floodFilterAsciiEqual(option, "tx=fast")) {
+        || floodFilterAsciiEqual(option, "tx=fast")
+        || floodFilterAsciiEqual(option, "tx=s")
+        || floodFilterAsciiEqual(option, "tx=f")) {
       if (timing_set) {
         strcpy(reply, "Err - duplicate tx timing");
         return;
       }
       timing_set = true;
-      slow_timing = floodFilterAsciiEqual(option, "tx=slow");
-    } else if (floodFilterAsciiEqual(option, "path=blacklist")) {
+      slow_timing = floodFilterAsciiEqual(option, "tx=slow")
+          || floodFilterAsciiEqual(option, "tx=s");
+    } else if (floodFilterAsciiEqual(option, "path=blacklist")
+        || floodFilterAsciiEqual(option, "p=bl")) {
       if (path_set) {
         strcpy(reply, "Err - duplicate path matcher");
         return;
       }
       path_set = true;
       path_selector = FloodFilterPolicy::SCOPE_PATH_BLACKLIST;
-    } else if (strncmp(option, "path=bucket:", 12) == 0) {
+    } else if (strncmp(option, "path=bucket:", 12) == 0
+        || strncmp(option, "p=b", 3) == 0) {
       if (path_set) {
         strcpy(reply, "Err - duplicate path matcher");
         return;
       }
       uint8_t bucket = 0;
       if (!parseFloodFilterUnsigned(
-              option + 12, FLOOD_RETRY_BRIDGE_BUCKETS, bucket)
+              option + (option[0] == 'p' && option[1] == '=' ? 3 : 12),
+              FLOOD_RETRY_BRIDGE_BUCKETS, bucket)
           || bucket == 0) {
         strcpy(reply, "Err - path bucket must be 1-6");
         return;
@@ -9959,36 +10067,45 @@ static bool floodModerationPathMatches(const mesh::Packet* packet, uint8_t hash_
   return memcmp(packet->path, path, path_hops * hash_size) == 0;
 }
 
-void MyMesh::loadFloodGroupModeration() {
-  memset(flood_group_moderation, 0, sizeof(flood_group_moderation));
-  if (_fs == NULL || !_fs->exists(FLOOD_GROUP_MODERATION_FILE)) return;
-  File file = openFloodSettingsRead(_fs, FLOOD_GROUP_MODERATION_FILE);
-  if (!file) return;
-
-  FloodGroupModerationEntry loaded[FLOOD_GROUP_MODERATION_SLOTS];
-  memset(loaded, 0, sizeof(loaded));
+bool MyMesh::readFloodGroupModerationFile(
+    const char* path, FloodGroupModerationEntry* entries, bool* readable) const {
+  if (readable) *readable = false;
+  if (_fs == NULL) return false;
+  if (!_fs->exists(path)) {
+    if (readable) *readable = true;
+    return false;
+  }
+  File file = openFloodSettingsRead(_fs, path);
+  if (!file) return false;
+  if (entries) memset(entries, 0, sizeof(FloodGroupModerationEntry) * FLOOD_GROUP_MODERATION_SLOTS);
   uint8_t magic[4];
   uint8_t count = 0;
-  bool success = file.read(magic, sizeof(magic)) == sizeof(magic)
+  bool complete = file.size() < 5
+      || (file.read(magic, sizeof(magic)) == sizeof(magic)
+          && file.read(&count, sizeof(count)) == sizeof(count));
+  bool success = file.size() >= 5 && complete
       && memcmp(magic, "FGM1", sizeof(magic)) == 0
-      && file.read(&count, sizeof(count)) == sizeof(count)
-      && count <= FLOOD_GROUP_MODERATION_SLOTS;
+      && count <= FLOOD_GROUP_MODERATION_SLOTS
+      && file.size() == 5U + count * (2U + PUB_KEY_SIZE
+          + 2U * FLOOD_GROUP_MODERATION_NAME_LEN + 3U
+          + FLOOD_GROUP_MODERATION_PATH_BYTES_MAX + sizeof(uint16_t));
+  FloodGroupModerationEntry scratch;
   for (int i = 0; success && i < count; i++) {
-    auto& entry = loaded[i];
+    auto& entry = entries ? entries[i] : scratch;
+    memset(&entry, 0, sizeof(entry));
     uint8_t active = 0;
-    success = file.read(&active, sizeof(active)) == sizeof(active);
-    success = success && file.read(&entry.key_len, sizeof(entry.key_len)) == sizeof(entry.key_len);
-    success = success && file.read(entry.secret, sizeof(entry.secret)) == sizeof(entry.secret);
-    success = success && file.read((uint8_t*)entry.channel_name, sizeof(entry.channel_name)) == sizeof(entry.channel_name);
-    success = success && file.read((uint8_t*)entry.sender, sizeof(entry.sender)) == sizeof(entry.sender);
-    success = success && file.read(&entry.path_hash_size, sizeof(entry.path_hash_size)) == sizeof(entry.path_hash_size);
-    success = success && file.read(&entry.path_hops, sizeof(entry.path_hops)) == sizeof(entry.path_hops);
-    success = success && file.read(entry.path, sizeof(entry.path)) == sizeof(entry.path);
-    success = success && file.read(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops);
-    success = success && file.read((uint8_t*)&entry.rate_per_minute, sizeof(entry.rate_per_minute)) == sizeof(entry.rate_per_minute);
-    entry.channel_name[sizeof(entry.channel_name) - 1] = 0;
-    entry.sender[sizeof(entry.sender) - 1] = 0;
+    complete = file.read(&active, sizeof(active)) == sizeof(active)
+        && file.read(&entry.key_len, sizeof(entry.key_len)) == sizeof(entry.key_len)
+        && file.read(entry.secret, sizeof(entry.secret)) == sizeof(entry.secret)
+        && file.read((uint8_t*)entry.channel_name, sizeof(entry.channel_name)) == sizeof(entry.channel_name)
+        && file.read((uint8_t*)entry.sender, sizeof(entry.sender)) == sizeof(entry.sender)
+        && file.read(&entry.path_hash_size, sizeof(entry.path_hash_size)) == sizeof(entry.path_hash_size)
+        && file.read(&entry.path_hops, sizeof(entry.path_hops)) == sizeof(entry.path_hops)
+        && file.read(entry.path, sizeof(entry.path)) == sizeof(entry.path)
+        && file.read(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops)
+        && file.read((uint8_t*)&entry.rate_per_minute, sizeof(entry.rate_per_minute)) == sizeof(entry.rate_per_minute);
     entry.active = active != 0;
+    success = complete && active <= 1;
     if (success && entry.active) {
       bool path_valid = (entry.path_hops == 0 && entry.path_hash_size == 0)
           || (entry.path_hops >= 1 && entry.path_hops <= FLOOD_GROUP_MODERATION_PATH_HOPS_MAX
@@ -9996,6 +10113,8 @@ void MyMesh::loadFloodGroupModeration() {
       bool hops_valid = entry.max_hops == FLOOD_GROUP_MODERATION_HOPS_ALL
           || entry.max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS;
       success = (entry.key_len == CIPHER_KEY_SIZE || entry.key_len == PUB_KEY_SIZE)
+          && memchr(entry.channel_name, 0, sizeof(entry.channel_name)) != NULL
+          && memchr(entry.sender, 0, sizeof(entry.sender)) != NULL
           && entry.channel_name[0] != 0 && floodModerationSenderNameValid(entry.sender)
           && path_valid && hops_valid;
       if (success) {
@@ -10004,34 +10123,114 @@ void MyMesh::loadFloodGroupModeration() {
     }
   }
   file.close();
-  // As with the general table, malformed persistence fails open.
-  if (success) memcpy(flood_group_moderation, loaded, sizeof(flood_group_moderation));
+  if (readable) *readable = complete;
+  return success;
+}
+
+bool MyMesh::recoverFloodGroupModeration() {
+  if (_fs == NULL) return false;
+  bool readable = false;
+  if (readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_FILE, NULL, &readable)) {
+    // A complete public image wins over uncommitted scratch and an old backup.
+    if (_fs->exists(FLOOD_GROUP_MODERATION_TEMP_FILE)
+        && !_fs->remove(FLOOD_GROUP_MODERATION_TEMP_FILE)) return false;
+    if (_fs->exists(FLOOD_GROUP_MODERATION_BACKUP_FILE)
+        && !_fs->remove(FLOOD_GROUP_MODERATION_BACKUP_FILE)) return false;
+    return true;
+  }
+  if (!readable) return false;
+  const char* candidate = NULL;
+  if (readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_BACKUP_FILE, NULL, &readable)) {
+    candidate = FLOOD_GROUP_MODERATION_BACKUP_FILE;
+  } else {
+    if (!readable) return false;
+    if (readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_TEMP_FILE, NULL, &readable))
+      candidate = FLOOD_GROUP_MODERATION_TEMP_FILE;
+    else if (!readable) return false;
+  }
+  if (candidate) {
+    if (_fs->exists(FLOOD_GROUP_MODERATION_FILE)
+        && !_fs->remove(FLOOD_GROUP_MODERATION_FILE)) return false;
+    _fs->rename(candidate, FLOOD_GROUP_MODERATION_FILE);
+    if (!readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_FILE, NULL)) return false;
+  }
+  // Invalid files fail open, but must not prevent an administrator repairing
+  // the table. Never discard a complete candidate after failed promotion.
+  if (_fs->exists(FLOOD_GROUP_MODERATION_TEMP_FILE)
+      && !_fs->remove(FLOOD_GROUP_MODERATION_TEMP_FILE)) return false;
+  if (_fs->exists(FLOOD_GROUP_MODERATION_BACKUP_FILE)
+      && !_fs->remove(FLOOD_GROUP_MODERATION_BACKUP_FILE)) return false;
+  if (!candidate && _fs->exists(FLOOD_GROUP_MODERATION_FILE)
+      && !_fs->remove(FLOOD_GROUP_MODERATION_FILE)) return false;
+  return true;
+}
+
+void MyMesh::loadFloodGroupModeration() {
+  memset(flood_group_moderation, 0, sizeof(flood_group_moderation));
+  if (_fs == NULL) return;
+  recoverFloodGroupModeration();
+  // A recovery failure can still leave a valid public or backup image. Use
+  // it for this boot without replacing the sole durable recovery source.
+  if (!readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_FILE, flood_group_moderation)
+      && !readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_BACKUP_FILE, flood_group_moderation)) {
+    memset(flood_group_moderation, 0, sizeof(flood_group_moderation));
+  }
 }
 
 bool MyMesh::saveFloodGroupModeration() {
-  if (_fs == NULL) return false;
-  File file = openFloodSettingsWrite(_fs, FLOOD_GROUP_MODERATION_FILE);
+  if (!recoverFloodGroupModeration()) return false;
+  File file = openFloodSettingsWrite(_fs, FLOOD_GROUP_MODERATION_TEMP_FILE);
   if (!file) return false;
+  size_t size = 0;
+  uint32_t hash = 2166136261UL;
+  auto writeExact = [&file, &size, &hash](const void* data, size_t length) {
+    if (file.write((const uint8_t*)data, length) != length) return false;
+    hash = updateFloodSettingsHash(hash, (const uint8_t*)data, length);
+    size += length;
+    return true;
+  };
   const uint8_t magic[4] = {'F', 'G', 'M', '1'};
   uint8_t count = FLOOD_GROUP_MODERATION_SLOTS;
-  bool success = file.write(magic, sizeof(magic)) == sizeof(magic)
-      && file.write(&count, sizeof(count)) == sizeof(count);
+  bool success = writeExact(magic, sizeof(magic)) && writeExact(&count, sizeof(count));
   for (int i = 0; success && i < FLOOD_GROUP_MODERATION_SLOTS; i++) {
     const auto& entry = flood_group_moderation[i];
     uint8_t active = entry.active ? 1 : 0;
-    success = file.write(&active, sizeof(active)) == sizeof(active);
-    success = success && file.write(&entry.key_len, sizeof(entry.key_len)) == sizeof(entry.key_len);
-    success = success && file.write(entry.secret, sizeof(entry.secret)) == sizeof(entry.secret);
-    success = success && file.write((const uint8_t*)entry.channel_name, sizeof(entry.channel_name)) == sizeof(entry.channel_name);
-    success = success && file.write((const uint8_t*)entry.sender, sizeof(entry.sender)) == sizeof(entry.sender);
-    success = success && file.write(&entry.path_hash_size, sizeof(entry.path_hash_size)) == sizeof(entry.path_hash_size);
-    success = success && file.write(&entry.path_hops, sizeof(entry.path_hops)) == sizeof(entry.path_hops);
-    success = success && file.write(entry.path, sizeof(entry.path)) == sizeof(entry.path);
-    success = success && file.write(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops);
-    success = success && file.write((const uint8_t*)&entry.rate_per_minute, sizeof(entry.rate_per_minute)) == sizeof(entry.rate_per_minute);
+    success = writeExact(&active, sizeof(active))
+        && writeExact(&entry.key_len, sizeof(entry.key_len))
+        && writeExact(entry.secret, sizeof(entry.secret))
+        && writeExact(entry.channel_name, sizeof(entry.channel_name))
+        && writeExact(entry.sender, sizeof(entry.sender))
+        && writeExact(&entry.path_hash_size, sizeof(entry.path_hash_size))
+        && writeExact(&entry.path_hops, sizeof(entry.path_hops))
+        && writeExact(entry.path, sizeof(entry.path))
+        && writeExact(&entry.max_hops, sizeof(entry.max_hops))
+        && writeExact(&entry.rate_per_minute, sizeof(entry.rate_per_minute));
   }
+  file.flush();
   file.close();
-  return success;
+  if (!success || !verifyFloodSettingsWrite(_fs, FLOOD_GROUP_MODERATION_TEMP_FILE, size, hash)
+      || !readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_TEMP_FILE, NULL)) {
+    _fs->remove(FLOOD_GROUP_MODERATION_TEMP_FILE);
+    return false;
+  }
+  if (_fs->exists(FLOOD_GROUP_MODERATION_FILE)) {
+    _fs->rename(FLOOD_GROUP_MODERATION_FILE, FLOOD_GROUP_MODERATION_BACKUP_FILE);
+    if (_fs->exists(FLOOD_GROUP_MODERATION_FILE)
+        || !readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_BACKUP_FILE, NULL)) {
+      _fs->remove(FLOOD_GROUP_MODERATION_TEMP_FILE);
+      return false;
+    }
+  }
+  _fs->rename(FLOOD_GROUP_MODERATION_TEMP_FILE, FLOOD_GROUP_MODERATION_FILE);
+  if (!verifyFloodSettingsWrite(_fs, FLOOD_GROUP_MODERATION_FILE, size, hash)
+      || !readFloodGroupModerationFile(FLOOD_GROUP_MODERATION_FILE, NULL)) {
+    // Preserve both candidates when publication cannot be confirmed. Recovery
+    // selects the complete public image, otherwise the previous backup.
+    return false;
+  }
+  if (_fs->exists(FLOOD_GROUP_MODERATION_BACKUP_FILE))
+    _fs->remove(FLOOD_GROUP_MODERATION_BACKUP_FILE);
+  return true;
 }
 
 #endif
@@ -10039,35 +10238,36 @@ bool MyMesh::saveFloodGroupModeration() {
 bool MyMesh::decodeFloodGroupPlainText(const mesh::Packet* packet, const uint8_t* secret, uint8_t key_len,
                                        uint32_t& timestamp, char* sender, size_t sender_len) const {
   if (sender != NULL && sender_len > 0) sender[0] = 0;
-  if (packet == NULL || secret == NULL || sender == NULL || sender_len < 2
+  if (sender == NULL || sender_len < 2) return false;
+  uint8_t data[MAX_PACKET_PAYLOAD];
+  mesh::FloodGroupPlainText::View view;
+  if (!decodeFloodGroupPlainTextSpan(packet, secret, key_len, data, sizeof(data), view)
+      || !view.has_sender || view.sender.size >= sender_len) return false;
+  timestamp = view.timestamp;
+  memcpy(sender, view.sender.data, view.sender.size);
+  sender[view.sender.size] = 0;
+  return true;
+}
+
+bool MyMesh::decodeFloodGroupPlainTextSpan(
+    const mesh::Packet* packet, const uint8_t* secret, uint8_t key_len,
+    uint8_t* buffer, size_t capacity, mesh::FloodGroupPlainText::View& view) const {
+  view = mesh::FloodGroupPlainText::View{};
+  if (packet == NULL || secret == NULL || buffer == NULL
       || !packet->isRouteFlood() || packet->getPayloadType() != PAYLOAD_TYPE_GRP_TXT
       || (key_len != CIPHER_KEY_SIZE && key_len != PUB_KEY_SIZE)
-      || packet->payload_len <= PATH_HASH_SIZE + CIPHER_MAC_SIZE) return false;
+      || packet->payload_len < PATH_HASH_SIZE + CIPHER_MAC_SIZE + CIPHER_BLOCK_SIZE
+      || ((packet->payload_len - PATH_HASH_SIZE - CIPHER_MAC_SIZE) % CIPHER_BLOCK_SIZE) != 0
+      || capacity < size_t(packet->payload_len - PATH_HASH_SIZE - CIPHER_MAC_SIZE)) return false;
 
   uint8_t channel_hash = 0;
   mesh::Utils::sha256(&channel_hash, sizeof(channel_hash), secret, key_len);
   if (packet->payload[0] != channel_hash) return false;
 
-  uint8_t data[MAX_PACKET_PAYLOAD];
-  int len = mesh::Utils::MACThenDecrypt(secret, data, &packet->payload[PATH_HASH_SIZE],
+  int len = mesh::Utils::MACThenDecrypt(secret, buffer, &packet->payload[PATH_HASH_SIZE],
                                         packet->payload_len - PATH_HASH_SIZE);
-  if (len <= 5 || (data[4] >> 2) != TXT_TYPE_PLAIN) return false;
-
-  memcpy(&timestamp, data, sizeof(timestamp));
-  const uint8_t* text = &data[5];
-  size_t text_len = (size_t)len - 5;
-  const uint8_t* colon = (const uint8_t*)memchr(text, ':', text_len);
-  if (colon == NULL) return false;
-
-  size_t parsed_len = (size_t)(colon - text);
-  while (parsed_len > 0 && text[parsed_len - 1] == ' ') parsed_len--;
-  if (parsed_len == 0 || parsed_len >= sender_len) return false;
-  for (size_t i = 0; i < parsed_len; i++) {
-    if (text[i] == '\r' || text[i] == '\n' || text[i] < 0x20) return false;
-  }
-  memcpy(sender, text, parsed_len);
-  sender[parsed_len] = 0;
-  return true;
+  return len > 0 && size_t(len) <= capacity
+      && mesh::FloodGroupPlainText::parse(buffer, size_t(len), TXT_TYPE_PLAIN, view);
 }
 
 #if MESH_ENABLE_FLOOD_GROUP_MODERATION
@@ -10080,8 +10280,8 @@ bool MyMesh::shouldBlockFloodGroupTextForward(const mesh::Packet* packet) {
   uint8_t cached_key_len = 0;
   bool cache_present = false;
   bool cache_valid = false;
-  char decoded_sender[FLOOD_GROUP_MODERATION_NAME_LEN];
-  decoded_sender[0] = 0;
+  uint8_t decrypted[MAX_PACKET_PAYLOAD];
+  mesh::FloodGroupPlainText::View decoded;
   uint8_t hops = packet->getPathHashCount();
   uint8_t rate_slots[FLOOD_GROUP_MODERATION_SLOTS];
   uint8_t rate_slot_count = 0;
@@ -10099,15 +10299,12 @@ bool MyMesh::shouldBlockFloodGroupTextForward(const mesh::Packet* packet) {
       cached_key_len = entry.key_len;
       memcpy(cached_secret, entry.secret, entry.key_len);
       cache_valid = false;
-      decoded_sender[0] = 0;
-
-      uint32_t ignored_timestamp = 0;
-      cache_valid = decodeFloodGroupPlainText(packet, entry.secret, entry.key_len,
-                                              ignored_timestamp, decoded_sender,
-                                              sizeof(decoded_sender));
+      cache_valid = decodeFloodGroupPlainTextSpan(packet, entry.secret, entry.key_len,
+                                                  decrypted, sizeof(decrypted), decoded);
     }
-    if (!cache_valid
-        || (strcmp(entry.sender, "*") != 0 && !floodFilterAsciiEqual(entry.sender, decoded_sender))) continue;
+    if (!cache_valid || !decoded.has_sender
+        || (strcmp(entry.sender, "*") != 0
+            && !mesh::FloodGroupPlainText::senderEquals(decoded, entry.sender))) continue;
 
     bool rule_blocked = entry.max_hops != FLOOD_GROUP_MODERATION_HOPS_ALL && hops >= entry.max_hops;
     if (entry.rate_per_minute != FLOOD_GROUP_MODERATION_RATE_UNLIMITED) {
@@ -10119,8 +10316,9 @@ bool MyMesh::shouldBlockFloodGroupTextForward(const mesh::Packet* packet) {
       }
     }
     if (rule_blocked) {
-      MESH_DEBUG_PRINTLN("allowPacketForward: flood.moderation slot=%d channel=%s sender=%s hops=%d rate=%d",
-                         i + 1, entry.channel_name, decoded_sender, hops, entry.rate_per_minute);
+      MESH_DEBUG_PRINTLN("allowPacketForward: flood.moderation slot=%d channel=%s sender=%.*s hops=%d rate=%d",
+                         i + 1, entry.channel_name, int(decoded.sender.size),
+                         (const char*)decoded.sender.data, hops, entry.rate_per_minute);
       return true;
     }
     if (entry.rate_per_minute != FLOOD_GROUP_MODERATION_RATE_UNLIMITED) {
@@ -10253,7 +10451,7 @@ void MyMesh::setFloodGroupModeration(const char* args, char* reply) {
   bool rate_set = false;
   char option[48];
   while ((token_result = takeFloodModerationToken(cursor, option, sizeof(option))) == 1) {
-    if (strcmp(option, "drop") == 0) {
+    if (strcmp(option, "drop") == 0 || strcmp(option, "d") == 0) {
       if (rate_set) {
         strcpy(reply, "Err - use only one rate/drop option");
         return;
@@ -10261,23 +10459,26 @@ void MyMesh::setFloodGroupModeration(const char* args, char* reply) {
       rate_per_minute = 0;
       rate_set = true;
       action_set = true;
-    } else if (strncmp(option, "rate=", 5) == 0) {
+    } else if (strncmp(option, "rate=", 5) == 0 || strncmp(option, "q=", 2) == 0) {
       if (rate_set) {
         strcpy(reply, "Err - use only one rate/drop option");
         return;
       }
       char rate_text[24];
-      if (strlen(option + 5) >= sizeof(rate_text)) {
+      const bool compact_rate = option[0] == 'q';
+      const char* value = option + (compact_rate ? 2 : 5);
+      if (strlen(value) >= sizeof(rate_text)) {
         strcpy(reply, "Err - rate value too long");
         return;
       }
-      StrHelper::strncpy(rate_text, option + 5, sizeof(rate_text));
+      StrHelper::strncpy(rate_text, value, sizeof(rate_text));
       char* slash = strchr(rate_text, '/');
-      if (slash == NULL || !(strcmp(slash, "/min") == 0 || strcmp(slash, "/m") == 0)) {
+      if ((!slash && !compact_rate)
+          || (slash && !(strcmp(slash, "/min") == 0 || strcmp(slash, "/m") == 0))) {
         strcpy(reply, "Err - rate format is X/min");
         return;
       }
-      *slash = 0;
+      if (slash) *slash = 0;
       uint32_t parsed;
       if (!parseFloodModerationUnsigned(rate_text, FLOOD_GROUP_MODERATION_RATE_UNLIMITED - 1, parsed)) {
         strcpy(reply, "Err - rate must be 0-65534/min");
@@ -10286,20 +10487,22 @@ void MyMesh::setFloodGroupModeration(const char* args, char* reply) {
       rate_per_minute = (uint16_t)parsed;
       rate_set = true;
       action_set = true;
-    } else if (strncmp(option, "hops=", 5) == 0) {
-      if (strcmp(option + 5, "all") == 0) {
+    } else if (strncmp(option, "hops=", 5) == 0 || strncmp(option, "h=", 2) == 0) {
+      const char* value = option + (option[1] == '=' ? 2 : 5);
+      if (strcmp(value, "all") == 0) {
         max_hops = FLOOD_GROUP_MODERATION_HOPS_ALL;
       } else {
         uint32_t parsed;
-        if (!parseFloodModerationUnsigned(option + 5, FLOOD_PACKET_FILTER_MAX_HOPS, parsed)) {
+        if (!parseFloodModerationUnsigned(value, FLOOD_PACKET_FILTER_MAX_HOPS, parsed)) {
           strcpy(reply, "Err - hops must be all or 0-63");
           return;
         }
         max_hops = (uint8_t)parsed;
         action_set = true;
       }
-    } else if (strncmp(option, "path=", 5) == 0) {
-      if (!parseFloodModerationPath(option + 5, path_hash_size, path_hops, path)) {
+    } else if (strncmp(option, "path=", 5) == 0 || strncmp(option, "p=", 2) == 0) {
+      if (!parseFloodModerationPath(option + (option[1] == '=' ? 2 : 5),
+                                     path_hash_size, path_hops, path)) {
         strcpy(reply, "Err - path is * or 1-3 comma-separated 1/2/3-byte hashes");
         return;
       }
@@ -10373,7 +10576,7 @@ void MyMesh::setFloodGroupModeration(const char* args, char* reply) {
   entry.rate_per_minute = rate_per_minute;
   if (!saveFloodGroupModeration()) {
     entry = previous;
-    strcpy(reply, "Err - unable to save moderation rule");
+    strcpy(reply, "Err - moderation save unconfirmed; reboot may differ");
     return;
   }
   char detail[160];
@@ -10390,7 +10593,7 @@ void MyMesh::deleteFloodGroupModeration(const char* args, char* reply) {
     memset(flood_group_moderation, 0, sizeof(flood_group_moderation));
     if (!saveFloodGroupModeration()) {
       memcpy(flood_group_moderation, previous, sizeof(flood_group_moderation));
-      strcpy(reply, "Err - unable to save moderation rules");
+      strcpy(reply, "Err - moderation save unconfirmed; reboot may differ");
     } else {
       strcpy(reply, "OK - all moderation rules removed");
     }
@@ -10410,7 +10613,7 @@ void MyMesh::deleteFloodGroupModeration(const char* args, char* reply) {
   memset(&flood_group_moderation[index], 0, sizeof(flood_group_moderation[index]));
   if (!saveFloodGroupModeration()) {
     flood_group_moderation[index] = previous;
-    strcpy(reply, "Err - unable to save moderation rules");
+    strcpy(reply, "Err - moderation save unconfirmed; reboot may differ");
   } else {
     strcpy(reply, "OK");
   }
@@ -11716,9 +11919,7 @@ bool MyMesh::handleClientPathCommand(ClientInfo* sender, char* command, char* re
 }
 
 static bool commandFamilyMatches(const char* command, const char* family) {
-  size_t len = strlen(family);
-  if (strncmp(command, family, len) != 0) return false;
-  return command[len] == 0 || command[len] == ' ' || command[len] == '.';
+  return mesh::cli::floodCommandArguments(command, family) != nullptr;
 }
 
 static bool isCommonManagerReadOnlyAllowed(const char* cmd) {
@@ -11749,6 +11950,9 @@ static bool isRegionMgrAllowed(const char* cmd) {
       || commandFamilyMatches(cmd, "get flood.channel.scope")
       || commandFamilyMatches(cmd, "set flood.channel.scope")
       || commandFamilyMatches(cmd, "del flood.channel.scope")
+      || commandFamilyMatches(cmd, "get flood.channel.scope.require")
+      || commandFamilyMatches(cmd, "set flood.channel.scope.require")
+      || commandFamilyMatches(cmd, "del flood.channel.scope.require")
       || isCommonManagerReadOnlyAllowed(cmd);
 }
 
@@ -11759,7 +11963,9 @@ static bool isFilterMgrAllowed(const char* cmd) {
       || commandFamilyMatches(cmd, "get loop.detect")
       || commandFamilyMatches(cmd, "get flood.max")
       || commandFamilyMatches(cmd, "get flood.channel.data")
+      || commandFamilyMatches(cmd, "get flood.advert")
       || commandFamilyMatches(cmd, "get flood.filter")
+      || commandFamilyMatches(cmd, "get flood.filter.blacklist")
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
       || commandFamilyMatches(cmd, "get flood.rule")
       || commandFamilyMatches(cmd, "get fr")
@@ -11768,6 +11974,8 @@ static bool isFilterMgrAllowed(const char* cmd) {
   // General payload/hop filters plus the remaining flood-hop gates.
   return commandFamilyMatches(cmd, "set flood.filter")
       || commandFamilyMatches(cmd, "del flood.filter")
+      || commandFamilyMatches(cmd, "set flood.filter.blacklist")
+      || commandFamilyMatches(cmd, "del flood.filter.blacklist")
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
       || commandFamilyMatches(cmd, "set flood.rule")
       || commandFamilyMatches(cmd, "set fr")
@@ -11776,6 +11984,7 @@ static bool isFilterMgrAllowed(const char* cmd) {
 #endif
       || commandFamilyMatches(cmd, "set flood.moderation")
       || commandFamilyMatches(cmd, "del flood.moderation")
+      || commandFamilyMatches(cmd, "clear flood.advert")
       || commandFamilyMatches(cmd, "set flood.channel.data")
       || commandFamilyMatches(cmd, "set flood.max")
       || commandFamilyMatches(cmd, "set loop.detect")
@@ -12419,28 +12628,28 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 #endif
   if (commandFamilyMatches(command, "get flood.channel.scope.require")) {
     formatFloodChannelScopeRequirements(
-        command + strlen("get flood.channel.scope.require"), reply);
+        mesh::cli::floodCommandArguments(command, "get flood.channel.scope.require"), reply);
   } else if (commandFamilyMatches(command, "set flood.channel.scope.require")) {
     setFloodChannelScopeRequirement(
-        command + strlen("set flood.channel.scope.require"), reply);
+        mesh::cli::floodCommandArguments(command, "set flood.channel.scope.require"), reply);
   } else if (commandFamilyMatches(command, "del flood.channel.scope.require")) {
     deleteFloodChannelScopeRequirement(
-        command + strlen("del flood.channel.scope.require"), reply);
+        mesh::cli::floodCommandArguments(command, "del flood.channel.scope.require"), reply);
   } else if (commandFamilyMatches(command, "get flood.channel.scope")) {
-    formatFloodChannelScopes(command + strlen("get flood.channel.scope"), reply);
+    formatFloodChannelScopes(mesh::cli::floodCommandArguments(command, "get flood.channel.scope"), reply);
   } else if (commandFamilyMatches(command, "set flood.channel.scope")) {
-    setFloodChannelScope(command + strlen("set flood.channel.scope"), reply);
+    setFloodChannelScope(mesh::cli::floodCommandArguments(command, "set flood.channel.scope"), reply);
   } else if (commandFamilyMatches(command, "del flood.channel.scope")) {
-    deleteFloodChannelScope(command + strlen("del flood.channel.scope"), reply);
+    deleteFloodChannelScope(mesh::cli::floodCommandArguments(command, "del flood.channel.scope"), reply);
   } else if (commandFamilyMatches(command, "get flood.filter.blacklist")) {
     formatFloodPacketFilterBlacklist(
-        command + strlen("get flood.filter.blacklist"), reply);
+        mesh::cli::floodCommandArguments(command, "get flood.filter.blacklist"), reply);
   } else if (commandFamilyMatches(command, "set flood.filter.blacklist")) {
     setFloodPacketFilterBlacklist(
-        command + strlen("set flood.filter.blacklist"), reply);
+        mesh::cli::floodCommandArguments(command, "set flood.filter.blacklist"), reply);
   } else if (commandFamilyMatches(command, "del flood.filter.blacklist")) {
     deleteFloodPacketFilterBlacklist(
-        command + strlen("del flood.filter.blacklist"), reply);
+        mesh::cli::floodCommandArguments(command, "del flood.filter.blacklist"), reply);
   } else if (commandFamilyMatches(command, "get flood.filter")) {
     formatFloodPacketFilters(command + strlen("get flood.filter"), reply);
   } else if (commandFamilyMatches(command, "set flood.filter")) {
@@ -12455,20 +12664,20 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
   } else if (commandFamilyMatches(command, "del fr")) {
     deleteFloodPacketFilter(command + strlen("del fr"), reply);
   } else if (commandFamilyMatches(command, "get flood.rule")) {
-    formatFloodPacketFilters(command + strlen("get flood.rule"), reply);
+    formatFloodPacketFilters(mesh::cli::floodCommandArguments(command, "get flood.rule"), reply);
   } else if (commandFamilyMatches(command, "set flood.rule")) {
-    setFloodPacketFilter(command + strlen("set flood.rule"), reply, true);
+    setFloodPacketFilter(mesh::cli::floodCommandArguments(command, "set flood.rule"), reply, true);
   } else if (commandFamilyMatches(command, "del flood.rule")) {
-    deleteFloodPacketFilter(command + strlen("del flood.rule"), reply);
+    deleteFloodPacketFilter(mesh::cli::floodCommandArguments(command, "del flood.rule"), reply);
 #endif
   }
 #if MESH_ENABLE_FLOOD_GROUP_MODERATION
   else if (commandFamilyMatches(command, "get flood.moderation")) {
-    formatFloodGroupModeration(command + strlen("get flood.moderation"), reply);
+    formatFloodGroupModeration(mesh::cli::floodCommandArguments(command, "get flood.moderation"), reply);
   } else if (commandFamilyMatches(command, "set flood.moderation")) {
-    setFloodGroupModeration(command + strlen("set flood.moderation"), reply);
+    setFloodGroupModeration(mesh::cli::floodCommandArguments(command, "set flood.moderation"), reply);
   } else if (commandFamilyMatches(command, "del flood.moderation")) {
-    deleteFloodGroupModeration(command + strlen("del flood.moderation"), reply);
+    deleteFloodGroupModeration(mesh::cli::floodCommandArguments(command, "del flood.moderation"), reply);
   }
 #endif
 #if MESH_ENABLE_CLOCK_SYNC

@@ -71,7 +71,8 @@ class ClientAclCliTest(unittest.TestCase):
         sources = {role: path.read_text() for role, path in ROLES.items()}
         utils = (ROOT / "src/Utils.cpp").read_text()
         hex_chars = re.search(r"static const char hex_chars\[\].*;", utils).group()
-        generated = "namespace mesh {\n" + hex_chars + "\n"
+        generated = f'#include "{(ROOT / "src/helpers/FloodCommandAliases.h").as_posix()}"\n'
+        generated += "namespace mesh {\n" + hex_chars + "\n"
         generated += extract_braced(utils, "void Utils::toHex(") + "\n"
         for signature in ("void Utils::printHex(", "static uint8_t hexVal(",
                           "bool Utils::isHexChar(", "bool Utils::fromHex("):
