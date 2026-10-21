@@ -189,6 +189,13 @@ published hardware/logging/mode intent and protects a possibly active reader.
 This temporary fallback cannot authorize a reset. The separate awake hint keeps
 an already durable watchdog policy serviced while publication is busy.
 
+On nRF52, the CPU can wait for interrupts between watchdog checks in both
+`on` and `auto` modes. Its clock and wake interrupts continue running, so this
+does not restart recovery deadlines or disable the watchdog. Active USB work
+and unfinished transport detach/reattach still prevent that idle wait. Other
+platforms retain their existing sleep guard, including protection against
+sleep modes that restart the application clock.
+
 ## Verification
 
 The two qualification stages below precede the subsequent upstream USB/GPS

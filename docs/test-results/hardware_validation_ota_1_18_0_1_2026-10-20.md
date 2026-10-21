@@ -60,6 +60,38 @@ verification and restored the original gateway service. Exact serial-port
 ownership and unchanged original service configuration were verified. The
 first failed guard remains a failed workflow record, not a gateway pass.
 
+The later application-only LoRa delta to commit `2bd4cb4d1` completed all
+55/55 blocks in 103 seconds. An on-air install acknowledgement verified the
+unsigned internal-flash delta, and on-air postboot reads proved exact body
+`1A3C9EB603C581C3` after 80 seconds plus the full `dev-2bd4cb4d` version.
+The receiving RAK used LoRa for setup, progress, installation and postboot
+proof. No receiver USB command drove this update. Normal radio restoration
+passed. Lost postboot status/version replies required bounded getter retries;
+their failed attempts remain in the private log. A subsequent independent
+USB diagnostic snapshot verified the same latest image, original saved
+preferences and zero core errors before the CPU sleep measurement.
+
+That first latest-image CPU measurement FAILED. Over 90.013 seconds, the
+nonhalting MEM-AP capture recorded 8013 CPU states, with one sleeping state
+(about 0.01% weighted sampled time). There was no halt, lockup or reset in
+the capture. Firmware diagnostics reported zero sleep-wait calls and zero
+eligible time; the surrounding diagnostic window was blocked primarily by
+`usb.recovery`. The saved settings were CPU power saving on, USB logging on,
+USB debug off, the system watchdog on and the USB logging watchdog in Auto.
+The gateway service and UART were closed during the capture.
+
+The watchdog's Auto policy still retained a previously confirmed reader and
+an initial recovery stage after the serial client closed. The shared awake
+hint treated that waiting policy as work requiring the CPU to remain awake.
+A focused nRF52 fix and a new physical measurement are in progress. Logging,
+watchdog settings and the failed result have not been disabled or cleared to
+obtain a sleep pass. CPU debug enable was already set and stayed unchanged;
+the explicit firmware sleep veto is recorded independently of that limit.
+Subsequent authenticated LoRa reads returned the exact same latest body and
+boot uptime, with zero core errors and both receive/transmit counters
+advancing by three. Radio communication remained functional after the failed
+idle measurement; this is not a CPU-sleep pass.
+
 ## RAK4631 and XIAO nRF52 full QSPI LoRa updates
 
 The RAK4631 downloaded all 325/325 blocks in 375 seconds. Its install response
@@ -137,8 +169,15 @@ Commit [720b9728c](https://github.com/mikecarper/MeshCore/commit/720b9728c)
 adds cold-idle RAK host-preflight preparation. The preparation may initialize
 optional staging media, but does not itself download firmware, install an
 image or change saved preferences. The host updater suite passed 379 tests
-with zero skips. Its targeted live cold-idle check remains pending; these
-host results alone do not qualify that hardware case.
+with zero skips. The targeted live cold-idle RAK4631 check subsequently
+passed: one USB restart established the unchanged, idle application with
+unprobed storage, then authenticated LoRa reads observed that state and the
+host performed exactly one explicit storage-preparation query. The result
+was external QSPI with ABI 3 and codec subset `0x5`, with unchanged body
+`B0886153CE824448` and no firmware download or bootloader write. The first
+host attempt lost a version reply before preparing storage; a fresh read-only
+snapshot and bounded getter retries completed the check without another
+restart. Both attempt records are retained.
 
 Commit [093fd98a3](https://github.com/mikecarper/MeshCore/commit/093fd98a3)
 retries lost remote clock reads within the existing bounded operation budget.
@@ -153,6 +192,25 @@ functionality is not claimed for repeater builds. The RAK4631 reports a 2 MiB
 W25Q16 QSPI device and completed its full QSPI LoRa update as recorded above.
 RAK3401 live diagnostics report no external NOR and 252 KiB
 internal staging capacity, matching the completed internal delta case.
+
+Commit [2bd4cb4d1](https://github.com/mikecarper/MeshCore/commit/2bd4cb4d1)
+automatically restarts the existing four-beacon discovery burst when a
+complete, changed update catalog becomes available through the source's
+ordinary file-data session. It requires no separate announcement command or
+control channel. USB or WiFi can feed files into the source radio; receiving
+radios still discover and download them over LoRa. All 136 affected native
+test methods passed, including cold catalog discovery and a negative control
+that removes the production readiness trigger. Canonical V4 Full and RAK3401
+and RAK4631 Full/Reduced builds passed. This fixes source discovery, and does
+not establish a fix for the separate Tower manifest timeout.
+
+The V4 source subsequently accepted one application-only WiFi upload of this
+commit. Authenticated GET and POST both returned HTTP 200, followed by exact
+USB version/body proof (`B6E8C347E1C5FA69`) and unchanged saved preferences
+and receive-power-saving configuration. This deploys the source firmware;
+it is not a receiver LoRa qualification result. The initial preparation
+rejected a valid start acknowledgement with a WebConfig-status suffix before
+any upload; the corrected continuation did not replay the start command.
 
 During RAK4631 discovery, source receive power saving was on and discovery
 timed out. After disabling that setting under a restoration intent, a fresh
@@ -211,12 +269,28 @@ did not support the proposed clock or access-control explanation for the
 rehearsal failure. The relevant handlers were the same; no clock or ACL
 cause is claimed from this review.
 
+A later local-control diagnostic made the signed full catalog visible, but
+both matching pull attempts remained at manifest timeout, 0/0 blocks. No
+install was requested. This local-control attempt is not a wireless-only
+qualification pass. Its temporary radio and saved receive-power-saving
+settings were restored and its USB port closed. One restoration command was
+explicitly rejected with a misleading "unsupported" response; source review
+shows that this response also covers a busy or failed reconfiguration. A
+fresh identity/settings check followed by one new, acknowledged restoration
+attempt proved the original configuration. No particular runtime guard is
+identified as the cause of that rejection.
+
 ## Limits and completion
 
-The MeshTower signed full-image LoRa case, the targeted live cold-idle RAK
-preflight check and final source cleanup remain pending. Newly requested
+The MeshTower signed full-image LoRa case and final source cleanup remain
+pending. The live cold-idle RAK preflight check is complete. Newly requested
 two-frequency ESP-NOW bridged one-hop OTA testing and latest RAK3401 CPU
-testing also remain pending. The first-command USB bootstrap observation,
+testing also remain pending. Receiver update setup, progress, installation
+and post-install verification in the new radio campaign must use LoRa;
+receiver USB commands cannot substitute for failed radio communication.
+The RAK3401's current-image pause snapshot recorded historical channel-busy
+bitmask `0x02`; it was retained without clearing statistics or claiming a
+CPU-sleep result. The first-command USB bootstrap observation,
 Tower SF5 preflight failure, later full-image self-proof failures and separate
 USB open failure remain unresolved. The Tower signed delta, RAK4631 and XIAO
 nRF52 full QSPI LoRa updates and their later postchecks are complete; the
