@@ -422,6 +422,32 @@ class FleetCommandCryptoTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.decode(envelope(command)), "reject")
 
+    def test_every_row_family_retains_suffix_bounds_and_detail_permissions(self):
+        filters = ("flood.filter", "flood.rule", "fr")
+        rows = filters + ("flood.filter.blacklist", "fb", "flood.moderation", "fm",
+                          "flood.channel.scope", "fs", "flood.channel.scope.require", "fsr")
+        for family in rows:
+            for suffix in ("", ".1", ".255"):
+                command = f"get {family}{suffix}"
+                with self.subTest(command=command):
+                    self.assertEqual(self.decode(envelope(command)), f"{NOW}\n{NOW + 120}\n{command}")
+            for suffix in (".0", ".01", ".256", ".9999999999", ".1.secret", "x"):
+                command = f"get {family}{suffix}"
+                with self.subTest(command=command):
+                    self.assertEqual(self.decode(envelope(command)), "reject")
+            for detail in ("sender", "n", "text", "x"):
+                for suffix in ("", ".1"):
+                    command = f"get {family}{suffix} {detail}"
+                    expected = f"{NOW}\n{NOW + 120}\n{command}" if family in filters and suffix else "reject"
+                    with self.subTest(command=command):
+                        self.assertEqual(self.decode(envelope(command)), expected)
+        for family in ("flood.channel.data", "flood.channel.data.hops", "flood.max",
+                       "flood.max.unscoped", "flood.max.advert", "radio2.status", "radio2.timing"):
+            for suffix in (".1", ".255", ".secret"):
+                command = f"get {family}{suffix}"
+                with self.subTest(command=command):
+                    self.assertEqual(self.decode(envelope(command)), "reject")
+
     def test_scheduled_radio_commands_have_cross_language_real_signatures(self):
         for command in [
                 "set radioat 910.5,500,5,5,+1,auto",

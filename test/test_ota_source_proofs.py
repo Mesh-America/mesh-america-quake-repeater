@@ -23,13 +23,28 @@ static_assert(OTA_PROOFGEN_SCRATCH / 4 == 4095, "odd byte limit lost usable leaf
 #endif
 """
         base = [os.environ.get("CXX", "g++"), "-std=c++17", "-fsyntax-only", "-x", "c++", "-",
-                "-I", str(ROOT / "src"), "-DESP32_PLATFORM=1", "-DCOMPANION_RADIO_FULL=1"]
-        for scratch in (None, 0, 1, 3, 4, 5, 16383, 16384, 16385, 32768):
-            bounded = scratch is None or 4 <= scratch <= 16384
-            flags = [] if scratch is None else [f"-DOTA_PROOFGEN_SCRATCH={scratch}"]
-            with self.subTest(scratch=scratch):
-                result = subprocess.run([*base, *flags, f"-DEXPECT_BOUNDED={int(bounded)}"],
-                                        input=source, text=True, capture_output=True, timeout=30)
+                "-I", str(ROOT / "src"), "-DESP32_PLATFORM=1"]
+        for role in ("COMPANION_RADIO_FULL", "MESH_CLIENT_REPEATER_ONLY"):
+            for scratch in (None, 0, 1, 3, 4, 5, 16383, 16384, 16385, 32768):
+                bounded = scratch is None or 4 <= scratch <= 16384
+                flags = [f"-D{role}=1"]
+                if scratch is not None:
+                    flags.append(f"-DOTA_PROOFGEN_SCRATCH={scratch}")
+                with self.subTest(role=role, scratch=scratch):
+                    result = subprocess.run([*base, *flags, f"-DEXPECT_BOUNDED={int(bounded)}"],
+                                            input=source, text=True, capture_output=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+        # Repeater proof buffers are internal even when the board has PSRAM.
+        result = subprocess.run([*base, "-DMESH_CLIENT_REPEATER_ONLY=1",
+                                 "-DBOARD_HAS_PSRAM=1", "-DEXPECT_BOUNDED=1"],
+                                input=source, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for flags in ([], ["-DMESH_CLIENT_REPEATER_ONLY=0"],
+                      ["-DCOMPANION_RADIO_FULL=1", "-DBOARD_HAS_PSRAM=1"],
+                      ["-DMESH_CLIENT_REPEATER_ONLY=1", "-DOTA_BOUNDED_SOURCE_PROOFS=0"]):
+            with self.subTest(legacy=flags):
+                result = subprocess.run([*base, *flags, "-DEXPECT_BOUNDED=0"], input=source,
+                                        text=True, capture_output=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
         for scratch in (0, 3, 16385):
             with self.subTest(forced_invalid=scratch):

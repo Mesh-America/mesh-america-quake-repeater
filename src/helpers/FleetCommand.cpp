@@ -230,6 +230,54 @@ bool rowKey(const char* key, size_t length, const char* family) {
   return true;
 }
 
+enum class CommandKind : uint8_t {
+  Filter, Row, Advert, Schedule, SecondarySchedule, Radio, RadioStatus, Cross, Setting
+};
+
+struct CommandFamily {
+  const char* name;
+  CommandKind kind;
+};
+
+// Match the signed namespace once. Row families alone accept a numeric suffix;
+// sharing the lookup also keeps the sender's full authorization policy compact.
+const CommandFamily* commandFamily(const char* key, size_t length) {
+  static const CommandFamily families[] = {
+    {"flood.filter", CommandKind::Filter},
+    {"flood.rule", CommandKind::Filter},
+    {"fr", CommandKind::Filter},
+    {"flood.filter.blacklist", CommandKind::Row},
+    {"fb", CommandKind::Row},
+    {"flood.moderation", CommandKind::Row},
+    {"fm", CommandKind::Row},
+    {"flood.channel.scope", CommandKind::Row},
+    {"fs", CommandKind::Row},
+    {"flood.channel.scope.require", CommandKind::Row},
+    {"fsr", CommandKind::Row},
+    {"flood.advert", CommandKind::Advert},
+    {"fa", CommandKind::Advert},
+    {"radioat", CommandKind::Schedule},
+    {"tempradioat", CommandKind::Schedule},
+    {"radioat2", CommandKind::SecondarySchedule},
+    {"tempradioat2", CommandKind::SecondarySchedule},
+    {"radio2", CommandKind::Radio},
+    {"tempradio2", CommandKind::Radio},
+    {"radio2.status", CommandKind::RadioStatus},
+    {"radio2.timing", CommandKind::RadioStatus},
+    {"radio2.cross", CommandKind::Cross},
+    {"flood.channel.data", CommandKind::Setting},
+    {"flood.channel.data.hops", CommandKind::Setting},
+    {"flood.max", CommandKind::Setting},
+    {"flood.max.unscoped", CommandKind::Setting},
+    {"flood.max.advert", CommandKind::Setting},
+  };
+  for (const auto& family : families) {
+    const bool row = family.kind == CommandKind::Filter || family.kind == CommandKind::Row;
+    if (row ? rowKey(key, length, family.name) : keyEquals(key, length, family.name)) return &family;
+  }
+  return nullptr;
+}
+
 // Regex punctuation is data only in the two content-pattern fields. Keep the
 // existing management-command character policy for every other argument.
 bool filterPatternCharactersAllowed(const char* text) {
@@ -520,12 +568,14 @@ bool FleetCommand::commandAllowed(const char* command) {
   const char* arguments = separator ? separator + 1 : "";
   if (!key_length || (separator && (!*arguments || *arguments == ' '))) return false;
 
-  const bool filter_rows = rowKey(key, key_length, "flood.filter")
-      || rowKey(key, key_length, "flood.rule") || rowKey(key, key_length, "fr");
+  const CommandFamily* family = commandFamily(key, key_length);
+  if (!family) return false;
+  const CommandKind kind = family->kind;
+  const bool filter_rows = kind == CommandKind::Filter;
   if (pattern_characters && (!set || !filter_rows
           || !filterPatternCharactersAllowed(arguments))) return false;
 
-  if (keyEquals(key, key_length, "flood.advert") || keyEquals(key, key_length, "fa")) {
+  if (kind == CommandKind::Advert) {
     if (get) {
       if (!*arguments) return true;
       const bool detail = !strncmp(arguments, "key ", 4);
@@ -542,46 +592,25 @@ bool FleetCommand::commandAllowed(const char* command) {
   }
   if (clear) return false;
 
-  const bool scheduled_primary = keyEquals(key, key_length, "radioat")
-      || keyEquals(key, key_length, "tempradioat");
-  const bool scheduled_secondary = keyEquals(key, key_length, "radioat2")
-      || keyEquals(key, key_length, "tempradioat2");
-  if (scheduled_primary || scheduled_secondary) {
+  const bool scheduled_secondary = kind == CommandKind::SecondarySchedule;
+  if (kind == CommandKind::Schedule || scheduled_secondary) {
     return set ? scheduledRadioTuple(arguments, key[0] == 't', scheduled_secondary)
         : (get || del) && scheduleSelector(arguments, scheduled_secondary);
   }
-  if (keyEquals(key, key_length, "radio2")
-      || keyEquals(key, key_length, "tempradio2")) {
+  if (kind == CommandKind::Radio) {
     return get ? !*arguments : set && radioTuple(arguments, key_length == 10);
   }
-  if (keyEquals(key, key_length, "radio2.status")
-      || keyEquals(key, key_length, "radio2.timing")) return get && !*arguments;
-  if (keyEquals(key, key_length, "radio2.cross")) {
+  if (kind == CommandKind::RadioStatus) return get && !*arguments;
+  if (kind == CommandKind::Cross) {
     return get ? !*arguments : set && (!strcmp(arguments, "on")
         || !strcmp(arguments, "off") || !strcmp(arguments, "auto"));
   }
-  const bool rows = filter_rows
-      || rowKey(key, key_length, "flood.filter.blacklist")
-      || rowKey(key, key_length, "fb")
-      || rowKey(key, key_length, "flood.moderation")
-      || rowKey(key, key_length, "fm")
-      || rowKey(key, key_length, "flood.channel.scope")
-      || rowKey(key, key_length, "fs")
-      || rowKey(key, key_length, "flood.channel.scope.require")
-      || rowKey(key, key_length, "fsr");
-  if (rows) return get ? (!*arguments || (filter_rows
-          && !keyEquals(key, key_length, "flood.filter")
-          && !keyEquals(key, key_length, "flood.rule")
-          && !keyEquals(key, key_length, "fr")
+  if (filter_rows || kind == CommandKind::Row) return get ? (!*arguments || (filter_rows
+          && key_length > strlen(family->name)
           && (!strcmp(arguments, "sender") || !strcmp(arguments, "n")
               || !strcmp(arguments, "text") || !strcmp(arguments, "x"))))
       : set ? *arguments != 0 : del && (!*arguments || !strcmp(arguments, "all"));
-  const bool settings = keyEquals(key, key_length, "flood.channel.data")
-      || keyEquals(key, key_length, "flood.channel.data.hops")
-      || keyEquals(key, key_length, "flood.max")
-      || keyEquals(key, key_length, "flood.max.unscoped")
-      || keyEquals(key, key_length, "flood.max.advert");
-  return settings && (get ? !*arguments : set && *arguments);
+  return kind == CommandKind::Setting && (get ? !*arguments : set && *arguments);
 }
 
 size_t FleetCommand::encode(const LocalIdentity& publisher, const uint8_t* key,

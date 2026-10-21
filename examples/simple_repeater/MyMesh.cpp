@@ -11922,73 +11922,53 @@ static bool commandFamilyMatches(const char* command, const char* family) {
   return mesh::cli::floodCommandArguments(command, family) != nullptr;
 }
 
-static bool isCommonManagerReadOnlyAllowed(const char* cmd) {
-  while (*cmd == ' ') cmd++; // skip leading spaces
-  if (commandFamilyMatches(cmd, "ver") || commandFamilyMatches(cmd, "board")
-      || commandFamilyMatches(cmd, "neighbors") || strcmp(cmd, "clock") == 0) return true;
-  // sensor reads only
-  if (commandFamilyMatches(cmd, "sensor get") || commandFamilyMatches(cmd, "sensor list")) return true;
+// Keep delegated namespaces explicit while sharing the matcher loop. The
+// generic get namespace includes credentials and must never be granted whole.
+static bool commandListMatches(const char* command, const char* const* families) {
+  for (; *families; ++families) {
+    if (commandFamilyMatches(command, *families)) return true;
+  }
+  return false;
+}
 
-  // Keep delegated reads explicit. CommonCLI's generic `get` namespace also
-  // contains credentials (guest.password, WiFi/MQTT secrets, bridge.secret,
-  // and similar settings), so it must never be granted wholesale.
-  return commandFamilyMatches(cmd, "get role")
-      || commandFamilyMatches(cmd, "get public.key")
-      || commandFamilyMatches(cmd, "get clock.sync")
-      || commandFamilyMatches(cmd, "get battery.alert")
-      || commandFamilyMatches(cmd, "get rx.watchdog")
-      || commandFamilyMatches(cmd, "get recent.repeater")
-      || commandFamilyMatches(cmd, "get recent.repeaters")
-      || commandFamilyMatches(cmd, "get outpath")
-      || commandFamilyMatches(cmd, "get altpath");
+static bool isCommonManagerReadOnlyAllowed(const char* cmd) {
+  while (*cmd == ' ') cmd++;
+  static const char* const families[] = {
+    "ver", "board", "neighbors", "sensor get", "sensor list", "get role",
+    "get public.key", "get clock.sync", "get battery.alert", "get rx.watchdog",
+    "get recent.repeater", "get recent.repeaters", "get outpath", "get altpath", nullptr
+  };
+  return strcmp(cmd, "clock") == 0 || commandListMatches(cmd, families);
 }
 
 // Whitelist helpers for delegated manager roles. Admins bypass both lists.
 static bool isRegionMgrAllowed(const char* cmd) {
   while (*cmd == ' ') cmd++;
-  return commandFamilyMatches(cmd, "region")
-      || commandFamilyMatches(cmd, "get flood.channel.scope")
-      || commandFamilyMatches(cmd, "set flood.channel.scope")
-      || commandFamilyMatches(cmd, "del flood.channel.scope")
-      || commandFamilyMatches(cmd, "get flood.channel.scope.require")
-      || commandFamilyMatches(cmd, "set flood.channel.scope.require")
-      || commandFamilyMatches(cmd, "del flood.channel.scope.require")
-      || isCommonManagerReadOnlyAllowed(cmd);
+  static const char* const families[] = {
+    "region", "get flood.channel.scope", "set flood.channel.scope", "del flood.channel.scope",
+    "get flood.channel.scope.require", "set flood.channel.scope.require",
+    "del flood.channel.scope.require", nullptr
+  };
+  return commandListMatches(cmd, families) || isCommonManagerReadOnlyAllowed(cmd);
 }
 
 static bool isFilterMgrAllowed(const char* cmd) {
   while (*cmd == ' ') cmd++;
-  if (isCommonManagerReadOnlyAllowed(cmd)) return true;
-  if (commandFamilyMatches(cmd, "get repeat")
-      || commandFamilyMatches(cmd, "get loop.detect")
-      || commandFamilyMatches(cmd, "get flood.max")
-      || commandFamilyMatches(cmd, "get flood.channel.data")
-      || commandFamilyMatches(cmd, "get flood.advert")
-      || commandFamilyMatches(cmd, "get flood.filter")
-      || commandFamilyMatches(cmd, "get flood.filter.blacklist")
+  static const char* const families[] = {
+    "get repeat", "get loop.detect", "get flood.max", "get flood.channel.data",
+    "get flood.advert", "get flood.filter", "get flood.filter.blacklist",
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
-      || commandFamilyMatches(cmd, "get flood.rule")
-      || commandFamilyMatches(cmd, "get fr")
+    "get flood.rule", "get fr",
 #endif
-      || commandFamilyMatches(cmd, "get flood.moderation")) return true;
-  // General payload/hop filters plus the remaining flood-hop gates.
-  return commandFamilyMatches(cmd, "set flood.filter")
-      || commandFamilyMatches(cmd, "del flood.filter")
-      || commandFamilyMatches(cmd, "set flood.filter.blacklist")
-      || commandFamilyMatches(cmd, "del flood.filter.blacklist")
+    "get flood.moderation", "set flood.filter", "del flood.filter",
+    "set flood.filter.blacklist", "del flood.filter.blacklist",
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
-      || commandFamilyMatches(cmd, "set flood.rule")
-      || commandFamilyMatches(cmd, "set fr")
-      || commandFamilyMatches(cmd, "del flood.rule")
-      || commandFamilyMatches(cmd, "del fr")
+    "set flood.rule", "set fr", "del flood.rule", "del fr",
 #endif
-      || commandFamilyMatches(cmd, "set flood.moderation")
-      || commandFamilyMatches(cmd, "del flood.moderation")
-      || commandFamilyMatches(cmd, "clear flood.advert")
-      || commandFamilyMatches(cmd, "set flood.channel.data")
-      || commandFamilyMatches(cmd, "set flood.max")
-      || commandFamilyMatches(cmd, "set loop.detect")
-      || commandFamilyMatches(cmd, "set repeat");
+    "set flood.moderation", "del flood.moderation", "clear flood.advert",
+    "set flood.channel.data", "set flood.max", "set loop.detect", "set repeat", nullptr
+  };
+  return isCommonManagerReadOnlyAllowed(cmd) || commandListMatches(cmd, families);
 }
 
 bool MyMesh::handleReplayResetCommand(ClientInfo* sender, const char* command,

@@ -1,6 +1,8 @@
 #include "MorseSettings.h"
 #include "FilePresence.h"
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+#if defined(NRF52_PLATFORM)
+#include <helpers/CheckedSettingsFile.h>
+#elif defined(STM32_PLATFORM)
 #include "AtomicFileWriter.h"
 #elif defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
 #include "ContactFileTransaction.h"
@@ -22,19 +24,27 @@ ReadResult read(const char* path, MorseSettings& result) {
   bool present = false;
   if (!filePresence(settings_fs, path, present)) return ReadResult::Unreadable;
   if (!present) return ReadResult::Missing;
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  uint8_t image[MorseSettingsImageSize];
+#if defined(NRF52_PLATFORM)
+  const storage::FixedSettingsRead read = storage::readFixedSettingsFileResult(
+      settings_fs, path, image, sizeof(image));
+  if (read != storage::FixedSettingsRead::Complete)
+    return read == storage::FixedSettingsRead::WrongSize
+        ? ReadResult::Invalid : ReadResult::Unreadable;
+#else
+#if defined(STM32_PLATFORM)
   File file(*settings_fs);
   if (!file.open(path, FILE_O_READ)) return ReadResult::Unreadable;
 #else
   File file = settings_fs->open(path, "r");
   if (!file) return ReadResult::Unreadable;
 #endif
-  uint8_t image[MorseSettingsImageSize];
   const bool right_size = file.size() == sizeof(image);
   const bool complete = right_size && file.read(image, sizeof(image)) == int(sizeof(image));
   file.close();
   if (!right_size) return ReadResult::Invalid;
   if (!complete) return ReadResult::Unreadable;
+#endif
   return decodeMorseSettings(image, sizeof(image), result)
       ? ReadResult::Valid : ReadResult::Invalid;
 }

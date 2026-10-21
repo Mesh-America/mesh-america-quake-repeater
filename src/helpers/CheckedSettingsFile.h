@@ -16,19 +16,28 @@ namespace mesh { namespace storage {
 
 // Share the filesystem boundary between small settings records. Callers keep
 // their own format/version checks; no preference layout changes here.
-MESH_SETTINGS_FILE_SHARED inline bool readFixedSettingsFile(
+enum class FixedSettingsRead : uint8_t { Complete, WrongSize, Unreadable };
+
+MESH_SETTINGS_FILE_SHARED inline FixedSettingsRead readFixedSettingsFileResult(
     FILESYSTEM* fs, const char* path, uint8_t* data, size_t size) {
-  if (!fs) return false;
+  if (!fs) return FixedSettingsRead::Unreadable;
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   File file(*fs);
-  if (!file.open(path, FILE_O_READ)) return false;
+  if (!file.open(path, FILE_O_READ)) return FixedSettingsRead::Unreadable;
 #else
   File file = fs->open(path, "r");
-  if (!file) return false;
+  if (!file) return FixedSettingsRead::Unreadable;
 #endif
-  const bool complete = file.size() == size && file.read(data, size) == size;
+  const bool right_size = file.size() == size;
+  const bool complete = right_size && file.read(data, size) == size;
   file.close();
-  return complete;
+  return !right_size ? FixedSettingsRead::WrongSize
+      : complete ? FixedSettingsRead::Complete : FixedSettingsRead::Unreadable;
+}
+
+inline bool readFixedSettingsFile(
+    FILESYSTEM* fs, const char* path, uint8_t* data, size_t size) {
+  return readFixedSettingsFileResult(fs, path, data, size) == FixedSettingsRead::Complete;
 }
 
 #if defined(NRF52_PLATFORM)

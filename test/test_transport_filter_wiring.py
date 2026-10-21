@@ -237,6 +237,23 @@ void run(const char* command,char* reply) {
 else strcpy(reply,"unhandled");
 }
 int main() {
+ // Preserve the advert CLI's whitespace delimiters for both full names and
+ // aliases, returning the original bytes for the caller's own validation.
+ struct Boundary {const char* command;const char* suffix;};
+ for(const auto& row : {
+     Boundary{"get flood.advert", ""}, Boundary{"get fa", ""},
+     Boundary{"get flood.advert\t2\r\n", "\t2\r\n"},
+     Boundary{"get fa\t2\r\n", "\t2\r\n"},
+     Boundary{"get flood.advert\r\n", "\r\n"},
+     Boundary{"get fa\n", "\n"}, Boundary{"get fa 2", " 2"},
+     Boundary{"get fa.2", ".2"}}) {
+   const char* suffix=mesh::cli::floodCommandArguments(row.command,"get flood.advert");
+   assert(suffix==row.command+strlen(row.command)-strlen(row.suffix));
+   assert(!strcmp(suffix,row.suffix));
+ }
+ for(const char* command : {"get flood.advertisement", "get fax", "get fa/2",
+     "get fa=2", "get fa\v2", "get fa\f2", "get\tfa 2"})
+   assert(!mesh::cli::floodCommandArguments(command,"get flood.advert"));
  struct Test {const char* command;const char* suffix;const char* action;};
  for(const auto& row : {
      Test{"get fm.2",".2","formatFloodGroupModeration"},
@@ -287,11 +304,41 @@ int main() {
     def test_shorthand_uses_the_existing_filter_manager_permissions(self):
         source = (ROOT/'examples/simple_repeater/MyMesh.cpp').read_text()
         helpers = '\n'.join(method(source, signature) for signature in [
-            'static bool commandFamilyMatches(', 'static bool isCommonManagerReadOnlyAllowed(',
+            'static bool commandFamilyMatches(', 'static bool commandListMatches(',
+            'static bool isCommonManagerReadOnlyAllowed(',
             'static bool isRegionMgrAllowed(', 'static bool isFilterMgrAllowed('])
         code = (f'#include "{(ROOT/"src/helpers/FloodCommandAliases.h").as_posix()}"\n'
                 '#include <cstring>\n#include <cassert>\n#include <initializer_list>\n') + helpers + r'''
 int main() {
+ // Every common namespace retains both manager roles; sensitive get namespaces
+ // and partial command names stay denied. Clock deliberately requires equality.
+ for (const char* cmd : {"ver", "board", "neighbors", "sensor get", "sensor list",
+     "get role", "get public.key", "get clock.sync", "get battery.alert",
+     "get rx.watchdog", "get recent.repeater", "get recent.repeaters",
+     "get outpath", "get altpath", "clock", "  get public.key"}) {
+   assert(isFilterMgrAllowed(cmd));
+   assert(isRegionMgrAllowed(cmd));
+ }
+ for (const char* cmd : {"clock secret", "version", "get rolepassword", "get public.keys",
+     "get admin.password", "get guest.password", "get wifi.password", "get bridge.secret"}) {
+   assert(!isFilterMgrAllowed(cmd));
+   assert(!isRegionMgrAllowed(cmd));
+ }
+ for (const char* cmd : {"get repeat", "get loop.detect", "get flood.max",
+     "get flood.channel.data", "get flood.advert", "get flood.filter",
+     "get flood.filter.blacklist", "get flood.moderation", "set flood.filter",
+     "del flood.filter", "set flood.filter.blacklist", "del flood.filter.blacklist",
+     "set flood.moderation", "del flood.moderation", "clear flood.advert",
+     "set flood.channel.data", "set flood.max", "set loop.detect", "set repeat"}) {
+   assert(isFilterMgrAllowed(cmd));
+   assert(!isRegionMgrAllowed(cmd));
+ }
+ for (const char* cmd : {"region", "get flood.channel.scope", "set flood.channel.scope",
+     "del flood.channel.scope", "get flood.channel.scope.require",
+     "set flood.channel.scope.require", "del flood.channel.scope.require"}) {
+   assert(isRegionMgrAllowed(cmd));
+   assert(!isFilterMgrAllowed(cmd));
+ }
  for (const char* cmd : {"get fr", "get fr.3", "set fr.3 any m=bc d", "del fr.3", "del fr all",
      "set fr.3 any c=public sender=^Alice$ text=BEACON len=1-80 prob=50 drop",
      "set flood.rule.3 type=grp_txt channel=public sender=^Alice$ text=BEACON drop",

@@ -667,7 +667,7 @@ int main() {
                 }, "board_companion_radio_full")
 
     def test_compact_tables_keep_capacity_and_reserve_active_ota_allocations(self):
-        for platform, leaf_limit in (("NRF52_PLATFORM", 4096), ("ESP32_PLATFORM", 16384),
+        for platform, leaf_limit in (("NRF52_PLATFORM", 4096), ("ESP32_PLATFORM", 1536),
                                      ("RP2040_PLATFORM", 4096), ("STM32_PLATFORM", 4096)):
             with self.subTest(platform=platform):
                 flags = {"ENABLE_OTA": 1, "MESH_CLIENT_REPEATER_ONLY": 1,
@@ -704,6 +704,22 @@ int main() {
         self.assertEqual(alias["components"]["neighbor_history"], 2048 * 9 + 16)
         self.assertEqual(alias["components"]["radio_packet_pool"], 10240)
 
+    def test_qualified_esp32_repeaters_stream_source_proofs_without_cutting_other_budgets(self):
+        for psram in (False, True):
+            flags = {"ENABLE_OTA": 1, "MESH_CLIENT_REPEATER_ONLY": 1,
+                     "WITH_MQTT_BRIDGE": 1, "WIFI_SSID": "test", "MAX_CLIENTS": 32}
+            if psram:
+                flags["BOARD_HAS_PSRAM"] = 1
+            with self.subTest(psram=psram):
+                legacy = ram.requirements("ESP32_PLATFORM", {
+                    **flags, "OTA_BOUNDED_SOURCE_PROOFS": 0}, "board_repeater")["components"]
+                selected = ram.requirements("ESP32_PLATFORM", flags, "board_repeater")["components"]
+                expected = 1536
+                self.assertEqual(selected["ota_generic_source_buffers"], expected + 2048 + 32)
+                for name, amount in legacy.items():
+                    if name != "ota_generic_source_buffers":
+                        self.assertEqual(selected[name], amount)
+
     def test_combined_rak_oled_bound_does_not_change_other_display_budgets(self):
         defines = {
             "RAK_4631": 1, "ETHERNET_ENABLED": 1, "OTA_RAK_AUTO_STORE": 1,
@@ -732,7 +748,7 @@ int main() {
         }
         full = ram.requirements("ESP32_PLATFORM", defines, "Heltec_v3_repeater_observer_mqtt")
         parts = full["components"]
-        self.assertEqual(full["required_heap_bytes"], 218768)
+        self.assertEqual(full["required_heap_bytes"], 203920)
         self.assertEqual(parts["display_pixels_and_driver"], 2048)
         self.assertEqual(parts["uart_bridge_and_driver"], 3072 + 4096)
         self.assertEqual(parts["wireless_stacks"], 49152)

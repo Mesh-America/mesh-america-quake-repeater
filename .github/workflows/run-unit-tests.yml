@@ -88,6 +88,15 @@ jobs:
           bash build.sh build-firmware heltec_v4_r8_tft_companion_radio_full
           --firmware-version v1.18.0.1-halo-keymind-cascade-dev
           --radio-preset usa-cascade-fixed --profile cascade --require-ota
+      - name: Show qualification build logs on failure
+        if: failure()
+        run: |
+          for log in out/build-logs/*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::$log (last 120 lines)"
+            tail -n 120 "$log"
+            echo "::endgroup::"
+          done
 
   esp32-sensor-smoke:
     runs-on: ubuntu-latest
@@ -109,6 +118,15 @@ jobs:
         run: |
           pio run -e meshnology_w12_repeater
           bash build.sh build-firmware meshnology_w12_companion_radio_full --firmware-version v1.17.1.10-halo-keymind-cascade-dev --radio-preset usa-cascade-fixed --profile cascade --require-ota
+      - name: Show qualification build logs on failure
+        if: failure()
+        run: |
+          for log in out/build-logs/*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::$log (last 120 lines)"
+            tail -n 120 "$log"
+            echo "::endgroup::"
+          done
 
   esp32-ethernet-companion-smoke:
     runs-on: ubuntu-latest
