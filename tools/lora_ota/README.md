@@ -12,11 +12,19 @@ wire format.
 Some deployed adaptive RAK3401, RAK4631 and MeshTower receiver images omit the
 bootloader ABI and codec mask from `ota self`. For application updates,
 `lora_ota.py` can verify these known diagnostic formats with an additional
-read-only `ota bootloader status` query. Hardware, selected storage and the
+`ota bootloader status` query. Hardware, selected storage and the
 installed bootloader's board/name/target identity, CRC status and storage
 profile must agree. That status contract guarantees codec subset `0x5` (full
 image and in-place delta); storage `caps` flags are not interpreted as codecs.
 Unsupported, incomplete or conflicting replies still stop preflight.
+
+On an idle RAK receiver that reports `storage unsafe: not probed`, the runner
+first uses one bounded bootloader-status query to prepare optional staging
+media. It then rechecks the running image, hardware, geometry and positive
+storage result before applying the usual capability checks. Preparation may
+initialize optional staging media; it does not download firmware or change
+preferences. Ordinary firmware status getters remain independent of that
+media preparation.
 
 This compatibility path applies only to application updates. Bootloader
 packages require directly reported ABI and codec-mask fields. New adaptive

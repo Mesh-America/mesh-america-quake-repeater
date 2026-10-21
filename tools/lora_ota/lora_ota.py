@@ -2862,9 +2862,104 @@ def query_bootloader_target(
     )
 
 
+def validate_adaptive_bootloader_status(live: BootloaderStatus, hw_id: str) -> None:
+    """Require an installed, canonical bootloader for this adaptive family."""
+    if hw_id in ("RAK_3401", "RAK4631"):
+        name = "3401" if hw_id == "RAK_3401" else "4631"
+        expected_board = 0x239A0029
+        identities = {f"{name}_DFU": 0x0A, f"{name}_AUTO_DFU": 0x1E}
+    elif hw_id == "Heltec_tower_v2":
+        expected_board = 0x239A0071
+        identities = {"TOWER_V2_OTA": 0x09}
+    else:
+        raise OtaError("adaptive destination hardware family is unverified")
+    if (
+        live.board_id != expected_board
+        or identities.get(live.device_name) != live.storage_flags
+        or not 3 <= live.apply_abi < 0xFFFF
+        or live.crc32 in (0, 0xFFFFFFFF)
+    ):
+        raise OtaError("adaptive destination bootloader identity, ABI or storage profile is unverified")
+
+
+def prepare_cold_rak_application_storage(
+    controller: Controller, target_name: str, status: str, self_status: str,
+) -> tuple[str, str, BootloaderStatus | None]:
+    """Prepare only the known idle, deferred RAK application-store selector.
+
+    Ordinary status/self getters intentionally do not probe optional storage.
+    The explicit bootloader status query enters the existing OTA media/staging
+    preparation boundary without downloading, changing preferences, or writing
+    firmware. Optional staging media may be initialized by that preparation.
+    Bind both sides of that one query to the same running application, then
+    require a complete positive storage diagnosis; preparation is never a
+    substitute for the normal package/capability checks.
+    """
+    identity_pattern = (
+        r"self body=([1-9][0-9]*) image=([1-9][0-9]*) "
+        r"base_hash=([0-9A-Fa-f]{16}) \| maxblk:(1024|2048)"
+        r"(?: abi=([0-9]+) codecs=0x([0-9A-Fa-f]+))? \| "
+    )
+    before = re.fullmatch(
+        identity_pattern + r"storage unsafe: not probed", self_status.strip(),
+    )
+    if before is None:
+        return status, self_status, None
+
+    def status_identity(reply: str) -> tuple[str, str, int]:
+        hardware = re.findall(r"\bhw=([^ |]+)", reply)
+        targets = re.findall(r"\btarget:([0-9A-Fa-f]{8})\b", reply)
+        limits = re.findall(r"\bmaxblk:(\d+)\b", reply)
+        backends = re.findall(r"\bbl:([^ |]+)", reply)
+        if (
+            not reply.startswith("OTA | ")
+            or len(hardware) != 1 or hardware[0] not in ("RAK_3401", "RAK4631")
+            or len(targets) != 1 or len(limits) != 1 or len(backends) != 1
+            or reply.split(" | ").count("no download") != 1
+            or "download:" in reply
+        ):
+            raise OtaError("cold RAK storage preparation requires a known, idle destination")
+        return hardware[0], targets[0].upper(), parse_target_max_block_size(reply, self_status)
+
+    bound_status = status_identity(status)
+    if re.findall(r"\bbl:([^ |]+)", status)[0] not in ("NONE", "storage-ERR"):
+        raise OtaError("cold RAK destination reports conflicting unprobed storage diagnostics")
+    boot_status = controller.remote_command(target_name, "ota bootloader status", retry=False)
+    live = parse_bootloader_status(boot_status)
+    validate_adaptive_bootloader_status(live, bound_status[0])
+    if not boot_status.strip().endswith("| staged:none mid=- hash=-"):
+        raise OtaError("cold RAK storage preparation requires no staged bootloader update")
+    prepared_status = controller.remote_command(target_name, "ota status", retry=False)
+    prepared_self = controller.remote_command(target_name, "ota self", retry=False)
+    after = re.fullmatch(identity_pattern + r"(.+)", prepared_self.strip())
+    if (
+        after is None
+        or before.groups() != after.groups()[:6]
+        or bound_status != status_identity(prepared_status)
+    ):
+        raise OtaError("destination firmware identity or geometry changed during cold RAK storage preparation")
+    if before.group(5) is not None and (
+        int(before.group(5)) != live.apply_abi or int(before.group(6), 16) & 0x5 != 0x5
+    ):
+        raise OtaError("cold RAK destination reports inconsistent or unsupported application capabilities")
+    tail = after.group(7)
+    if re.fullmatch(r"internal store:[1-9][0-9]*K \| bootloader: delta apply OK", tail):
+        backend = "internal"
+    elif re.fullmatch(r"QSPI store:[1-9][0-9]*K \| bootloader: QSPI apply OK", tail):
+        backend = "QSPI"
+    elif bound_status[0] == "RAK4631" and tail == "SD store | bootloader: authenticated SD apply OK":
+        backend = "SD"
+    else:
+        raise OtaError("cold RAK application storage remains unprepared, unsafe or unsupported")
+    if re.findall(r"\bbl:([^ |]+)", prepared_status) != [backend]:
+        raise OtaError("cold RAK destination reports conflicting prepared storage diagnostics")
+    print("[storage] prepared idle RAK application storage; running firmware identity unchanged")
+    return prepared_status, prepared_self, live
+
+
 def query_adaptive_bootloader_caps(
     controller: Controller, target_name: str, status: str, self_status: str,
-    hw_id: str | None,
+    hw_id: str | None, *, verified_bootloader: BootloaderStatus | None = None,
 ) -> tuple[int, int] | None:
     """Recover only capabilities guaranteed by known adaptive firmware.
 
@@ -2896,9 +2991,6 @@ def query_adaptive_bootloader_caps(
             self_status.strip(),
         ):
             storage = "SD"
-        name = "3401" if hw_id == "RAK_3401" else "4631"
-        expected_board = 0x239A0029
-        identities = {f"{name}_DFU": 0x0A, f"{name}_AUTO_DFU": 0x1E}
     elif hw_id == "Heltec_tower_v2":
         shape = re.fullmatch(
             prefix + r"store:(SD|internal) \| bootloader:apply OK",
@@ -2906,8 +2998,6 @@ def query_adaptive_bootloader_caps(
         )
         if shape:
             storage = shape.group(1)
-        expected_board = 0x239A0071
-        identities = {"TOWER_V2_OTA": 0x09}
     else:
         return None
     if storage is None:
@@ -2918,16 +3008,10 @@ def query_adaptive_bootloader_caps(
         or re.findall(r"\bbl:([^ |]+)", status) != [storage]
     ):
         raise OtaError("adaptive destination reports conflicting hardware/storage diagnostics")
-    live = parse_bootloader_status(
+    live = verified_bootloader or parse_bootloader_status(
         controller.remote_command(target_name, "ota bootloader status", retry=False)
     )
-    if (
-        live.board_id != expected_board
-        or identities.get(live.device_name) != live.storage_flags
-        or not 3 <= live.apply_abi < 0xFFFF
-        or live.crc32 in (0, 0xFFFFFFFF)
-    ):
-        raise OtaError("adaptive destination bootloader identity, ABI or storage profile is unverified")
+    validate_adaptive_bootloader_status(live, hw_id)
     print(
         "[bootloader] adaptive diagnostics verified through installed "
         f"bootloader status: ABI {live.apply_abi}, guaranteed codec subset 0x5 "
@@ -2962,6 +3046,11 @@ def query_target(
     except OtaError as exc:
         print(f"[warn] optional `get bootloader.ver` probe unavailable: {exc}")
     self_status = controller.remote_command(args.target, "ota self")
+    verified_bootloader = None
+    if getattr(args, "package_kind", "application") == "application":
+        status, self_status, verified_bootloader = prepare_cold_rak_application_storage(
+            controller, args.target, status, self_status,
+        )
     hash_match = re.search(r"base_hash=([0-9A-Fa-f]{16})", self_status)
     if not hash_match:
         raise OtaError("could not read destination base hash from `ota self`")
@@ -3034,6 +3123,7 @@ def query_target(
         try:
             adaptive_caps = query_adaptive_bootloader_caps(
                 controller, args.target, status, self_status, hw_id,
+                verified_bootloader=verified_bootloader,
             )
         except OtaError as exc:
             raise OtaError(
@@ -3048,6 +3138,12 @@ def query_target(
                 "to expose complete bootloader diagnostics before retrying"
             )
         bootloader_abi, bootloader_codecs = adaptive_caps
+    if (
+        platform == "nrf52"
+        and getattr(args, "package_kind", "application") == "application"
+        and "storage unsafe:" in self_status
+    ):
+        raise OtaError("destination reports unsafe application OTA storage")
     current_version = None
     current_version_source = None
     try:
