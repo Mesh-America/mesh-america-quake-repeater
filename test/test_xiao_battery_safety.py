@@ -88,7 +88,11 @@ void pinMode(int pin,int value) {
 void delay(unsigned) {}
 void analogReadResolution(int) {}
 void analogReference(int) {}
-struct FakeWire { void setPins(int,int) {} void begin() {} } Wire;
+struct FakeWire {
+  int sda=-1, scl=-1;
+  void setPins(int data,int clock) { sda=data; scl=clock; }
+  void begin() {}
+} Wire;
 struct NRF52Board { static void begin() {} };
 struct NRF52BoardDCDC { static void begin() {} };
 struct Config { int lpcomp_ain_channel; int lpcomp_refsel; };
@@ -108,6 +112,10 @@ int main() {
   // Repeated startup, optional peripherals and USB/charging status must not
   // create a HIGH pulse; the production code deliberately does not infer USB.
   for(int repeat=0;repeat<3;++repeat) { @CALLS@ }
+#ifdef CHECK_XIAO_BOARD_I2C
+  reset(); XiaoNrf52Board().begin(); check();
+  assert(Wire.sda==30 && Wire.scl==31);
+#endif
   for(uint8_t reason : {SHUTDOWN_REASON_LOW_VOLTAGE, SHUTDOWN_REASON_BOOT_PROTECT,
                        SHUTDOWN_REASON_USER, 0}) {
     reset(); shutdown(reason); check();
@@ -122,7 +130,7 @@ int main() {
 
 
 class XiaoBatterySafetyTests(unittest.TestCase):
-    def run_case(self, optional=False, mutation=None):
+    def run_case(self, optional=False, mutation=None, board_i2c=False):
         compiler = os.environ.get("CXX") or shutil.which("g++") or shutil.which("clang++")
         self.assertIsNotNone(compiler, "a host C++11 compiler is required")
         with tempfile.TemporaryDirectory(prefix="xiao-battery-safety-") as directory:
@@ -134,6 +142,9 @@ class XiaoBatterySafetyTests(unittest.TestCase):
             flags = ["-DNRF52_POWER_MANAGEMENT"]
             if optional:
                 flags.append("-DOPTIONAL_PINS")
+            if board_i2c:
+                flags += ["-DPIN_BOARD_SDA=30", "-DPIN_BOARD_SCL=31",
+                          "-DCHECK_XIAO_BOARD_I2C"]
             build = subprocess.run([compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror",
                 *sanitizer, *flags, str(cpp), "-o", str(binary)],
                 text=True, capture_output=True, timeout=30)
@@ -149,6 +160,9 @@ class XiaoBatterySafetyTests(unittest.TestCase):
 
     def test_optional_button_i2c_display_led_startup(self):
         self.run_case(optional=True)
+
+    def test_carrier_i2c_pins_override_generic_wire_pins(self):
+        self.run_case(optional=True, board_i2c=True)
 
     def test_old_ikoka_high_startup_is_rejected(self):
         self.run_case(mutation="old-begin-high")

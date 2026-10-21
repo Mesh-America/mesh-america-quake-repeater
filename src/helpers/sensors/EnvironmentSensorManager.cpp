@@ -919,13 +919,15 @@ static const SensorDef SENSOR_TABLE[] = {
   { TELEM_INA3221_ADDRESS, "INA3221",      init_ina3221,  query_ina3221,
     query_ina3221_voltage },
 #endif
+#if ENV_INCLUDE_INA260
+  // INA260 verifies its device ID before configuring the chip. Give it first
+  // claim when it shares 0x40 with INA219, whose driver has no identity check.
+  { TELEM_INA260_ADDRESS,  "INA260",       init_ina260,   query_ina260,
+    query_ina260_voltage },
+#endif
 #if ENV_INCLUDE_INA219
   { TELEM_INA219_ADDRESS,  "INA219",       init_ina219,   query_ina219,
     query_ina219_voltage },
-#endif
-#if ENV_INCLUDE_INA260
-  { TELEM_INA260_ADDRESS,  "INA260",       init_ina260,   query_ina260,
-    query_ina260_voltage },
 #endif
 #if ENV_INCLUDE_INA226
   { TELEM_INA226_ADDRESS,  "INA226",       init_ina226,   query_ina226,

@@ -46,7 +46,9 @@ void XiaoNrf52Board::begin() {
   pinMode(PIN_USER_BTN, INPUT_PULLUP);
 #endif
 
-#if defined(PIN_WIRE_SDA) && defined(PIN_WIRE_SCL)
+#if defined(PIN_BOARD_SDA) && defined(PIN_BOARD_SCL)
+  Wire.setPins(PIN_BOARD_SDA, PIN_BOARD_SCL);
+#elif defined(PIN_WIRE_SDA) && defined(PIN_WIRE_SCL)
   Wire.setPins(PIN_WIRE_SDA, PIN_WIRE_SCL);
 #endif
 
