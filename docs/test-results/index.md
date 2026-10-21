@@ -11,6 +11,7 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Radio and RF
 
+- [SolarXiao 33S HEAD bootloader, LoRa OTA and repeater acceptance, 2026-10-21](solarxiao_33s_head_bootloader_lora_ota_2026-10-21.md)
 - [SX1262 channel-scanning hardware results](cad_scan_validation.md)
 - [CW and CW2 validation](carrier_wave_validation.md)
 - [Double center-frequency write: V4 transmitter / XIAO receiver](double_frequency_v4_validation.md)
