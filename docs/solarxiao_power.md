@@ -112,7 +112,8 @@ A remotely deployed node must first receive compatible firmware before these
 commands can be used. Deployment still requires its installed target and
 bootloader compatibility to be checked when it is reachable.
 
-See the [earlier manual Advanced profile validation](test-results/solarxiao_advanced_2026-10-21.md).
+See the [automatic detection/Base build and host validation](test-results/solarxiao_auto_2026-10-21.md)
+and [earlier manual Advanced profile validation](test-results/solarxiao_advanced_2026-10-21.md).
 This adds no measurements beyond existing self voltage/MCU temperature and has
 not been installed on the remote Advanced board.
 
