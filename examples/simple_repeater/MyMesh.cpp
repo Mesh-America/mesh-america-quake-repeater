@@ -3531,8 +3531,8 @@ void MyMesh::onControlDataRecv(mesh::Packet* packet) {
           const auto& secondary = profiles->secondary;
           data[length - 1] = 1 | (static_cast<uint8_t>(secondary.mode) << 1)
               | (profiles->secondary_temporary ? 0x08 : 0);
-          const uint32_t frequency = static_cast<uint32_t>(lroundf(secondary.params.freq * 1000.0f));
-          const uint32_t bandwidth = static_cast<uint32_t>(lroundf(secondary.params.bw * 1000.0f));
+          const uint32_t frequency = static_cast<uint32_t>(secondary.params.freq * 1000.0f + 0.5f);
+          const uint32_t bandwidth = static_cast<uint32_t>(secondary.params.bw * 1000.0f + 0.5f);
           for (unsigned shift = 0; shift < 32; shift += 8) data[length++] = frequency >> shift;
           for (unsigned shift = 0; shift < 32; shift += 8) data[length++] = bandwidth >> shift;
           data[length++] = secondary.params.sf;
@@ -5503,12 +5503,11 @@ bool MyMesh::handleGuestCommand(const char* command, char* reply, size_t capacit
   } else if (get) {
     snprintf(reply, capacity, "> %s%s", guest_login.enabled() ? "on" : "off",
         guest_login.healthy() ? "" : " (settings unavailable)");
-  } else if (!guest_login.setEnabled(strcmp(value, "on") == 0)) {
-    if (!guest_login.enabled()) acl.removeGuestClients();
-    snprintf(reply, capacity, "Err - guest setting save unconfirmed; reboot may differ");
   } else {
+    const bool saved = guest_login.setEnabled(strcmp(value, "on") == 0);
     if (!guest_login.enabled()) acl.removeGuestClients();
-    snprintf(reply, capacity, "OK - guest %s", guest_login.enabled() ? "on" : "off");
+    if (saved) snprintf(reply, capacity, "OK - guest %s", guest_login.enabled() ? "on" : "off");
+    else snprintf(reply, capacity, "Err - guest setting save unconfirmed; reboot may differ");
   }
   return true;
 }

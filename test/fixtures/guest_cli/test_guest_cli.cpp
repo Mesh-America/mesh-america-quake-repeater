@@ -119,7 +119,8 @@ static void rejects_bad_pages() {
   acl.load(&fs, self);
   add(acl, 0, PERM_ACL_GUEST);
   for (const char* command : {
-      "get guests 0", "get guests -1", "get guests +1", "get guests 1x",
+      "get guests 0", "get guests 0000000000000000000000000000000000000000",
+      "get guests -1", "get guests +1", "get guests 1x", "get guests\n1",
       "get guests 1 2", "get guests 1.0", "get guests page 1",
       "get guests 65536", "get guests 4294967296",
       "get guests 99999999999999999999999999", "get guests 1\nset guest off"}) {

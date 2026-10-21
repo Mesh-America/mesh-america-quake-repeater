@@ -726,10 +726,11 @@ void RadioProfileCLI::appendChirpWarning(char* reply, size_t capacity, const Rad
   const bool short_a = preview.primary.preamble && preview.primary.preamble < timing.preamble[0];
   const bool short_b = preview.secondary.params.preamble && preview.secondary.params.preamble < timing.preamble[1];
   const bool a = timing.preamble[0] > 32 || short_a, b = timing.preamble[1] > 32 || short_b;
-  if (a && b) appendReply(reply, capacity, "; WARN recommended preamble: radio=%.0f,radio2=%.0f",
-                       timing.preamble[0], timing.preamble[1]);
-  else if (a || b) appendReply(reply, capacity, "; WARN recommended preamble: %s=%.0f",
-                            a ? "radio" : "radio2", timing.preamble[a ? 0 : 1]);
+  if (a || b) {
+    appendReply(reply, capacity, "; WARN recommended preamble: %s=%.0f",
+                a ? "radio" : "radio2", timing.preamble[a ? 0 : 1]);
+    if (a && b) appendReply(reply, capacity, ",radio2=%.0f", timing.preamble[1]);
+  }
   if (short_a || short_b)
     appendReply(reply, capacity, "; short override: %s",
              short_a && short_b ? "radio,radio2" : short_a ? "radio" : "radio2");
@@ -783,16 +784,26 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
   memcpy(key, text, n); key[n] = 0;
   const char* args = text + n;
   while (*args == ' ' || *args == '\t') ++args;
-  const bool base = !strcmp(key, "radio2");
-  const bool temporary = !strcmp(key, "tempradio2");
-  const bool scheduled = !strcmp(key, "radioat2") || !strcmp(key, "tempradioat2");
-  const bool scheduled_temp = !strcmp(key, "tempradioat2");
-  const bool crossing = !strcmp(key, "radio2.cross");
-  const bool replies = infrastructure_replies_ && !strcmp(key, "tx.reply");
-  const bool status = !strcmp(key, "radio2.status");
-  const bool scan = !strcmp(key, "radio2.scan");
-  const bool timing = !strcmp(key, "radio2.timing") || !strcmp(key, "radio.timing");
-  if (!base && !temporary && !scheduled && !crossing && !replies && !status && !scan && !timing) return false;
+  enum { Base, Temporary, Scheduled, ScheduledTemporary, Crossing, Replies,
+         Status, Scan, Timing, TimingAlias, KeyCount };
+  static const char keys[] = "radio2\0tempradio2\0radioat2\0tempradioat2\0radio2.cross\0"
+      "tx.reply\0radio2.status\0radio2.scan\0radio2.timing\0radio.timing";
+  const char* candidate = keys;
+  unsigned kind = 0;
+  while (kind < KeyCount && strcmp(key, candidate)) {
+    candidate += strlen(candidate) + 1;
+    ++kind;
+  }
+  if (kind == KeyCount || (kind == Replies && !infrastructure_replies_)) return false;
+  const bool base = kind == Base;
+  const bool temporary = kind == Temporary;
+  const bool scheduled = kind == Scheduled || kind == ScheduledTemporary;
+  const bool scheduled_temp = kind == ScheduledTemporary;
+  const bool crossing = kind == Crossing;
+  const bool replies = kind == Replies;
+  const bool status = kind == Status;
+  const bool scan = kind == Scan;
+  const bool timing = kind == Timing || kind == TimingAlias;
   if (!radio_ || !radio_->profiles()) { cli::formatError(reply, capacity, "radio profiles unsupported"); return true; }
   if (command == text && *args && verb == Get && (temporary || base)) verb = Set;
   if (remote_origin && !remote_command_
@@ -801,6 +812,10 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
   }
   if (hasReplyMutation() && verb != Get) {
     cli::formatError(reply, capacity, "radio acknowledgement pending"); return true;
+  }
+  if ((timing || scan || status) && (verb != Get || *args)) {
+    snprintf(reply, capacity, "Error: %s is read-only", timing ? "radio timing" : key);
+    return true;
   }
   if (replies) {
     const auto* p = radio_->profiles();
@@ -836,7 +851,6 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     return true;
   }
   if (timing) {
-    if (verb != Get || *args) { cli::formatError(reply, capacity, "radio timing is read-only"); return true; }
     const auto& p = *radio_->profiles();
     const auto t = p.chirpTiming();
     if (!p.enabled()) snprintf(reply, capacity, "> off");
@@ -872,7 +886,6 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     return true;
   }
   if (scan) {
-    if (verb != Get || *args) { cli::formatError(reply, capacity, "radio2.scan is read-only"); return true; }
     const auto& p = *radio_->profiles();
     if (!p.enabled()) snprintf(reply, capacity, "> off");
     else {
@@ -886,7 +899,6 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     return true;
   }
   if (status) {
-    if (verb != Get || *args) { cli::formatError(reply, capacity, "radio2.status is read-only"); return true; }
     if (hasReplyMutation()) {
       snprintf(reply, capacity, "> radio2 change pending %s; previous channel retained",
           remote_delivered_ ? "storage commit (retrying)" : "reply transmission");

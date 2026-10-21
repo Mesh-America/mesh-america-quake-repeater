@@ -144,7 +144,8 @@ static void strict_page_and_command_parsing() {
   LoginHistory history;
   record(history, 0, 0);
   const char* invalid[] = {
-    "get logins 0", "get logins -1", "get logins +1", "get logins 1x",
+    "get logins 0", "get logins 0000000000000000000000000000000000000000",
+    "get logins -1", "get logins +1", "get logins 1x", "get logins\n1",
     "get logins 1 2", "get logins 1.0", "get logins page 1", "get logins 65536",
     "get logins 4294967296", "get logins 9999999999999999999999999999",
     "get logins 1\nset guest on",

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CLIPage.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,11 +36,11 @@ class LoginHistory {
     while (index < _size && memcmp(_entries[index].key, key, KEY_SIZE) != 0) ++index;
 
     Entry latest = {};
+    memcpy(latest.key, key, KEY_SIZE);
     if (index < _size) {
-      latest = _entries[index];
+      latest.attempts = _entries[index].attempts;
       if (latest.attempts != UINT32_MAX) ++latest.attempts;
     } else {
-      memcpy(latest.key, key, KEY_SIZE);
       latest.attempts = 1;
       if (_size < CAPACITY) ++_size;
       index = _size - 1;
@@ -82,17 +83,8 @@ inline bool handleLoginsGet(const LoginHistory& history, const char* command,
   if (*arg && *arg != ' ' && *arg != '\t' && *arg != '\r' && *arg != '\n') return false;
   if (reply == nullptr || capacity == 0) return true;
 
-  while (*arg == ' ' || *arg == '\t') ++arg;
-  unsigned page = 1;
-  if (*arg >= '0' && *arg <= '9') {
-    page = 0;
-    do {
-      page = page * 10 + unsigned(*arg++ - '0');
-      if (page > 65535) break;
-    } while (*arg >= '0' && *arg <= '9');
-  }
-  while (*arg == ' ' || *arg == '\t' || *arg == '\r' || *arg == '\n') ++arg;
-  if (*arg || page == 0 || page > 65535) {
+  const unsigned page = parseCliPage(arg);
+  if (page == 0) {
     snprintf(reply, capacity, "Err - usage: get logins [page]");
     return true;
   }
@@ -108,9 +100,10 @@ inline bool handleLoginsGet(const LoginHistory& history, const char* command,
     return true;
   }
 
-  char rows[2][80] = {};
-  unsigned count = 0;
-  for (unsigned index = (page - 1) * 2; index < total && count < 2; ++index) {
+  int used = snprintf(reply, capacity, "Logins %u/%u (%u)", page, pages, total);
+  const unsigned end = page * 2 < total ? page * 2 : total;
+  for (unsigned index = (page - 1) * 2; index < end
+       && used >= 0 && size_t(used) < capacity; ++index) {
     const auto& entry = *history.get(index);
     char key[13];
     static const char hex[] = "0123456789ABCDEF";
@@ -119,20 +112,15 @@ inline bool handleLoginsGet(const LoginHistory& history, const char* command,
       key[i * 2 + 1] = hex[entry.key[i] & 0x0F];
     }
     key[12] = 0;
-    snprintf(rows[count], sizeof(rows[count]), "%s n=%lu last=%lu %s", key,
+    const int written = snprintf(reply + used, capacity - size_t(used), "\n%s n=%lu last=%lu %s", key,
              static_cast<unsigned long>(entry.attempts),
              static_cast<unsigned long>(entry.timestamp), loginResultName(entry.result));
-    ++count;
+    if (written < 0) { used = -1; break; }
+    used += written;
   }
-  const char* separator = count == 2 ? "\n" : "";
-  const int needed = snprintf(nullptr, 0, "Logins %u/%u (%u)\n%s%s%s",
-                              page, pages, total, rows[0], separator, rows[1]);
   // Never accidentally expose a partly formatted public-key prefix.
-  if (needed < 0 || size_t(needed) >= capacity) {
+  if (used < 0 || size_t(used) >= capacity) {
     snprintf(reply, capacity, "Err - login reply too small");
-  } else {
-    snprintf(reply, capacity, "Logins %u/%u (%u)\n%s%s%s",
-             page, pages, total, rows[0], separator, rows[1]);
   }
   return true;
 }

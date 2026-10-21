@@ -401,21 +401,39 @@ RECENT_TEST = r'''
 
 class CooperativeOutputTest(unittest.TestCase):
     def role_methods(self, text, role):
-        dump_start = text.index("void MyMesh::dumpLogFile()")
+        signature = "void MyMesh::dumpLogFile()"
+        dump = body(text, signature)
+        dump_start = text.index(dump)
         guard = "#if MESH_ENABLE_PACKET_FILE_LOGGING\n"
         if text[:dump_start].endswith(guard):
-            dump_start -= len(guard)
-        dump_end = text.index("\n#if MESH_USB_CONSOLE_COOPERATIVE\nbool MyMesh::hasPendingSerialOutput", dump_start)
-        methods = text[dump_start:dump_end] + "\n" + "\n".join(body(text, signature) for signature in (
-            "bool MyMesh::hasPendingSerialOutput()", "void MyMesh::cancelPendingSerialOutput()",
+            active_end = dump_start + len(dump)
+            fallback = body(text[active_end:], signature)
+            fallback_start = text.index(fallback, active_end)
+            self.assertEqual(text[active_end:fallback_start].strip(), "#else")
+            fallback_end = fallback_start + len(fallback)
+            dump_end = text.index("\n#endif", fallback_end) + len("\n#endif")
+            self.assertEqual(text[fallback_end:dump_end].strip(), "#endif")
+            dump = text[dump_start - len(guard):dump_end]
+        methods = dump + "\n" + "\n".join(body(text, signature) for signature in (
+            "void MyMesh::printAclSerial()", "bool MyMesh::hasPendingSerialOutput()",
+            "void MyMesh::cancelPendingSerialOutput()",
             "void MyMesh::servicePendingSerialOutput()"))
         if role == "simple_repeater":
-            format_start = text.index("static void formatLocalSnrX4(")
-            format_end = text.index("\nvoid MyMesh::formatRecentRepeatersReply", format_start)
-            recent_start = text.index("void MyMesh::printRecentRepeatersSerial()")
-            recent_end = text.index("\nbool MyMesh::setRecentRepeater(", recent_start)
-            methods = text[format_start:format_end] + "\n" + text[recent_start:recent_end] + "\n" + methods
+            methods = "\n".join(body(text, signature) for signature in (
+                "static void formatLocalSnrX4(", "void MyMesh::printRecentRepeatersSerial()"
+            )) + "\n" + methods
         return methods
+
+    def test_role_method_extraction_ignores_adjacent_definitions(self):
+        for role in ("simple_repeater", "simple_room_server"):
+            with self.subTest(role=role):
+                text = (ROOT / f"examples/{role}/MyMesh.cpp").read_text()
+                text = text.replace("void MyMesh::printAclSerial()",
+                    "bool MyMesh::unrelatedCommand() { return true; }\n\n"
+                    "void MyMesh::printAclSerial()", 1)
+                methods = self.role_methods(text, role)
+                self.assertNotIn("unrelatedCommand", methods)
+                self.assertNotIn("handleGuestCommand", methods)
 
     def test_usb_acl_commands_route_to_the_cooperative_pump(self):
         for role in ("simple_repeater", "simple_room_server"):

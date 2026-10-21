@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ClientACL.h"
+#include "CLIPage.h"
 #include <Utils.h>
 #include <stdio.h>
 #include <string.h>
@@ -29,24 +30,17 @@ inline bool handleGuestsGet(const ClientACL& acl, const char* command,
   if (*arg && *arg != ' ' && *arg != '\t' && *arg != '\r' && *arg != '\n') return false;
   if (reply == nullptr || capacity == 0) return true;
 
-  while (*arg == ' ' || *arg == '\t') ++arg;
-  unsigned page = 1;
-  if (*arg >= '0' && *arg <= '9') {
-    page = 0;
-    do {
-      page = page * 10 + unsigned(*arg++ - '0');
-      if (page > 65535) break;
-    } while (*arg >= '0' && *arg <= '9');
-  }
-  while (*arg == ' ' || *arg == '\t' || *arg == '\r' || *arg == '\n') ++arg;
-  if (*arg || page == 0 || page > 65535) {
+  const unsigned page = parseCliPage(arg);
+  if (page == 0) {
     snprintf(reply, capacity, "Err - usage: get guests [page]");
     return true;
   }
 
   unsigned total = 0;
+  const ClientInfo* selected = nullptr;
   for (int i = 0; i < acl.getNumClients(); ++i) {
-    if (isLiveGuest(*acl.getClientByIdx(i))) ++total;
+    const auto* client = acl.getClientByIdx(i);
+    if (isLiveGuest(*client) && ++total == page) selected = client;
   }
   if (total == 0 && page == 1) {
     snprintf(reply, capacity, "Guests: empty");
@@ -58,24 +52,16 @@ inline bool handleGuestsGet(const ClientACL& acl, const char* command,
     return true;
   }
 
-  unsigned index = 0;
-  for (int i = 0; i < acl.getNumClients(); ++i) {
-    const auto* client = acl.getClientByIdx(i);
-    if (!isLiveGuest(*client) || ++index != page) continue;
+  if (selected) {
     char key[PUB_KEY_SIZE * 2 + 1];
-    Utils::toHex(key, client->id.pub_key, PUB_KEY_SIZE);
-    const int needed = snprintf(nullptr, 0, "Guests %u/%u (%u)\n%s last=%lu",
+    Utils::toHex(key, selected->id.pub_key, PUB_KEY_SIZE);
+    const int needed = snprintf(reply, capacity, "Guests %u/%u (%u)\n%s last=%lu",
                                 page, pages, total, key,
-                                static_cast<unsigned long>(client->last_activity));
+                                static_cast<unsigned long>(selected->last_activity));
     // A small caller buffer must never turn a complete key into a prefix.
     if (needed < 0 || size_t(needed) >= capacity) {
       snprintf(reply, capacity, "Err - guest reply too small");
-    } else {
-      snprintf(reply, capacity, "Guests %u/%u (%u)\n%s last=%lu",
-               page, pages, total, key,
-               static_cast<unsigned long>(client->last_activity));
     }
-    return true;
   }
   return true;
 }

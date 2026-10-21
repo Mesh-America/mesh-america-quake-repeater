@@ -10,7 +10,9 @@
  */
 
 #include "fixedint.h"
-#include "sha512.h"
+#include "ed_sha512.h"
+
+#if !ED25519_USE_CRYPTO_SHA512
 
 /* the K array */
 static const uint64_t K[80] = {
@@ -303,3 +305,5 @@ int sha512(const unsigned char *message, size_t message_len, unsigned char *out)
     if ((ret = sha512_final(&ctx, out))) return ret;
     return 0;
 }
+
+#endif

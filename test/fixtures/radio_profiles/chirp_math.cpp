@@ -24,6 +24,19 @@ static void checkSafePreamble(unsigned sf, float bw, uint16_t symbols) {
 int main() {
   Profiles fresh;
   assert(fresh.cross==mesh::RadioCrossMode::Off && !fresh.canCross());
+  // Listen durations round upward for the minimum, downward for a larger
+  // fast visit, and saturate rejected previews before converting to integers.
+  Profiles listen_bounds;
+  listen_bounds.primary=params(5,1000);
+  assert(listen_bounds.listenUs(0)==148);
+  listen_bounds.secondary.params=params(5,500);
+  listen_bounds.secondary.mode=mesh::RadioProfileMode::Rx;
+  assert(listen_bounds.listenUs(0,1)==148);
+  assert(listen_bounds.listenUs(0,32)==729);
+  listen_bounds.secondary.params.bw=7.8f;
+  assert(listen_bounds.listenUs(0,32)==46769);
+  listen_bounds.secondary.params.bw=1e-30f;
+  assert(listen_bounds.listenUs(0,1)==UINT32_MAX);
   // Sharing the read-only validation table must preserve every supported
   // value and the strict float tolerance on both sides of its boundary.
   for (float bw : {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f,

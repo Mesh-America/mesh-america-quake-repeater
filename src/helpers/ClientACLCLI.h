@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ClientACL.h"
+#include "CLIPage.h"
 #include <Utils.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,17 +22,8 @@ inline bool handleACLGet(const ClientACL& acl, const char* command,
   if (local && *arg == 0) return false;
   if (reply == nullptr || capacity == 0) return true;
 
-  while (*arg == ' ' || *arg == '\t') ++arg;
-  unsigned page = 1;
-  if (*arg >= '0' && *arg <= '9') {
-    page = 0;
-    do {
-      page = page * 10 + unsigned(*arg++ - '0');
-      if (page > 65535) break;
-    } while (*arg >= '0' && *arg <= '9');
-  }
-  while (*arg == ' ' || *arg == '\t' || *arg == '\r' || *arg == '\n') ++arg;
-  if (*arg || page == 0 || page > 65535) {
+  const unsigned page = parseCliPage(arg);
+  if (page == 0) {
     snprintf(reply, capacity, "Err - usage: get acl [page]");
     return true;
   }

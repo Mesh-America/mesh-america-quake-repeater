@@ -248,14 +248,15 @@ class RadioProfiles {
   }
   uint32_t listenUs(uint8_t profile, uint16_t slow_preamble = 0) const {
     const uint8_t slow = slowerProfile();
-    const double minimum = minimumListenUs(params(profile), enabled() && profile == slow);
-    if (!enabled() || profile == slow) return (uint32_t)ceil(minimum);
+    const uint32_t minimum = minimumListenUs(params(profile), enabled() && profile == slow);
+    if (!enabled() || profile == slow) return minimum;
     if (!slow_preamble) slow_preamble = preamble(slow, 32);
     const double available = double(slow_preamble) / 2.0 * symbolUs(params(slow))
         - minimumListenUs(params(slow), true) - 2.0 * switchBudgetUs() - LoopBudgetUs;
     // Rejected previews must not cause an out-of-range floating-to-int cast.
+    // In the positive branch, truncation already rounds down to whole us.
     return available > UINT32_MAX ? UINT32_MAX
-        : available > minimum ? (uint32_t)floor(available) : (uint32_t)minimum;
+        : available > minimum ? (uint32_t)available : minimum;
   }
   ChirpTiming chirpTiming() const {
     if (!enabled()) return {};

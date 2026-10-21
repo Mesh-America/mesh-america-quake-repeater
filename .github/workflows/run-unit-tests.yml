@@ -274,6 +274,9 @@ jobs:
           mkdir -p .pio/libdeps/room-mail-test
           pio pkg install --global --library 'rweather/Crypto@0.4.0' --storage-dir .pio/libdeps/room-mail-test
 
+      - name: Verify shared SHA-512 signing against the original backend and RFC8032
+        run: python3 -B test/test_ed25519_shared_sha512.py -v
+
       - name: Verify ArduinoJson pin
         run: |
           python3 -B scripts/check_arduinojson_pin.py --self-test
