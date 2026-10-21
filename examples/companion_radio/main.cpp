@@ -399,7 +399,7 @@ public:
                "; cleared %u oldest queued messages for OTA", (unsigned)drained);
     }
 
-    context.manager.announce();
+    // The mesh loop announces the fully enumerated source with a bounded burst.
     mesh::usbLoggingPort().println("Bluetooth mOTA source attached");
     return true;
   }

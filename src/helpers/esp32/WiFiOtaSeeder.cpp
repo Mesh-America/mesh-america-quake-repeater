@@ -133,7 +133,7 @@ void WiFiOtaSeeder::loop() {
   snprintf(link_info, sizeof(link_info), "tcp %s",
            seeder_client.remoteIP().toString().c_str());
   context.set_folder_dest(&folder_store, link_info);
-  context.manager.announce();
+  // The mesh loop announces the fully enumerated source with a bounded burst.
   mesh::usbLoggingPort().printf(
       "OTA seeder client connected (%s)\n", link_info);
 }

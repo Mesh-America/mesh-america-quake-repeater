@@ -1126,7 +1126,7 @@ static __attribute__((noinline)) bool handle_control_command(
 #if !defined(OTA_SEEDER_ONLY)
       if (c.self_serve_supported && !c.serving) c.serving = ota_serve_self(c, 0);
 #endif
-      char m2[120]; c.attach_folder(m2, sizeof(m2)); c.manager.announce();
+      char m2[120]; c.attach_folder(m2, sizeof(m2));
       strncpy(reply, m2, 159); reply[159] = 0;
 #else
       strcpy(reply, "ERR not built with OTA_FOLDER_SERIAL (set the seeder UART in platformio.ini)");

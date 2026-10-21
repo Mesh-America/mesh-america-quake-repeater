@@ -537,6 +537,12 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
     _ota_announce_count = 0;
   }
   const float ota_speed = getOtaSpeedFactor();
+  if (ota::ota_ctx().manager.takeSourceReadyAnnouncement()) {
+    // COUNT/DESCRIBE completed over the existing host data session. Reuse the
+    // bounded discovery burst even when host preparation outlasted boot.
+    _ota_announce_count = 0;
+    _ota_announce_timer.arm(_ms->getMillis(), 0, 1.0f);
+  }
   if (_ota_timer_speed != ota_speed) {
     _ota_announce_timer.rescale(_ms->getMillis(), _ota_timer_speed, ota_speed);
     _ota_timer_speed = ota_speed;
@@ -602,7 +608,8 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
 #if !defined(OTA_SEEDER_ONLY)
       if (oc.self_serve_supported && !oc.serving) oc.serving = ota::ota_serve_self(oc, 0);
 #endif
-      oc.manager.announce();
+      if (oc.manager.sourceCatalogComplete() && oc.manager.servedCount())
+        oc.manager.announce();
       if (_ota_announce_count < 250) _ota_announce_count++;
     }
     // Re-arm: tight spacing during the boot burst; afterwards the fixed cadence (default 24h). When periodic

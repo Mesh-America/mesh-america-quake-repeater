@@ -31,6 +31,8 @@ struct Manager {
   unsigned cleared = 0;
   std::vector<uint32_t> sent;
   uint32_t advert_mins() const { return minutes; }
+  bool sourceCatalogComplete() const { return true; }
+  unsigned servedCount() const { return 1; }
   void announce() { sent.push_back(clock->now); }
   void clearPendingEgress() { ++cleared; }
 };

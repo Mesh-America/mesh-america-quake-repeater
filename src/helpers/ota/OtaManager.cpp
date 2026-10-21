@@ -181,6 +181,7 @@ void OtaManager::begin(uint32_t my_target_id, OtaSend send, void* ctx) {
   _resume_verify_idx = 0; _resume_invalidated = false;
   _resume_merkle.reset();
   _n_serve = 0; _n_src_obj = 0; _view0.valid = false; _srcv.valid = false;
+  _sources_complete = true; _source_announce_pending = false;
   memset(_src_offered, 0, sizeof(_src_offered));
   memset(_src_advertised, 0, sizeof(_src_advertised));
   _n_src = 0; _n_cat = 0;
@@ -297,6 +298,10 @@ bool OtaManager::remove_source(MotaSource* src) {
 }
 
 void OtaManager::refresh_sources() {
+  uint8_t previous_digest[4];
+  setDigest(previous_digest);
+  const bool was_complete = _sources_complete;
+  bool complete = true;
   clearPendingEgress();
   releaseColdBuffers();
   _n_serve = 0;
@@ -311,7 +316,7 @@ void OtaManager::refresh_sources() {
     for (uint8_t i = 0; i < cnt; i++) {
       if (_n_serve >= OTA_MAX_SERVE) break;
       MotaDesc d;
-      if (!src->describe(i, d)) continue;
+      if (!src->describe(i, d)) { complete = false; continue; }
       if (d.block_count == 0 || (uint64_t)d.block_count * 4 > OTA_PROOFGEN_SCRATCH) continue;
       // A legacy serial descriptor left the geometry byte zero. Inspect its fixed manifest once so it is
       // either proven servable before advertisement or excluded from the registry.
@@ -320,7 +325,7 @@ void OtaManager::refresh_sources() {
         MotaManifest parsed;
         if (!src->read(i, 8, mf, sizeof(mf)) || !mota_parse_manifest(mf, sizeof(mf), parsed) ||
             memcmp(parsed.merkle_root, d.mid, 4) != 0 || parsed.block_count != d.block_count ||
-            parsed.payload_size != d.payload_size) continue;
+            parsed.payload_size != d.payload_size) { complete = false; continue; }
         d.block_size_log2 = parsed.block_size_log2;
       }
       if (d.block_size_log2 >= 32 || (1UL << d.block_size_log2) > OTA_MAX_BLOCK) continue;
@@ -337,6 +342,15 @@ void OtaManager::refresh_sources() {
     }
   }
   _srcv.valid = false;                        // a loaded source view may now be stale; reloads on demand
+  _sources_complete = complete;
+  uint8_t digest[4];
+  setDigest(digest);
+  // Host compression/attachment can finish after the TempRadio boot burst.
+  // Keep one signal until the normal mesh loop can announce the ready set;
+  // unchanged rescans coalesce, and failed metadata never starts a burst.
+  if (!complete || !_n_serve) _source_announce_pending = false;
+  else if (!was_complete || memcmp(previous_digest, digest, 4) != 0)
+    _source_announce_pending = true;
 }
 
 bool OtaManager::sourceStats(const MotaSource* src, uint16_t& offered, uint16_t& advertised) const {
@@ -360,6 +374,8 @@ void OtaManager::clear_sources() {
   memset(_src_offered, 0, sizeof(_src_offered));
   memset(_src_advertised, 0, sizeof(_src_advertised));
   _n_serve = 0;
+  _sources_complete = true;
+  _source_announce_pending = false;
   if (_view0.valid) registerSelfEntry();
 }
 

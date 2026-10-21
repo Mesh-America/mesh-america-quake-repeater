@@ -374,6 +374,12 @@ public:
     return _view0.valid && _view0.m.manifest_start == manifest;
   }
   uint8_t servedCount() const { return _n_serve; }   // total mOTAs we offer (own fw + folder)
+  bool sourceCatalogComplete() const { return _sources_complete; }
+  bool takeSourceReadyAnnouncement() {
+    const bool ready = _source_announce_pending;
+    _source_announce_pending = false;
+    return ready;
+  }
   // Per-source enumeration accounting. `offered` is what the attached host/source reported; `advertised`
   // is what fit in this build's serve registry after validation/deduplication/capacity limits.
   bool sourceStats(const MotaSource* src, uint16_t& offered, uint16_t& advertised) const;
@@ -853,6 +859,8 @@ private:
   bool       _enforce_auto_version = false;     // OtaContext enables this even when EndF/version is unknown
   uint16_t   _checkpoint_blocks = OTA_CHECKPOINT_BLOCKS;  // resume checkpoint cadence (persisted)
   uint16_t   _advert_mins = OTA_ADVERT_INTERVAL_MINS;    // beacon re-advertise cadence, minutes; 0=off (persisted)
+  bool       _sources_complete = true;
+  bool       _source_announce_pending = false;
   uint8_t    _max_hops = OTA_HOP_LIMIT_DEFAULT;          // OTA flood reach in hops; 0=direct only (persisted)
   uint8_t    _fflags = 0;                       // flags of the manifest currently being fetched
   bool       _wire_v2_enabled = true;            // advertise v2 in OTA_REQ while retaining transparent fallback
