@@ -232,7 +232,7 @@ bool rowKey(const char* key, size_t length, const char* family) {
 }
 
 enum class CommandKind : uint8_t {
-  Filter, Row, Advert, Schedule, SecondarySchedule, Radio, RadioStatus, Cross, Setting
+  Filter, Row, Advert, Schedule, SecondarySchedule, Radio, RadioStatus, Cross, Guest, Guests, Setting
 };
 
 struct CommandFamily {
@@ -266,6 +266,8 @@ const CommandFamily* commandFamily(const char* key, size_t length) {
     {"radio2.status", CommandKind::RadioStatus},
     {"radio2.timing", CommandKind::RadioStatus},
     {"radio2.cross", CommandKind::Cross},
+    {"guest", CommandKind::Guest},
+    {"guests", CommandKind::Guests},
     {"flood.channel.data", CommandKind::Setting},
     {"flood.channel.data.hops", CommandKind::Setting},
     {"flood.max", CommandKind::Setting},
@@ -592,6 +594,14 @@ bool FleetCommand::commandAllowed(const char* command) {
     return true;
   }
   if (clear) return false;
+  if (kind == CommandKind::Guest) {
+    return get ? !*arguments : set && (!strcmp(arguments, "on") || !strcmp(arguments, "off"));
+  }
+  if (kind == CommandKind::Guests) {
+    uint32_t page = 0;
+    return get && (!*arguments || (arguments[0] >= '1' && arguments[0] <= '9'
+        && boundedIntegerToken(arguments, strlen(arguments), 65535, page)));
+  }
 
   const bool scheduled_secondary = kind == CommandKind::SecondarySchedule;
   if (kind == CommandKind::Schedule || scheduled_secondary) {

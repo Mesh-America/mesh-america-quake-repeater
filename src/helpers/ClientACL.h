@@ -124,6 +124,7 @@ public:
   void protectExplicitPermissions(bool protect = true) { protect_explicit_permissions = protect; }
   bool save(FILESYSTEM* _fs, bool (*filter)(ClientInfo*)=NULL);
   bool clear();
+  int removeGuestClients();  // transient sessions only; never writes flash
 
   // Authenticate the sender/password first, then call this before allocating
   // or mutating a client.  A true result means any required replay high-water

@@ -7,6 +7,7 @@
 #include <helpers/PowerSavingDiagnostics.h>
 #include <helpers/FloodGroupPlainText.h>
 #include <helpers/FloodRuleExtensions.h>
+#include <helpers/GuestLoginSettings.h>
 #if defined(ENABLE_OTA)
   #include <helpers/ota/OtaContext.h>
 #endif
@@ -381,6 +382,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   RadioActivityWindow _activity;
 #endif
   NodePrefs _prefs;
+  mesh::GuestLoginSettings guest_login;
+  bool handleGuestCommand(const char* command, char* reply, size_t capacity);
   ClientACL  acl;
   CommonCLI _cli;
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)

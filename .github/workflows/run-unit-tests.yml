@@ -673,6 +673,9 @@ jobs:
           python3 -B test/test_client_acl_role.py -v
           python3 -B test/test_client_acl_metadata.py -v
           python3 -B test/test_client_acl_cli.py -v
+          python3 -B test/test_guest_cli.py -v
+          python3 -B test/test_guest_login_settings.py -v
+          python3 -B test/test_repeater_guest_access.py -v
           python3 -B test/test_client_acl_response.py -v
 
       - name: Setup Node for official app compatibility tests

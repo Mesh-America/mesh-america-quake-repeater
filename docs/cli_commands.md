@@ -2384,6 +2384,41 @@ replace radio ACL permissions.
 
 ---
 
+#### Enable or disable repeater guest logins
+
+**Availability:** Repeater firmware. Local administrative consoles and authenticated
+remote admins can use these commands.
+
+```text
+get guest
+set guest on
+set guest off
+```
+
+**Default:** `off`, including when upgrading from firmware without this setting.
+The choice is saved and takes effect without a reboot. `set guest off` also
+removes existing guest sessions immediately. Turning it back on requires guests
+to log in again; admin and assigned ACL access are unaffected.
+
+When enabled, guests must supply the configured `guest.password`. Its default is
+blank, so enabling guests without setting a password permits passwordless guest
+access. A guest can read repeater status and basic telemetry but cannot run
+administrative commands. This setting does not disable ordinary packet forwarding
+or public discovery queries.
+
+For example:
+
+```text
+set guest.password a-private-code
+set guest on
+get guests
+set guest off
+```
+
+Room-server login settings are unchanged.
+
+---
+
 #### View or change this node's guest password
 **Usage:**
 - `get guest.password`
@@ -2395,6 +2430,10 @@ replace radio ACL permissions.
 **Set by build flag:** `ROOM_PASSWORD` (Room Server only)
 
 **Default:** `<blank>`
+
+Repeater guest logins must also be enabled with `set guest on`. Changing this
+password takes effect immediately; use `set guest off` to remove existing guest
+sessions. Setting the password to `off` makes it the literal password `off`.
 
 ---
 
@@ -4276,6 +4315,28 @@ Bare `get acl` keeps the full streamed listing on USB and direct network CLI,
 or via Companion binary command `0x42` where the role supports the command.
 The listing contains public keys and permissions, not passwords or shared
 secrets, and does not change the ACL.
+
+---
+
+#### View repeater guest sessions
+
+**Usage:**
+
+- `get guests` - first page
+- `get guests <page>` - a numbered page, starting at 1
+
+Available on repeaters through local administrative consoles or an authenticated
+remote admin session. Delegated region/filter managers and guest clients cannot
+read this list.
+
+Each page starts with `Guests <page>/<pages> (<total>)` and shows one guest's full
+public key followed by `last=<UTC epoch seconds>`. An empty list returns
+`Guests: empty`. A `last=0` value can occur before the node's clock is set.
+
+These are live RAM entries, separate from the persistent ACL shown by `get acl`.
+They indicate an accepted session, not whether the guest is currently online.
+Entries can move between pages as clients change. A reboot or `set guest off`
+clears them.
 
 ---
 

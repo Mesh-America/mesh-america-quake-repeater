@@ -38,6 +38,7 @@
 #include <helpers/NRF52VoltagePolicy.h>
 #endif
 #include <helpers/ClientACLCLI.h>
+#include <helpers/GuestCLI.h>
 #include <helpers/ClientACLResponse.h>
 #include <helpers/ClockSyncUtils.h>
 #include <helpers/ClientLoginPersistence.h>
@@ -573,8 +574,12 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
   ClientInfo* existing_client =
       acl.getClient(sender.pub_key, PUB_KEY_SIZE);
   const bool admin_password =
-      strcmp((char *)data, _prefs.password) == 0;
-  ClientInfo* client = admin_password ? NULL : existing_client;
+      _prefs.password[0] != 0 && strcmp((char *)data, _prefs.password) == 0;
+  // Only explicitly authorized roles may reconnect without a password.
+  // A cached guest identity must still pass the current guest-login policy.
+  ClientInfo* client = !admin_password && existing_client != NULL
+          && (existing_client->permissions & PERM_ACL_ROLE_MASK) != PERM_ACL_GUEST
+      ? existing_client : NULL;
   uint8_t perms;
   if (client != NULL) {
     // A preauthorized ACL identity is authenticated by the anonymous packet's
@@ -588,7 +593,8 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     }
     if (admin_password) { // valid admin password bypasses ACL (allows upgrade)
       perms = PERM_ACL_ADMIN;
-    } else if (strcmp((char *)data, _prefs.guest_password) == 0) { // check guest password
+    } else if (guest_login.enabled()
+        && strcmp((char *)data, _prefs.guest_password) == 0) {
       perms = PERM_ACL_GUEST;
     } else {
 #if MESH_DEBUG
@@ -764,6 +770,8 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
 int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t *payload, size_t payload_len,
                           size_t reply_capacity) {
   if (sender == NULL || payload_len == 0 || reply_capacity < 4) return 0;
+  if (!guest_login.enabled()
+      && (sender->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) return 0;
   if (reply_capacity > mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY) {
     reply_capacity = mesh::CLIENT_ACL_DIRECT_REPLY_CAPACITY;
   }
@@ -2813,7 +2821,10 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
   }
 #endif
   for (int i = 0; i < acl.getNumClients() && n < MAX_CLIENTS; i++) {
-    if (acl.getClientByIdx(i)->id.isHashMatch(hash)) {
+    const auto* client = acl.getClientByIdx(i);
+    if (!guest_login.enabled()
+        && (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) continue;
+    if (client->id.isHashMatch(hash)) {
       matching_peer_indexes[n++] = i; // store the INDEXES of matching contacts (for subsequent 'peer' methods)
     }
   }
@@ -2913,6 +2924,8 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     return;
   }
   ClientInfo* client = acl.getClientByIdx(i);
+  if (!guest_login.enabled()
+      && (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) return;
 #if defined(WITH_MQTT_NEIGHBORS)
   // A neighbour that IS an ACL client resolves to a normal index above, so a
   // scope-query response from it lands here -- match it against the overlay.
@@ -3440,6 +3453,8 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
   if (i >= 0 && i < acl.getNumClients()) { // get from our known_clients table (sender SHOULD already be known in this context)
     MESH_DEBUG_PRINTLN("PATH to client, path_len=%d", (uint32_t)path_len);
     auto client = acl.getClientByIdx(i);
+    if (!guest_login.enabled()
+        && (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) return false;
 
     // A flood login's reciprocal PATH is direct and has no embedded payload
     // (decoded as the reserved 0x0F extra type). Retain that one independently
@@ -3871,6 +3886,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   mesh::hilStartupTrace("mesh_acl_begin");
   acl.load(_fs, self_id);
+  guest_login.begin(_fs);
+  if (!guest_login.enabled()) acl.removeGuestClients();
   mesh::hilStartupTrace("mesh_acl_ready");
   // TODO: key_store.begin();
   region_map.load(_fs);
@@ -5446,6 +5463,27 @@ void MyMesh::dumpLogFile() {
 #else
 void MyMesh::dumpLogFile() { }
 #endif
+
+bool MyMesh::handleGuestCommand(const char* command, char* reply, size_t capacity) {
+  const bool get = strncmp(command, "get guest", 9) == 0;
+  const bool set = strncmp(command, "set guest", 9) == 0;
+  if ((!get && !set) || (command[9] && command[9] != ' ' && command[9] != '\t')) return false;
+  const char* value = command + 9;
+  while (*value == ' ' || *value == '\t') ++value;
+  if ((get && *value) || (set && strcmp(value, "on") && strcmp(value, "off"))) {
+    snprintf(reply, capacity, "Err - use get guest or set guest on|off");
+  } else if (get) {
+    snprintf(reply, capacity, "> %s%s", guest_login.enabled() ? "on" : "off",
+        guest_login.healthy() ? "" : " (settings unavailable)");
+  } else if (!guest_login.setEnabled(strcmp(value, "on") == 0)) {
+    if (!guest_login.enabled()) acl.removeGuestClients();
+    snprintf(reply, capacity, "Err - guest setting save unconfirmed; reboot may differ");
+  } else {
+    if (!guest_login.enabled()) acl.removeGuestClients();
+    snprintf(reply, capacity, "OK - guest %s", guest_login.enabled() ? "on" : "off");
+  }
+  return true;
+}
 
 void MyMesh::printAclSerial() {
 #if MESH_USB_CONSOLE_COOPERATIVE
@@ -12538,6 +12576,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       return;
     }
   }
+  if (handleGuestCommand(command, reply, 157)
+      || mesh::cli::handleGuestsGet(acl, command, reply, 157)) return;
   _cli.handleCommand(sender_timestamp, command, reply);
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
   if (_command_output && _local_cli_output.owns(*_command_output)) reply[0] = 0;
@@ -12557,6 +12597,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       return;
     }
   }
+
+  if (handleGuestCommand(command, reply, 157)
+      || mesh::cli::handleGuestsGet(acl, command, reply, 157)) return;
 
   if (strncmp(command, "backup prv.key", 14) == 0
       && (command[14] == 0 || command[14] == ' ')) {

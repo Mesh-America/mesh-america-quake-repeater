@@ -303,6 +303,8 @@ Reboot or changing enrollment discards the partial transfers.
 | UTC clock | `clock`, `clock sync`, `time <epoch-seconds>` |
 | Profile diagnostics | `get radio2.status`, `get radio2.timing` |
 | Crossover | `get radio2.cross`, `set radio2.cross <auto|on|off>` |
+| Repeater guest login | `get guest`, `set guest on|off` |
+| Repeater guest sessions | `get guests [page]` |
 | Filter rules | `get/set/del flood.filter[.n]`, `flood.rule[.n]` |
 | Path blacklist | `get/set/del flood.filter.blacklist[.n]` |
 | Channel moderation | `get/set/del flood.moderation[.n]` |
@@ -313,6 +315,10 @@ Reboot or changing enrollment discards the partial transfers.
 Each role still checks whether it supports the requested setting. Immediate
 primary radio changes, identity export, passwords, ACL edits, filesystem operations, firmware
 installation, reboot, and unrestricted CLI are outside fleet capability.
+
+Repeater guest login defaults to off. `set guest off` saves that choice and
+clears existing guest sessions immediately. Enabling it uses the existing
+guest password; this switch does not change any password or assigned ACL role.
 
 `set radio2 mediamesh` saves 911.150 MHz, 250 kHz, SF7, CR 4/5, `rxtx`,
 with automatic scan-aware preamble. `mediamesh-range` uses 125 kHz instead.

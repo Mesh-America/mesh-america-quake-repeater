@@ -895,6 +895,22 @@ bool ClientACL::clear() {
   return true;
 }
 
+int ClientACL::removeGuestClients() {
+  int retained = 0;
+  const int previous_count = num_clients;
+  for (int i = 0; i < previous_count; ++i) {
+    if ((clients[i].permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) continue;
+    if (retained != i) clients[retained] = clients[i];
+    ++retained;
+  }
+  const int removed = previous_count - retained;
+  if (removed != 0) {
+    memset(clients + retained, 0, sizeof(ClientInfo) * size_t(removed));
+    num_clients = retained;
+  }
+  return removed;
+}
+
 ClientInfo* ClientACL::getClient(const uint8_t* pubkey, int key_len) {
   if (pubkey == NULL || key_len <= 0 || key_len > PUB_KEY_SIZE) return NULL;
   for (int i = 0; i < num_clients; i++) {

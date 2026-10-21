@@ -7,6 +7,8 @@
 
 #define REQ_TYPE_GET_ACCESS_LIST 0x05
 #define SERVER_RESPONSE_DELAY 300
+#define PERM_ACL_ROLE_MASK 7
+#define PERM_ACL_GUEST 0
 
 namespace mesh {
 struct Identity {
@@ -71,6 +73,7 @@ struct Clock : mesh::RTCClock {
 class MyMesh : public mesh::Mesh {
 public:
   uint8_t reply_data[MAX_PACKET_PAYLOAD] = {};
+    struct { bool enabled() const { return false; } } guest_login;
   ACL acl;
   ClientInfo sender;
   Clock clock;

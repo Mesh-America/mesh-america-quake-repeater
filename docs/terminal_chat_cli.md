@@ -108,6 +108,7 @@ the corresponding feature:
 | `get wifi.pwd` | Stored WiFi password on WiFi builds |
 | `get mqttN.password`, `get mqttN.token` | Stored credentials for MQTT slot N |
 | `get acl`, `log` | Infrastructure ACL or captured packet log; these stores do not exist on Companion |
+| `get guest`, `set guest on`, `set guest off`, `get guests [page]` | Repeater guest-login control and current guest sessions |
 
 The command text is the same for direct connections. A binary Companion app
 can send `0x42` (`CMD_RUN_CLI_COMMAND`) followed by the ASCII command, without
@@ -634,6 +635,19 @@ LOGIN -> Hilltop Repeater accepted (ACL permissions 0x03, server v13)
 cmd ver
 cmd get radio
 ```
+
+Repeater guest logins default to off. An admin can use `cmd set guest on` to
+enable them or `cmd set guest off` to disable them and remove current guest
+sessions immediately. These settings are saved and need no reboot. When enabled,
+the configured `guest.password` applies; its blank default permits passwordless
+guest access. Admin and assigned ACL access are unaffected. Room-server login
+settings are unchanged.
+
+Use `cmd get guests` or `cmd get guests 2` from an admin session to inspect the
+repeater's guest entries. Each page shows one full public key and its last
+activity time in UTC epoch seconds. Guests are held in RAM, so this is a list of
+accepted sessions rather than proof that a device is currently reachable. They
+are cleared by a reboot or `set guest off` and remain separate from `get acl`.
 
 The exact commands and permissions depend on the target firmware. `cmd` does
 not run a command on the local Companion; it sends the text over LoRa to the

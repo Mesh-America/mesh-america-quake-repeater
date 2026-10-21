@@ -23,6 +23,12 @@ struct ClientInfo {
   bool isFilterMgr() const { return (permissions & FilterManager) != 0; }
 };
 
+// Guest authorization has its own real-handler suite. These unrelated
+// dispatch targets must not consume any of the Morse commands below.
+namespace mesh { namespace cli {
+bool handleGuestsGet(int, const char*, char*, size_t) { return false; }
+} }
+
 @MANAGER_HELPERS@
 
 struct CommonCLI {
@@ -39,6 +45,8 @@ struct CommonCLI {
 
 struct LegacyPortable {
   CommonCLI _cli;
+  int acl = 0;
+  bool handleGuestCommand(const char*, char*, size_t) { return false; }
   void dispatch(ClientInfo* sender, uint32_t sender_timestamp,
                 const char* command, char* reply) {
     @PORTABLE_HANDOFF@
