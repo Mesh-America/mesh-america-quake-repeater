@@ -3690,9 +3690,11 @@ bool MyMesh::handleTrafficRoutingCommand(const char* command, char* reply, size_
       return true;
     }
   }
-  const uint8_t mask = mesh::companion::trafficTransmitMask(policy, _radio->profiles());
+  const uint8_t effective = mesh::companion::trafficPolicy(parsed.kind,
+      _prefs.tx_media, _prefs.tx_ssh, _radio->profiles());
+  const uint8_t mask = mesh::companion::trafficTransmitMask(effective, _radio->profiles());
   snprintf(reply, reply_size, "%s tx.%s %s; active=%s%s", parsed.set ? "OK -" : ">", kind,
-      mesh::radioTxPolicyName(policy), policy == mesh::RADIO_TX_AUTO ? "channel/global"
+      mesh::radioTxPolicyName(policy), effective == mesh::RADIO_TX_AUTO ? "channel/global"
           : mask ? mesh::radioTxPolicyName(mask) : "off",
       (policy == mesh::RADIO_TX_SECONDARY || policy == mesh::RADIO_TX_BOTH) && !(mask & 2)
           ? " (radio2 unavailable for TX)" : "");
@@ -3703,7 +3705,7 @@ bool MyMesh::sendClientGroupData(mesh::GroupChannel& channel, uint8_t* path, uin
                                 uint16_t data_type, const uint8_t* data, int data_len) {
   if (data_len < 0 || data_len > MAX_GROUP_DATA_LENGTH || (data_len && !data)) return false;
   const uint8_t policy = mesh::companion::trafficPolicy(mesh::companion::groupTrafficKind(data_type),
-      _prefs.tx_media, _prefs.tx_ssh);
+      _prefs.tx_media, _prefs.tx_ssh, _radio->profiles());
   if (policy == mesh::RADIO_TX_AUTO) return sendGroupData(channel, path, path_len, data_type, data, data_len);
   // Override only this datagram, not the saved channel, PSK, alias or text route.
   mesh::GroupChannel routed = channel;
@@ -3716,7 +3718,7 @@ bool MyMesh::sendClientRawData(const uint8_t* data, size_t data_len, uint8_t* pa
   auto pkt = createRawData(data, data_len);
   if (!pkt) return false;
   const uint8_t policy = mesh::companion::trafficPolicy(mesh::companion::rawTrafficKind(data, data_len),
-      _prefs.tx_media, _prefs.tx_ssh);
+      _prefs.tx_media, _prefs.tx_ssh, _radio->profiles());
   if (policy != mesh::RADIO_TX_AUTO) pkt->tx_radio = policy;
   // sendDirect owns/releases the packet on either success or failure.
   return sendDirect(pkt, path, path_len);
@@ -7601,6 +7603,19 @@ void MyMesh::handleCmdFrame(size_t len) {
     if (pkt) {
       uint8_t priority = cmd_frame[1];
       if (tryParsePacket(pkt, &cmd_frame[2], len - 2)) {
+        if (pkt->getPayloadType() == PAYLOAD_TYPE_RAW_CUSTOM) {
+          const uint8_t policy = mesh::companion::trafficPolicy(
+              mesh::companion::rawTrafficKind(pkt->payload, pkt->payload_len),
+              _prefs.tx_media, _prefs.tx_ssh, _radio->profiles());
+          if (policy != mesh::RADIO_TX_AUTO) {
+            if (!mesh::companion::trafficTransmitMask(policy, _radio->profiles())) {
+              releasePacket(pkt);
+              writeErrFrame(ERR_CODE_BAD_STATE);
+              return;
+            }
+            pkt->tx_radio = policy;
+          }
+        }
         sendPacket(pkt, priority, 0);
         writeOKFrame();
       } else {

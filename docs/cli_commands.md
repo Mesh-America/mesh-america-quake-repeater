@@ -7,6 +7,12 @@
 See [two LoRa profiles](radio_profiles.md) for `radio2`, `tempradio2`, scheduling,
 RX-only mode, cross-transmission policy, and optional radio preambles.
 
+For a saved MediaMesh second profile, use `set radio2 mediamesh`
+(911.150 MHz, 250 kHz, SF7, CR 4/5, `rxtx`, automatic preamble), or
+`set radio2 mediamesh-range` for 125 kHz. These leave the primary profile
+and crossing policy unchanged. Both radio2 and `radio2.cross` default to `off`.
+See [MediaMesh presets](radio_profiles.md#mediamesh-presets).
+
 For supported Full Companions, see [Meshtext channel chat](radio_profiles.md#meshtext-channel-chat)
 for `mt-` channels and the explicit `send mt.nodeinfo <channel slot>` command.
 Chat remains plain text. A separate GPS-free NodeInfo is sent after the first
@@ -995,6 +1001,9 @@ set tx.ssh auto|radio|radio2|both|off
 Choose one value after `set`. Both default to `auto` and are saved across
 reboot. Explicit choices override a channel route for the matching application
 data only; they do not change ordinary text, adverts or contact ACKs.
+`tx.media auto` selects only the active `rxtx` MeshCore second profile,
+including `tempradio2`, when available. Otherwise, it uses the normal
+channel/global route. `tx.ssh auto` keeps that normal route.
 `radio2` requires an active `rxtx` MeshCore profile and never falls back to
 the primary. `both` uses the available profiles; `off` blocks sending only.
 Queries include the effective `active=` selection and warn if radio2 is

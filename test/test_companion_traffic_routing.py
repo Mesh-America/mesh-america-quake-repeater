@@ -116,6 +116,27 @@ int main() {
  assert(trafficTransmitMask(RADIO_TX_AUTO,&profiles)==0);
  for (uint8_t policy=0;policy<=4;++policy)
    assert(trafficTransmitMask(policy,nullptr)==((policy==RADIO_TX_AUTO || policy==RADIO_TX_PRIMARY || policy==RADIO_TX_BOTH) ? 1 : 0));
+
+ // AUTO media selects only radio2 independently of crossover, temporary
+ // isolation, and the channel route. Other traffic retains normal AUTO.
+ for (auto cross : {RadioCrossMode::Off,RadioCrossMode::Auto,RadioCrossMode::On})
+ for (bool primary_temporary : {false,true}) for (bool secondary_temporary : {false,true})
+ for (auto mode : {RadioProfileMode::Off,RadioProfileMode::Rx,RadioProfileMode::RxTx})
+ for (auto protocol : {RadioProfileProtocol::MeshCore,RadioProfileProtocol::Meshtext,RadioProfileProtocol::Ethernet}) {
+   profiles=RadioProfiles();
+   profiles.cross=cross; profiles.primary_temporary=primary_temporary;
+   profiles.secondary_temporary=secondary_temporary;
+   profiles.secondary.mode=mode; profiles.secondary.params.protocol=protocol;
+   const bool media_secondary=mode==RadioProfileMode::RxTx && protocol==RadioProfileProtocol::MeshCore;
+   for (uint8_t media=0;media<=4;++media) for (uint8_t ssh_policy=0;ssh_policy<=4;++ssh_policy) {
+     const auto effective=trafficPolicy(TrafficKind::Media,media,ssh_policy,&profiles);
+     assert(effective==(media==RADIO_TX_AUTO && media_secondary ? uint8_t(RADIO_TX_SECONDARY) : media));
+     if (media==RADIO_TX_AUTO && media_secondary) assert(trafficTransmitMask(effective,&profiles)==2);
+     assert(trafficPolicy(TrafficKind::Ssh,media,ssh_policy,&profiles)==ssh_policy);
+     assert(trafficPolicy(TrafficKind::Other,media,ssh_policy,&profiles)==RADIO_TX_AUTO);
+     assert(trafficPolicy(TrafficKind::Media,media,ssh_policy,nullptr)==media);
+   }
+ }
 }
 '''
 
@@ -185,7 +206,7 @@ int main() {
  for (const char* name : {"media","ssh"}) {
    char text[64];
    snprintf(text,sizeof(text),"get tx.%s",name); cmd(text);
-   assert(strstr(reply,"auto") && strstr(reply,"active=channel/global"));
+   assert(strstr(reply,"auto") && strstr(reply,!strcmp(name,"media") ? "active=radio2" : "active=channel/global"));
    for (uint8_t policy=0;policy<=4;++policy) {
      snprintf(text,sizeof(text),"set tx.%s %s",name,radioTxPolicyName(policy)); cmd(text);
      assert(!strncmp(reply,"OK",2));
@@ -228,13 +249,13 @@ int main() {
  for (uint8_t policy=0;policy<=4;++policy) {
    node._prefs.tx_media=policy; node._prefs.tx_ssh=RADIO_TX_BOTH;
    bool result=node.sendClientGroupData(channel,path,2,0x5643,media,sizeof(media));
-   const uint8_t expected=policy==RADIO_TX_AUTO ? original.tx_radio : policy;
+   const uint8_t expected=policy==RADIO_TX_AUTO ? uint8_t(RADIO_TX_SECONDARY) : policy;
    assert(result==(expected!=RADIO_TX_OFF));
    if (result) { assert(node.last_policy==expected && node.last_type==0x5643 && node.last_path_len==2); }
    assert(!memcmp(&channel,&original,sizeof(channel)));
    result=node.sendClientRawData(media,sizeof(media),path,2);
    assert(result==(policy!=RADIO_TX_OFF));
-   if (result) assert(node.last_policy==policy && node.last_data==std::vector<uint8_t>(media,media+sizeof(media)));
+   if (result) assert(node.last_policy==expected && node.last_data==std::vector<uint8_t>(media,media+sizeof(media)));
  }
  node._prefs.tx_media=RADIO_TX_OFF;
  for (uint8_t policy=0;policy<=4;++policy) {
@@ -253,6 +274,40 @@ int main() {
  assert(node.last_policy==original.tx_radio && node.last_type==0x5654);
  assert(node.sendClientRawData(unknown,sizeof(unknown),path,2));
  assert(node.last_policy==RADIO_TX_AUTO);
+
+ // Existing apps need no new command or saved preference: AUTO media wins
+ // over channel/global routing while radio2 supports MeshCore transmission.
+ node._prefs.tx_media=RADIO_TX_AUTO;
+ for (auto cross : {RadioCrossMode::Off,RadioCrossMode::Auto,RadioCrossMode::On})
+ for (uint8_t channel_policy=0;channel_policy<=4;++channel_policy) {
+   node.radio.config.cross=cross;
+   channel.tx_radio=channel_policy;
+   const auto before=channel;
+   assert(node.sendClientGroupData(channel,path,2,0x5643,media,sizeof(media)));
+   assert(node.last_policy==RADIO_TX_SECONDARY);
+   assert(!memcmp(&channel,&before,sizeof(channel)));
+   assert(node.sendClientRawData(media,sizeof(media),path,2));
+   assert(node.last_policy==RADIO_TX_SECONDARY);
+ }
+ assert(node._prefs.tx_media==RADIO_TX_AUTO);
+ channel=original;
+ // Unavailable/receive-only/foreign profiles preserve the existing AUTO
+ // fallback. Group media follows its channel; raw media follows global AUTO.
+ for (auto mode : {RadioProfileMode::Off,RadioProfileMode::Rx,RadioProfileMode::RxTx})
+ for (auto protocol : {RadioProfileProtocol::MeshCore,RadioProfileProtocol::Meshtext,RadioProfileProtocol::Ethernet}) {
+   if (mode==RadioProfileMode::RxTx && protocol==RadioProfileProtocol::MeshCore) continue;
+   node.radio.config.secondary.mode=mode;
+   node.radio.config.secondary.params.protocol=protocol;
+   channel.tx_radio=RADIO_TX_PRIMARY;
+   cmd("get tx.media"); assert(strstr(reply,"auto") && strstr(reply,"active=channel/global"));
+   assert(node.sendClientGroupData(channel,path,2,0x5643,media,sizeof(media)));
+   assert(node.last_policy==RADIO_TX_PRIMARY);
+   assert(node.sendClientRawData(media,sizeof(media),path,2));
+   assert(node.last_policy==RADIO_TX_AUTO);
+ }
+ node.radio.config.secondary.mode=RadioProfileMode::RxTx;
+ node.radio.config.secondary.params.protocol=RadioProfileProtocol::MeshCore;
+ channel=original;
  node._prefs.tx_media=RADIO_TX_SECONDARY;
  node.radio.config.secondary.mode=RadioProfileMode::Off;
  assert(!node.sendClientRawData(media,sizeof(media),path,2));
@@ -355,6 +410,100 @@ int main() {
 '''
 
 
+RAW_PACKET_HARNESS = r'''
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <initializer_list>
+#include <vector>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#include <Packet.h>
+#pragma GCC diagnostic pop
+#include <helpers/CompanionTrafficRouting.h>
+@CONSTANTS@
+namespace mesh {
+@PACKET_CONSTRUCTOR@
+}
+struct TestRadio {
+ mesh::RadioProfiles config;
+ mesh::RadioProfiles* profiles() { return &config; }
+ uint8_t receiveProfile() const { return 0; }
+ uint32_t receiveProfileGeneration() const { return 1; }
+};
+class MyMesh {
+public:
+ TestRadio radio;
+ TestRadio* _radio=&radio;
+ struct { uint8_t tx_media=mesh::RADIO_TX_AUTO,tx_ssh=mesh::RADIO_TX_AUTO; } _prefs;
+ mesh::Packet packet;
+ unsigned ok=0,errors=0,sends=0,releases=0;
+ uint8_t error=0,last_policy=255;
+ bool allocate=true;
+ mesh::Packet* obtainNewPacket() { return allocate ? &packet : nullptr; }
+ void releasePacket(mesh::Packet* value) { assert(value==&packet); ++releases; }
+ void writeOKFrame() { ++ok; }
+ void writeErrFrame(uint8_t value) { ++errors; error=value; }
+ bool tryParsePacket(mesh::Packet*,const uint8_t*,int);
+ bool sendPacket(mesh::Packet* value,uint8_t priority,uint32_t delay) {
+   assert(value==&packet && priority==17 && !delay);
+   ++sends; last_policy=value->tx_radio; return true;
+ }
+ void onFrame(uint8_t* cmd_frame,size_t len) {
+   @RAW_CLAUSE@
+   else writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+ }
+};
+using namespace mesh;
+@PARSE_PACKET@
+
+int main() {
+ using namespace mesh;
+ using namespace mesh::companion;
+ const std::vector<uint8_t> payloads[] = {
+   {0x56,0,1,2,3,0,99}, {0x57,0,1,2,3,0,99,42},
+   {0x72,0,0,0,0,0,0,0,0,0,0,0,0}, {'S','S','H',1,42},
+   {0x56}, {0x12,0x34,0x56}, {}
+ };
+ for (uint8_t type : {PAYLOAD_TYPE_RAW_CUSTOM,PAYLOAD_TYPE_GRP_DATA,PAYLOAD_TYPE_ACK})
+ for (auto mode : {RadioProfileMode::Off,RadioProfileMode::Rx,RadioProfileMode::RxTx})
+ for (auto protocol : {RadioProfileProtocol::MeshCore,RadioProfileProtocol::Meshtext,RadioProfileProtocol::Ethernet})
+ for (auto cross : {RadioCrossMode::Off,RadioCrossMode::Auto,RadioCrossMode::On})
+ for (uint8_t policy=RADIO_TX_AUTO;policy<=RADIO_TX_OFF;++policy)
+ for (const auto& data : payloads) {
+   MyMesh node;
+   node.radio.config.secondary.mode=mode;
+   node.radio.config.secondary.params.protocol=protocol;
+   node.radio.config.cross=cross;
+   node._prefs.tx_media=node._prefs.tx_ssh=policy;
+   std::vector<uint8_t> frame={CMD_SEND_RAW_PACKET,17,
+       static_cast<uint8_t>((type << PH_TYPE_SHIFT)|ROUTE_TYPE_DIRECT),0};
+   frame.insert(frame.end(),data.begin(),data.end());
+   const auto original=frame;
+   node.onFrame(frame.data(),frame.size());
+   const auto kind=type==PAYLOAD_TYPE_RAW_CUSTOM ? rawTrafficKind(data.data(),data.size()) : TrafficKind::Other;
+   const auto effective=trafficPolicy(kind,policy,policy,&node.radio.config);
+   const bool blocked=effective!=RADIO_TX_AUTO && !trafficTransmitMask(effective,&node.radio.config);
+   assert(frame==original);
+   if (blocked) {
+     assert(node.errors==1 && node.error==ERR_CODE_BAD_STATE && !node.ok && !node.sends && node.releases==1);
+   } else {
+     assert(node.ok==1 && !node.errors && node.sends==1 && !node.releases);
+     assert(node.last_policy==effective);
+     assert(node.packet.payload_len==data.size());
+     if (!data.empty()) assert(!memcmp(node.packet.payload,data.data(),data.size()));
+   }
+ }
+ // Parsing and allocation errors still release exactly once or not at all.
+ uint8_t invalid[]={CMD_SEND_RAW_PACKET,17,0xff,0};
+ MyMesh bad; bad.onFrame(invalid,sizeof(invalid));
+ assert(bad.error==ERR_CODE_ILLEGAL_ARG && bad.releases==1 && !bad.sends && !bad.ok);
+ MyMesh full; full.allocate=false; full.onFrame(invalid,sizeof(invalid));
+ assert(full.error==ERR_CODE_TABLE_FULL && !full.releases && !full.sends && !full.ok);
+}
+'''
+
+
 class CompanionTrafficRoutingTest(unittest.TestCase):
     def compile_and_run(self, source):
         with tempfile.TemporaryDirectory() as directory:
@@ -412,6 +561,24 @@ class CompanionTrafficRoutingTest(unittest.TestCase):
         ))
         self.compile_and_run(RAW_FRAME_HARNESS.replace('@CONSTANTS@', constants)
                              .replace('@PACKET_METHODS@', packet_methods)
+                             .replace('@RAW_CLAUSE@', clause))
+
+    def test_fully_encoded_raw_media_packets_use_routing(self):
+        source = (ROOT / 'examples/companion_radio/MyMesh.cpp').read_text()
+        packet = (ROOT / 'src/Packet.cpp').read_text()
+        dispatcher = (ROOT / 'src/Dispatcher.cpp').read_text()
+        clause = method(source, '} else if (cmd_frame[0] == CMD_SEND_RAW_PACKET')
+        clause = clause.removeprefix('} else ')
+        names = ('CMD_SEND_RAW_PACKET', 'ERR_CODE_UNSUPPORTED_CMD',
+                 'ERR_CODE_ILLEGAL_ARG', 'ERR_CODE_BAD_STATE', 'ERR_CODE_TABLE_FULL')
+        constants = '\n'.join(re.search(
+            r'^#define\s+' + name + r'\s+\d+.*$', source, re.MULTILINE).group(0)
+            for name in names)
+        parser = method(dispatcher, 'bool Dispatcher::tryParsePacket(')
+        parser = parser.replace('Dispatcher::tryParsePacket(', 'MyMesh::tryParsePacket(')
+        self.compile_and_run(RAW_PACKET_HARNESS.replace('@CONSTANTS@', constants)
+                             .replace('@PACKET_CONSTRUCTOR@', method(packet, 'Packet::Packet('))
+                             .replace('@PARSE_PACKET@', parser)
                              .replace('@RAW_CLAUSE@', clause))
 
 

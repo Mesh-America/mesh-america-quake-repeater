@@ -42,9 +42,17 @@ inline TrafficKind rawTrafficKind(const uint8_t* data, size_t length) {
   return TrafficKind::Other;
 }
 
-inline uint8_t trafficPolicy(TrafficKind kind, uint8_t media, uint8_t ssh) {
-  return kind == TrafficKind::Media ? media
+inline uint8_t trafficPolicy(TrafficKind kind, uint8_t media, uint8_t ssh,
+                             const RadioProfiles* profiles = nullptr) {
+  const uint8_t policy = kind == TrafficKind::Media ? media
       : kind == TrafficKind::Ssh ? ssh : static_cast<uint8_t>(RADIO_TX_AUTO);
+  // Keep media off the main mesh whenever the second MeshCore profile can TX.
+  // An explicit radio2 choice also pins queued packets if radio2 is disabled
+  // before they reach Dispatcher, rather than falling back onto the main mesh.
+  return kind == TrafficKind::Media && policy == RADIO_TX_AUTO && profiles
+          && profiles->canTransmit(1)
+          && profiles->params(1).protocol == RadioProfileProtocol::MeshCore
+      ? static_cast<uint8_t>(RADIO_TX_SECONDARY) : policy;
 }
 
 inline uint8_t trafficTransmitMask(uint8_t policy, const RadioProfiles* profiles) {

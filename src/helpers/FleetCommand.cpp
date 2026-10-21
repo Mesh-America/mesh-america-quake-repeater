@@ -1,4 +1,5 @@
 #include "FleetCommand.h"
+#include "RadioProfilePresets.h"
 #include <SHA256.h>
 #include <math.h>
 #include <string.h>
@@ -598,7 +599,8 @@ bool FleetCommand::commandAllowed(const char* command) {
         : (get || del) && scheduleSelector(arguments, scheduled_secondary);
   }
   if (kind == CommandKind::Radio) {
-    return get ? !*arguments : set && radioTuple(arguments, key_length == 10);
+    return get ? !*arguments : set && ((key_length == 6
+        && cli::radio2PresetTuple(arguments)) || radioTuple(arguments, key_length == 10));
   }
   if (kind == CommandKind::RadioStatus) return get && !*arguments;
   if (kind == CommandKind::Cross) {

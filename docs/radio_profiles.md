@@ -8,6 +8,9 @@
 settings. It is useful for listening to two networks, or keeping your usual
 channel available during a LoRa firmware update.
 
+The second profile and `radio2.cross` both default to `off`. Saved settings
+survive firmware updates; selecting a profile does not change the crossing policy.
+
 There are **at most two active profiles**. `tempradio` temporarily replaces
 `radio`; `tempradio2` temporarily replaces `radio2`. These are time-shared receive
 windows, not simultaneous receivers. Receiving or transmitting a packet on one
@@ -32,6 +35,40 @@ get radio2.status
 
 The tuple is **frequency in MHz, bandwidth in kHz, spreading factor, coding-rate
 denominator, mode, optional preamble in symbols**. `5` means coding rate 4/5.
+
+### MediaMesh presets
+
+Enable the saved MediaMesh profile with one command:
+
+```text
+set radio2 mediamesh
+```
+
+This sets **911.150 MHz, 250 kHz, SF7, CR 4/5, `rxtx`, automatic preamble**.
+For the same profile at **125 kHz**, use:
+
+```text
+set radio2 mediamesh-range
+```
+
+The RF settings match the presets documented by
+[MeshCore Open TAK](https://github.com/jade-on-mesh/meshcore-open-tak/blob/main/documentation/media-mesh.md)
+and [Wadamesh TAK](https://github.com/jade-on-mesh/wadamesh-tak/blob/main/MEDIAMESH.md).
+Nodes exchanging media need matching radio settings.
+
+Both leave the primary profile and `radio2.cross` unchanged. The center is
+625 kHz above a 910.525 MHz primary. Automatic preamble remains scan-aware;
+neither preset fixes it at 32 symbols. See [preamble](#preamble) for the
+switching measurement and recommendations.
+
+On Companions, the default `tx.media auto` sends recognized binary photo/voice
+traffic only on an active `rxtx` MeshCore second profile, including `tempradio2`.
+Apps do not need to set `tx.media`. Ordinary traffic keeps its existing route.
+If the second profile cannot transmit MeshCore, media uses the normal
+channel/global route; `set tx.media radio2` instead requires radio2 with no
+primary fallback. See [application TX routing](#companion-media-and-ssh-tx-routing).
+
+### Channel spacing
 
 When setting a saved, temporary or scheduled second profile, the response warns
 if its occupied bandwidth overlaps the primary channel or comes within **6 kHz
@@ -67,6 +104,7 @@ For transmission on both permanent profiles:
 
 ```text
 set radio2 910.5,500,8,5,rxtx
+set radio2.cross on
 ```
 
 The same encoded message is queued separately for each allowed transmit profile.
@@ -283,17 +321,27 @@ set tx.ssh radio
 
 Both accept `auto|radio|radio2|both|off` and default to `auto`. An explicit
 application route overrides the channel's TX choice for that datagram only;
-`auto` preserves the channel/global behavior. `radio2` never falls back to
-`radio`, and must be an enabled `rxtx` **MeshCore** profile. `both` uses the
+`tx.media auto` chooses only radio2 whenever its active profile permits
+`rxtx` **MeshCore** transmission, including an active `tempradio2`. This
+overrides the channel/global route for recognized media even when an app
+has never configured `tx.media`. Otherwise, media uses the normal channel/global
+route. `tx.ssh auto` always preserves that normal route.
+
+The explicit `radio2` choice never falls back to `radio`, and requires an enabled
+`rxtx` **MeshCore** profile. `both` uses the
 profiles available for MeshCore transmission. `off` blocks transmission, not
 reception. Getters show the saved choice and current `active=` mask; `auto`
-shows `active=channel/global`, because the effective route depends on the
+shows `active=radio2` while media automatically selects radio2, and
+`active=channel/global` otherwise, because the effective route then depends on the
 destination channel (or global rules for raw data). Settings
 survive reboot; a failed save returns an error and keeps the previous choice.
 Already queued packets retain their original route.
 
 `tx.media` recognizes Open TAK photo/voice channel data type `0x5643`, raw
 clip packets `0x56`/`0x57`, and well-formed binary fetch requests `0x72`.
+This covers `CMD_SEND_CHANNEL_DATA` and `CMD_SEND_RAW_DATA`, plus visible
+raw media in `CMD_SEND_RAW_PACKET`. Fully encoded encrypted group packets
+submitted through `CMD_SEND_RAW_PACKET` retain their existing route.
 Text announcements (`VE3:`, `VM1:`, `VI1:`), text fetch requests (`VR3:`),
 ordinary chat, contact ACKs, adverts, OTA, and unrelated raw data keep their
 normal routing. The format is defined in
@@ -313,9 +361,11 @@ adopt the contract. Other channel data types do not acquire an SSH route
 merely because their contents start with `SSH`. Raw packets still require
 a direct path, including zero-hop; this does not enable raw flooding.
 
-For a media-only side channel, configure `radio2`/`tempradio2` in `rxtx`,
-set `radio2.cross off`, then set `tx.media radio2`. Ordinary text can stay on
-the primary profile without routing every raw application onto radio2.
+For a media-only side channel, use `set radio2 mediamesh` with the default
+`radio2.cross off` and `tx.media auto`. Ordinary text can stay on the primary
+profile without routing every raw application onto radio2. Choose
+`set tx.media radio2` if media must fail rather than use the primary when
+radio2 is off, RX-only, or owned by another protocol.
 
 ## ESP32 Companion Ethernet over LoRa (KISS)
 
@@ -821,6 +871,7 @@ setting is preserved across firmware updates and reboots.
 
 These are the global rules used by Companion targets set to `auto`; an explicit
 contact/channel choice above overrides crossing for its own outbound packets.
+Recognized media uses the separate `tx.media auto` selection described above.
 Ordinary crossing respects `rx`. The infrastructure-only `tx.reply ... force`
 override above permits locally generated replies on that profile.
 With crossing allowed, a packet received there may still be forwarded on the

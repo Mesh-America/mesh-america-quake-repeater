@@ -4,6 +4,7 @@
 #include "CarrierWaveCLI.h"
 #endif
 #include "RadioProfileCommandUtils.h"
+#include "RadioProfilePresets.h"
 #include "FilePresence.h"
 #include "PersistentStoreFormat.h"
 #include "radiolib/RXPowerSaving.h"
@@ -1005,6 +1006,10 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
     return true;
   }
   if (verb != Set) { cli::formatError(reply, capacity, "invalid radio2 command"); return true; }
+  if (base) {
+    const char* preset = cli::radio2PresetTuple(args);
+    if (preset) args = preset;
+  }
   char local[140];
   if (strlen(args) >= sizeof(local)) { cli::formatError(reply, capacity, "params too long"); return true; }
   strcpy(local, args);

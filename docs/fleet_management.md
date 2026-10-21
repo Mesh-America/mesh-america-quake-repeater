@@ -92,6 +92,7 @@ Examples use private channel index `3`:
 
 ```text
 fleet send 3 get radio2
+fleet send 3 set radio2 mediamesh
 fleet send 3 set tempradio2 910.5,500,8,5,rxtx,120
 fleet send 3 set radio2.cross auto
 fleet send 3 set flood.rule.4 type=grp_txt hops=6+ drop
@@ -295,7 +296,7 @@ Reboot or changing enrollment discards the partial transfers.
 
 | Control | Fleet commands |
 | --- | --- |
-| Saved second profile | `get radio2`, `set radio2 <tuple|off>` |
+| Saved second profile | `get radio2`, `set radio2 <tuple|mediamesh|mediamesh-range|off>` |
 | Temporary second profile | `get tempradio2`, `set tempradio2 <tuple|off>` |
 | Scheduled primary profile | `get/set/del radioat`, `get/set/del tempradioat` |
 | Scheduled second profile | `get/set/del radioat2`, `get/set/del tempradioat2` |
@@ -312,6 +313,11 @@ Reboot or changing enrollment discards the partial transfers.
 Each role still checks whether it supports the requested setting. Immediate
 primary radio changes, identity export, passwords, ACL edits, filesystem operations, firmware
 installation, reboot, and unrestricted CLI are outside fleet capability.
+
+`set radio2 mediamesh` saves 911.150 MHz, 250 kHz, SF7, CR 4/5, `rxtx`,
+with automatic scan-aware preamble. `mediamesh-range` uses 125 kHz instead.
+These presets preserve the primary profile and crossing policy; new
+configurations default to radio2 off and `radio2.cross off`.
 
 ## Schedule radio changes and set clocks
 

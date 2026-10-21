@@ -502,6 +502,52 @@ static void spectrumOverlap() {
   assert(roundtrips == 1000);
 }
 
+static void mediaMeshPresets() {
+  for (bool infrastructure : {false, true}) {
+    for (bool range : {false, true}) {
+      Fixture f(infrastructure);
+      const auto primary = f.radio.p.primary;
+      assert(!f.radio.p.enabled() && f.radio.p.cross == mesh::RadioCrossMode::Off);
+      const char* command = range ? "set radio2 mediamesh-range" : "set radio2 mediamesh";
+      f.cmd(command);
+      assert(!f.radio.p.enabled()); // Same delayed apply as a saved tuple.
+      f.advance(2000);
+      const auto config = f.radio.p.secondary;
+      assert(config.mode == mesh::RadioProfileMode::RxTx);
+      assert(fabsf(config.params.freq - 911.150f) < 0.0001f
+          && config.params.bw == (range ? 125 : 250));
+      assert(config.params.sf == 7 && config.params.cr == 5 && !config.params.preamble);
+      assert(config.params.protocol == mesh::RadioProfileProtocol::MeshCore);
+      assert(f.radio.p.primary == primary && f.radio.p.cross == mesh::RadioCrossMode::Off);
+      assert(!f.fs.files["/radio_profiles"][14] && !f.fs.files["/radio_profiles"][15]);
+      Radio reboot; mesh::RadioProfileCLI restored;
+      restored.begin(&f.fs, &reboot, &f.clock, infrastructure);
+      assert(reboot.p.secondary.params == config.params);
+      assert(reboot.p.secondary.mode == mesh::RadioProfileMode::RxTx);
+      assert(reboot.p.cross == mesh::RadioCrossMode::Off);
+      // A preset replaces an old preamble override but retains operator crossover.
+      f.cmd("set radio2.cross on");
+      f.cmd("set radio2 912.5,500,8,5,rxtx,80"); f.advance(2000);
+      f.cmd(command); f.advance(2000);
+      assert(!f.radio.p.secondary.params.preamble && f.radio.p.cross == mesh::RadioCrossMode::On);
+      const auto committed = f.fs.files["/radio_profiles"];
+      f.fs.fail_write = true;
+      f.cmd(range ? "set radio2 mediamesh" : "set radio2 mediamesh-range", false);
+      assert(f.radio.p.secondary.params == config.params
+          && f.fs.files["/radio_profiles"] == committed);
+    }
+  }
+  Fixture invalid;
+  for (const char* command : {"set radio2 mediamesh-extra", "set radio2 mediamesh,32",
+                              "set tempradio2 mediamesh", "set radioat2 mediamesh"}) {
+    invalid.cmd(command, false);
+    assert(!invalid.radio.p.enabled() && invalid.fs.files.empty());
+  }
+  invalid.radio.minimum_frequency = 912;
+  invalid.cmd("set radio2 mediamesh", false); // The hardware validator still applies.
+  assert(!invalid.radio.p.enabled() && invalid.fs.files.empty());
+}
+
 int main(int argc, char** argv) {
   static_assert(uint8_t(mesh::RadioCrossMode::Auto)==0 && uint8_t(mesh::RadioCrossMode::On)==1
       && uint8_t(mesh::RadioCrossMode::Off)==2, "saved crossover encoding must remain compatible");
@@ -547,6 +593,7 @@ int main(int argc, char** argv) {
     else if (!strcmp(argv[1], "storage_isolation")) storageBackoffDoesNotDelayTemporaryWindows();
     else if (!strcmp(argv[1], "relative_schedule")) relativeSchedules();
     else if (!strcmp(argv[1], "spectrum_overlap")) spectrumOverlap();
+    else if (!strcmp(argv[1], "mediamesh")) mediaMeshPresets();
     else return 2;
     return 0;
   }

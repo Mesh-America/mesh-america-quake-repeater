@@ -448,6 +448,17 @@ class FleetCommandCryptoTests(unittest.TestCase):
                 with self.subTest(command=command):
                     self.assertEqual(self.decode(envelope(command)), "reject")
 
+    def test_mediamesh_presets_have_cross_language_real_signatures(self):
+        for preset in ["mediamesh", "mediamesh-range"]:
+            command = "set radio2 " + preset
+            expected = envelope(command)
+            self.assertEqual(self.run_tool("encode", CHANNEL.hex(), "all", NOW, NOW + 120, command),
+                             expected.hex())
+            self.assertEqual(self.decode(expected), f"{NOW}\n{NOW + 120}\n{command}")
+        for command in ["set radio2 mediamesh-extra", "set radio2 mediamesh,32",
+                        "set tempradio2 mediamesh", "get radio2 mediamesh"]:
+            self.assertEqual(self.decode(envelope(command)), "reject")
+
     def test_scheduled_radio_commands_have_cross_language_real_signatures(self):
         for command in [
                 "set radioat 910.5,500,5,5,+1,auto",
