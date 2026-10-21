@@ -96,6 +96,9 @@ A failed/corrupt settings file blocks configuration saves and automatic replay.
 These actions acknowledge the request, not completion of charging, resistance
 measurement or entry into ship mode. Read the corresponding status afterward.
 
+See the [bench acceptance report](test-results/solarxiao_power_2026-10-21.md)
+for exact firmware identity, measured readouts and test limits.
+
 ## Conversion defaults and carrier revisions
 
 The supplied [Standard schematic](https://github.com/wehooper4/Meshtastic-Hardware/blob/main/XaioSeries/SolarXaio/MPPT/Standard/Schematic_SolarXaio_MPPT_2025-10-23.pdf)
