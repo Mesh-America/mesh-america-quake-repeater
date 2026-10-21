@@ -938,11 +938,16 @@ static __attribute__((noinline)) bool handle_control_command(
 #if defined(OTA_SEEDER_ONLY)
     (void)bl;
     snprintf(reply + n, 160 - n, " | source-only; local install disabled");
-#elif defined(OTA_TOWER_AUTO_STORE)
+#elif defined(OTA_TOWER_AUTO_STORE) || defined(OTA_RAK_AUTO_STORE)
+    // These adaptive stores choose their backend at runtime. Keep the actual
+    // application capability fields ahead of storage text so remote preflight
+    // can verify them even when a diagnostic tail reaches the reply limit.
+    n += snprintf(reply + n, 160 - n, " abi=%u codecs=0x%x", bl.apply_abi, bl.codec_mask);
+#if defined(OTA_TOWER_AUTO_STORE)
     snprintf(reply + n, 160 - n, " | store:%s | bootloader:%s",
              c.fetch_store.usesExternal() ? "SD" : c.fetch_store.usesInternal() ? "internal" : "unsafe",
              c.fetch_store.compatible() ? "apply OK" : "unsupported");
-#elif defined(OTA_RAK_AUTO_STORE)
+#else
 #if defined(OTA_RAK15002_SD_STORE)
     if (c.fetch_store.usesSd()) {
       snprintf(reply + n, 160 - n, " | SD store | bootloader: %s",
@@ -963,6 +968,7 @@ static __attribute__((noinline)) bool handle_control_command(
       snprintf(reply + n, 160 - n, " | storage unsafe: %s",
                c.fetch_store.selectionReason());
     }
+#endif
 #elif defined(OTA_QSPI_STORE)
     uint32_t qspi_capacity = c.fetch_store.capacity();
     n += snprintf(reply + n, 160 - n, " | QSPI store:%s%uK",

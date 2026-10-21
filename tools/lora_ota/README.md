@@ -7,6 +7,24 @@ command or the Ethernet-only KISS endpoint. See the [mOTA tooling](../mota/READM
 for container creation and the [OTA protocol](../../docs/ota_protocol.md) for the
 wire format.
 
+## Companion runner capability checks
+
+Some deployed adaptive RAK3401, RAK4631 and MeshTower receiver images omit the
+bootloader ABI and codec mask from `ota self`. For application updates,
+`lora_ota.py` can verify these known diagnostic formats with an additional
+read-only `ota bootloader status` query. Hardware, selected storage and the
+installed bootloader's board/name/target identity, CRC status and storage
+profile must agree. That status contract guarantees codec subset `0x5` (full
+image and in-place delta); storage `caps` flags are not interpreted as codecs.
+Unsupported, incomplete or conflicting replies still stop preflight.
+
+This compatibility path applies only to application updates. Bootloader
+packages require directly reported ABI and codec-mask fields. New adaptive
+firmware reports those actual fields early in `ota self`, before storage
+diagnostics, so they survive the remote reply limit and need no fallback.
+If required fields cannot be verified, update the application to expose them
+before retrying.
+
 ## KISS direct source
 
 The default invocation is **read-only probing; no RF transmission**. Serving

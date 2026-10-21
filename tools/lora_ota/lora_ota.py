@@ -290,6 +290,17 @@ class TargetInfo:
 
 
 @dataclass(frozen=True)
+class BootloaderStatus:
+    board_id: int
+    target_id: int
+    device_name: str
+    hw_id: str
+    crc32: int
+    apply_abi: int
+    storage_flags: int
+
+
+@dataclass(frozen=True)
 class RadioSettings:
     frequency: float
     bandwidth: float
@@ -2805,14 +2816,13 @@ def bind_contact_selectors(controller: Controller, args: argparse.Namespace) -> 
     args.source_contact_value = source
 
 
-def query_bootloader_target(
-    controller: Controller, target: TargetInfo,
-) -> TargetInfo:
-    reply = controller.remote_command(target.name, "ota bootloader status")
+def parse_bootloader_status(reply: str) -> BootloaderStatus:
+    """Validate the installed bootloader's complete status and identity."""
     match = re.fullmatch(
         r"BL board=([0-9A-Fa-f]{8}) target=([0-9A-Fa-f]{8}) name=(\S+) "
         r"crc=([0-9A-Fa-f]{8}) abi=(\d+) caps=([0-9A-Fa-f]{2}) "
-        r"\| staged:(?:ready|none) mid=(?:-|[0-9A-Fa-f]{8}) hash=(?:-|[0-9A-Fa-f]{16})",
+        r"\| staged:(?:none mid=- hash=-|"
+        r"ready mid=[0-9A-Fa-f]{8} hash=[0-9A-Fa-f]{16})",
         reply.strip(),
     )
     if match is None:
@@ -2820,7 +2830,7 @@ def query_bootloader_target(
             f"destination cannot stage a bootloader update: {reply}; "
             "requires exact-board ABI-3 self-update bootloader and capable application"
         )
-    board, target_id, name, _crc, abi, caps = match.groups()
+    board, target_id, name, crc, abi, caps = match.groups()
     library = bootloader_library()
     try:
         hw_id = (
@@ -2832,12 +2842,98 @@ def query_bootloader_target(
         raise OtaError(f"invalid destination bootloader identity: {exc}") from exc
     if derived_target != int(target_id, 16):
         raise OtaError("destination bootloader board/name does not match its target ID")
-    if int(abi) < 3 or int(abi) != target.bootloader_abi:
+    return BootloaderStatus(
+        int(board, 16), derived_target, name, hw_id, int(crc, 16),
+        int(abi), int(caps, 16),
+    )
+
+
+def query_bootloader_target(
+    controller: Controller, target: TargetInfo,
+) -> TargetInfo:
+    live = parse_bootloader_status(
+        controller.remote_command(target.name, "ota bootloader status")
+    )
+    if live.apply_abi < 3 or live.apply_abi != target.bootloader_abi:
         raise OtaError("destination reports inconsistent or unsupported bootloader ABI")
     return replace(
-        target, boot_target_id=derived_target, boot_hw_id=hw_id,
-        boot_storage=int(caps, 16),
+        target, boot_target_id=live.target_id, boot_hw_id=live.hw_id,
+        boot_storage=live.storage_flags,
     )
+
+
+def query_adaptive_bootloader_caps(
+    controller: Controller, target_name: str, status: str, self_status: str,
+    hw_id: str | None,
+) -> tuple[int, int] | None:
+    """Recover only capabilities guaranteed by known adaptive firmware.
+
+    Adaptive RAK/Tower `ota self` formats were introduced in 72afac9a4 and
+    30fe0d617. Both descend from 3d78d9c84 (required FULL|INPLACE mask 0x5)
+    and fd98bc90f (status refuses invalid self-update capabilities). Thus a
+    successful strict `ota bootloader status` attests that subset, independently
+    of its `caps` field, which describes storage and is NOT a codec mask.
+    Generic legacy diagnostics predate that contract and must still fail.
+    """
+    prefix = (
+        r"self body=[1-9][0-9]* image=[1-9][0-9]* "
+        r"base_hash=[0-9A-Fa-f]{16} \| maxblk:(?:1024|2048) \| "
+    )
+    storage = None
+    if hw_id in ("RAK_3401", "RAK4631"):
+        if re.fullmatch(
+            prefix + r"internal store:[1-9][0-9]*K \| bootloader: delta apply OK",
+            self_status.strip(),
+        ):
+            storage = "internal"
+        elif re.fullmatch(
+            prefix + r"QSPI store:[1-9][0-9]*K \| bootloader: QSPI apply OK",
+            self_status.strip(),
+        ):
+            storage = "QSPI"
+        elif hw_id == "RAK4631" and re.fullmatch(
+            prefix + r"SD store \| bootloader: authenticated SD apply OK",
+            self_status.strip(),
+        ):
+            storage = "SD"
+        name = "3401" if hw_id == "RAK_3401" else "4631"
+        expected_board = 0x239A0029
+        identities = {f"{name}_DFU": 0x0A, f"{name}_AUTO_DFU": 0x1E}
+    elif hw_id == "Heltec_tower_v2":
+        shape = re.fullmatch(
+            prefix + r"store:(SD|internal) \| bootloader:apply OK",
+            self_status.strip(),
+        )
+        if shape:
+            storage = shape.group(1)
+        expected_board = 0x239A0071
+        identities = {"TOWER_V2_OTA": 0x09}
+    else:
+        return None
+    if storage is None:
+        return None
+    if (
+        not status.startswith("OTA | ")
+        or re.findall(r"\bhw=([^ |]+)", status) != [hw_id]
+        or re.findall(r"\bbl:([^ |]+)", status) != [storage]
+    ):
+        raise OtaError("adaptive destination reports conflicting hardware/storage diagnostics")
+    live = parse_bootloader_status(
+        controller.remote_command(target_name, "ota bootloader status", retry=False)
+    )
+    if (
+        live.board_id != expected_board
+        or identities.get(live.device_name) != live.storage_flags
+        or not 3 <= live.apply_abi < 0xFFFF
+        or live.crc32 in (0, 0xFFFFFFFF)
+    ):
+        raise OtaError("adaptive destination bootloader identity, ABI or storage profile is unverified")
+    print(
+        "[bootloader] adaptive diagnostics verified through installed "
+        f"bootloader status: ABI {live.apply_abi}, guaranteed codec subset 0x5 "
+        "(storage flags are independent)"
+    )
+    return live.apply_abi, 0x5
 
 
 def query_target(
@@ -2929,12 +3025,29 @@ def query_target(
         bootloader_abi = int(caps_match.group(1))
         bootloader_codecs = int(caps_match.group(2), 16)
     elif platform == "nrf52":
-        version = bootloader_version or "unknown version"
-        raise OtaError(
-            f"destination nRF52 bootloader {version} does not report a "
-            "compatible mOTA ABI and codec mask in `ota self`; install the "
-            "exact-board OTAFIX bootloader first"
-        )
+        if getattr(args, "package_kind", "application") != "application":
+            raise OtaError(
+                "bootloader packages require a directly reported mOTA ABI and "
+                "codec mask; upgrade the application to expose complete "
+                "bootloader diagnostics before retrying"
+            )
+        try:
+            adaptive_caps = query_adaptive_bootloader_caps(
+                controller, args.target, status, self_status, hw_id,
+            )
+        except OtaError as exc:
+            raise OtaError(
+                "cannot verify the destination's mOTA ABI and codec mask from "
+                f"adaptive diagnostics: {exc}; upgrade the application to expose "
+                "complete bootloader diagnostics before retrying"
+            ) from exc
+        if adaptive_caps is None:
+            raise OtaError(
+                "destination nRF52 application does not report a compatible "
+                "mOTA ABI and codec mask in `ota self`; upgrade the application "
+                "to expose complete bootloader diagnostics before retrying"
+            )
+        bootloader_abi, bootloader_codecs = adaptive_caps
     current_version = None
     current_version_source = None
     try:
