@@ -14,6 +14,7 @@ nrf_adapter_usage() {
       '  --artifact APPLICATION.zip --sha256 HEX --allow-write' \
       'Only an inventory-matched application-only DFU ZIP is accepted.' \
       'The sibling verified_nrf_flash.py helper and installed dependencies are required.' \
+      'Newer flashers also require their matching bundled tools/ serial-touch helpers.' \
       'Successful DFU still requires a separate application-level boot/version check.'
 }
 
@@ -103,6 +104,82 @@ for nrf_adapter_function in preferred_flash_serial_port save_selected_serial_por
     nrf52_usb_path_stem run_nrf52_dfu_package_buttonless; do
     declare -F "$nrf_adapter_function" >/dev/null || nrf_adapter_die "Flasher lacks $nrf_adapter_function."
 done
+
+# Newer flashers use a pinned Python helper for the single 1200-baud touch.
+# Their normal startup initializes paths and hashes, but sourcing startup here
+# would also install traps and run unrelated device/service operations. Read
+# only the two literal hash declarations and freeze their bundled helpers.
+# Never let a definitions-only adapter fall back to downloading dependencies.
+if declare -F resolve_meshcore_serial_touch_tool >/dev/null; then
+    nrf_adapter_bundled_hashes=$(python3 - "$nrf_adapter_flasher" "$nrf_adapter_state_dir" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+flasher, state = map(Path, sys.argv[1:])
+text = flasher.read_text(encoding="utf-8")
+helpers = (
+    ("meshcore_serial_touch.py", "MESHCORE_SERIAL_TOUCH_TOOL_SHA256"),
+    ("meshcore_usb_reset.py", "MESHCORE_USB_RESET_TOOL_SHA256"),
+)
+verified = []
+for name, variable in helpers:
+    declarations = re.findall(r"^" + variable + r"=.*$", text, re.MULTILINE)
+    if len(declarations) != 1:
+        raise SystemExit("Expected one literal helper hash declaration: " + variable)
+    match = re.fullmatch(variable + r'="([0-9a-fA-F]{64})"', declarations[0])
+    if match is None:
+        raise SystemExit("Unsupported helper hash declaration: " + variable)
+    expected = match[1].lower()
+    source = flasher.parent / "tools" / name
+    try:
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ValueError("Helper is not a regular file")
+            content = handle.read(1024 * 1024 + 1)
+    except (OSError, ValueError) as exc:
+        raise SystemExit("Bundled helper unavailable: " + name) from exc
+    if not content or len(content) > 1024 * 1024:
+        raise SystemExit("Bundled helper is empty or oversized: " + name)
+    if hashlib.sha256(content.replace(b"\r\n", b"\n")).hexdigest() != expected:
+        raise SystemExit("Bundled helper hash mismatch: " + name)
+    verified.append((name, content, expected))
+
+directory = state / "tools"
+directory.mkdir(mode=0o700)
+for name, content, expected in verified:
+    descriptor = os.open(directory / name,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(content)
+print(" ".join(expected for _, _, expected in verified))
+PY
+    ) || nrf_adapter_die 'Bundled serial-touch helpers failed verification; no DFU touch was requested.'
+    read -r MESHCORE_SERIAL_TOUCH_TOOL_SHA256 MESHCORE_USB_RESET_TOOL_SHA256 \
+        <<< "$nrf_adapter_bundled_hashes"
+    PWD_SCRIPT=$nrf_adapter_state_dir
+    FIRMWARE_ROOT=$nrf_adapter_state_dir
+    MESHCORE_SERIAL_TOUCH_TOOL_URL=''
+    MESHCORE_USB_RESET_TOOL_URL=''
+    nrf_adapter_local_helper() {
+        local helper="$nrf_adapter_state_dir/tools/$1" expected=$2 observed
+        [[ -f "$helper" && ! -L "$helper" && -r "$helper" ]] || return 1
+        observed=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read().replace(b"\r\n", b"\n")).hexdigest())' "$helper") || return 1
+        [[ "$observed" == "$expected" ]] || return 1
+        printf '%s\n' "$helper"
+    }
+    resolve_meshcore_usb_reset_tool() {
+        nrf_adapter_local_helper meshcore_usb_reset.py "$MESHCORE_USB_RESET_TOOL_SHA256"
+    }
+    resolve_meshcore_serial_touch_tool() {
+        resolve_meshcore_usb_reset_tool >/dev/null || return 1
+        nrf_adapter_local_helper meshcore_serial_touch.py "$MESHCORE_SERIAL_TOUCH_TOOL_SHA256"
+    }
+fi
 
 # Stage a private, hash-verified snapshot, so the build output may not change
 # beneath a DFU operation. Keep the original board-qualified artifact basename.

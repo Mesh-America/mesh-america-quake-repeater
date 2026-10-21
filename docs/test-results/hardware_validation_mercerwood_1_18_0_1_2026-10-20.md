@@ -4,12 +4,19 @@
 
 # Mercerwood bench qualification: 12 active radios, 20 October 2026
 
+**21 October follow-up:** the user lifted MeshPocket's bootloader-work
+exclusion. Its fresh Full Companion USB, BLE, contact persistence/sync and
+three two-way LoRa rounds passed in the
+[MeshPocket qualification](mesh_pocket_qualification_1_18_0_1_2026-10-21.md).
+The exclusion and source-bound measurements below describe the earlier
+20 October campaign; the other twelve boards were not retested for this update.
+
 Status: **PASS**. 12/12 active boards have complete
 accepted bench coverage; 0 have a latest required failure and
 0 remain incomplete. The original inventory has thirteen
 radios: eleven Full Companions and two Full OTA repeaters. The active target
-is twelve radios: ten Companions and two repeaters. MeshPocket is
-operator-excluded from all further testing for separate bootloader work.
+is twelve radios: ten Companions and two repeaters. MeshPocket was
+operator-excluded at this campaign's close for separate bootloader work.
 
 All thirteen 0865 candidate builds passed. Companion updates target
 `08650f644b680a5dfaacb95142e3cef8529da9d2`; the table records each board's
@@ -51,8 +58,8 @@ records each axis's actual tested source, artifact, measurement interval,
 conditions and evidence digest. V3, Tag and T096 retain valid ABF USB/BLE/RF measurements; V4 retains ABF RF.
 Pocket's earlier ABF and 0865 results appear only in its excluded historical
 record; its current installed application and bootloader are unverified
-outside this report for operator bootloader work, and no further Pocket tests
-are planned. ABF is
+outside this report for operator bootloader work. The later Pocket tests are
+recorded separately in the follow-up linked above. ABF is
 `abf7ba5d5c3958580d52d6954d816c08a035a552`. For active boards, changed applications, current identities and new 64/32
 contact trials are separate measurements.
 Reviewed source assurance `577aee5162c7553f58bf13b550560da50bbf73860ab37febe3674a5ae73c01aa`

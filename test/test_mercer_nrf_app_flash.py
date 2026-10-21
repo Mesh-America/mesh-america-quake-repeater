@@ -81,8 +81,14 @@ class MercerNrfAppShellTest(unittest.TestCase):
         self.inventory_file.write_text(json.dumps(inventory()), encoding="utf-8")
         self.startup_marker = self.work / "STARTUP-WAS-SOURCED"
         self.dfu_marker = self.work / "MOCK-DFU-ONLY"
+        self.resolver_marker = self.work / "REMOTE-RESOLVER-WAS-CALLED"
+        self.helper_marker = self.work / "LOCAL-HELPER-PATHS"
+        self.port_check_marker = self.work / "SERIAL-PREFLIGHT-WAS-CALLED"
         self.env = dict(os.environ, SIM_STARTUP_MARKER=str(self.startup_marker),
-                        SIM_DFU_MARKER=str(self.dfu_marker))
+                        SIM_DFU_MARKER=str(self.dfu_marker),
+                        SIM_RESOLVER_MARKER=str(self.resolver_marker),
+                        SIM_HELPER_MARKER=str(self.helper_marker),
+                        SIM_PORT_CHECK_MARKER=str(self.port_check_marker))
 
         def executable(name, text):
             path = self.bin / name
@@ -128,6 +134,47 @@ class MercerNrfAppShellTest(unittest.TestCase):
         for index in range(100):
             text += f"unused_mock_function_{index}() {{\n    return 0\n}}\n"
         self.flasher.write_text(text, encoding="utf-8")
+
+    def newer_flasher(self):
+        """Model the bundled-helper contract added by meshfirmware 41a21fa.
+
+        The real helper entry points are never executed. Resolver stubs would
+        mark an unwanted dependency fetch if the adapter did not replace them.
+        """
+        directory = self.work / "tools"
+        directory.mkdir()
+        helpers = {
+            "meshcore_serial_touch.py": b"# SIMULATED TOUCH ONLY\r\n",
+            "meshcore_usb_reset.py": b"# SIMULATED IDENTITY ONLY\n",
+        }
+        declarations = ""
+        for name, content in helpers.items():
+            (directory / name).write_bytes(content)
+            variable = ("MESHCORE_SERIAL_TOUCH_TOOL_SHA256" if "serial_touch" in name
+                        else "MESHCORE_USB_RESET_TOOL_SHA256")
+            digest = hashlib.sha256(content.replace(b"\r\n", b"\n")).hexdigest()
+            declarations += f'{variable}="{digest}"\n'
+        text = self.flasher.read_text(encoding="utf-8") + declarations
+        for name in ("resolve_meshcore_serial_touch_tool", "resolve_meshcore_usb_reset_tool"):
+            text += (f"{name}() {{\n"
+                     '    printf \'UNEXPECTED DOWNLOAD\\n\' > "$SIM_RESOLVER_MARKER"\n'
+                     "    return 89\n}\n")
+        text += (
+            "preferred_flash_serial_port() {\n"
+            '    printf \'PREFLIGHT\\n\' > "$SIM_PORT_CHECK_MARKER"\n'
+            '    printf \'%s\\n\' "$1"\n}\n'
+            "run_nrf52_dfu_package_buttonless() {\n"
+            '    [[ "$PWD_SCRIPT" == "$FIRMWARE_ROOT" ]] || return 90\n'
+            '    [[ -z "$MESHCORE_SERIAL_TOUCH_TOOL_URL" && -z "$MESHCORE_USB_RESET_TOOL_URL" ]] || return 91\n'
+            '    local touch identity\n'
+            '    touch=$(resolve_meshcore_serial_touch_tool) || return 92\n'
+            '    identity=$(resolve_meshcore_usb_reset_tool) || return 92\n'
+            '    printf \'%s\\n%s\\n\' "$touch" "$identity" > "$SIM_HELPER_MARKER"\n'
+            '    printf \'%s|%s|%s|%s\\n\' "$1" "$2" "$3" "$4" > "$SIM_DFU_MARKER"\n'
+            "}\n"
+        )
+        self.flasher.write_text(text, encoding="utf-8")
+        return helpers
 
     def invoke(self, overrides=None, *, consent=True):
         arguments = {
@@ -180,6 +227,68 @@ class MercerNrfAppShellTest(unittest.TestCase):
         self.assertNotEqual(Path(call[0]), self.package)
         self.assertEqual(Path(call[0]).name, self.package.name)
         self.assertIn("Application-only DFU completed", result.stdout)
+
+    def test_new_flasher_uses_only_verified_private_bundled_helpers(self):
+        helpers = self.newer_flasher()
+        # Ambient values cannot select different helper bytes or locations.
+        self.env.update(PWD_SCRIPT="/unreviewed", FIRMWARE_ROOT="/unreviewed",
+                        MESHCORE_SERIAL_TOUCH_TOOL_SHA256="0" * 64,
+                        MESHCORE_USB_RESET_TOOL_SHA256="0" * 64)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.dfu_marker.exists())
+        self.assertFalse(self.resolver_marker.exists(), "a remote-capable resolver was called")
+        paths = [Path(value) for value in self.helper_marker.read_text().splitlines()]
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(paths[0].parent, paths[1].parent)
+        for path in paths:
+            self.assertEqual(path.parent.name, "tools")
+            self.assertTrue(path.parent.parent.name.startswith(".mcfirmware-nrf-app."))
+            self.assertNotEqual(path, self.work / "tools" / path.name)
+            self.assertEqual(path.read_bytes(), helpers[path.name])
+            self.assertEqual(path.stat().st_mode & 0o777, 0o400)
+
+    def test_missing_bundled_helper_fails_before_serial_preflight(self):
+        self.newer_flasher()
+        (self.work / "tools/meshcore_usb_reset.py").unlink()
+        self.assert_refused(self.invoke(), "Bundled helper unavailable")
+        self.assertFalse(self.port_check_marker.exists())
+        self.assertFalse(self.resolver_marker.exists())
+
+    def test_mismatched_bundled_helper_fails_before_serial_preflight(self):
+        self.newer_flasher()
+        (self.work / "tools/meshcore_serial_touch.py").write_bytes(b"UNREVIEWED HELPER")
+        self.assert_refused(self.invoke(), "Bundled helper hash mismatch")
+        self.assertFalse(self.port_check_marker.exists())
+        self.assertFalse(self.resolver_marker.exists())
+
+    def test_symlink_bundled_helper_fails_before_serial_preflight(self):
+        self.newer_flasher()
+        source = self.work / "tools/meshcore_serial_touch.py"
+        source.rename(self.work / "external-helper.py")
+        source.symlink_to(self.work / "external-helper.py")
+        self.assert_refused(self.invoke(), "Bundled helper unavailable")
+        self.assertFalse(self.port_check_marker.exists())
+
+    def test_helper_hash_declaration_is_data_and_must_be_unique(self):
+        self.newer_flasher()
+        original = self.flasher.read_text(encoding="utf-8")
+        for declaration, reason in (
+            ('MESHCORE_USB_RESET_TOOL_SHA256="' + "0" * 64 + '"\n',
+             "Expected one literal helper hash declaration"),
+            ('MESHCORE_SERIAL_TOUCH_TOOL_SHA256="$(touch $SIM_STARTUP_MARKER)"\n',
+             "Unsupported helper hash declaration"),
+        ):
+            with self.subTest(declaration=declaration):
+                if declaration.startswith("MESHCORE_SERIAL_TOUCH"):
+                    text = "\n".join(line for line in original.splitlines()
+                                     if not line.startswith("MESHCORE_SERIAL_TOUCH_TOOL_SHA256=")) + "\n"
+                else:
+                    text = original
+                self.flasher.write_text(text + declaration, encoding="utf-8")
+                self.assert_refused(self.invoke(), reason)
+                self.assertFalse(self.port_check_marker.exists())
+                self.assertFalse(self.resolver_marker.exists())
 
 
 if __name__ == "__main__":
