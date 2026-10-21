@@ -1,7 +1,9 @@
 #include "SolarXiaoPower.h"
 #if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
 #include "SolarXiaoPowerCore.h"
+#include "SolarXiaoCarrier.h"
 #include <helpers/CheckedSettingsFile.h>
+#include <helpers/FilePresence.h>
 #include <Wire.h>
 #include <math.h>
 
@@ -55,21 +57,68 @@ public:
   }
 };
 constexpr const char* CarrierStore::path;
+class SelectionStore : public Store {
+public:
+  FILESYSTEM* fs=nullptr;
+  static constexpr const char* path="/solar_board";
+  bool available() const override { return fs!=nullptr; }
+  bool exists() const override {
+    bool present=false;
+    // Unknown metadata must force a complete checked read, never a default.
+    return fs && (!mesh::filePresence(fs,path,present) || present);
+  }
+  bool load(uint8_t* data,size_t size) override {
+    return storage::readFixedSettingsFile(fs,path,data,size);
+  }
+  bool save(const uint8_t* data,size_t size) override {
+    return storage::writeCheckedSettingsFile(fs,path,data,size)
+        == AtomicFileWriter::Outcome::Committed;
+  }
+};
+constexpr const char* SelectionStore::path;
+MainBoard* main_board=nullptr;
+bool history_available=false;
 CarrierBus transport;
 CarrierStore persistence;
+SelectionStore selection_store;
+CarrierSelection selection(selection_store);
 Controller controller(transport,persistence);
 }
 
-void beginSettings(FILESYSTEM* fs) {
+void beginSettings(MainBoard& board,FILESYSTEM* fs,bool telemetry_history_available) {
   const volatile char* marker=meshcore_capability_solarxiao_power;
   (void)*marker;
+  main_board=&board;
+  history_available=telemetry_history_available;
+  selection_store.fs=fs;
+  selection.begin();
   persistence.fs=fs; controller.begin();
 }
-void service() { controller.service(millis()); }
+void service() { if (selection.nativeAllowed()) controller.service(millis()); }
 bool handleCommand(const char* command,char* reply,size_t capacity,bool local) {
+  float battery=NAN,temperature=NAN;
+  if (main_board && command && (!strcmp(command,"get solar readings") || !strcmp(command,"get solar battery"))) {
+    battery=main_board->getBattMilliVolts()/1000.0f;
+    temperature=main_board->getMCUTemperature();
+  }
+  const bool native_before=selection.nativeAllowed();
+  if (selection.handle(command,reply,capacity,battery,temperature,history_available)) {
+    if (!native_before && selection.nativeAllowed()) controller.reload();
+    return true;
+  }
+  if (!command || !reply || !capacity) return false;
+  const bool mppt=(!strncmp(command,"get mppt",8) && (!command[8] || command[8]==' '))
+      || !strncmp(command,"set mppt ",9) || !strncmp(command,"mppt ",5);
+  if (mppt && !selection.nativeAllowed()) {
+    snprintf(reply,capacity,selection.isAdvanced()
+        ? "Err - BQ24650 Advanced has no digital charger/INA interface; use get solar readings"
+        : "Err - carrier selection unconfirmed; set solar.board advanced|mppt");
+    return true;
+  }
   return controller.handle(command,reply,capacity,local);
 }
 void addTelemetry(CayenneLPP& lpp) {
+  if (!selection.nativeAllowed()) return;
   Snapshot s; controller.snapshot(s);
   if (s.monitor) {
     lpp.addVoltage(2,s.battery_v); lpp.addCurrent(2,s.battery_a); lpp.addPower(2,s.battery_w);
@@ -89,12 +138,13 @@ void addTelemetry(CayenneLPP& lpp) {
   for (unsigned i=0;i<3;++i) lpp.addGenericSensor(11+i,s.alerts[i]);
 }
 uint8_t voltageChannels(uint8_t* channels,uint8_t capacity) {
+  if (!selection.nativeAllowed()) return 0;
   const uint8_t count=capacity<4 ? capacity : 4;
   for (uint8_t i=0;channels && i<count;++i) channels[i]=2+i;
   return count;
 }
 uint8_t queryVoltages(SensorManager::VoltageSensorReading* readings,uint8_t capacity) {
-  if (!readings || !capacity) return 0;
+  if (!selection.nativeAllowed() || !readings || !capacity) return 0;
   Snapshot s; controller.snapshot(s);
   const float volts[]={s.battery_v,s.vin_v,s.vout_v,s.charger_vbat_v};
   const uint8_t count=capacity<4 ? capacity : 4;

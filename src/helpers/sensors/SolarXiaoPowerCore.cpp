@@ -303,6 +303,11 @@ bool Controller::identify(uint16_t& identity) {
   if (cells) last_cells=cells;
   return true;
 }
+void Controller::reload() {
+  started=false;
+  begin();
+  next_service=0;
+}
 bool Controller::verifyWritableIdentity(char* reply,size_t capacity) {
   uint16_t identity;
   if (!identify(identity)) {snprintf(reply,capacity,"Err - charger unavailable; power SOLAR/VIN"); return false;}
@@ -523,7 +528,7 @@ bool Controller::action(const char* args,bool local,char* reply,size_t capacity)
     return true;
   }
   if (!strcmp(args,"reload")) {
-    started=false; begin(); next_service=0;
+    reload();
     snprintf(reply,capacity,storage_healthy?"OK - saved settings loaded; apply on service":"Err - saved settings invalid/unavailable"); return true;
   }
   if (!strcmp(args,"forget")) {

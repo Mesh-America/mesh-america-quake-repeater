@@ -7,7 +7,7 @@
 namespace mesh { namespace solar {
 // Stable carrier channels 2..13 precede optional environmental sensors.
 constexpr uint8_t FIRST_OPTIONAL_CHANNEL = 14;
-void beginSettings(FILESYSTEM* fs);
+void beginSettings(MainBoard& board, FILESYSTEM* fs, bool telemetry_history_available);
 void service();
 bool handleCommand(const char* command, char* reply, size_t capacity, bool local);
 void addTelemetry(CayenneLPP& telemetry);

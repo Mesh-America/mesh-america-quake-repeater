@@ -215,7 +215,7 @@ void setup() {
 #endif
   mesh::leds::beginSettings(board, regulator_prefs_fs);
 #if defined(MESH_SOLARXIAO_POWER) && MESH_SOLARXIAO_POWER
-  mesh::solar::beginSettings(regulator_prefs_fs);
+  mesh::solar::beginSettings(board, regulator_prefs_fs, MESH_ENABLE_TELEMETRY_HISTORY);
 #endif
   if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
     MESH_DEBUG_PRINTLN("Regulator selection could not be applied");

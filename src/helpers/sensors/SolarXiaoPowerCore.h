@@ -70,6 +70,7 @@ public:
     settings.defaults();
   }
   void begin();
+  void reload();
   void service(uint32_t now);
   bool snapshot(Snapshot& result);
   bool readMonitor(float& volts, float& amps, float& watts);

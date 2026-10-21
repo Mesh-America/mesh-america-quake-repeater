@@ -1,9 +1,73 @@
-# SolarXiao MPPT and battery controls
+# SolarXiao carrier profiles, MPPT and battery controls
 
-SolarXiao Repeater firmware includes a native INA260 battery monitor and LTC4162
-charger interface in Full and Reduced builds. Use USB CLI or the authenticated
+SolarXiao Repeater firmware supports the older BQ24650 Advanced carrier and the
+LTC4162/INA260 MPPT carrier in Full and Reduced builds. Use USB CLI or the authenticated
 administrator CLI over LoRa. Ship mode and
 saved-policy reset require local USB. Commands do not change RF settings.
+
+## Selecting the carrier
+
+Carrier selection is configured by the operator; missing I2C responses never
+identify an Advanced board. `mppt` is the default for existing installations.
+The firmware environment, hardware/OTA identity and flash layout are unchanged.
+
+```
+get solar.board
+set solar.board advanced
+get solar
+get solar capabilities
+get solar readings
+get solar history
+```
+
+For the older SolarXiao 2W Advanced, choose `advanced`. This reports the BQ24650
+hardware capabilities and the live XIAO battery ADC and processor temperature.
+The existing self telemetry stays on channel 1, with voltage and temperature as
+different LPP types. It adds no invented charger flags, current, watts, battery
+NTC temperature or panel measurements. `get solar battery` aliases the self
+readings; the MCU temperature is not a battery or charger temperature.
+If a node already reports battery voltage and MCU temperature on channel 1,
+this profile adds no further physical measurements. It adds explicit carrier
+selection and capability reporting; the voltage/temperature history commands
+also already exist in builds that include telemetry history.
+
+The [2025 Advanced schematic](https://github.com/wehooper4/Meshtastic-Hardware/blob/main/XaioSeries/SolarXaio/Advanced/Standard/Schematic_SolarXaio_ADV_2025-10-23.pdf)
+has no INA monitor or digital charger interface. Charger status pins drive LEDs,
+NTC goes only to the charger, and current/voltage/MPP setpoints use hardware
+resistors, switches and a solder jumper. An OTA update cannot measure those
+signals or change those setpoints without additional hardware connections.
+
+Advanced mode suppresses native LTC4162/INA260 polling, register reads/writes,
+replay and telemetry/history channels 2..13. `get mppt`, `set mppt ...` and
+`mppt ...` explain that the Advanced carrier has no digital charger interface.
+The generic sensor scanner still reserves native addresses 0x40 and 0x68, so it
+cannot bypass that policy. Optional external sensor channels still start at 14.
+Historical samples retained from a previous carrier selection describe the old
+samples, not current sensor availability.
+
+Where telemetry history is included, `get solar history` points to the existing
+`get telemetry.volt [1-7]` and `get telemetry.temp [1-7]` commands: 30-minute
+samples, seven days in RAM. History starts filling after boot and resets at
+reboot. Voltage trends can help assess a remote installation, but are not a
+measurement of solar power, charge current or charge state. Radio/status and
+history-transfer commands remain the existing role commands.
+
+The selection is stored separately in an eight-byte, versioned checked record
+at `/solar_board`, using atomic publication and full public readback. A corrupt,
+unreadable or unconfirmed selection blocks native access and replay. Self ADC
+and MCU readings remain available. An explicit successful `set solar.board`
+recovers selection. With an unavailable filesystem, the selection cannot be
+saved and native access remains blocked.
+
+For the LTC4162 carrier, select `set solar.board mppt`. This re-enables native
+access and reloads any retained `/solar_power` charger overrides. Changing the
+carrier does not erase those overrides, change RF/PA settings, modify battery
+protection, or write charger defaults. Advanced mode is not chip autodetection.
+A remotely deployed node must first receive compatible firmware before these
+commands can be used. Deployment still requires its installed target and
+bootloader compatibility to be checked when it is reachable.
+
+## MPPT carrier commands
 
 Start with:
 
@@ -126,6 +190,9 @@ Changing calibration changes units/conversions, not already saved register codes
 INA260 uses its integrated shunt and does not use these sense-resistor values.
 
 ## Telemetry channels
+
+The following carrier channels apply to MPPT mode. Advanced mode reports the
+existing self voltage/MCU temperature on channel 1 and omits native channels.
 
 Carrier telemetry requires the environmental telemetry permission. Channel 1
 remains the XIAO internal ADC; it is separate from the 4S carrier battery and its

@@ -4,8 +4,9 @@
 
 # CLI Commands
 
-For SolarXiao carrier battery readings and charger controls, see
-[SolarXiao MPPT and battery controls](solarxiao_power.md) (`get mppt`, `set mppt`).
+For SolarXiao Advanced/MPPT carrier selection, live battery/MCU readings and
+charger controls, see [SolarXiao carrier profiles](solarxiao_power.md)
+(`get solar`, `get solar readings`, `set solar.board`, `get mppt`, `set mppt`).
 
 See [two LoRa profiles](radio_profiles.md) for `radio2`, `tempradio2`, scheduling,
 RX-only mode, cross-transmission policy, and optional radio preambles.
