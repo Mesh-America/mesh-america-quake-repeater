@@ -62,6 +62,7 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Build, storage, memory, and checklists
 
+- [RAK3401 all firmware CPU sleep checks, 2026-10-21](rak3401_all_roles_cpu_sleep_2026-10-21.md)
 - [Shared contact RAM savings and RAK4631 Full qualification, 2026-10-19](contact_memory_2026-10-19.md)
 - [Heltec V3 Full memory qualification, 2026-10-19](heltec_v3_full_memory_2026-10-19.md)
 - [Personal room mailbox checks](room_mailboxes.md)
