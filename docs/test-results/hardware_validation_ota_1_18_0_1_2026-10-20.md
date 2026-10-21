@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/hardware_validation_ota_1_18_0_1_2026-10-20/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # OTA hardware qualification, 20-21 October 2026 UTC
 
 Status: IN PROGRESS. Results below describe completed measurements only.
