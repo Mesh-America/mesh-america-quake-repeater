@@ -1712,8 +1712,33 @@ UsbLoggingObservation observeUsbLoggingTransport() {
 #elif MESH_ESP32_HWCDC_SESSION_GUARD
   result.supported = true;
   if (xPortInIsrContext()) return result;
-  result.host_connected = Serial.isPlugged();
-  result.reader_connected = result.host_connected && bool(Serial);
+  // The SDK's five-millisecond SOF sample can briefly go low on a healthy
+  // connection. Do not let one such sample revoke a fifteen-minute stats
+  // lease and provoke USB recovery five minutes later. Match the primary
+  // session's 100 ms host-loss edge; actual BUS_RESET still revokes the lease
+  // immediately in handleEsp32HwcdcEvent(). Only the application loop/CLI
+  // samples this state, after the ISR guard above.
+  static bool host_seen = false, loss_pending = false;
+  static uint32_t loss_at = 0;
+  const uint32_t now = millis();
+  if (Serial.isPlugged()) {
+    host_seen = true;
+    loss_pending = false;
+  } else if (host_seen) {
+    if (!loss_pending) {
+      loss_pending = true;
+      loss_at = now;
+    } else if (uint32_t(now - loss_at) >= 100) {
+      host_seen = false;
+      loss_pending = false;
+    }
+  }
+  result.host_connected = host_seen;
+  // HWCDC has no DTR/open-reader signal. Its bool operator is an RX/TX
+  // heuristic which can remain false after a transient SOF gap. Physical
+  // presence, real TX completion/stalls and the separate stats lease are the
+  // available evidence; this does not claim that a host process is reading.
+  result.reader_connected = result.host_connected;
   const size_t capacity = esp32_hwcdc_tx_buffer_capacity.load(std::memory_order_acquire);
   result.pending = usb_logging_tx_waiting.load(std::memory_order_acquire)
       || (capacity != 0 && Serial.availableForWrite() < int(capacity))

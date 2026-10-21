@@ -323,10 +323,12 @@ int main(int argc, char** argv) {
     assert(!f.run(0) && !f.run(1));
     mesh::host_connected = mesh::reader_connected = false;
     assert(!f.run(2));
-    assert(!f.run(2 + Policy::EARLY_RECOVERY_MS));
-    assert(!f.run(2 + Policy::EARLY_RECOVERY_MS + Policy::RECOVERY_GRACE_MS));
+    assert(!f.run(101));
+    assert(!f.run(102)); // HWCDC requires a 100 ms observed physical loss.
+    assert(!f.run(102 + Policy::EARLY_RECOVERY_MS));
+    assert(!f.run(102 + Policy::EARLY_RECOVERY_MS + Policy::RECOVERY_GRACE_MS));
     assert(mesh::usbLoggingStatus().stage == 2 && mesh::detach_calls == 1);
-    assert(!f.run(2 + deadline + Policy::RECOVERY_GRACE_MS));
+    assert(!f.run(102 + deadline + Policy::RECOVERY_GRACE_MS));
     assert(mesh::usbLoggingStatus().watchdog_auto && !mesh::usbLoggingStatus().reboot_count);
   } else if (scenario == "journal-fail") {
     Fixture f(1, step);
