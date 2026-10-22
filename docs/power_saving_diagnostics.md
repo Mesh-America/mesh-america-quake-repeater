@@ -92,6 +92,49 @@ The [ESP32 Bluetooth and radio2 qualification report](test-results/esp32_ble_rad
 records the tested firmware, saved-pairing checks, SDK wait measurements and
 packet-test failures. SDK wait time is not a current measurement.
 
+## ESP32 processor speed and temporary test controls
+
+The WebConfig **Processor speed** selector and `set cpu.freq auto|80|160|240`
+save the processor clock choice. `get cpu.freq` reports the choice, actual MHz
+and supported values. The board rejects unsupported clocks. Auto retains the
+existing policy: Companion normally selects 80 MHz with device power saving
+on and its configured nominal speed with it off. Other roles retain their
+nominal speed in Auto. A fixed speed stays fixed when power saving changes.
+The selection applies immediately; a failed apply or save reports an error and
+attempts to restore the previous selection. Returning to Auto clears the saved
+override. Existing preferences load as Auto.
+
+Local USB/Bluetooth console commands provide temporary controls for controlled
+radio2 experiments. They are held in RAM and reset at reboot:
+
+| Command | Values | Default |
+| --- | --- | --- |
+| `set powersaving.test sleep VALUE` | `on`, `off` | `on` |
+| `set powersaving.test slice_ms VALUE` | 2–20 ms | 10 ms |
+| `set powersaving.test guard_ms VALUE` | 0–20 ms | 4 ms |
+| `set powersaving.test min_ms VALUE` | 1–10 ms | 2 ms |
+| `set powersaving.test settle_ms VALUE` | `auto`, 1–50 ms | `auto` |
+| `set powersaving.test uart_quiet VALUE` | 5–300 seconds, `off` | inactive |
+
+`get powersaving.test` shows the current controls; `set powersaving.test reset`
+restores their defaults. Sleep on permits existing power-saving decisions; the
+saved device power-saving setting and every normal transport, interrupt and
+radio deadline guard still apply. Settle changes only when profile sleep is
+allowed, leaving radio calibration timing unchanged.
+
+UART quiet is available only for an ordinary hardware UART console, such as
+the V3's external USB bridge. After draining its acknowledgement, it stops the
+UART driver and automatically restores the console at 115200 baud after the
+chosen interval. USB logging and OTA must be off. Native USB boards reject
+this command. A reboot also restores the console.
+
+To separate clock speed from CPU sleep, hold the clock at 80 or 160 MHz and
+compare sleep off/on at the same RF settings. Use matching transmitter and
+receiver preambles, unique packets without retries, and diagnostic counters
+that prove SDK sleep occurred. Keep every failed packet in the result. These
+controls are experimental tools; a reported SDK wait is not a current reading
+or proof of a loss-free radio link.
+
 ## Noise-floor sampling and sleep
 
 Startup still collects a complete baseline promptly: 64 accepted samples,

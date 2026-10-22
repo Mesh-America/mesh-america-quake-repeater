@@ -4,6 +4,9 @@
 #include <new>
 #include "DataStore.h"
 #include "PrefsStorageLayout.h"
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#endif
 #if defined(RAK_4631)
 #include <helpers/PeripheralModePrefs.h>
 #endif
@@ -1253,6 +1256,14 @@ bool DataStore::loadPrefsInt(const char *filename,
         + mesh::companion::timezone::FooterSize;
     const uint32_t prefs_size = file.size();
     bool known_size = prefs_size == TIMEZONE_PREFS_SIZE;
+#if defined(ESP32_PLATFORM)
+    const bool has_cpu_footer = prefs_size == TIMEZONE_PREFS_SIZE
+            + mesh::esp32::cpuclock::FooterSize
+        || prefs_size == TIMEZONE_PREFS_SIZE - mesh::companion::timezone::FooterSize
+            + mesh::esp32::cpuclock::FooterSize;
+    known_size = known_size || has_cpu_footer;
+    loaded_prefs.cpu_freq_mhz = 0;
+#endif
     for (size_t i = 0;
          i < sizeof(KNOWN_PREFS_SIZES) / sizeof(KNOWN_PREFS_SIZES[0]); i++) {
       if (prefs_size == KNOWN_PREFS_SIZES[i]) {
@@ -1437,7 +1448,11 @@ bool DataStore::loadPrefsInt(const char *filename,
     if (prefs_size >= TIMEZONE_PREFS_SIZE - mesh::companion::timezone::FooterSize) {
       uint8_t footers[mesh::companion::traffic::FooterSize
           + mesh::companion::timezone::FooterSize];
-      const bool fractional = prefs_size == TIMEZONE_PREFS_SIZE;
+      const bool fractional = prefs_size == TIMEZONE_PREFS_SIZE
+#if defined(ESP32_PLATFORM)
+          || prefs_size == TIMEZONE_PREFS_SIZE + mesh::esp32::cpuclock::FooterSize
+#endif
+          ;
       const size_t length = fractional ? sizeof(footers)
           : mesh::companion::traffic::FooterSize;
       success = success && file.read(footers, length) == length
@@ -1448,6 +1463,15 @@ bool DataStore::loadPrefsInt(const char *filename,
               footers + mesh::companion::traffic::FooterSize,
               mesh::companion::timezone::FooterSize, loaded_prefs.tz_offset));
     }
+#if defined(ESP32_PLATFORM)
+    if (has_cpu_footer) {
+      uint8_t cpu_footer[mesh::esp32::cpuclock::FooterSize] = {};
+      const size_t length = file.read(cpu_footer, sizeof(cpu_footer));
+      // A bad CPU selection must not discard valid identity/radio preferences.
+      // Missing or corrupt CPU metadata alone falls back to Auto.
+      mesh::esp32::cpuclock::decodeFooter(cpu_footer, length, loaded_prefs.cpu_freq_mhz);
+    }
+#endif
 
     // Any bytes left over form only part of a historically appended field.
     // Preserve the file and defaults rather than treating that tail as EOF.
@@ -1691,6 +1715,15 @@ bool DataStore::savePrefs(const CompanionNodePrefs& _prefs, double node_lat, dou
     success = success && file.write(image, image_length_with_footers) == image_length_with_footers;
 #else
     success = success && file.write(footers, footer_length) == footer_length;
+#endif
+#if defined(ESP32_PLATFORM)
+    // Auto is represented by the legacy image without a CPU footer. Saving
+    // Auto removes an earlier explicit choice without changing old offsets.
+    if (_prefs.cpu_freq_mhz && mesh::esp32::cpuclock::validSelection(_prefs.cpu_freq_mhz)) {
+      uint8_t cpu_footer[mesh::esp32::cpuclock::FooterSize];
+      mesh::esp32::cpuclock::encodeFooter(cpu_footer, _prefs.cpu_freq_mhz);
+      success = success && file.write(cpu_footer, sizeof(cpu_footer)) == sizeof(cpu_footer);
+    }
 #endif
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM) || defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
     success = file.commit(success);

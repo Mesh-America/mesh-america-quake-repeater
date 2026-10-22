@@ -162,6 +162,9 @@ public:
   char bridge_secret[16] = {}; // for XOR encryption of bridge packets (ESP-NOW only)
   // Power setting
   uint8_t powersaving_enabled = DEFAULT_POWERSAVING_ENABLED ? 1 : 0; // boolean
+#if defined(ESP32_PLATFORM)
+  uint16_t cpu_freq_mhz = 0; // 0=Auto; checked ESP32-only append-only footer
+#endif
   uint8_t reboot_interval = 0; // hours, 0-255 (default 0=disable)
   // Gps settings
   uint8_t gps_enabled = 0;
@@ -398,6 +401,9 @@ private:
     void structure() override {
       def("adc_mult", _parent->adc_multiplier);
       def("pwr_sav_en", _parent->powersaving_enabled);
+#if defined(ESP32_PLATFORM)
+      def("cpu_freq", _parent->cpu_freq_mhz);
+#endif
     }
 
   public:

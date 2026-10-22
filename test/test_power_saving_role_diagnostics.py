@@ -362,6 +362,7 @@ int main() {
         code = r'''
 #include <cassert>
 #include <helpers/PowerSavingDiagnostics.h>
+#include <helpers/esp32/PowerTestControls.h>
 #define ARDUINO_USB_CDC_ON_BOOT 1
 #define MESH_USB_LOGGING_AVAILABLE 1
 using esp_err_t = int;
@@ -400,6 +401,7 @@ struct MainBoard {
 };
 struct ESP32Board : MainBoard {
   bool inhibit_sleep = false, usb = false, test = false;
+  uint32_t uart_quiet_restore_at = 0;
   uint32_t irq = 14;
   bool isUsbSleepHeld() { return usb; }
   bool isRadioTestActive() const { return test; }

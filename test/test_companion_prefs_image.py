@@ -238,6 +238,11 @@ int main() {
   accepted_sizes.push_back(historical_size + mesh::peripherals::FooterSize);
 #endif
   accepted_sizes.push_back(before.size());
+#if defined(ESP32_PLATFORM)
+  // A complete CPU footer, including a corrupt one, preserves the checked
+  // prefix and falls back to Auto. A partial append remains an invalid image.
+  accepted_sizes.push_back(before.size() + mesh::esp32::cpuclock::FooterSize);
+#endif
   for (size_t length = 0; length <= before.size() + 256; ++length) {
     DataStore reboot;
     auto candidate = before;
@@ -256,8 +261,13 @@ int main() {
       assert(live.buzzer_quiet == (length >= 85 ? 0 : 1));
       assert(live.vibe_quiet == (length >= 143 ? 1 : 0));
       assert(live.lost_reply == (length >= historical_size ? 2 : 0));
-      assert(live.tx_media == (length == before.size() ? mesh::RADIO_TX_SECONDARY : mesh::RADIO_TX_AUTO));
-      assert(live.tx_ssh == (length == before.size() ? mesh::RADIO_TX_OFF : mesh::RADIO_TX_AUTO));
+      const bool has_traffic = length == before.size()
+#if defined(ESP32_PLATFORM)
+          || length == before.size() + mesh::esp32::cpuclock::FooterSize
+#endif
+          ;
+      assert(live.tx_media == (has_traffic ? mesh::RADIO_TX_SECONDARY : mesh::RADIO_TX_AUTO));
+      assert(live.tx_ssh == (has_traffic ? mesh::RADIO_TX_OFF : mesh::RADIO_TX_AUTO));
 #if defined(RAK_4631)
       assert(live.peripherals_shared == (length >= 244 ? 1 : 0));
 #endif

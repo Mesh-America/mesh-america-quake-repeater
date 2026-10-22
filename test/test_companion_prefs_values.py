@@ -243,12 +243,17 @@ class CompanionPrefsValuesTests(unittest.TestCase):
             'wifi_pwd': 'defined(RP2040_PLATFORM) && defined(ENABLE_WIFI_INTERFACE)',
             'peripherals_shared': 'RAK_4631',
             'leds_quiet': 'WIO_E5_MINI_HEADLESS_COMPANION_UI',
+            'cpu_freq_mhz': 'ESP32_PLATFORM',
         }
 
         def fields(template):
             rows = []
             for name in declarations:
                 row = template.format(name=name)
+                # Historical byte/EOF comparisons use Auto; explicit CPU
+                # footer round trips have their own actual-codec fault suite.
+                if name == 'cpu_freq_mhz' and template.startswith('fill('):
+                    row = 'prefs.cpu_freq_mhz = 0;'
                 if name in optional:
                     condition = optional[name]
                     if not condition.startswith('defined('):

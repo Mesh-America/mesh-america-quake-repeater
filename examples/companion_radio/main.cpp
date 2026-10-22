@@ -539,17 +539,9 @@ static void serviceCompanionRadioRecovery() {
 #ifdef ESP32_PLATFORM
 static int8_t applied_power_saving = -1;
 static int8_t attempted_power_saving = -1;
+static uint16_t applied_cpu_frequency = UINT16_MAX;
+static uint16_t attempted_cpu_frequency = UINT16_MAX;
 static unsigned long power_saving_retry_at = 0;
-
-static uint32_t companionNominalCpuMhz() {
-#ifdef ESP32_POST_BOOT_CPU_FREQ
-  return ESP32_POST_BOOT_CPU_FREQ;
-#elif defined(ESP32_CPU_FREQ)
-  return ESP32_CPU_FREQ;
-#else
-  return F_CPU / 1000000UL;
-#endif
-}
 
 #if COMPANION_BT_MODEM_SLEEP_AVAILABLE
 static void applyCompanionBluetoothSleep(bool enabled,
@@ -568,11 +560,17 @@ static void applyCompanionBluetoothSleep(bool enabled,
 #endif
 
 static bool applyCompanionPowerSaving(bool enabled) {
-  const uint32_t nominal_mhz = companionNominalCpuMhz();
-  const uint32_t max_mhz = enabled && nominal_mhz > 80 ? 80 : nominal_mhz;
+  const uint16_t selected = the_mesh.getNodePrefs()->cpu_freq_mhz;
+  uint32_t max_mhz = mesh::esp32::cpuclock::resolveMHz(selected, enabled, true);
+  if (!board.applyCpuFrequencyMHz(selected, enabled)) {
+    mesh::usbLoggingPort().printf("Device power saving failed: CPU clock policy rejected\r\n");
+    return false;
+  }
+  if (!selected && max_mhz == 240 && !board.supportsCpuFrequencyMHz(240)
+      && board.supportsCpuFrequencyMHz(160)) max_mhz = 160;
 
 #if COMPANION_IDF_PM_AVAILABLE
-  const uint32_t min_mhz = enabled && max_mhz > 40 ? 40 : max_mhz;
+  const uint32_t min_mhz = !selected && enabled && max_mhz > 40 ? 40 : max_mhz;
 #if (defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT) \
     || defined(ENABLE_USB_INTERFACE)
   // Automatic light sleep interrupts native USB CDC and USB companions.
@@ -581,35 +579,6 @@ static bool applyCompanionPowerSaving(bool enabled) {
 #else
   const bool automatic_light_sleep = enabled;
 #endif
-#if CONFIG_IDF_TARGET_ESP32C3
-  esp_pm_config_esp32c3_t pm_config;
-#elif CONFIG_IDF_TARGET_ESP32S3
-  esp_pm_config_esp32s3_t pm_config;
-#elif CONFIG_IDF_TARGET_ESP32
-  esp_pm_config_esp32_t pm_config;
-#else
-  esp_pm_config_t pm_config;
-#endif
-  pm_config.max_freq_mhz = max_mhz;
-  pm_config.min_freq_mhz = min_mhz;
-  pm_config.light_sleep_enable = automatic_light_sleep;
-
-  esp_err_t pm_result = esp_pm_configure(&pm_config);
-  if (pm_result != ESP_OK) {
-    mesh::usbLoggingPort().printf("Device power saving failed: %s\r\n",
-                                  esp_err_to_name(pm_result));
-    return false;
-  }
-#else
-  // Arduino's prebuilt ESP-IDF normally has CONFIG_PM_ENABLE disabled, in
-  // which case esp_pm_configure() is a stub returning ESP_ERR_NOT_SUPPORTED.
-  // Keep frequency throttling functional instead of retrying that stub.
-  if (!setCpuFrequencyMhz(max_mhz)) {
-    mesh::usbLoggingPort().printf(
-        "Device power saving failed: CPU %lu MHz is unsupported\r\n",
-        (unsigned long)max_mhz);
-    return false;
-  }
 #endif
 
 #if COMPANION_BT_MODEM_SLEEP_AVAILABLE
@@ -636,18 +605,21 @@ static bool applyCompanionPowerSaving(bool enabled) {
 
 static void serviceCompanionPowerSaving(bool force = false) {
   const int8_t requested = the_mesh.getNodePrefs()->powersaving_enabled ? 1 : 0;
-  if (!force && applied_power_saving == requested) return;
+  const uint16_t selected = the_mesh.getNodePrefs()->cpu_freq_mhz;
+  if (!force && applied_power_saving == requested && applied_cpu_frequency == selected) return;
 
   const unsigned long now = millis();
-  if (!force && attempted_power_saving == requested
+  if (!force && attempted_power_saving == requested && attempted_cpu_frequency == selected
       && power_saving_retry_at != 0
       && (int32_t)(now - power_saving_retry_at) < 0) {
     return;
   }
 
   attempted_power_saving = requested;
+  attempted_cpu_frequency = selected;
   if (applyCompanionPowerSaving(requested != 0)) {
     applied_power_saving = requested;
+    applied_cpu_frequency = selected;
     power_saving_retry_at = 0;
   } else {
     power_saving_retry_at = now + 5000;
@@ -3571,6 +3543,9 @@ void setup() {
   mesh::serialLogBegin();
 #endif
   mesh::beginUsbLoggingPort();
+#if defined(ESP32_PLATFORM)
+  board.setCompanionCpuClockPolicy(true);
+#endif
   board.begin();
 
 #if defined(ESP32) && defined(WIFI_SSID)
@@ -4278,6 +4253,7 @@ void loop() {
 #endif
 
 #ifdef ESP32_PLATFORM
+  board.servicePowerTestControls(!interface_manager.hasPendingIO());
   serviceCompanionPowerSaving();
 #endif
 #if defined(NRF52_PLATFORM)
@@ -4293,6 +4269,9 @@ void loop() {
   // actually vetoed sleep, without polling otherwise skipped peripherals.
   mesh::powerdiag::Mask sleep_reason = [&]() -> mesh::powerdiag::Mask {
     if (!the_mesh.getNodePrefs()->powersaving_enabled) return mask(Reason::PolicyOff);
+#if defined(ESP32_PLATFORM)
+    if (!mesh::esp32::manualCpuSleepEnabled()) return mask(Reason::PolicyOff);
+#endif
     if (morse_timing) return mask(Reason::Morse);
     const auto pending = the_mesh.pendingWorkReason();
     if (pending) return pending;
@@ -4330,8 +4309,13 @@ void loop() {
   if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(sleep_reason, millis());
   const bool can_sleep = sleep_reason == 0;
   if (can_sleep && the_mesh.canIdleDualRadio()) {
-    const uint32_t idle_slice_ms = noise_floor_wait && noise_floor_delay_ms < 10
-        ? noise_floor_delay_ms : 10;
+#if defined(ESP32_PLATFORM)
+    const uint32_t maximum_slice_ms = mesh::esp32::profileSleepSliceMillis();
+#else
+    const uint32_t maximum_slice_ms = 10;
+#endif
+    const uint32_t idle_slice_ms = noise_floor_wait && noise_floor_delay_ms < maximum_slice_ms
+        ? noise_floor_delay_ms : maximum_slice_ms;
 #if defined(NRF52_PLATFORM)
     if (noise_floor_wait) board.sleepMilliseconds(idle_slice_ms);
     else board.sleep(0); // nrf ignores seconds param, sleeps whenever possible

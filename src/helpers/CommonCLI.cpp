@@ -9,6 +9,10 @@
 #include "UsbLoggingWatchdog.h"
 #include "PowerSavingDiagnostics.h"
 #include "HilStartupTrace.h"
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#include <helpers/esp32/PowerTestControls.h>
+#endif
 #include <helpers/ui/DisplayPowerSettings.h>
 #if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
 #include <helpers/ui/OLEDControllerSettings.h>
@@ -1100,6 +1104,9 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
   _prefs->gps_sync_interval_hours = 0;
   _prefs->ota_channel = 0;
   _prefs->rs232_bridge_enabled = 0;
+#if defined(ESP32_PLATFORM)
+  _prefs->cpu_freq_mhz = 0;
+#endif
 #if defined(RAK_4631)
   // Failure to read an existing policy cannot authorize a shared-rail cut.
   _prefs->peripherals_shared = 1;
@@ -1804,6 +1811,11 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 #if defined(RAK_4631)
     _prefs->peripherals_shared = mesh::peripherals::readCommonMode(file);
 #endif
+#if defined(ESP32_PLATFORM)
+    _prefs->cpu_freq_mhz = mesh::esp32::cpuclock::readFooter(file);
+    if (_prefs->cpu_freq_mhz && !_board->supportsCpuFrequencyMHz(_prefs->cpu_freq_mhz))
+      _prefs->cpu_freq_mhz = 0;
+#endif
     file.close();
   }
 }
@@ -1974,6 +1986,13 @@ static bool writeCommonPrefsImage(Writer& writer, NodePrefs* prefs) {
   mesh::peripherals::encodeFooter(peripheral_footer, prefs->peripherals_shared);
   WRITE_COMMON_PREFS_BYTES(peripheral_footer, sizeof(peripheral_footer));
 #endif
+#if defined(ESP32_PLATFORM)
+  if (prefs->cpu_freq_mhz && mesh::esp32::cpuclock::validSelection(prefs->cpu_freq_mhz)) {
+    uint8_t cpu_footer[mesh::esp32::cpuclock::FooterSize];
+    mesh::esp32::cpuclock::encodeFooter(cpu_footer, prefs->cpu_freq_mhz);
+    WRITE_COMMON_PREFS_BYTES(cpu_footer, sizeof(cpu_footer));
+  }
+#endif
 
 #undef WRITE_COMMON_PREFS_BYTES
 #undef WRITE_COMMON_PREFS
@@ -2057,6 +2076,11 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     _common_save_succeeded = false;
     _prefs->usb_debug_enabled = _prefs->usb_debug_enabled == 1 ? 1 : 0;
     _prefs->trace_when_repeat_off = _prefs->trace_when_repeat_off == 1 ? 1 : 0;
+#if defined(ESP32_PLATFORM)
+    if (!mesh::esp32::cpuclock::validSelection(_prefs->cpu_freq_mhz)
+        || (_prefs->cpu_freq_mhz && !_board->supportsCpuFrequencyMHz(_prefs->cpu_freq_mhz)))
+      _prefs->cpu_freq_mhz = 0;
+#endif
 #ifdef WITH_RS232_BRIDGE
     mesh::bridge::rs232power::sanitize(_prefs->rs232_heartbeat,
         _prefs->rs232_autosleep, _prefs->rs232_idle_seconds);
@@ -2212,6 +2236,13 @@ void CommonCLI::savePrefs(FILESYSTEM* fs, PrefsSaveRouting::Scope scope) {
     uint8_t peripheral_footer[mesh::peripherals::FooterSize];
     mesh::peripherals::encodeFooter(peripheral_footer, _prefs->peripherals_shared);
     file.write(peripheral_footer, sizeof(peripheral_footer));
+#endif
+#if defined(ESP32_PLATFORM)
+    if (_prefs->cpu_freq_mhz && mesh::esp32::cpuclock::validSelection(_prefs->cpu_freq_mhz)) {
+      uint8_t cpu_footer[mesh::esp32::cpuclock::FooterSize];
+      mesh::esp32::cpuclock::encodeFooter(cpu_footer, _prefs->cpu_freq_mhz);
+      file.write(cpu_footer, sizeof(cpu_footer));
+    }
 #endif
 
     _common_save_succeeded = file.commit();
@@ -3033,6 +3064,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     if (mesh::leds::handleCommand(command, reply, 157)) return;
     if (mesh::handleUsbLoggingWatchdogCommand(command, reply, 160)) return;
     if (mesh::powerdiag::handleCommand(command, reply, 157, millis())) return;
+#if defined(ESP32_PLATFORM)
+    if (mesh::esp32::cpuclock::handleCommand(*_board, _prefs->cpu_freq_mhz,
+            _prefs->powersaving_enabled != 0, command, reply, 157,
+            [this]() { return saveCommonPrefs(); })) return;
+    if (mesh::esp32::handlePowerTestCommand(command, reply, 157,
+                                           sender_timestamp == 0)) return;
+#endif
     if (handleManagementCommand(command, reply)) return;
 #if MESH_ENABLE_TX_BEACONS
     if (handleBeaconCommand(command, reply, 157)) return;

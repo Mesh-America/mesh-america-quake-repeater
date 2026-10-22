@@ -1,4 +1,8 @@
 #include <helpers/RegulatorSettings.h>
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#include <helpers/esp32/PowerTestControls.h>
+#endif
 #include <helpers/LedSettings.h>
 #include <helpers/ui/DisplayPowerSettings.h>
 #if defined(OLED_AUTO_DETECT) && OLED_AUTO_DETECT && defined(DISPLAY_CLASS)
@@ -3177,6 +3181,11 @@ void MyMesh::begin(bool has_display, bool radio_available,
   _prefs.radio_fem_txgain = constrain(_prefs.radio_fem_txgain, 0, 1);
   _prefs.rx_powersaving_enabled = constrain(_prefs.rx_powersaving_enabled, 0, 1);
   _prefs.powersaving_enabled = constrain(_prefs.powersaving_enabled, 0, 1);
+#if defined(ESP32_PLATFORM)
+  if (!mesh::esp32::cpuclock::validSelection(_prefs.cpu_freq_mhz)
+      || (_prefs.cpu_freq_mhz && !board.supportsCpuFrequencyMHz(_prefs.cpu_freq_mhz)))
+    _prefs.cpu_freq_mhz = 0;
+#endif
   _prefs.wifi_enabled = constrain(_prefs.wifi_enabled, 0, 1);
   _prefs.usb_logging_enabled = constrain(_prefs.usb_logging_enabled, 0, 2);
   _prefs.usb_debug_enabled = _prefs.usb_debug_enabled == 1 ? 1 : 0;
@@ -3869,6 +3878,12 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   }
 #endif
   if (mesh::powerdiag::handleCommand(command, reply, reply_size, millis())) return true;
+#if defined(ESP32_PLATFORM)
+  if (mesh::esp32::cpuclock::handleCommand(board, _prefs.cpu_freq_mhz,
+          _prefs.powersaving_enabled != 0, command, reply, reply_size,
+          [this]() { return savePrefs(); })) return true;
+  if (mesh::esp32::handlePowerTestCommand(command, reply, reply_size, true)) return true;
+#endif
 #if defined(OTA_RAK15002_SD_STORE) && defined(ETHERNET_USE_RAK13800)
   if (handleRak4631PeripheralCommand(command, reply, reply_size)) return true;
 #endif
@@ -5144,6 +5159,13 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   s.rx_ps_rx_us = _prefs.rx_ps_rx_us;
   s.rx_ps_sleep_us = _prefs.rx_ps_sleep_us;
   s.power_saving = _prefs.powersaving_enabled;
+#if defined(ESP32_PLATFORM)
+  s.cpu_freq_mhz = _prefs.cpu_freq_mhz;
+  s.cpu_actual_mhz = board.getCpuFrequencyMHz();
+  s.cpu_supported_mask = (board.supportsCpuFrequencyMHz(80) ? 1 : 0)
+      | (board.supportsCpuFrequencyMHz(160) ? 2 : 0)
+      | (board.supportsCpuFrequencyMHz(240) ? 4 : 0);
+#endif
 #if MESH_ENABLE_LOST_REPLY
   s.lost_reply = _prefs.lost_reply;
 #endif
@@ -10772,6 +10794,12 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
     while (*command == ' ' || *command == '\t') command++;
   }
 
+#if defined(ESP32_PLATFORM)
+  // Catch remote requests before the direct-transport router below. That
+  // router is also used by USB/BLE/browser commands without a timestamp.
+  if (mesh::esp32::handlePowerTestCommand(command, reply, reply_capacity,
+                                         sender_timestamp == 0)) return true;
+#endif
   if (mesh::power::handleRegulatorCommand(command, reply, reply_capacity)) return true;
 #if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI)
   if (handleCompactLedCommand(command, reply, reply_capacity)) return true;

@@ -21,6 +21,12 @@
 #include "UsbHostSleepPolicy.h"
 #include "PowerSavingDiagnostics.h"
 #include "esp32/LightSleepPolicy.h"
+#include "esp32/PowerTestControls.h"
+#include "esp32/CpuClockPolicy.h"
+#include <esp_pm.h>
+#if CONFIG_IDF_TARGET_ESP32
+#include <soc/efuse_reg.h>
+#endif
 #if defined(STATION_G3_ESP32)
 #include <StationG3RadioSlot.h>
 #endif
@@ -47,6 +53,10 @@ protected:
   bool inhibit_sleep = false;
   bool ota_started_ap = false;
   bool ota_started_radio = false;
+  bool companion_cpu_clock_policy = false;
+  uint32_t uart_quiet_start_at = 0;
+  uint32_t uart_quiet_restore_at = 0;
+  uint16_t uart_quiet_seconds = 0;
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   mesh::UsbHostSleepPolicy usb_host_sleep_policy;
 #endif
@@ -76,6 +86,12 @@ public:
     // for future use, sub-classes SHOULD call this from their begin()
     startup_reason = BD_STARTUP_NORMAL;    
 
+    mesh::esp32::registerUartQuietControl(this,
+        [](void* owner, mesh::esp32::UartQuietAction action, uint16_t seconds,
+           char* reply, size_t capacity) {
+          return static_cast<ESP32Board*>(owner)->handleUartQuiet(action, seconds, reply, capacity);
+        });
+
   #ifdef ESP32_CPU_FREQ
     setCpuFrequencyMhz(ESP32_CPU_FREQ);
   #endif
@@ -103,6 +119,137 @@ public:
   }
 
   void attachDynamicPrefs(KeyValueStore* prefs) { (void)prefs; }  // no-op
+
+  void setCompanionCpuClockPolicy(bool enabled) { companion_cpu_clock_policy = enabled; }
+  uint16_t getCpuFrequencyMHz() const override { return ::getCpuFrequencyMhz(); }
+  bool supportsCpuFrequencyMHz(uint16_t mhz) const override {
+#if CONFIG_IDF_TARGET_ESP32H2
+    (void)mhz;
+    return false;
+#else
+    if (mhz == 80) return true;
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 \
+    || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+    if (mhz == 160) return true;
+#endif
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3
+    if (mhz == 240) {
+#if CONFIG_IDF_TARGET_ESP32
+      if (REG_GET_BIT(EFUSE_BLK0_RDATA3_REG, EFUSE_RD_CHIP_CPU_FREQ_RATED)
+          && REG_GET_BIT(EFUSE_BLK0_RDATA3_REG, EFUSE_RD_CHIP_CPU_FREQ_LOW)) return false;
+#endif
+      return true;
+    }
+#endif
+    return false;
+#endif
+  }
+
+  bool applyCpuFrequencyMHz(uint16_t selected, bool powersaving) override {
+    if (!mesh::esp32::cpuclock::validSelection(selected)
+        || (selected && !supportsCpuFrequencyMHz(selected))) return false;
+    uint16_t maximum = mesh::esp32::cpuclock::resolveMHz(
+        selected, powersaving, companion_cpu_clock_policy);
+    if (!selected && maximum == 240 && !supportsCpuFrequencyMHz(240)
+        && supportsCpuFrequencyMHz(160)) maximum = 160;
+#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
+    const uint16_t minimum = !selected && companion_cpu_clock_policy && powersaving && maximum > 40
+        ? 40 : maximum;
+#if CONFIG_IDF_TARGET_ESP32C3
+    esp_pm_config_esp32c3_t config;
+#elif CONFIG_IDF_TARGET_ESP32S3
+    esp_pm_config_esp32s3_t config;
+#elif CONFIG_IDF_TARGET_ESP32
+    esp_pm_config_esp32_t config;
+#else
+    esp_pm_config_t config;
+#endif
+    config.max_freq_mhz = maximum;
+    config.min_freq_mhz = minimum;
+#if (defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT) || defined(ENABLE_USB_INTERFACE)
+    config.light_sleep_enable = false;
+#else
+    config.light_sleep_enable = companion_cpu_clock_policy && powersaving;
+#endif
+    if (esp_pm_configure(&config) != ESP_OK) return false;
+#else
+    if (!setCpuFrequencyMhz(maximum)) return false;
+#endif
+    return !selected || getCpuFrequencyMHz() == selected;
+  }
+
+  bool handleUartQuiet(mesh::esp32::UartQuietAction action, uint16_t seconds,
+                       char* reply, size_t capacity) {
+#if (defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT) \
+    || defined(SERIAL_RX) || defined(SERIAL_TX)
+    (void)seconds;
+    const bool harmless = action != mesh::esp32::UartQuietAction::Schedule;
+    snprintf(reply, capacity, harmless ? "uart=unsupported"
+        : "Error: UART quiet requires a default hardware UART console");
+    return harmless;
+#else
+    if (action == mesh::esp32::UartQuietAction::Cancel) {
+      uart_quiet_start_at = 0;
+      if (uart_quiet_restore_at) {
+        Serial.begin(115200);  // all four roles start this same default console
+        if (!Serial) {
+          uart_quiet_restore_at = millis() + 1000;
+          if (!uart_quiet_restore_at) uart_quiet_restore_at = 1;
+          snprintf(reply, capacity, "Error: UART restore failed; retrying automatically");
+          return false;
+        }
+        uart_quiet_restore_at = 0;
+      }
+      uart_quiet_seconds = 0;
+    } else if (action == mesh::esp32::UartQuietAction::Schedule) {
+      if (seconds < 5 || seconds > 300 || uart_quiet_start_at || uart_quiet_restore_at
+          || !Serial || inhibit_sleep || isOTAUpdateRunning() || isRadioTestActive()
+          || mesh::isUsbLoggingEnabled()) {
+        snprintf(reply, capacity, "Error: UART quiet needs an idle console, logging/OTA off, and 5..300 seconds");
+        return false;
+      }
+      uart_quiet_seconds = seconds;
+      uart_quiet_start_at = millis() + 100;
+      if (!uart_quiet_start_at) uart_quiet_start_at = 1;
+      snprintf(reply, capacity, "OK - UART quiet in 100ms after replies drain, for %us; automatic restore", unsigned(seconds));
+      return true;
+    }
+    const int32_t remaining = static_cast<int32_t>(uart_quiet_restore_at - millis());
+    snprintf(reply, capacity, "uart=%s remaining_s=%lu", uart_quiet_start_at ? "armed"
+        : uart_quiet_restore_at ? "quiet" : "active", static_cast<unsigned long>(
+            uart_quiet_start_at ? uart_quiet_seconds : uart_quiet_restore_at && remaining > 0
+                ? (uint32_t(remaining) + 999) / 1000 : 0));
+    return true;
+#endif
+  }
+
+  // Call after the role's reply pump, and regardless of its sleep decision.
+  // A quiet console is always restored by a timer; no permanent guard bypass.
+  void servicePowerTestControls(bool replies_drained = true) {
+#if (!defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT) \
+    && !defined(SERIAL_RX) && !defined(SERIAL_TX)
+    char ignored[96];
+    const uint32_t now = millis();
+    if (uart_quiet_restore_at && (static_cast<int32_t>(now - uart_quiet_restore_at) >= 0
+        || inhibit_sleep || isOTAUpdateRunning() || isRadioTestActive() || mesh::isUsbLoggingEnabled())) {
+      handleUartQuiet(mesh::esp32::UartQuietAction::Cancel, 0, ignored, sizeof(ignored));
+    }
+    if (!uart_quiet_start_at || static_cast<int32_t>(now - uart_quiet_start_at) < 0) return;
+    if (static_cast<int32_t>(now - uart_quiet_start_at) >= 1900
+        || inhibit_sleep || isOTAUpdateRunning() || isRadioTestActive() || mesh::isUsbLoggingEnabled()) {
+      uart_quiet_start_at = 0; uart_quiet_seconds = 0;
+      return;
+    }
+    if (!replies_drained || mesh::hasPendingUsbTerminalOutput()) return;
+    Serial.flush();  // drain the hardware FIFO containing the acknowledgement
+    Serial.end();
+    uart_quiet_restore_at = millis() + uint32_t(uart_quiet_seconds) * 1000;
+    if (!uart_quiet_restore_at) uart_quiet_restore_at = 1;
+    uart_quiet_start_at = 0;
+#else
+    (void)replies_drained;
+#endif
+  }
 
   // Temperature from ESP32 MCU
   float getMCUTemperature() override {
@@ -152,12 +299,32 @@ public:
                             bool has_deadline, uint32_t deadline_us) {
     using mesh::powerdiag::Reason;
     const bool diagnostics = mesh::powerdiag::enabled();
+    // Preserve native-host signal history even while a test disables sleep.
+    const bool usb_sleep_held = isUsbSleepHeld();
+    if (!mesh::esp32::manualCpuSleepEnabled()) {
+      if (diagnostics) mesh::powerdiag::boardVeto(Reason::PolicyOff, millis());
+      return;
+    }
+    // A temporary UART quiet interval must not sleep past console recovery.
+    // This only shortens the request and leaves every normal wake guard live.
+    if (uart_quiet_restore_at) {
+      const int32_t remaining_ms = static_cast<int32_t>(uart_quiet_restore_at - millis());
+      if (remaining_ms <= 0) return;
+      const uint32_t quiet_us = uint32_t(remaining_ms) * 1000UL;
+      if (has_deadline) {
+        const uint32_t now_us = micros();
+        if (static_cast<int32_t>(deadline_us - now_us) > static_cast<int32_t>(quiet_us))
+          deadline_us = now_us + quiet_us;
+      } else {
+        if (!wake_us || wake_us > quiet_us) wake_us = quiet_us;
+        require_timer = true;
+      }
+    }
     // Native USB loses its connection in light sleep. An enumerated host
     // still needs USB serviced when no terminal asserts CDC DTR (for example,
     // after a Pi closes its serial port). Guard every caller here.
     // Sample even when another blocker is active, so an open console/OTA does
     // not leave the last positive native USB host signal stale.
-    const bool usb_sleep_held = isUsbSleepHeld();
     Reason veto_reason = Reason::Board;
     int32_t veto_detail = 1;  // Explicit inhibit_sleep.
     const auto hold = [&veto_reason, &veto_detail](bool active, Reason reason, int32_t detail = 0) {
@@ -276,7 +443,7 @@ public:
       // Keep this immediately before the SDK wait with local interrupts held.
       // A short/rejected slice polls instead; it must not reuse an older timer.
       const int32_t remaining_us = static_cast<int32_t>(deadline_us - micros());
-      if (remaining_us < 2000) deadline_expired = true;
+      if (remaining_us < static_cast<int32_t>(mesh::esp32::profileSleepMinimumMicros())) deadline_expired = true;
       else gpio_error = esp_sleep_enable_timer_wakeup(static_cast<uint32_t>(remaining_us));
     }
     esp_err_t sleep_error = ESP_OK;

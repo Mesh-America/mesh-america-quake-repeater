@@ -390,6 +390,11 @@ void loop() {
       && the_mesh.isDualRadioActive() && !morse_timing) board.prepareProfileIdleCycle();
 #endif
 
+#if defined(ESP32_PLATFORM)
+  board.servicePowerTestControls();
+  mesh::esp32::serviceCpuFrequencyPolicy(board, the_mesh.getNodePrefs()->cpu_freq_mhz,
+      the_mesh.getNodePrefs()->powersaving_enabled != 0, millis());
+#endif
   const auto sleep_guard = [](bool allowed, mesh::powerdiag::Reason reason) {
     if (!allowed && mesh::powerdiag::enabled())
       mesh::powerdiag::decision(mesh::powerdiag::mask(reason), millis());

@@ -447,6 +447,9 @@ jobs:
           python3 -B test/test_power_saving_diagnostics.py -v
           python3 -B test/test_power_saving_role_diagnostics.py -v
           python3 -B test/test_companion_power_diagnostics.py -v
+          python3 -B test/test_esp32_cpu_clock.py -v
+          python3 -B test/test_esp32_cpu_clock_board.py -v
+          python3 -B test/test_esp32_power_test_controls.py -v
           python3 -B test/test_companion_rxps_getters.py -v
           python3 -B test/test_nrf52_sleep_cycle.py -v
           python3 -B test/test_nrf52_sleep_events.py -v
@@ -1053,6 +1056,7 @@ jobs:
           python3 -B test/test_sensor_webconfig_capabilities.py -v
           python3 -B test/test_webconfig_ui_runtime.py
           python3 -B test/test_webconfig_lost_reply.py -v
+          python3 -B test/test_webconfig_cpu_frequency.py -v
           MESHCORE_REQUIRE_ROOM_BROWSER=1 python3 -B test/test_room_web_ui.py -v
           MESHCORE_REQUIRE_ROOM_BROWSER=1 python3 -B test/test_room_mail_web_ui.py -v
 

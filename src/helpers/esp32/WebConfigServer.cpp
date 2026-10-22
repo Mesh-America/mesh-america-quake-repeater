@@ -2374,6 +2374,16 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     radio["rxps_rx_us"] = node.rx_ps_rx_us;
     radio["rxps_sleep_us"] = node.rx_ps_sleep_us;
     radio["powersaving"] = (bool)node.power_saving;
+    if (node.cpu_supported_mask & 7U) {
+      JsonObject cpu = doc.createNestedObject("cpu");
+      cpu["selected_mhz"] = node.cpu_freq_mhz;
+      cpu["actual_mhz"] = node.cpu_actual_mhz;
+      JsonArray supported = cpu.createNestedArray("supported_mhz");
+      static const uint16_t frequencies[] = {80, 160, 240};
+      for (unsigned i = 0; i < 3; ++i) {
+        if (node.cpu_supported_mask & (1U << i)) supported.add(frequencies[i]);
+      }
+    }
 #ifdef MESHCORE_HAS_REAL_DISPLAY
     JsonObject screen = doc["display"].to<JsonObject>();
     const auto& display_prefs = mesh::ui::displayPowerPrefs();

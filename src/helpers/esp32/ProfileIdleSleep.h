@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <esp_timer.h>
+#include "PowerTestControls.h"
 
 namespace mesh {
 namespace esp32 {
@@ -13,16 +14,18 @@ namespace esp32 {
 template <typename Mesh, typename Board>
 bool tryProfileIdleSleep(Mesh& mesh, Board& board,
                          uint32_t budget_started_us, uint32_t budget_ms) {
-  if (budget_ms == 0 || budget_ms > 0x7fffffffUL / 1000UL) return false;
+  if (!manualCpuSleepEnabled() || budget_ms == 0 || budget_ms > 0x7fffffffUL / 1000UL) return false;
 
   const uint32_t observed_us = static_cast<uint32_t>(esp_timer_get_time());
   uint32_t profile_ms = 0;
-  if (!mesh.getDualRadioIdleDelay(profile_ms) || profile_ms < 2 || profile_ms > 10)
+  const uint32_t minimum_us = profileSleepMinimumMicros();
+  if (!mesh.getDualRadioIdleDelay(profile_ms) || profile_ms * 1000UL < minimum_us
+      || profile_ms > profileSleepSliceMillis())
     return false;
 
   const uint32_t role_deadline = budget_started_us + budget_ms * 1000UL;
   const int32_t role_remaining_us = static_cast<int32_t>(role_deadline - observed_us);
-  if (role_remaining_us < 2000) return false;
+  if (role_remaining_us < static_cast<int32_t>(minimum_us)) return false;
 
   const uint32_t profile_us = profile_ms * 1000UL;
   const uint32_t remaining_us = static_cast<uint32_t>(role_remaining_us) < profile_us

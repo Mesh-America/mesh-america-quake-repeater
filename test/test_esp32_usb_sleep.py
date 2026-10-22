@@ -21,6 +21,7 @@ HARNESS = r'''
 #include <array>
 #include <helpers/UsbHostSleepPolicy.h>
 #include <helpers/PowerSavingDiagnostics.h>
+#include <helpers/esp32/PowerTestControls.h>
 
 #ifndef MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS
 #define MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS 120000UL
@@ -140,6 +141,7 @@ struct MainBoard {
 };
 struct ESP32Board : MainBoard {
   bool inhibit_sleep = false;
+  uint32_t uart_quiet_restore_at = 0;
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   mesh::UsbHostSleepPolicy usb_host_sleep_policy;
 #endif
@@ -342,6 +344,7 @@ V4_BUTTON_HARNESS = r'''
 #include <Arduino.h>
 #include <helpers/UsbHostSleepPolicy.h>
 #include <helpers/PowerSavingDiagnostics.h>
+#include <helpers/esp32/PowerTestControls.h>
 #include <helpers/ui/MomentaryButton.h>
 #include <helpers/ui/DisplayPowerPolicy.h>
 #include <helpers/MorseLoopPolicy.h>
@@ -408,6 +411,7 @@ struct MainBoard {
 };
 struct ESP32Board : MainBoard {
   bool inhibit_sleep = false;
+  uint32_t uart_quiet_restore_at = 0;
   uint32_t getIRQGpio() { return P_LORA_DIO_1; }
   bool isExternalPowered() const { return false; }
 @METHODS@

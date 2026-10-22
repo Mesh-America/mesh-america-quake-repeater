@@ -12,6 +12,9 @@
 #include <helpers/DynamicConfigSerializer.h>
 #include <helpers/CompanionTrafficPrefs.h>
 #include <helpers/CompanionTimezonePrefs.h>
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#endif
 
 #include "BluetoothName.h"
 
@@ -130,6 +133,9 @@ public:
   uint8_t peripherals_shared = 0; // applied at boot, not on a live CLI save
 #endif
   // Checked footer after all previously published fields/board footers.
+#if defined(ESP32_PLATFORM)
+  uint16_t cpu_freq_mhz = 0; // 0=Auto; ESP32-only CPU footer, no legacy offset moves
+#endif
   uint8_t tx_media = mesh::RADIO_TX_AUTO;
   uint8_t tx_ssh = mesh::RADIO_TX_AUTO;
 

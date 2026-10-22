@@ -3194,6 +3194,13 @@ void MyMesh::getNodeSnapshot(WebConfigServer::NodeSnapshot& s) {
   s.rx_ps_rx_us = _prefs.rx_ps_rx_us;
   s.rx_ps_sleep_us = _prefs.rx_ps_sleep_us;
   s.power_saving = _prefs.powersaving_enabled;
+#if defined(ESP32_PLATFORM)
+  s.cpu_freq_mhz = _prefs.cpu_freq_mhz;
+  s.cpu_actual_mhz = board.getCpuFrequencyMHz();
+  s.cpu_supported_mask = (board.supportsCpuFrequencyMHz(80) ? 1U : 0U)
+      | (board.supportsCpuFrequencyMHz(160) ? 2U : 0U)
+      | (board.supportsCpuFrequencyMHz(240) ? 4U : 0U);
+#endif
   s.mqtt_enabled = _prefs.bridge_enabled != 0;
   s.repeat = !_prefs.disable_fwd;
   s.advert_interval = _prefs.advert_interval * 2;

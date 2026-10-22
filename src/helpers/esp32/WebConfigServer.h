@@ -130,6 +130,9 @@ public:
     uint32_t rx_ps_rx_us;
     uint32_t rx_ps_sleep_us;
     uint8_t power_saving;
+    uint16_t cpu_freq_mhz;         // 0 = automatic device policy
+    uint16_t cpu_actual_mhz;
+    uint8_t cpu_supported_mask;   // bits 0/1/2 = 80/160/240 MHz
     bool display_rotation_supported;
     uint16_t display_rotation_degrees;
     bool mqtt_enabled;

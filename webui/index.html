@@ -429,6 +429,10 @@ body.tab-cli{padding-bottom:0}
         <span class="tgl"><input type="checkbox" data-k="radio.fem.rxgain"><u></u></span></div>
       <div class="sw" data-cap="8192"><span><b>Device power saving</b><i>Reduce device and GPS idle power</i></span>
         <span class="tgl"><input type="checkbox" data-k="powersaving"><u></u></span></div>
+      <div class="f hide" id="cpu-frequency-setting"><label>Processor speed</label>
+        <select data-k="cpu.freq" disabled><option value="auto">Auto (device policy)</option></select>
+        <div class="hint" id="cpu-frequency-status"></div>
+        <div class="hint">Power saving can still pause the processor while idle.</div></div>
       <div class="hide" id="regulator-settings">
         <h2>Power regulators</h2>
         <div class="note">Auto follows the board default. Changes are saved and restart the node. Selecting a mode clears that regulator's automatic fallback.</div>
@@ -923,6 +927,7 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
     case"radio.fem.rxgain":return r.fem_rxgain?"on":"off";
     case"radio.rxps":return rxpsCfgValue(r);
     case"powersaving":return r.powersaving?"on":"off";
+    case"cpu.freq":return c.cpu&&c.cpu.selected_mhz?String(c.cpu.selected_mhz):"auto";
     case"mcu.regulator":return ((c.regulators||{}).mcu||{}).requested||"auto";
     case"radio.regulator":return ((c.regulators||{}).radio||{}).requested||"auto";
     case"display.mode":return (st.cfg.display||{}).mode||"button";
@@ -1086,6 +1091,16 @@ function resetRegulatorFallback(domain){
   // through the normal authenticated save/result/reboot flow.
   st.dirty[key]=select.value;select.classList.add("dirty");updateSaveBar();
 }
+function syncCpuFrequency(c){
+  var cpu=c.cpu||{},select=$('[data-k="cpu.freq"]'),supported=cpu.supported_mhz;
+  var values=Array.isArray(supported)?[80,160,240].filter(function(mhz){return supported.indexOf(mhz)>=0}):[];
+  select.textContent="";
+  var automatic=document.createElement("option");automatic.value="auto";automatic.textContent="Auto (device policy)";select.appendChild(automatic);
+  values.forEach(function(mhz){var option=document.createElement("option");option.value=String(mhz);option.textContent=mhz+" MHz";select.appendChild(option)});
+  var available=values.length>0;
+  $("#cpu-frequency-setting").classList.toggle("hide",!available);select.disabled=!available;
+  $("#cpu-frequency-status").textContent=available&&cpu.actual_mhz>0?"Running at "+cpu.actual_mhz+" MHz":"";
+}
 function loadConfig(loadCapture){
   var epoch=++st.configEpoch;
   if(loadCapture)loadCapture.loadEpoch=epoch;
@@ -1096,6 +1111,7 @@ function loadConfig(loadCapture){
     st.cfg=c;st.orig={};st.dirty={};st.skipRadio=false;st.skipMqtt=false;
     st.wifiPasswordAutoCleared=false;
     syncRegulators(c);
+    syncCpuFrequency(c);
     if(st.hasMqtt){buildSlots("#app-slots");buildSlots("#wz-slots")}
     $$("[data-k]").forEach(function(el){
       var k=el.dataset.k,v=cfgVal(k);
@@ -1498,6 +1514,7 @@ function loadConfigSoft(){ // re-sync origin values without clobbering result ch
   api("/api/config").then(function(c){
     st.cfg=c;
     syncRegulators(c);
+    syncCpuFrequency(c);
     $$("[data-k]").forEach(function(el){
       var k=el.dataset.k,stored=cfgVal(k);
       st.orig[k]=stored;
@@ -2038,6 +2055,7 @@ var CLI_VERBS=[
   ["gps advert share","Advertise the live GPS position"],
   ["gps advert prefs","Advertise the stored lat/lon"],
   ["get powersaving","Show the power-saving mode"],
+  ["get cpu.freq","Show selected, running and supported processor speeds"],
   ["set powersaving on","Enable power saving"],
   ["set powersaving off","Disable power saving"],
   ["get bluetooth.mac","Show the Bluetooth address mode"],
@@ -2116,6 +2134,7 @@ var CLI_KEYS=[
   ["webui","WiFi settings website",0,"on|off"],
   ["usb.logging","USB logging",0,"on|off"],
   ["powersaving","Device power saving",0,"on|off"],
+  ["cpu.freq","Processor speed (get cpu.freq shows supported values)",0,"auto|80|160|240"],
   ["mcu.regulator","Processor regulator (supported boards; reboot required)",0,"auto|dcdc|ldo"],
   ["radio.regulator","LoRa regulator (supported boards; reboot required)",0,"auto|dcdc|ldo"],
   ["gps","GPS power",0,"on|off"],
@@ -2249,6 +2268,7 @@ var CLI_COMPANION_VERBS=[
   ["board","Board and hardware info"],
   ["memory","Heap and PSRAM free/min/largest block (Full Companion)"],
   ["get powersaving","Show device power saving"],
+  ["get cpu.freq","Show selected, running and supported processor speeds"],
   ["set powersaving on","Enable device power saving"],
   ["set powersaving off","Disable device power saving"],
   ["tempradio","Show the temporary radio window (Full Companion)"],
@@ -2278,6 +2298,7 @@ var CLI_COMPANION_KEYS=[
   ["radio.fem.txgain","Front-end module TX gain",0,"on|off"],
   ["radio.rxps","Configured RX power saving",0,"on|off"],
   ["powersaving","Device power saving",0,"on|off"],
+  ["cpu.freq","Processor speed (get cpu.freq shows supported values)",0,"auto|80|160|240"],
   ["mcu.regulator","Processor regulator (supported boards; reboot required)",0,"auto|dcdc|ldo"],
   ["radio.regulator","LoRa regulator (supported boards; reboot required)",0,"auto|dcdc|ldo"],
   ["usb.logging","USB packet logging (logging-enabled builds)",0,"on|off"],

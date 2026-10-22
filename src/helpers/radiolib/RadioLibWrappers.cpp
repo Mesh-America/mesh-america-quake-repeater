@@ -11,6 +11,7 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <driver/gpio.h>
+#include "../esp32/PowerTestControls.h"
 #elif defined(NRF52_PLATFORM)
 #include <utility/debug.h>
 #include "../NRF52Board.h"
@@ -1089,18 +1090,19 @@ bool RadioLibWrapper::getProfileIdleDelay(uint32_t& delay_ms) const {
   const uint64_t elapsed_us = now_us - _esp32_profile_idle_stamp_us;
   // Keep frontend settling and short visits on their polling path. Only the
   // MCU idles; the RF receiver stays in continuous RX on the current profile.
-  if (elapsed_us < NoiseFloorSettleMillis * 1000UL
+  if (elapsed_us < mesh::esp32::profileSleepSettleMillis(NoiseFloorSettleMillis) * 1000UL
       || elapsed_us >= _esp32_profile_idle_visit_us) return false;
   const uint32_t remaining_us = _esp32_profile_idle_visit_us - static_cast<uint32_t>(elapsed_us);
   // Reserve return-to-loop/wake latency and require a useful timer interval.
   // These bounds are a conservative policy, not a measured latency guarantee.
   // The caller anchors this budget to an absolute ESP Timer deadline before
   // querying it and checks that deadline again immediately before sleeping.
-  constexpr uint32_t wake_guard_us = 4000;
-  constexpr uint32_t minimum_idle_us = 2000;
+  const uint32_t wake_guard_us = mesh::esp32::profileSleepGuardMicros();
+  const uint32_t minimum_idle_us = mesh::esp32::profileSleepMinimumMicros();
   if (remaining_us < wake_guard_us + minimum_idle_us) return false;
   delay_ms = (remaining_us - wake_guard_us) / 1000;
-  if (delay_ms > 10) delay_ms = 10;
+  if (delay_ms > mesh::esp32::profileSleepSliceMillis())
+    delay_ms = mesh::esp32::profileSleepSliceMillis();
   return true;
 #else
   return false; // Other platforms retain polling until their wake path is validated.

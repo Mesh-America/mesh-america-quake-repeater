@@ -221,7 +221,7 @@ int64_t esp_timer_get_time() { return static_cast<int64_t>(elapsed_us); }
         fixture = fixture.replace("state=STATE_RX; _profile_visit_stamp=profileTimestamp(_profiles.enabled());",
             "state=STATE_RX; _esp32_profile_visit_started_us=elapsed_us; "
             "_profile_visit_stamp=profileTimestamp(_profiles.enabled());")
-        return fixture.replace("@METHODS@", methods) + COMMON
+        return "#include <helpers/esp32/PowerTestControls.h>\n" + fixture.replace("@METHODS@", methods) + COMMON
 
     def run_fixture(self, main):
         with tempfile.TemporaryDirectory(prefix="meshcore-esp32-profile-idle-") as directory:

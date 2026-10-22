@@ -148,6 +148,13 @@ public:
   virtual void onAfterTransmit() { }
   // Update only indicator outputs; transmit hooks may also control RF hardware.
   virtual void applyLedPolicy() { }
+#if defined(ESP32_PLATFORM)
+  // CPU clock selection is ESP32-only; other platforms retain their current
+  // preference layout and board vtable. Zero selects the role's Auto policy.
+  virtual uint16_t getCpuFrequencyMHz() const { return 0; }
+  virtual bool supportsCpuFrequencyMHz(uint16_t) const { return false; }
+  virtual bool applyCpuFrequencyMHz(uint16_t, bool) { return false; }
+#endif
   virtual void reboot() = 0;
   MESH_REGULATOR_VIRTUAL uint8_t mcuRegulatorModes() const { return 0; }
   MESH_REGULATOR_VIRTUAL power::RegulatorMode defaultMcuRegulatorMode() const {
