@@ -25,6 +25,9 @@
 #define TXT_TYPE_CLI_COMMAND 2
 #define SERVER_RESPONSE_DELAY 1
 #define TXT_ACK_DELAY 1
+#define PERM_ACL_ROLE_MASK 7
+#define PERM_ACL_GUEST 0
+#define PERM_ACL_ADMIN 3
 
 namespace mesh {
 struct Utils {
@@ -45,6 +48,7 @@ struct TransportKey { uint8_t key[32] = {}; };
 struct Region { bool isWildcard() const { return true; } };
 struct ClientInfo {
   struct { uint8_t pub_key[PUB_KEY_SIZE] = {}; } id;
+  uint8_t permissions = PERM_ACL_ADMIN;
   uint32_t last_timestamp = 0, last_activity = 0;
   uint8_t out_path_len = 1, alt_path_len = 0xff;
   uint8_t out_path[MAX_PATH_SIZE] = {}, alt_path[MAX_PATH_SIZE] = {};
@@ -63,6 +67,7 @@ static uint32_t millis() { return now_millis; }
 
 class MyMesh {
 public:
+  struct { bool enabled() const { return false; } } guest_login;
   struct {
     ClientInfo clients[3];
     int num_clients = 3;
