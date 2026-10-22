@@ -127,11 +127,22 @@ public:
 class BLEService {
 public:
   BLEService() { ++fake_bt::services; }
+#ifdef TEST_BLE_OWNED_SERVER
+private:
+  friend class BLEDevice;
   ~BLEService() { --fake_bt::services; }
+public:
+#else
+  ~BLEService() { --fake_bt::services; }
+#endif
+  std::vector<BLECharacteristic*> children;
   unsigned made=0;
   BLECharacteristic* createCharacteristic(const char*,uint32_t) {
     const char* phase = made++ ? "rx" : "tx";
-    return fake_bt::failure==phase ? nullptr : new BLECharacteristic;
+    if (fake_bt::failure==phase) return nullptr;
+    auto* child = new BLECharacteristic;
+    children.push_back(child);
+    return child;
   }
   void start() {}
 };
@@ -145,7 +156,10 @@ public:
     assert(fake_bt::host!=ESP_BLUEDROID_STATUS_ENABLED || fake_bt::server!=this);
     --fake_bt::servers;
   }
-  BLEService* createService(const char*) { return fake_bt::failure=="service" ? nullptr : new BLEService; }
+  BLEService* service = nullptr;
+  BLEService* createService(const char*) {
+    return service = fake_bt::failure=="service" ? nullptr : new BLEService;
+  }
   BLEAdvertising* getAdvertising() { if(!fake_advertising) fake_advertising=new BLEAdvertising; return fake_advertising; }
   void setCallbacks(BLEServerCallbacks* cb) { callbacks=cb; }
   unsigned getConnectedCount() const { return connected; }
@@ -175,6 +189,7 @@ public:
     if(!fake_bt::initialized) return;
 #ifdef TEST_BLE_OWNED_SERVER
     assert(fake_bt::host!=ESP_BLUEDROID_STATUS_ENABLED);
+    if (fake_bt::server) delete fake_bt::server->service;
     delete fake_bt::server; fake_bt::server=nullptr;
     delete fake_advertising; fake_advertising=nullptr;
 #endif

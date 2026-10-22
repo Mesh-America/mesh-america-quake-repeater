@@ -29,6 +29,7 @@ HARNESS = r'''
 #include <cassert>
 #include <cstdio>
 #include <initializer_list>
+#include <vector>
 using esp_err_t = int;
 constexpr int ESP_OK = 0;
 enum esp_bt_controller_status_t { ESP_BT_CONTROLLER_STATUS_IDLE,
@@ -71,6 +72,7 @@ using BLEService = GattObject;
 using BLECharacteristic = GattObject;
 using BLE2902 = GattObject;
 static BLEServer* library_server = nullptr;
+static std::vector<GattObject*> library_children;
 struct BLEDevice {
   static bool getInitialized() { return initialized; }
   static BLEServer* getServer() { return library_server; }
@@ -80,6 +82,8 @@ struct BLEDevice {
     ++wrapper_deinits;
     // The current native wrapper deletes the server before stopping its port.
     // The adapter must have stopped callback dispatch before entering here.
+    for (auto* child : library_children) delete child;
+    library_children.clear();
     delete library_server; library_server = nullptr;
     (void)nimble_port_stop();
     initialized = host_task_created = false;
@@ -110,6 +114,7 @@ public:
     pTxCharacteristic = new BLECharacteristic;
     pRxCharacteristic = new BLECharacteristic;
     pTxDescriptor = new BLE2902;
+    library_children = {pService};
   }
 };
 @STACK_STOP@
@@ -166,7 +171,7 @@ int main() {
 class NativeNimbleStopTests(unittest.TestCase):
     def test_production_stop_handles_absent_and_started_host_tasks(self):
         source = (ROOT / "src/helpers/esp32/SerialBLEInterface.cpp").read_text()
-        ownership_start = source.index("template <typename Device>")
+        ownership_start = source.index("template <typename Device,")
         ownership = source[ownership_start:source.index("\n#endif", ownership_start)]
         harness = HARNESS.replace("@OWNERSHIP@", ownership).replace(
             "@CONTROLLER_STOP@", function(source, "static bool stopBluetoothController()"))

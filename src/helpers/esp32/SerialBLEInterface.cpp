@@ -43,14 +43,18 @@ static bool stopBluetoothController() {
 }
 
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
-// The pinned 2.0.17/3.1.3 wrappers leave their static server/advertiser alive
-// on deinit(false). The newer wrapper exposing getServer() deletes them.
-// Keep that ownership distinction independent of the processor model.
-template <typename Device>
-static auto bluetoothLibraryOwnsServer(int)
+// The newer wrapper owns its private service objects (the pinned 3.3.11
+// ownership repair is build-local in esp32_ble_lifecycle_fix.py). Select this
+// at compile time: a runtime if still compiles an inaccessible destructor.
+// Both wrappers leave our known NUS characteristics/descriptors app-owned.
+template <typename Device, typename Service>
+static auto cleanupBluetoothService(Service*, int)
     -> decltype(Device::getServer(), bool()) { return true; }
-template <typename Device>
-static bool bluetoothLibraryOwnsServer(...) { return false; }
+template <typename Device, typename Service>
+static bool cleanupBluetoothService(Service* service, ...) {
+  delete service;
+  return false;
+}
 #endif
 
 void SerialBLEInterface::forgetGattPointers() {
@@ -90,15 +94,11 @@ bool SerialBLEInterface::stopBluetoothStack() {
 #if defined(CONFIG_BLUEDROID_ENABLED)
   if (!stopBluetoothController()) return false;
 #endif
-  const bool owns_server = bluetoothLibraryOwnsServer<BLEDevice>(0);
   BLEDevice::deinit(false);
-  // Neither pinned Arduino wrapper owns our characteristics/service. The
-  // legacy server is retained until createServer() replaces its static
-  // pointer; deleting it sooner would leave a dangling callback target.
   delete pTxDescriptor;
   delete pRxCharacteristic;
   delete pTxCharacteristic;
-  delete pService;
+  const bool owns_server = cleanupBluetoothService<BLEDevice>(pService, 0);
   pTxDescriptor = NULL;
   pRxCharacteristic = pTxCharacteristic = NULL;
   pService = NULL;
