@@ -235,7 +235,11 @@ int main() {
 
     def test_home_history_pending_and_connections_fit(self):
         source = (ROOT / "examples/companion_radio/ui-new/UITask.cpp").read_text()
-        first_page = extract_braced(source, "if (_page == HomePage::FIRST)")
+        # Pocket rendering also tests FIRST, including unbraced conditions.
+        # Bound the page extraction to the complete standard render method.
+        home_screen = extract_braced(source, "class HomeScreen :")
+        render = extract_braced(home_screen, "int render(DisplayDriver& display) override")
+        first_page = extract_braced(render, "if (_page == HomePage::FIRST) {")
         first_page = first_page.rsplit("#if UI_MESSAGES_HOME_PAGE == 1", 1)[0] + "}"
         first_page = first_page.replace("if (_page == HomePage::FIRST)", "")
         preamble = PREAMBLE.replace("int getMsgCount() const { return 0; }", UI_MEMBERS)
