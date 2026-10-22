@@ -54,6 +54,8 @@ bool projectWorldPoint(const MapView& view, double, double, int& x, int& y) {
 class PocketGui {
 public:
   std::vector<std::string> labels;
+  std::string hint;
+  Settings _settings;
   unsigned markers = 0, own_markers = 0, range = 0;
   int width() const { return 250; }
   int bodyTop() const { return 20; }
@@ -66,7 +68,15 @@ public:
     ++markers;
     if (own) ++own_markers;
   }
-  void renderMapChrome(unsigned height) { range = height; }
+  void header(const char* title, const char* range_label) {
+    assert(std::strcmp(title, "Map") == 0);
+    assert(std::sscanf(range_label, "%u km", &range) == 1);
+  }
+  void footer(const char* footer_hint) {
+    assert(footer_hint != nullptr);
+    hint = footer_hint;
+  }
+  // @MAP_CHROME_IMPLEMENTATION@
 };
 
 }}}
@@ -81,7 +91,11 @@ public:
   Task* _task;
   mesh::ui::pocket::PocketGui _pocket;
   bool _pocket_map_located = false;
+  bool _pocket_zooming = false, _pocket_dirty = false;
+  unsigned save_count = 0, clean_count = 0;
   explicit HomeScreen(Task& task) : _task(&task) {}
+  bool flushPocketSettings() { ++save_count; _pocket_dirty = false; return true; }
+  void displayForceClean() { ++clean_count; }
   // @MAP_IMPLEMENTATION@
 };
 
@@ -93,6 +107,9 @@ static void checkView(const HomeScreen& home, double latitude, double longitude,
   assert(rendered_view.height_km == height && home._pocket.range == height);
   assert(rendered_view.width == 250 && rendered_view.height == 82);
   assert(home._pocket_map_located == located);
+  assert(home._pocket.hint == (!located ? "click next  2x back"
+      : home._pocket_zooming ? "1x zoom in  2x out  hold done"
+      : "click next  2x back  hold zoom"));
 }
 
 int main() {
@@ -102,54 +119,77 @@ int main() {
   home.renderPocketMap();
   assert(renders == 1 && home._pocket.markers == 0);
   checkView(home, 0, 0, 20000, false);
+  assert(home.clean_count == 0);
   assert(home._pocket.labels.back() == "World / no node locations");
 
-  // Executing the actual page binding is essential: valid zoom settings used
-  // to be discarded here whenever no contact or self location was available.
-  const unsigned heights[] = {20000, 5000, 1000, 200, 100, 50, 20, 10, 5};
+  // Even a saved 5 km preference must show the complete world without a
+  // location. Rendering the fallback must not overwrite that preference.
   the_mesh.contacts = {{0, 0, "Unset"}, {91000000, 1000000, "Invalid"}};
-  for (unsigned zoom = 0; zoom < 9; ++zoom) {
+  for (unsigned zoom = 0; zoom < 10; ++zoom) {
     task.settings.map_zoom = zoom;
     home.renderPocketMap();
-    checkView(home, 0, 0, heights[zoom], false);
+    checkView(home, 0, 0, 20000, false);
+    assert(task.settings.map_zoom == zoom);
     assert(home._pocket.markers == 0);
-    assert(home._pocket.labels.back() == (zoom == 0
-        ? "World / no node locations" : "no node locations"));
+    assert(home._pocket.labels.back() == "World / no node locations");
+    assert(home.clean_count == 0);
   }
 
-  task.settings = Settings{};
-  assert(zoomMap(task.settings, true, home._pocket_map_located));
-  home.renderPocketMap();
-  checkView(home, 0, 0, 5000, false);
-  assert(zoomMap(task.settings, false, home._pocket_map_located));
-  home.renderPocketMap();
-  checkView(home, 0, 0, 20000, false);
-
-  // Auto uses the real local center when it is known and returns to the
-  // overview if that location disappears. It never invents a node at 0,0.
-  task.settings = Settings{};
+  // The first frame with an own location resumes 5 km and immediately shows
+  // the zoom hint, even though the previous frame had no location.
+  task.settings.map_zoom = 8;
   the_mesh.contacts.clear();
   sensors = {47.5, -122.25};
   home.renderPocketMap();
-  checkView(home, 47.5, -122.25, 200, true);
+  checkView(home, 47.5, -122.25, 5, true);
   assert(home._pocket.own_markers == 1);
+  assert(home.clean_count == 1);
+
+  home._pocket_zooming = home._pocket_dirty = true;
+  home.renderPocketMap();
+  checkView(home, 47.5, -122.25, 5, true);
+  assert(home._pocket_zooming && home._pocket_dirty && home.save_count == 0);
+  assert(home.clean_count == 1);
+
+  // Losing the location while zooming saves the pending preference once and
+  // releases the controls for page navigation. The footer changes this frame.
   sensors = {0, 0};
   home.renderPocketMap();
   checkView(home, 0, 0, 20000, false);
-  assert(home._pocket.own_markers == 1);
+  assert(task.settings.map_zoom == 8 && !home._pocket_zooming && !home._pocket_dirty);
+  assert(home.save_count == 1);
+  assert(home.clean_count == 2);
+  home.renderPocketMap();
+  assert(home.save_count == 1 && home.clean_count == 2);
+  home._pocket_zooming = true;
+  home.renderPocketMap();
+  assert(!home._pocket_zooming && home.save_count == 1 && home.clean_count == 2);
 
   // With no own position, the first valid contact supplies the center; later
-  // contacts do not move it. Invalid or unset contact locations are skipped.
+  // contacts do not move it. The saved 5 km range resumes for this case too.
+  home._pocket.markers = home._pocket.own_markers = 0;
   sensors = {std::numeric_limits<double>::quiet_NaN(), 999};
   the_mesh.contacts = {{0, 0, "Unset"}, {91000000, 1000000, "Invalid"},
                       {37500000, 139100000, "First"},
                       {48000000, -120000000, "Later"}};
   home.renderPocketMap();
-  checkView(home, 37.5, 139.1, 200, true);
-  assert(home._pocket.markers == 3 && home._pocket.own_markers == 1);
+  checkView(home, 37.5, 139.1, 5, true);
+  assert(home._pocket.markers == 2 && home._pocket.own_markers == 0);
+  assert(home.clean_count == 3);
 
   sensors = {47.5, -122.25};
   home.renderPocketMap();
+  checkView(home, 47.5, -122.25, 5, true);
+  assert(home._pocket.own_markers == 1);
+  assert(home.clean_count == 3);
+
+  // Auto still chooses a 200 km local view and the world fallback.
+  task.settings = Settings{};
+  home.renderPocketMap();
   checkView(home, 47.5, -122.25, 200, true);
-  assert(home._pocket.own_markers == 2);
+  sensors = {0, 0};
+  the_mesh.contacts.clear();
+  home.renderPocketMap();
+  checkView(home, 0, 0, 20000, false);
+  assert(home.clean_count == 4);
 }

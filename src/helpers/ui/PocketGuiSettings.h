@@ -96,7 +96,9 @@ inline unsigned nameCharacters(const Settings& value) {
 }
 
 inline uint8_t mapZoomIndex(const Settings& value, bool located = true) {
-  return value.map_zoom < MAP_ZOOM_AUTO ? value.map_zoom : (located ? 3 : 0);
+  // A local range has no useful center until a node location is available.
+  if (!located) return 0;
+  return value.map_zoom < MAP_ZOOM_AUTO ? value.map_zoom : 3;
 }
 
 inline double mapHeightKm(const Settings& value, bool located = true) {
@@ -105,6 +107,7 @@ inline double mapHeightKm(const Settings& value, bool located = true) {
 }
 
 inline bool zoomMap(Settings& value, bool closer, bool located) {
+  if (!located) return false;
   const uint8_t index = mapZoomIndex(value, located);
   if ((closer && index == 8) || (!closer && index == 0)) return false;
   value.map_zoom = closer ? index + 1 : index - 1;

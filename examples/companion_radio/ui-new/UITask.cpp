@@ -705,7 +705,12 @@ class HomeScreen : public UIScreen {
         if (pocketLocation(latitude, longitude)) { located = true; break; }
       }
     }
+    if (_pocket_map_located != located) displayForceClean();
     _pocket_map_located = located;
+    if (!located && _pocket_zooming) {
+      _pocket_zooming = false;
+      if (_pocket_dirty) flushPocketSettings();
+    }
     MapView view = {located ? latitude : 0, located ? longitude : 0,
         mapHeightKm(settings, located), _pocket.width(),
         _pocket.bodyBottom() - _pocket.bodyTop()};
@@ -740,7 +745,9 @@ class HomeScreen : public UIScreen {
     else snprintf(summary, sizeof(summary), "%sno node locations",
         view.height_km == 20000 ? "World / " : "");
     _pocket.label(3, _pocket.bodyTop() + 9, summary);
-    _pocket.renderMapChrome((unsigned)view.height_km);
+    _pocket.renderMapChrome((unsigned)view.height_km, located
+        ? (_pocket_zooming ? "1x zoom in  2x out  hold done" : "click next  2x back  hold zoom")
+        : "click next  2x back");
   }
 
   int renderPocket(DisplayDriver& display) {
@@ -1676,6 +1683,10 @@ public:
     }
     if (_page == HomePage::MAP) {
       if (key == KEY_ENTER) {
+        if (!_pocket_map_located) {
+          _task->showAlert("Set location in app to zoom", 1500);
+          return true;
+        }
         _pocket_zooming = !_pocket_zooming;
         if (!_pocket_zooming) flushPocketSettings();
         return true;

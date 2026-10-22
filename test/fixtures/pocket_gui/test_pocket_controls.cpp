@@ -1,6 +1,7 @@
 #include <helpers/ui/PocketGuiSettings.h>
 #include <helpers/ui/UIScreen.h>
 #include <cassert>
+#include <cstring>
 #include <initializer_list>
 
 #define MAX_GROUP_CHANNELS 40
@@ -10,10 +11,14 @@ uint32_t millis() { return clock_millis; }
 struct Task {
   mesh::ui::pocket::Settings settings;
   int reader_opens = 0;
+  int alerts = 0, alert_millis = 0;
+  const char* alert_text = nullptr;
   mesh::ui::pocket::Settings& pocketSettings() { return settings; }
   unsigned pocketBoardCount() const { return 3; }
   void showReader() { ++reader_opens; }
-  void showAlert(const char*, int) {}
+  void showAlert(const char* text, int duration) {
+    ++alerts; alert_text = text; alert_millis = duration;
+  }
 };
 struct Mesh {
   bool dual = true;
@@ -53,18 +58,18 @@ static void key(HomeScreen& home, uint8_t value) {
 }
 
 static void mapZoomControls() {
-  for (bool located : {false, true}) {
+  {
     Task task;
     HomeScreen home(task);
     home._page = HomeScreen::MAP;
-    home._pocket_map_located = located;
+    home._pocket_map_located = true;
     key(home, KEY_ENTER);
     assert(home._pocket_zooming && task.settings.map_zoom == 9);
     key(home, KEY_NEXT);
-    assert(task.settings.map_zoom == (located ? 4 : 1));
+    assert(task.settings.map_zoom == 4);
     assert(home._pocket_dirty && home.clean_count == 1);
     key(home, KEY_PREV);
-    assert(task.settings.map_zoom == (located ? 3 : 0));
+    assert(task.settings.map_zoom == 3);
     assert(home.clean_count == 2);
     key(home, KEY_ENTER);
     assert(!home._pocket_zooming && !home._pocket_dirty);
@@ -90,12 +95,25 @@ static void mapZoomControls() {
     }
   }
 
-  Task task;
-  HomeScreen home(task);
-  home._page = HomeScreen::MAP;
-  key(home, KEY_ENTER);
-  key(home, KEY_PREV);
-  assert(task.settings.map_zoom == 9 && !home._pocket_dirty && home.clean_count == 0);
+  // A hold with no location explains why zoom is unavailable. Subsequent
+  // clicks still navigate pages rather than becoming invisible zoom changes.
+  for (unsigned zoom = 0; zoom < 10; ++zoom) {
+    Task task;
+    task.settings.map_zoom = zoom;
+    HomeScreen home(task);
+    home._page = HomeScreen::MAP;
+    key(home, KEY_ENTER);
+    assert(!home._pocket_zooming && task.settings.map_zoom == zoom);
+    assert(!home._pocket_dirty && home.clean_count == 0 && home.save_count == 0);
+    assert(task.alerts == 1 && task.alert_millis == 1500);
+    assert(std::strcmp(task.alert_text, "Set location in app to zoom") == 0);
+    key(home, KEY_NEXT);
+    assert(home._page == HomeScreen::STATUS && task.settings.map_zoom == zoom);
+    key(home, KEY_PREV);
+    assert(home._page == HomeScreen::MAP);
+    key(home, KEY_PREV);
+    assert(home._page == HomeScreen::FIRST && task.settings.map_zoom == zoom);
+  }
 }
 
 int main() {
@@ -117,12 +135,13 @@ int main() {
   assert(home.clean_count == 0);
   key(home, KEY_NEXT);
   assert(home._page == HomeScreen::MAP && home.clean_count == 1);
+  home._pocket_map_located = true;
   key(home, KEY_ENTER);
   assert(home._pocket_zooming);
   key(home, KEY_NEXT);
-  assert(task.settings.map_zoom == 1 && home._pocket_dirty);
+  assert(task.settings.map_zoom == 4 && home._pocket_dirty);
   key(home, KEY_PREV);
-  assert(task.settings.map_zoom == 0);
+  assert(task.settings.map_zoom == 3);
   key(home, KEY_ENTER);
   assert(!home._pocket_zooming && !home._pocket_dirty);
   key(home, KEY_NEXT);

@@ -37,10 +37,10 @@ saved timeouts are retained; set `display.timeout` and `display.usb.timeout` to
 `900` to use 15 minutes. The return-to-board delay is a separate setting.
 
 The map centres on this node's location, or the first contact with a location.
-Auto zoom shows a world overview when no locations are available, or a 200 km
-view when a location is available. Selected zoom levels also work without
-nodes; the map then centres on latitude 0, longitude 0 until a location is
-available. Contacts appear as dots, with nearby names at closer zooms.
+With no locations it shows a world overview, keeping the selected zoom saved
+for when a location becomes available. Zoom controls require a location.
+Auto zoom uses a 200 km view when a location is available. Contacts appear as
+dots, with nearby names at closer zooms.
 The view spans 20,000 km down to 5 km vertically;
 coastline detail stays coarse at close zooms. It contains no streets, terrain,
 regional downloads or ocean tiles. See the [map data notes](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/meshpocket_map/README.md)

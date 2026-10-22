@@ -368,12 +368,12 @@ public:
     normal(); footer();
   }
 
-  void renderMapChrome(unsigned actual_height_km = 0) {
+  void renderMapChrome(unsigned actual_height_km = 0, const char* hint = nullptr) {
     char range[24];
     snprintf(range, sizeof(range), "%u km", actual_height_km != 0
         ? actual_height_km : (unsigned)mapHeightKm(_settings));
     header("Map", range);
-    footer();
+    footer(hint);
   }
   void mapEmpty(const char* message) {
     font(true); textCentre(_width / 2, 54, message);

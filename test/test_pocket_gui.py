@@ -93,13 +93,16 @@ class PocketGuiTest(unittest.TestCase):
                                          "-DCOMPANION_FEATURE_READER=1", "-DUI_NO_DISCOVER_SCREEN=1",
                                          "-Wno-unused-parameter"])
 
-    def test_map_page_honors_zoom_without_node_locations(self):
+    def test_map_page_shows_world_without_locations_and_preserves_zoom(self):
         source = (ROOT / "examples/companion_radio/ui-new/UITask.cpp").read_text()
         implementation = "\n".join(extract_braced(source, signature) for signature in (
             "static bool pocketLocation(",
             "__attribute__((noinline)) void renderPocketMap() {"))
         fixture = (FIXTURE / "test_pocket_map_binding.cpp").read_text()
         fixture = fixture.replace("// @MAP_IMPLEMENTATION@", implementation)
+        gui = (ROOT / "examples/companion_radio/ui-new/PocketGui.h").read_text()
+        fixture = fixture.replace("// @MAP_CHROME_IMPLEMENTATION@",
+                                  extract_braced(gui, "void renderMapChrome("))
         with tempfile.TemporaryDirectory(prefix="mesh-pocket-map-binding-") as directory:
             generated = Path(directory) / "map.cpp"
             generated.write_text(fixture)

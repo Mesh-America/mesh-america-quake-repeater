@@ -97,7 +97,8 @@ static void settingsRoundTrip() {
         assert(decodeSettings(migrated, bytes, sizeof(bytes)));
         if (version == 1) old.refresh = 3;
         assert(equal(migrated, old));
-        assert(mapZoomIndex(migrated, false) == zoom);
+        assert(mapZoomIndex(migrated, true) == zoom);
+        assert(mapZoomIndex(migrated, false) == 0);
       }
     }
     // Auto was not a valid choice in these formats, even with a valid CRC.
@@ -151,17 +152,9 @@ static void mapZoomBehavior() {
   Settings value;
   assert(mapZoomIndex(value, true) == 3 && mapZoomIndex(value, false) == 0);
 
-  // With no position, Auto starts at the world overview. The first click
-  // must select the adjacent range rather than skip to the 100 km setting.
-  assert(zoomMap(value, true, false));
-  assert(value.map_zoom == 1 && mapHeightKm(value, false) == 5000);
-  assert(zoomMap(value, false, false));
-  assert(value.map_zoom == 0 && mapHeightKm(value, false) == 20000);
-  const Settings world = value;
-  assert(!zoomMap(value, false, false) && equal(value, world));
-
-  value = Settings{};
+  // Without a location, show the world and leave the zoom preference alone.
   const Settings automatic = value;
+  assert(!zoomMap(value, true, false) && equal(value, automatic));
   assert(!zoomMap(value, false, false) && equal(value, automatic));
   assert(zoomMap(value, true, true));
   assert(value.map_zoom == 4 && mapHeightKm(value, true) == 100);
@@ -169,18 +162,19 @@ static void mapZoomBehavior() {
   assert(zoomMap(value, false, true));
   assert(value.map_zoom == 2 && mapHeightKm(value, true) == 1000);
 
-  // Manual selections behave the same before and after a location arrives.
+  // Every manual selection resumes when a location arrives. Falling back to
+  // the overview must not replace a saved close range with the world range.
   for (unsigned zoom = 0; zoom < 9; ++zoom) {
     value.map_zoom = zoom;
-    for (bool located : {false, true}) {
-      assert(mapZoomIndex(value, located) == zoom);
-      assert(mapHeightKm(value, located) == heights[zoom]);
-      Settings closer = value, farther = value;
-      assert(zoomMap(closer, true, located) == (zoom < 8));
-      assert(closer.map_zoom == (zoom < 8 ? zoom + 1 : 8));
-      assert(zoomMap(farther, false, located) == (zoom > 0));
-      assert(farther.map_zoom == (zoom > 0 ? zoom - 1 : 0));
-    }
+    assert(mapZoomIndex(value, false) == 0 && mapHeightKm(value, false) == 20000);
+    Settings closer = value, farther = value;
+    assert(!zoomMap(closer, true, false) && equal(closer, value));
+    assert(!zoomMap(farther, false, false) && equal(farther, value));
+    assert(mapZoomIndex(value, true) == zoom && mapHeightKm(value, true) == heights[zoom]);
+    assert(zoomMap(closer, true, true) == (zoom < 8));
+    assert(closer.map_zoom == (zoom < 8 ? zoom + 1 : 8));
+    assert(zoomMap(farther, false, true) == (zoom > 0));
+    assert(farther.map_zoom == (zoom > 0 ? zoom - 1 : 0));
   }
 
   value.map_zoom = 8;
