@@ -69,6 +69,25 @@ def esp_fixture(path, modern=False, fragmented=False, internal_length=0x10000):
 
 
 class FirmwareRamTest(unittest.TestCase):
+    def test_pocket_gui_reserves_expanded_history_without_changing_other_boards(self):
+        flags = {"DISPLAY_CLASS": "GxEPDDisplay", "HELTEC_MESH_POCKET": 1,
+                 "COMPANION_RADIO_FULL": 1, "UI_MSG_PREVIEW_SIZE": 161}
+        target = "Mesh_pocket_companion_radio_full"
+        enabled = ram.requirements("NRF52_PLATFORM", flags, target)
+        self.assertEqual(enabled["components"]["screen_objects_and_history"], 12288)
+        self.assertNotIn("expanded_message_previews", enabled["components"])
+        self.assertGreaterEqual(enabled["required_contiguous_bytes"], 12288)
+
+        for changed in ({**flags, "UI_POCKET_GUI": 0},
+                        {key: value for key, value in flags.items()
+                         if key != "HELTEC_MESH_POCKET"}):
+            policy = ram.requirements("NRF52_PLATFORM", changed, target)
+            self.assertEqual(policy["components"]["screen_objects_and_history"], 8192)
+            self.assertEqual(policy["components"]["expanded_message_previews"], 2816)
+        larger = ram.requirements("NRF52_PLATFORM", {
+            **flags, "MESH_COMPANION_SCREEN_STARTUP_BYTES": 16384}, target)
+        self.assertEqual(larger["components"]["screen_objects_and_history"], 16384)
+
     def test_st7789_budget_matches_production_allocation_peak_and_reuses_buffers(self):
         ui = ROOT / "src/helpers/ui"
         spi = (ui / "ST7789Spi.h").read_text()

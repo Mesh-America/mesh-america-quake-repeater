@@ -27,6 +27,10 @@
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 #include <helpers/CompanionReaderConfig.h>
+#if UI_POCKET_GUI
+#include <helpers/ui/PocketGuiSettings.h>
+namespace mesh { namespace ui { namespace pocket { class PocketGui; } } }
+#endif
 
 class UITask : public AbstractUITask {
   DisplayDriver* _display;
@@ -100,6 +104,9 @@ class UITask : public AbstractUITask {
   UIScreen* home;
   UIScreen* msg_preview = nullptr;
   UIScreen* curr;
+#if UI_POCKET_GUI
+  mesh::ui::pocket::Settings _pocket_settings;
+#endif
 #if COMPANION_FEATURE_READER
   UIScreen* reader = nullptr;
 #endif
@@ -148,6 +155,15 @@ public:
   int  getMsgCount() const { return _msgcount; }
   int getPreviewCount() const;
   void renderMessageSummary(DisplayDriver& display) const;
+#if UI_POCKET_GUI
+  mesh::ui::pocket::Settings& pocketSettings() { return _pocket_settings; }
+  void renderPocketBoard(mesh::ui::pocket::PocketGui& gui) const;
+  void renderPocketInbox(mesh::ui::pocket::PocketGui& gui) const;
+  unsigned pocketBoardCount() const;
+  void cleanPocketDisplay() { if (_display) _display->forceFullRefresh(); }
+  void channelMessageSent(int channel_idx, const char* channel_name,
+                          const char* sender, const char* text, size_t length) override;
+#endif
   bool hasDisplay() const { return _display != NULL; }
 #ifdef HAS_TOUCH
   bool supportsTouchDebug() const override { return _display != nullptr; }

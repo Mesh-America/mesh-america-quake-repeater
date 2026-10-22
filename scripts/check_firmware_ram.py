@@ -385,7 +385,9 @@ def requirements(platform, defines, target):
                                                         external_ota)
     if display and display != "NullDisplayDriver":
         parts["display_pixels_and_driver"] = display_heap
-        screen_budget = integer(defines, "MESH_COMPANION_SCREEN_STARTUP_BYTES", 0)
+        pocket_gui = ("HELTEC_MESH_POCKET" in defines and "COMPANION_RADIO_FULL" in defines
+                      and integer(defines, "UI_POCKET_GUI", 1) != 0)
+        screen_budget = integer(defines, "MESH_COMPANION_SCREEN_STARTUP_BYTES", 12288 if pocket_gui else 0)
         if companion and screen_budget:
             # A target using this override has a source-side static assertion
             # that covers its concrete startup screens and allocator overhead.

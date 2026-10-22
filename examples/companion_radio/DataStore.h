@@ -9,6 +9,10 @@
 #include <helpers/ContactSecretCache.h>
 #endif
 #include <helpers/CompanionReaderConfig.h>
+#include <helpers/ui/PocketGuiConfig.h>
+#if UI_POCKET_GUI
+#include <helpers/ui/PocketGuiSettings.h>
+#endif
 #if defined(ESP32_PLATFORM)
 namespace mesh { class ContactFileTransaction; }
 #endif
@@ -235,6 +239,10 @@ public:
   bool loadPrefs(CompanionNodePrefs& prefs, double& node_lat,
                  double& node_lon);
   bool savePrefs(const CompanionNodePrefs& prefs, double node_lat, double node_lon);
+#if UI_POCKET_GUI
+  bool loadPocketGuiSettings(mesh::ui::pocket::Settings& settings);
+  bool savePocketGuiSettings(const mesh::ui::pocket::Settings& settings);
+#endif
 #if COMPANION_FEATURE_READER
   bool loadReaderBookmark(mesh::bible::Position& pos);
   bool saveReaderBookmark(mesh::bible::Position pos);

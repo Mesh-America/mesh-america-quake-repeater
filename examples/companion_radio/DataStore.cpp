@@ -763,6 +763,27 @@ bool DataStore::saveReaderBookmark(mesh::bible::Position pos) {
 }
 #endif
 
+#if UI_POCKET_GUI
+bool DataStore::loadPocketGuiSettings(mesh::ui::pocket::Settings& settings) {
+  if (_primary_storage_unavailable || _fs == nullptr) return false;
+  File file = openRead(_fs, "/pocket.ui");
+  if (!file) return false;
+  uint8_t bytes[mesh::ui::pocket::SETTINGS_RECORD_SIZE];
+  const bool read = file.size() == sizeof(bytes)
+      && file.read(bytes, sizeof(bytes)) == sizeof(bytes);
+  file.close();
+  return read && mesh::ui::pocket::decodeSettings(settings, bytes, sizeof(bytes), MAX_GROUP_CHANNELS);
+}
+
+bool DataStore::savePocketGuiSettings(const mesh::ui::pocket::Settings& settings) {
+  if (_primary_storage_unavailable || _volatile_primary_fs || _fs == nullptr) return false;
+  uint8_t bytes[mesh::ui::pocket::SETTINGS_RECORD_SIZE];
+  if (!mesh::ui::pocket::encodeSettings(settings, bytes, sizeof(bytes), MAX_GROUP_CHANNELS)) return false;
+  mesh::AtomicFileWriter file(_fs, "/pocket.ui");
+  return file && file.write(bytes, sizeof(bytes)) == sizeof(bytes) && file.commit();
+}
+#endif
+
 File DataStore::openRead(FILESYSTEM* fs, const char* filename) {
   return mesh::openFileRead(fs, filename);
 }

@@ -6266,7 +6266,12 @@ void MyMesh::handleCmdFrame(size_t len) {
       bool success = getChannel(channel_idx, channel);
 #if MESH_ENABLE_MESHTEXT_CHAT
       if (success && isMeshtextChannel(channel)) {
-        if (sendMeshtextText(channel, text, len - i)) writeOKFrame();
+        if (sendMeshtextText(channel, text, len - i)) {
+#if UI_POCKET_GUI
+          if (_ui) _ui->channelMessageSent(channel_idx, channel.name, _prefs.node_name, text, len - i);
+#endif
+          writeOKFrame();
+        }
         else writeErrFrame(ERR_CODE_BAD_STATE);
       } else
 #endif
@@ -6274,6 +6279,9 @@ void MyMesh::handleCmdFrame(size_t len) {
           && parseCompanionChannelAlias(channel.name).kind == CompanionChannelKind::Meshtext) {
         writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
       } else if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
+#if UI_POCKET_GUI
+        if (_ui) _ui->channelMessageSent(channel_idx, channel.name, _prefs.node_name, text, len - i);
+#endif
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx

@@ -6,6 +6,7 @@
 #include <helpers/SensorManager.h>
 #include <helpers/MultiSerialInterface.h>
 #include <Arduino.h>
+#include <helpers/ui/PocketGuiConfig.h>
 
 #ifdef PIN_BUZZER
   #include <helpers/ui/buzzer.h>
@@ -100,6 +101,12 @@ public:
                       int channel_idx = -1,
                       const char* channel_name = nullptr,
                       int queue_index = -1) = 0;
+#if UI_POCKET_GUI
+  virtual void channelMessageSent(int channel_idx, const char* channel_name,
+                                  const char* sender, const char* text, size_t length) {
+    (void)channel_idx; (void)channel_name; (void)sender; (void)text; (void)length;
+  }
+#endif
   virtual void notify(UIEventType t = UIEventType::none) = 0;
   virtual bool supportsDisplayRotation() const { return false; }
   virtual bool setDisplayRotationDegrees(uint16_t degrees) {

@@ -584,6 +584,10 @@ public:
   bool loadReaderBookmark(mesh::bible::Position& pos) { return _store->loadReaderBookmark(pos); }
   bool saveReaderBookmark(mesh::bible::Position pos) { return _store->saveReaderBookmark(pos); }
 #endif
+#if UI_POCKET_GUI
+  bool loadPocketGuiSettings(mesh::ui::pocket::Settings& settings) { return _store->loadPocketGuiSettings(settings); }
+  bool savePocketGuiSettings(const mesh::ui::pocket::Settings& settings) { return _store->savePocketGuiSettings(settings); }
+#endif
 
 #if ENV_INCLUDE_GPS == 1
   bool setGpsEnabled(bool enabled);

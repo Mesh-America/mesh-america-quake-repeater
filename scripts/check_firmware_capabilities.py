@@ -15,6 +15,8 @@ from rp2040_application import read_application as read_rp2040_application
 from package_meshtext_license import (CAPABILITY as MESHTEXT_CAPABILITY,
     meshtext_evidence, notice_bytes as meshtext_notice_bytes,
     notice_record as meshtext_notice_record)
+from package_pocket_gui_license import (pocket_gui_evidence,
+    notice_bytes as pocket_gui_notice_bytes, notice_record as pocket_gui_notice_record)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "mota"))
 from motalib import parse_nrf52_layout
@@ -216,6 +218,13 @@ def main() -> int:
                            "source": "linked ELF symbols"})
     except (OSError, ValueError) as error:
         print(f"capability check: cannot qualify linked Meshtext code: {error}", file=sys.stderr)
+        malformed = True
+    try:
+        if pocket_gui_evidence(args.image):
+            stem = args.output.name.removesuffix(".capabilities.json")
+            third_party_notices.append(pocket_gui_notice_record(stem, pocket_gui_notice_bytes()))
+    except (OSError, ValueError) as error:
+        print(f"capability check: cannot qualify linked MeshPocket GUI/fonts: {error}", file=sys.stderr)
         malformed = True
     if args.require_meshtext and not chat_symbols:
         checks.append({"capability": MESHTEXT_CAPABILITY,

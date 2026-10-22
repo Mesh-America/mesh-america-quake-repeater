@@ -15,6 +15,7 @@
 #include <CRC32.h>
 
 #include "DisplayDriver.h"
+#include "PocketGuiConfig.h"
 
 #ifndef EINK_MAX_PARTIAL_REFRESH
   // 60 to prevent ghosting when refreshing every minute ...
@@ -58,6 +59,9 @@ class GxEPDDisplay : public DisplayDriver {
   int last_display_crc_value = 0;
   int _cycles_before_full_refresh;
   int max_partial_refresh = EINK_MAX_PARTIAL_REFRESH; // so this can be changed by an option after
+#if UI_POCKET_GUI
+  bool _full_frame = false;
+#endif
 
 public:
 #if defined(EINK_DISPLAY_MODEL)
@@ -67,6 +71,29 @@ public:
 #endif
 
   bool begin();
+#if UI_POCKET_GUI
+  Adafruit_GFX& gfx() { return display; }
+  void crcAdd(const void* bytes, size_t length) {
+    display_crc.update(static_cast<const uint8_t*>(bytes), length);
+  }
+  void setMaxPartialRefresh(int count) {
+    if (count == max_partial_refresh) return;
+    max_partial_refresh = count;
+    resetPartialRefreshCounter();
+  }
+  void setNativeRotation(int rotation) {
+    rotation &= 3;
+    if (display.getRotation() == rotation) return;
+    display.setRotation(rotation);
+    setDimensions(display.width(), display.height());
+    display.setFullWindow();
+    _full_frame = true;
+    forceFullRefresh();
+  }
+  void setFlipped(bool flipped) override {
+    setNativeRotation((DISPLAY_ROTATION + (flipped ? 2 : 0)) & 3);
+  }
+#endif
 
   bool isOn() override { return _isOn; }
   bool isEink() override { return true; }

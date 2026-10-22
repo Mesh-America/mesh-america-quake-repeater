@@ -138,12 +138,17 @@ void GxEPDDisplay::startFrame(ColorVal bkg) {
   if (_cycles_before_full_refresh != 0) {
     display.setPartialWindow(0, 0, display.width(), display.height());
   } else {
+#if UI_POCKET_GUI
+    display.setFullWindow();
+    _full_frame = true;
+#else
     // forces a full wipe of the screen ...
     display.clearScreen(0xFF); // Clears microcontroller side RAM
     display.writeScreenBuffer(0xFF); // Forces 0xFF (White) into the display controller's history registers
     // we'll need a partial refresh after that (whatever crc value is)
     last_display_crc_value = 0;
     resetPartialRefreshCounter();
+#endif
   }
 }
 
@@ -247,11 +252,25 @@ uint16_t GxEPDDisplay::getTextWidth(const char* str) {
 void GxEPDDisplay::endFrame() {
   if (_isOn == false) return;
   uint32_t crc = display_crc.finalize();
+#if UI_POCKET_GUI
+  if (_full_frame) {
+    display.display(false);
+    display.setPartialWindow(0, 0, display.width(), display.height());
+    resetPartialRefreshCounter();
+    _full_frame = false;
+    display.powerOff();
+  } else if (crc != last_display_crc_value) {
+    display.display(true);
+    if (_cycles_before_full_refresh > 0) --_cycles_before_full_refresh;
+    display.powerOff();
+  }
+#else
   if (crc != last_display_crc_value) {
     display.display(true);
     if (_cycles_before_full_refresh > 0) {
       _cycles_before_full_refresh--;
     }
   }
+#endif
   last_display_crc_value = crc;
 }
