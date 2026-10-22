@@ -554,17 +554,105 @@ Its receipt is `v4-auto-restoration-after-e411-awake.private.json` (SHA-256
 `4dbf10eeac81e8897c8a4f9fa4d7b62ac20e74c91b467a501f31fa3a1d8bd0ec`).
 
 Both receive defects remain proven by executed host regressions, but the
-physical results show that additional losses remain. The next diagnostic
+physical results show that additional losses remain. The following diagnostic
 records bounded activity and transmission times on the radios themselves.
-It must distinguish other-profile ownership, unresolved preamble activity,
+It distinguishes other-profile ownership, unresolved preamble activity,
 read/rearm gaps and delays between scanner calls without treating host counter
 replies as RF timestamps. No arbitrary preamble or CPU-sleep setting change
 or replacement packet was used to turn a failed result into a pass.
 
+## On-radio capture after the receive fixes
+
+Source `9b70827d0` adds an opt-in, bounded RAM trace for this diagnosis.
+It is compiled out of normal firmware. The private V3 sender and V4 receiver
+images record physical interrupt bounds and receive activity without additional
+SPI reads or asynchronous USB output. Trace capture does not qualify a release
+image by itself.
+
+Two controller failures are retained separately. The first rejected a valid
+pending-frequency response before sending any RF. After correcting that parser,
+the absolute-slot attempt sent and received one primary packet, then stopped
+with 39 packets unsent. Its next frequency change took 2.847 seconds, exceeding
+the 2.553 seconds available after transmit confirmation. Both attempts restored
+the original checked settings and verified a fresh MQTT PUBACK. Neither is an
+RF qualification pass, and no original packet was resent.
+
+A separate, predeclared `minimum-gap-v1` measurement keeps the seeded packet
+order and minimum gaps, allowing slow frequency changes to stretch the cadence.
+It uses 40 fresh unique packets, 20 per profile, each sent once. The entire
+transmission phase completed in 114.162 seconds with zero retries or duplicate
+deliveries. Its changed cadence must not be treated as a passing replacement
+for the failed absolute-slot attempt or directly compared as the same loss-rate
+experiment.
+
+| V4 awake, radio2 scanning | Sent once | Received |
+| --- | --- | --- |
+| Primary | 20 | 20 |
+| Secondary | 20 | 12 |
+
+Both radios recorded zero SDK sleep calls, returns and errors. Both captures
+had zero overflow, SPI errors and context errors. All 32 shared packet-end
+checks agreed with the clock model. The timing model uses causal clock-query
+brackets, a conditional awake ESP32-S3 rate bound of 10 ppm per radio, and an
+explicit conditional 2 ms PHY allowance. Its full uncertainty envelope is
+retained; the predeclared 50 ms quality limit never narrows that envelope.
+
+Three of the eight secondary losses have a positive ownership classification:
+the entire possible preamble interval fell inside a confirmed valid primary
+packet reception from ambient traffic, rather than one of the owned test
+packets. The single transceiver could not listen on the secondary frequency
+during that reception. Five losses remain unresolved. Three overlap
+a read/rearm window, which is only a timing association; the other two have
+no qualifying cause in this capture. These results do not establish desense,
+noise, a new scanner defect, or the cause of historical missing packets.
+
+The strict RF result remains failed. The successful fixed-frequency controls
+and the new timing evidence establish frequency sharing as a cause of some
+losses while CPU sleep is disabled. Five losses still lack a qualifying cause.
+A longer preamble, different scan
+period, or dropping a valid primary reception is not silently applied as a
+general fix.
+
+The completed capture receipt is
+`radio-trace-minimum-gap-v1-completed.private.json` (SHA-256
+`a2f34dc973692c9567ac7854db59446c590ab1c176375b06076fe6944ea7440a`).
+It retains a cleanup failure: restoring the V4's automatic radio2 permission
+exceeded the controller's combined 15-second budget after a busy rejection.
+The primary temporary lease had already become inactive; automatic permission
+remained unrestored. Fresh MQTT PUBACK recovery passed. A separate guarded operation
+restored that permission with one setter and no RF, checked channel semantics
+and the PIN through a fresh handshake, and preserved the original failed
+receipt. Its receipt SHA-256 is
+`432b1104156e2b6c4802efa5af6089d1b2ccc6bcfe70ea7acb1596fcc3cfa89f`.
+A subsequent read-only baseline verified both radios against all checked
+original settings and credential digests, with no transmissions or preference
+writes (SHA-256
+`f32cb54600142b2011fd9bcf51a186e95f41b70e590fabbf5e06516bb6506dc7`).
+
 ## Final handback and limits
 
-V3 currently runs `7d0709bf0`; V4 runs `e4119a120`, and the peer remains on
-`ebb59d48`. The completed earlier V3 campaign and V4 scanning controls,
+V3 and V4 now run normal Full Companion `9b70827d0`, with the diagnostic trace
+compiled out. The peer remains on `ebb59d48`. Both application-only returns
+passed complete readback, partition-table and OTA-metadata preservation, and
+checked configuration/credential preservation. The normal application SHA-256
+values are `39e15c4df674993ef1a3a809867a381a01b182af3e920ff208f28bef16178619`
+(V3) and `dd714ad4e9f57f811647af889c8eab7e99a434f81da9541a4398624049b6361f`
+(V4). Return receipts have SHA-256
+`28a5e075ee9154c2e67b1d4bc1fbec375d45abc1a41f40ac4797dc4a23bd9528` (V3)
+and `5894b59b1d3344cf88d3804a05022271c86f7b4aad29e5307be0f1af475237b9` (V4).
+A read-only post-boot observation confirms V4 MQTT running with its saved
+broker connected and zero core error flags.
+
+The first V3 return invocation stopped before any ROM operation or firmware
+write because the existing diagnostic install used the same source-commit
+attempt marker. That failed receipt is retained (SHA-256
+`972e888b0d5c425676b2411ae6f7ca04cbd1b5e126fd1557667c474d0617c741`).
+The normal return uses a separate node/source/application-hash marker while
+retaining exclusive creation and all original update checks; the diagnostic
+marker is unchanged. Later source commits only repair a host fixture and
+update this report. Unchanged RF tests were not repeated for the normal return.
+
+The completed earlier V3 campaign and V4 scanning controls,
 including the `a5293fa50` awake run, restored their checked radio, RX power-saving,
 Bluetooth, WiFi, MQTT, logging, diagnostics and USB-watchdog settings, including
 credential digests, original radio2 automatic permission and peer power/channel
