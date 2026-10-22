@@ -1003,6 +1003,7 @@ jobs:
           MESH_VOICE_TEST_SANITIZERS=1 python3 -B test/test_voice_prefixes.py -v
           python3 -B test/test_nimble_companion.py
           python3 -B test/test_esp32_ble_power.py -v
+          python3 -B test/test_esp32_native_ble_stop.py -v
           python3 -B test/test_bluetooth_pairing_ui.py
           python3 -B test/test_companion_pairing_display.py
           python3 -B test/test_companion_identity_startup.py

@@ -82,7 +82,7 @@ bool SerialBLEInterface::stopBluetoothStack() {
   if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_INITIALIZED
       && esp_bluedroid_deinit() != ESP_OK) return false;
 #elif defined(CONFIG_NIMBLE_ENABLED)
-  if (!_nativeHostStopped) {
+  if (!_nativeHostStopped && BLEDevice::getInitialized()) {
     if (nimble_port_stop() != 0) return false;
     _nativeHostStopped = true;
   }
