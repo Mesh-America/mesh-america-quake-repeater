@@ -11,6 +11,7 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Radio and RF
 
+- [RS-232 bridge diagnostics: host/build checks and existing RAK Full RAM failure, 2026-10-22](rs232_bridge_diagnostics_2026-10-22.md)
 - [ESP-NOW bridge diagnostics: V4 and V4 R8 TFT Full build/host validation, 2026-10-22](espnow_bridge_diagnostics_2026-10-22.md)
 - [V3/V4/T096 radio2 with two fixed witnesses, matched SF7/BW62.5 at preamble 32, 2026-10-22](radio2_simultaneous_receivers_2026-10-22.md)
 - [SolarXiao Room Server power profiles and history build/host validation, 2026-10-21](solarxiao_room_2026-10-21.md)
