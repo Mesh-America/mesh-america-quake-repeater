@@ -185,7 +185,13 @@ class OnboardQspiProfilesTest(unittest.TestCase):
         self.assertEqual(parents, ["env:" + profile.parent])
         self.assertEqual(options.get("board"), profile.board)
         self.assertEqual(options.get("board"), parent.get("board"))
-        self.assertEqual(role_defines(options), role_defines(parent))
+        expected_role = role_defines(parent)
+        if profile in PREEXISTING_SOLAR_ROOMS:
+            # Canonical SolarXiao Room OTA adds native power support; its
+            # internal-only compatibility/recovery parent keeps legacy behavior.
+            self.assertNotIn("MESH_SOLARXIAO_POWER", expected_role)
+            expected_role["MESH_SOLARXIAO_POWER"] = "1"
+        self.assertEqual(role_defines(options), expected_role)
         self.assertEqual(variant_includes(options), {"variants/" + profile.variant})
         self.assertEqual(variant_includes(options), variant_includes(parent))
         self.assertEqual(options.get("board_build.ldscript"), profile.linker)
@@ -224,6 +230,24 @@ class OnboardQspiProfilesTest(unittest.TestCase):
                 for name in ("OTA_QSPI_STORE", "OTA_QSPI_BOOTLOADER_UPDATE", PENDING, *INTERNAL_ONLY):
                     self.assertNotIn(name, defines)
                 self.assertNotEqual(profile.target, profile.parent)
+
+    def test_solar_room_role_override_rejects_missing_wrong_or_unrelated_changes(self):
+        for profile, suffix in (
+            (PREEXISTING_SOLAR_ROOMS[0], "-UMESH_SOLARXIAO_POWER"),
+            (PREEXISTING_SOLAR_ROOMS[1], "-DMESH_SOLARXIAO_POWER=0"),
+            (PREEXISTING_SOLAR_ROOMS[0], "-DMESH_SOLARXIAO_POWER=2"),
+            (PREEXISTING_SOLAR_ROOMS[0], "-DUNRELATED_ROLE_CHANGE=1"),
+            (SUPPORTED[0], "-DMESH_SOLARXIAO_POWER=1"),
+        ):
+            with self.subTest(target=profile.target, suffix=suffix):
+                options = self.options(profile.target)
+                original = options["build_flags"]
+                try:
+                    options["build_flags"] = text_option(original) + "\n" + suffix
+                    with self.assertRaises(AssertionError):
+                        self.assert_external_contract(profile)
+                finally:
+                    options["build_flags"] = original
 
     def test_linker_files_keep_the_checked_application_geometry(self):
         for linker, start, end, maximum_size in (
