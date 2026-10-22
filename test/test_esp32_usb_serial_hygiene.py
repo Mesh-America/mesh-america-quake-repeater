@@ -53,6 +53,7 @@ static std::atomic<unsigned> esp32_hwcdc_allowed_generation{0};
 static std::atomic<unsigned> esp32_hwcdc_access_generation{0};
 static size_t tx_capacity=0;
 static void setUsbCompanionTxBufferCapacity(size_t capacity) { tx_capacity=capacity; }
+static void installEsp32SdkLogging() {}
 struct SerialMock {
   bool live=false, fail_rx=false;
   size_t rx=0, rx_calls=0, tx=0, timeout=0;

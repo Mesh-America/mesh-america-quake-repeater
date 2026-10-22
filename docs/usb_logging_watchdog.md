@@ -68,6 +68,13 @@ full logging endpoint drops diagnostic output without falling back to the
 control port. Explicit framework UART and RTT logger selections keep their
 existing destinations.
 
+On ESP32 USB-Serial/JTAG builds, ESP-IDF diagnostics also follow both
+`usb.logging` and `usb.debug`. Driver tasks submit bounded text; the USB owner
+emits it through the same session and writer guards as functional output.
+Logging-off, host changes and congestion discard pending diagnostics instead
+of falling back to the raw SDK console. Fragmented diagnostics from concurrent
+SDK tasks remain best effort. UART and native TinyUSB routes are unchanged.
+
 ## Recovery timing and safety
 
 For a physical host/reader outage, or pending TX with no real completion,
