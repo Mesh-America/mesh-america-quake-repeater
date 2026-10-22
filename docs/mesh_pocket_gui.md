@@ -2,7 +2,7 @@
 
 Full Companion on MeshPocket includes a channel message board, a worldwide
 coastline map and display settings. Other boards keep their existing home UI.
-USB, Bluetooth, notifications and the shared Reader remain available.
+USB, Bluetooth and notifications remain available.
 
 Use the Pocket's user button:
 
@@ -12,7 +12,6 @@ Use the Pocket's user button:
 | Message board, browsing | Older message | Newer message | Finish browsing |
 | Map, zooming | Zoom in | Zoom out | Save and finish |
 | Settings, editing | Change value | Next setting | Save and finish |
-| Network or Radio 2 | Next page | Previous page | Open Reader |
 
 Hold on the message board, map or settings page to enter its mode. Three or
 four clicks on the board select the next or previous configured channel.

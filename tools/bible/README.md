@@ -27,16 +27,14 @@ roles omit the corpus. `COMPANION_FEATURE_READER=0` excludes it from a Full buil
 
 ## On-device Reader
 
-Full Companions using the `ui-new` display (including the V4) also offer a
-Reader from the Network/radio-settings page:
+Full Companions using the `ui-new` display (including the V4) use these
+reading controls:
 
-- Long press opens at the first reference, or resumes the saved position.
 - Single click advances one screenful; double click goes back one screenful.
   Pages continue across verse and chapter boundaries to fill the available rows.
 - Three taps jump to verse one of the next chapter; four taps jump to verse
   one of the previous chapter. Navigation stops at the first and last chapters.
-- Long press exits to the radio page. It does not invoke early-boot CLI rescue
-  while opening or closing the reader.
+- Long press exits.
 
 Each verse starts with its subsection number. The header shows the first and
 last references on the screen instead of a verse-local part count. This layout
@@ -46,7 +44,7 @@ every three seconds, matching the message controls (which change channels).
 These are taps of the user button. Narrower displays use `hold: X` for exit
 or split the hint across lines. Both hint views reserve the same height; the
 V4 keeps its existing single footer row. Touch/joystick builds keep their own
-controls. The entry gesture stays hidden on the radio page. The footer has
+controls. The footer has
 reserved space in the pagination calculation, so text continues on another
 page when necessary.
 Text wraps at word boundaries without truncation. Both the screen and CLI use
