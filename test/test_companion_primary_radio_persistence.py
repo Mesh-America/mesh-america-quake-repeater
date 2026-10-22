@@ -18,6 +18,7 @@ HARNESS = r'''
 #include <helpers/RadioProfileCLI.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/radiolib/RXPowerSaving.h>
+#include <helpers/esp32/PowerTestControls.h>
 #include "companion_fleet_dispatch.h"
 #include <sys/stat.h>
 #include <limits>
