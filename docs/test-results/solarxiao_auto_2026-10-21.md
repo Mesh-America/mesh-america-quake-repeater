@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/solarxiao_auto_2026-10-21/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SolarXiao automatic carrier detection and Base support, 2026-10-21
 
 SolarXiao repeater firmware now defaults to automatic carrier detection when

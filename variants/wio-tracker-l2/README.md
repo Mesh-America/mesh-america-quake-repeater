@@ -63,6 +63,5 @@ PIN shown on the device screen.
   idle Bluetooth switches to slow advertising.
 - **Display orientation**: `offset_rotation=1` (landscape). If a unit shows
   the UI upside-down, use 3 in `WioTrackerL2Display.h`.
-- Pin map source: `meshtastic/firmware` [PR #10909](https://github.com/meshtastic/firmware/pull/10909),
-  since merged as [`variants/esp32s3/seeed_wio_tracker_L2`](https://github.com/meshtastic/firmware/tree/master/variants/esp32s3/seeed_wio_tracker_L2),
-  and the `meshtastic/device-ui` [`wio-l2` branch](https://github.com/meshtastic/device-ui/tree/wio-l2).
+- Pin map follows Seeed's Wio Tracker L2 firmware and display support work.
+  These pre-release assignments remain subject to hardware revision changes.

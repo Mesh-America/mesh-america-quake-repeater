@@ -1,5 +1,5 @@
 // LilyGo T-Beam-1W variant.h
-// Configuration based on Meshtastic PR #8967 and LilyGO documentation
+// Configuration follows the board support pin map and LilyGO documentation.
 
 #pragma once
 

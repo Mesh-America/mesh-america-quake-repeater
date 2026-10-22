@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/solarxiao_advanced_2026-10-21/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SolarXiao Advanced carrier profile, 2026-10-21
 
 The older SolarXiao 2W Advanced already supplies battery voltage and processor

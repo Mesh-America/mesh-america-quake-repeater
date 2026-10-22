@@ -63,7 +63,7 @@ A list of frequently-asked questions and answers for MeshCore
     - [5.1. Q: What are BW, SF, and CR?](#51-q-what-are-bw-sf-and-cr)
     - [5.2. Q: Do MeshCore clients repeat?](#52-q-do-meshcore-clients-repeat)
     - [5.3. Q: What happens when a node learns a route via a mobile repeater, and that repeater is gone?](#53-q-what-happens-when-a-node-learns-a-route-via-a-mobile-repeater-and-that-repeater-is-gone)
-    - [5.4. Q: How does a node discover a path to its destination and then use it to send messages in the future, instead of flooding every message it sends like Meshtastic?](#54-q-how-does-a-node-discover-a-path-to-its-destination-and-then-use-it-to-send-messages-in-the-future-instead-of-flooding-every-message-it-sends-like-meshtastic)
+    - [5.4. Q: How does a node discover and reuse a path to its destination?](#54-q-how-does-a-node-discover-and-reuse-a-path-to-its-destination)
     - [5.5. Q: Do public channels always flood? Do private channels always flood?](#55-q-do-public-channels-always-flood-do-private-channels-always-flood)
     - [5.6. Q: What is the public key for the default public channel?](#56-q-what-is-the-public-key-for-the-default-public-channel)
     - [5.7. Q: Is MeshCore open source?](#57-q-is-meshcore-open-source)
@@ -75,7 +75,7 @@ A list of frequently-asked questions and answers for MeshCore
     - [5.13. Q: Can I use a Raspberry Pi to update a MeshCore radio?](#513-q-can-i-use-a-raspberry-pi-to-update-a-meshcore-radio)
     - [5.14. Q: Are there projects built around MeshCore?](#514-q-are-there-projects-built-around-meshcore)
     - [5.15. Q: Are there client applications for Windows or Mac?](#515-q-are-there-client-applications-for-windows-or-mac)
-    - [5.16. Q: Are there any resources that compare MeshCore to other LoRa systems?](#516-q-are-there-any-resources-that-compare-meshcore-to-other-lora-systems)
+    - [5.16. Q: Where can I learn more about MeshCore?](#516-q-where-can-i-learn-more-about-meshcore)
 - [6. Troubleshooting](#6-troubleshooting)
     - [6.1. Q: My client says another client or a repeater or a room server was last seen many, many days ago.](#61-q-my-client-says-another-client-or-a-repeater-or-a-room-server-was-last-seen-many-many-days-ago)
     - [6.2. Q: A repeater or a client or a room server I expect to see on my discover list (on T-Deck) or contact list (on a smart device client) are not listed.](#62-q-a-repeater-or-a-client-or-a-room-server-i-expect-to-see-on-my-discover-list-on-t-deck-or-contact-list-on-a-smart-device-client-are-not-listed)
@@ -194,7 +194,7 @@ If you have more supported devices, you can use your additional devices with the
 ### 2.2. Q: Does MeshCore cost any money?
 **A:** All radio firmware versions (e.g. for Heltec V3, RAK, T-1000E, etc.) are free and open source developed by Scott at Ripple Radios.
 
-The native Android and iOS client uses the freemium model and is developed by Liam Cottle, developer of meshtastic map at [meshtastic.liamcottle.net](https://meshtastic.liamcottle.net) on [GitHub](https://github.com/liamcottle/meshtastic-map) and [reticulum-meshchat on GitHub](https://github.com/liamcottle/reticulum-meshchat).
+The native Android and iOS client uses the freemium model and is developed by Liam Cottle.
 
 The T-Deck firmware is free to download and most features are available without cost. To support the firmware developer, you can pay for a registration key to unlock your T-Deck for deeper map zoom and remote server administration over RF using the T-Deck. You do not need to pay for the registration to use your T-Deck for direct messaging and connecting to repeaters and room servers.
 
@@ -216,7 +216,7 @@ If you have consensus from your community in your region to update your region's
 
 ### 2.4. Q: What is an "advert" in MeshCore?
 **A:**
-Advert means to advertise yourself on the network. In Reticulum terms it would be to announce. In Meshtastic terms it would be the node sending its node info.
+An advert announces a node and its public information to the network.
 
 MeshCore allows you to manually broadcast your name, position and public encryption key, which is also signed to prevent spoofing. When you click the advert button, it broadcasts that data over LoRa. MeshCore calls that an Advert. There's two ways to advert, "zero hop" and "flood".
 
@@ -570,7 +570,7 @@ when explicitly configured, but separating the roles is generally preferable.
 
 In the case if users are moving around frequently, and the paths are breaking, they just see the phone client retries and revert to flood to attempt to re-establish a path.
 
-### 5.4. Q: How does a node discover a path to its destination and then use it to send messages in the future, instead of flooding every message it sends like Meshtastic?
+### 5.4. Q: How does a node discover and reuse a path to its destination?
 Routes are stored in sender's contact list. When you send a message the first time, the message first gets to your destination by flood routing. When your destination node gets the message, it will send back a delivery report to the sender with all repeaters that the original message went through. This delivery report is flood-routed back to you the sender and is a basis for future direct path. When you send the next message, the path will get embedded into the packet and be evaluated by repeaters. If the hop and address of the repeater matches, it will retransmit the message, otherwise it will not retransmit, hence minimizing utilization.
 
 [Source](https://discord.com/channels/826570251612323860/1330643963501351004/1351279141630119996)
@@ -739,12 +739,10 @@ As new MeshCore community projects become available on a weekly basis, we have s
 
 Both the Windows and Mac versions of the client app are fully unlocked and are free to use.
 
-### 5.16. Q: Are there any resources that compare MeshCore to other LoRa systems?
-**A:** Here is a list of MeshCore comparison resources:
-
-- The Comms Channel on YouTube: <https://www.youtube.com/watch?v=guDoKGs02Us>
-- MeshCore Advantages by MCarper: <https://github.com/mikecarper/meshfirmware/blob/main/MeshCoreAdvantages.md>
-- MeshCore vs Meshtastic by austinmesh.org: <https://www.austinmesh.org/about/meshcore-vs-meshtastic/>
+### 5.16. Q: Where can I learn more about MeshCore?
+**A:** Start with the [MeshCore documentation](https://docs.meshcore.io) and
+[QuickStart playlist](https://www.youtube.com/watch?v=iaFltojJrAc&list=PLshzThxhw4O4WU_iZo3NmNZOv6KMrUuF9).
+For this fork, see [feature switches by role](role_feature_switches.md).
 
 
 ---

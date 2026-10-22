@@ -44,8 +44,7 @@ public:
   bool hasUsbPowerDetect() const override { return true; }
 
   bool isUsbPowered() override {
-    // P0.13 is the dedicated USB / external power-detect line on the M6 PCB
-    // (same pin the Meshtastic M6 variant uses for USB detection).
+    // P0.13 is the dedicated USB / external power-detect line on the M6 PCB.
     return digitalRead(EXT_PWR_DETECT) == EXT_PWR_DETECT_VALUE;
   }
 

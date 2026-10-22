@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/solarxiao_power/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SolarXiao carrier profiles, MPPT and battery controls
 
 SolarXiao Repeater and QSPI OTA Room Server firmware support the CN3791 Base,

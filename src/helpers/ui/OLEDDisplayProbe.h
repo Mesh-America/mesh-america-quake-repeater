@@ -18,9 +18,8 @@ constexpr OLEDControllerMode defaultOLEDControllerMode() {
 #endif
 }
 
-// Status-byte detection is used by ss_oled and Meshtastic. Only 0x08 is
+// Status-byte detection is also used by ss_oled. Only 0x08 is
 // evidence of SH1106: some RAK1921 SSD1306 panels return the ambiguous 0x00.
-// See https://github.com/meshtastic/firmware/pull/11265.
 template <typename WireBus>
 OLEDController detectOLEDController(WireBus& wire, uint8_t address) {
   wire.beginTransmission(address);

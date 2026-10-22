@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/solarxiao_room_2026-10-21/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # SolarXiao Room Server power profiles and history, 2026-10-21
 
 The canonical SolarXiao QSPI OTA Room Server builds now initialize and service

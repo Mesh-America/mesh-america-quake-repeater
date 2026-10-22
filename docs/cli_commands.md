@@ -1103,8 +1103,7 @@ override remains a fallback for existing custom builds. Any saved selection
 takes precedence, including `auto`, which restores detection even when that
 fallback forces a controller.
 
-See [the Pocket v3 issue](https://github.com/meshcore-dev/MeshCore/issues/3296)
-and [the RAK1921 detection caveat](https://github.com/meshtastic/firmware/pull/11265).
+See [the Pocket v3 issue](https://github.com/meshcore-dev/MeshCore/issues/3296).
 
 ---
 

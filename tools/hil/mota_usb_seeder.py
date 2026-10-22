@@ -291,10 +291,9 @@ def main(argv=None):
             catalog, report["catalog"] = prepare_catalog(args.mota)
             save()
             from companion_raw_radio2_sweep import safe_identity
-            from meshtext_delivery import dependencies, require_idle_port
+            from companion_serial import Companion, require_idle_port
             report["usb"] = safe_identity(args.source_port, args.source_serial)
             require_idle_port(args.source_port)
-            Companion, _ = dependencies()
             node = Companion(args.source_port)
             safe_identity(args.source_port, args.source_serial)
             report["companion"] = node.start()

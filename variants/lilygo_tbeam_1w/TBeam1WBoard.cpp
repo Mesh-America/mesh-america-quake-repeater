@@ -111,7 +111,7 @@ void TBeam1WBoard::onAfterTransmit() {
 
 uint16_t TBeam1WBoard::getBattMilliVolts() {
   // T-Beam 1W uses a 2S battery through the GPIO4 divider. These settings
-  // match the hardware-tested fork and the Meshtastic board definition.
+  // match the hardware-tested fork's board configuration.
   static bool adc_initialized = false;
   if (!adc_initialized) {
     pinMode(BATTERY_PIN, INPUT);

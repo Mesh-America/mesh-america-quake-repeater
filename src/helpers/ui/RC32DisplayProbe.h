@@ -5,7 +5,7 @@
 namespace mesh { namespace ui { namespace rc32 {
 
 // Heltec's optional T108 uses NV3001B on the shared, bidirectional SDA pin.
-// Read commands/ID: meshtastic/firmware src/mesh/NodeDB.cpp, TFT_NV3001B_DETECT.
+// Probe command 0x04 or individual bytes 0xDA..0xDC for controller ID 0x300101.
 // Pins/power: HelTecAutomation/RadioCore_Library examples/NV3001B_Display.
 // Probe before claiming the SPI peripheral; no independent MISO is connected.
 inline uint32_t readIdCommand(uint8_t command, uint8_t bits, uint8_t dummy, uint8_t bias) {

@@ -78,9 +78,9 @@ bool HeltecV4R8Board::isExternalPowered() {
   if (!power_voltage_sampled || uint32_t(now - last_power_check_ms) >= 5000) {
     last_power_check_ms = now;
     power_voltage_sampled = true;
-    // Like Meshtastic's analog power detection, enter above a full Li-ion cell
-    // plus 10 mV. Release at 4.20 V to reduce display-profile chatter. This can
-    // miss a charger while the battery is low; it is not a charging-status flag.
+    // Enter above a full Li-ion cell plus 10 mV. Release at 4.20 V to reduce
+    // display-profile chatter. This can miss a charger while the battery is
+    // low; it is not a charging-status flag.
     const uint16_t millivolts = getBattMilliVolts();
     voltage_external_power = millivolts > (voltage_external_power ? 4200 : 4210);
   }

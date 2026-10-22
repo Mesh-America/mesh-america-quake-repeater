@@ -332,8 +332,7 @@ def main(argv=None):
             stream.flush()
 
         try:
-            from meshtext_delivery import dependencies, require_idle_port
-            Companion, _ = dependencies()
+            from companion_serial import Companion, require_idle_port
             for name, port, serial in (("a", args.a_port, args.a_serial), ("b", args.b_port, args.b_serial)):
                 usb[name] = safe_identity(port, serial)
                 require_idle_port(port)

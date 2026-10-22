@@ -6,9 +6,9 @@ MIT-licensed esp-cpp/espp radio messaging component identified below. They do
 not incorporate code from GPL firmware or generated protobuf definitions.
 
 Pinned upstream source:
-https://github.com/esp-cpp/espp/tree/4b32f78e007f3750b2ea82a96c3c5896c2770a97/components/meshtastic
-Files: include/meshtastic_types.hpp, src/meshtastic_protocol.cpp,
-src/meshtastic_crypto.cpp, src/meshtastic_protobuf.cpp.
+https://github.com/esp-cpp/espp/tree/4b32f78e007f3750b2ea82a96c3c5896c2770a97
+The adapted radio messaging helpers cover packet types, framing, encryption
+and protobuf wire encoding at this pinned repository revision.
 License:
 https://github.com/esp-cpp/espp/blob/4b32f78e007f3750b2ea82a96c3c5896c2770a97/LICENSE
 
