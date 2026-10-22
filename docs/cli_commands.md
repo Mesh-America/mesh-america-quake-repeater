@@ -5576,6 +5576,87 @@ For a complete two-repeater setup with each option explained, see the
 
 ---
 
+#### Diagnose the ESP-NOW bridge
+
+Available when the optional ESP-NOW bridge is compiled in. These are runtime
+diagnostics; no `BRIDGE_DEBUG` build flag is required.
+
+**Read-only commands:**
+
+```text
+get espnow.status
+get espnow.stats
+get espnow.stats rx
+get espnow.stats tx
+get espnow.stats drops
+get espnow.stats test
+```
+
+Status reports local state (`off`, `teardown-error`, `driver-error`,
+`channel-mismatch` or `ready`), then these compact fields:
+
+| Field | Meaning |
+| --- | --- |
+| `ch` | Configured/actual 2.4 GHz channel; actual `0` means unavailable. |
+| `fmt`, `src` | Packet format and configured LoRa packet source (`rx` or `tx`). |
+| `wifi` | Shared WiFi enable setting, not proof of WiFi association. |
+| `mode`, `ps`, `proto` | WiFi SDK mode and power-save integers, and protocol bitmask in hexadecimal. An unavailable mode or power-save query returns `-1`. |
+| `q` | Current receive/transmit queue depths. |
+| `last` | Last recorded SDK error stage/code, which may remain after recovery. |
+
+`espnow.running on` means the local bridge initialized; it does not prove a
+peer is reachable. The statistics pages use these keys:
+
+| Page | Keys and meaning |
+| --- | --- |
+| Default | `rx`: received callback frames; `mesh`: inbound MeshCore packets queued; `tx`: outbound MeshCore packets queued; `sent`: successful frame callbacks. |
+| `rx` | `frames`: received callback frames; `decoded`: parsed MeshCore packets; `mesh`: queued for mesh processing; `crc`: checksum failures; `bad`: malformed frames; `parse`: packet parse failures. |
+| `tx` | `req`: mesh TX requests; `queued`: mesh packets queued; `start`: SDK-accepted frames; `ok`: successful frame callbacks; `err`: SDK start failures; `cbfail`: failed frame callbacks; `timeout`: callback timeouts. |
+| `drops` | `rxq`: RX queue drops; `foreign`: foreign-group packets; `filter`/`dupe`: inbound filter/duplicate drops; `txq`: total mesh TX drops; `txfilter`/`txdupe`: outbound filter/duplicate drops; `big`: oversize TX drops. |
+| `test` | `queued`, `start`, `ok`, `fail`, `timeout`: probe TX stages; `rx`, `bad`: valid/invalid probes received; `txid`, `rxid`: last queued/received IDs in hexadecimal. |
+
+Mesh admission means queued for normal processing, not confirmed LoRa
+forwarding or end-to-end delivery. Packet and frame counters have different
+units: fragmentation can produce several frames for one mesh packet. Counters
+survive bridge stop/start; reboot or the explicit reset starts a new window.
+
+**Local-only actions:**
+
+```text
+espnow test
+espnow test A1B2C3D4
+espnow resetstats
+```
+
+The optional test ID is exactly eight hexadecimal digits, case-insensitive,
+without `0x`, spaces or trailing arguments. Omitting it uses uptime in
+milliseconds. The reply `OK - test queued id=...; confirm on peer` confirms
+local queueing only. Read the other updated board's `get espnow.stats test`
+and match `rxid`, with an increased `rx`, to establish one-way probe receipt. Send a
+different ID from the other board to test the reverse direction.
+
+A probe is unencrypted, CRC-checked transport diagnostic data, not a MeshCore
+packet or a security token. It does not verify packet-format compatibility or
+`bridge.secret`, authenticate the peer or establish normal packet delivery.
+There is no automatic echo,
+retry or LoRa forwarding; older firmware ignores it. Resetting statistics
+does not restart the bridge or write preferences. Test/reset commands are
+rejected over LoRa; use a local console. Every reply fits the bounded CLI
+frame, and diagnostics do not print from WiFi callbacks.
+
+For a short USB debug capture, record both `get usb.logging` and
+`get usb.debug`, then enable both `set usb.logging on` and `set usb.debug on`.
+Run the test and restore both original settings. The ordinary image emits
+bounded `ESPNOW:` updates from its main loop at most once per second when
+diagnostic state changes, even with `BRIDGE_DEBUG=0`. Updates can be skipped
+when USB is busy; read the counter pages for exact values. The CLI counter
+pages and probes do not require either logging gate.
+
+See the [two-board diagnostic flow](espnow_bridge_setup.md#test-the-24-ghz-path-without-lora-forwarding).
+Do not include `get bridge.secret` or WiFi credentials in shared debug logs.
+
+---
+
 #### View or change the bridge enabled flag
 
 **Search terms:** enable bridge, disable bridge, serial bridge, RS232 bridge.

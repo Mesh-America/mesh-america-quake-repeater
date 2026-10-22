@@ -40,6 +40,8 @@ HARNESS = r'''
 #include <cassert>
 #include <vector>
 #include <helpers/bridges/RS232Heartbeat.h>
+#include <helpers/bridges/ESPNowBridgeDiagnostics.h>
+#include <helpers/bridges/ESPNowBridgeFormat.h>
 #define BRIDGE_DEBUG_PRINTLN(...) ((void)0)
 #define PUB_KEY_SIZE 32
 #define PAYLOAD_TYPE_ADVERT 4
@@ -57,15 +59,6 @@ struct Identity {
  explicit Identity(const uint8_t*) {}
  bool verify(const uint8_t*,const uint8_t*,int) {assert(false);return false;}
 };
-namespace espnow {
- struct ESPNowRawFrames {uint8_t count=0;uint16_t lengths[2]={};uint8_t data[2][256]={};};
- bool encodeEspNowRawFrames(const uint8_t*,size_t,ESPNowRawFrames& f) {f.count=1;return true;}
-}
-namespace bridge {
- enum {ESPNOW_FORMAT_RAW=0};
- size_t espNowMaxMeshPacketSize(int) {return 256;}
- const char* espNowFormatName(int) {return "raw";}
-}
 }
 namespace AdvertSignature {
  constexpr unsigned kMaxMessageLen=68;
@@ -83,6 +76,7 @@ struct Manager {
 };
 struct Prefs {unsigned bridge_delay=10;unsigned bridge_baud=115200;};
 struct BridgeBase : AbstractBridge {
+@INGRESS_HOOK@
  bool _initialized=true;
  Seen _seen_packets;
  Manager manager; Manager* _mgr=&manager;
@@ -120,8 +114,16 @@ struct RS232Bridge : BridgeBase {
 };
 struct ESPNowBridge : BridgeBase {
  int _active_format=0;
+ mesh::bridge::diag::Stats _stats;
+ std::atomic<bool> _debug_dirty{false};
+ void noteTx(uint32_t mesh::bridge::diag::TxStats::* field) {
+   mesh::bridge::diag::increment(_stats.tx.*field);
+ }
+ void recordError(mesh::bridge::diag::Stage stage,int32_t code) {
+   _stats.error={stage,code,millis()};
+ }
  bool xorCrypt(uint8_t*,size_t) {return true;}
- bool queueTransmitFrames(mesh::espnow::ESPNowRawFrames&,const mesh::Packet&) {++queued;return true;}
+ bool queueTransmitFrames(const mesh::espnow::ESPNowRawFrames&,const mesh::Packet&,bool=false) {++queued;return true;}
  void sendPacket(mesh::Packet*) override;
 };
 struct MQTTBridge : BridgeBase {
@@ -204,6 +206,14 @@ int main() {
  BridgeBase no_policy;no_policy.onPacketReceived(&p);assert(no_policy.manager.queued==1);
 }
 '''
+
+# Importers use this shared harness directly, so expand its production hook
+# here rather than leaving fixture setup to one test's compilation path.
+_base_header = (ROOT / 'src/helpers/bridges/BridgeBase.h').read_text(encoding='ascii')
+_ingress_hook = '#if defined(WITH_ESPNOW_BRIDGE)\n'
+_ingress_hook += method(_base_header, 'enum class IngressResult') + ';\n'
+_ingress_hook += method(_base_header, 'virtual void onIngressResult(') + '\n#endif\n'
+HARNESS = HARNESS.replace('@INGRESS_HOOK@', _ingress_hook)
 
 class TransportFilterWiring(unittest.TestCase):
     def test_aliases_dispatch_the_original_suffix_without_expanding_a_command_buffer(self):
@@ -394,11 +404,13 @@ int main() {
             (work/'Mesh.h').write_text(PACKET)
             code = '#include <initializer_list>\n' + HARNESS.replace('@METHODS@', '\n'.join(methods))
             (work/'test.cpp').write_text(code)
-            result = subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                '-I', str(work), '-I', str(ROOT/'src'), str(work/'test.cpp'),
-                '-o', str(work/'test')], text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            subprocess.run([str(work/'test')], check=True)
+            for macros in [[], ['-DWITH_ESPNOW_BRIDGE=1']]:
+                with self.subTest(macros=macros):
+                    result = subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                        *macros, '-I', str(work), '-I', str(ROOT/'src'), str(work/'test.cpp'),
+                        '-o', str(work/'test')], text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    subprocess.run([str(work/'test')], check=True)
 
     def test_roles_wire_filter_at_every_bridge_start_and_cross_hook(self):
         for role in ['simple_repeater', 'simple_room_server']:

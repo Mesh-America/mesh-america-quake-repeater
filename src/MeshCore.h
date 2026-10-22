@@ -34,7 +34,8 @@
     (defined(NRF52_PLATFORM) || MESH_ESP32_USB_CONSOLE_COOPERATIVE) && \
     ((defined(MESH_DEBUG) && MESH_DEBUG) || \
      (defined(BRIDGE_DEBUG) && BRIDGE_DEBUG) || \
-     (defined(POWERSAVING_DEBUG) && POWERSAVING_DEBUG))
+     (defined(POWERSAVING_DEBUG) && POWERSAVING_DEBUG) || \
+     defined(WITH_ESPNOW_BRIDGE))
   #include <Arduino.h>
   #include <atomic>
   #include <stdarg.h>

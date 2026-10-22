@@ -651,6 +651,27 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
 
 #if defined(WITH_ESPNOW_BRIDGE)
+  ESPNowBridge& diagnosticEspNowBridge() {
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+    return espnow_bridge;
+#else
+    return bridge;
+#endif
+  }
+  void formatEspNowStatus(char* reply, size_t capacity) override {
+    diagnosticEspNowBridge().formatStatus(reply, capacity);
+  }
+  void formatEspNowStats(const char* page, char* reply, size_t capacity) override {
+    diagnosticEspNowBridge().formatStats(page, reply, capacity);
+  }
+  bool sendEspNowTest(uint32_t nonce) override {
+    return diagnosticEspNowBridge().sendTest(nonce);
+  }
+  bool resetEspNowStats() override {
+    diagnosticEspNowBridge().resetStats();
+    return true;
+  }
+
   // Retry ESP-NOW without taking over an active OTA session. MQTT creates its
   // WiFi task asynchronously, so it must first associate on the shared channel.
   bool startSharedEspNowBridgeIfReady() {

@@ -112,17 +112,23 @@ Run on both boards:
 ```text
 get espnow.enabled
 get espnow.running
+get espnow.status
 get bridge.channel
 get bridge.format
-get bridge.secret
 get bridge.source
 get bridge.delay
 get repeat
 get radio
 ```
 
-Expected: enabled and running `on`, matching channel/format/secret, source
-`tx`, delay `500`, repeat `on`, and the intended LoRa settings on each side.
+For the example above, expect enabled and running `on`, matching channel and
+format, source `tx`, delay `500`, repeat `on`, and the intended LoRa settings
+on each side. An existing `bridge.source rx` setup is also valid; diagnose
+the selected source rather than changing it just to match this example.
+Compare the shared secret privately; omit `get bridge.secret` from logs you
+share. `get espnow.status` distinguishes the configured channel from the actual
+2.4 GHz channel. Its `last` error stage/code is historical and may remain after
+recovery. A running bridge is not proof that the other board received anything.
 
 Send a message from a Companion on network A to one on network B, then reply
 from B to A. Check both directions; configuration readback alone does not test
@@ -136,6 +142,98 @@ If it does not work:
 - **Both are running but traffic does not cross:** compare channel, format,
   and secret; confirm each board's LoRa settings were applied with a reboot,
   and check the networks' forwarding and scope rules.
+
+If those saved settings already match, use the bounded test below before
+changing them again.
+
+### Test the 2.4 GHz path without LoRa forwarding
+
+Updated ESP-NOW bridge firmware includes runtime diagnostics in the ordinary
+image. No `BRIDGE_DEBUG` build flag or continuous USB logging is needed. Use
+the USB console so a WiFi change cannot disconnect your diagnostic session.
+
+On both boards, start a fresh observation window:
+
+```text
+espnow resetstats
+get espnow.status
+get espnow.stats test
+```
+
+On A, send one probe:
+
+```text
+espnow test A1B2C3D4
+```
+
+`OK - test queued id=A1B2C3D4; confirm on peer` means queued locally. On B, run
+`get espnow.stats test`: `rx` must increase and `rxid` must be `A1B2C3D4`.
+Then send `espnow test B1C2D3E4` on B and confirm that ID on A. The two
+commands are two one-way tests; there is no
+automatic reply or retry. Sender completion alone does not prove peer receipt.
+The optional ID is exactly eight hexadecimal digits, without `0x`; omitting
+it uses the current uptime in milliseconds as a correlation ID.
+
+These small, unencrypted CRC-checked probes test transport reachability only.
+They do not validate packet-format compatibility or the wrapped shared secret,
+authenticate the peer or prove MeshCore packet delivery. They are never
+injected into the mesh or forwarded
+onto LoRa. Older firmware ignores them and cannot report the received ID;
+use an updated peer for confirmation. Sending a probe and resetting
+statistics require a local connection; neither changes saved preferences.
+
+### Locate a mesh forwarding failure
+
+If both probe directions work, send one fresh identifiable message from a
+Companion on A's LoRa network and read these pages on both bridge boards:
+
+```text
+get espnow.stats
+get espnow.stats rx
+get espnow.stats tx
+get espnow.stats drops
+```
+
+Repeat in the opposite direction with a new message. Counters accumulate until
+`espnow resetstats` or reboot and survive an ESP-NOW stop/start. Inspect changes
+across the one message, rather than assuming old totals describe the current
+attempt.
+
+- **No source-side bridge TX request:** check the configured source.
+  `bridge.source rx` exports LoRa receptions; confirm the board heard the
+  fresh message. `bridge.source tx` exports LoRa transmissions; confirm it
+  forwards the message with repeat on and the intended routing, scope and
+  flood-filter settings. Either source is valid.
+- **TX requested but not sent:** the TX/drops pages separate queued traffic,
+  filtering, duplicates, size/queue drops and SDK start/completion failures.
+  Check the configured/live 2.4 GHz channel and last error stage/code.
+- **Peer sees frames but accepts no MeshCore packet:** inspect RX rejection
+  counters, format and the privately compared wrapped secret. A successful
+  diagnostic probe does not rule out a packet-format or secret mismatch.
+- **Peer admits the packet but no LoRa delivery follows:** admission means
+  queued for normal mesh processing, not a completed LoRa transmission. Check
+  repeat, scope, filters, duplicate suppression and the destination network.
+
+An absent counter change narrows a stage; these checks do not assume a cause
+for a particular pair of boards.
+
+If both bridge boards also hear the same message directly on LoRa, normal
+duplicate suppression can discard its later bridged copy. That alone does
+not show a broken ESP-NOW link. This is a possibility to check with the
+counters, not an established cause of a reported delivery failure.
+
+### Optional short USB debug capture
+
+For a brief observation window, run `get usb.logging` and `get usb.debug`
+and record both original settings. Enable both gates with `set usb.logging on`
+and `set usb.debug on`. The bridge emits bounded `ESPNOW:` status/counter
+updates from its main loop, at most once per second when diagnostic state
+changes. No `BRIDGE_DEBUG` build flag is required, and WiFi callbacks do not
+print to USB. Send the two probes or one fresh message, then restore both
+original settings. The CLI counter pages and probes do not require either
+logging gate. Use the counter pages for exact values; a busy USB console can
+skip a debug update. Do not include secrets or WiFi credentials in a shared
+capture.
 
 A running bridge keeps the device awake, even with device power saving enabled.
 ESP-NOW shares the WiFi radio: use the connected WiFi network's channel when

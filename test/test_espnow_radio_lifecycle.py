@@ -14,6 +14,7 @@ STUBS = r'''
 #include <cstring>
 #include <helpers/WirelessControl.h>
 #include <helpers/ESPNowRawFragmentation.h>
+#include <helpers/bridges/ESPNowBridgeDiagnostics.h>
 #define ESP_IDF_VERSION_VAL(a,b,c) ((a)*10000+(b)*100+(c))
 #define ESPNOW_DEBUG_PRINTLN(...) ((void)0)
 #define portENTER_CRITICAL(x) ((void)0)
@@ -213,6 +214,10 @@ struct Backend : mesh::wireless::Backend {
 };
 class Bridge {
 public:
+ static constexpr int ESP_ERR_INVALID_STATE=-78,ESP_ERR_INVALID_ARG=-79;
+ std::atomic<bool> _debug_dirty{false};
+ void recordError(mesh::bridge::diag::Stage,int32_t){}
+ void emitDebug(){}
  struct Prefs {int bridge_format=mesh::bridge::ESPNOW_FORMAT_RAW;uint8_t bridge_channel=6;} prefs;
  Prefs* _prefs=&prefs;bool _initialized=false;
  int _active_format=0,_rx_mux=0,_rx_head=0,_rx_tail=0,_rx_count=0,_rx_dropped=0,_rx_dropped_reported=0;
@@ -220,7 +225,7 @@ public:
  int _tx_callback_status=0,_tx_dropped=0,_tx_dropped_reported=0;
  uint32_t _tx_started_at=0,_tx_retry_at=0;bool _sdk_teardown_failed=false;
  mesh::espnow::ESPNowRawReassembler _raw_reassembler;
- struct QueuedTransmit {bool started=false;int packet=0;};
+ struct QueuedTransmit {bool started=false,diagnostic=false;int packet=0;};
  static constexpr int TX_QUEUE_DEPTH=2;
  QueuedTransmit _tx_queue[TX_QUEUE_DEPTH];
  struct {void clear(const int*){}} _seen_packets;

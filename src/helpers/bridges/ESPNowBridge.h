@@ -7,6 +7,8 @@
 #include "helpers/ESPNowRawFragmentation.h"
 #include "helpers/bridges/BridgeBase.h"
 #include "helpers/bridges/ESPNowBridgeFormat.h"
+#include "helpers/bridges/ESPNowBridgeDiagnostics.h"
+#include <atomic>
 
 #ifdef WITH_ESPNOW_BRIDGE
 
@@ -106,6 +108,7 @@ private:
     uint8_t next_frame;
     bool started;
     uint8_t start_retries;
+    bool diagnostic;
   };
   QueuedTransmit _tx_queue[TX_QUEUE_DEPTH];
   portMUX_TYPE _tx_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -129,6 +132,17 @@ private:
   // Snapshotted by begin() and immutable until end(), so callbacks and sends
   // never observe a partially applied preference change.
   uint8_t _active_format;
+  mesh::bridge::diag::Stats _stats;
+  std::atomic<bool> _debug_dirty{true};
+  uint32_t _debug_last_at = 0;
+  bool _debug_was_enabled = false;
+
+  mesh::bridge::diag::Stats snapshotStats();
+  void noteRx(uint32_t mesh::bridge::diag::RxStats::* field);
+  void noteTx(uint32_t mesh::bridge::diag::TxStats::* field);
+  void recordError(mesh::bridge::diag::Stage stage, int32_t code);
+  void emitDebug();
+  void onIngressResult(IngressResult result) override;
 
   /**
    * Performs XOR encryption/decryption of data
@@ -162,7 +176,7 @@ private:
 
   /** Atomically append one logical packet's one or two transport frames. */
   bool queueTransmitFrames(const mesh::espnow::ESPNowRawFrames& frames,
-                           const mesh::Packet& packet);
+                           const mesh::Packet& packet, bool diagnostic = false);
 
   /** Submit at most one queued frame after the previous send callback. */
   void pumpTransmitQueue();
@@ -227,6 +241,13 @@ public:
    * @param packet The mesh packet to transmit
    */
   void sendPacket(mesh::Packet *packet) override;
+
+  // Runtime diagnostics work in ordinary firmware, without BRIDGE_DEBUG.
+  // All output is bounded and generated on the main loop, never a callback.
+  void formatStatus(char* reply, size_t reply_size);
+  void formatStats(const char* page, char* reply, size_t reply_size);
+  bool sendTest(uint32_t nonce);
+  void resetStats();
 };
 
 #endif

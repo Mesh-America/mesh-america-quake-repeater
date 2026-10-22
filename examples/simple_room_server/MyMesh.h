@@ -670,6 +670,22 @@ public:
 
 #if defined(WITH_BRIDGE)
 #if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+  void formatEspNowStatus(char* reply, size_t capacity) override {
+    espnow_bridge.formatStatus(reply, capacity);
+  }
+  void formatEspNowStats(const char* page, char* reply, size_t capacity) override {
+    espnow_bridge.formatStats(page, reply, capacity);
+  }
+  bool sendEspNowTest(uint32_t nonce) override {
+    return espnow_bridge.sendTest(nonce);
+  }
+  bool resetEspNowStats() override {
+    espnow_bridge.resetStats();
+    return true;
+  }
+#endif
+
+#if defined(WITH_MQTT_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
   // MQTT's WiFi task associates asynchronously. ESP-NOW must wait for that
   // station interface so it can share the AP-selected channel safely.
   bool startSharedEspNowBridgeIfReady() {

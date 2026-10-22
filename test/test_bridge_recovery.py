@@ -15,7 +15,10 @@ MOCKS = r'''
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdarg>
+#include <string>
 #include <helpers/bridges/RS232Heartbeat.h>
+#include <helpers/bridges/ESPNowBridgeDiagnostics.h>
 #define MAX_TRANS_UNIT 255
 #define PAYLOAD_TYPE_OTA 0x0c
 using portMUX_TYPE=int;
@@ -23,6 +26,11 @@ using portMUX_TYPE=int;
 struct esp_now_recv_info_t {const uint8_t* src_addr;};
 struct esp_now_send_info_t {const uint8_t* des_addr;};
 constexpr int ESP_ERR_ESPNOW_NO_MEM=-77;
+constexpr int ESP_ERR_INVALID_STATE=-78,ESP_ERR_INVALID_ARG=-79;
+constexpr int ESP_ERR_TIMEOUT=-80;
+enum wifi_ps_type_t {WIFI_PS_NONE=0,WIFI_PS_MIN_MODEM=1};
+int esp_wifi_get_ps(wifi_ps_type_t* value){*value=WIFI_PS_NONE;return sdk_initialized?ESP_OK:-1;}
+int esp_wifi_get_protocol(int,uint8_t* value){*value=15;return sdk_initialized?ESP_OK:-1;}
 uint32_t now_ms=100;
 uint32_t millis(){return now_ms;}
 int send_result=0,send_calls=0;
@@ -33,6 +41,23 @@ int esp_now_send(const uint8_t*,const uint8_t* bytes,size_t len){
  sent.emplace_back(bytes,bytes+len);return ESP_OK;
 }
 namespace mesh {
+bool master_logging=false,verbose_logging=false,in_sdk_callback=false;
+std::vector<std::string> debug_output;
+bool isUsbDebugLoggingEnabled(){return master_logging&&verbose_logging;}
+struct DebugPort {
+ int capacity=1024;
+ int availableForWrite()const{return capacity;}
+ size_t write(const uint8_t* bytes,size_t length){
+  assert(!in_sdk_callback&&length<=static_cast<size_t>(capacity));
+  debug_output.emplace_back(reinterpret_cast<const char*>(bytes),length);return length;
+ }
+} debug_port;
+DebugPort& usbLoggingPort(){return debug_port;}
+size_t nrf52DebugPrintf(const char* format,...){
+ assert(!in_sdk_callback);char output[256];va_list args;va_start(args,format);
+ const int count=vsnprintf(output,sizeof(output),format,args);va_end(args);
+ if(count>0)debug_output.emplace_back(output);return count>0?static_cast<size_t>(count):0;
+}
 struct RTCClock {};
 struct Packet {
  uint8_t data[MAX_TRANS_UNIT]={};uint16_t length=4;
@@ -61,6 +86,7 @@ struct PacketManager {
 struct NodePrefs {
  int bridge_format=mesh::bridge::ESPNOW_FORMAT_RAW;
  uint8_t bridge_channel=6;uint32_t bridge_baud=115200,bridge_delay=1;
+ uint8_t bridge_pkt_src=0;
  char bridge_secret[32]="fleet-test";
 };
 struct Seen {
@@ -71,6 +97,7 @@ struct Seen {
 };
 class BridgeBase {
 public:
+@INGRESS_HOOK@
  static constexpr uint16_t BRIDGE_PACKET_MAGIC=0xc03e;
  static constexpr uint16_t BRIDGE_MAGIC_SIZE=2,BRIDGE_LENGTH_SIZE=2,BRIDGE_CHECKSUM_SIZE=2;
  NodePrefs* _prefs;mesh::PacketManager* _mgr;mesh::RTCClock* _rtc;
@@ -110,6 +137,10 @@ def code():
     sdk = sdk.replace("int esp_now_deinit() { assert(espnow_active); espnow_active=false; return ESP_OK; }",
                       "int esp_now_deinit() { assert(espnow_active); if(failure==18)return -1; espnow_active=false; return ESP_OK; }")
     base = (ROOT / "src/helpers/bridges/BridgeBase.cpp").read_text()
+    base_header = (ROOT / "src/helpers/bridges/BridgeBase.h").read_text()
+    ingress_hook = "#if defined(WITH_ESPNOW_BRIDGE)\n"
+    ingress_hook += method(base_header, "enum class IngressResult") + ";\n"
+    ingress_hook += method(base_header, "virtual void onIngressResult(") + "\n#endif\n"
     base_methods = "\n".join(method(base, signature) for signature in (
         "uint16_t BridgeBase::fletcher16(", "bool BridgeBase::validateChecksum(",
         "void BridgeBase::handleReceivedPacket("))
@@ -119,7 +150,7 @@ def code():
         source = (ROOT / f"src/helpers/bridges/{name}.cpp").read_text()
         headers.append(re.sub(r"^\s*#(?:include|pragma).*?$", "", header, flags=re.MULTILINE).replace("private:", "public:"))
         sources.append(re.sub(r"^\s*#include.*?$", "", source, flags=re.MULTILINE))
-    return sdk + MOCKS + "\n".join(headers) + base_methods + "\n".join(sources)
+    return sdk + MOCKS.replace("@INGRESS_HOOK@", ingress_hook) + "\n".join(headers) + base_methods + "\n".join(sources)
 
 
 COMMON = r'''

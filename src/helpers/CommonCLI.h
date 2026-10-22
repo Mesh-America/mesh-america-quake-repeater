@@ -646,6 +646,17 @@ public:
   virtual bool isEspNowBridgeRunning() { return isBridgeRunning(); }
   virtual bool isRs232BridgeRunning() const { return isBridgeRunning(); }
   virtual void formatRs232Status(char* reply) { strcpy(reply, "RS232 unavailable"); }
+#if defined(WITH_ESPNOW_BRIDGE)
+  virtual void formatEspNowStatus(char* reply, size_t capacity) {
+    snprintf(reply, capacity, "Error: ESP-NOW diagnostics unavailable");
+  }
+  virtual void formatEspNowStats(const char* page, char* reply, size_t capacity) {
+    (void)page;
+    snprintf(reply, capacity, "Error: ESP-NOW diagnostics unavailable");
+  }
+  virtual bool sendEspNowTest(uint32_t nonce) { (void)nonce; return false; }
+  virtual bool resetEspNowStats() { return false; }
+#endif
 
   virtual void restartBridgeSlot(int slot) {
     // Default: fall back to full restart
@@ -897,6 +908,9 @@ class CommonCLI {
   void handleRegionCmd(char* command, char* reply);
   void handleGetCmd(uint32_t sender_timestamp, char* command, char* reply);
   void handleSetCmd(uint32_t sender_timestamp, char* command, char* reply);
+#if defined(WITH_ESPNOW_BRIDGE)
+  bool handleEspNowDiagnosticCommand(uint32_t sender_timestamp, const char* command, char* reply);
+#endif
   void handleDelCmd(char* command, char* reply);
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
   bool handleSdCardGetCmd(const char* config, char* reply);

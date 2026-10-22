@@ -33,6 +33,9 @@
 #ifdef WITH_RS232_BRIDGE
 #include "bridges/RS232PowerSettings.h"
 #endif
+#if defined(WITH_ESPNOW_BRIDGE)
+#include "bridges/ESPNowBridgeDiagnostics.h"
+#endif
 #include "GpsPowerPolicy.h"
 #include "FloodAdvertCLI.h"
 #include "StorageLayout.h"
@@ -3048,9 +3051,65 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
   }
 }
 
+#if defined(WITH_ESPNOW_BRIDGE)
+bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
+                                             const char* command, char* reply) {
+  constexpr size_t capacity = 157;  // Leave room for an infrastructure reply prefix.
+  if (strncmp(command, "get espnow.status", 17) == 0) {
+    if (strcmp(command, "get espnow.status") != 0) {
+      snprintf(reply, capacity, "Error: use get espnow.status");
+    } else {
+      _callbacks->formatEspNowStatus(reply, capacity);
+    }
+    return true;
+  }
+  if (strncmp(command, "get espnow.stats", 16) == 0) {
+    const char* page = command + 16;
+    if (*page == 0) {
+      _callbacks->formatEspNowStats("", reply, capacity);
+    } else if (strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
+               || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0) {
+      _callbacks->formatEspNowStats(page + 1, reply, capacity);
+    } else {
+      snprintf(reply, capacity, "Error: use get espnow.stats [rx|tx|drops|test]");
+    }
+    return true;
+  }
+  if (strncmp(command, "espnow", 6) != 0
+      || (command[6] != 0 && command[6] != ' ')) return false;
+  if (sender_timestamp != 0) {
+    snprintf(reply, capacity, "Error: ESP-NOW test/reset requires a local connection");
+    return true;
+  }
+  if (strcmp(command, "espnow resetstats") == 0) {
+    snprintf(reply, capacity, "%s", _callbacks->resetEspNowStats()
+        ? "OK - ESP-NOW statistics reset" : "Error: ESP-NOW diagnostics unavailable");
+    return true;
+  }
+  uint32_t nonce = 0;
+  if (strcmp(command, "espnow test") == 0) {
+    nonce = millis();  // Correlation only; this is not a security token.
+  } else if (strncmp(command, "espnow test ", 12) != 0
+             || !mesh::bridge::diag::parseNonce(command + 12, nonce)) {
+    snprintf(reply, capacity, "Error: use espnow test [8 hex digits] or espnow resetstats");
+    return true;
+  }
+  if (_callbacks->sendEspNowTest(nonce)) {
+    snprintf(reply, capacity, "OK - test queued id=%08lX; confirm on peer",
+             static_cast<unsigned long>(nonce));
+  } else {
+    snprintf(reply, capacity, "Error: ESP-NOW test not queued; check status/stats");
+  }
+  return true;
+}
+#endif
+
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     PrefsSaveReplyGuard save_reply(_prefs_save_failures, reply);
     mesh::cli::normalizeCommandVerb(command);
+#if defined(WITH_ESPNOW_BRIDGE)
+    if (handleEspNowDiagnosticCommand(sender_timestamp, command, reply)) return;
+#endif
 #if MESH_ENABLE_FLEET_CONTROL
     if (handleFleetCommand(command, reply)) return;
 #endif
