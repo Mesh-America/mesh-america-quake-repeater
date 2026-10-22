@@ -52,6 +52,27 @@ PRELUDE = r'''
 #define RADIOLIB_LR2021_IRQ_LORA_HEADER_VALID 64
 #define RADIOLIB_LR2021_IRQ_LORA_HDR_CRC_ERROR 512
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
+#if defined(ESP32_PLATFORM)
+#define ICACHE_RAM_ATTR
+#define RADIOLIB_NC UINT32_MAX
+#define SOC_GPIO_PIN_COUNT 49
+// Match the pinned S3 SDK: holes are invalid and the macro itself shifts.
+#define GPIO_IS_VALID_GPIO(pin) (((UINT64_C(0x1fffffc3fffff) >> (pin)) & 1) != 0)
+static bool gpio_levels[SOC_GPIO_PIN_COUNT]={};
+static unsigned gpio_reads=0;
+struct RadioLibHal {
+ const uint32_t GpioLevelHigh=1;
+ uint32_t digitalRead(uint32_t pin) {
+   assert(pin<SOC_GPIO_PIN_COUNT && GPIO_IS_VALID_GPIO(pin));
+   ++gpio_reads;return gpio_levels[pin];
+ }
+};
+struct Module {
+ RadioLibHal instance;RadioLibHal* hal=&instance;
+ uint32_t irq=3;
+ uint32_t getIrq()const{return irq;}
+};
+#endif
 static uint32_t now_ms=100;
 uint32_t millis(){return now_ms;}
 struct LR2021 {
@@ -60,11 +81,15 @@ struct LR2021 {
  uint32_t irq=0;
  uint16_t fifo=4;
  int packet_length=4;
- unsigned reads=0, clears=0, standbys=0, arms=0, irq_clears=0, tx_starts=0;
+ unsigned reads=0, clears=0, standbys=0, arms=0, irq_clears=0, tx_starts=0, irq_probes=0;
+#if defined(ESP32_PLATFORM)
+ Module module;Module* selected_module=&module;
+ Module* getMod(){return selected_module;}
+#endif
  void (*callback)()=nullptr;
  void clearPacketReceivedAction(){callback=nullptr;}
  void setPacketReceivedAction(void (*fn)()){callback=fn;}
- int checkIrq(int type){return type==RADIOLIB_IRQ_RX_DONE?rx_status:tx_status;}
+ int checkIrq(int type){++irq_probes;return type==RADIOLIB_IRQ_RX_DONE?rx_status:tx_status;}
  int standby(){++standbys;if(standby_status)return standby_status;stopped=true;return 0;}
  int clearIrqFlags(uint32_t){assert(stopped);++irq_clears;rx_status=0;return 0;}
  int getPacketLength(){return packet_length;}
@@ -80,6 +105,11 @@ struct LR2021 {
    assert(stopped);
 #endif
    memset(output,0xa5,len);fifo=0;
+#if defined(ESP32_PLATFORM)
+   // Actual FIFO service clears RX_DONE; the level then falls. A delayed
+   // software callback after this point must not redeliver the old FIFO.
+   rx_status=0;gpio_levels[module.irq]=false;
+#endif
    if(inject_read_irq && !stopped && callback) callback();
    return base_status;
  }
@@ -103,7 +133,7 @@ struct Board {
 };
 struct RadioLibWrapper {
  uint8_t state=STATE_RX, _interrupt_slot=0xff, _irq_probe_failures=0;
- bool _loop_event_pending=false, _cw_active=false, _profile_repair_required=false;
+ bool _loop_event_pending=false, _cw_active=false, _profile_repair_required=false, _profile_refresh_required=false;
  bool _rx_ps_armed=false, _rx_hold_continuous=false, _rx_ps_enabled=false;
  bool _rx_ps_continuous_fallback=false, _nf_calib_active=false;
  float _last_snr=0, _last_rssi=0;
@@ -118,13 +148,15 @@ protected:
  ~RadioLibWrapper()=default;
 public:
  bool registerInterruptAction();void unregisterInterruptAction();
- bool hasPendingRadioInterrupt()const;bool claimRadioInterrupt();
+ bool hasAssertedRadioInterrupt()const;bool hasPendingRadioInterrupt()const;bool claimRadioInterrupt();
+ uint8_t beginReconfigure();
  void requestRestartRecv();bool isPacketReady();
  bool startSendRaw(const uint8_t*,int);bool isSendComplete();
  int recvRaw(uint8_t*,int);
  void onSendFinished();
  void idle(){state=STATE_IDLE;}
  bool isChipBusy(){return false;}
+ bool isReceivingPacket(){return false;}
  bool isPacketPendingOrReceiving(){return hasPendingRadioInterrupt();}
  bool recoverRadio(bool){return !hasPendingRadioInterrupt();}
  void stopReceiveDutyCycle(){_rx_ps_armed=false;chip.standby();}
@@ -245,7 +277,9 @@ int main(){
         callbacks += "\n" + wrapper[wrapper.index("static\n#if defined(ESP8266)"):
                                       wrapper.index("bool RadioLibWrapper::registerInterruptAction()")]
         names = [("bool", "registerInterruptAction"), ("void", "unregisterInterruptAction"),
+                 ("bool", "hasAssertedRadioInterrupt"),
                  ("bool", "hasPendingRadioInterrupt"), ("bool", "claimRadioInterrupt"),
+                 ("uint8_t", "beginReconfigure"),
                  ("void", "requestRestartRecv"), ("bool", "isPacketReady"),
                  ("bool", "startSendRaw"), ("bool", "isSendComplete"), ("int", "recvRaw"),
                  ("void", "onSendFinished")]
@@ -389,6 +423,114 @@ int main(){
         for defines in ([], ["-DRADIO_CLASS=CustomSTM32WLx"],
                         ["-DSTM32_PLATFORM=1", "-DRADIO_CLASS=CustomSX1262"]):
             compile_run(checks, defines)
+
+    def esp32_recovery_checks(self):
+        return r'''
+int main(){
+ uint8_t bytes[16]={};
+ auto* first=new CustomSX1262Wrapper;auto* second=new CustomSX1262Wrapper;
+ first->chip.module.irq=3;second->chip.module.irq=4;
+ assert(first->registerInterruptAction()&&second->registerInterruptAction());
+ // A completed RF packet wakes the CPU, but no normal edge ISR was delivered.
+ gpio_levels[3]=true;first->chip.rx_status=1;
+ assert(!radio_interrupt_events[first->_interrupt_slot].pending());
+ const unsigned spi_before=first->chip.irq_probes;
+ assert(first->hasPendingRadioInterrupt()&&!second->hasPendingRadioInterrupt());
+ assert(first->chip.irq_probes==spi_before); // level-only check, no SPI
+ const unsigned arm_before=first->chip.arms,standby_before=first->chip.standbys;
+ assert(first->beginReconfigure()==2); // no retune/rearm may discard its FIFO
+ assert(first->chip.arms==arm_before&&first->chip.standbys==standby_before);
+ assert(!first->startSendRaw(bytes,4)&&first->chip.tx_starts==0);
+ assert(first->recvRaw(bytes,sizeof(bytes))==4&&first->n_recv==1&&first->chip.reads==1);
+ assert(!gpio_levels[3]&&!first->hasPendingRadioInterrupt());
+ assert(first->recvRaw(bytes,sizeof(bytes))==0&&first->chip.reads==1);
+
+ // Physical and software ownership coalesce. Claim both instead of leaving
+ // the software callback pending behind the physical level's short circuit.
+ gpio_levels[3]=true;first->chip.rx_status=1;first->chip.fifo=4;first->chip.callback();
+ assert(first->recvRaw(bytes,sizeof(bytes))==4&&first->n_recv==2&&first->chip.reads==2);
+ assert(!radio_interrupt_events[first->_interrupt_slot].pending());
+ assert(!first->hasPendingRadioInterrupt());
+
+ // A delayed ISR after FIFO service has no RX_DONE. The unchanged status
+ // probe prevents stale payloads despite its positive software notification.
+ first->chip.callback();first->chip.rx_status=0;
+ assert(first->recvRaw(bytes,sizeof(bytes))==0&&first->chip.reads==2);
+ assert(first->recvRaw(bytes,sizeof(bytes))==0&&first->recvRaw(bytes,sizeof(bytes))==0);
+ assert(first->n_recv==2&&!first->hasPendingRadioInterrupt());
+
+ // Distinct module pins remain independent, including a rejected wrapper
+ // with a stale slot number. No board-level shared pin is consulted.
+ gpio_levels[4]=true;second->chip.rx_status=1;
+ assert(!first->hasPendingRadioInterrupt()&&second->hasPendingRadioInterrupt());
+ auto* denied=new CustomSX1262Wrapper;denied->_interrupt_slot=second->_interrupt_slot;
+ denied->chip.module.irq=4;
+ const unsigned reads_before=gpio_reads;
+ assert(!denied->hasPendingRadioInterrupt()&&!denied->claimRadioInterrupt());
+ assert(gpio_reads==reads_before);
+ denied->_interrupt_slot=0xff;
+ assert(!denied->hasPendingRadioInterrupt()&&!denied->claimRadioInterrupt());
+ assert(gpio_reads==reads_before);
+ delete denied;
+ assert(second->recvRaw(bytes,sizeof(bytes))==4&&second->n_recv==1);
+
+ // No GPIO access, or undefined SDK macro shift, for a missing module/HAL,
+ // NC, pin beyond the S3 range, or its real GPIO22..25 holes.
+ Chip* saved_chip=first->_radio;
+ first->_radio=nullptr;
+ unsigned checked_reads=gpio_reads;
+ assert(!first->hasPendingRadioInterrupt()&&!first->claimRadioInterrupt());
+ first->_radio=saved_chip;
+ Module* saved=first->chip.selected_module;
+ first->chip.selected_module=nullptr;
+ assert(!first->hasPendingRadioInterrupt()&&!first->claimRadioInterrupt());
+ first->chip.selected_module=saved;first->chip.module.hal=nullptr;
+ assert(!first->hasPendingRadioInterrupt()&&!first->claimRadioInterrupt());
+ first->chip.module.hal=&first->chip.module.instance;
+ for(uint32_t invalid:{RADIOLIB_NC,uint32_t(49),uint32_t(64),UINT32_MAX-1,
+                      uint32_t(22),uint32_t(23),uint32_t(24),uint32_t(25)}){
+   first->chip.module.irq=invalid;
+   assert(!first->hasPendingRadioInterrupt()&&!first->claimRadioInterrupt());
+ }
+ assert(gpio_reads==checked_reads);
+ first->chip.module.irq=3;
+ first->unregisterInterruptAction();gpio_levels[3]=true;
+ assert(!first->hasPendingRadioInterrupt()&&!first->claimRadioInterrupt());
+ assert(gpio_reads==checked_reads);
+ gpio_levels[3]=false;delete first;delete second;
+}
+'''
+
+    def test_esp32_asserted_module_dio_recovers_lost_wake_isr_once(self):
+        compile_run(self.source()+self.esp32_recovery_checks(), ["-DESP32_PLATFORM=1"])
+
+    def test_removed_physical_pending_or_claim_fallback_loses_real_receive(self):
+        source=self.source()
+        for name in ("hasPendingRadioInterrupt", "claimRadioInterrupt"):
+            with self.subTest(removed=name):
+                original=method(source, f"bool RadioLibWrapper::{name}(")
+                mutant=original.replace(" || hasAssertedRadioInterrupt()", "")
+                self.assertNotEqual(original,mutant)
+                with self.assertRaises(AssertionError) as failure:
+                    compile_run(source.replace(original,mutant)+self.esp32_recovery_checks(),
+                                ["-DESP32_PLATFORM=1"])
+                expected=("first->hasPendingRadioInterrupt()" if name=="hasPendingRadioInterrupt"
+                          else "first->recvRaw(bytes,sizeof(bytes))==4")
+                self.assertIn(expected,str(failure.exception))
+
+    def test_non_esp32_retains_software_only_interrupt_contract(self):
+        checks=self.source()+r'''
+int main(){
+ CustomSX1262Wrapper w;assert(w.registerInterruptAction());uint8_t bytes[16]={};
+ assert(!w.hasAssertedRadioInterrupt()&&!w.hasPendingRadioInterrupt());
+ assert(w.recvRaw(bytes,sizeof(bytes))==0&&w.chip.reads==0);
+ w.chip.callback();assert(w.hasPendingRadioInterrupt());
+ assert(w.recvRaw(bytes,sizeof(bytes))==4&&w.chip.reads==1&&!w.hasPendingRadioInterrupt());
+ w.unregisterInterruptAction();
+}
+'''
+        for defines in ([], ["-DNRF52_PLATFORM=1"], ["-DSTM32_PLATFORM=1"]):
+            with self.subTest(defines=defines): compile_run(checks,defines)
 
     def test_lr2021_fifo_guards_stopped_snapshot_cleanup_and_recovery(self):
         compile_run(self.source() + r'''

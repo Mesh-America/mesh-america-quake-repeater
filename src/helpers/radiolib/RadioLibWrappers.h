@@ -41,6 +41,7 @@ protected:
   uint8_t _irq_probe_failures = 0;
   bool registerInterruptAction();
   void unregisterInterruptAction();
+  bool hasAssertedRadioInterrupt() const;
   bool hasPendingRadioInterrupt() const;
   bool claimRadioInterrupt();
   PhysicalLayer* _radio;

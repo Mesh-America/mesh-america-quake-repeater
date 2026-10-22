@@ -10,6 +10,7 @@
 #if defined(ESP32_PLATFORM)
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <driver/gpio.h>
 #elif defined(NRF52_PLATFORM)
 #include <utility/debug.h>
 #include "../NRF52Board.h"
@@ -176,15 +177,37 @@ void RadioLibWrapper::unregisterInterruptAction() {
   _interrupt_slot = 0xff;
 }
 
+bool RadioLibWrapper::hasAssertedRadioInterrupt() const {
+#if defined(ESP32_PLATFORM)
+  // GPIO wake does not guarantee that the normal edge ISR ran during light
+  // sleep. Retain a completed packet even when DIO is already high after
+  // restoring its edge mode. Read this PHY's pin, never a shared board pin.
+  if (_interrupt_slot >= RADIO_INTERRUPT_SLOT_COUNT
+      || radio_interrupt_owners[_interrupt_slot] != this || _radio == nullptr) return false;
+  Module* module = _radio->getMod();
+  if (module == nullptr || module->hal == nullptr) return false;
+  const uint32_t irq = module->getIrq();
+  // GPIO_IS_VALID_GPIO shifts by its argument on older IDF versions, so its
+  // mask check must follow the range check even for an invalid/NC module pin.
+  if (irq == RADIOLIB_NC || irq >= SOC_GPIO_PIN_COUNT || !GPIO_IS_VALID_GPIO(irq)) return false;
+  return module->hal->digitalRead(irq) == module->hal->GpioLevelHigh;
+#else
+  return false;
+#endif
+}
+
 bool RadioLibWrapper::hasPendingRadioInterrupt() const {
-  return _loop_event_pending || (_interrupt_slot < RADIO_INTERRUPT_SLOT_COUNT && radio_interrupt_events[_interrupt_slot].pending());
+  return _loop_event_pending || (_interrupt_slot < RADIO_INTERRUPT_SLOT_COUNT && radio_interrupt_events[_interrupt_slot].pending())
+      || hasAssertedRadioInterrupt();
 }
 
 bool RadioLibWrapper::claimRadioInterrupt() {
   const bool startup = _loop_event_pending;
   _loop_event_pending = false;
   const bool interrupt = _interrupt_slot < RADIO_INTERRUPT_SLOT_COUNT && radio_interrupt_events[_interrupt_slot].claim();
-  return startup || interrupt;
+  // Always claim the software event too, even when the physical pin is high.
+  // recvRaw still verifies RX_DONE before reading FIFO, including a late ISR.
+  return startup || interrupt || hasAssertedRadioInterrupt();
 }
 
 void RadioLibWrapper::begin() {
