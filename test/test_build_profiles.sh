@@ -109,7 +109,7 @@ grep -Fq 'void HeltecRC32Board::onBootComplete()' \
 grep -Fq 'current_mhz > ESP32_POST_BOOT_CPU_FREQ' \
   variants/heltec_rc32/HeltecRC32Board.cpp \
   || fail "RC32 post-boot clock transition overrides lower power-saving clocks"
-grep -Fq 'return ESP32_POST_BOOT_CPU_FREQ;' examples/companion_radio/main.cpp \
+grep -Fq 'return ESP32_POST_BOOT_CPU_FREQ;' src/helpers/esp32/CpuClockPolicy.h \
   || fail "Companion power saving ignores the RC32 post-boot nominal clock"
 grep -Fq 'board.onBootComplete();' examples/simple_sensor/main.cpp \
   || fail "sensor firmware never applies board post-boot policy"

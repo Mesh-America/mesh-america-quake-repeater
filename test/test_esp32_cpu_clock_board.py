@@ -181,5 +181,31 @@ int main(){
             with self.subTest(role=role):
                 self.run_fixture(tests,["-DCONFIG_IDF_TARGET_ESP32S3=1","-DCONFIG_PM_ENABLE=0"])
 
+    def test_rc32_post_boot_nominal_survives_shared_policy_and_explicit_selection(self):
+        main=(ROOT/"examples/companion_radio/main.cpp").read_text()
+        apply=body(main,"static bool applyCompanionPowerSaving(")
+        tests=r'''
+int main(){
+ // RC32 starts peripherals at 240 MHz, then uses 160 MHz as its Auto nominal.
+ // This must take precedence over the generic ESP32_CPU_FREQ=240 fixture.
+ board.setCompanionCpuClockPolicy(true);
+ assert(applyCompanionPowerSaving(false)&&actual_mhz==160);
+ assert(applyCompanionPowerSaving(true)&&actual_mhz==80);
+ assert(applyCompanionPowerSaving(false)&&actual_mhz==160);
+ // A saved explicit clock remains an operator choice even with PS enabled.
+ prefs.cpu_freq_mhz=240;
+ assert(applyCompanionPowerSaving(true)&&actual_mhz==240);
+ prefs.cpu_freq_mhz=0;
+ assert(applyCompanionPowerSaving(false)&&actual_mhz==160);
+ // Infrastructure Auto also uses the post-boot nominal in either PS state.
+ board.setCompanionCpuClockPolicy(false);
+ for(bool ps:{false,true})assert(board.applyCpuFrequencyMHz(0,ps)&&actual_mhz==160);
+}
+'''
+        self.run_fixture("#include <initializer_list>\n"+apply+tests,[
+            "-DCONFIG_IDF_TARGET_ESP32S3=1","-DCONFIG_PM_ENABLE=0",
+            "-DESP32_POST_BOOT_CPU_FREQ=160","-DCOMPANION_IDF_PM_AVAILABLE=0",
+            "-DCOMPANION_BT_MODEM_SLEEP_AVAILABLE=0"])
+
 
 if __name__=="__main__": unittest.main(verbosity=2)
