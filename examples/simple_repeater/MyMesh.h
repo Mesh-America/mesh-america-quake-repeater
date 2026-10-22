@@ -672,9 +672,6 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
 
 #if defined(WITH_ESPNOW_BRIDGE)
-#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
-  bool isEspNowBridgeRunning() override { return bridge.isRunning(); }
-#endif
   ESPNowBridge& diagnosticEspNowBridge() {
 #if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
     return espnow_bridge;
@@ -1542,12 +1539,21 @@ public:
 #endif
   }
 
+#if defined(WITH_ESPNOW_BRIDGE)
+  // The wireless backend queries this public transport API in standalone
+  // Full repeaters as well as MQTT/UART combinations. UDP can be running
+  // independently, so the generic isBridgeRunning() result is insufficient.
+  bool isEspNowBridgeRunning() override {
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+    return espnow_bridge.isRunning();
+#else
+    return bridge.isRunning();
+#endif
+  }
+#endif
+
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
-  bool isEspNowBridgeRunning() override {
-    return espnow_bridge.isRunning();
-  }
-
 #ifdef WITH_MQTT_BRIDGE
   bool setMqttBridgeState(bool enable) override {
     if (!enable) {

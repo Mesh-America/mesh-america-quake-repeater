@@ -2,6 +2,7 @@
 """Execute production repeater UDP lifecycle with shared station owners."""
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -173,6 +174,65 @@ int main(){
 '''
 
 class UDPBridgeIntegrationTest(unittest.TestCase):
+    def test_wireless_backend_can_query_public_espnow_state_in_every_udp_owner_mix(self):
+        header = (ROOT / 'examples/simple_repeater/MyMesh.h').read_text(encoding='ascii')
+        signature = 'bool isEspNowBridgeRunning() override'
+        offset = header.index(signature)
+        # Preserve the actual member access from the production class. A
+        # private override compiles inside a role fixture but fails when the
+        # external wireless backend calls it, as the Indicator build exposed.
+        labels = re.findall(r'^\s*(public|protected|private):', header[:offset], re.M)
+        access = labels[-1] if labels else 'private'
+        method = body(header, signature)
+        backend = body((ROOT / 'examples/InfrastructureWireless.h').read_text(encoding='ascii'),
+                       'uint8_t enabled() const override')
+        fixture = r'''
+#include <cassert>
+#include <cstdint>
+#include <helpers/WirelessControl.h>
+struct Base { virtual bool isEspNowBridgeRunning() { return false; } };
+struct Bridge { bool running; bool isRunning() const { return running; } };
+class MyMesh : public Base {
+  Bridge bridge{false}, espnow_bridge{true};
+public:
+  bool isUDPBridgeNetworkEnabled() const { return true; }
+  bool isMqttBridgeRunning() const { return false; }
+@ACCESS@:
+@METHOD@
+public:
+  void flip() { bridge.running = true; espnow_bridge.running = false; }
+} the_mesh;
+struct BackendBase { virtual uint8_t enabled() const = 0; };
+struct Backend : BackendBase {
+@BACKEND@
+};
+int main() {
+  Backend backend;
+  assert(backend.enabled() & mesh::wireless::WiFi);
+#if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
+  assert(backend.enabled() & mesh::wireless::EspNow);
+  the_mesh.flip();
+  assert(!(backend.enabled() & mesh::wireless::EspNow));
+#else
+  assert(!(backend.enabled() & mesh::wireless::EspNow));
+  the_mesh.flip();
+  assert(backend.enabled() & mesh::wireless::EspNow);
+#endif
+}
+'''.replace('@ACCESS@', access).replace('@METHOD@', method).replace('@BACKEND@', backend)
+        for flags in ((), ('WITH_MQTT_BRIDGE',), ('WITH_RS232_BRIDGE',),
+                      ('WITH_MQTT_BRIDGE', 'WITH_RS232_BRIDGE')):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory(prefix='udp-public-api-') as tmp:
+                path = Path(tmp)
+                (path / 'test.cpp').write_text(fixture, encoding='ascii')
+                binary = path / 'test'
+                subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++11', '-Wall', '-Wextra', '-Werror',
+                    '-DWITH_UDP_BRIDGE=1', '-DWITH_ESPNOW_BRIDGE=1',
+                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-pie', '-no-pie',
+                    '-I', str(ROOT / 'src'), *['-D' + flag + '=1' for flag in flags],
+                    str(path / 'test.cpp'), '-o', str(binary)], check=True)
+                subprocess.run([str(binary)], check=True)
+
     def test_wireless_master_restores_udp_station_without_starting_setup_ap(self):
         backend=body((ROOT/'examples/InfrastructureWireless.h').read_text(),
                      'class InfrastructureWirelessBackend')+';'
