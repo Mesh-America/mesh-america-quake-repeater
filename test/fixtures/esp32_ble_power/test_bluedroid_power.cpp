@@ -171,7 +171,9 @@ static void cache_async_migration_and_real_nus_proof() {
   rx->callbacks->onWrite(rx,&stale_write); tick(a); // Old CCCD2D is now RX, actual TX remains off.
   disconnect_cache(); connect_cache(a); auth_cache(); tick(a);
   assert(cache_deletes==1); // Local START was not proof that this peer repaired its cache.
-  changed_cache(false,1); tick(a); assert(cache_deletes==2); // Known failure retry.
+  changed_cache(false,1); a.servicePowerState(); assert(cache_deletes==1);
+  test_millis+=999; a.servicePowerState(); assert(cache_deletes==1);
+  ++test_millis; a.servicePowerState(); assert(cache_deletes==2); // Known failure retry.
   changed_cache(false); tick(a);
   verify_nus(a);
   disconnect_cache(); connect_cache(a); auth_cache(); tick(a);
@@ -209,6 +211,40 @@ static void cache_disconnect_pending_timeout_and_teardown() {
   }
   ++suites;
 }
+static void cache_success_progresses_without_timer_delay() {
+  reset_cache_stats();
+  SerialBLEInterface a; assert(a.begin("MeshCore-","legacy",246810,custom)); a.enable();
+  connect_cache(a); const uint32_t connected_at=test_millis;
+  assert(encryptions==1 && cache_creates==0);
+  auth_cache(); a.servicePowerState(); assert(cache_creates==1);
+  created_cache(); a.servicePowerState(); assert(cache_starts==1);
+  changed_cache(true); a.servicePowerState();
+  assert(test_millis==connected_at); // No artificial wait between successful phases.
+  disconnect_cache(); stopped(a); retire_global();
+  BLEDevice::setCustomGattsHandler(nullptr);
+
+  for(const char* fault : {"encrypt","cache-create","cache-start"}) {
+    reset_cache_stats();
+    SerialBLEInterface b; assert(b.begin("MeshCore-","legacy",246810,custom)); b.enable();
+    if(std::string(fault)=="encrypt") failure=fault;
+    connect_cache(b);
+    if(std::string(fault)!="encrypt") {
+      auth_cache();
+      if(std::string(fault)=="cache-create") failure=fault;
+      b.servicePowerState();
+      if(std::string(fault)=="cache-start") {
+        created_cache(); failure=fault; b.servicePowerState();
+      }
+    }
+    const unsigned attempts=encryptions+cache_creates+cache_starts;
+    b.servicePowerState(); assert(encryptions+cache_creates+cache_starts==attempts);
+    test_millis+=999; b.servicePowerState(); assert(encryptions+cache_creates+cache_starts==attempts);
+    ++test_millis; b.servicePowerState(); assert(encryptions+cache_creates+cache_starts==attempts+1);
+    failure.clear(); disconnect_cache(); stopped(b); retire_global();
+    BLEDevice::setCustomGattsHandler(nullptr);
+  }
+  ++suites;
+}
 static void cache_api_and_async_failures_are_bounded() {
   for(const char* fault : {"encrypt","cache-create","async-create","malformed-create","cache-start"}) {
     reset_cache_stats();
@@ -217,7 +253,9 @@ static void cache_api_and_async_failures_are_bounded() {
     connect_cache(a); auth_cache();
     if(std::string(fault)=="cache-create") failure=fault;
     tick(a);
-    if(std::string(fault)=="async-create") { created_cache(1); tick(a); created_cache(1); tick(a); created_cache(1); }
+    if(std::string(fault)=="async-create") {
+      for(unsigned i=0;i<3;++i) { created_cache(1); a.servicePowerState(); tick(a); }
+    }
     if(std::string(fault)=="malformed-create") {
       esp_ble_gatts_cb_param_t param;
       memcpy(param.add_attr_tab.svc_uuid.uuid.uuid128,marker_attributes->att_desc.value,16);
@@ -240,6 +278,7 @@ int main() {
   cache_async_migration_and_real_nus_proof();
   cache_disconnect_pending_timeout_and_teardown();
   cache_api_and_async_failures_are_bounded();
+  cache_success_progresses_without_timer_delay();
 #endif
   pointer_map_reproduces_cached_cccd_failure();
   repeated_cycles(); partial_stop_failures_and_late_callbacks(); startup_failures();

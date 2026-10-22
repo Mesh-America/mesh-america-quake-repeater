@@ -180,6 +180,7 @@ void SerialBLEInterface::serviceGattCacheRefresh(uint32_t now) {
       }
     } else {
       ++_cacheFailures;
+      _cacheLastAttempt = now; // Back off known failures, not successful progress.
       if (event == CacheOperation::Create && _cacheEventHandle == UINT16_MAX)
         _cacheStalled = true;
     }
@@ -208,9 +209,10 @@ void SerialBLEInterface::serviceGattCacheRefresh(uint32_t now) {
     _cacheLastAttempt = now;
     // A stale cached handle can fail before its security permissions are
     // consulted. Request the same existing MITM security independently of NUS.
-    if (esp_ble_set_encryption(remote, ESP_BLE_SEC_ENCRYPT_MITM) == ESP_OK)
+    if (esp_ble_set_encryption(remote, ESP_BLE_SEC_ENCRYPT_MITM) == ESP_OK) {
       _cacheEncryptedConnection = connection;
-    else ++_cacheFailures;
+      _cacheLastAttempt = now - BLE_POWER_RETRY_MS;
+    } else ++_cacheFailures;
     return;
   }
   if (!_cacheAuthenticated.load(std::memory_order_acquire)) return;
@@ -241,6 +243,9 @@ void SerialBLEInterface::serviceGattCacheRefresh(uint32_t now) {
   if (result != ESP_OK) {
     _cacheOperation.store(CacheOperation::None, std::memory_order_release);
     ++_cacheFailures;
+  } else {
+    // Completion events serialize the successful phases; no timer is needed.
+    _cacheLastAttempt = now - BLE_POWER_RETRY_MS;
   }
 }
 #endif
