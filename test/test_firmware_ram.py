@@ -69,6 +69,68 @@ def esp_fixture(path, modern=False, fragmented=False, internal_length=0x10000):
 
 
 class FirmwareRamTest(unittest.TestCase):
+    def test_explicit_esp32_contact_cache_adds_reader_allowance(self):
+        flags = {"BLE_PIN_CODE": 123456, "DISPLAY_CLASS": "SSD1306Display",
+                 "MAX_CONTACTS": 160, "MAX_GROUP_CHANNELS": 8,
+                 "OFFLINE_QUEUE_SIZE": 128}
+        target = "Heltec_v2_companion_radio_ble"
+        for extra in ({}, {"BOARD_HAS_PSRAM": 1}, {"COMPANION_RADIO_FULL": 1}):
+            with self.subTest(extra=extra):
+                original = ram.requirements("ESP32_PLATFORM", {**flags, **extra}, target)
+                disabled = ram.requirements("ESP32_PLATFORM", {
+                    **flags, **extra, "MESH_CONTACT_CACHE": 0,
+                }, target)
+                enabled = ram.requirements("ESP32_PLATFORM", {
+                    **flags, **extra, "MESH_CONTACT_CACHE": 1,
+                }, target)
+                self.assertEqual(original, disabled)
+                self.assertNotIn("contact_cache_reader", original["components"])
+                self.assertEqual(enabled["components"]["contact_cache_reader"], 6144)
+                self.assertEqual(enabled["required_heap_bytes"],
+                                 original["required_heap_bytes"] + 6144)
+                for name, expected in (("core_tasks_usb_filesystems", 24576),
+                                       ("allocation_and_transient_margin", 16384)):
+                    self.assertEqual(original["components"][name], expected)
+                    self.assertEqual(enabled["components"][name], expected)
+                self.assertEqual({key: value for key, value in enabled["components"].items()
+                                  if key != "contact_cache_reader"}, original["components"])
+
+    def test_explicit_contact_cache_does_not_change_other_platform_budgets(self):
+        for platform in ("NRF52_PLATFORM", "RP2040_PLATFORM", "STM32_PLATFORM"):
+            with self.subTest(platform=platform):
+                original = ram.requirements(platform, {}, "board_companion_radio_ble")
+                enabled = ram.requirements(platform, {"MESH_CONTACT_CACHE": 1},
+                                           "board_companion_radio_ble")
+                self.assertEqual(enabled, original)
+
+    def test_explicit_contact_cache_elf_rejects_old_capacity_and_enforces_boundary(self):
+        flags = {"BLE_PIN_CODE": 123456, "DISPLAY_CLASS": "SSD1306Display",
+                 "MAX_CONTACTS": 160, "MAX_GROUP_CHANNELS": 8,
+                 "OFFLINE_QUEUE_SIZE": 128}
+        target = "Heltec_v2_companion_radio_ble"
+        original = ram.requirements("ESP32_PLATFORM", flags, target)
+        cached = {**flags, "MESH_CONTACT_CACHE": 1}
+        required = ram.requirements("ESP32_PLATFORM", cached, target)["required_heap_bytes"]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "firmware.elf"
+            report = Path(temporary) / "firmware.memory.json"
+            for capacity, accepted in ((original["required_heap_bytes"], False),
+                                       (required - 1, False), (required, True)):
+                with self.subTest(capacity=capacity), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    # Classic ESP32 also reclaims the fixture's 64 KiB ROM-stack
+                    # region; its first region excludes a 16 KiB reservation.
+                    esp_fixture(path, internal_length=capacity - 0x10000 + 0x4000)
+                    self.assertEqual(ram.check_firmware(path, "ESP32_PLATFORM", "esp32",
+                                                       flags, target) == 0, True)
+                    status = ram.check_firmware(path, "ESP32_PLATFORM", "esp32",
+                                                cached, target, report)
+                    result = json.loads(report.read_text())
+                    self.assertEqual(status == 0, accepted)
+                    self.assertEqual(result["passed"], accepted)
+                    self.assertEqual(result["available_internal_bytes"], capacity)
+                    self.assertEqual(result["required_heap_bytes"], required)
+                    self.assertEqual(result["components"]["contact_cache_reader"], 6144)
+
     def test_pocket_gui_reserves_expanded_history_without_changing_other_boards(self):
         flags = {"DISPLAY_CLASS": "GxEPDDisplay", "HELTEC_MESH_POCKET": 1,
                  "COMPANION_RADIO_FULL": 1, "UI_MSG_PREVIEW_SIZE": 161}

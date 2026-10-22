@@ -242,6 +242,12 @@ def requirements(platform, defines, target):
             parts["uart_bridge_and_driver"] = 3072
     elif platform == "ESP32_PLATFORM":
         parts["core_tasks_usb_filesystems"] = 24576
+        if integer(defines, "MESH_CONTACT_CACHE", 0):
+            # The new explicit cache opt-in retains a contact-path reader:
+            # allow 4096 bytes of stdio buffering plus 2048 for its File/VFS
+            # objects and allocator overhead, beyond the common allowances.
+            # Automatic Full defaults keep their existing policy unchanged.
+            parts["contact_cache_reader"] = 6144
         # MQTT joins with saved runtime credentials even without a compiled SSID
         # or OTA seeder. Count its mandatory WiFi stack once with other WiFi uses.
         wifi = 49152 if any(name in defines for name in (

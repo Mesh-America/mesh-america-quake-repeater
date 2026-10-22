@@ -140,6 +140,18 @@ jobs:
           --firmware-version v1.17.1.10-halo-keymind-cascade-dev
           --radio-preset usa-cascade-fixed --profile cascade --require-ota
 
+  esp32-classic-companion-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+      - name: Qualify Heltec V2 BLE with retained contacts and RAM reserves
+        run: >-
+          bash build.sh build-firmware Heltec_v2_companion_radio_ble
+          --firmware-version v1.18.0.1-halo-keymind-cascade-dev
+          --radio-preset usa-cascadia --profile cascade --auto
+
   cross-platform-smoke:
     runs-on: ubuntu-latest
     steps:
