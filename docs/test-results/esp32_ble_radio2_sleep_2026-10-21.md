@@ -359,13 +359,22 @@ ambient traffic still prevents a causal delivery comparison. Neither CPU speed
 nor manual sleep consistently removed packet loss. Original settings, channels,
 identity and checked credential hashes were restored, with clean core flags.
 
-V4's new comparison stopped during setup, before Bluetooth-off was sent and
-before any case or RF transmission. Its strict stable-Binary check rejected one
-unexpected prefix byte after a valid health response. Seven valid push frames
-were accepted; the rejected byte was not retained, so its origin is unknown.
-The failure remains recorded and requires bounded raw capture before diagnosis.
-Cleanup restored checked settings/channels and verified a fresh MQTT PUBACK
-increase. This failed setup does not supply new V4 packet-delivery evidence.
+V4's first new comparison stopped during setup, before Bluetooth-off was sent
+and before any case or RF transmission. Its strict stable-Binary check rejected
+one unexpected prefix byte after a valid health response. Seven valid push
+frames were accepted; the rejected byte was not retained, so its origin was
+unknown at the time. That original failure remains recorded.
+
+Two diagnostics-only attempts on unchanged `7d0709bf0` also stopped before
+Bluetooth-off was sent, with zero RF transmissions. Bounded raw capture retained
+the late SDK line `E (2905571) wifi:timeout when WiFi un-init, type=4`.
+Source inspection identified an SDK timer firing after shutdown; this message
+does not establish that WiFi deinitialization timed out. The raw SDK log
+bypassed disabled USB logging and broke strict Binary Companion framing.
+All three attempts restored checked settings/channels and verified a fresh
+MQTT PUBACK increase. The latest immutable diagnostic receipt is
+`v4-7d0709bf-suffix-completed.private.json`. A fix is underway; these setup
+failures supply no new V4 packet-delivery or firmware-fix qualification.
 
 ## Final handback and limits
 

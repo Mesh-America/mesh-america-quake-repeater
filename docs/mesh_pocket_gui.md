@@ -40,11 +40,11 @@ The map centres on this node's location, or the first contact with a location.
 With no locations it shows a world overview. Contacts appear as dots, with
 nearby names at closer zooms. The view spans 20,000 km down to 5 km vertically;
 coastline detail stays coarse at close zooms. It contains no streets, terrain,
-regional downloads or ocean tiles. See the [map data notes](../tools/meshpocket_map/README.md)
+regional downloads or ocean tiles. See the [map data notes](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/meshpocket_map/README.md)
 for resolution, storage and reproducible generation.
 
 The UI is adapted from [MeshCore-Mesh-Pocket-MessageBoard](https://github.com/jackywashere/MeshCore-Mesh-Pocket-MessageBoard).
-Include [PocketGui-NOTICE.txt](../tools/meshpocket_map/PocketGui-NOTICE.txt) alongside
+Include [PocketGui-NOTICE.txt](https://github.com/mikecarper/MeshCore/blob/keymindCascade/tools/meshpocket_map/PocketGui-NOTICE.txt) alongside
 distributed firmware for the UI and font notices. The application DFU ZIP keeps
 its required manifest, binary and metadata entries; the notice is a sidecar.
 
