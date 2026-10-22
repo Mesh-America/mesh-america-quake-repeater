@@ -27,9 +27,9 @@ class ReaderScreen : public UIScreen {
     _display->setTextSize(1);
     const int width = _display->width();
     const int header_height = _display->textLineHeight();
-    // Narrow/rotated panels need separate reference and progress lines.
+    // Narrow/rotated panels need separate start/end reference lines.
     const bool stacked_header = width < _display->getTextWidth("88:88")
-        + _display->getTextWidth("88/88") + 4;
+        + _display->getTextWidth("88:88") + 4;
     const int header_content_height = header_height * (stacked_header ? 2 : 1);
 #if UI_READER_TOUCH_BAR
     const int padded_header_height = mesh::ui::readerTouchHeaderHeight(header_content_height);
@@ -76,62 +76,108 @@ class ReaderScreen : public UIScreen {
       return body.getTextWidth(filtered);
     };
 
-    // At most two lookups: the current verse, then its adjacent verse when
-    // navigation crosses a boundary. No recursive decode or second buffer.
-    for (int pass = 0; pass < 2; ++pass) {
-      const LookupResult result = mesh::readReaderVerse(
-          referenceAt(pos.verse), scratch, sizeof(scratch), text);
-      if (result != LookupResult::Found) {
-        if (draw) {
-          body.setColor(UIColor::warning_txt);
-          body.drawTextEllipsized(0, top, width, "Reader unavailable");
-#if UI_BUTTON_READER_HINT
-#if UI_READER_TOUCH_BAR
-          mesh::ui::drawReaderTouchBar(hint_text, _touch_bar);
-#else
-          mesh::ui::drawButtonReaderHint(hint_text, hint);
-#endif
-#endif
-        } else _task->showAlert("Reader data error", 1500);
-        return;
-      }
+    // Stream adjacent verses through one decode buffer. Number labels are
+    // display-only, so existing raw-text bookmarks remain compatible.
+    uint16_t loaded_verse = kVerseCount;
+    LookupResult result = LookupResult::Found;
+    auto load = [&](uint16_t verse) {
+      if (loaded_verse == verse) return true;
+      result = mesh::readReaderVerse(referenceAt(verse), scratch, sizeof(scratch), text);
+      if (result != LookupResult::Found) return false;
       memmove(scratch, text, strlen(text) + 1);
-      const ReaderPage page = readerPage(scratch, pos.offset, width, rows, measure);
-      pos.offset = page.start; // clamp stale bookmarks after a layout change
-      if (direction > 0) {
-        if (scratch[page.next]) pos.offset = page.next;
-        else if (pos.verse + 1 < kVerseCount) { ++pos.verse; pos.offset = 0; }
-        direction = 0;
-        continue;
+      loaded_verse = verse;
+      return true;
+    };
+    char line[kReaderLineBytes];
+    auto nextLine = [&](uint16_t verse, uint16_t offset) {
+      char number[5] = {};
+      if (!offset)
+        snprintf(number, sizeof(number), "%u ", referenceAt(verse).verse);
+      return readerLine(scratch, offset, width, measure, line, number);
+    };
+
+    if (load(pos.verse)) {
+      // Resume on the line containing the saved word after font/rotation
+      // changes, without tying the bookmark to a page or a number label.
+      uint16_t offset = 0;
+      while (scratch[offset]) {
+        const uint16_t next = nextLine(pos.verse, offset);
+        if (next > pos.offset || !scratch[next]) break;
+        offset = next;
       }
+      pos.offset = offset;
+
       if (direction < 0) {
-        if (page.start) pos.offset = page.previous;
-        else if (pos.verse) { --pos.verse; pos.offset = kBlockSize - 1; }
-        direction = 0;
-        continue;
+        int remaining = rows;
+        while (load(pos.verse)) {
+          uint16_t count = 0;
+          offset = 0;
+          while (scratch[offset] && offset < pos.offset) {
+            offset = nextLine(pos.verse, offset);
+            ++count;
+          }
+          if (count >= remaining) {
+            offset = 0;
+            for (int skip = count - remaining; skip > 0; --skip)
+              offset = nextLine(pos.verse, offset);
+            pos.offset = offset;
+            break;
+          }
+          remaining -= count;
+          if (!pos.verse) { pos.offset = 0; break; }
+          --pos.verse;
+          pos.offset = kBlockSize - 1;
+        }
       }
-      _bookmark.move(pos, millis());
-      if (!draw) return;
-      char label[32], progress[16];
-      const Reference ref = referenceAt(pos.verse);
-      snprintf(label, sizeof(label), "Reader %u:%u", ref.chapter, ref.verse);
-      snprintf(progress, sizeof(progress), "%u/%u", page.part, page.parts);
-      const int progress_width = _display->getTextWidth(progress);
-      if (stacked_header || _display->getTextWidth(label) > width - progress_width - 4)
-        snprintf(label, sizeof(label), "%u:%u", ref.chapter, ref.verse);
-      _display->setColor(UIColor::title_txt);
-      _display->drawTextEllipsized(0, header_text_y, stacked_header ? width : width - progress_width - 4, label);
-      _display->drawTextRightAlign(width, header_text_y + (stacked_header ? header_height : 0), progress);
-      _display->drawRect(0, top - 2, width, 1);
-      body.setColor(UIColor::primary_txt);
-      uint16_t offset = page.start;
-      for (int row = 0; row < rows && scratch[offset]; ++row) {
-        char line[kReaderLineBytes], filtered[kReaderLineBytes];
-        offset = readerLine(scratch, offset, width, measure, line);
-        body.translateUTF8ToBlocks(filtered, line, sizeof(filtered));
-        body.setCursor(0, top + row * line_height);
-        body.print(filtered);
+
+      Position cursor = pos, last = pos;
+      if (direction >= 0 && result == LookupResult::Found) {
+        body.setColor(UIColor::primary_txt);
+        for (int row = 0; row < rows && cursor.verse < kVerseCount; ++row) {
+          if (!load(cursor.verse)) break;
+          last = cursor;
+          cursor.offset = nextLine(cursor.verse, cursor.offset);
+          if (draw) {
+            char filtered[kReaderLineBytes];
+            body.translateUTF8ToBlocks(filtered, line, sizeof(filtered));
+            body.setCursor(0, top + row * line_height);
+            body.print(filtered);
+          }
+          if (!scratch[cursor.offset]) { ++cursor.verse; cursor.offset = 0; }
+        }
+        // At the end keep the final page visible; never persist an EOF cursor.
+        if (direction > 0 && cursor.verse < kVerseCount) pos = cursor;
       }
+      if (result == LookupResult::Found) {
+        _bookmark.move(pos, millis());
+        if (!draw) return;
+        char label[32], progress[16];
+        const Reference ref = referenceAt(pos.verse);
+        const Reference end = referenceAt(last.verse);
+        snprintf(label, sizeof(label), "Reader %u:%u", ref.chapter, ref.verse);
+        if (last.verse != pos.verse)
+          snprintf(progress, sizeof(progress), "%u:%u",
+                   end.chapter, end.verse);
+        else progress[0] = 0;
+        const int progress_width = _display->getTextWidth(progress);
+        if (stacked_header || _display->getTextWidth(label) > width - progress_width - 4)
+          snprintf(label, sizeof(label), "%u:%u", ref.chapter, ref.verse);
+        _display->setColor(UIColor::title_txt);
+        _display->drawTextEllipsized(0, header_text_y, stacked_header ? width : width - progress_width - 4, label);
+        _display->drawTextRightAlign(width, header_text_y + (stacked_header ? header_height : 0), progress);
+        _display->drawRect(0, top - 2, width, 1);
+      } else if (draw) {
+        body.setColor(UIColor::window_bkg);
+        body.fillRect(0, top, width, bottom - top);
+      }
+    }
+    if (result != LookupResult::Found) {
+      if (draw) {
+        body.setColor(UIColor::warning_txt);
+        body.drawTextEllipsized(0, top, width, "Reader unavailable");
+      } else _task->showAlert("Reader data error", 1500);
+    }
+    if (draw) {
 #if UI_BUTTON_READER_HINT
 #if UI_READER_TOUCH_BAR
       mesh::ui::drawReaderTouchBar(hint_text, _touch_bar);
@@ -139,7 +185,6 @@ class ReaderScreen : public UIScreen {
       mesh::ui::drawButtonReaderHint(hint_text, hint);
 #endif
 #endif
-      return;
     }
   }
 

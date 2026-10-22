@@ -103,7 +103,27 @@ class CompanionReaderTest(unittest.TestCase):
                     f"-DUI_SMALL_MESSAGE_FONT={small_font}", "-DUI_BUTTON_READER_HINT=1",
                     "-DUI_READER_TOUCH_BAR=0", "-c", str(FIXTURE / "test_reader_screen.cpp"),
                     "-o", str(directory / (name + ".o"))])
-                ui = frame(frames(name), "ReaderScreen::process(") + lookup + decoder_bytes
+                # The screen loads a verse, then wraps it: decoding and line
+                # measurement never nest. Keep the larger real call path,
+                # including emitted lambda/template helpers on each path.
+                screen_frames = frames(name)
+                entry = frame(screen_frames, "void ReaderScreen::process(int, bool)")
+                load = frame(screen_frames, "ReaderScreen::process(int, bool)::<lambda(uint16_t)>")
+                wrap = frame(screen_frames, "ReaderScreen::process(int, bool)::<lambda(uint16_t, uint16_t)>")
+                line_frames = [count for function, count in screen_frames.items()
+                               if "mesh::bible::readerLine(" in function
+                               and "ReaderScreen::process(" in function]
+                self.assertEqual(len(line_frames), 1)
+                measure_frames = [count for function, count in screen_frames.items()
+                                  if "ReaderScreen::process(int, bool)::<lambda(const char*)>" in function
+                                  and " [with " not in function]
+                self.assertLessEqual(len(measure_frames), 1)
+                # Any newly emitted helper must be placed in this call graph,
+                # rather than silently disappearing from the stack estimate.
+                self.assertEqual(sum("ReaderScreen::process(" in function for function in screen_frames),
+                                 4 + len(measure_frames))
+                ui = entry + max(load + lookup + decoder_bytes,
+                                 wrap + sum(line_frames) + sum(measure_frames))
                 ui_max = max(ui_max, ui)
                 self.assertLessEqual(ui + caller_reserve, loop_bytes)
             self.assertEqual(packer.BLOCK_SIZE, 4096)
@@ -273,6 +293,7 @@ namespace mesh {
 bool morseTimingActive(const Radio* radio) { return radio && radio->active; }
 namespace power { bool handleRegulatorCommand(const char*,char*,size_t) { return false; } }
 namespace leds { bool handleCommand(const char*,char*,size_t) { return false; } }
+namespace esp32 { bool handlePowerTestCommand(const char*,char*,size_t,bool) { return false; } }
 }
 @PREDICATE@
 struct MyMesh {

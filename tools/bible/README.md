@@ -28,18 +28,19 @@ roles omit the corpus. `COMPANION_FEATURE_READER=0` excludes it from a Full buil
 ## On-device Reader
 
 Full Companions using the `ui-new` display (including the V4) also offer a
-Reader from the radio-settings page:
+Reader from the Network/radio-settings page:
 
 - Long press opens at the first reference, or resumes the saved position.
-- Single click advances one screenful, then to the next verse.
-- Double click goes back one screenful; at a verse boundary it shows the
-  previous verse's last screenful.
+- Single click advances one screenful; double click goes back one screenful.
+  Pages continue across verse and chapter boundaries to fill the available rows.
 - Three taps jump to verse one of the next chapter; four taps jump to verse
   one of the previous chapter. Navigation stops at the first and last chapters.
 - Long press exits to the radio page. It does not invoke early-boot CLI rescue
   while opening or closing the reader.
 
-The header shows the reference and part count. Single-button builds alternate
+Each verse starts with its subsection number. The header shows the first and
+last references on the screen instead of a verse-local part count. This layout
+applies to all boards with Reader support. Single-button builds alternate
 `<- 2 tap  1 tap ->  long press: exit` and `<<- 4 tap  3 tap ->>` in the footer
 every three seconds, matching the message controls (which change channels).
 These are taps of the user button. Narrower displays use `hold: X` for exit
@@ -57,14 +58,14 @@ the display.
 
 Sub-160px displays use the same adaptive font selector as received messages:
 Squeezed Regular 6 on panels at least 128x64 (or 64x128 when rotated), and
-5px Picopixel on smaller panels. The reference and part counter retain their
+5px Picopixel on smaller panels. The reference range retains its
 normal header font, stacking on narrow rotated screens to avoid overlap. On
 the V4's 128x64 display, five complete 8-pixel-spaced body rows fit above the
 navigation hint, and reference 3:16 fits on one screen. Wrapping and pagination use the selected font's
 actual character widths and line height. Any panel with either dimension at
 least 160px uses its normal font, including rotated 80x160 panels. Larger display classes, and builds with
 `UI_SMALL_MESSAGE_FONT=0`, retain the regular body font. Existing bookmarks
-resume at the page containing the same text offset after a font/layout change.
+resume at the line containing the same text offset after a font/layout change.
 
 The T096 and other ST7735 boards use native 160x80 coordinates and the normal
 body font (five 10-pixel-spaced rows between the header and button hint). The existing color
@@ -163,9 +164,9 @@ the screen reader's small cursor object is described above. The temporary
 
 The native Reader suite also cross-compiles the production Reader and C
 `tinf` decoder with Cortex-M4 GCC 14.2 and `-fstack-usage`. With 4 KiB blocks,
-the terminal decode frames use at most 6,264 bytes including the bounded
+the terminal decode frames use at most 6,304 bytes including the bounded
 page wrapper; the adaptive-font/button Reader screen's local decode path is
-6,400 bytes. The check reserves another 1,536 bytes for outer callers within
+6,456 bytes. The check reserves another 1,536 bytes for outer callers within
 the unchanged 8 KiB nRF52 loop stack. This is a compiler-derived bound on
 these paths, not a physical stack high-water measurement. Decoder frames are
 counted in addition to output scratch; ordinary commands never reserve it.
@@ -178,10 +179,10 @@ ASCII-normalized copy of the pinned plaintext source, check references across
 every block boundary, exercise malformed references and corrupted block
 bounds, and verify that unrelated build profiles exclude the data.
 
-Reader tests additionally traverse every part of all 879 verses in both
-directions, with and without the button hint, using regular and adaptive
+Reader tests additionally traverse full pages spanning all 879 numbered verses
+in both directions, with and without the button hint, using regular and adaptive
 5px/6px fonts at 128x64, 64x128, 160x80,
-240x135, 72x40, 40x72, 128x32, 32x128, 64x48 and 48x64. They compare rendered
+240x135, 250x122, 320x240, 72x40, 40x72, 128x32, 32x128, 64x48 and 48x64. They compare rendered
 body pixels/text separately from the hint, check active-reader resizing across
 font thresholds, and cover resume
 within a verse, book/chapter boundaries, no writes at the start, clearing stale

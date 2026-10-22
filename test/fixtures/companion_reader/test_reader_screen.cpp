@@ -136,6 +136,58 @@ static Position pos(uint16_t verse, uint16_t offset = 0) {
   Position p; p.verse = verse; p.offset = offset; return p;
 }
 
+struct ExpectedLine {
+  Position start;
+  std::string display;
+};
+
+// Construct the visible stream independently of readerLine()/readerPage().
+// The numeric prefix consumes display width, but never bookmark text bytes.
+template <typename Measure>
+static std::vector<ExpectedLine> wrapVerse(uint16_t verse, const char* text,
+                                          int width, Measure measure) {
+  std::vector<ExpectedLine> result;
+  const std::string source(text);
+  const std::string number = std::to_string(referenceAt(verse).verse) + " ";
+  std::string rebuilt;
+  for (size_t offset = 0; offset < source.size();) {
+    const std::string prefix = offset == 0 ? number : "";
+    size_t count = 0;
+    while (offset + count < source.size() && prefix.size() + count < 127) {
+      const std::string candidate = prefix + source.substr(offset, count + 1);
+      if (count && measure(candidate.c_str()) > width) break;
+      ++count; // One body glyph always advances, even on a narrow panel.
+    }
+    assert(count);
+    if (offset + count < source.size()) {
+      const size_t space = source.rfind(' ', offset + count - 1);
+      if (space != std::string::npos && space > offset) count = space - offset;
+    }
+    const std::string body = source.substr(offset, count);
+    result.push_back({pos(verse, static_cast<uint16_t>(offset)), prefix + body});
+    rebuilt += body;
+    offset += count;
+    while (offset < source.size() && source[offset] == ' ') ++offset;
+  }
+  assert(!result.empty() && noSpaces(rebuilt) == noSpaces(source));
+  assert(result.front().display.compare(0, number.size(), number) == 0);
+  return result;
+}
+
+template <typename Measure>
+static Position containingLine(uint16_t verse, uint16_t offset, int width,
+                                Measure measure) {
+  char scratch[kBlockSize];
+  const char* text;
+  assert(mesh::readReaderVerse(referenceAt(verse), scratch, sizeof(scratch), text)
+      == LookupResult::Found);
+  const auto lines = wrapVerse(verse, text, width, measure);
+  Position result = lines.front().start;
+  for (const auto& line : lines)
+    if (line.start.offset <= offset) result = line.start;
+  return result;
+}
+
 int main(int argc, char** argv) {
   if (argc > 1) {
     if (argc > 2) assert(std::freopen(argv[2], "w", stdout));
@@ -168,7 +220,8 @@ int main(int argc, char** argv) {
 #endif
     return 0;
   }
-  // Every verse/part, in both directions, at common small-screen sizes.
+  // Every numbered verse, packed into full pages in both directions, at
+  // common small-screen sizes including the MeshPocket's native dimensions.
   const int cases[][3] = {
     {128,64,6}, {64,128,6}, {160,80,0}, {80,160,0}, {240,135,0},
     {159,80,6}, {80,159,6}, {320,240,0}, {240,320,0}, {250,122,0}, {200,200,0},
@@ -233,47 +286,76 @@ int main(int argc, char** argv) {
       }
     }
 #endif
-    std::vector<std::string> expected_pages;
+    std::vector<ExpectedLine> expected_lines;
     char scratch[kBlockSize];
     for (uint16_t verse = 0; verse < kVerseCount; ++verse) {
       const char* text;
       assert(mesh::readReaderVerse(referenceAt(verse), scratch, sizeof(scratch), text) == LookupResult::Found);
-      memmove(scratch, text, strlen(text) + 1);
-      std::string rebuilt;
-      uint16_t offset = 0;
-      do {
-        const auto page = readerPage(scratch, offset, display.width(), rows, measure);
-        assert(page.start == offset && page.next > offset);
-        expected.clear();
-        uint16_t next = offset;
-        for (int row = 0; row < rows && scratch[next]; ++row) {
-          char line[kReaderLineBytes];
-          next = readerLine(scratch, next, display.width(), measure, line);
-          rebuilt += line;
-          expected_text.setCursor(0, top + row * line_height);
-          expected_text.print(line);
-        }
-        assert(next == page.next);
-        display.clear(); screen.render(display);
-        const std::string body = display.body();
-        assert(!body.empty());
-        assert(body == expected.body());
-        assert(display.getTextWidth("ABC") == 18); // header/driver font unchanged
-        expected_pages.push_back(body);
-        screen.handleInput(KEY_NEXT);
-        offset = page.next;
-      } while (scratch[offset]);
-      if (noSpaces(rebuilt) != noSpaces(scratch)) {
-        std::fprintf(stderr, "%dx%d verse index %u\nExpected: %s\nActual: %s\n",
-                     display.width(), display.height(), verse, scratch, rebuilt.c_str());
-        return 1;
-      }
+      const auto verse_lines = wrapVerse(verse, text, display.width(), measure);
+      expected_lines.insert(expected_lines.end(), verse_lines.begin(), verse_lines.end());
     }
+    std::vector<std::string> expected_pages;
+    std::vector<Position> expected_positions;
+    bool packed_verses = false, crossed_chapter = false;
+    const int body_rows = std::max(1, rows);
+    for (size_t first = 0; first < expected_lines.size(); first += body_rows) {
+      expected.clear();
+      const size_t end = std::min(first + body_rows, expected_lines.size());
+      for (size_t index = first; index < end; ++index) {
+        expected_text.setCursor(0, top + static_cast<int>(index - first) * line_height);
+        expected_text.print(expected_lines[index].display.c_str());
+      }
+      const Position start = expected_lines[first].start;
+      const Position last = expected_lines[end - 1].start;
+      packed_verses |= start.verse != last.verse;
+      crossed_chapter |= referenceAt(start.verse).chapter != referenceAt(last.verse).chapter;
+      display.clear(); screen.render(display);
+      const std::string body = display.body();
+      if (body != expected.body()) {
+        std::fprintf(stderr, "%dx%d continuous page at verse %u offset %u\n",
+                     display.width(), display.height(), start.verse, start.offset);
+        assert(false);
+      }
+      assert(!body.empty());
+      const Reference first_ref = referenceAt(start.verse);
+      const std::string first_label = std::to_string(first_ref.chapter) + ":"
+          + std::to_string(first_ref.verse);
+      // Both full references must survive narrow headers, particularly the
+      // 64-pixel portrait case once chapter and verse each have two digits.
+      assert(std::any_of(display.lines.begin(), display.lines.end(),
+          [&](const Display::Line& line) {
+            return line.y < top && line.x == 0
+                && (line.text == first_label || line.text == "Reader " + first_label);
+          }));
+      if (last.verse != start.verse) {
+        const Reference last_ref = referenceAt(last.verse);
+        const std::string last_label = std::to_string(last_ref.chapter) + ":"
+            + std::to_string(last_ref.verse);
+        assert(std::any_of(display.lines.begin(), display.lines.end(),
+            [&](const Display::Line& line) {
+              return line.y < top && line.x > 0 && line.text == last_label;
+            }));
+      }
+      assert(display.getTextWidth("ABC") == 18); // header/driver font unchanged
+      assert(screen.flush());
+      Position saved;
+      the_mesh.loadReaderBookmark(saved);
+      assert(saved == start);
+      expected_positions.push_back(start);
+      expected_pages.push_back(body);
+      screen.handleInput(KEY_NEXT);
+    }
+    if (body_rows > 1) assert(packed_verses);
+    if (body_rows > 2) assert(crossed_chapter);
     display.clear(); screen.render(display);
     assert(display.body() == expected_pages.back()); // no wrap at end
     for (size_t page = expected_pages.size(); page > 0; --page) {
       display.clear(); screen.render(display);
       assert(display.body() == expected_pages[page - 1]);
+      assert(screen.flush());
+      Position saved;
+      the_mesh.loadReaderBookmark(saved);
+      assert(saved == expected_positions[page - 1]);
       screen.handleInput(KEY_PREV);
     }
     display.clear(); screen.render(display);
@@ -304,7 +386,7 @@ int main(int argc, char** argv) {
       touch_gesture(x, screen.readerTouchBar()->top, x, screen.readerTouchBar()->top);
     };
     tap(2); assert(screen.flush());
-    Position saved; assert(the_mesh.loadReaderBookmark(saved) && saved.verse == 1);
+    Position saved; assert(the_mesh.loadReaderBookmark(saved) && saved == expected_positions[1]);
     tap(1); assert(screen.flush());
     assert(!the_mesh.loadReaderBookmark(saved) && saved.atStart());
     tap(3); assert(screen.flush());
@@ -314,11 +396,11 @@ int main(int argc, char** argv) {
     tap(4); assert(task.closed);
     task.closed = false;
     touch_gesture(120,70,120,70); assert(screen.flush());
-    assert(the_mesh.loadReaderBookmark(saved) && saved.verse == 1);
+    assert(the_mesh.loadReaderBookmark(saved) && saved == expected_positions[1]);
     touch_gesture(40,70,40,70); assert(screen.flush());
     assert(!the_mesh.loadReaderBookmark(saved) && saved.atStart());
     touch_gesture(120,70,40,70); assert(screen.flush());
-    assert(the_mesh.loadReaderBookmark(saved) && saved.verse == 1);
+    assert(the_mesh.loadReaderBookmark(saved) && saved == expected_positions[1]);
     touch_gesture(40,70,120,70); assert(screen.flush());
     assert(!the_mesh.loadReaderBookmark(saved) && saved.atStart());
     touch_gesture(80,100,80,50); assert(screen.flush());
@@ -397,13 +479,11 @@ int main(int argc, char** argv) {
   Display migrated_display(128,64);
   mesh::ui::SmallMessageText compact(migrated_display);
   const auto compact_measure = [&compact](const char* line) { return compact.getTextWidth(line); };
-  const auto compact_page = readerPage(text, legacy.next, 128,
-      compact.lineCount(12, migrated_display.bodyBottom()), compact_measure);
-  assert(compact_page.start <= legacy.next && compact_page.next > legacy.next);
+  const Position compact_line = containingLine(91, legacy.next, 128, compact_measure);
+  assert(compact_line.offset <= legacy.next);
   ReaderScreen migrated(&task, &migrated_display);
   migrated.open(); migrated.render(migrated_display); assert(migrated.flush());
-  assert(the_mesh.loadReaderBookmark(saved) && saved == pos(91, compact_page.start));
-  assert(compact_page.parts == 1); // reader 3:16 now fits in one V4 screen
+  assert(the_mesh.loadReaderBookmark(saved) && saved == compact_line);
 
   // Reflow an already-open reader when panel geometry crosses the 5px/6px
   // threshold, and when a tiny panel rotates into the stacked-header layout.
@@ -418,14 +498,11 @@ int main(int argc, char** argv) {
     const bool small = changed.useSmallMessageFont();
     DisplayDriver& new_font = small ? static_cast<DisplayDriver&>(small_font) : changed;
     auto new_measure = [&new_font](const char* line) { return new_font.getTextWidth(line); };
-    const auto new_page = readerPage(text, before.offset, changed.width(),
-        small ? small_font.lineCount(changed.bodyY(), changed.bodyBottom())
-              : (changed.bodyBottom() - changed.bodyY()) / 10,
-        new_measure);
-    assert(new_page.start <= before.offset && new_page.next > before.offset);
+    const Position new_line = containingLine(91, before.offset, changed.width(), new_measure);
+    assert(new_line.offset <= before.offset);
     active.render(changed); assert(active.flush());
     Position after; assert(the_mesh.loadReaderBookmark(after));
-    assert(after == pos(91, new_page.start));
+    assert(after == new_line);
     const auto rendered = changed.body();
     ReaderScreen reopened(&task, &changed);
     reopened.open(); changed.clear(); reopened.render(changed);

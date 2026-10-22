@@ -32,15 +32,20 @@ constexpr size_t kReaderLineBytes = 128;
 // word or cut a UTF-8 codepoint, including overlong words on narrow displays.
 template <typename Measure>
 uint16_t readerLine(const char* text, uint16_t start, int width,
-                    Measure measure, char (&line)[kReaderLineBytes]) {
+                    Measure measure, char (&line)[kReaderLineBytes],
+                    const char* prefix = "") {
+  // Number labels take display space but never become bookmark offsets.
+  size_t prefix_bytes = strlen(prefix);
+  if (prefix_bytes > sizeof(line) - 5) prefix_bytes = sizeof(line) - 5;
+  memcpy(line, prefix, prefix_bytes);
   size_t count = 0, last_space = 0;
   while (text[start + count]) {
     size_t bytes = 1;
     while (bytes < 4 && text[start + count + bytes]
            && (static_cast<uint8_t>(text[start + count + bytes]) & 0xc0) == 0x80) ++bytes;
-    if (count + bytes >= sizeof(line)) break;
-    memcpy(line + count, text + start + count, bytes);
-    line[count + bytes] = 0;
+    if (prefix_bytes + count + bytes >= sizeof(line)) break;
+    memcpy(line + prefix_bytes + count, text + start + count, bytes);
+    line[prefix_bytes + count + bytes] = 0;
     const int pixels = static_cast<int>(measure(line));
     if (pixels > width && count != 0) break;
     if (text[start + count] == ' ') last_space = count;
@@ -48,8 +53,8 @@ uint16_t readerLine(const char* text, uint16_t start, int width,
     if (pixels > width) break; // one too-wide glyph still makes progress
   }
   if (text[start + count] && last_space > 0) count = last_space;
-  memcpy(line, text + start, count);
-  line[count] = 0;
+  memcpy(line + prefix_bytes, text + start, count);
+  line[prefix_bytes + count] = 0;
   uint16_t next = static_cast<uint16_t>(start + count);
   while (text[next] == ' ') ++next;
   return next;
