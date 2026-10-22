@@ -243,6 +243,7 @@ struct MyMesh {
   void configureBridgeFilter(AbstractBridge*) {} void drainOutbound(unsigned) {} void otaAlert(const char*) {}
   void suspendUnconfiguredSetupBridges(); void serviceIdleWiFi();
   bool startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup);
+  @WIFI_OWNER_DECLARATION@
   bool startWebConfig(bool force_ap, char* reply); bool stopWebConfig(char* reply);
   uint32_t getPowerSaveSleepMilliseconds(uint32_t) const;
   bool hasPendingWork() const; uint32_t getPowerSaveSleepSeconds(uint32_t) const;
@@ -398,6 +399,10 @@ class ESP32FullPowerLifecycleTest(unittest.TestCase):
             "bool MyMesh::hasPendingWork() const", "mesh::powerdiag::Mask MyMesh::pendingWorkReason() const",
             "uint32_t MyMesh::getPowerSaveSleepMilliseconds(",
             "uint32_t MyMesh::getPowerSaveSleepSeconds("))
+        wifi_owner_signature = "bool MyMesh::webConfigOwnsWiFi("
+        wifi_owner = (extract_braced(source, wifi_owner_signature)
+                      if wifi_owner_signature in source else "")
+        methods += "\n" + wifi_owner
         defaults_start = source.index("  // bridge defaults")
         defaults = source[defaults_start:source.index("  _prefs.bridge_delay", defaults_start)]
         startup = source[source.index("  bool start_webui = WebConfigServer::loadEnabled(false);"):]
@@ -417,6 +422,7 @@ class ESP32FullPowerLifecycleTest(unittest.TestCase):
         stop_owned = extract_braced(web_source, "static void stopOwnedWiFiRadio()")
         return (FIXTURE.replace("@INLINE_METHODS@", inline.replace(" override", ""))
                 .replace("@METHODS@", methods).replace("@DEFAULTS@", defaults)
+                .replace("@WIFI_OWNER_DECLARATION@", "bool webConfigOwnsWiFi() const;" if wifi_owner else "")
                 .replace("@STARTUP@", startup).replace("@PORTAL_LOOP@", portal_loop)
                 .replace("@MANIFEST@", manifest).replace("@OTA_CLI@", cli[begin:end])
                 .replace("@OTA_STATE@", state)
