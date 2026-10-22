@@ -198,6 +198,9 @@ Repeat in the opposite direction with a new message. Counters accumulate until
 `espnow resetstats` or reboot and survive an ESP-NOW stop/start. Inspect changes
 across the one message, rather than assuming old totals describe the current
 attempt.
+Stopping or restarting clears pending queue work without classifying delivery;
+the TX drop counter records local rejection/final-failure decisions, not every
+undelivered packet.
 
 - **No source-side bridge TX request:** check the configured source.
   `bridge.source rx` exports LoRa receptions; confirm the board heard the

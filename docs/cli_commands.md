@@ -5612,13 +5612,15 @@ peer is reachable. The statistics pages use these keys:
 | Default | `rx`: received callback frames; `mesh`: inbound MeshCore packets queued; `tx`: outbound MeshCore packets queued; `sent`: successful frame callbacks. |
 | `rx` | `frames`: received callback frames; `decoded`: parsed MeshCore packets; `mesh`: queued for mesh processing; `crc`: checksum failures; `bad`: malformed frames; `parse`: packet parse failures. |
 | `tx` | `req`: mesh TX requests; `queued`: mesh packets queued; `start`: SDK-accepted frames; `ok`: successful frame callbacks; `err`: SDK start failures; `cbfail`: failed frame callbacks; `timeout`: callback timeouts. |
-| `drops` | `rxq`: RX queue drops; `foreign`: foreign-group packets; `filter`/`dupe`: inbound filter/duplicate drops; `txq`: total mesh TX drops; `txfilter`/`txdupe`: outbound filter/duplicate drops; `big`: oversize TX drops. |
+| `drops` | `rxq`: RX queue drops; `foreign`: foreign-group packets; `filter`/`dupe`: inbound filter/duplicate drops; `txq`: recorded local mesh TX rejection/final-failure decisions; `txfilter`/`txdupe`: outbound filter/duplicate drops; `big`: oversize TX drops. |
 | `test` | `queued`, `start`, `ok`, `fail`, `timeout`: probe TX stages; `rx`, `bad`: valid/invalid probes received; `txid`, `rxid`: last queued/received IDs in hexadecimal. |
 
 Mesh admission means queued for normal processing, not confirmed LoRa
 forwarding or end-to-end delivery. Packet and frame counters have different
 units: fragmentation can produce several frames for one mesh packet. Counters
 survive bridge stop/start; reboot or the explicit reset starts a new window.
+Stopping or restarting the bridge clears pending queue work without classifying
+its delivery. These counters are not a complete end-to-end delivery ledger.
 
 **Local-only actions:**
 
