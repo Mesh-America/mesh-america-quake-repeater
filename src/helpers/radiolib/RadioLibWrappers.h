@@ -10,6 +10,7 @@
 #include "RadioAirtime.h"
 #include "RXPowerSaving.h"
 #include "HilTxFrequencyGuard.h"
+#include "ESP32RadioTrace.h"
 #if defined(STATION_G3_ESP32)
 #include <StationG3RadioSlot.h>
 #endif

@@ -30,6 +30,9 @@
 #if defined(MESH_SOAK_DIAGNOSTICS)
 #include "../../tools/hil/S3SoakDiagnostics.h"
 #endif
+#if defined(ESP32_PLATFORM) && defined(MESH_HIL_RADIO_TRACE) && MESH_HIL_RADIO_TRACE
+#include <helpers/radiolib/ESP32RadioTraceCLI.h>
+#endif
 
 #include <Arduino.h> // needed for PlatformIO
 #include <ctype.h>
@@ -10644,6 +10647,9 @@ bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_
 #endif
 #if defined(MESH_SOAK_DIAGNOSTICS)
   if (mesh::hil::handleSoakCommand(command, reply, reply_size)) return true;
+#endif
+#if defined(ESP32_PLATFORM) && defined(MESH_HIL_RADIO_TRACE) && MESH_HIL_RADIO_TRACE
+  if (mesh::radiotrace::handleTraceCommand(command, reply, reply_size)) return true;
 #endif
 #if MESH_ENABLE_ONE_KEY_DM
   if (strcmp(command, "get dm.one_key") == 0) {

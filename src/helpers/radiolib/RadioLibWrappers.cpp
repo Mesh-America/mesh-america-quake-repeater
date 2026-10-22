@@ -191,7 +191,15 @@ bool RadioLibWrapper::hasAssertedRadioInterrupt() const {
   // GPIO_IS_VALID_GPIO shifts by its argument on older IDF versions, so its
   // mask check must follow the range check even for an invalid/NC module pin.
   if (irq == RADIOLIB_NC || irq >= SOC_GPIO_PIN_COUNT || !GPIO_IS_VALID_GPIO(irq)) return false;
-  return module->hal->digitalRead(irq) == module->hal->GpioLevelHigh;
+  #if MESH_RADIO_TRACE_ENABLED
+  const bool tracing = mesh::radiotrace::trace().pending();
+  const uint64_t before = tracing ? mesh::radiotrace::nowUs() : 0;
+  #endif
+  const bool asserted = module->hal->digitalRead(irq) == module->hal->GpioLevelHigh;
+  #if MESH_RADIO_TRACE_ENABLED
+  if (tracing) mesh::radiotrace::trace().dio(_radio, before, mesh::radiotrace::nowUs(), asserted);
+  #endif
+  return asserted;
 #else
   return false;
 #endif
@@ -212,6 +220,9 @@ bool RadioLibWrapper::claimRadioInterrupt() {
 }
 
 void RadioLibWrapper::begin() {
+#if MESH_RADIO_TRACE_ENABLED
+  mesh::radiotrace::trace().context(_radio, _active_profile, _profile_generation);
+#endif
 #if MESH_ENABLE_TX_BEACONS
   if (_beacon_owned) return;
 #endif
@@ -340,6 +351,9 @@ bool RadioLibWrapper::setTxPower(int8_t dbm) {
 }
 
 uint8_t RadioLibWrapper::beginReconfigure() {
+#if MESH_RADIO_TRACE_ENABLED
+  mesh::radiotrace::trace().context(_radio, _active_profile, _profile_generation);
+#endif
 #if MESH_ENABLE_TX_BEACONS
   if (_beacon_owned && !_beacon_restoring) return 2;
 #endif
@@ -610,6 +624,9 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
     cacheParams(p.freq, p.bw, p.sf, p.cr);
     _active_profile = profile;
     _profile_generation = _profiles.generation[profile];
+#if MESH_RADIO_TRACE_ENABLED
+    mesh::radiotrace::trace().context(_radio, _active_profile, _profile_generation);
+#endif
     _profile_refresh_required = false;
     _profile_repair_required = false;
     endReconfigure(resume);
@@ -875,6 +892,12 @@ mesh::RadioParamApplyResult RadioLibWrapper::tryRestoreCodingRate(uint8_t cr) {
 }
 
 void RadioLibWrapper::serviceProfileScan() {
+#if MESH_RADIO_TRACE_ENABLED
+  if (mesh::radiotrace::trace().pending()) {
+    mesh::radiotrace::trace().context(_radio, _active_profile, _profile_generation);
+    mesh::radiotrace::trace().scan(_radio, mesh::radiotrace::nowUs(), 0, 0);
+  }
+#endif
 #if defined(NRF52_PLATFORM)
   _profile_idle_visit_ticks = 0; // Every deferred/restarted scan fails closed.
 #endif
@@ -965,6 +988,10 @@ void RadioLibWrapper::serviceProfileScan() {
 #if defined(ESP32_PLATFORM)
     // Keep long visits and light-sleep elapsed time in the same 64-bit domain.
     const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+#if MESH_RADIO_TRACE_ENABLED
+    if (mesh::radiotrace::trace().pending())
+      mesh::radiotrace::trace().scan(_radio, now_us, _esp32_profile_visit_started_us, visit_us, false);
+#endif
     if (now_us < _esp32_profile_visit_started_us
         || now_us - _esp32_profile_visit_started_us >= visit_us) target ^= 1;
 #else
@@ -2019,6 +2046,12 @@ bool RadioLibWrapper::serviceCarrierWave() {
 #endif
 
 void RadioLibWrapper::loop() {
+#if MESH_RADIO_TRACE_ENABLED
+  if (mesh::radiotrace::trace().pending()) {
+    mesh::radiotrace::trace().context(_radio, _active_profile, _profile_generation);
+    mesh::radiotrace::trace().tick(mesh::radiotrace::nowUs());
+  }
+#endif
 #if MESH_ENABLE_TX_BEACONS
   if (_beacon_owned) return;
 #endif
@@ -2334,6 +2367,11 @@ bool RadioLibWrapper::setRxPowerSaving(bool enabled, uint32_t rx_us, uint32_t sl
 }
 
 int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
+#if MESH_RADIO_TRACE_ENABLED
+  auto& radio_trace = mesh::radiotrace::trace();
+  uint16_t trace_rx = mesh::radiotrace::NoIndex;
+  radio_trace.context(_radio, _active_profile, _profile_generation);
+#endif
 #if MESH_ENABLE_TX_BEACONS
   if (_beacon_owned) return 0;
 #endif
@@ -2346,6 +2384,9 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
     last_radio_interrupt_millis = millis();   // ISR fired -> radio hardware is alive
     const bool packet_ready = isPacketReady();
     if (packet_ready) {
+#if MESH_RADIO_TRACE_ENABLED
+      if (radio_trace.pending()) trace_rx = radio_trace.receiveRead(_radio, mesh::radiotrace::nowUs());
+#endif
       #if defined(USE_LR2021)
       // The LR2021 base reader clears FIFO/IRQs while otherwise staying in
       // continuous RX. Freeze reception before taking length/status/FIFO
@@ -2431,6 +2472,11 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
       _rx_retry_pending = true;
       MESH_DEBUG_PRINTLN("RadioLibWrapper: error: startReceive after packet (%d)", err);
     }
+#if MESH_RADIO_TRACE_ENABLED
+    if (trace_rx != mesh::radiotrace::NoIndex)
+      radio_trace.receiveFinish(_radio, trace_rx, mesh::radiotrace::nowUs(),
+          mesh::radiotrace::fingerprint(bytes, len), static_cast<uint16_t>(len), true);
+#endif
     return len;
   }
 
@@ -2448,6 +2494,12 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
     }
     startRecv();
   }
+#if MESH_RADIO_TRACE_ENABLED
+  if (trace_rx != mesh::radiotrace::NoIndex)
+    radio_trace.receiveFinish(_radio, trace_rx, mesh::radiotrace::nowUs(),
+        len > 0 ? mesh::radiotrace::fingerprint(bytes, len) : 0,
+        static_cast<uint16_t>(len), len > 0);
+#endif
   return len;
 }
 
@@ -2528,12 +2580,23 @@ bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
     return false;
   }
   _irq_probe_failures = 0;
+#if MESH_RADIO_TRACE_ENABLED
+  if (mesh::radiotrace::trace().pending()) {
+    mesh::radiotrace::trace().context(_radio, _active_profile, _profile_generation);
+    mesh::radiotrace::trace().transmitPrepare(_radio, mesh::radiotrace::nowUs(),
+        mesh::radiotrace::fingerprint(bytes, len), static_cast<uint16_t>(len), _radio->getTimeOnAir(len));
+  }
+#endif
   int err = _radio->startTransmit((uint8_t *) bytes, len);
   if (err == RADIOLIB_ERR_NONE) {
     state = STATE_TX_WAIT;
     return true;
   }
   MESH_DEBUG_PRINTLN("RadioLibWrapper: error: startTransmit(%d)", err);
+#if MESH_RADIO_TRACE_ENABLED
+  if (mesh::radiotrace::trace().pending())
+    mesh::radiotrace::trace().transmitFinish(_radio, mesh::radiotrace::nowUs(), false);
+#endif
   idle();   // trigger another startRecv()
   _board->onAfterTransmit();
   if (err == RADIOLIB_ERR_SPI_CMD_TIMEOUT) {
@@ -2556,12 +2619,20 @@ bool RadioLibWrapper::isSendComplete() {
     _irq_probe_failures = 0;
     state = STATE_IDLE;
     n_sent++;
+#if MESH_RADIO_TRACE_ENABLED
+    if (mesh::radiotrace::trace().pending())
+      mesh::radiotrace::trace().transmitFinish(_radio, mesh::radiotrace::nowUs(), true);
+#endif
     return true;
   }
   return false;
 }
 
 void RadioLibWrapper::onSendFinished() {
+#if MESH_RADIO_TRACE_ENABLED
+  if (mesh::radiotrace::trace().pending())
+    mesh::radiotrace::trace().transmitFinish(_radio, mesh::radiotrace::nowUs(), false);
+#endif
   _radio->finishTransmit();
   // Receive has not been rearmed yet: these are completion/probe events for
   // the retired TX. They must not block the Dispatcher's timeout recovery.

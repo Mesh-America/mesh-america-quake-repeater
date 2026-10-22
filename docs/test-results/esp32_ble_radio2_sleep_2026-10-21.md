@@ -460,8 +460,8 @@ The immutable receipt is `v4-a5293fa5-awake-completed.private.json` (SHA-256
 The stale-IRQ regression proves a receive-path bug and the new guard repairs
 that case. This physical sample does not establish which historical misses
 encountered it or show that all scanning losses are fixed. A controlled
-two-transmitter overlap diagnostic is pending; no result or cause is claimed
-for that experiment here.
+two-transmitter overlap diagnostic is recorded below; it does not establish a
+cause for these historical misses.
 
 ### Receive activity across RX restarts
 
@@ -485,19 +485,93 @@ ASan/UBSan variants, including reset-removal controls that reproduce the
 retune over a new packet for all six handlers. All 19 affected host-fixture
 tests and 26 interrupt-recovery, receive-contract and receive-retry checks
 pass. The new suite runs in the required unit-test workflow. Physical RF
-validation remains pending; this proof does not attribute historical missing
-nonces or establish a complete RF pass. The installed versions and packet
-counts above remain unchanged.
+results on the new image are recorded below. The host proof does not attribute
+historical missing nonces or establish a complete RF pass.
+
+## RX-restart installation and overlap diagnostic
+
+The V4 image built from pushed source
+[`e4119a120`](https://github.com/mikecarper/MeshCore/commit/e4119a1206efefc0506c12ebe529883b966784f5)
+passes its capability and memory gates at 2,558,984 application bytes. Its
+application SHA-256 is
+`fc1a835c45ebc5e7a9fec95c757d8606e145bbc92fa8d365ba62d96a7930286d`.
+The application-only installation passed full readback and checked
+configuration preservation. The receipt is
+`flash-v4-e4119a12-completed.private.json` (SHA-256
+`b06d8b6ef8d9df9aa881d6d1ca2f6096d19c8bcc6d4cbb2873fb20d47a9f85c5`).
+
+Two overlap conditions completed on this image at 80 MHz with manual CPU sleep
+off. Each condition sent 20 unique primary/secondary pairs; all 40 sends
+reached TX_DONE once, with zero retries or duplicate deliveries and zero SDK
+counters in both conditions.
+
+| Condition | Primary received | Secondary received |
+| --- | --- | --- |
+| Radio2 scanning | 16/20 | 2/20 |
+| Fixed 916 MHz, radio2 off | 0/20 (outside receive frequency) | 20/20 |
+
+All 20 scanner timing bounds were inconclusive. The nominal 140 ms secondary
+write occurred 227.239-263.257 ms after the primary write (median 244.363 ms),
+while the first counter reply confirming primary TX_DONE arrived
+523.533-903.982 ms after that write. That reply bounds completion; it does not
+timestamp the RF event. The controller synchronously saved the report before
+the secondary write and after each counter reply, widening these bounds.
+The analysis uses 101-byte wire airtimes of 397.824/652.288 ms, a complete
+148.480 ms secondary preamble and a 2 ms margin. No pair proves that the whole
+secondary preamble fell inside the primary payload reception. The timings
+do not exclude desense or attribute historical misses. The ordinary
+alternating-profile check is recorded below.
+
+Three earlier setup attempts sent no RF: the first two stopped before
+mutation; the third encountered a pending lease, with separate V3 automatic
+cleanup recovery passing. The overlap experiment completed with an
+inconclusive status: neither condition has a qualified timing pair, so masking
+was not demonstrated. Full restoration of all three boards passed without
+errors, and a fresh MQTT PUBACK verified recovery. The final host receipt is
+`/home/mesh/hwtest/esp32-radio2-pson-v3-v4-20261021/overlap-v4-e4119a12-completed.private.json`
+(SHA-256
+`c1aee5132b447734df3fe9c663f4f3ae7a8b980f3165de43f96c2653d05200e1`).
+No firmware qualification pass is claimed.
+
+## Ordinary awake check after both receive fixes
+
+The predeclared `e4119a120` check sent 20 new packets per profile, once each,
+with the ordinary alternating schedule and no deliberate overlapping sender.
+It received **17/20 primary and 18/20 secondary packets**. All 40 sends reached
+TX_DONE once; duplicates, RF retries and SDK sleep calls were zero. The strict
+RF result remains failed. The physical counters recorded 120 successful raw
+receives: 35 owned direct packets and 85 ambient floods, with seven separate
+receive errors. These totals do not identify the cause of each missing nonce.
+The immutable receipt is `v4-e4119a12-awake-completed.private.json` (SHA-256
+`9f2f8acecc634ebaf7b9e9aa21e51079b9872316e571a886d3866bfedabab558`).
+
+That receipt also retains a cleanup failure: restoring automatic radio2
+permission was rejected while the temporary primary restore was still pending.
+Fresh MQTT recovery passed. A separate guarded operation subsequently restored
+automatic permission with one setter and no RF transmissions, then verified
+the checked settings, credentials and channel semantics against the baseline.
+Its receipt is `v4-auto-restoration-after-e411-awake.private.json` (SHA-256
+`4dbf10eeac81e8897c8a4f9fa4d7b62ac20e74c91b467a501f31fa3a1d8bd0ec`).
+
+Both receive defects remain proven by executed host regressions, but the
+physical results show that additional losses remain. The next diagnostic
+records bounded activity and transmission times on the radios themselves.
+It must distinguish other-profile ownership, unresolved preamble activity,
+read/rearm gaps and delays between scanner calls without treating host counter
+replies as RF timestamps. No arbitrary preamble or CPU-sleep setting change
+or replacement packet was used to turn a failed result into a pass.
 
 ## Final handback and limits
 
-V3 currently runs `7d0709bf0`; V4 runs `a5293fa50`, and the peer remains on
-`ebb59d48`. The completed V3 campaign and V4 scanning controls, including the
-new awake run, restored their checked radio, RX power-saving,
+V3 currently runs `7d0709bf0`; V4 runs `e4119a120`, and the peer remains on
+`ebb59d48`. The completed earlier V3 campaign and V4 scanning controls,
+including the `a5293fa50` awake run, restored their checked radio, RX power-saving,
 Bluetooth, WiFi, MQTT, logging, diagnostics and USB-watchdog settings, including
 credential digests, original radio2 automatic permission and peer power/channel
 state. Fresh MQTT PUBACK increases verified recovery. The fixed-tuple cleanup
 power failure is retained, with the later peer recovery verified separately.
+Full overlap restoration is verified. The ordinary run's original cleanup
+failure is retained, with its separate automatic-permission recovery verified.
 No nRF52 board, hub power or other firmware was changed in this task.
 
 The Bluetooth hardware checks pass. SDK light-sleep calls are observed without
