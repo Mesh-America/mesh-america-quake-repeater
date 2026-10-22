@@ -11486,6 +11486,17 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
   return startWebConfigImpl(force_ap, reply, false);
 }
 
+bool MyMesh::webConfigOwnsWiFi() const {
+  bool owns_wifi = true;
+#ifdef WITH_MQTT_BRIDGE
+  owns_wifi = !mqtt_bridge || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping());
+#endif
+#ifdef WITH_UDP_BRIDGE
+  owns_wifi = owns_wifi && !isUDPBridgeNetworkEnabled();
+#endif
+  return owns_wifi;
+}
+
 bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup) {
   if (_cli.getBoard()->isOTAUpdateRunning()) {
     strcpy(reply, "Err: OTA server is running - 'stop ota' first");
@@ -11518,11 +11529,9 @@ bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup
 #endif
   if (!_webconfig) {
     void* mqtt_prefs = nullptr;
-    bool owns_wifi = true;
+    const bool owns_wifi = webConfigOwnsWiFi();
 #ifdef WITH_MQTT_BRIDGE
     mqtt_prefs = _cli.getObserverPrefs();
-    owns_wifi = !mqtt_bridge
-        || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping());
 #endif
     _webconfig = new WebConfigServer(this, mqtt_prefs, owns_wifi,
                                      self_id.pub_key, getFirmwareVer(), getBuildDate(), getRole(),
@@ -11542,10 +11551,7 @@ bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup
   // WiFi start (including master-radio restoration) must retain explicit ESP-NOW.
   if (automatic_setup) suspendUnconfiguredSetupBridges();
 
-#ifdef WITH_MQTT_BRIDGE
-  _webconfig->updateWiFiOwnership(!mqtt_bridge
-      || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping()));
-#endif
+  _webconfig->updateWiFiOwnership(webConfigOwnsWiFi());
 
 #ifdef WITH_UDP_BRIDGE
   // The portal may switch to AP/setup mode synchronously. Close the station
@@ -13624,10 +13630,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
     mesh::usbConsolePort().printf("%s\r\n", wc_reply);
   }
   if (_webconfig) {
-#ifdef WITH_MQTT_BRIDGE
-    _webconfig->updateWiFiOwnership(!mqtt_bridge
-        || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping()));
-#endif
+    _webconfig->updateWiFiOwnership(webConfigOwnsWiFi());
     _webconfig->tick(millis());
     if (!_webconfig->isRunning() && !_webconfig->isStopping()) {
       delete _webconfig;
@@ -14352,13 +14355,15 @@ void MyMesh::serviceUDPBridge() {
   }
   // An AP, setup portal, OTA uploader or MQTT worker owns its WiFi lifecycle.
   // UDP may share its connected station, but never reconnects underneath it.
-  if (!mesh::wifi::stationMutationAllowed()) return;
-#ifdef WITH_WEBCONFIG
-  if (isWebConfigActive() || isWebConfigStopping()) return;
-#endif
 #ifdef WITH_MQTT_BRIDGE
   if (mqtt_bridge && (mqtt_bridge->isRunning() || mqtt_bridge->isStopping())) return;
 #endif
+#ifdef WITH_WEBCONFIG
+  // A LAN/connecting listener follows this station owner. An explicit setup
+  // AP, active recovery browser or draining request retains its own link.
+  if (_webconfig && !_webconfig->prepareStationOwner()) return;
+#endif
+  if (!mesh::wifi::stationMutationAllowed()) return;
   if (!millisHasNowPassed(udp_station_retry_at)) return;
   udp_station_retry_at = millis() + 15000U;
   mesh::wifi::Credentials credentials;

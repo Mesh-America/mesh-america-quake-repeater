@@ -7,10 +7,12 @@
 #include <helpers/RoomWebMailbox.h>
 #include <helpers/WiFiReconnectPolicy.h>
 #include <helpers/WiFiNetworkPowerPolicy.h>
+#define MESH_MANAGEMENT_PASSWORD_HOST_TEST
+#include <helpers/esp32/ManagementPassword.h>
 static uint32_t clock_ms = 1000;
 uint32_t millis() { return clock_ms; }
 void delay(unsigned) {}
-enum { WL_DISCONNECTED = 6, WL_CONNECTED = 3, WIFI_STA = 1,
+enum { WL_DISCONNECTED = 6, WL_CONNECTED = 3, WIFI_STA = 1, WIFI_AP = 2, WIFI_AP_STA = 3,
        WIFI_IF_STA = 0, ESP_OK = 0, WIFI_PS_NONE = 0,
        WIFI_PS_MAX_MODEM = 2, WIFI_PS_MIN_MODEM = 1 };
 using wifi_ps_type_t = int;
@@ -22,12 +24,16 @@ struct IP {
 };
 struct FakeWiFi {
   int state = WL_DISCONNECTED, begins = 0, disconnects = 0;
+  int current_mode = WIFI_STA, ap_clients = 0, ap_disconnects = 0;
+  bool fail_mode = false, fail_ap_stop = false;
   bool next_begin_connects = false;
   std::string ssid, password;
   int status() const { return state; }
-  bool mode(int) { return true; }
+  bool mode(int value) { if (fail_mode) return false; current_mode = value; return true; }
+  int getMode() const { return current_mode; }
+  int softAPgetStationNum() const { return ap_clients; }
   void disconnect(bool, bool) { ++disconnects; state = WL_DISCONNECTED; }
-  void softAPdisconnect(bool) {}
+  void softAPdisconnect(bool) { ++ap_disconnects; if (!fail_ap_stop) current_mode &= ~WIFI_AP; }
   IP localIP() const { return {}; }
 } WiFi;
 namespace mesh {
@@ -39,7 +45,8 @@ Control& control() { static Control c; return c; }
 namespace wifi {
 constexpr uint8_t kPowerSaveMax = 2, kDefaultPowerSave = 0, kPowerSaveNone = 1;
 constexpr bool kPrimaryEspNowRadio = false;
-int applyProtocolMask(int) { return ESP_OK; }
+bool fail_protocol = false;
+int applyProtocolMask(int) { return fail_protocol ? -1 : ESP_OK; }
 void setStationAutoReconnect(bool) {}
 int beginStation(const char* ssid, const char* password) {
   ++WiFi.begins; WiFi.ssid = ssid; WiFi.password = password;
@@ -77,6 +84,7 @@ static bool canonical_available = true;
 static const char* canonical_ssid = "saved-station";
 static std::string canonical_password(64, 'A');
 struct DNS { void stop() {} };
+struct WCLock { explicit WCLock(void*) {} };
 class WebConfigServer {
 public:
   enum Mode { MODE_OFF, MODE_SETUP, MODE_CONNECTING, MODE_LAN };
@@ -98,6 +106,13 @@ public:
   bool _setup_reconnect_in_progress = false, _board_cmds_probed = false;
   bool _was_setup_ap = false, _initial_setup = false;
   bool foreground = false;
+  bool _setup_provisioning_privilege = false, _setup_wifi_handoff_pending = false;
+  enum { BATCH_IDLE, BATCH_PENDING };
+  int _batch_state = BATCH_IDLE;
+  unsigned _reboot_at = 0, handler_refs = 0;
+  bool routes_attached = true, handler_arrives_on_detach = false;
+  struct Terminal { bool running = false; struct { bool pending = false; } queue; };
+  Terminal* _terminal = nullptr;
   uint32_t _setup_reconnect_deadline = 0, _connect_deadline = 0;
   uint32_t _setup_started_at = 0, _last_activity = 0;
   WiFiReconnectPolicy::Tracker _wifi_reconnect_tracker;
@@ -124,6 +139,7 @@ public:
   }
   bool startSetupMode(char* reply) {
     ++setup_starts; WiFi.disconnect(false, true); _mode = MODE_SETUP;
+    WiFi.current_mode = WIFI_AP_STA;
     createServer();
     _was_setup_ap = true; _retry_saved_wifi_in_setup = false;
     strcpy(reply, "setup"); return true;
@@ -131,11 +147,15 @@ public:
   bool startLanMode(char* reply) { _mode = MODE_LAN; strcpy(reply, "LAN"); return true; }
   bool startAutoMode(char*);
   bool beginSavedStation(uint32_t);
+  bool prepareStationOwner();
   void tick(uint32_t);
   void createServer() { ++server_starts; }
   void probeBoardCommands() { _board_cmds_probed = true; }
   void serviceTerminal(uint32_t) {}
   void serviceRoom(uint32_t) {}
+  unsigned handlerRefCount() const { return handler_refs; }
+  void detachRoutes() { routes_attached = false; if (handler_arrives_on_detach) ++handler_refs; }
+  void attachRoutes() { routes_attached = true; }
   bool isNetworkForegroundActive(uint32_t) const { return foreground || _mode == MODE_SETUP; }
   bool bluetoothWiFiCoexistenceRequired() { return false; }
   bool acceptWiFi(Entry& e, const char* value) {
@@ -153,6 +173,7 @@ public:
 };
 @CONSTRUCTOR@
 @ATTEMPT@
+@PREPARE@
 @START@
 @RECOVERY@
 
@@ -164,7 +185,74 @@ int main() {
   assert(portal._standalone_wifi && portal.rawPskCapability());
   assert(strcmp(portal._wifi_ssid, canonical_ssid) == 0);
   assert(strlen(portal._wifi_password) == 64);
-#if defined(TEST_CREDENTIAL_PRIORITY)
+#if defined(TEST_UDP_STATION_OWNER)
+  // UDP takes the station before the portal's first 15-second deadline.
+  assert(portal.startAutoMode(reply) && WiFi.begins == 1);
+  assert(portal.prepareStationOwner() && !portal._owns_wifi && !portal._connect_deadline);
+  portal.tick(16000);
+  assert(portal.setup_starts == 0 && WiFi.begins == 1);
+  // With UDP off, ordinary WiFi-on owns its join and may expose recovery AP.
+  portal.updateWiFiOwnership(true);
+  portal.tick(16001);
+  portal.tick(31001);
+  assert(portal.setup_starts == 1 && portal._retry_saved_wifi_in_setup);
+  const int begins = WiFi.begins, disconnects = WiFi.ap_disconnects;
+  // A browser, queued command, handoff, reboot or active HTTP handler must
+  // finish without its AP being taken away when UDP is enabled later.
+  WiFi.ap_clients = 1; assert(!portal.prepareStationOwner()); WiFi.ap_clients = 0;
+  portal._batch_state = WebConfigServer::BATCH_PENDING;
+  assert(!portal.prepareStationOwner()); portal._batch_state = WebConfigServer::BATCH_IDLE;
+  portal._setup_wifi_handoff_pending = true;
+  assert(!portal.prepareStationOwner()); portal._setup_wifi_handoff_pending = false;
+  portal._reboot_at = 1; assert(!portal.prepareStationOwner()); portal._reboot_at = 0;
+  portal.handler_refs = 1; assert(!portal.prepareStationOwner()); portal.handler_refs = 0;
+  portal.handler_arrives_on_detach = true;
+  assert(!portal.prepareStationOwner()); portal.handler_arrives_on_detach = false; portal.handler_refs = 0;
+  WebConfigServer::Terminal terminal;
+  portal._terminal = &terminal; terminal.queue.pending = true;
+  assert(!portal.prepareStationOwner()); terminal.queue.pending = false; terminal.running = true;
+  assert(!portal.prepareStationOwner()); portal._terminal = nullptr;
+  mesh::RoomWebMailbox room;
+  uint8_t token[32] = {1}, digest[32] = {2};
+  assert(room.submit(token, 1, digest, "test", 4, clock_ms) == mesh::RoomWebMailbox::Result::Accepted);
+  portal._room_mailbox = &room;
+  assert(!portal.prepareStationOwner());
+  assert(room.begin() && !portal.prepareStationOwner()); portal._room_mailbox = nullptr;
+  assert(portal.routes_attached && WiFi.ap_disconnects == disconnects);
+  assert(mesh::esp32::managementPassword::initialize("admin-password"));
+  mesh::esp32::managementPassword::Snapshot credential;
+  assert(mesh::esp32::managementPassword::snapshot(credential));
+  {
+    mesh::esp32::managementPassword::UploadGuard upload(credential.generation);
+    assert(upload.acquired() && !portal.prepareStationOwner());
+    assert(WiFi.ap_disconnects == disconnects);
+  }
+  // An SDK failure must retain the recovery state and attached routes so a
+  // later ordinary loop can complete the handoff, without a reboot or clear.
+  WiFi.fail_ap_stop = true;
+  assert(!portal.prepareStationOwner() && portal.routes_attached);
+  assert(portal._mode == WebConfigServer::MODE_SETUP && portal._retry_saved_wifi_in_setup);
+  WiFi.fail_ap_stop = false;
+  mesh::wifi::fail_protocol = true;
+  assert(!portal.prepareStationOwner() && portal.routes_attached);
+  assert(portal._mode == WebConfigServer::MODE_SETUP && portal._retry_saved_wifi_in_setup);
+  mesh::wifi::fail_protocol = false;
+  assert(portal.prepareStationOwner() && portal._mode == WebConfigServer::MODE_CONNECTING);
+  assert(!portal._retry_saved_wifi_in_setup && !portal._was_setup_ap && portal.routes_attached);
+  assert(WiFi.current_mode == WIFI_STA && WiFi.begins == begins);
+  // The external owner joins; the same portal follows the resulting LAN.
+  WiFi.state = WL_CONNECTED; portal.tick(31002);
+  assert(portal._mode == WebConfigServer::MODE_LAN);
+  // An explicit setup AP is never reclassified as an automatic fallback.
+  portal._mode = WebConfigServer::MODE_OFF;
+  portal.startSetupMode(reply);
+  assert(!portal._retry_saved_wifi_in_setup);
+  const int explicit_disconnects = WiFi.ap_disconnects;
+  assert(!portal.prepareStationOwner() && WiFi.current_mode == WIFI_AP_STA);
+  assert(WiFi.ap_disconnects == explicit_disconnects);
+  portal._stopping = true;
+  assert(!portal.prepareStationOwner());
+#elif defined(TEST_CREDENTIAL_PRIORITY)
   // Credential saves and async capability stay in canonical storage across
   // both ownership transitions; raw PSKs never enter MQTTPrefs[64].
   strcpy(obs.wifi_ssid, "legacy-station"); strcpy(obs.wifi_password, "legacy-secret");

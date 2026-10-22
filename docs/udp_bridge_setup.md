@@ -20,6 +20,14 @@ WiFi ownership transitions, then resumes when station operation is available.
 Opening a captive configuration access point does not create a UDP bridge
 network. USB/LoRa CLI access remains useful for inspecting a paused bridge.
 
+With saved WiFi credentials, enabling UDP requests a connection to that
+network. The web page can share the same station connection. An unused
+automatic recovery AP returns to station mode when UDP needs the network;
+connected setup clients and unfinished browser/OTA work keep their link.
+An explicitly requested `start webconfig ap` stays active until released.
+Use `stop webconfig` when finished with that AP, then check `get udp.status`.
+Switching WiFi back on does not enable UDP if you saved `udp.enabled off`.
+
 ## Router client isolation
 
 Client isolation is an optional access-point or guest-network policy, not a

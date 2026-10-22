@@ -192,7 +192,7 @@ public:
                   bool standalone_wifi = false);
   ~WebConfigServer();
 
-  // Infrastructure roles refresh this from the actual MQTT worker state.
+  // Infrastructure roles refresh this from actual MQTT/UDP station owners.
   // A compiled-in but stopped/unconfigured bridge cannot reconnect WiFi.
   // Companion runtimes retain their own station ownership. Loop task only.
   void updateWiFiOwnership(bool owns_wifi) {
@@ -204,6 +204,10 @@ public:
     _setup_reconnect_in_progress = false;
     _setup_reconnect_deadline = 0;
   }
+  // A station-only owner may reclaim an idle automatic recovery AP. Explicit
+  // setup APs and active browser/OTA work keep their link until released.
+  // Returns true when that owner may manage STA. Loop task only.
+  bool prepareStationOwner();
 
   // For the device display: true while a setup-mode portal is active.
   // Fills the AP SSID and portal IP; either buffer may be NULL to just poll.

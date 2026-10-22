@@ -1053,6 +1053,52 @@ bool WebConfigServer::startAutoMode(char reply[]) {
   return true;
 }
 
+bool WebConfigServer::prepareStationOwner() {
+  if (_stopping) return false;
+  updateWiFiOwnership(false);
+  if (_mode != MODE_SETUP) return true;
+  // Only startAutoMode's saved-network fallback is relinquished. A manual
+  // setup AP never sets this flag, even when saved credentials exist.
+  if (!_retry_saved_wifi_in_setup || WiFi.softAPgetStationNum() != 0) return false;
+  const auto busy = [this]() {
+    WCLock lock(_mux);
+    return handlerRefCount() != 0 || _batch_state == BATCH_PENDING
+        || _setup_wifi_handoff_pending || _reboot_at
+        || (_terminal && (_terminal->running || _terminal->queue.pending))
+        || (_room_mailbox && (_room_mailbox->state() == mesh::RoomWebMailbox::State::Pending
+            || _room_mailbox->state() == mesh::RoomWebMailbox::State::Running));
+  };
+  if (busy()) return false;
+  // Prevent an accepted OTA upload from racing the AP-to-STA transition.
+  mesh::esp32::managementPassword::ChangeGuard handoff;
+  if (!handoff.acquired()) return false;
+  detachRoutes();
+  if (busy()) {
+    attachRoutes();
+    return false;
+  }
+  WiFi.softAPdisconnect(true);
+  if ((WiFi.getMode() & WIFI_AP) || !WiFi.mode(WIFI_STA)
+      || mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) {
+    attachRoutes();
+    return false;
+  }
+  if (_dns) {
+    _dns->stop();
+    delete _dns;
+    _dns = NULL;
+  }
+  _was_setup_ap = false;
+  _initial_setup = false;
+  _setup_provisioning_privilege = false;
+  _setup_started_at = 0;
+  _retry_saved_wifi_in_setup = false;
+  _mode = MODE_CONNECTING;
+  attachRoutes();
+  mesh::usbDebugPort().println("WebConfig: station owner resumed; waiting for saved WiFi");
+  return true;
+}
+
 void WebConfigServer::createServer() {
   if (_host == NULL) {
     _host = new AsyncWebServer(80);

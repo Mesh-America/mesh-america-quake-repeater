@@ -66,6 +66,7 @@ struct Board {bool ota=false;bool isOTAUpdateRunning()const{return ota;}};
 struct ObserverPrefs {const char*wifi_ssid="test";const char*wifi_password="";uint8_t wifi_power_save=1;};
 struct CLI {Board board;ObserverPrefs observer;Board*getBoard(){return &board;}const ObserverPrefs*getObserverPrefs(){return &observer;}};
 struct MQTT {bool running=false,stopping=false;bool isRunning()const{return running;}bool isStopping()const{return stopping;}};
+struct WebConfig {bool allowed=true;int prepares=0;bool prepareStationOwner(){++prepares;return allowed;}};
 struct UDPBridge {
  static int allocations;bool running=false;int loops=0,closes=0;
  uint32_t address=0,mask=0;
@@ -84,6 +85,7 @@ struct MyMesh {
  NodePrefs _prefs;void* _mgr=nullptr;CLI _cli;FakeSettings udp_bridge_settings;
  UDPBridge*udp_bridge=nullptr;uint32_t udp_station_retry_at=0;bool udp_network_paused=false;
  MQTT* mqtt_bridge=nullptr;bool web_active=false,web_stopping=false;
+ WebConfig* _webconfig=nullptr;
  ~MyMesh(){delete udp_bridge;}
  bool isWebConfigActive(){return web_active;}
  bool isWebConfigStopping(){return web_stopping;}
@@ -131,17 +133,20 @@ int main(){
  assert(node.setUDPBridgeNetworkState(true)&&node.udp_bridge->running);
  WiFi.state=WL_IDLE_STATUS;now_ms+=16000;const int before_owner=WiFi.begins;
 #ifdef WITH_WEBCONFIG
- node.web_active=true;node.serviceUDPBridge();assert(WiFi.begins==before_owner&&!node.udp_bridge->running);
- node.web_active=false;node.web_stopping=true;node.serviceUDPBridge();assert(WiFi.begins==before_owner);
- node.web_stopping=false;
+ WebConfig portal;node._webconfig=&portal;portal.allowed=false;
+ node.serviceUDPBridge();assert(WiFi.begins==before_owner&&!node.udp_bridge->running);
+ assert(portal.prepares==1);
+ portal.allowed=true;node.serviceUDPBridge();assert(WiFi.begins==before_owner+1);
+ node._webconfig=nullptr;now_ms+=16000;
 #endif
+ const int before_mqtt=WiFi.begins;
 #ifdef WITH_MQTT_BRIDGE
  MQTT mqtt;node.mqtt_bridge=&mqtt;mqtt.running=true;node.serviceUDPBridge();
- assert(WiFi.begins==before_owner&&!node.udp_bridge->running);
- mqtt.running=false;mqtt.stopping=true;node.serviceUDPBridge();assert(WiFi.begins==before_owner);
+ assert(WiFi.begins==before_mqtt&&!node.udp_bridge->running);
+ mqtt.running=false;mqtt.stopping=true;node.serviceUDPBridge();assert(WiFi.begins==before_mqtt);
  mqtt.stopping=false;
 #endif
- node.serviceUDPBridge();assert(WiFi.begins==before_owner+1);
+ node.serviceUDPBridge();assert(WiFi.begins==before_mqtt+1);
  WiFi.state=WL_CONNECTED;node.serviceUDPBridge();assert(node.udp_bridge->running);
  // A failed MQTT destination must not park a healthy independent LAN bridge.
  mesh::wifi::NetworkPowerPolicy policy;
@@ -174,6 +179,49 @@ int main(){
 '''
 
 class UDPBridgeIntegrationTest(unittest.TestCase):
+    def test_webconfig_station_ownership_uses_live_udp_and_mqtt_intent(self):
+        method = body((ROOT / 'examples/simple_repeater/MyMesh.cpp').read_text(encoding='ascii'),
+                      'bool MyMesh::webConfigOwnsWiFi(')
+        fixture = r'''
+#include <cassert>
+struct Worker {
+  bool running=false,stopping=false;
+  bool isRunning()const{return running;}
+  bool isStopping()const{return stopping;}
+};
+struct MyMesh {
+  Worker* mqtt_bridge=nullptr; bool udp=false;
+  bool isUDPBridgeNetworkEnabled()const{return udp;}
+  bool webConfigOwnsWiFi()const;
+};
+@METHOD@
+int main(){
+  MyMesh node;Worker mqtt;
+  for(int udp=0;udp<2;++udp)for(int state=0;state<4;++state){
+    node.udp=udp;node.mqtt_bridge=state?&mqtt:nullptr;
+    mqtt.running=state==2;mqtt.stopping=state==3;
+    bool expected=true;
+#ifdef WITH_MQTT_BRIDGE
+    expected=state<2;
+#endif
+#ifdef WITH_UDP_BRIDGE
+    expected=expected&&!udp;
+#endif
+    assert(node.webConfigOwnsWiFi()==expected);
+  }
+}
+'''.replace('@METHOD@', method)
+        for flags in ((), ('WITH_MQTT_BRIDGE',), ('WITH_UDP_BRIDGE',),
+                      ('WITH_MQTT_BRIDGE', 'WITH_UDP_BRIDGE')):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory(prefix='udp-web-owner-') as tmp:
+                path = Path(tmp)
+                (path / 'test.cpp').write_text(fixture, encoding='ascii')
+                binary = path / 'test'
+                subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++11', '-Wall', '-Wextra', '-Werror',
+                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-pie', '-no-pie',
+                    *['-D' + flag + '=1' for flag in flags], str(path / 'test.cpp'), '-o', str(binary)], check=True)
+                subprocess.run([str(binary)], check=True)
+
     def test_wireless_backend_can_query_public_espnow_state_in_every_udp_owner_mix(self):
         header = (ROOT / 'examples/simple_repeater/MyMesh.h').read_text(encoding='ascii')
         signature = 'bool isEspNowBridgeRunning() override'
