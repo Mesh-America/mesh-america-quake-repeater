@@ -315,13 +315,66 @@ calls could have occurred before traffic began. The delivery counts remain
 valid, but sleep comparison qualification requires retiring that UART session
 and timing evidence inside the RF sequence. No pending-work guard is bypassed.
 
+## UART session repair and timed V3 comparison
+
+The campaign continued on 2026-10-22 with
+[`7d0709bf0`](https://github.com/mikecarper/MeshCore/commit/7d0709bf03aa53f3a31467f1ed1496e24824a7c8).
+UART quiet now retires only that USB protocol session after draining the ACK,
+including its pending reply owners and USB Reader output. The offline inbox
+and other transports remain active. A successful UART restart restores a
+fresh silent session; failed restarts keep the interface parked and retry.
+The integration regression reproduces the original stuck notification, then
+retains and downloads 40 actual receive frames without weakening sleep guards.
+
+ESP32 diagnostics now retain sixteen 16-second SDK-entry buckets, with explicit
+outside-window, saturation and missing-clock indications. The collector stays
+within its 256-byte budget; nRF52 layout and behavior are unchanged. The
+physical comparison requires a positive bucket wholly after the first confirmed
+TX_DONE and before the last TX request, including host/device clock uncertainty.
+This establishes SDK entries during the packet sequence, not sleep through a
+particular packet or electrical residency.
+
+Both Full Companion builds passed 24 capability markers and their memory gates.
+V3 and V4 application sizes are 2,120,088 and 2,557,400 bytes. Application-only
+updates passed full readback, unchanged partition/OTA metadata and checked
+configuration/credential preservation on both boards. No Bluetooth lifecycle
+or earlier quiet-only test was repeated solely for documentation changes.
+
+The new V3 comparison again sent 20 unique packets per frequency per case,
+with no RF retries, the same 32-symbol preambles and default sleep dials:
+
+| CPU | Manual CPU sleep | Primary received | Secondary received | SDK calls/returns | SDK calls in wholly contained RF-time buckets |
+| --- | --- | --- | --- | --- | --- |
+| 80 MHz | Off | 17/20 | 15/20 | 0/0 | 0 |
+| 80 MHz | On | 18/20 | 19/20 | 10,925/10,925 | 4,625 |
+| 160 MHz | On | 18/20 | 16/20 | 10,164/10,164 | 4,585 |
+| 160 MHz | Off | 20/20 | 16/20 | 0/0 | 0 |
+
+All 160 sends reached TX_DONE once; there were no duplicate deliveries. All
+four strict delivery checks failed. On cases have positive SDK activity during
+the RF sequence, with zero SDK errors, short returns or pending waits. In the
+80 MHz On comparison, serial blocking fell from 109,265 ms on the old image to
+1,368 ms after session parking. This supports the console-fix mechanism; varied
+ambient traffic still prevents a causal delivery comparison. Neither CPU speed
+nor manual sleep consistently removed packet loss. Original settings, channels,
+identity and checked credential hashes were restored, with clean core flags.
+
+V4's new comparison stopped during setup, before Bluetooth-off was sent and
+before any case or RF transmission. Its strict stable-Binary check rejected one
+unexpected prefix byte after a valid health response. Seven valid push frames
+were accepted; the rejected byte was not retained, so its origin is unknown.
+The failure remains recorded and requires bounded raw capture before diagnosis.
+Cleanup restored checked settings/channels and verified a fresh MQTT PUBACK
+increase. This failed setup does not supply new V4 packet-delivery evidence.
+
 ## Final handback and limits
 
-Both V3 and V4 now run `6236eec3`. Its original radio, RX power-saving, Bluetooth,
+Both V3 and V4 now run `7d0709bf0`. Its original radio, RX power-saving, Bluetooth,
 WiFi, MQTT, logging, diagnostics and USB-watchdog settings were restored and
 checked against the frozen baseline, including credential digests. Radio2 is
 `off (automatic allowed)`, preserving its original automatic permission.
-Bluetooth is on. WiFi reconnected and MQTT resumed with two broker PUBACKs.
+Bluetooth is on. WiFi reconnected and MQTT resumed with a verified fresh
+broker PUBACK increase.
 The peer's original 22 dBm power and logical channel state were restored.
 No nRF52 board, hub power or other firmware was changed in this task.
 
