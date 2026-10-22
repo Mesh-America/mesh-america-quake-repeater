@@ -36,7 +36,7 @@ void BridgeBase::handleReceivedPacket(mesh::Packet *packet) {
   if (_initialized == false) {
     BRIDGE_DEBUG_PRINTLN("RX packet received before initialization\n");
     _mgr->free(packet);
-#if defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE)
     onIngressResult(IngressResult::Stopped);
 #endif
     return;
@@ -44,7 +44,7 @@ void BridgeBase::handleReceivedPacket(mesh::Packet *packet) {
 
   if (!preparePacketIngress(packet) || !allowsPacket(packet)) {
     _mgr->free(packet);
-#if defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE)
     onIngressResult(IngressResult::Filtered);
 #endif
     return;
@@ -58,12 +58,12 @@ void BridgeBase::handleReceivedPacket(mesh::Packet *packet) {
     if (!ota) _seen_packets.markSeen(packet);
     // bridge_delay provides a buffer to prevent immediate processing conflicts in the mesh network.
     _mgr->queueInbound(packet, millis() + _prefs->bridge_delay);
-#if defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE)
     onIngressResult(IngressResult::Queued);
 #endif
   } else {
     _mgr->free(packet);
-#if defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE)
     onIngressResult(IngressResult::Duplicate);
 #endif
   }

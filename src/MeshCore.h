@@ -35,7 +35,7 @@
     ((defined(MESH_DEBUG) && MESH_DEBUG) || \
      (defined(BRIDGE_DEBUG) && BRIDGE_DEBUG) || \
      (defined(POWERSAVING_DEBUG) && POWERSAVING_DEBUG) || \
-     defined(WITH_ESPNOW_BRIDGE))
+     defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE))
   #include <Arduino.h>
   #include <atomic>
   #include <stdarg.h>

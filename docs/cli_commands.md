@@ -5568,8 +5568,9 @@ still overrides the first-boot default after an update.
 
 ### Bridge (When bridge support is compiled in)
 
-For a complete two-repeater setup with each option explained, see the
-[ESP-NOW bridge setup guide](espnow_bridge_setup.md).
+For a two-repeater setup and diagnostic flow, see the
+[ESP-NOW bridge setup guide](espnow_bridge_setup.md) or
+[RS-232/UART bridge guide](rs232_bridge_setup.md).
 
 #### View the compiled bridge type
 **Usage:** `get bridge.type`
@@ -5684,6 +5685,102 @@ Full MQTT repeaters with RS-232 expose three independent transports. Use
 RS-232. `bridge.baud` and `bridge.uart` change only UART configuration, without
 restarting MQTT or ESP-NOW. The new UART mode starts off when upgrading old
 MQTT preferences and retains explicit settings across reboots.
+
+---
+
+#### Diagnose the RS232 bridge
+
+Available on repeater builds containing the optional RS-232 bridge. These
+runtime diagnostics require no `BRIDGE_DEBUG` build flag. Builds without the
+transport do not gain UART support from these commands.
+
+**Read-only commands:**
+
+```text
+get rs232.transport
+get rs232.stats
+get rs232.stats rx
+get rs232.stats tx
+get rs232.stats drops
+get rs232.stats test
+```
+
+The existing `get rs232.status` keeps its heartbeat/automatic-standby report.
+If no UART bridge object exists, such as after explicitly disabling it,
+the transport and counter commands report `RS232 diagnostics unavailable`;
+use `rs232.enabled`, `rs232.running` and `rs232.status` to check saved intent
+and power state.
+`get rs232.transport` reports the local transport state (`ready`, `off`,
+`standby`, `probing` or `retrying`) and these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `baud` | Configured serial baud rate. |
+| `pins` | Selected RX/TX pin numbers. |
+| `src` | Configured LoRa packet source, `rx` or `tx`. |
+| `rxpart`, `rxready` | Bytes held in the current RX frame and whether a complete frame awaits mesh-pool space. |
+| `tx` | Bytes remaining in the owned TX frame. |
+| `heartbeat` | `on` initiates heartbeats; `passive` can still answer a valid ping. |
+| `last` | Last recorded diagnostic error: `none`, `pins`, `driver`, `test.stopped`, `test.busy` or `test.timeout`. It can remain after recovery. |
+
+A running UART means local initialization succeeded, not that a peer is
+reachable. Counter pages separate ordinary mesh traffic from explicit probes:
+
+| Page | Keys and meaning |
+| --- | --- |
+| Default | `rx`: received data frames; `mesh`: inbound packets admitted to mesh processing; `tx`: outbound mesh packets queued; `sent`: mesh frames fully accepted by the local UART. |
+| `rx` | `bytes`: all consumed UART bytes; `frames`: checksum-valid data frames; `crc`: checksum failures; `length`: invalid lengths; `parse`: mesh-packet parse failures; `timeout`: incomplete-frame expiry; `pool`: complete frames held for mesh-pool space. |
+| `tx` | `req`: mesh TX requests; `queued`: mesh frames accepted into the owned buffer; `sent`: fully UART-accepted mesh frames; `bytes`: all UART-accepted bytes; `stall`, `short`: blocked drain attempts or short-write events. |
+| `drops` | `noise`: synchronization rejects; `filter`/`dupe`: inbound filter/duplicate drops; `busy`/`stopped`: mesh TX rejected by transport state; `txfilter`/`txdupe`: outbound filter/duplicate drops; `big`: invalid or oversize TX packets. |
+| `test` | `queued`, `sent`, `fail`: probe TX stages and recorded failures; a late write can count as both failed and sent; `rx`, `bad`: valid/invalid probes received; `txid`, `rxid`: last queued/received IDs in hexadecimal. |
+
+Mesh admission means queued for normal processing, not confirmed LoRa
+forwarding or end-to-end delivery. Local write acceptance does not prove the
+bytes reached the peer. Byte totals include data, heartbeat and test traffic;
+RX bytes also include discarded noise. A frame can cause several write stalls.
+Counters survive same-object UART stop/start, including
+automatic standby. Disabling or reconfiguring the bridge can delete and replace
+that object, starting a new window; reboot and explicit reset also clear the
+counters. Stopping a transport can discard unfinished work without determining
+delivery, so the pages are not a complete delivery ledger.
+
+**Local-only actions:**
+
+```text
+rs232 test
+rs232 test A1B2C3D4
+rs232 resetstats
+```
+
+The optional ID is exactly eight hexadecimal digits, case-insensitive, without
+`0x`, spaces or trailing arguments. Omitting it uses uptime in milliseconds.
+`OK - test queued id=...; confirm on peer` confirms local queueing only. On
+the other updated board, `get rs232.stats test` must show an increased `rx`
+and matching `rxid`. Use a different ID in the reverse direction.
+
+Probes use a reserved UART-local control frame. They do not allocate a mesh
+packet, enter duplicate tracking, refresh peer liveness, authenticate a peer,
+or get forwarded onto LoRa. There is no automatic echo or retransmission.
+A probe that misses its write deadline records one failure. If no byte was
+accepted by the UART, it is cancelled. If a prefix was already accepted, the
+bridge retains and drains only the original suffix, with bounded work per
+main-loop pass, before another frame can start. This preserves framing for
+older receivers. A later completion also increments `sent`; the historical
+failure is retained and neither result proves peer receipt.
+A stopped, transitioning
+or busy UART, including a due heartbeat, rejects the test rather than waking or
+taking over the port. Older
+firmware ignores the extension. The test and counter reset do not write
+preferences and are rejected over LoRa; use a local console.
+
+For a short USB capture, record both `get usb.logging` and `get usb.debug`,
+then enable both `set usb.logging on` and `set usb.debug on`. The ordinary
+image emits bounded `RS232:` updates from its main loop at most once per
+second when diagnostic state changes. Busy USB output can skip updates; use
+the counter pages for exact values. Restore both original settings afterward.
+The CLI pages and test probes need neither logging gate.
+
+See the [two-board serial diagnostic flow](rs232_bridge_setup.md#test-each-serial-direction-without-lora-forwarding).
 
 ---
 

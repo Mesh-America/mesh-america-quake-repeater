@@ -50,7 +50,7 @@ public:
   static constexpr uint16_t BRIDGE_CHECKSUM_SIZE = sizeof(uint16_t);
 
 protected:
-#if defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE)
   // Observe the existing admission decision without evaluating filters twice.
   enum class IngressResult : uint8_t { Stopped, Filtered, Duplicate, Queued };
   virtual void onIngressResult(IngressResult) {}

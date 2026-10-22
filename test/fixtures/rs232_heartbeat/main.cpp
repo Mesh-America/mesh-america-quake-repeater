@@ -690,4 +690,5 @@ int main(int argc, char** argv) {
   else if (name == "counter-cycle") counter_cycle_test();
   else assert(false);
   printf("%s passed\n", name.c_str());
+  return 0;
 }

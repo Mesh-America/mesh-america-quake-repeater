@@ -3051,6 +3051,77 @@ uint8_t CommonCLI::buildAdvertData(uint8_t node_type, uint8_t* app_data) {
   }
 }
 
+#if defined(WITH_RS232_BRIDGE)
+bool CommonCLI::handleRs232DiagnosticCommand(uint32_t sender_timestamp,
+                                            const char* command, char* reply) {
+  constexpr size_t capacity = 157;  // Leave room for an infrastructure reply prefix.
+  if (strncmp(command, "get rs232.transport", 19) == 0) {
+    if (strcmp(command, "get rs232.transport") != 0) {
+      snprintf(reply, capacity, "Error: use get rs232.transport");
+    } else {
+      _callbacks->formatRs232Transport(reply, capacity);
+    }
+    return true;
+  }
+  if (strncmp(command, "get rs232.stats", 15) == 0) {
+    const char* page = command + 15;
+    if (*page == 0) {
+      _callbacks->formatRs232Stats("", reply, capacity);
+    } else if (strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
+               || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0) {
+      _callbacks->formatRs232Stats(page + 1, reply, capacity);
+    } else {
+      snprintf(reply, capacity, "Error: use get rs232.stats [rx|tx|drops|test]");
+    }
+    return true;
+  }
+  if (strncmp(command, "rs232", 5) != 0
+      || (command[5] != 0 && command[5] != ' ')) return false;
+  if (sender_timestamp != 0) {
+    snprintf(reply, capacity, "Error: RS232 test/reset requires a local connection");
+    return true;
+  }
+  if (strcmp(command, "rs232 resetstats") == 0) {
+    snprintf(reply, capacity, "%s", _callbacks->resetRs232Stats()
+        ? "OK - RS232 statistics reset" : "Error: RS232 diagnostics unavailable");
+    return true;
+  }
+  uint32_t nonce = 0;
+  if (strcmp(command, "rs232 test") == 0) {
+    nonce = millis();  // Correlation only; this is not a security token.
+  } else {
+    if (strncmp(command, "rs232 test ", 11) != 0) {
+      snprintf(reply, capacity, "Error: use rs232 test [8 hex digits] or rs232 resetstats");
+      return true;
+    }
+    const char* value = command + 11;
+    if (strlen(value) != 8) {
+      snprintf(reply, capacity, "Error: use rs232 test [8 hex digits] or rs232 resetstats");
+      return true;
+    }
+    for (size_t i = 0; i < 8; ++i) {
+      const char c = value[i];
+      uint8_t digit;
+      if (c >= '0' && c <= '9') digit = static_cast<uint8_t>(c - '0');
+      else if (c >= 'a' && c <= 'f') digit = static_cast<uint8_t>(c - 'a' + 10);
+      else if (c >= 'A' && c <= 'F') digit = static_cast<uint8_t>(c - 'A' + 10);
+      else {
+        snprintf(reply, capacity, "Error: use rs232 test [8 hex digits] or rs232 resetstats");
+        return true;
+      }
+      nonce = (nonce << 4) | digit;
+    }
+  }
+  if (_callbacks->sendRs232Test(nonce)) {
+    snprintf(reply, capacity, "OK - test queued id=%08lX; confirm on peer",
+             static_cast<unsigned long>(nonce));
+  } else {
+    snprintf(reply, capacity, "Error: RS232 test not queued; check status/stats");
+  }
+  return true;
+}
+#endif
+
 #if defined(WITH_ESPNOW_BRIDGE)
 bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
                                              const char* command, char* reply) {
@@ -3107,6 +3178,9 @@ bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     PrefsSaveReplyGuard save_reply(_prefs_save_failures, reply);
     mesh::cli::normalizeCommandVerb(command);
+#if defined(WITH_RS232_BRIDGE)
+    if (handleRs232DiagnosticCommand(sender_timestamp, command, reply)) return;
+#endif
 #if defined(WITH_ESPNOW_BRIDGE)
     if (handleEspNowDiagnosticCommand(sender_timestamp, command, reply)) return;
 #endif

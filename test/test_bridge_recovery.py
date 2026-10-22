@@ -18,6 +18,7 @@ MOCKS = r'''
 #include <cstdarg>
 #include <string>
 #include <helpers/bridges/RS232Heartbeat.h>
+#include <helpers/bridges/RS232BridgeDiagnostics.h>
 #include <helpers/bridges/ESPNowBridgeDiagnostics.h>
 #define MAX_TRANS_UNIT 255
 #define PAYLOAD_TYPE_OTA 0x0c
@@ -138,7 +139,7 @@ def code():
                       "int esp_now_deinit() { assert(espnow_active); if(failure==18)return -1; espnow_active=false; return ESP_OK; }")
     base = (ROOT / "src/helpers/bridges/BridgeBase.cpp").read_text()
     base_header = (ROOT / "src/helpers/bridges/BridgeBase.h").read_text()
-    ingress_hook = "#if defined(WITH_ESPNOW_BRIDGE)\n"
+    ingress_hook = "#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE)\n"
     ingress_hook += method(base_header, "enum class IngressResult") + ";\n"
     ingress_hook += method(base_header, "virtual void onIngressResult(") + "\n#endif\n"
     base_methods = "\n".join(method(base, signature) for signature in (

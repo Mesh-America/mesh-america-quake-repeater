@@ -646,6 +646,17 @@ public:
   virtual bool isEspNowBridgeRunning() { return isBridgeRunning(); }
   virtual bool isRs232BridgeRunning() const { return isBridgeRunning(); }
   virtual void formatRs232Status(char* reply) { strcpy(reply, "RS232 unavailable"); }
+#if defined(WITH_RS232_BRIDGE)
+  virtual void formatRs232Transport(char* reply, size_t capacity) {
+    snprintf(reply, capacity, "Error: RS232 diagnostics unavailable");
+  }
+  virtual void formatRs232Stats(const char* page, char* reply, size_t capacity) {
+    (void)page;
+    snprintf(reply, capacity, "Error: RS232 diagnostics unavailable");
+  }
+  virtual bool sendRs232Test(uint32_t nonce) { (void)nonce; return false; }
+  virtual bool resetRs232Stats() { return false; }
+#endif
 #if defined(WITH_ESPNOW_BRIDGE)
   virtual void formatEspNowStatus(char* reply, size_t capacity) {
     snprintf(reply, capacity, "Error: ESP-NOW diagnostics unavailable");
@@ -908,6 +919,9 @@ class CommonCLI {
   void handleRegionCmd(char* command, char* reply);
   void handleGetCmd(uint32_t sender_timestamp, char* command, char* reply);
   void handleSetCmd(uint32_t sender_timestamp, char* command, char* reply);
+#if defined(WITH_RS232_BRIDGE)
+  bool handleRs232DiagnosticCommand(uint32_t sender_timestamp, const char* command, char* reply);
+#endif
 #if defined(WITH_ESPNOW_BRIDGE)
   bool handleEspNowDiagnosticCommand(uint32_t sender_timestamp, const char* command, char* reply);
 #endif

@@ -78,6 +78,7 @@ nav:
           - room_services.md
           - carrier_wave.md
           - espnow_bridge_setup.md
+          - rs232_bridge_setup.md
           - WiFi.md
           - flood_filtering.md
           - gps_tracking.md

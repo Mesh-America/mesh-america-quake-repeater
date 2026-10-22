@@ -1441,6 +1441,24 @@ public:
         static_cast<unsigned>(_prefs.rs232_idle_seconds), heartbeat);
   }
 
+  // Diagnostics address the UART transport even when MQTT and ESP-NOW also run.
+  void formatRs232Transport(char* reply, size_t capacity) override {
+    if (bridge) bridge->formatStatus(reply, capacity);
+    else snprintf(reply, capacity, "Error: RS232 diagnostics unavailable");
+  }
+  void formatRs232Stats(const char* page, char* reply, size_t capacity) override {
+    if (bridge) bridge->formatStats(page, reply, capacity);
+    else snprintf(reply, capacity, "Error: RS232 diagnostics unavailable");
+  }
+  bool sendRs232Test(uint32_t nonce) override {
+    return bridge && bridge->sendTest(nonce);
+  }
+  bool resetRs232Stats() override {
+    if (!bridge) return false;
+    bridge->resetStats();
+    return true;
+  }
+
   bool setRs232BridgeState(bool enable) override {
     if (!enable) {
       const bool stopped = endRS232Bridge();

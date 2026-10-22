@@ -2,6 +2,7 @@
 
 #include "helpers/bridges/BridgeBase.h"
 #include "helpers/bridges/RS232Heartbeat.h"
+#include "helpers/bridges/RS232BridgeDiagnostics.h"
 
 #include <Stream.h>
 
@@ -123,6 +124,13 @@ public:
   void formatHeartbeatStatus(char* out, size_t capacity, uint32_t now) const;
   bool isPowerSuspended() const { return _power.suspended(); }
 
+  // Object-lifetime, read-only diagnostics; ordinary firmware needs no special
+  // BRIDGE_DEBUG build. Test transmission never wakes or claims the UART.
+  void formatStatus(char* out, size_t capacity) const;
+  void formatStats(const char* page, char* out, size_t capacity) const;
+  bool sendTest(uint32_t nonce);
+  void resetStats();
+
 private:
   /**
    * RS232 Protocol Structure:
@@ -159,6 +167,7 @@ private:
   // Retain the completed parser buffer while the shared pool is exhausted;
   // unread bytes remain in the UART driver until this frame is delivered.
   bool _rx_packet_ready = false;
+  bool _rx_pool_blocked = false;
   void drainReceivedPackets();
 
   /** Current position in the receive buffer */
@@ -172,6 +181,10 @@ private:
   uint32_t _tx_wire_until = 0;
   bool _tx_wire_pending = false;
   bool _tx_is_ping = false;
+  bool _tx_is_probe = false;
+  bool _probe_timed_out = false;
+  bool _tx_is_data = false;
+  uint32_t _probe_deadline = 0;
   uint32_t _tx_ping_challenge = 0;
 
   mesh::bridge::RS232PowerPolicy _power;
@@ -197,6 +210,14 @@ private:
   bool _legacy_rx = false;
   bool _legacy_fresh = false;
   bool _partial_suspend_grace = false;
+
+  mesh::bridge::rs232diag::Stats _stats;
+  uint32_t _debug_last_at = 0;
+  bool _debug_dirty = true;
+  bool _debug_was_enabled = false;
+  void onIngressResult(IngressResult result) override;
+  void emitDebug();
+  void expireProbeTransmit(uint32_t now);
 
   void resetTransportState();
   void expirePartialReceive(uint32_t now);

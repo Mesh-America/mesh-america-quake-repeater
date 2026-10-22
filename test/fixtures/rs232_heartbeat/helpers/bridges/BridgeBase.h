@@ -2,13 +2,47 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#if defined(ARDUINO)
+#include <Stream.h>
+#include <cstdarg>
+#include <cstdio>
+#endif
 
 #define MAX_TRANS_UNIT 255
 #define PAYLOAD_TYPE_OTA 0x0c
 #define BRIDGE_DEBUG_PRINTLN(...) ((void)0)
-struct NodePrefs { uint32_t bridge_baud = 115200; };
+struct NodePrefs { uint32_t bridge_baud = 115200; uint8_t bridge_pkt_src = 1; };
 
 namespace mesh {
+#if defined(ARDUINO)
+inline bool logging_enabled = false, debug_enabled = false;
+class DebugStream : public Stream {
+public:
+  int capacity = 4096;
+  unsigned writes = 0;
+  std::vector<uint8_t> bytes;
+  int available() override { return 0; }
+  int read() override { return -1; }
+  int availableForWrite() override { return capacity; }
+  size_t write(const uint8_t* data, size_t size) override {
+    ++writes;
+    if (size > static_cast<size_t>(capacity)) return 0;
+    bytes.insert(bytes.end(), data, data + size); return size;
+  }
+};
+inline DebugStream debug_stream;
+inline bool isUsbDebugLoggingEnabled() { return logging_enabled && debug_enabled; }
+inline Stream& usbLoggingPort() { return debug_stream; }
+inline size_t nrf52DebugPrintf(const char* format, ...) {
+  if (!isUsbDebugLoggingEnabled()) return 0;
+  char record[256];
+  va_list args; va_start(args, format);
+  int size = vsnprintf(record, sizeof(record), format, args); va_end(args);
+  if (size <= 0) return 0;
+  if (size >= static_cast<int>(sizeof(record))) size = sizeof(record) - 1;
+  return debug_stream.write(reinterpret_cast<const uint8_t*>(record), size);
+}
+#endif
 struct Packet {
   std::vector<uint8_t> payload{1, 2, 3};
   bool allowed = true;
@@ -56,7 +90,10 @@ public:
   virtual void sendPacket(mesh::Packet*) = 0;
   virtual void onPacketReceived(mesh::Packet*) = 0;
   bool isRunning() const { return _initialized; }
+  size_t seenCount() const { return _seen_packets.seen.size(); }
 protected:
+  enum class IngressResult : uint8_t { Stopped, Filtered, Duplicate, Queued };
+  virtual void onIngressResult(IngressResult) {}
   bool _initialized = false;
   NodePrefs* _prefs;
   mesh::PacketManager* _mgr;
@@ -74,6 +111,10 @@ protected:
     return fletcher16(bytes, size) == checksum;
   }
   void handleReceivedPacket(mesh::Packet* packet) {
+    if (!allowsPacket(packet)) {
+      onIngressResult(IngressResult::Filtered); _mgr->free(packet); return;
+    }
+    onIngressResult(IngressResult::Queued);
     _mgr->received.push_back(packet->payload); _mgr->free(packet);
   }
 };

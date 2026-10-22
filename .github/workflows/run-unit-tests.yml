@@ -409,6 +409,9 @@ jobs:
           python3 -B test/test_rs232_heartbeat.py -v
           python3 -B test/test_rs232_heartbeat_owner.py -v
           python3 -B test/test_rs232_power_settings.py -v
+          python3 -B test/test_rs232_bridge_diagnostics.py -v
+          python3 -B test/test_rs232_diagnostic_cli.py -v
+          python3 -B test/test_bridge_debug_formatter.py -v
 
       - name: Verify saved repeat-off trace exception and relay guards
         run: |

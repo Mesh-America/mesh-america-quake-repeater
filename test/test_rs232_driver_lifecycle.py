@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = r'''
 #include <cassert>
 #include <cstdint>
+#include <helpers/bridges/RS232BridgeDiagnostics.h>
+namespace rsdiag = mesh::bridge::rs232diag;
 #define ESP32 1
 #define BRIDGE_DEBUG_PRINTLN(...) ((void)0)
 struct NodePrefs { uint32_t bridge_baud = 57600; };
@@ -38,7 +40,10 @@ struct RS232Bridge : BridgeBase {
   Stream* _serial;
   int16_t _rx_pin, _tx_pin;
   uint16_t _rx_buffer_pos = 37;
-  bool _rx_packet_ready = true;
+  bool _rx_packet_ready = true, _rx_pool_blocked = false;
+  bool _tx_is_probe = false, _tx_is_data = false, _debug_dirty = false;
+  bool _probe_timed_out = false;
+  rsdiag::Stats _stats;
   uint16_t _tx_size = 19, _tx_pos = 3;
   bool _tx_wire_pending = true, _tx_is_ping = true;
   uint32_t _tx_ping_challenge = 4, _outstanding_challenge = 5;
@@ -127,7 +132,8 @@ class RS232DriverLifecycleTests(unittest.TestCase):
             source.write_text(code, encoding="ascii")
             built = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                 "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
-                str(source), "-o", str(binary)], capture_output=True, text=True, timeout=60)
+                "-I" + str(ROOT / "src"), str(source), "-o", str(binary)],
+                capture_output=True, text=True, timeout=60)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             checked = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
             self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)

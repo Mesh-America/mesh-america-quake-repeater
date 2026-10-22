@@ -40,6 +40,8 @@ HARNESS = r'''
 #include <cassert>
 #include <vector>
 #include <helpers/bridges/RS232Heartbeat.h>
+#include <helpers/bridges/RS232BridgeDiagnostics.h>
+namespace rsdiag = mesh::bridge::rs232diag;
 #include <helpers/bridges/ESPNowBridgeDiagnostics.h>
 #include <helpers/bridges/ESPNowBridgeFormat.h>
 #define BRIDGE_DEBUG_PRINTLN(...) ((void)0)
@@ -108,7 +110,11 @@ struct RS232Bridge : BridgeBase {
  uint16_t _tx_size=0,_tx_pos=0;
  uint32_t _tx_wire_until=0,_tx_ping_challenge=0;
  uint32_t _outstanding_challenge=0,_outstanding_since=0;
- bool _tx_wire_pending=false,_tx_is_ping=false;
+ bool _tx_wire_pending=false,_tx_is_ping=false,_tx_is_probe=false,_tx_is_data=false,_probe_timed_out=false;
+ uint32_t _probe_deadline=0;
+ bool _debug_dirty=false;
+ rsdiag::Stats _stats;
+ void expireProbeTransmit(uint32_t);
  void drainTransmit(uint32_t,bool blocking=false);
  void sendPacket(mesh::Packet*) override;
 };
@@ -210,7 +216,7 @@ int main() {
 # Importers use this shared harness directly, so expand its production hook
 # here rather than leaving fixture setup to one test's compilation path.
 _base_header = (ROOT / 'src/helpers/bridges/BridgeBase.h').read_text(encoding='ascii')
-_ingress_hook = '#if defined(WITH_ESPNOW_BRIDGE)\n'
+_ingress_hook = '#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE)\n'
 _ingress_hook += method(_base_header, 'enum class IngressResult') + ';\n'
 _ingress_hook += method(_base_header, 'virtual void onIngressResult(') + '\n#endif\n'
 HARNESS = HARNESS.replace('@INGRESS_HOOK@', _ingress_hook)
@@ -393,7 +399,7 @@ int main() {
         methods = []
         for name, signatures in {
             'BridgeBase': ['void BridgeBase::handleReceivedPacket('],
-            'RS232Bridge': ['void RS232Bridge::drainTransmit(', 'void RS232Bridge::sendPacket('],
+            'RS232Bridge': ['void RS232Bridge::expireProbeTransmit(', 'void RS232Bridge::drainTransmit(', 'void RS232Bridge::sendPacket('],
             'ESPNowBridge': ['void ESPNowBridge::sendPacket('],
             'MQTTBridge': ['void MQTTBridge::sendPacket(', 'void MQTTBridge::onPacketReceived('],
         }.items():
