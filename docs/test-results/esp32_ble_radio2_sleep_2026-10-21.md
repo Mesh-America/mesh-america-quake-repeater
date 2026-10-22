@@ -13,6 +13,18 @@ Bluetooth and SDK wait checks pass. Three strict sleeping RF trials with
 matched preambles received five of six packets, including the trial after the IRQ fix. They remain
 failures; radio2 is not fully qualified.
 
+The subsequent V3 CPU-clock sweep stopped during setup, before any of its
+20-packet-per-frequency cases transmitted. Switching Bluetooth off exposed a
+NimBLE-Arduino 2.5.1 shutdown crash: PC zero in the host task, with the event
+address resolving to `ble_hs_timer + 8`. This matches upstream
+[issue #1184](https://github.com/h2zero/NimBLE-Arduino/issues/1184) and its
+[merged fix #1185](https://github.com/h2zero/NimBLE-Arduino/pull/1185).
+The backport removes premature timer deinitialization while leaving final
+cleanup intact. The earlier V4 Bluedroid checks do not qualify V3 NimBLE.
+The regression reproduces the original null callback, then passes 1,000
+shutdown/cleanup cycles under ASan/UBSan for each timer backend. Library
+version, source hash and build-local middleware checks also pass.
+
 ## Behavior and safeguards
 
 Bluetooth off disconnects clients and completes host/controller teardown in

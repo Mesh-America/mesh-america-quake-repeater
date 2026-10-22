@@ -82,6 +82,13 @@ failed teardown keeps the CPU awake rather than treating stopped advertising
 as a stopped controller. `get bluetooth` reports a pending change until that
 transition finishes.
 
+NimBLE-Arduino 2.5.1 builds include the upstream host-timer shutdown fix
+([NimBLE-Arduino #1185](https://github.com/h2zero/NimBLE-Arduino/pull/1185)).
+Stopping Bluetooth preserves an already queued timer event's callback until
+final host cleanup. Without this fix, switching Bluetooth off can reset an
+ESP32 through a null callback. The version/hash-checked repair is applied to a
+build-local source copy; the shared library installation is unchanged.
+
 USB host sessions, logging, active WiFi/ESP-NOW, OTA and serial work keep their
 existing sleep guards. This change does not sleep an ESP32 through a live
 Bluetooth or WiFi connection. Such connections require SDK-managed modem and
