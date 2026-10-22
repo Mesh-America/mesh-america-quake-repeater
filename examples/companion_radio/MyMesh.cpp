@@ -6983,7 +6983,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       int i = 0;
       out_frame[i++] = RESP_CODE_CHANNEL_INFO;
       out_frame[i++] = channel_idx;
-      strcpy((char *)&out_frame[i], channel.name);
+      // This fixed-width field must not retain bytes from an earlier reply.
+      strncpy((char *)&out_frame[i], channel.name, 32);
+      out_frame[i + 31] = 0;
       i += 32;
       size_t key_size = 16; // Original app response remains byte-for-byte compatible.
 #if MESH_ENABLE_MESHTEXT_CHAT

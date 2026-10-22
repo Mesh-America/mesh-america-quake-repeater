@@ -822,6 +822,73 @@ int main() {
 }
 '''
 
+GET_PADDING_HARNESS = r'''
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#undef assert
+#define assert(condition) do { if(!(condition)) { \
+  std::fprintf(stderr,"channel GET assertion: %s\n",#condition);std::exit(91); \
+} } while(false)
+@CONSTANTS@
+struct ChannelDetails {
+  struct { uint8_t secret[32]; } channel;
+  char name[32];
+};
+struct Serial {
+  uint8_t frame[128]; int length=0;
+  void writeFrame(const uint8_t* bytes,int size) {
+    assert(size>0 && size<=int(sizeof(frame)));
+    memcpy(frame,bytes,size);length=size;
+  }
+};
+struct MyMesh {
+  uint8_t out_frame[128];ChannelDetails saved{};
+  Serial serial;Serial* _serial=&serial;
+  bool meshtext=false;int error=-1;
+  bool getChannelForSave(uint8_t slot,ChannelDetails& out) {
+    if(slot!=5)return false;
+    out=saved;
+    return true;
+  }
+  bool isMeshtextChannel(const ChannelDetails&)const{return meshtext;}
+  void writeErrFrame(int code){error=code;}
+  void command(uint8_t* cmd_frame,int len) {
+    @GET_BRANCH@
+  }
+};
+int main() {
+  MyMesh node;
+  for(size_t name_length=0;name_length<=32;++name_length) {
+    memset(node.saved.name,0,sizeof(node.saved.name));
+    for(size_t i=0;i<name_length;++i)node.saved.name[i]=char('A'+i%26);
+    for(size_t i=0;i<32;++i)node.saved.channel.secret[i]=uint8_t(0x80+i);
+    for(unsigned mt=0;mt<2;++mt)for(unsigned request=0;request<3;++request) {
+      node.meshtext=mt!=0;
+      uint8_t cmd_frame[]={CMD_GET_CHANNEL,5,uint8_t(request==2?32:16)};
+      // Model a shared output buffer after arbitrary unrelated replies.
+      memset(node.out_frame,0xe3,sizeof(node.out_frame));
+      memset(node.serial.frame,0xd7,sizeof(node.serial.frame));node.serial.length=0;
+      node.command(cmd_frame,request==0?2:3);
+      const size_t key_size=MESH_ENABLE_MESHTEXT_CHAT && mt && request==2?32:16;
+      uint8_t expected[66]={RESP_CODE_CHANNEL_INFO,5};
+      const size_t wire_name_length=name_length<31?name_length:31;
+      memcpy(expected+2,node.saved.name,wire_name_length);
+      memcpy(expected+34,node.saved.channel.secret,key_size);
+      assert(node.error==-1 && node.serial.length==int(34+key_size));
+      assert(memcmp(node.serial.frame,expected,34+key_size)==0);
+      assert(node.out_frame[34+key_size]==0xe3);
+      // A repeat after a different dirty reply must be byte-for-byte stable.
+      memset(node.out_frame,0xb9,sizeof(node.out_frame));
+      node.command(cmd_frame,request==0?2:3);
+      assert(memcmp(node.serial.frame,expected,34+key_size)==0);
+    }
+  }
+  puts("PASS padding fixed-width names, stable key bytes and legacy/extended frame lengths");
+}
+'''
+
 
 def oracle_vectors():
     vectors = ",\n".join(
@@ -945,6 +1012,26 @@ class CompanionChannelAliasTest(unittest.TestCase):
             "@VECTORS@", vectors).replace("@KEY_VECTORS@", key_vectors).replace(
             "@METHODS@", methods).replace("@COMMAND_BRANCHES@", branches)
         self.run_native_program(source_text, "command")
+
+    def test_production_binary_get_zero_pads_dirty_fixed_width_name(self):
+        companion = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="utf-8")
+        branch = body(companion, "if (cmd_frame[0] == CMD_GET_CHANNEL && len >= 2)")
+        constants = "\n".join(re.search(r"^#define\s+" + name + r"\s+[^\r\n]+", companion,
+            flags=re.MULTILINE).group(0) for name in (
+                "CMD_GET_CHANNEL", "RESP_CODE_CHANNEL_INFO", "ERR_CODE_NOT_FOUND"))
+        for meshtext in (0, 1):
+            with self.subTest(meshtext=meshtext):
+                source = (f"#define MESH_ENABLE_MESHTEXT_CHAT {meshtext}\n" + GET_PADDING_HARNESS
+                    .replace("@CONSTANTS@", constants).replace("@GET_BRANCH@", branch))
+                self.run_native_program(source, "padding")
+        # Preserve the original bug as an executable negative control: an
+        # unpadded strcpy response must fail the independent full-frame oracle.
+        old_branch = re.sub(r"strncpy\(([^\n]+), 32\);\s*out_frame\[i \+ 31\] = 0;",
+                            r"strcpy(\1);", branch)
+        self.assertNotEqual(old_branch, branch)
+        source = ("#define MESH_ENABLE_MESHTEXT_CHAT 0\n" + GET_PADDING_HARNESS
+            .replace("@CONSTANTS@", constants).replace("@GET_BRANCH@", old_branch))
+        self.run_native_program(source, "padding", expect_failure="memcmp(node.serial.frame,expected")
 
     def test_persisted_emergency_join_seeds_quiet_local_history_and_defers_without_eviction(self):
         companion = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text(encoding="utf-8")
