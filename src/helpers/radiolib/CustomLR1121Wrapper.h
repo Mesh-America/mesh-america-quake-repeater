@@ -110,9 +110,8 @@ public:
     return ((CustomLR1121 *)_radio)->isReceiving();
   }
   float getCurrentRSSI() override {
-    float rssi = -110;
-    ((CustomLR1121 *)_radio)->getRssiInst(&rssi);
-    return rssi;
+    float rssi = NAN;
+    return ((CustomLR1121 *)_radio)->getRssiInst(&rssi) == RADIOLIB_ERR_NONE ? rssi : NAN;
   }
 
   void onSendFinished() override {

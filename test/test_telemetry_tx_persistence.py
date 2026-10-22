@@ -38,7 +38,7 @@ class TelemetryPersistenceTests(unittest.TestCase):
             "bool CommonCLI::handleDataTxCommand(")) + "\n"
         generated += '#define TELEMETRY_HISTORY_TX_PREFS_FILE "/telemetry_tx"\n'
         for name in ("RETRY_MILLIS", "PACKET_SPACING_MILLIS", "DEFAULT_DAYS", "MAX_DAYS",
-                     "TEMPERATURE", "VOLTAGE", "EXTERNAL_VOLTAGE"):
+                     "TEMPERATURE", "VOLTAGE", "EXTERNAL_VOLTAGE", "NOISE", "NOISE2"):
             generated += re.search(r"static const uint(?:8|64)_t TELEMETRY_HISTORY_TX_" +
                                    name + r"[^;]*;", source).group() + "\n"
         generated += "\n".join(extract_braced(source, signature) for signature in (
@@ -46,6 +46,7 @@ class TelemetryPersistenceTests(unittest.TestCase):
             "static bool recoverTelemetryHistoryTxPrefs(",
             "static bool readTelemetryHistoryTxPrefsImage(", "void MyMesh::loadTelemetryHistoryTxPrefs(",
             "bool MyMesh::saveTelemetryHistoryTxPrefs(", "bool MyMesh::sendTelemetryHistorySnapshot(",
+            "bool MyMesh::sendNoiseFloorHistorySnapshot(",
             "bool MyMesh::sendExternalVoltageHistorySnapshot(", "void MyMesh::serviceTelemetryHistoryTx(",
             "void MyMesh::formatTelemetryHistoryTxStatus(", "static char* trimSpaces(")) + "\n"
         generated += ('void MyMesh::handle(char* command, char* reply, ClientInfo* sender) {\n'

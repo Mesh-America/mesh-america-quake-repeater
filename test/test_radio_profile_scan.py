@@ -46,6 +46,7 @@ struct RadioLibWrapper {
   bool _profile_standby_held=false, _saved_standby_xosc=false;
   bool _nf_calib_active=false, _nf_refresh_requested=false, _noise_floor_valid=true, _noise_floor_secondary_valid=true, _profile_refresh_required=false;
   bool _nf_window_armed=false, _nf_lazy_refresh=false, _nf_refresh_attempted=false;
+  uint8_t _nf_published_valid=0;
   unsigned long _nf_last_calib=0, _nf_calib_deadline=0, _nf_sample_from=0;
   NoiseFloorEstimator _floor_estimator;
   NoiseFloorEstimator _secondary_floor_estimator;

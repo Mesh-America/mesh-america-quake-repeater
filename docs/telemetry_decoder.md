@@ -9,7 +9,7 @@ the instructions but cannot run the decoder's buttons or JavaScript.
 
 Paste raw hexadecimal packet data copied from the
 [Let's Mesh packet analyzer](https://analyzer.letsmesh.net/packets) to decode a
-repeater's scheduled temperature, battery-voltage, or external I2C-voltage
+repeater's temperature, battery-voltage, external I2C-voltage, or radio noise-floor
 snapshot. The decoder also accepts the payload hex without its MeshCore packet
 header and the Base64 pages returned by repeater or room-server CLI commands.
 Decoding happens entirely in this browser; pasted data is not uploaded or sent
@@ -54,6 +54,14 @@ history is entirely zero are treated as disconnected and are not sent. The
 command requires at least one collected base sample and works even when the
 automatic schedule is off.
 
+It also queues a `N1B1` noise-floor packet once the main radio has completed a
+15-minute history bucket. With radio2 enabled, it queues a separate `N2B1`
+packet for that profile once it has a completed bucket. Each holds the latest
+255 positions: up to 63 hours 45 minutes at 15-minute resolution. A position
+can be Missing; failed measurements do not silently shorten the timeline.
+The existing automatic transmission cadence is unchanged. Recording a new
+noise-floor position every 15 minutes does not transmit a packet every 15 minutes.
+
 Schedule changes are saved transactionally; a failed write does not truncate
 the previous preferences. A legacy route must be successfully migrated into
 `data.tx` before its schedule can run. Corrupt, unreadable, or ambiguously
@@ -75,8 +83,8 @@ to paste a packet, load an example, or download CSV.
 ## Analyzer hex examples
 
 The buttons load synthetic, protocol-valid zero-hop RAW_CUSTOM packets. A real
-scheduled snapshot normally has 165 samples and is much longer. Routed packets
-also contain path bytes before the `TTB1` or `TVB1` payload magic; the decoder
+snapshot can contain many more samples. Routed packets
+also contain path bytes before the telemetry payload magic; the decoder
 finds and validates the payload automatically.
 
 ### Temperature
@@ -97,7 +105,13 @@ finds and validates the payload automatically.
 3E00495642311122334455667788800092651E00020800000004019026927109C427107FFF
 ```
 
-All three examples identify the source as `1122334455667788`.
+### Radio1 noise floor
+
+```text
+3E004E3142311122334455667788800092650F00080044CB77DF
+```
+
+All four examples identify the source as `1122334455667788`.
 
 ## CLI history pages
 
@@ -110,9 +124,12 @@ administrator commands:
 | Battery voltage | `get telemetry.volt` | `get telemetry.volt 3` | 48 (24 hours) |
 | I2C voltage | `get telemetry.volt.i2c 2` | `get telemetry.volt.i2c 2 4` | 48 (24 hours) |
 | GPS position | `get telemetry.gps` | `get telemetry.gps 2` | 24 (12 hours) |
+| Main-radio noise floor | `get telemetry.noise` | `get telemetry.noise 2` | Up to 176 (44 hours) |
+| Radio2 noise floor | `get telemetry.noise2` | `get telemetry.noise2 2` | Up to 176 (44 hours) |
 
 Paste either the complete reply beginning with `> ` or Base64 alone. For
-example:
+noise replies, the optional two-character CLI correlation prefix is accepted
+too (`01|Base64` or `01|> Base64`). For example:
 
 ```text
 get telemetry.volt 1
@@ -124,7 +141,15 @@ channels. For each channel, collect pages `1` through `4`. Paste all four reply
 lines into the decoder at once; it merges their timestamps into one 192-point,
 four-day table and downloads them as one CSV. The same merging works for the
 three `IVB1` analyzer packets from a full channel. Inputs must have the same
-telemetry type, source, LPP channel, and sample interval.
+telemetry type, source, LPP channel, radio profile, and sample interval.
+
+Noise history retains eight days (768 quarter-hour positions) per profile in
+RAM and resets on reboot. Page `1` is newest; up to five pages are available
+as history fills. Paste the replies for one radio together to merge them.
+Main-radio and radio2 pages remain separate. A full noise CLI page is 117
+decoded bytes or 156 Base64 characters, fitting the current CLI reply buffer
+over USB and administrator LoRa CLI. Radio2 history is read with
+`get telemetry.noise2`, including when it is not being transmitted.
 
 An INA3221 exposes its three enabled hardware inputs as three consecutive LPP
 channels. When it is the only external sensor these are normally `2`, `3`, and
@@ -147,12 +172,28 @@ IDs reported by `get telemetry.volt.i2c` rather than assuming them.
   missing/disconnected; codes `1` through `32767` cover `0.02 V` through
   `655.34 V`. The LPP channel remains part of every page and raw chunk so
   multiple monitor inputs cannot be mixed accidentally.
+- `N1B1` is main-radio noise history; `N2B1` is radio2 history. The chart and
+  table use dBm. Codes `0`, `1`, and `2` mean `-120`, `-119`, and `-118 dBm`;
+  codes `3` through `29` continue in 2 dB steps through `-64 dBm`. Code `30`
+  is **MAX**, displayed as `>-64 dBm`, and code `31` is **Missing**. CSV uses
+  separate `radio_profile`, `status`, and `noise_floor_dbm` columns. MAX and
+  Missing have an empty numeric field and leave gaps in the chart.
 - GPS positions are reconstructed from signed 10-meter differentials. A zero
   differential after the page origin is inherently ambiguous: it can represent
   an unchanged fix, movement below the encoded resolution, or no fix. The table
   labels those rows rather than inventing a coordinate.
 - A GPS clipping warning means at least one movement exceeded the differential
   range, so positions after that point can be less accurate.
+
+Each noise position combines three fresh noise-floor estimates collected
+roughly five minutes apart within its UTC-aligned 15-minute bucket. If any
+estimate is `-100 dBm` or lower, the minimum wins, including a bucket containing
+both low and high values. Otherwise, if any estimate is `-80 dBm` or higher,
+the maximum wins. Otherwise the three estimates are averaged. Minimums round
+downward, maximums upward, and averages to the nearest encodable value. Values
+below `-120 dBm` clamp to `-120 dBm`; values above `-64 dBm` become MAX.
+Fewer than three fresh, valid estimates produce Missing. These are idle RSSI
+noise estimates, not received-packet RSSI measurements.
 
 GPS history remains available through the administrator CLI, but `telemetry.tx`
 never puts GPS in RAW_CUSTOM packets. Location data therefore must come from a

@@ -56,6 +56,9 @@ protected:
   uint32_t _cad_scan_timeout_override_ms;
   bool _noise_floor_valid;
   bool _noise_floor_secondary_valid = false;
+  uint32_t _nf_published_at[2] = {};
+  uint32_t _nf_published_generation[2] = {};
+  uint8_t _nf_published_valid = 0;
   bool _nf_refresh_requested;
   NoiseFloorEstimator _floor_estimator;
   NoiseFloorEstimator _secondary_floor_estimator;
@@ -552,6 +555,17 @@ public:
     }
     return getNoiseFloorDbm();
   }
+  bool getNoiseFloorReading(uint8_t profile, float& dbm,
+                           uint32_t& published_at_ms) const override {
+    if (profile > 1 || (profile == 1 && !_profiles.enabled())
+        || !(_nf_published_valid & (1U << profile))
+        || _nf_published_generation[profile] != _profiles.generation[profile]
+        || !(profile == 1 ? _noise_floor_secondary_valid : _noise_floor_valid)) return false;
+    dbm = (profile == 1 ? _noise_floor_secondary_centi_dbm : _noise_floor_centi_dbm) / 100.0f;
+    published_at_ms = _nf_published_at[profile];
+    return true;
+  }
+  void requestNoiseFloorMeasurement() override { requestNoiseFloorRefresh(); }
   float getNoiseFloorCalibrationSecondsRemaining() const override {
     const float primary = profileNoiseFloorSecondsRemaining(0);
     if (!_profiles.enabled()) return primary;

@@ -245,6 +245,8 @@ static const uint8_t TELEMETRY_HISTORY_TX_MAX_DAYS = 30U;
 static const uint8_t TELEMETRY_HISTORY_TX_TEMPERATURE = 1U;
 static const uint8_t TELEMETRY_HISTORY_TX_VOLTAGE = 2U;
 static const uint8_t TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE = 4U;
+static const uint8_t TELEMETRY_HISTORY_TX_NOISE = 8U;
+static const uint8_t TELEMETRY_HISTORY_TX_NOISE2 = 16U;
 #endif
 
 #define CLOCK_SYNC_VALID_YEARS 10
@@ -12270,6 +12272,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 
   while (*command == ' ') command++; // skip leading spaces
 
+#if MESH_ENABLE_TELEMETRY_HISTORY
+  const bool prefixed_reply = strlen(command) > 4 && command[2] == '|';
+#endif
   if (strlen(command) > 4 && command[2] == '|') { // optional prefix (for companion radio CLI)
     memcpy(reply, command, 3);                    // reflect the prefix back
     reply += 3;
@@ -12309,6 +12314,17 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
 #endif
 
 #if MESH_ENABLE_TELEMETRY_HISTORY
+  const char* noise_commands[] = {"get telemetry.noise", "get telemetry.noise2"};
+  for (uint8_t profile = 0; profile < 2; ++profile) {
+    const size_t length = strlen(noise_commands[profile]);
+    if (strncmp(command, noise_commands[profile], length) == 0
+        && (command[length] == 0 || command[length] == ' ')) {
+      if (sender != NULL && !sender->isAdmin()) strcpy(reply, "Err - not permitted");
+      else noise_floor_history.formatPageReply(profile, command + length, reply,
+                                                prefixed_reply ? 157 : 160, !prefixed_reply);
+      return;
+    }
+  }
   const char* telemetry_args = NULL;
   mesh::TelemetryHistory::Series telemetry_series =
       mesh::TelemetryHistory::SERIES_TEMPERATURE;
@@ -12351,6 +12367,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     }
     telemetry_history_tx_pending = TELEMETRY_HISTORY_TX_TEMPERATURE
         | TELEMETRY_HISTORY_TX_VOLTAGE;
+    if (noise_floor_history.sampleCount(0) != 0)
+      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_NOISE;
+    if (isDualRadioActive() && noise_floor_history.sampleCount(1) != 0)
+      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_NOISE2;
     const uint8_t external_channels =
         external_voltage_history.populatedChannelCount();
     if (external_channels != 0) {
@@ -12371,8 +12391,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     const unsigned external_packets = (unsigned)external_channels
         * external_voltage_history.binaryChunkCount();
     snprintf(reply, 160,
-             "OK - telemetry.tx queued temp=%u volt=%u i2c=%u/%u",
-             sent, sent, (unsigned)external_channels, external_packets);
+             "OK - telemetry.tx queued temp=%u volt=%u i2c=%u/%u noise=%u/%u",
+             sent, sent, (unsigned)external_channels, external_packets,
+             (telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE) != 0,
+             (telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE2) != 0);
     return;
   }
 
@@ -13326,6 +13348,18 @@ bool MyMesh::sendTelemetryHistorySnapshot(
   return sendDirect(packet, data_path, data_path_len);
 }
 
+bool MyMesh::sendNoiseFloorHistorySnapshot(uint8_t profile) {
+  const uint8_t* data_path = NULL;
+  uint8_t data_path_len = OUT_PATH_UNKNOWN;
+  if (!_cli.getDataTxPath(data_path, data_path_len)) return false;
+  uint8_t payload[mesh::NoiseFloorHistory::BINARY_PAYLOAD_SIZE];
+  const size_t length = noise_floor_history.formatBinarySnapshot(
+      profile, self_id.pub_key, payload, sizeof(payload));
+  if (length <= mesh::NoiseFloorHistory::BINARY_HEADER_SIZE) return false;
+  mesh::Packet* packet = createRawData(payload, length);
+  return packet != NULL && sendDirect(packet, data_path, data_path_len);
+}
+
 bool MyMesh::sendExternalVoltageHistorySnapshot(uint8_t channel_index,
                                                 uint8_t chunk_index) {
   const uint8_t* data_path = NULL;
@@ -13369,6 +13403,10 @@ void MyMesh::serviceTelemetryHistoryTx() {
     telemetry_history_tx_resume_uptime = 0;
     telemetry_history_tx_pending = TELEMETRY_HISTORY_TX_TEMPERATURE
         | TELEMETRY_HISTORY_TX_VOLTAGE;
+    if (noise_floor_history.sampleCount(0) != 0)
+      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_NOISE;
+    if (isDualRadioActive() && noise_floor_history.sampleCount(1) != 0)
+      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_NOISE2;
     if (external_voltage_history.populatedChannelCount() != 0) {
       telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE;
     }
@@ -13392,6 +13430,14 @@ void MyMesh::serviceTelemetryHistoryTx() {
       telemetry_history_tx_pending &=
           (uint8_t)~TELEMETRY_HISTORY_TX_VOLTAGE;
     }
+  } else if ((telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE) != 0) {
+    sent = noise_floor_history.sampleCount(0) == 0
+        || sendNoiseFloorHistorySnapshot(0);
+    if (sent) telemetry_history_tx_pending &= (uint8_t)~TELEMETRY_HISTORY_TX_NOISE;
+  } else if ((telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE2) != 0) {
+    sent = !isDualRadioActive() || noise_floor_history.sampleCount(1) == 0
+        || sendNoiseFloorHistorySnapshot(1);
+    if (sent) telemetry_history_tx_pending &= (uint8_t)~TELEMETRY_HISTORY_TX_NOISE2;
   } else if ((telemetry_history_tx_pending
               & TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE) != 0) {
     const uint8_t channel_count =
@@ -13441,6 +13487,11 @@ void MyMesh::serviceTelemetryHistoryTx() {
     telemetry_history_next_tx_uptime =
         current_uptime_millis + TELEMETRY_HISTORY_TX_PACKET_SPACING_MILLIS;
   }
+}
+
+void MyMesh::sampleNoiseFloorHistory() {
+  noise_floor_sampler.poll(*_radio, noise_floor_history,
+                          rtc_clock.getCurrentTime(), millis());
 }
 
 void MyMesh::sampleTelemetryHistory() {
@@ -13516,6 +13567,7 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
 #endif
   checkRxInactivityWatchdog();
 #if MESH_ENABLE_TELEMETRY_HISTORY
+  sampleNoiseFloorHistory();
   sampleTelemetryHistory();
   serviceTelemetryHistoryTx();
 #endif

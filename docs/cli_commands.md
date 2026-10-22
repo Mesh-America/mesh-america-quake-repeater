@@ -749,6 +749,11 @@ default; repeaters request a seven-day default at startup. Builds without a GPS
 provider omit the GPS history commands to conserve flash. All history and any
 runtime retention change are held in RAM and reset after a reboot.
 
+Radio noise-floor history is recorded separately every 15 minutes, retaining
+768 positions (eight rolling days) per profile. It uses idle RSSI calibration
+estimates rather than received-packet RSSI. Main-radio and radio2 history are
+kept separate; failed measurements retain a Missing position in the timeline.
+
 The feature is omitted from flash-constrained STM32 repeater and room images.
 
 **Usage:**
@@ -757,6 +762,8 @@ The feature is omitted from flash-constrained STM32 repeater and room images.
 - `get telemetry.volt [page]`
 - `get telemetry.volt.i2c [channel [page]]`
 - `get telemetry.gps [page]`
+- `get telemetry.noise [page]`
+- `get telemetry.noise2 [page]`
 - `set telemetry.gps <days>`
 - `get telemetry.tx`
 - `set telemetry.tx <off|direct|path>`
@@ -773,7 +780,9 @@ The feature is omitted from flash-constrained STM32 repeater and room images.
 - `page`: Page `1` is always newest. Temperature and voltage pages each hold
   24 hours and accept `1`-`7`. GPS pages each hold 12 hours and accept `1`
   through twice the current GPS retention in days. Omitting the page selects
-  page `1`.
+  page `1`. Noise pages contain up to 176 quarter-hour positions (44 hours)
+  and accept only pages already collected, up to `1`-`5`. Use `telemetry.noise`
+  for the main profile and `telemetry.noise2` for radio2.
 - `channel`: Cayenne LPP channel assigned to an external voltage monitor.
   `get telemetry.volt.i2c` lists channels that have at least one non-zero
   sample. Supplying a channel returns 48 points (24 hours) per page; pages
@@ -803,10 +812,23 @@ voltage monitors, and an already-valid onboard GPS fix. It does not wake GPS,
 so an off, sleeping, or unfixed GPS produces a missing location sample without
 changing its power-saving schedule.
 
+Noise history combines three fresh estimates collected roughly five minutes
+apart in each UTC-aligned quarter-hour. If any is at or below `-100 dBm`, use
+the minimum. Otherwise, if any is at or above `-80 dBm`, use the maximum.
+Otherwise, average all three. Thus a bucket containing both low and high
+values uses the minimum. Minimums round down, maximums round up, and averages
+round to the nearest encoded step. Incomplete buckets are Missing. A busy
+channel can prevent a fresh estimate; old calibration results are not reused
+as fresh measurements.
+
 External voltage history allocates 360 bytes for each detected monitor channel
 (1,080 bytes for all three INA3221 inputs). The allocation reserves all
 detected inputs so a sensor connected later can start recording, but all-zero
 inputs are omitted from command replies and LoRa transmission.
+
+Packed noise history uses 480 bytes per retained profile, plus its collection
+state. It does not add a 15-minute transmission schedule. USB and administrator
+LoRa CLI return the same Base64 format in the existing reply buffer.
 
 Replies contain `> ` followed by standard padded Base64. After decoding, all
 multi-byte integers are little-endian. Packed fields are written most
@@ -825,7 +847,8 @@ shared path and enables the default `2d` schedule; new configuration should use
 An automatic run waits until 165 half-hour positions are
 available, then sends one maximum-size temperature packet, one maximum-size
 battery-voltage packet, and up to three `IVB1` packets for every populated I2C
-voltage channel. GPS is never included in this raw transmission. The history
+voltage channel, plus the collected noise-floor snapshots. GPS is never included
+in this raw transmission. The history
 remains boot-local, so the first scheduled run after a reboot needs about 82.5
 hours to fill. On the default two-day interval, each 82.5-hour temperature or
 battery packet overlaps its predecessor by 34.5 hours. Packets are paced two
@@ -834,14 +857,19 @@ that did not queue; successfully queued packets are not duplicated.
 
 `send telemetry.tx now` is an administrator-only test action. It queues
 temperature and battery-voltage snapshots plus the available I2C voltage
-chunks over the configured path. It uses all currently available base
+chunks over the configured path. It also queues one main-radio `N1B1` packet
+once a noise bucket has completed and one `N2B1` packet when radio2 is enabled
+and has a completed bucket. Missing positions are included; an all-Missing
+history is still sent. It uses all currently available base
 positions up to 165 and all available I2C positions up to 192 per populated
-channel. It works while the schedule is off and does not move the next
+channel, plus the latest 255 positions per noise profile (63 hours 45 minutes).
+It works while the schedule is off and does not move the next
 scheduled send time. RAW_CUSTOM direct packets do not enter the normal
 encrypted direct-message retry mechanism.
 
-Full snapshots are 184-byte RAW_CUSTOM payloads. Manual tests can be shorter
-while history fills. Both formats are binary, not Base64 and not encrypted:
+Full temperature and battery snapshots are 184-byte RAW_CUSTOM payloads.
+Manual tests can be shorter while history fills. Both formats are binary,
+not Base64 and not encrypted:
 
 | Bytes | Meaning |
 |---|---|
@@ -856,6 +884,14 @@ Temperature codes reserve `0` for no reading, `1` for below `-50 C`, and `2`
 for above `+77 C`. Codes `3` through `130` represent exact whole degrees from
 `-50 C` through `+77 C`; decode them as `code - 53`. Voltage codes use the
 same encoding as the paged voltage payload documented below.
+
+Noise snapshots reuse this 19-byte telemetry header. Their magic is `N1B1`
+for the main radio or `N2B1` for radio2; the interval is `15`, the count is
+`1`-`255`, and data begins at byte `19`. Samples are packed 5-bit codes,
+oldest first and most significant bit first, with zero padding in the last
+byte. The payload is `19 + ceil(count * 5 / 8)` bytes: 179 bytes for 255
+positions. No GPS coordinates are included in a noise packet. Noise packets
+are additional RAW_CUSTOM telemetry snapshots, not a new MeshCore packet type.
 
 External voltage snapshots use a separate packed layout. A full four-day
 channel takes three 140-byte `IVB1` payloads of 64 points each:
@@ -924,6 +960,36 @@ External I2C voltage payload (`0x14`, 98 bytes):
 | `8`-`97` | 48 packed 15-bit voltage codes |
 
 The codes have the same `0.02 V` through `655.34 V` meaning as `IVB1`.
+
+Noise-floor payload (`0x15` main radio, `0x16` radio2; up to 117 bytes):
+
+| Bytes | Meaning |
+|---|---|
+| `0` | Format/type `0x15` or `0x16` |
+| `1`-`4` | First sample UTC epoch, unsigned 32-bit |
+| `5` | Sample interval in minutes (`15`) |
+| `6` | Sample count (`1`-`176`) |
+| `7` onward | Oldest-to-newest packed 5-bit noise-floor codes |
+
+The same codes are used by `N1B1` and `N2B1`:
+
+| Code | Meaning |
+|---|---|
+| `0` | `-120 dBm` (also clamps lower values) |
+| `1` | `-119 dBm` |
+| `2`-`29` | `-118` through `-64 dBm`, in 2 dB steps |
+| `30` | MAX: above `-64 dBm` |
+| `31` | Missing: fewer than three fresh, valid estimates |
+
+The last byte's unused low bits are zero. A full page encodes as 156 Base64
+characters, plus the existing `> ` reply prefix. The decoder keeps radio1 and
+radio2 separate and rejects wrong lengths, intervals, or padding. MAX is a
+status, not an invented numeric `-62 dBm` reading.
+
+When a Companion CLI command includes its three-character correlation prefix
+(for example `01|`), noise replies retain that prefix and omit the `> ` prompt.
+A full `01|Base64` response then fits in 160 bytes including its terminating
+NUL. The decoder accepts either reply style.
 
 GPS payload (`0x13`, 101 bytes):
 

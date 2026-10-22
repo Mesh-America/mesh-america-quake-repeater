@@ -10,6 +10,7 @@
 #endif
 #include <helpers/TelemetryHistory.h>
 #include <helpers/ExternalVoltageHistory.h>
+#include <helpers/NoiseFloorHistory.h>
 #include <array>
 #include <cassert>
 #include <cstdio>
@@ -81,6 +82,9 @@ public:
   struct Identity { uint8_t pub_key[32] = {}; } self_id;
   mesh::TelemetryHistory telemetry_history;
   mesh::ExternalVoltageHistory external_voltage_history;
+  mesh::NoiseFloorHistory noise_floor_history;
+  bool dual = false;
+  bool isDualRadioActive() const { return dual; }
   bool telemetry_history_tx_prefs_healthy = false;
   bool telemetry_history_tx_enabled = false;
   uint8_t telemetry_history_tx_interval_days = 2;
@@ -93,12 +97,16 @@ public:
   uint64_t uptime_millis = 0;
   uint32_t last_millis = 0;
   std::vector<mesh::Packet> packets;
+  std::vector<std::string> attempts;
+  std::string reject_magic;
+  unsigned rejected_sends = 0;
   explicit MyMesh(FILESYSTEM& fs) : _fs(&fs) {}
   void loadTelemetryHistoryTxPrefs();
   bool saveTelemetryHistoryTxPrefs();
   void serviceTelemetryHistoryTx();
   bool sendTelemetryHistorySnapshot(mesh::TelemetryHistory::Series);
   bool sendExternalVoltageHistorySnapshot(uint8_t, uint8_t);
+  bool sendNoiseFloorHistorySnapshot(uint8_t);
   void formatTelemetryHistoryTxStatus(char*, size_t) const;
   void handle(char*, char*, ClientInfo*);
   // Radio queue boundary. Payload formatting and producer scheduling are real.
@@ -109,6 +117,11 @@ public:
     return packet;
   }
   bool sendDirect(mesh::Packet* packet, const uint8_t* path, uint8_t length) {
+    const std::string magic(reinterpret_cast<char*>(packet->payload), 4);
+    attempts.push_back(magic);
+    if (magic == reject_magic && rejected_sends != 0) {
+      --rejected_sends; delete packet; return false;
+    }
     packet->path_len = mesh::Packet::copyPath(packet->path, path, length);
     packets.push_back(*packet); delete packet; return true;
   }
@@ -162,6 +175,22 @@ struct Fixture {
     for (uint32_t i = 0; i < mesh::TelemetryHistory::BINARY_MAX_SAMPLES; ++i) {
       node.telemetry_history.record(1000000 + i * 1800, 22, true, 3750, 0, 0, false);
     }
+  }
+  void noiseHistory(uint16_t count = 300, bool missing = false) {
+    const uint32_t start = 999900;
+    node.noise_floor_history.advance(start);
+    for (uint32_t index = 0; index < count; ++index) {
+      for (uint8_t profile = 0; profile < 2; ++profile) {
+        for (uint8_t slot = 0; slot < 3; ++slot) {
+          if (missing) continue;
+          assert(node.noise_floor_history.observe(profile,
+              start + index * 900 + slot * 300, profile ? -66.0f : -119.0f,
+              index * 3 + slot));
+        }
+      }
+      node.noise_floor_history.advance(start + (index + 1) * 900);
+    }
+    assert(node.noise_floor_history.sampleCount(0) == count);
   }
   void expectFault() {
     assert(!node.telemetry_history_tx_prefs_healthy);
@@ -531,6 +560,116 @@ static void checkRouteReadbackAndRetry() {
 #endif
 }
 
+static uint32_t read32(const uint8_t* bytes) {
+  return uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8
+      | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
+}
+
+static uint8_t packedNoiseCode(const mesh::Packet& packet, unsigned index) {
+  uint8_t value = 0;
+  for (unsigned bit = 0; bit < 5; ++bit) {
+    const unsigned at = index * 5 + bit;
+    value = uint8_t((value << 1)
+        | ((packet.payload[19 + at / 8] >> (7 - at % 8)) & 1));
+  }
+  return value;
+}
+
+static void verifyNoisePacket(const MyMesh& node, const mesh::Packet& packet,
+                             unsigned profile, bool missing) {
+  assert(packet.payload_len == 19 + (255 * 5 + 7) / 8);
+  assert(!memcmp(packet.payload, profile ? "N2B1" : "N1B1", 4));
+  assert(!memcmp(packet.payload + 4, node.self_id.pub_key, 8));
+  assert(read32(packet.payload + 12) == 999900 + (300 - 255) * 900);
+  assert(packet.payload[16] == 15 && packet.payload[17] == 0);
+  assert(packet.payload[18] == 255);
+  for (unsigned i = 0; i < 255; ++i) {
+    assert(packedNoiseCode(packet, i) == (missing ? 31 : profile ? 28 : 1));
+  }
+  assert((packet.payload[packet.payload_len - 1] & 0x1f) == 0);
+}
+
+static void serviceDue(MyMesh& node) {
+  node.uptime_millis = node.telemetry_history_next_tx_uptime;
+  node.last_millis = test_millis;
+  node.serviceTelemetryHistoryTx();
+}
+
+static void finishPending(MyMesh& node) {
+  unsigned calls = 0;
+  while (node.telemetry_history_tx_pending != 0) {
+    assert(++calls < 20);
+    serviceDue(node);
+  }
+}
+
+static void checkNoiseHistoryTransmission() {
+  for (const bool manual : {false, true}) {
+    for (const bool dual : {false, true}) {
+      for (const bool missing : {false, true}) {
+        Fixture f; f.seed(current(!manual, 2)); f.history(); f.noiseHistory(300, missing);
+        f.node.dual = dual;
+        for (unsigned i = 0; i < 8; ++i) f.node.self_id.pub_key[i] = uint8_t(0x80 + i);
+        if (manual) {
+          const auto reply = f.node.command("send telemetry.tx now");
+          assert(reply.find(dual ? "noise=1/1" : "noise=1/0") != std::string::npos);
+          assert(f.node.telemetry_history_tx_pending == (dual ? 27 : 11));
+          assert(f.node.packets.empty());
+        } else {
+          f.node.serviceTelemetryHistoryTx();
+          assert(f.node.packets.size() == 1);
+        }
+        finishPending(f.node);
+        assert(f.node.packets.size() == (dual ? 4U : 3U));
+        assert(f.node.attempts.size() == f.node.packets.size());
+        assert(!memcmp(f.node.packets[0].payload, "TTB1", 4));
+        assert(!memcmp(f.node.packets[1].payload, "TVB1", 4));
+        verifyNoisePacket(f.node, f.node.packets[2], 0, missing);
+        if (dual) verifyNoisePacket(f.node, f.node.packets[3], 1, missing);
+        assert(!f.node.telemetry_history_tx_manual);
+        assert(bool(f.node.telemetry_history_next_tx_uptime) == !manual);
+      }
+    }
+  }
+}
+
+static void checkNoiseHistoryRetries() {
+  for (const bool second : {false, true}) {
+    Fixture f; f.seed(current(false, 2)); f.history(); f.noiseHistory();
+    f.node.dual = true;
+    f.node.reject_magic = second ? "N2B1" : "N1B1";
+    f.node.rejected_sends = 1;
+    assert(f.node.command("send telemetry.tx now").find("noise=1/1") != std::string::npos);
+    while (f.node.rejected_sends != 0) serviceDue(f.node);
+    const auto attempts = f.node.attempts;
+    const uint64_t retry = f.node.telemetry_history_next_tx_uptime;
+    assert(retry == f.node.uptime_millis + TELEMETRY_HISTORY_TX_RETRY_MILLIS);
+    assert(f.node.telemetry_history_tx_pending == (second ? 16 : 24));
+    f.node.uptime_millis = retry - 1;
+    f.node.serviceTelemetryHistoryTx();
+    assert(f.node.attempts == attempts); // failed packet waits for its retry deadline
+    finishPending(f.node);
+    const std::vector<std::string> expected = second
+        ? std::vector<std::string>{"TTB1", "TVB1", "N1B1", "N2B1", "N2B1"}
+        : std::vector<std::string>{"TTB1", "TVB1", "N1B1", "N1B1", "N2B1"};
+    assert(f.node.attempts == expected);
+    assert(f.node.packets.size() == 4); // successful earlier packets were never resent
+    assert(!f.node.telemetry_history_next_tx_uptime && !f.node.telemetry_history_tx_manual);
+  }
+  Fixture disabled; disabled.seed(current(false, 2));
+  disabled.history(); disabled.noiseHistory(); disabled.node.dual = true;
+  disabled.node.reject_magic = "N2B1"; disabled.node.rejected_sends = 1;
+  assert(disabled.node.command("send telemetry.tx now").find("noise=1/1") != std::string::npos);
+  while (disabled.node.rejected_sends != 0) serviceDue(disabled.node);
+  assert(disabled.node.telemetry_history_tx_pending == TELEMETRY_HISTORY_TX_NOISE2);
+  const auto attempts = disabled.node.attempts;
+  disabled.node.dual = false;
+  serviceDue(disabled.node);
+  assert(!disabled.node.telemetry_history_tx_pending && disabled.node.attempts == attempts);
+  assert(!disabled.node.telemetry_history_next_tx_uptime && !disabled.node.telemetry_history_tx_manual);
+  assert(disabled.node.packets.size() == 3);
+}
+
 int main() {
   checkFreshAndValid();
   checkLoadFailures();
@@ -540,5 +679,7 @@ int main() {
   checkAmbiguousPublicationAndServiceGate();
   checkRoutePublicationAuthority();
   checkRouteReadbackAndRetry();
+  checkNoiseHistoryTransmission();
+  checkNoiseHistoryRetries();
   puts("telemetry persistence checks passed");
 }

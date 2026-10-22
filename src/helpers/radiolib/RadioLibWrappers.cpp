@@ -271,6 +271,7 @@ void RadioLibWrapper::begin() {
   _noise_floor_secondary_centi_dbm = 0;
   _noise_floor_valid = false;
   _noise_floor_secondary_valid = false;
+  _nf_published_valid = 0;
   _threshold = 0;
   _cad_enabled = false;
   _rx_mode_checked_at = millis();
@@ -919,6 +920,7 @@ void RadioLibWrapper::serviceProfileScan() {
     // values from two frequencies are never blended into one estimate.
     _noise_floor_valid = false;
     _noise_floor_secondary_valid = false;
+    _nf_published_valid = 0;
     _nf_refresh_requested = true;
     _nf_last_calib = 0;
     _nf_calib_deadline = 0;
@@ -964,6 +966,7 @@ void RadioLibWrapper::serviceProfileScan() {
     // the first visit on the replacement tuples.
     _noise_floor_valid = false;
     _noise_floor_secondary_valid = false;
+    _nf_published_valid = 0;
     _nf_refresh_requested = true;
     _nf_last_calib = 0;
     _nf_calib_deadline = 0;
@@ -1262,6 +1265,7 @@ void RadioLibWrapper::recalibrateNoiseFloor() {
   // available while discarding the old samples and rise-hold history.
   _noise_floor_valid = false;
   _noise_floor_secondary_valid = false;
+  _nf_published_valid = 0;
   _nf_refresh_requested = true;
   _nf_last_calib = 0;
   _nf_lazy_refresh = _nf_refresh_attempted = false;
@@ -2079,11 +2083,17 @@ void RadioLibWrapper::loop() {
         && _secondary_floor_estimator.complete()) {
       if (_floor_estimator.publish(_noise_floor_centi_dbm, _noise_floor_valid)) {
         _noise_floor_valid = true;
+        _nf_published_at[0] = static_cast<uint32_t>(now);
+        _nf_published_generation[0] = _profiles.generation[0];
+        _nf_published_valid |= 1U;
         _noise_floor = (_noise_floor_centi_dbm - 50) / 100;
       }
       if (_secondary_floor_estimator.publish(_noise_floor_secondary_centi_dbm,
                                               _noise_floor_secondary_valid)) {
         _noise_floor_secondary_valid = true;
+        _nf_published_at[1] = static_cast<uint32_t>(now);
+        _nf_published_generation[1] = _profiles.generation[1];
+        _nf_published_valid |= 2U;
       }
       _nf_refresh_requested = false;
       _nf_last_calib = now;
@@ -2143,6 +2153,9 @@ void RadioLibWrapper::loop() {
     _nf_lazy_refresh = _floor_estimator.publish(_noise_floor_centi_dbm, _noise_floor_valid);
     if (_nf_lazy_refresh) {
       _noise_floor_valid = true;
+      _nf_published_at[0] = static_cast<uint32_t>(now);
+      _nf_published_generation[0] = _profiles.generation[0];
+      _nf_published_valid |= 1U;
       // Retain the whole-dB API/wire format and the fractional display value.
       _noise_floor = (_noise_floor_centi_dbm - 50) / 100;
     }

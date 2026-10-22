@@ -80,6 +80,8 @@ struct RadioLibWrapper {
   bool _nf_calib_active = false, _nf_refresh_requested = true, _noise_floor_valid = true,
       _noise_floor_secondary_valid = true;
   bool _nf_window_armed = false, _nf_lazy_refresh = false, _nf_refresh_attempted = false;
+  uint32_t _nf_published_at[2] = {}, _nf_published_generation[2] = {};
+  uint8_t _nf_published_valid = 0;
   bool _cad_enabled = true, packet = false, busy = false, inject_arm_irq = false;
   bool _rx_boosted_gain_valid = false, _cur_rx_boosted_gain = false, gain_apply_success = true;
   bool _wd_last_busy = false;

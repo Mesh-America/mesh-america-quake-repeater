@@ -126,6 +126,7 @@
 #if MESH_ENABLE_TELEMETRY_HISTORY
 #include <helpers/ExternalVoltageHistory.h>
 #include <helpers/TelemetryHistory.h>
+#include <helpers/NoiseFloorHistorySampler.h>
 #endif
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/RegionMap.h>
@@ -575,6 +576,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #if MESH_ENABLE_TELEMETRY_HISTORY
   mesh::TelemetryHistory telemetry_history;
   mesh::ExternalVoltageHistory external_voltage_history;
+  mesh::NoiseFloorHistory noise_floor_history;
+  mesh::NoiseFloorHistorySampler noise_floor_sampler;
   bool telemetry_history_tx_prefs_healthy;
   bool telemetry_history_tx_enabled;
   uint8_t telemetry_history_tx_interval_days;
@@ -859,6 +862,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void servicePostMeshLoop();
 #if MESH_ENABLE_TELEMETRY_HISTORY
   void sampleTelemetryHistory();
+  void sampleNoiseFloorHistory();
 #if MESH_ENABLE_TELEMETRY_GPS_HISTORY
   uint8_t resizeTelemetryGpsDays(uint8_t requested_days);
 #endif
@@ -866,6 +870,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool saveTelemetryHistoryTxPrefs();
   void serviceTelemetryHistoryTx();
   bool sendTelemetryHistorySnapshot(mesh::TelemetryHistory::Series series);
+  bool sendNoiseFloorHistorySnapshot(uint8_t profile);
   bool sendExternalVoltageHistorySnapshot(uint8_t channel_index,
                                           uint8_t chunk_index);
   void formatTelemetryHistoryTxStatus(char* reply, size_t reply_size) const;

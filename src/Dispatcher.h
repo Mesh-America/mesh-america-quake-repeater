@@ -212,6 +212,16 @@ public:
     (void)profile;
     return getNoiseFloorDbm();
   }
+  // Only successfully published estimates have a timestamp. Unsupported
+  // transports and disabled/unmeasured profiles return false, not a zero dBm
+  // reading. millis() may legitimately be zero or wrap between publications.
+  virtual bool getNoiseFloorReading(uint8_t profile, float& dbm,
+                                   uint32_t& published_at_ms) const {
+    (void)profile; (void)dbm; (void)published_at_ms; return false;
+  }
+  // Join a bounded idle-RX collection without discarding a valid estimate or
+  // interrupting reception, transmission, or another owner of the radio.
+  virtual void requestNoiseFloorMeasurement() { }
 
   // A zero result means there is no active sampled calibration window (or
   // that this transport does not expose one). The estimate itself may remain

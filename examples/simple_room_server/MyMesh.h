@@ -66,6 +66,7 @@ namespace mesh { class RoomJsonWriter; }
 #if MESH_ENABLE_TELEMETRY_HISTORY
 #include <helpers/ExternalVoltageHistory.h>
 #include <helpers/TelemetryHistory.h>
+#include <helpers/NoiseFloorHistorySampler.h>
 #endif
 
 #ifdef WITH_MQTT_BRIDGE
@@ -253,6 +254,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
 #if MESH_ENABLE_TELEMETRY_HISTORY
   mesh::TelemetryHistory telemetry_history;
   mesh::ExternalVoltageHistory external_voltage_history;
+  mesh::NoiseFloorHistory noise_floor_history;
+  mesh::NoiseFloorHistorySampler noise_floor_sampler;
 #endif
   RegionEntry* load_stack[8];
   RegionEntry* recv_pkt_region;
@@ -493,8 +496,10 @@ protected:
 
   bool sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 #if MESH_ENABLE_TELEMETRY_HISTORY
-  bool handleTelemetryHistoryCommand(const char* command, char* reply);
+  bool handleTelemetryHistoryCommand(const char* command, char* reply,
+                                     size_t reply_capacity = 160, bool include_prompt = true);
   void sampleTelemetryHistory();
+  void sampleNoiseFloorHistory();
 #endif
 
 public:

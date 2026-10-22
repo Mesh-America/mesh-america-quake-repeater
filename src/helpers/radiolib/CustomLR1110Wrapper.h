@@ -131,9 +131,8 @@ public:
     return ((CustomLR1110 *)_radio)->isChipBusy();
   }
   float getCurrentRSSI() override {
-    float rssi = -110;
-    ((CustomLR1110 *)_radio)->getRssiInst(&rssi);
-    return rssi;
+    float rssi = NAN;
+    return ((CustomLR1110 *)_radio)->getRssiInst(&rssi) == RADIOLIB_ERR_NONE ? rssi : NAN;
   }
 
   uint32_t getEstAirtimeFor(int len_bytes) override {

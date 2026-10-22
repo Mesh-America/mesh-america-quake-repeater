@@ -76,6 +76,7 @@ HISTORY_HARNESS = r'''
 #include <helpers/SensorManager.h>
 #include <helpers/TelemetryHistory.h>
 #include <helpers/ExternalVoltageHistory.h>
+#include <helpers/NoiseFloorHistory.h>
 #include <helpers/ClientACLResponse.h>
 #include <Wire.h>
 #define ATOMIC_FILE_WRITER_IMPLEMENTATION
@@ -138,12 +139,13 @@ public:
   uint8_t reply_data[184];
   mesh::TelemetryHistory telemetry_history;
   mesh::ExternalVoltageHistory external_voltage_history;
+  mesh::NoiseFloorHistory noise_floor_history;
   Clock* getRTCClock() {return &clock;}
   void configureHistory() {
     @HISTORY_INIT@
   }
   void sampleTelemetryHistory();
-  bool handleTelemetryHistoryCommand(const char*,char*);
+  bool handleTelemetryHistoryCommand(const char*,char*,size_t=160,bool=true);
   int handleRequest(ClientInfo*,uint32_t,uint8_t*,size_t,size_t);
   void handleCommand(uint32_t sender_timestamp,char* command,char* reply,
                      int gpio_client_index=-1,uint8_t gpio_path_hash_size=1) {

@@ -123,7 +123,7 @@ extra_css:
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.css
   - _stylesheets/extra.css
   - _stylesheets/firmware_picker.css?v=20261013-pick-first-1
-  - _stylesheets/telemetry_decoder.css
+  - _stylesheets/telemetry_decoder.css?v=20261022-noise-history
   - _stylesheets/management_decoder.css
   - _stylesheets/filter_tool.css
   - _stylesheets/preset_test.css?v=20260923-2
@@ -134,7 +134,7 @@ extra_javascript:
   - _javascript/notification_builder.js?v=20261006-channel9
   - https://unpkg.com/leaflet@1.9.4/dist/leaflet.js
   - _javascript/firmware_picker.js?v=20261018-variant-consolidation-1
-  - _javascript/telemetry_decoder.js?v=20261007-hosted-form
+  - _javascript/telemetry_decoder.js?v=20261022-noise-history
   - _javascript/management_decoder.js
   - _javascript/filter_tool.js?v=20261002-hashbytes-2plus
   - _javascript/preset_test.js?v=20260923-2

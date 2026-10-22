@@ -3649,7 +3649,18 @@ void MyMesh::onUserGpioTimerCompleted(uint8_t pin, uint8_t state,
 #endif
 
 #if MESH_ENABLE_TELEMETRY_HISTORY
-bool MyMesh::handleTelemetryHistoryCommand(const char* command, char* reply) {
+bool MyMesh::handleTelemetryHistoryCommand(const char* command, char* reply,
+                                          size_t reply_capacity, bool include_prompt) {
+  const char* noise_commands[] = {"get telemetry.noise", "get telemetry.noise2"};
+  for (uint8_t profile = 0; profile < 2; ++profile) {
+    const size_t length = strlen(noise_commands[profile]);
+    if (strncmp(command, noise_commands[profile], length) == 0
+        && (command[length] == 0 || command[length] == ' ')) {
+      noise_floor_history.formatPageReply(profile, command + length, reply,
+                                          reply_capacity, include_prompt);
+      return true;
+    }
+  }
   static const char temperature_command[] = "get telemetry.temp";
   static const char battery_command[] = "get telemetry.volt";
   static const char external_voltage_command[] =
@@ -3663,7 +3674,7 @@ bool MyMesh::handleTelemetryHistoryCommand(const char* command, char* reply) {
       && (command[sizeof(external_voltage_command) - 1U] == 0
           || command[sizeof(external_voltage_command) - 1U] == ' ')) {
     external_voltage_history.formatPageReply(
-        command + sizeof(external_voltage_command) - 1U, reply, 160);
+        command + sizeof(external_voltage_command) - 1U, reply, reply_capacity);
     return true;
   }
 
@@ -3691,8 +3702,13 @@ bool MyMesh::handleTelemetryHistoryCommand(const char* command, char* reply) {
   }
 
   if (args == NULL) return false;
-  telemetry_history.formatPageReply(series, args, reply, 160);
+  telemetry_history.formatPageReply(series, args, reply, reply_capacity);
   return true;
+}
+
+void MyMesh::sampleNoiseFloorHistory() {
+  noise_floor_sampler.poll(*_radio, noise_floor_history,
+                          getRTCClock()->getCurrentTime(), millis());
 }
 
 void MyMesh::sampleTelemetryHistory() {
@@ -3803,6 +3819,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   while (*command == ' ')
     command++; // skip leading spaces
 
+#if MESH_ENABLE_TELEMETRY_HISTORY
+  const bool prefixed_reply = strlen(command) > 4 && command[2] == '|';
+#endif
   if (strlen(command) > 4 && command[2] == '|') { // optional prefix (for companion radio CLI)
     memcpy(reply, command, 3);                    // reflect the prefix back
     reply += 3;
@@ -3840,7 +3859,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 #endif
 
 #if MESH_ENABLE_TELEMETRY_HISTORY
-  if (handleTelemetryHistoryCommand(command, reply)) return;
+  if (handleTelemetryHistoryCommand(command, reply,
+                                    prefixed_reply ? 157 : 160, !prefixed_reply)) return;
 #endif
 
   // handle ACL related commands
@@ -4000,6 +4020,7 @@ void MyMesh::loop() {
 #endif
   _clock_sync.loop();
 #if MESH_ENABLE_TELEMETRY_HISTORY
+  sampleNoiseFloorHistory();
   sampleTelemetryHistory();
 #endif
 #ifdef WITH_MQTT_BRIDGE

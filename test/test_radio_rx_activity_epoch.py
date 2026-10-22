@@ -99,6 +99,7 @@ struct Chip : LR2021 {
  bool _params_valid=true,_profile_rxps_suspended=true,_profile_saved_rxps=false;
  bool _noise_floor_valid=true,_noise_floor_secondary_valid=true,_nf_refresh_requested=false;
  bool _nf_window_armed=false,_nf_lazy_refresh=false,_nf_refresh_attempted=false;
+ uint8_t _nf_published_valid=0;
  uint32_t _profile_retry_at=0,_profile_generation=1,_profile_visit_stamp=0,_profile_scan_generation[2]={};
  uint8_t _active_profile=0,_cur_sf=7,_cur_cr=5;
  uint16_t _physical_preamble=32;
