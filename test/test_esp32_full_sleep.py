@@ -28,7 +28,7 @@ def run_cpp(source, defines=()):
         exe = Path(directory) / "test"
         (Path(directory) / "Dispatcher.h").write_text(MORSE_RADIO, encoding="ascii")
         (Path(directory) / "esp_timer.h").write_text("#pragma once\n#include <stdint.h>\nint64_t esp_timer_get_time();\n")
-        for header in ("esp_wifi.h", "esp_bt.h", "esp_bt_main.h"):
+        for header in ("sdkconfig.h", "esp_wifi.h", "esp_bt.h", "esp_bt_main.h"):
             (Path(directory) / header).write_text("#pragma once\n")
         cpp.write_text(source)
         built = subprocess.run(

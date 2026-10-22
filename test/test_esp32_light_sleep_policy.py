@@ -44,6 +44,8 @@ int main() {
     mode = value;
     assert(manualLightSleepBlocker() == Reason::Network);
   }
+  mode = static_cast<wifi_mode_t>(99);
+  assert(manualLightSleepBlocker() == Reason::Network);
   mode = WIFI_MODE_NULL;
   for (int error : {ESP_ERR_WIFI_NOT_INIT, ESP_ERR_WIFI_NOT_STARTED}) {
     wifi_error = error;
@@ -76,31 +78,65 @@ int main() {
 '''
 
 
-class LightSleepPolicyTest(unittest.TestCase):
-    def test_real_guard_across_sdk_and_host_modes(self):
-        for flags in (
+SDK_MODES = (
             (), ("CONFIG_BT_ENABLED=0", "CONFIG_IDF_TARGET_ESP32S2=1"),
             ("CONFIG_BT_ENABLED=1", "CONFIG_BLUEDROID_ENABLED=1", "CONFIG_IDF_TARGET_ESP32=1"),
             ("CONFIG_BT_ENABLED=1", "CONFIG_BLUEDROID_ENABLED=1", "CONFIG_IDF_TARGET_ESP32S3=1"),
             ("CONFIG_BT_ENABLED=1", "CONFIG_BLUEDROID_ENABLED=0", "CONFIG_IDF_TARGET_ESP32C3=1"),
             ("CONFIG_BT_ENABLED=1", "CONFIG_BLUEDROID_ENABLED=1", "MESH_USE_NIMBLE_ARDUINO=1", "CONFIG_IDF_TARGET_ESP32C6=1"),
-        ):
-            with self.subTest(flags=flags), tempfile.TemporaryDirectory(prefix="mesh-esp32-sleep-driver-") as directory:
-                root = Path(directory)
-                (root / "esp_wifi.h").write_text(WIFI)
-                bt = "CONFIG_BT_ENABLED=1" in flags
-                bluedroid = bt and "CONFIG_BLUEDROID_ENABLED=1" in flags and "MESH_USE_NIMBLE_ARDUINO=1" not in flags
-                (root / "esp_bt.h").write_text(CONTROLLER if bt else '#error "Bluetooth absent on this target"\n')
-                (root / "esp_bt_main.h").write_text(HOST if bluedroid else '#error "Bluedroid absent from this host build"\n')
-                cpp, exe = root / "guard.cpp", root / "guard"
-                cpp.write_text("#include <initializer_list>\n" + HARNESS)
-                result = subprocess.run([
-                    os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                    *("-D" + flag for flag in flags), "-I", str(root), "-I", str(ROOT / "src"),
-                    str(cpp), "-o", str(exe)], text=True, capture_output=True, timeout=30)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                result = subprocess.run([str(exe)], text=True, capture_output=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stderr)
+        )
+
+
+class LightSleepPolicyTest(unittest.TestCase):
+    def test_real_guard_across_sdk_and_host_modes(self):
+        for flags in SDK_MODES:
+            with self.subTest(flags=flags):
+                self.run_guard((*flags, 'WIFI_SSID=""'))
+
+    def test_every_wifi_owner_keeps_physical_driver_fail_closed(self):
+        for owner in ("WIFI_SSID", "ENABLE_WIFI_INTERFACE", "WITH_MQTT_BRIDGE",
+                      "WITH_ESPNOW_BRIDGE", "MESH_PRIMARY_ESPNOW", "WIFI_OTA_SEEDER",
+                      "ADMIN_PASSWORD", "COMPANION_RADIO_FULL"):
+            with self.subTest(owner=owner):
+                self.run_guard((owner, "CONFIG_BT_ENABLED=1",
+                                "CONFIG_BLUEDROID_ENABLED=1"))
+
+    def test_ble_only_links_without_wifi_sdk_or_headers(self):
+        # No WiFi SDK header or function definition exists. An unconditional
+        # check fails compilation/linking instead of silently passing a fake.
+        # ENABLE_OTA is deliberately present: this role still has LoRa OTA.
+        source = "#include <initializer_list>\n" + HARNESS
+        start = source.index("  for (auto value : {WIFI_MODE_STA")
+        end = source.index("#if defined(CONFIG_BT_ENABLED)", start)
+        source = source[:start] + source[end:]
+        for flags in SDK_MODES:
+            with self.subTest(flags=flags):
+                self.run_guard((*flags, "BLE_PIN_CODE=123456", "ENABLE_OTA=1",
+                                "MESH_PRIMARY_ESPNOW=0"), source, wifi=False)
+
+    def run_guard(self, flags, source=None, wifi=True):
+        with tempfile.TemporaryDirectory(prefix="mesh-esp32-sleep-driver-") as directory:
+            root = Path(directory)
+            (root / "sdkconfig.h").write_text("#pragma once\n")
+            (root / "esp_wifi.h").write_text(WIFI if wifi else '#error "WiFi SDK is absent"\n')
+            bt = "CONFIG_BT_ENABLED=1" in flags
+            bluedroid = bt and "CONFIG_BLUEDROID_ENABLED=1" in flags and "MESH_USE_NIMBLE_ARDUINO=1" not in flags
+            (root / "esp_bt.h").write_text(CONTROLLER if bt else '#error "Bluetooth absent on this target"\n')
+            (root / "esp_bt_main.h").write_text(HOST if bluedroid else '#error "Bluedroid absent from this host build"\n')
+            cpp, exe = root / "guard.cpp", root / "guard"
+            cpp.write_text(source or "#include <initializer_list>\n" + HARNESS)
+            result = subprocess.run([
+                os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                *("-D" + flag for flag in flags), "-I", str(root), "-I", str(ROOT / "src"),
+                str(cpp), "-o", str(exe)], text=True, capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(exe)], text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if not wifi:
+                symbols = subprocess.run(["nm", "-C", str(exe)], text=True,
+                                         capture_output=True, timeout=10)
+                self.assertEqual(symbols.returncode, 0, symbols.stderr)
+                self.assertNotIn("esp_wifi_", symbols.stdout)
 
 
 if __name__ == "__main__":

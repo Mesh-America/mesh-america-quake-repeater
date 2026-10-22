@@ -701,6 +701,7 @@ jobs:
           python3 -B test/test_usb_host_sleep_policy.py
           python3 -B test/test_esp32_light_sleep_policy.py -v
           python3 -B test/test_esp32_profile_idle_sleep.py -v
+          python3 -B test/test_esp32_role_profile_idle_handoff.py -v
           python3 -B test/test_profile_idle_esp32.py -v
           python3 -B test/test_profile_idle.py -v
           python3 -B test/test_esp32_usb_sleep.py
