@@ -23,7 +23,8 @@ static void settingsRoundTrip() {
   Settings value;
   assert(settingsValid(value));
   assert(idleMillis(value) == 60000 && refreshCount(value) == 10);
-  assert(nameCharacters(value) == 5 && mapHeightKm(value) == 200);
+  assert(nameCharacters(value) == 5 && value.map_zoom == 9);
+  assert(mapHeightKm(value) == 200 && mapHeightKm(value, false) == 20000);
 
   uint8_t bytes[SETTINGS_RECORD_SIZE];
   for (unsigned channels : {1U, 40U, 256U}) {
@@ -31,7 +32,7 @@ static void settingsRoundTrip() {
       for (unsigned name = 0; name < 4; ++name)
         for (unsigned idle = 0; idle < 4; ++idle)
           for (unsigned refresh = 0; refresh < 4; ++refresh)
-            for (unsigned zoom = 0; zoom < 9; ++zoom) {
+            for (unsigned zoom = 0; zoom < 10; ++zoom) {
               value.channel = static_cast<uint8_t>(channels - 1);
               value.text_large = choices & 1;
               value.flip = (choices >> 1) & 1;
@@ -41,6 +42,7 @@ static void settingsRoundTrip() {
               value.refresh = refresh;
               value.map_zoom = zoom;
               assert(encodeSettings(value, bytes, sizeof(bytes), channels));
+              assert(bytes[2] == 3);
               Settings recovered;
               assert(decodeSettings(recovered, bytes, sizeof(bytes), channels));
               assert(equal(value, recovered));
@@ -73,7 +75,7 @@ static void settingsRoundTrip() {
   // A record with a valid CRC still cannot select invalid enum values, a
   // missing channel, an unknown format or reserved bits.
   const unsigned bad_offsets[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-  const unsigned bad_values[] = {'X', 'X', 3, 40, 2, 4, 4, 4, 4, 9, 1};
+  const unsigned bad_values[] = {'X', 'X', 4, 40, 2, 4, 4, 4, 4, 10, 1};
   for (size_t test = 0; test < sizeof(bad_offsets) / sizeof(*bad_offsets); ++test) {
     uint8_t changed[sizeof(bytes)];
     std::memcpy(changed, bytes, sizeof(bytes));
@@ -82,16 +84,28 @@ static void settingsRoundTrip() {
     rejects(changed, sizeof(changed));
   }
 
-  // Migrate each old cleanup choice without resetting any other settings.
-  for (unsigned old_refresh = 0; old_refresh < 4; ++old_refresh) {
-    Settings old{39, 1, 3, 1, 1, 2, static_cast<uint8_t>(old_refresh), 8};
-    assert(encodeSettings(old, bytes, sizeof(bytes)));
-    bytes[2] = 1;
+  // Every older manual zoom remains manual. Only v1 cleanup choices migrate.
+  for (unsigned version : {1U, 2U}) {
+    for (unsigned old_refresh = 0; old_refresh < 4; ++old_refresh) {
+      for (unsigned zoom = 0; zoom < 9; ++zoom) {
+        Settings old{39, 1, 3, 1, 1, 2, static_cast<uint8_t>(old_refresh),
+                     static_cast<uint8_t>(zoom)};
+        assert(encodeSettings(old, bytes, sizeof(bytes)));
+        bytes[2] = version;
+        repairChecksum(bytes);
+        Settings migrated;
+        assert(decodeSettings(migrated, bytes, sizeof(bytes)));
+        if (version == 1) old.refresh = 3;
+        assert(equal(migrated, old));
+        assert(mapZoomIndex(migrated, false) == zoom);
+      }
+    }
+    // Auto was not a valid choice in these formats, even with a valid CRC.
+    value = Settings{};
+    assert(encodeSettings(value, bytes, sizeof(bytes)));
+    bytes[2] = version;
     repairChecksum(bytes);
-    Settings migrated;
-    assert(decodeSettings(migrated, bytes, sizeof(bytes)));
-    old.refresh = 3;
-    assert(equal(migrated, old) && refreshCount(migrated) == 10);
+    rejects(bytes, sizeof(bytes));
   }
   const int cleanup_counts[] = {1, 3, 5, 10};
   for (unsigned choice = 0; choice < 4; ++choice) {
@@ -105,7 +119,7 @@ static void settingsRoundTrip() {
   for (unsigned row = 0; row < SETTINGS_COUNT; ++row) {
     Settings changed;
     const Settings initial = changed;
-    const unsigned periods[] = {40, 2, 4, 2, 2, 4, 4, 9};
+    const unsigned periods[] = {40, 2, 4, 2, 2, 4, 4, 10};
     for (unsigned step = 0; step < periods[row]; ++step) {
       assert(cycleSetting(changed, row));
       assert(settingsValid(changed));
@@ -125,10 +139,54 @@ static void settingsRoundTrip() {
     assert(idleMillis(value) == 60000 && refreshCount(value) == 10);
     assert(nameCharacters(value) == 5);
   }
-  for (unsigned bad = 9; bad <= 255; ++bad) {
+  for (unsigned bad = 10; bad <= 255; ++bad) {
     value.map_zoom = static_cast<uint8_t>(bad);
     assert(mapHeightKm(value) == 200);
+    assert(mapHeightKm(value, false) == 20000);
   }
+}
+
+static void mapZoomBehavior() {
+  const unsigned heights[] = {20000, 5000, 1000, 200, 100, 50, 20, 10, 5};
+  Settings value;
+  assert(mapZoomIndex(value, true) == 3 && mapZoomIndex(value, false) == 0);
+
+  // With no position, Auto starts at the world overview. The first click
+  // must select the adjacent range rather than skip to the 100 km setting.
+  assert(zoomMap(value, true, false));
+  assert(value.map_zoom == 1 && mapHeightKm(value, false) == 5000);
+  assert(zoomMap(value, false, false));
+  assert(value.map_zoom == 0 && mapHeightKm(value, false) == 20000);
+  const Settings world = value;
+  assert(!zoomMap(value, false, false) && equal(value, world));
+
+  value = Settings{};
+  const Settings automatic = value;
+  assert(!zoomMap(value, false, false) && equal(value, automatic));
+  assert(zoomMap(value, true, true));
+  assert(value.map_zoom == 4 && mapHeightKm(value, true) == 100);
+  value = Settings{};
+  assert(zoomMap(value, false, true));
+  assert(value.map_zoom == 2 && mapHeightKm(value, true) == 1000);
+
+  // Manual selections behave the same before and after a location arrives.
+  for (unsigned zoom = 0; zoom < 9; ++zoom) {
+    value.map_zoom = zoom;
+    for (bool located : {false, true}) {
+      assert(mapZoomIndex(value, located) == zoom);
+      assert(mapHeightKm(value, located) == heights[zoom]);
+      Settings closer = value, farther = value;
+      assert(zoomMap(closer, true, located) == (zoom < 8));
+      assert(closer.map_zoom == (zoom < 8 ? zoom + 1 : 8));
+      assert(zoomMap(farther, false, located) == (zoom > 0));
+      assert(farther.map_zoom == (zoom > 0 ? zoom - 1 : 0));
+    }
+  }
+
+  value.map_zoom = 8;
+  assert(cycleSetting(value, 7) && value.map_zoom == 9);
+  assert(mapHeightKm(value, false) == 20000 && mapHeightKm(value, true) == 200);
+  assert(cycleSetting(value, 7) && value.map_zoom == 0);
 }
 
 static void scrollHistory() {
@@ -215,6 +273,7 @@ static void messageNamesAndText() {
 
 int main() {
   settingsRoundTrip();
+  mapZoomBehavior();
   scrollHistory();
   messageNamesAndText();
 }

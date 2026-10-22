@@ -358,7 +358,10 @@ public:
         case 4: snprintf(value, sizeof(value), "%s", _settings.dark ? "Dark" : "Light"); break;
         case 5: snprintf(value, sizeof(value), "%s", idle[_settings.idle <= 3 ? _settings.idle : 1]); break;
         case 6: snprintf(value, sizeof(value), "%s", clean[_settings.refresh <= 3 ? _settings.refresh : 3]); break;
-        default: snprintf(value, sizeof(value), "%u km", (unsigned)mapHeightKm(_settings)); break;
+        default:
+          if (_settings.map_zoom == MAP_ZOOM_AUTO) snprintf(value, sizeof(value), "Auto");
+          else snprintf(value, sizeof(value), "%u km", (unsigned)mapHeightKm(_settings));
+          break;
       }
       textRight(_width - 4, y + 8, value);
     }

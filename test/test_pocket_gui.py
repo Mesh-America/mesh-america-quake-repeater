@@ -93,6 +93,18 @@ class PocketGuiTest(unittest.TestCase):
                                          "-DCOMPANION_FEATURE_READER=1", "-DUI_NO_DISCOVER_SCREEN=1",
                                          "-Wno-unused-parameter"])
 
+    def test_map_page_honors_zoom_without_node_locations(self):
+        source = (ROOT / "examples/companion_radio/ui-new/UITask.cpp").read_text()
+        implementation = "\n".join(extract_braced(source, signature) for signature in (
+            "static bool pocketLocation(",
+            "__attribute__((noinline)) void renderPocketMap() {"))
+        fixture = (FIXTURE / "test_pocket_map_binding.cpp").read_text()
+        fixture = fixture.replace("// @MAP_IMPLEMENTATION@", implementation)
+        with tempfile.TemporaryDirectory(prefix="mesh-pocket-map-binding-") as directory:
+            generated = Path(directory) / "map.cpp"
+            generated.write_text(fixture)
+            self.compile_and_run(generated)
+
     def test_received_and_sent_message_bindings_preserve_screen_policy(self):
         source = (ROOT / "examples/companion_radio/ui-new/UITask.cpp").read_text()
         methods = "\n".join(extract_braced(source, signature) for signature in (

@@ -480,6 +480,7 @@ class HomeScreen : public UIScreen {
   bool _pocket_editing = false;
   bool _pocket_browsing = false;
   bool _pocket_zooming = false;
+  bool _pocket_map_located = false;
   bool _pocket_dirty = false;
   uint8_t _pocket_setting = 0;
   uint32_t _pocket_last_input = 0;
@@ -704,8 +705,9 @@ class HomeScreen : public UIScreen {
         if (pocketLocation(latitude, longitude)) { located = true; break; }
       }
     }
+    _pocket_map_located = located;
     MapView view = {located ? latitude : 0, located ? longitude : 0,
-        located ? mapHeightKm(settings) : 20000, _pocket.width(),
+        mapHeightKm(settings, located), _pocket.width(),
         _pocket.bodyBottom() - _pocket.bodyTop()};
     if (!renderWorldMap(view, [](void* context, int x0, int y0, int x1, int y1) {
           auto& gui = *static_cast<PocketGui*>(context);
@@ -735,7 +737,8 @@ class HomeScreen : public UIScreen {
     char summary[40];
     if (located) snprintf(summary, sizeof(summary), "%u nodes%s", shown,
         view.height_km < 100 ? " / coarse coast" : "");
-    else snprintf(summary, sizeof(summary), "World / no node locations");
+    else snprintf(summary, sizeof(summary), "%sno node locations",
+        view.height_km == 20000 ? "World / " : "");
     _pocket.label(3, _pocket.bodyTop() + 9, summary);
     _pocket.renderMapChrome((unsigned)view.height_km);
   }
@@ -1678,12 +1681,11 @@ public:
         return true;
       }
       if (_pocket_zooming && (key == KEY_NEXT || key == KEY_RIGHT || key == KEY_PREV || key == KEY_LEFT)) {
-        const uint8_t previous_zoom = settings.map_zoom;
         const bool closer = key == KEY_NEXT || key == KEY_RIGHT;
-        if (closer && settings.map_zoom < 8) ++settings.map_zoom;
-        if (!closer && settings.map_zoom > 0) --settings.map_zoom;
-        _pocket_dirty = true;
-        if (previous_zoom != settings.map_zoom) displayForceClean();
+        if (mesh::ui::pocket::zoomMap(settings, closer, _pocket_map_located)) {
+          _pocket_dirty = true;
+          displayForceClean();
+        }
         return true;
       }
     }

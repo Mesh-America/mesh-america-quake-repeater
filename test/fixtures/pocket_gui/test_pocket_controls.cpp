@@ -32,6 +32,7 @@ public:
   Task* _task;
   uint8_t _page = FIRST;
   bool _pocket_editing = false, _pocket_browsing = false, _pocket_zooming = false;
+  bool _pocket_map_located = false;
   bool _pocket_dirty = false, _dual_radio_enabled_seen = false;
   uint8_t _pocket_setting = 0, _radio_status_page = 0;
   uint32_t _pocket_last_input = 0, _radio_profile_page_started_at = 0;
@@ -51,7 +52,54 @@ static void key(HomeScreen& home, uint8_t value) {
   assert(home._pocket_last_input == clock_millis);
 }
 
+static void mapZoomControls() {
+  for (bool located : {false, true}) {
+    Task task;
+    HomeScreen home(task);
+    home._page = HomeScreen::MAP;
+    home._pocket_map_located = located;
+    key(home, KEY_ENTER);
+    assert(home._pocket_zooming && task.settings.map_zoom == 9);
+    key(home, KEY_NEXT);
+    assert(task.settings.map_zoom == (located ? 4 : 1));
+    assert(home._pocket_dirty && home.clean_count == 1);
+    key(home, KEY_PREV);
+    assert(task.settings.map_zoom == (located ? 3 : 0));
+    assert(home.clean_count == 2);
+    key(home, KEY_ENTER);
+    assert(!home._pocket_zooming && !home._pocket_dirty);
+
+    key(home, KEY_ENTER);
+    for (unsigned zoom = 0; zoom < 9; ++zoom) {
+      task.settings.map_zoom = zoom;
+      home._pocket_dirty = false;
+      int previous_cleans = home.clean_count;
+      key(home, KEY_RIGHT);
+      assert(task.settings.map_zoom == (zoom < 8 ? zoom + 1 : 8));
+      assert(home._pocket_dirty == (zoom < 8));
+      assert(home.clean_count == previous_cleans + (zoom < 8));
+
+      task.settings.map_zoom = zoom;
+      home._pocket_dirty = false;
+      previous_cleans = home.clean_count;
+      key(home, KEY_LEFT);
+      assert(task.settings.map_zoom == (zoom > 0 ? zoom - 1 : 0));
+      assert(home._pocket_dirty == (zoom > 0));
+      assert(home.clean_count == previous_cleans + (zoom > 0));
+      assert(home._page == HomeScreen::MAP && home._pocket_zooming);
+    }
+  }
+
+  Task task;
+  HomeScreen home(task);
+  home._page = HomeScreen::MAP;
+  key(home, KEY_ENTER);
+  key(home, KEY_PREV);
+  assert(task.settings.map_zoom == 9 && !home._pocket_dirty && home.clean_count == 0);
+}
+
 int main() {
+  mapZoomControls();
   Task task;
   HomeScreen home(task);
   key(home, KEY_ENTER);
@@ -72,9 +120,9 @@ int main() {
   key(home, KEY_ENTER);
   assert(home._pocket_zooming);
   key(home, KEY_NEXT);
-  assert(task.settings.map_zoom == 4 && home._pocket_dirty);
+  assert(task.settings.map_zoom == 1 && home._pocket_dirty);
   key(home, KEY_PREV);
-  assert(task.settings.map_zoom == 3);
+  assert(task.settings.map_zoom == 0);
   key(home, KEY_ENTER);
   assert(!home._pocket_zooming && !home._pocket_dirty);
   key(home, KEY_NEXT);

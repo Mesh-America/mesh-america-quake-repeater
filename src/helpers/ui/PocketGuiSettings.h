@@ -8,6 +8,8 @@ namespace mesh {
 namespace ui {
 namespace pocket {
 
+constexpr uint8_t MAP_ZOOM_AUTO = 9;
+
 // Store an explicit wire record rather than compiler-specific structure padding.
 struct Settings {
   uint8_t channel = 0;
@@ -17,7 +19,7 @@ struct Settings {
   uint8_t dark = 0;
   uint8_t idle = 1;
   uint8_t refresh = 3;
-  uint8_t map_zoom = 3;
+  uint8_t map_zoom = MAP_ZOOM_AUTO;
 };
 
 constexpr size_t SETTINGS_RECORD_SIZE = 13;
@@ -27,7 +29,7 @@ inline bool settingsValid(const Settings& value, unsigned channel_count = 40) {
   return channel_count != 0 && channel_count <= 256 && value.channel < channel_count
       && value.text_large <= 1 && value.name_len <= 3
       && value.flip <= 1 && value.dark <= 1
-      && value.idle <= 3 && value.refresh <= 3 && value.map_zoom <= 8;
+      && value.idle <= 3 && value.refresh <= 3 && value.map_zoom <= MAP_ZOOM_AUTO;
 }
 
 inline uint16_t settingsChecksum(const uint8_t* bytes, size_t length) {
@@ -44,7 +46,7 @@ inline uint16_t settingsChecksum(const uint8_t* bytes, size_t length) {
 inline bool encodeSettings(const Settings& value, uint8_t* bytes, size_t size,
                            unsigned channel_count = 40) {
   if (bytes == nullptr || size != SETTINGS_RECORD_SIZE || !settingsValid(value, channel_count)) return false;
-  bytes[0] = 'P'; bytes[1] = 'G'; bytes[2] = 2;
+  bytes[0] = 'P'; bytes[1] = 'G'; bytes[2] = 3;
   bytes[3] = value.channel;
   bytes[4] = value.text_large;
   bytes[5] = value.name_len;
@@ -62,8 +64,9 @@ inline bool encodeSettings(const Settings& value, uint8_t* bytes, size_t size,
 inline bool decodeSettings(Settings& value, const uint8_t* bytes, size_t size,
                            unsigned channel_count = 40) {
   if (bytes == nullptr || size != SETTINGS_RECORD_SIZE
-      || bytes[0] != 'P' || bytes[1] != 'G' || (bytes[2] != 1 && bytes[2] != 2)
+      || bytes[0] != 'P' || bytes[1] != 'G' || bytes[2] < 1 || bytes[2] > 3
       || (bytes[6] & ~3U) != 0 || bytes[10] != 0
+      || (bytes[2] < 3 && bytes[9] > 8)
       || settingsChecksum(bytes, 11) != (uint16_t)(bytes[11] | (uint16_t)bytes[12] << 8)) return false;
   Settings next;
   next.channel = bytes[3]; next.text_large = bytes[4]; next.name_len = bytes[5];
@@ -92,9 +95,20 @@ inline unsigned nameCharacters(const Settings& value) {
   return values[value.name_len <= 3 ? value.name_len : 1];
 }
 
-inline double mapHeightKm(const Settings& value) {
+inline uint8_t mapZoomIndex(const Settings& value, bool located = true) {
+  return value.map_zoom < MAP_ZOOM_AUTO ? value.map_zoom : (located ? 3 : 0);
+}
+
+inline double mapHeightKm(const Settings& value, bool located = true) {
   static const uint16_t values[] = {20000, 5000, 1000, 200, 100, 50, 20, 10, 5};
-  return values[value.map_zoom <= 8 ? value.map_zoom : 3];
+  return values[mapZoomIndex(value, located)];
+}
+
+inline bool zoomMap(Settings& value, bool closer, bool located) {
+  const uint8_t index = mapZoomIndex(value, located);
+  if ((closer && index == 8) || (!closer && index == 0)) return false;
+  value.map_zoom = closer ? index + 1 : index - 1;
+  return true;
 }
 
 inline bool cycleSetting(Settings& value, unsigned row, unsigned channel_count = 40) {
@@ -108,7 +122,7 @@ inline bool cycleSetting(Settings& value, unsigned row, unsigned channel_count =
     case 4: value.dark = !value.dark; break;
     case 5: value.idle = (value.idle + 1) % 4; break;
     case 6: value.refresh = (value.refresh + 1) % 4; break;
-    case 7: value.map_zoom = (value.map_zoom + 1) % 9; break;
+    case 7: value.map_zoom = (value.map_zoom + 1) % (MAP_ZOOM_AUTO + 1); break;
     default: return false;
   }
   return true;
