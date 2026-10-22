@@ -121,6 +121,7 @@ int main() {
 #define ESP32_PLATFORM
 uint32_t clockUs=0;
 uint32_t micros() { return clockUs; }
+int64_t esp_timer_get_time() { return clockUs; }
 @CLOCK@
 struct BenchWrapper { uint32_t _profile_visit_stamp=0; @GETTER@ };
 int main() {

@@ -32,6 +32,8 @@ void companionPairingUiHilProbe();
 #include "esp_pm.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
+#include <helpers/esp32/ProfileIdleSleep.h>
+#include <helpers/esp32/LightSleepPolicy.h>
 #if defined(CONFIG_BLUEDROID_ENABLED) && !defined(MESH_USE_NIMBLE_ARDUINO)
 #include <esp_bt_main.h>
 #endif
@@ -3260,6 +3262,9 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
     snprintf(reply, reply_size, "bluetooth %s%s",
              interface_manager.isBluetoothEnabled() ? "on" : "off",
              companion_bluetooth_off_at ? " (off pending)"
+#if defined(ESP32_PLATFORM)
+                 : bluetooth_interface.isPowerTransitionPending() ? " (change pending)"
+#endif
                  : interface_manager.isBluetoothInhibited()
                      ? " (USB data connected)" : "");
     return true;
@@ -3286,6 +3291,11 @@ bool handleCompanionBluetoothCommand(const char* command, char* reply,
       companion_bluetooth_off_at = 0;
       snprintf(reply, reply_size,
                "OK - Bluetooth on (saved); paused while USB data is connected");
+#if defined(ESP32_PLATFORM)
+    } else if (bluetooth_interface.isPowerTransitionPending()) {
+      companion_bluetooth_off_at = 0;
+      snprintf(reply, reply_size, "OK - Bluetooth on (saved); start pending");
+#endif
     } else if (interface_manager.isBluetoothEnabled()) {
       companion_bluetooth_off_at = 0;
       snprintf(reply, reply_size, "OK - Bluetooth on (saved)");
@@ -3425,6 +3435,9 @@ public:
       if (on) interface_manager.enableBluetooth();
       else disableCompanionBluetoothForCli();
       if (on && interface_manager.isBluetoothInhibited()) return Result::Done;
+#if defined(ESP32_PLATFORM)
+      if (bluetooth_interface.isPowerTransitionPending()) return Result::Pending;
+#endif
       return interface_manager.isBluetoothEnabled() == on ? Result::Done : Result::Failed;
     }
 #endif
@@ -3496,27 +3509,13 @@ static bool companionNativeUsbLightSleepReady() {
     }
   }
 #endif
+#if defined(BLE_PIN_CODE)
+  if (bluetooth_interface.isPowerTransitionPending()) return false;
+#endif
   if (enabled_services != 0 || interface_manager.hasPendingIO()
       || board.isOTAUpdateRunning() || board.isRadioTestActive()
       || sensors.gpsUsesSerialUart(1)) return false;
-#if defined(BLE_PIN_CODE) && !CONFIG_IDF_TARGET_ESP32C6
-  // Stopped advertising is not a stopped controller. Manual light sleep
-  // requires the RF driver to be disabled, including during BLE teardown.
-  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED)
-    return false;
-#if defined(CONFIG_BLUEDROID_ENABLED) && !defined(MESH_USE_NIMBLE_ARDUINO)
-  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED) return false;
-#endif
-#endif
-#if defined(ESP32) && defined(WIFI_SSID)
-  // Catch an unfinished teardown even if the logical WiFi owner is off.
-  wifi_mode_t mode = WIFI_MODE_NULL;
-  const esp_err_t result = esp_wifi_get_mode(&mode);
-  if (result == ESP_OK) return mode == WIFI_MODE_NULL;
-  return result == ESP_ERR_WIFI_NOT_INIT || result == ESP_ERR_WIFI_NOT_STARTED;
-#else
-  return true;
-#endif
+  return mesh::esp32::manualLightSleepReady();
 }
 #endif
 
@@ -4337,6 +4336,7 @@ void loop() {
     if (noise_floor_wait) board.sleepMilliseconds(idle_slice_ms);
     else board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
 #elif defined(ESP32_PLATFORM)
+    const uint32_t sleep_budget_started_us = static_cast<uint32_t>(esp_timer_get_time());
 #if defined(ENABLE_USB_INTERFACE) \
     && defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT \
     && !defined(ETHERNET_ENABLED) && !defined(SERIAL_RX)
@@ -4348,6 +4348,13 @@ void loop() {
     if (!companionNativeUsbLightSleepReady()) {
       if (mesh::powerdiag::enabled()) mesh::powerdiag::boardVeto(Reason::Board, millis());
       sleep_failed = true;
+    } else if (the_mesh.isDualRadioActive()) {
+      // The scanner owns a shorter absolute deadline than the normal loop
+      // cadence. The board also arms a radio GPIO wake and rechecks elapsed
+      // time after its setup; short/expired visits keep polling.
+      if (!mesh::esp32::tryProfileIdleSleep(the_mesh, board, sleep_budget_started_us, idle_slice_ms)
+          && mesh::powerdiag::enabled())
+        mesh::powerdiag::decision(mask(Reason::DualRadio), millis());
     } else {
       esp_err_t error = esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(idle_slice_ms) * 1000ULL);
       if (error == ESP_OK) {
@@ -4360,17 +4367,22 @@ void loop() {
         sleep_failed = true;
       }
     }
-    if (sleep_failed) {
+    if (sleep_failed && !the_mesh.isDualRadioActive()) {
       vTaskDelay(pdMS_TO_TICKS(idle_slice_ms));
     }
-#elif COMPANION_IDF_PM_AVAILABLE
-    // Yield long enough for ESP-IDF automatic light sleep to enter when no
-    // driver holds a power-management lock.
-    vTaskDelay(pdMS_TO_TICKS(idle_slice_ms));
 #else
-    // Connected transports need their own modem sleep and must retain the
-    // normal FreeRTOS idle behavior.
-    vTaskDelay(pdMS_TO_TICKS(idle_slice_ms));
+    if (the_mesh.isDualRadioActive()) {
+      // A rounded RTOS delay can outlast a scanner visit. Use the same
+      // absolute, GPIO-wake deadline as infrastructure, with board USB,
+      // logging and physical wireless guards. A veto keeps polling.
+      if (!mesh::esp32::tryProfileIdleSleep(the_mesh, board, sleep_budget_started_us, idle_slice_ms)
+          && mesh::powerdiag::enabled())
+        mesh::powerdiag::decision(mask(Reason::DualRadio), millis());
+    } else {
+      // PM-enabled cores may use automatic sleep; other connected transports
+      // retain their modem sleep and normal FreeRTOS idle behavior.
+      vTaskDelay(pdMS_TO_TICKS(idle_slice_ms));
+    }
 #endif
 #elif defined(RP2040_PLATFORM) || defined(STM32_PLATFORM)
     if (noise_floor_wait) board.sleepMilliseconds(idle_slice_ms);
@@ -4537,6 +4549,11 @@ void loop() {
 #endif
   serviceCompanionBluetoothIdentity();
   serviceCompanionBluetoothControl();
+#if defined(ESP32_PLATFORM)
+  // A logical off request must finish physical host/controller teardown even
+  // while this interface is disabled and no longer polled for frames.
+  bluetooth_interface.servicePowerState();
+#endif
 #if defined(NRF52_PLATFORM)
   serviceCompanionBluetoothName();
 #endif

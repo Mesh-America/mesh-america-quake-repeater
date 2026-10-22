@@ -20,6 +20,8 @@ struct FakeRtc {
 } rtc;
 #define NRF_RTC2 (&rtc)
 uint32_t micros() { return 1234; }
+static uint64_t esp_elapsed_us=1234;
+int64_t esp_timer_get_time() { return static_cast<int64_t>(esp_elapsed_us); }
 @CLOCK@
 int main() {
   assert(profileTimestamp(false) == 1234);
@@ -61,6 +63,17 @@ int main() {
   rtc.COUNTER=(rtc.COUNTER+32768)&0x00ffffffUL;
   const auto wrapped=profileTimestamp(true);assert(wrapped==0);
   assert(profileElapsedUs(before,wrapped,true)==1000000UL);
+#elif defined(ESP32_PLATFORM)
+  assert(profileTimestamp(true) == 1234);
+  // The ESP Timer is the light-sleep-adjusted clock; a frozen cycle/micros
+  // source must not extend a radio visit while the MCU was asleep.
+  esp_elapsed_us+=10000;
+  assert(micros()==1234 && profileTimestamp(true)==11234);
+  assert(profileTimestamp(false)==11234);
+  esp_elapsed_us=0x100000010ULL;
+  assert(profileTimestamp(true)==0x10);
+  assert(profileElapsedUs(0xfffffff0,profileTimestamp(true),true)==32);
+  assert(rtc.TASKS_START == 0 && rtc.TASKS_STOP == 0);
 #else
   assert(profileTimestamp(true) == 1234);
   assert(profileElapsedUs(12, 42, true) == 30);
@@ -76,7 +89,7 @@ class ProfileClockTest(unittest.TestCase):
             cpp = Path(folder) / "test.cpp"
             exe = Path(folder) / "test.exe"
             cpp.write_text(HARNESS.replace("@CLOCK@", CLOCK))
-            for defines in ([], ["-DNRF52_PLATFORM=1"]):
+            for defines in ([], ["-DNRF52_PLATFORM=1"], ["-DESP32_PLATFORM=1"]):
                 result = subprocess.run(
                     [os.environ.get("CXX", "g++"), "-std=c++17", "-Wall", "-Wextra",
                      "-Werror", *defines, str(cpp), "-o", str(exe)],

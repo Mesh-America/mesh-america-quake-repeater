@@ -20,6 +20,7 @@
 #include "UsbLogging.h"
 #include "UsbHostSleepPolicy.h"
 #include "PowerSavingDiagnostics.h"
+#include "esp32/LightSleepPolicy.h"
 #if defined(STATION_G3_ESP32)
 #include <StationG3RadioSlot.h>
 #endif
@@ -137,6 +138,18 @@ public:
   }
 
   void sleepMicroseconds(uint64_t wake_us, bool require_timer = false) {
+    sleepMicrosecondsImpl(wake_us, require_timer, false, 0);
+  }
+
+  // Radio-profile visits use the low 32 bits of esp_timer_get_time()/micros().
+  // An absolute deadline prevents setup work or a task preemption from making
+  // the sleep slice outlast the visit which the scanner proved safe.
+  void sleepUntilMicroseconds(uint32_t deadline_us) {
+    sleepMicrosecondsImpl(0, true, true, deadline_us);
+  }
+
+  void sleepMicrosecondsImpl(uint64_t wake_us, bool require_timer,
+                            bool has_deadline, uint32_t deadline_us) {
     using mesh::powerdiag::Reason;
     const bool diagnostics = mesh::powerdiag::enabled();
     // Native USB loses its connection in light sleep. An enumerated host
@@ -166,9 +179,13 @@ public:
     // it and across host disconnects. Compiled-out logging is not a blocker.
     keep_awake = keep_awake || hold(mesh::isUsbLoggingEnabled(), Reason::UsbLogging);
 #endif
+    if (!keep_awake) {
+      const Reason wireless = mesh::esp32::manualLightSleepBlocker();
+      keep_awake = hold(wireless != Reason::Count, wireless);
+    }
     if (keep_awake) {
       if (diagnostics) mesh::powerdiag::boardVeto(veto_reason, millis(), veto_detail);
-      delay(1); // Keep USB and OTA tasks running.
+      if (!has_deadline) delay(1); // A bounded profile visit must retain polling.
       return;
     }
 
@@ -176,7 +193,7 @@ public:
     // Otherwise its real elapsed time would be mislabelled as blocked time.
     esp_err_t setup_error = ESP_OK;
     // Configure timer wakeup
-    if (wake_us > 0) {
+    if (!has_deadline && wake_us > 0) {
       const esp_err_t error = esp_sleep_enable_timer_wakeup(wake_us);
       // A calibration slice must not inherit an old, longer timer after a
       // setup failure. Keep the legacy seconds API's policy unchanged.
@@ -189,6 +206,11 @@ public:
 
     const uint32_t irqGpio = getIRQGpio();
     const bool radio_wakeup = irqGpio != static_cast<uint32_t>(-1);
+    if (has_deadline && !radio_wakeup) {
+      // A timer-only wake cannot service a newly arrived profile packet.
+      if (diagnostics) mesh::powerdiag::boardVeto(Reason::NoWake, millis());
+      return;
+    }
 #if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) \
     && MOMENTARY_BUTTON_WAKE_FROM_SLEEP && defined(PIN_USER_BTN)
     const int button_gpio = PIN_USER_BTN;
@@ -225,28 +247,43 @@ public:
       if (diagnostics) mesh::powerdiag::boardVeto(
           radio_pending ? Reason::Mesh : Reason::Button, millis(),
           radio_pending ? static_cast<int32_t>(irqGpio) : button_gpio);
-      delay(1);
+      if (!has_deadline) delay(1);
       return;
     }
 
-    // Configure GPIO wakeup
-    const esp_err_t gpio_error = esp_sleep_enable_gpio_wakeup();
-    if (diagnostics && setup_error == ESP_OK && gpio_error != ESP_OK) setup_error = gpio_error;
+    // Configure each level source before enabling global GPIO wake. Setup
+    // errors must veto sleep even with diagnostics off: a timer alone cannot
+    // replace the pending radio/button event which this caller must service.
+    esp_err_t gpio_error = ESP_OK;
     if (radio_wakeup) {
       const esp_err_t error = gpio_wakeup_enable(wakeupPin, GPIO_INTR_HIGH_LEVEL);
-      if (diagnostics && setup_error == ESP_OK && error != ESP_OK) setup_error = error;
+      if (error != ESP_OK) gpio_error = error;
     }
     if (button_gpio >= 0) {
       const esp_err_t error = gpio_wakeup_enable((gpio_num_t)button_gpio,
           USER_BTN_PRESSED == LOW ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
-      if (diagnostics && setup_error == ESP_OK && error != ESP_OK) setup_error = error;
+      if (gpio_error == ESP_OK && error != ESP_OK) gpio_error = error;
     }
+    if (gpio_error == ESP_OK) gpio_error = esp_sleep_enable_gpio_wakeup();
 
-    // MCU enters light sleep
-    if (diagnostics) mesh::powerdiag::sleepBegin(micros());
-    const esp_err_t sleep_error = esp_light_sleep_start();
-    if (diagnostics) {
-      mesh::powerdiag::sleepEnd(micros());
+    // The level source also catches an IRQ asserted while configuring wake.
+    // Avoid entering the SDK at all if its pending state is already visible.
+    const bool pending_after_setup = (radio_wakeup && gpio_get_level(wakeupPin) == HIGH)
+        || (button_gpio >= 0
+            && gpio_get_level((gpio_num_t)button_gpio) == USER_BTN_PRESSED);
+    bool deadline_expired = false;
+    if (has_deadline && gpio_error == ESP_OK && !pending_after_setup) {
+      // Keep this immediately before the SDK wait with local interrupts held.
+      // A short/rejected slice polls instead; it must not reuse an older timer.
+      const int32_t remaining_us = static_cast<int32_t>(deadline_us - micros());
+      if (remaining_us < 2000) deadline_expired = true;
+      else gpio_error = esp_sleep_enable_timer_wakeup(static_cast<uint32_t>(remaining_us));
+    }
+    esp_err_t sleep_error = ESP_OK;
+    if (gpio_error == ESP_OK && !pending_after_setup && !deadline_expired) {
+      if (diagnostics) mesh::powerdiag::sleepBegin(micros());
+      sleep_error = esp_light_sleep_start();
+      if (diagnostics) mesh::powerdiag::sleepEnd(micros());
     }
 
     // Avoid ISR flood during wakeup due to HIGH LEVEL interrupt
@@ -264,7 +301,12 @@ public:
     portEXIT_CRITICAL(&sleepMux);
     if (diagnostics) {
       if (setup_error != ESP_OK) mesh::powerdiag::boardError(setup_error, millis());
+      if (gpio_error != ESP_OK) mesh::powerdiag::boardError(gpio_error, millis());
       if (sleep_error != ESP_OK) mesh::powerdiag::boardError(sleep_error, millis());
+      if (pending_after_setup) mesh::powerdiag::boardVeto(
+          radio_wakeup && gpio_get_level(wakeupPin) == HIGH ? Reason::Mesh : Reason::Button,
+          millis());
+      if (deadline_expired) mesh::powerdiag::boardVeto(Reason::Scheduled, millis());
     }
   }
 

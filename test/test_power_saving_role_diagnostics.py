@@ -356,6 +356,8 @@ int main() {
             "void sleep(uint32_t secs) override",
             "void sleepMilliseconds(uint32_t millisecs) override",
             "void sleepMicroseconds(uint64_t wake_us, bool require_timer = false)",
+            "void sleepUntilMicroseconds(uint32_t deadline_us)",
+            "void sleepMicrosecondsImpl(uint64_t wake_us, bool require_timer,",
         ))
         code = r'''
 #include <cassert>
@@ -388,6 +390,9 @@ static esp_err_t esp_light_sleep_start() { ++sdk_calls; now_us += sleep_duration
 namespace mesh {
 static bool logging = false;
 static bool isUsbLoggingEnabled() { return logging; }
+namespace esp32 {
+static powerdiag::Reason manualLightSleepBlocker() { return powerdiag::Reason::Count; }
+}
 }
 struct MainBoard {
   virtual void sleep(uint32_t) = 0;
@@ -412,8 +417,8 @@ int main() {
   board.sleepMilliseconds(0);
   assert(sdk_calls == 2 && timer_us == 50000ULL);
   setEnabled(true, millis()); reset(millis()); decision(0, millis());
-  timer_error = 29; gpio_error = 31; pin_error = 33;
-  board.sleep(30); // Diagnostics may observe failures, never repair/change policy.
+  timer_error = 29;
+  board.sleep(30); // Keep the legacy seconds API's timer-error policy.
   auto value = snapshot(millis());
   assert(sdk_calls == 3 && value.calls == 1 && value.returns == 1 && value.errors == 1);
   assert(value.detail == 29); // First setup failure, without changing later SDK calls.
@@ -426,6 +431,18 @@ int main() {
   value = snapshot(millis());
   assert(sdk_calls == before_failed_slice && value.calls == 0);
   assert(value.errors == 1 && value.detail == 29 && critical_depth == 0);
+  const int gpio_errors[] = {31, 33};
+  for (int error : gpio_errors) {
+    reset(millis()); decision(0, millis());
+    timer_error = 0;
+    gpio_error = error == 31 ? error : 0;
+    pin_error = error == 33 ? error : 0;
+    board.sleep(30);
+    value = snapshot(millis());
+    assert(sdk_calls == before_failed_slice && value.calls == 0 && value.returns == 0);
+    assert(value.errors == 1 && value.detail == error && critical_depth == 0);
+    assert(value.eligible_ms == 0 && value.call_us == 0);
+  }
   reset(millis()); decision(0, millis());
   timer_error = gpio_error = pin_error = 0; sleep_error = 41;
   board.sleep(30);

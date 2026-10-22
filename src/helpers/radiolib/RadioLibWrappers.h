@@ -125,6 +125,18 @@ protected:
   uint32_t _profile_idle_switch_us = 0;
   uint16_t _profile_idle_preamble = 0;
 #endif
+#if defined(ESP32_PLATFORM)
+  // ESP Timer advances by the RTC interval after light sleep. Retain its
+  // full domain as well as the legacy scanner timestamp: a long RX hold or
+  // delayed loop must not resurrect a visit after micros() wraps.
+  uint64_t _esp32_profile_visit_started_us = 0;
+  uint64_t _esp32_profile_idle_stamp_us = 0;
+  uint32_t _esp32_profile_idle_visit_us = 0;
+  uint32_t _esp32_profile_idle_switch_us = 0;
+  uint32_t _esp32_profile_idle_generation[2] = {};
+  uint16_t _esp32_profile_idle_preamble = 0;
+  uint8_t _esp32_profile_idle_profile = 0;
+#endif
 #if defined(MESH_HIL_TX_FREQ_MHZ)
   bool hilPacketTransmitAllowed() const;
 #endif

@@ -27,6 +27,9 @@ def run_cpp(source, defines=()):
         cpp = Path(directory) / "test.cpp"
         exe = Path(directory) / "test"
         (Path(directory) / "Dispatcher.h").write_text(MORSE_RADIO, encoding="ascii")
+        (Path(directory) / "esp_timer.h").write_text("#pragma once\n#include <stdint.h>\nint64_t esp_timer_get_time();\n")
+        for header in ("esp_wifi.h", "esp_bt.h", "esp_bt_main.h"):
+            (Path(directory) / header).write_text("#pragma once\n")
         cpp.write_text(source)
         built = subprocess.run(
             [os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
@@ -105,18 +108,25 @@ int main() {
 static uint32_t now = 1000;
 uint32_t millis() { return now; }
 uint32_t micros() { return now * 1000U; }
+int64_t esp_timer_get_time() { return int64_t(now) * 1000; }
 using esp_err_t = int;
 enum wifi_mode_t { WIFI_MODE_NULL, WIFI_MODE_STA, WIFI_MODE_AP, WIFI_MODE_APSTA };
 constexpr int ESP_OK = 0, ESP_ERR_WIFI_NOT_INIT = 1, ESP_ERR_WIFI_NOT_STARTED = 2;
 static wifi_mode_t sdk_mode = WIFI_MODE_NULL;
 static int sdk_result = ESP_OK, sleeps = 0, yields = 0;
-constexpr int ESP_BT_CONTROLLER_STATUS_ENABLED = 1;
+using esp_bt_controller_status_t = int;
+constexpr int ESP_BT_CONTROLLER_STATUS_IDLE = 0, ESP_BT_CONTROLLER_STATUS_INITED = 1,
+              ESP_BT_CONTROLLER_STATUS_ENABLED = 2;
 static bool bt_controller_active = false;
-int esp_bt_controller_get_status() { return bt_controller_active ? 1 : 0; }
-constexpr int ESP_BLUEDROID_STATUS_ENABLED = 1;
+int esp_bt_controller_get_status() { return bt_controller_active ? 2 : 0; }
+using esp_bluedroid_status_t = int;
+constexpr int ESP_BLUEDROID_STATUS_UNINITIALIZED = 0, ESP_BLUEDROID_STATUS_INITIALIZED = 1,
+              ESP_BLUEDROID_STATUS_ENABLED = 2;
 static bool bt_host_active = false;
-int esp_bluedroid_get_status() { return bt_host_active ? 1 : 0; }
+int esp_bluedroid_get_status() { return bt_host_active ? 2 : 0; }
 int esp_wifi_get_mode(wifi_mode_t* mode) { *mode = sdk_mode; return sdk_result; }
+#include <helpers/esp32/LightSleepPolicy.h>
+#include <helpers/esp32/ProfileIdleSleep.h>
 int esp_sleep_enable_timer_wakeup(uint64_t us) { assert(us == 10000); return ESP_OK; }
 int esp_light_sleep_start() { ++sleeps; return ESP_OK; }
 int pdMS_TO_TICKS(int ms) { return ms; }
@@ -129,6 +139,7 @@ struct Board {
   @USB_HELD@
   bool isOTAUpdateRunning() const { return ota; }
   bool isRadioTestActive() const { return test; }
+  void sleepUntilMicroseconds(uint32_t) { ++sleeps; }
 } board;
 struct Prefs { bool powersaving_enabled = true; } prefs;
 struct TestRadio : mesh::Radio {
@@ -146,10 +157,12 @@ struct Mesh {
   }
   bool isDualRadioActive() const { return dual; }
   bool canIdleDualRadio() const { return !dual; }
+  bool getDualRadioIdleDelay(uint32_t& out) const { out = 0; return false; }
   bool getNextNoiseFloorWakeDelay(uint32_t&) const { return false; }
   mesh::Radio* getProfileRadio() { return &timing_radio; }
 } the_mesh;
 struct Interfaces { bool pending = false; bool hasPendingIO() const { return pending; } } interface_manager;
+struct Bluetooth { bool pending = false; bool isPowerTransitionPending() const { return pending; } } bluetooth_interface;
 struct Sensors { bool gps_uart = false; bool gpsUsesSerialUart(uint8_t uart) const { return uart == 1 && gps_uart; } } sensors;
 struct Button { bool polling = false; bool needsPolling() const { return polling; } } user_btn;
 struct Wireless { unsigned services = 0; unsigned enabled() const { return services; } } companion_wireless;
@@ -202,7 +215,7 @@ int main() {
   blocks(board.ota); blocks(board.test); blocks(the_mesh.pending);
   blocks(interface_manager.pending); blocks(user_btn.polling); blocks(mesh::logging);
   blocks(bt_controller_active);
-  blocks(bt_host_active); blocks(sensors.gps_uart);
+  blocks(bt_host_active); blocks(sensors.gps_uart); blocks(bluetooth_interface.pending);
   blocks(mesh::watchdog); blocks(mesh::wireless::controller.transition);
   prefs.powersaving_enabled = false; before = sleeps; idle(); assert(sleeps == before);
   prefs.powersaving_enabled = true; idle(); assert(sleeps == before + 1);
@@ -263,7 +276,7 @@ int main() {
         source = "#include <initializer_list>\n" + source
         flags = ("ESP32_PLATFORM", "ESP32", "ENABLE_USB_INTERFACE", "ARDUINO_USB_CDC_ON_BOOT=1",
                  'WIFI_SSID=""', "BLE_PIN_CODE=123456", "MESH_USB_LOGGING_AVAILABLE=1",
-                 "CONFIG_BLUEDROID_ENABLED=1",
+                 "CONFIG_BLUEDROID_ENABLED=1", "CONFIG_BT_ENABLED=1",
                  "MESH_ESP32_USB_CONSOLE_COOPERATIVE=1", "MESH_ESP32_USB_HOST_LOSS_SLEEP_GRACE_MS=120000UL",
                  "MOMENTARY_BUTTON_WAKE_FROM_SLEEP=1", "PIN_USER_BTN=0", "DISPLAY_CLASS=Mock")
         for pm in (0, 1):

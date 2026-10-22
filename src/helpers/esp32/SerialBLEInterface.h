@@ -29,6 +29,7 @@ class SerialBLEInterface : public BaseSerialInterface,
   BLEServer *pServer;
   BLEService *pService;
   BLECharacteristic * pTxCharacteristic;
+  BLECharacteristic *pRxCharacteristic;
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
   BLE2902 *pTxDescriptor;
 #endif
@@ -37,6 +38,22 @@ class SerialBLEInterface : public BaseSerialInterface,
   bool notifySucceeded;
   std::atomic<bool> notificationsEnabled{false};
   bool _isEnabled;
+  bool _enableRequested = false;
+  // This interface outlives each host/controller session. Disable callbacks
+  // before stopping the host, and only then destroy its GATT objects.
+  std::atomic<bool> _callbacksEnabled{false};
+  bool _stackActive = false;
+  bool _shutdownPending = false;
+  bool _nativeHostStopped = false;
+  bool _configured = false;
+  bool _powerAttempted = false;
+  uint32_t _lastPowerAttempt = 0;
+  char _deviceName[48] = {};
+  uint8_t _customAddress[mesh::companion::BLUETOOTH_MAC_BYTES] = {};
+  bool _hasCustomAddress = false;
+  bool _advertisingConfigured = false;
+  bool _hasBondedPeer = false;
+  mesh::companion::BluetoothPeerIdentity _bondedPeer;
   uint16_t last_conn_id;
   uint32_t _pin_code;
   uint32_t _last_write;
@@ -67,6 +84,10 @@ class SerialBLEInterface : public BaseSerialInterface,
   Frame send_queue[FRAME_QUEUE_SIZE];
 
   void clearBuffers();
+  bool startBluetoothStack(bool clear_bonds);
+  bool stopBluetoothStack();
+  void forgetGattPointers();
+  void startServiceAndAdvertising();
   bool hasRequiredReplyCapacity() const;
   void servicePendingTxReset();
   void scheduleAdvertisingRestart(uint32_t now);
@@ -131,6 +152,7 @@ public:
     pServer = NULL;
     pService = NULL;
     pTxCharacteristic = NULL;
+    pRxCharacteristic = NULL;
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
     pTxDescriptor = NULL;
 #endif
@@ -171,6 +193,12 @@ public:
   void enable() override;
   void disable() override;
   bool isEnabled() const override { return _isEnabled; }
+  // Call from the application task even while the logical interface is off.
+  // Disconnects are asynchronous; never stop a host from its own callback.
+  void servicePowerState();
+  bool isPowerTransitionPending() const {
+    return _shutdownPending || (_stackActive != _enableRequested);
+  }
 
   bool isConnected() const override;
 

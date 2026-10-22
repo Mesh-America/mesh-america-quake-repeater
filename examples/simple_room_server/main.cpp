@@ -21,6 +21,7 @@
 
 #if defined(ESP32_PLATFORM)
   #include <helpers/ESP32TrueRandom.h>
+  #include <helpers/esp32/ProfileIdleSleep.h>
   #include <helpers/esp32/BootFileSystem.h>
 #endif
 #if defined(NRF52_PLATFORM)
@@ -446,6 +447,9 @@ void loop() {
   can_power_save = can_power_save && sleep_guard(!user_btn.needsPolling(), mesh::powerdiag::Reason::Button);
 #endif
   if (can_power_save) {
+#if defined(ESP32_PLATFORM)
+    const uint32_t sleep_budget_started_us = static_cast<uint32_t>(esp_timer_get_time());
+#endif
     uint32_t sleep_ms = the_mesh.getPowerSaveSleepMilliseconds(30000);
     uint32_t noise_floor_delay_ms = 0;
     const bool noise_floor_wait = the_mesh.getNextNoiseFloorWakeDelay(noise_floor_delay_ms);
@@ -467,6 +471,13 @@ void loop() {
 #else
     if (sleep_ms > 0 && the_mesh.millisHasNowPassed(POWERSAVING_FIRSTSLEEP_SECS * 1000)) { // To check if it is time to sleep
       if (mesh::powerdiag::enabled()) mesh::powerdiag::decision(0, millis());
+#if defined(ESP32_PLATFORM)
+      if (the_mesh.isDualRadioActive()) {
+        if (!mesh::esp32::tryProfileIdleSleep(the_mesh, board, sleep_budget_started_us, sleep_ms)
+            && mesh::powerdiag::enabled())
+          mesh::powerdiag::decision(mesh::powerdiag::mask(mesh::powerdiag::Reason::DualRadio), millis());
+      } else
+#endif
       board.sleepMilliseconds(sleep_ms); // Wake for scheduled jobs or a LoRa packet.
     } else if (sleep_ms > 0 && mesh::powerdiag::enabled()) {
       mesh::powerdiag::decision(mesh::powerdiag::mask(mesh::powerdiag::Reason::Startup), millis());

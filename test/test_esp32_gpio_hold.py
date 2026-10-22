@@ -301,7 +301,9 @@ int main(){FEMBoard board; board.enterDeepSleep(5); assert(slept);}
         light='\n'.join(body(header, signature) for signature in (
             'void sleep(uint32_t secs) override',
             'void sleepMilliseconds(uint32_t millisecs) override',
-            'void sleepMicroseconds(uint64_t wake_us, bool require_timer = false)'))
+            'void sleepMicroseconds(uint64_t wake_us, bool require_timer = false)',
+            'void sleepUntilMicroseconds(uint32_t deadline_us)',
+            'void sleepMicrosecondsImpl(uint64_t wake_us, bool require_timer,'))
         self.assertNotIn('commitTerminalDeepSleepHolds',light)
         for folder in (ROOT/'src',ROOT/'variants'):
             for path in folder.rglob('*'):

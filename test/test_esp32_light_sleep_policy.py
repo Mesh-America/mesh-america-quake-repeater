@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Compile the real manual-sleep driver guard for WiFi/BT SDK configurations."""
+
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+WIFI = r'''
+#pragma once
+using esp_err_t = int;
+constexpr int ESP_OK = 0, ESP_ERR_WIFI_NOT_INIT = 1, ESP_ERR_WIFI_NOT_STARTED = 2;
+enum wifi_mode_t { WIFI_MODE_NULL, WIFI_MODE_STA, WIFI_MODE_AP, WIFI_MODE_APSTA };
+static wifi_mode_t mode = WIFI_MODE_NULL;
+static int wifi_error = ESP_OK;
+inline int esp_wifi_get_mode(wifi_mode_t* out) { *out = mode; return wifi_error; }
+'''
+CONTROLLER = r'''
+#pragma once
+enum esp_bt_controller_status_t { ESP_BT_CONTROLLER_STATUS_IDLE,
+  ESP_BT_CONTROLLER_STATUS_INITED, ESP_BT_CONTROLLER_STATUS_ENABLED };
+static auto controller = ESP_BT_CONTROLLER_STATUS_IDLE;
+inline esp_bt_controller_status_t esp_bt_controller_get_status() { return controller; }
+'''
+HOST = r'''
+#pragma once
+enum esp_bluedroid_status_t { ESP_BLUEDROID_STATUS_UNINITIALIZED,
+  ESP_BLUEDROID_STATUS_INITIALIZED, ESP_BLUEDROID_STATUS_ENABLED };
+static auto host = ESP_BLUEDROID_STATUS_UNINITIALIZED;
+inline esp_bluedroid_status_t esp_bluedroid_get_status() { return host; }
+'''
+HARNESS = r'''
+#include <helpers/esp32/LightSleepPolicy.h>
+#include <cassert>
+using mesh::powerdiag::Reason;
+using mesh::esp32::manualLightSleepBlocker;
+using mesh::esp32::manualLightSleepReady;
+int main() {
+  assert(manualLightSleepReady());
+  for (auto value : {WIFI_MODE_STA, WIFI_MODE_AP, WIFI_MODE_APSTA}) {
+    mode = value;
+    assert(manualLightSleepBlocker() == Reason::Network);
+  }
+  mode = WIFI_MODE_NULL;
+  for (int error : {ESP_ERR_WIFI_NOT_INIT, ESP_ERR_WIFI_NOT_STARTED}) {
+    wifi_error = error;
+    assert(manualLightSleepReady());
+  }
+  wifi_error = -1;
+  assert(manualLightSleepBlocker() == Reason::Network);
+  wifi_error = ESP_OK;
+#if defined(CONFIG_BT_ENABLED) && CONFIG_BT_ENABLED
+  controller = ESP_BT_CONTROLLER_STATUS_INITED;
+  assert(manualLightSleepReady());
+  controller = ESP_BT_CONTROLLER_STATUS_ENABLED;
+  assert(manualLightSleepBlocker() == Reason::Wireless);
+  controller = static_cast<esp_bt_controller_status_t>(99);
+  assert(manualLightSleepBlocker() == Reason::Wireless);
+  controller = ESP_BT_CONTROLLER_STATUS_IDLE;
+#if defined(CONFIG_BLUEDROID_ENABLED) && CONFIG_BLUEDROID_ENABLED \
+    && !defined(MESH_USE_NIMBLE_ARDUINO)
+  host = ESP_BLUEDROID_STATUS_INITIALIZED;
+  assert(manualLightSleepReady());
+  host = ESP_BLUEDROID_STATUS_ENABLED;
+  assert(manualLightSleepBlocker() == Reason::Wireless);
+  host = static_cast<esp_bluedroid_status_t>(99);
+  assert(manualLightSleepBlocker() == Reason::Wireless);
+  host = ESP_BLUEDROID_STATUS_UNINITIALIZED;
+#endif
+#endif
+  assert(manualLightSleepReady());
+}
+'''
+
+
+class LightSleepPolicyTest(unittest.TestCase):
+    def test_real_guard_across_sdk_and_host_modes(self):
+        for flags in (
+            (), ("CONFIG_BT_ENABLED=0", "CONFIG_IDF_TARGET_ESP32S2=1"),
+            ("CONFIG_BT_ENABLED=1", "CONFIG_BLUEDROID_ENABLED=1", "CONFIG_IDF_TARGET_ESP32=1"),
+            ("CONFIG_BT_ENABLED=1", "CONFIG_BLUEDROID_ENABLED=1", "CONFIG_IDF_TARGET_ESP32S3=1"),
+            ("CONFIG_BT_ENABLED=1", "CONFIG_BLUEDROID_ENABLED=0", "CONFIG_IDF_TARGET_ESP32C3=1"),
+            ("CONFIG_BT_ENABLED=1", "CONFIG_BLUEDROID_ENABLED=1", "MESH_USE_NIMBLE_ARDUINO=1", "CONFIG_IDF_TARGET_ESP32C6=1"),
+        ):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory(prefix="mesh-esp32-sleep-driver-") as directory:
+                root = Path(directory)
+                (root / "esp_wifi.h").write_text(WIFI)
+                bt = "CONFIG_BT_ENABLED=1" in flags
+                bluedroid = bt and "CONFIG_BLUEDROID_ENABLED=1" in flags and "MESH_USE_NIMBLE_ARDUINO=1" not in flags
+                (root / "esp_bt.h").write_text(CONTROLLER if bt else '#error "Bluetooth absent on this target"\n')
+                (root / "esp_bt_main.h").write_text(HOST if bluedroid else '#error "Bluedroid absent from this host build"\n')
+                cpp, exe = root / "guard.cpp", root / "guard"
+                cpp.write_text("#include <initializer_list>\n" + HARNESS)
+                result = subprocess.run([
+                    os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                    *("-D" + flag for flag in flags), "-I", str(root), "-I", str(ROOT / "src"),
+                    str(cpp), "-o", str(exe)], text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                result = subprocess.run([str(exe)], text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

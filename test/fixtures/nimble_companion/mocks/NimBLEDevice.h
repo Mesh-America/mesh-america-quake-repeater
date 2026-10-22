@@ -51,8 +51,10 @@ struct NimBLEAdvertisementData {
   bool setFlags(uint8_t value) { flags = value; return true; }
 };
 namespace fake_nimble {
+inline int controller_state = 0;
 inline bool initialized = false, persisted = true, accept_notification = true;
-inline std::string failure;
+inline std::string failure, initialized_name;
+inline unsigned stops = 0, deleted_servers = 0, bond_deletions = 0;
 inline std::vector<std::string> calls;
 inline uint8_t address[6] = {}, own_type = BLE_OWN_ADDR_PUBLIC, io_cap = 255;
 inline ble_addr_t allowlisted;
@@ -76,7 +78,8 @@ struct NimBLEAdvertising {
   bool active = false, scan_response = false, scan_filter = false, connect_filter = false;
   std::string name, service;
   bool start(uint32_t = 0, const NimBLEAddress* = nullptr) {
-    fake_nimble::calls.push_back("advertise"); active = true; return true;
+    fake_nimble::calls.push_back("advertise");
+    active = fake_nimble::failure != "advertise"; return active;
   }
   bool stop() { active = false; return true; }
   void enableScanResponse(bool value) { scan_response = value; }
@@ -115,7 +118,11 @@ struct NimBLEServer {
   std::unique_ptr<NimBLEService> service;
   NimBLEServerCallbacks* callbacks = nullptr;
   bool owns_callbacks = true, auto_advertise = true, connected = false;
-  ~NimBLEServer() { if (owns_callbacks) delete callbacks; }
+  ~NimBLEServer() {
+    ++fake_nimble::deleted_servers;
+    assert(!fake_nimble::initialized); // Stop must precede destruction.
+    if (owns_callbacks) delete callbacks;
+  }
   void setCallbacks(NimBLEServerCallbacks* cb, bool take_ownership = true) {
     callbacks = cb; owns_callbacks = take_ownership;
   }
@@ -126,7 +133,7 @@ struct NimBLEServer {
     return fake_nimble::pin == 123456
         ? callbacks->onPassKeyDisplay() : fake_nimble::pin;
   }
-  bool start() { return true; }
+  bool start() { return fake_nimble::failure != "start-service"; }
   uint8_t getConnectedCount() const { return connected; }
   uint16_t getPeerMTU(uint16_t) const { return fake_nimble::mtu; }
   void updateConnParams(uint16_t handle, uint16_t minimum, uint16_t maximum,
@@ -142,17 +149,28 @@ struct NimBLEServer {
 };
 struct NimBLEDevice {
   inline static std::unique_ptr<NimBLEServer> server;
-  static bool init(const std::string&) {
+  static bool init(const std::string& name) {
+    fake_nimble::initialized_name = name;
     fake_nimble::calls.push_back("init");
-    return fake_nimble::initialized = fake_nimble::failure != "init";
+    fake_nimble::initialized = fake_nimble::failure != "init";
+    fake_nimble::controller_state = fake_nimble::initialized ? 2 : 0;
+    return fake_nimble::initialized;
   }
   static bool deinit(bool clear = false) {
+    ++fake_nimble::stops;
+    if (fake_nimble::failure == "stop-host") return false;
+    if (fake_nimble::initialized) {
+      // The real NimBLE wrapper ignores its port's controller teardown error.
+      if (fake_nimble::failure == "stop-controller") fake_nimble::controller_state = 2;
+      else if (fake_nimble::failure == "deinit-controller") fake_nimble::controller_state = 1;
+      else fake_nimble::controller_state = 0;
+    }
     fake_nimble::initialized = false;
     if (clear) server.reset();
     return true;
   }
-  static bool deleteAllBonds() { fake_nimble::calls.push_back("clear-bonds"); return fake_nimble::failure != "clear-bonds"; }
-  static bool deleteBond(const NimBLEAddress&) { return true; }
+  static bool deleteAllBonds() { ++fake_nimble::bond_deletions; fake_nimble::calls.push_back("clear-bonds"); return fake_nimble::failure != "clear-bonds"; }
+  static bool deleteBond(const NimBLEAddress&) { ++fake_nimble::bond_deletions; return true; }
   static bool isBonded(const NimBLEAddress&) { return fake_nimble::persisted; }
   static bool setOwnAddr(const uint8_t* address) {
     fake_nimble::calls.push_back("address");

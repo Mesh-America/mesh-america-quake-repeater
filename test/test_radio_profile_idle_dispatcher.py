@@ -76,8 +76,10 @@ int main() {
   Manager manager;
   Dispatcher legacy{&unknown, &clock, &manager};
   assert(legacy.canIdleDualRadio());
+  assert(!legacy.getDualRadioIdleDelay(unchanged) && unchanged == 0);
   unknown.profile.active = true;
   assert(!legacy.canIdleDualRadio());
+  assert(!legacy.getDualRadioIdleDelay(unchanged) && unchanged == 0);
   assert(legacy.getNextQueueWakeDelay(unchanged) && unchanged == 0);
 
   for (uint32_t now : {1000U, UINT32_MAX - 15U}) {
@@ -87,20 +89,25 @@ int main() {
     Dispatcher node{&radio, &clock, &manager};
     uint32_t delay = 99;
     assert(node.canIdleDualRadio() && radio.reads == 0);
+    assert(!node.getDualRadioIdleDelay(delay) && delay == 0 && radio.reads == 0);
     assert(!node.getNextQueueWakeDelay(delay) && radio.reads == 0);
     radio.profile.active = true;
     radio.delay = 37;
     assert(!node.canIdleDualRadio()); // Unknown ports keep their polling contract.
+    assert(!node.getDualRadioIdleDelay(delay) && delay == 0); // Ignore a false writer's output.
     assert(node.getNextQueueWakeDelay(delay) && delay == 0);
     radio.supported = true;
     radio.delay = 0;
     assert(!node.canIdleDualRadio()); // A due/too-short visit is not an idle budget.
+    assert(!node.getDualRadioIdleDelay(delay) && delay == 0);
     assert(node.getNextQueueWakeDelay(delay) && delay == 0);
     radio.delay = 37;
     assert(node.canIdleDualRadio());
+    assert(node.getDualRadioIdleDelay(delay) && delay == 37);
     assert(node.getNextQueueWakeDelay(delay) && delay == 37);
     node.radio_available = false;
     assert(!node.canIdleDualRadio());
+    assert(!node.getDualRadioIdleDelay(delay) && delay == 0);
     assert(node.getNextQueueWakeDelay(delay) && delay == 0);
     node.radio_available = true;
 
@@ -173,7 +180,8 @@ class RadioProfileIdleDispatcherTest(unittest.TestCase):
         header = (ROOT / 'src/Dispatcher.h').read_text(encoding='ascii')
         source = (ROOT / 'src/Dispatcher.cpp').read_text(encoding='ascii')
         code = HARNESS.replace('@DEFAULT@', method(header, 'virtual bool getProfileIdleDelay('))
-        code = code.replace('@ADMISSION@', method(header, 'bool canIdleDualRadio() const'))
+        code = code.replace('@ADMISSION@', method(header, 'bool canIdleDualRadio() const') + '\n'
+                            + method(header, 'bool getDualRadioIdleDelay('))
         code = code.replace('@DEADLINES@', method(source, 'bool Dispatcher::getNextQueueWakeDelay('))
         with tempfile.TemporaryDirectory(prefix='meshcore-profile-idle-dispatcher-') as directory:
             cpp, binary = Path(directory) / 'test.cpp', Path(directory) / 'test'

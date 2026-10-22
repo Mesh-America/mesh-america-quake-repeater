@@ -101,8 +101,15 @@ static mesh::Radio radio_driver;
     sleep_getter = "  unsigned getPowerSaveSleepMilliseconds(unsigned limit) { return limit; }"
     assert fixture.count(sleep_getter) == 1, "Missing sleep-deadline peripheral boundary"
     fixture = fixture.replace(sleep_getter, sleep_getter + "\n" +
-        "  bool getNextNoiseFloorWakeDelay(uint32_t&) const { return false; }")
+        "  bool getNextNoiseFloorWakeDelay(uint32_t&) const { return false; }\n" +
+        # This RF boundary has no settled scanner proof, so a live radio2
+        # must keep polling. Execute the production deadline helper below.
+        "  bool getDualRadioIdleDelay(uint32_t& ms) const { ms = 0; return false; }")
     source += "\n#include <helpers/PowerManagementUtils.h>\n"
+    profile_helper = body((ROOT / "src/helpers/esp32/ProfileIdleSleep.h").read_text(),
+                          "template <typename Mesh, typename Board>")
+    source += ("\nstatic int64_t esp_timer_get_time() { return micros(); }\n"
+               "namespace mesh { namespace esp32 {\n" + profile_helper + "\n} }\n")
     return source + morse_radio + (fixture.replace("@SETTER@", setter).replace("@GETTER@", getter)
                      .replace("@COMMAND_PUMP@", pump).replace("@POWER_LOOP@", power_loop))
 

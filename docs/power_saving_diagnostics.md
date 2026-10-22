@@ -45,8 +45,10 @@ after off starts a fresh window. Collection defaults off at every boot.
 
 `radio2` means the scanner cannot safely idle right now: for example, a short
 remaining visit, calibration, pending reception or an unvalidated platform.
-On nRF52, settled long visits can idle the MCU with power saving enabled;
-the RF receiver stays on. See [radio profiles](radio_profiles.md#mcu-power-saving-while-scanning).
+On nRF52 and ESP32, settled long visits can idle the MCU with power saving
+enabled; the RF receiver stays on. ESP32 requires working radio GPIO wake and
+physically stopped WiFi/Bluetooth drivers. Short visits and active transports
+retain polling. See [radio profiles](radio_profiles.md#mcu-power-saving-while-scanning).
 
 The role reports the first actual short-circuit blocker. It does not query
 otherwise skipped hardware just to populate an exhaustive list. Board guards
@@ -70,6 +72,21 @@ most 256 bytes of collector state. Each wait-call interval must be shorter
 than the 32-bit `micros()` wrap (about 71 minutes); the normal wait paths here
 are much shorter. Keep gaps between policy observations below the `millis()`
 wrap (about 49 days).
+
+## ESP32 Bluetooth off and CPU sleep
+
+Switching Bluetooth off now completes a reversible host/controller shutdown,
+including when Bluetooth was saved off at startup. Existing pairings, address,
+name and PIN are retained when it is switched back on. A pending disconnect or
+failed teardown keeps the CPU awake rather than treating stopped advertising
+as a stopped controller. `get bluetooth` reports a pending change until that
+transition finishes.
+
+USB host sessions, logging, active WiFi/ESP-NOW, OTA and serial work keep their
+existing sleep guards. This change does not sleep an ESP32 through a live
+Bluetooth or WiFi connection. Such connections require SDK-managed modem and
+automatic sleep; lowering CPU frequency or yielding alone is not proof of
+light sleep.
 
 ## Noise-floor sampling and sleep
 

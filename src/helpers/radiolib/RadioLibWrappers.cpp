@@ -9,6 +9,7 @@
 #include <new>
 #if defined(ESP32_PLATFORM)
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #elif defined(NRF52_PLATFORM)
 #include <utility/debug.h>
 #include "../NRF52Board.h"
@@ -94,7 +95,12 @@ static uint32_t profileTimestamp(bool dual_profile) {
     return profile_clock_ticks;
   }
 #endif
+#if defined(ESP32_PLATFORM)
+  // Unlike a cycle counter, this domain includes elapsed light-sleep time.
+  return static_cast<uint32_t>(esp_timer_get_time());
+#else
   return micros();
+#endif
 }
 
 static uint32_t profileElapsedUs(uint32_t since, uint32_t now, bool dual_profile) {
@@ -486,7 +492,12 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
     }
   }
 
+#if defined(ESP32_PLATFORM)
+  _esp32_profile_visit_started_us = static_cast<uint64_t>(esp_timer_get_time());
+  _profile_visit_stamp = static_cast<uint32_t>(_esp32_profile_visit_started_us);
+#else
   _profile_visit_stamp = profileTimestamp(_profiles.enabled());
+#endif
   return success ? mesh::RadioParamApplyResult::APPLIED : mesh::RadioParamApplyResult::FAILED;
 }
 
@@ -610,7 +621,12 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
     if (!restored || (resume && !isInRecvMode()))
       _profile_refresh_required = _profile_repair_required = true;
   }
+#if defined(ESP32_PLATFORM)
+  _esp32_profile_visit_started_us = static_cast<uint64_t>(esp_timer_get_time());
+  _profile_visit_stamp = static_cast<uint32_t>(_esp32_profile_visit_started_us);
+#else
   _profile_visit_stamp = profileTimestamp(dual_profile);
+#endif
   // A profile retune re-enters RX on a different tuple. Do not read its
   // instantaneous RSSI until the chip family's settle interval has elapsed.
   if (applied && _nf_refresh_requested) {
@@ -838,6 +854,9 @@ void RadioLibWrapper::serviceProfileScan() {
 #if defined(NRF52_PLATFORM)
   _profile_idle_visit_ticks = 0; // Every deferred/restarted scan fails closed.
 #endif
+#if defined(ESP32_PLATFORM)
+  _esp32_profile_idle_visit_us = 0;
+#endif
   (void)profileTimestamp(_profiles.enabled());
   if (_cw_active) return;
   if (!_params_valid || (_profile_retry_at && (int32_t)(millis() - _profile_retry_at) < 0)) return;
@@ -886,7 +905,7 @@ void RadioLibWrapper::serviceProfileScan() {
     if (!_profiles.switchTestReady()) return;
   }
   uint8_t target = _active_profile;
-#if defined(NRF52_PLATFORM)
+#if defined(NRF52_PLATFORM) || defined(ESP32_PLATFORM)
   const uint8_t visited_profile = _active_profile;
 #endif
   uint32_t visit_us = 0;
@@ -919,13 +938,25 @@ void RadioLibWrapper::serviceProfileScan() {
         && visit_us < NF_CALIB_SETTLE_MS * 1000UL) {
       visit_us = NF_CALIB_SETTLE_MS * 1000UL;
     }
+#if defined(ESP32_PLATFORM)
+    // Keep long visits and light-sleep elapsed time in the same 64-bit domain.
+    const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+    if (now_us < _esp32_profile_visit_started_us
+        || now_us - _esp32_profile_visit_started_us >= visit_us) target ^= 1;
+#else
     if (profileElapsedUs(_profile_visit_stamp, profileTimestamp(true), true) >= visit_us) target ^= 1;
+#endif
   }
   const auto result = tuneProfile(target);
   if (restart_scan && result == mesh::RadioParamApplyResult::APPLIED) {
     _profile_scan_generation[0] = _profiles.generation[0];
     _profile_scan_generation[1] = _profiles.generation[1];
+#if defined(ESP32_PLATFORM)
+    _esp32_profile_visit_started_us = static_cast<uint64_t>(esp_timer_get_time());
+    _profile_visit_stamp = static_cast<uint32_t>(_esp32_profile_visit_started_us);
+#else
     _profile_visit_stamp = profileTimestamp(true);
+#endif
   }
   if (result == mesh::RadioParamApplyResult::FAILED) {
     // Retry a rejected or failing profile at a bounded rate; retain primary RX.
@@ -953,6 +984,19 @@ void RadioLibWrapper::serviceProfileScan() {
     _profile_idle_stamp = _profile_visit_stamp;
     _profile_idle_switch_us = _profiles.switchBudgetUs();
     _profile_idle_preamble = _physical_preamble;
+  }
+#endif
+#if defined(ESP32_PLATFORM)
+  if (_profiles.enabled() && !restart_scan && _active_profile == visited_profile
+      && result == mesh::RadioParamApplyResult::APPLIED
+      && !isChipBusy() && !isPacketPendingOrReceiving()) {
+    _esp32_profile_idle_visit_us = visit_us;
+    _esp32_profile_idle_stamp_us = _esp32_profile_visit_started_us;
+    _esp32_profile_idle_switch_us = _profiles.switchBudgetUs();
+    _esp32_profile_idle_preamble = _physical_preamble;
+    _esp32_profile_idle_profile = _active_profile;
+    _esp32_profile_idle_generation[0] = _profiles.generation[0];
+    _esp32_profile_idle_generation[1] = _profiles.generation[1];
   }
 #endif
 }
@@ -993,6 +1037,48 @@ bool RadioLibWrapper::getProfileIdleDelay(uint32_t& delay_ms) const {
       || _profile_idle_visit_ticks - elapsed <= 32 + guard_ticks) return false;
   delay_ms = uint64_t(_profile_idle_visit_ticks - elapsed - guard_ticks) * 15625 / 512000;
   return delay_ms != 0;
+#elif defined(ESP32_PLATFORM)
+  if (!_profiles.enabled() || !_esp32_profile_idle_visit_us
+      || !_params_valid || state != STATE_RX || !_profile_rxps_suspended
+      || _rx_ps_enabled || _rx_ps_armed || _rx_hold_continuous
+      || _rx_retry_pending || _profile_retry_at || _profile_refresh_required
+      || _profile_repair_required || _nf_refresh_requested || _nf_calib_active
+      || !_noise_floor_valid || !_noise_floor_secondary_valid
+      || _wd_observe_until || _cw_active || _morse_owned || hasPendingRadioInterrupt()
+      || !_profiles.switchTestReady() || _active_profile > 1
+      || _esp32_profile_idle_profile != _active_profile
+      || _profile_generation != _profiles.generation[_active_profile]
+      || _profile_scan_generation[0] != _profiles.generation[0]
+      || _profile_scan_generation[1] != _profiles.generation[1]
+      || _esp32_profile_idle_generation[0] != _profiles.generation[0]
+      || _esp32_profile_idle_generation[1] != _profiles.generation[1]
+      || _esp32_profile_idle_stamp_us != _esp32_profile_visit_started_us
+      || _esp32_profile_idle_preamble != _physical_preamble
+      || _esp32_profile_idle_switch_us != _profiles.switchBudgetUs()) return false;
+#if MESH_ENABLE_TX_BEACONS
+  if (_beacon_owned) return false;
+#endif
+#if MESH_ENABLE_MORSE_RX
+  if (_morse_rx_owned) return false;
+#endif
+  const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+  if (now_us < _esp32_profile_idle_stamp_us) return false;
+  const uint64_t elapsed_us = now_us - _esp32_profile_idle_stamp_us;
+  // Keep frontend settling and short visits on their polling path. Only the
+  // MCU idles; the RF receiver stays in continuous RX on the current profile.
+  if (elapsed_us < NoiseFloorSettleMillis * 1000UL
+      || elapsed_us >= _esp32_profile_idle_visit_us) return false;
+  const uint32_t remaining_us = _esp32_profile_idle_visit_us - static_cast<uint32_t>(elapsed_us);
+  // Reserve return-to-loop/wake latency and require a useful timer interval.
+  // These bounds are a conservative policy, not a measured latency guarantee.
+  // The caller anchors this budget to an absolute ESP Timer deadline before
+  // querying it and checks that deadline again immediately before sleeping.
+  constexpr uint32_t wake_guard_us = 4000;
+  constexpr uint32_t minimum_idle_us = 2000;
+  if (remaining_us < wake_guard_us + minimum_idle_us) return false;
+  delay_ms = (remaining_us - wake_guard_us) / 1000;
+  if (delay_ms > 10) delay_ms = 10;
+  return true;
 #else
   return false; // Other platforms retain polling until their wake path is validated.
 #endif
@@ -2070,7 +2156,12 @@ void RadioLibWrapper::startRecv() {
   int err = startReceiveMode();
   if (err == RADIOLIB_ERR_NONE) {
     // A very short frame may complete while startReceiveMode() returns.
+#if defined(ESP32_PLATFORM)
+    _esp32_profile_visit_started_us = static_cast<uint64_t>(esp_timer_get_time());
+    _profile_visit_stamp = static_cast<uint32_t>(_esp32_profile_visit_started_us);
+#else
     _profile_visit_stamp = profileTimestamp(_profiles.enabled());
+#endif
     // Retain that RX interrupt instead of overwriting it with software state.
     state = STATE_RX;
     // RSSI is unsettled after every RX entry, including CAD/TX completion.

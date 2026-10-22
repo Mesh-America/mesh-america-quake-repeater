@@ -2,12 +2,15 @@
 #include "../BluetoothMac.h"
 #include "../CompanionFrameQueue.h"
 #include "esp_mac.h"
+#include "esp_bt.h"
 #include <stdlib.h>
 #if defined(CONFIG_BLUEDROID_ENABLED) && !defined(MESH_USE_NIMBLE_ARDUINO)
 #include "esp_gap_ble_api.h"
+#include "esp_bt_main.h"
 #endif
 #if MESH_BLE_USES_NIMBLE && !defined(MESH_USE_NIMBLE_ARDUINO)
 #include <host/ble_store.h>
+#include <nimble/nimble_port.h>
 #endif
 
 // Arduino 3.x relies on a library constructor to mark BLE as used before
@@ -29,12 +32,83 @@ extern "C" bool bleInUse(void) {
 #define ADVERT_RESTART_DELAY  1000   // millis
 #define BLE_BOND_PERSIST_TIMEOUT_MS 15000
 
-static void cleanupFailedBluetoothStart() {
-#if defined(MESH_USE_NIMBLE_ARDUINO)
-  BLEDevice::deinit(true);
-#else
-  BLEDevice::deinit(false);
+#define BLE_POWER_RETRY_MS 1000
+
+static bool stopBluetoothController() {
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED
+      && esp_bt_controller_disable() != ESP_OK) return false;
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED
+      && esp_bt_controller_deinit() != ESP_OK) return false;
+  return esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE;
+}
+
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
+// The pinned 2.0.17/3.1.3 wrappers leave their static server/advertiser alive
+// on deinit(false). The newer wrapper exposing getServer() deletes them.
+// Keep that ownership distinction independent of the processor model.
+template <typename Device>
+static auto bluetoothLibraryOwnsServer(int)
+    -> decltype(Device::getServer(), bool()) { return true; }
+template <typename Device>
+static bool bluetoothLibraryOwnsServer(...) { return false; }
 #endif
+
+void SerialBLEInterface::forgetGattPointers() {
+  pServer = NULL;
+  pService = NULL;
+  pTxCharacteristic = NULL;
+  pRxCharacteristic = NULL;
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
+  pTxDescriptor = NULL;
+#endif
+}
+
+bool SerialBLEInterface::stopBluetoothStack() {
+  _callbacksEnabled.store(false, std::memory_order_release);
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+  // clearAll is OBJECT ownership, not bond storage. Stop first without
+  // deleting objects: a failed stop must leave callback targets valid.
+  if (!BLEDevice::deinit(false)) return false;
+  if (!stopBluetoothController()) return false;
+  BLEDevice::deinit(true);
+  forgetGattPointers();
+  _advertisingConfigured = false;
+#else
+#if defined(CONFIG_BLUEDROID_ENABLED)
+  // Stop callback dispatch before the newer wrapper deletes its server.
+  // Never release controller memory: Bluetooth on must work in this boot.
+  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED
+      && esp_bluedroid_disable() != ESP_OK) return false;
+  if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_INITIALIZED
+      && esp_bluedroid_deinit() != ESP_OK) return false;
+#elif defined(CONFIG_NIMBLE_ENABLED)
+  if (!_nativeHostStopped) {
+    if (nimble_port_stop() != 0) return false;
+    _nativeHostStopped = true;
+  }
+#endif
+#if defined(CONFIG_BLUEDROID_ENABLED)
+  if (!stopBluetoothController()) return false;
+#endif
+  const bool owns_server = bluetoothLibraryOwnsServer<BLEDevice>(0);
+  BLEDevice::deinit(false);
+  // Neither pinned Arduino wrapper owns our characteristics/service. The
+  // legacy server is retained until createServer() replaces its static
+  // pointer; deleting it sooner would leave a dangling callback target.
+  delete pTxDescriptor;
+  delete pRxCharacteristic;
+  delete pTxCharacteristic;
+  delete pService;
+  pTxDescriptor = NULL;
+  pRxCharacteristic = pTxCharacteristic = NULL;
+  pService = NULL;
+  if (owns_server) {
+    pServer = NULL;
+    _advertisingConfigured = false;
+  }
+  if (!stopBluetoothController()) return false;
+#endif
+  return true;
 }
 
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
@@ -276,6 +350,8 @@ bool SerialBLEInterface::configureBondedOnlyAdvertising(
   advertising->setAdvertisementData(minimal_advertisement);
 
   _bonded_only = true;
+  _bondedPeer = peer;
+  _hasBondedPeer = true;
   _stealth_pair_once = false;
   _advertisingSuppressed.store(false, std::memory_order_release);
   _adv_restart_pending = false;
@@ -310,7 +386,9 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
                                bool clear_bonds, bool stealth_pair_once,
                                const mesh::companion::BluetoothPeerIdentity*
                                    bonded_only_peer) {
+  if (_stackActive || _shutdownPending) return false;
   _pin_code = pin_code;
+  _hasBondedPeer = false;
   _successfulConnectionPending.store(false, std::memory_order_release);
   _successfulConnectionStarted.store(0, std::memory_order_relaxed);
   _bondedOnlyRecoveryPending.store(false, std::memory_order_release);
@@ -344,22 +422,58 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
     return false;
   }
 
+  memcpy(_deviceName, dev_name, dev_name_len + 1);
+  _hasCustomAddress = custom_address != nullptr;
+  if (_hasCustomAddress) {
+    memcpy(_customAddress, custom_address, sizeof(_customAddress));
+  }
+  if (bonded_only_peer != nullptr) {
+    _bondedPeer = *bonded_only_peer;
+    _hasBondedPeer = true;
+    _bonded_only = true;
+  }
+  _configured = true;
+  if (startBluetoothStack(clear_bonds)) return true;
+  servicePowerState();
+  return false;
+}
+
+bool SerialBLEInterface::startBluetoothStack(bool clear_bonds) {
+  const char* dev_name = _deviceName;
+  const uint8_t* custom_address = _hasCustomAddress ? _customAddress : nullptr;
+  const uint32_t pin_code = _pin_code;
+  // A failed start can have partially initialized the controller. Keep the
+  // shutdown gate closed until servicePowerState() has cleaned it up.
+  _stackActive = true;
+  _nativeHostStopped = false;
+  _callbacksEnabled.store(false, std::memory_order_release);
   // Create the BLE Device
 #if MESH_BLE_USES_NIMBLE
   if (!BLEDevice::init(dev_name)) {
     BLE_DEBUG_PRINTLN("BLEDevice::init failed");
+    _isEnabled = _enableRequested = false;
+    _shutdownPending = true;
     return false;
   }
 #else
   // Arduino-ESP32 2.x Bluedroid exposes a void init(). Its first observable
   // failure is a null server below, which is handled without dereferencing it.
   BLEDevice::init(dev_name);
+#if defined(CONFIG_BLUEDROID_ENABLED)
+  if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED
+      || esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+    _isEnabled = _enableRequested = false;
+    _shutdownPending = true;
+    return false;
+  }
+#endif
 #endif
 
 #if defined(MESH_USE_NIMBLE_ARDUINO)
   if (clear_bonds && !BLEDevice::deleteAllBonds()) {
     BLE_DEBUG_PRINTLN("Could not clear NimBLE bonds for the new identity");
-    cleanupFailedBluetoothStart();
+    _isEnabled = _enableRequested = false;
+    _shutdownPending = true;
     return false;
   }
 #else
@@ -376,13 +490,15 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
     if (!BLEDevice::setOwnAddr(native_address)
         || !BLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM)) {
       BLE_DEBUG_PRINTLN("Custom Bluetooth MAC setup failed");
-      cleanupFailedBluetoothStart();
+      _isEnabled = _enableRequested = false;
+      _shutdownPending = true;
       return false;
     }
   }
 #if defined(MESH_USE_NIMBLE_ARDUINO)
   else if (!BLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC)) {
-    cleanupFailedBluetoothStart();
+    _isEnabled = _enableRequested = false;
+    _shutdownPending = true;
     return false;
   }
 #endif
@@ -424,10 +540,19 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   //BLEDevice::setPower(ESP_PWR_LVL_N8);
 
   // Create the BLE Server
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
+  BLEServer* retired_server = pServer;
+#endif
   pServer = BLEDevice::createServer();
+#if !defined(MESH_USE_NIMBLE_ARDUINO)
+  // createServer has replaced the legacy library's static callback pointer.
+  // Its old server can now be freed, without ever exposing a dangling one.
+  delete retired_server;
+#endif
   if (pServer == NULL) {
     BLE_DEBUG_PRINTLN("BLEDevice::createServer failed");
-    cleanupFailedBluetoothStart();
+    _isEnabled = _enableRequested = false;
+    _shutdownPending = true;
     return false;
   }
 #if defined(MESH_USE_NIMBLE_ARDUINO)
@@ -454,8 +579,8 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   pService = pServer->createService(SERVICE_UUID);
   if (pService == NULL) {
     BLE_DEBUG_PRINTLN("BLEServer::createService failed");
-    cleanupFailedBluetoothStart();
-    pServer = NULL;
+    _isEnabled = _enableRequested = false;
+    _shutdownPending = true;
     return false;
   }
 
@@ -479,9 +604,8 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
       CHARACTERISTIC_UUID_TX, tx_properties);
   if (pTxCharacteristic == NULL) {
     BLE_DEBUG_PRINTLN("BLEService::createCharacteristic(TX) failed");
-    cleanupFailedBluetoothStart();
-    pServer = NULL;
-    pService = NULL;
+    _isEnabled = _enableRequested = false;
+    _shutdownPending = true;
     return false;
   }
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
@@ -500,17 +624,12 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   pTxCharacteristic->addDescriptor(pTxDescriptor);
 #endif
 
-  BLECharacteristic * pRxCharacteristic = pService->createCharacteristic(
+  pRxCharacteristic = pService->createCharacteristic(
       CHARACTERISTIC_UUID_RX, rx_properties);
   if (pRxCharacteristic == NULL) {
     BLE_DEBUG_PRINTLN("BLEService::createCharacteristic(RX) failed");
-    cleanupFailedBluetoothStart();
-    pServer = NULL;
-    pService = NULL;
-    pTxCharacteristic = NULL;
-#if !defined(MESH_USE_NIMBLE_ARDUINO)
-    pTxDescriptor = NULL;
-#endif
+    _isEnabled = _enableRequested = false;
+    _shutdownPending = true;
     return false;
   }
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
@@ -522,10 +641,16 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
   pServer->getAdvertising()->setName(dev_name);
   pServer->getAdvertising()->enableScanResponse(true);
 #endif
-  pServer->getAdvertising()->addServiceUUID(SERVICE_UUID);
-  if (bonded_only_peer != nullptr) {
-    configureBondedOnlyAdvertising(*bonded_only_peer, true);
+  if (!_advertisingConfigured) {
+    pServer->getAdvertising()->addServiceUUID(SERVICE_UUID);
+    _advertisingConfigured = true;
   }
+  if (_bonded_only && _hasBondedPeer) {
+    const bool suppressed = _advertisingSuppressed.load(std::memory_order_acquire);
+    configureBondedOnlyAdvertising(_bondedPeer, true);
+    if (suppressed) _advertisingSuppressed.store(true, std::memory_order_release);
+  }
+  _callbacksEnabled.store(true, std::memory_order_release);
   return true;
 }
 
@@ -533,11 +658,13 @@ bool SerialBLEInterface::begin(const char* prefix, const char* name,
 
 #if defined(MESH_USE_NIMBLE_ARDUINO)
 uint32_t SerialBLEInterface::onPassKeyDisplay() {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return _pin_code;
   _pairingRequestPending.store(true, std::memory_order_release);
   return _pin_code;
 }
 
 void SerialBLEInterface::onAuthenticationComplete(NimBLEConnInfo& info) {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return;
   if (pServer == NULL || pServer->getConnectedCount() == 0
       || info.getConnHandle() != last_conn_id) return;
   if (info.isEncrypted() && info.isAuthenticated() && info.isBonded()) {
@@ -562,17 +689,20 @@ void SerialBLEInterface::onAuthenticationComplete(NimBLEConnInfo& info) {
 }
 #else
 uint32_t SerialBLEInterface::onPassKeyRequest() {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return _pin_code;
   BLE_DEBUG_PRINTLN("onPassKeyRequest()");
   _pairingRequestPending.store(true, std::memory_order_release);
   return _pin_code;
 }
 
 void SerialBLEInterface::onPassKeyNotify(uint32_t pass_key) {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return;
   BLE_DEBUG_PRINTLN("onPassKeyNotify(%u)", pass_key);
   _pairingRequestPending.store(true, std::memory_order_release);
 }
 
 bool SerialBLEInterface::onConfirmPIN(uint32_t pass_key) {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return false;
   BLE_DEBUG_PRINTLN("onConfirmPIN(%u)", pass_key);
   _pairingRequestPending.store(true, std::memory_order_release);
   return true;
@@ -580,11 +710,12 @@ bool SerialBLEInterface::onConfirmPIN(uint32_t pass_key) {
 
 bool SerialBLEInterface::onSecurityRequest() {
   BLE_DEBUG_PRINTLN("onSecurityRequest()");
-  return true;  // allow
+  return _callbacksEnabled.load(std::memory_order_acquire);
 }
 
 #if MESH_BLE_USES_NIMBLE
 void SerialBLEInterface::onAuthenticationComplete(ble_gap_conn_desc* desc) {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return;
   const bool success = desc != NULL && desc->sec_state.encrypted &&
                        desc->sec_state.authenticated
                        && desc->sec_state.bonded;
@@ -621,6 +752,7 @@ void SerialBLEInterface::onAuthenticationComplete(ble_gap_conn_desc* desc) {
 }
 #else
 void SerialBLEInterface::onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return;
   if (cmpl.success) {
     BLE_DEBUG_PRINTLN(" - SecurityCallback - Authentication Success");
     deviceConnected = true;
@@ -662,6 +794,11 @@ void SerialBLEInterface::onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
 
 #if defined(MESH_USE_NIMBLE_ARDUINO)
 void SerialBLEInterface::onConnect(BLEServer* pServer, NimBLEConnInfo& info) {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) {
+    last_conn_id = info.getConnHandle();
+    pServer->disconnect(last_conn_id);
+    return;
+  }
   last_conn_id = info.getConnHandle();
   deviceConnected = false;
   oldDeviceConnected = false;
@@ -682,6 +819,11 @@ void SerialBLEInterface::onConnect(BLEServer* pServer) {
 
 #if MESH_BLE_USES_NIMBLE
 void SerialBLEInterface::onConnect(BLEServer* pServer, ble_gap_conn_desc* desc) {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) {
+    last_conn_id = desc->conn_handle;
+    pServer->disconnect(last_conn_id);
+    return;
+  }
   BLE_DEBUG_PRINTLN("onConnect(), conn_id=%d, mtu=%d", desc->conn_handle,
                     pServer->getPeerMTU(desc->conn_handle));
   last_conn_id = desc->conn_handle;
@@ -703,6 +845,11 @@ void SerialBLEInterface::onMtuChanged(BLEServer* pServer,
 }
 #else
 void SerialBLEInterface::onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) {
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) {
+    last_conn_id = param->connect.conn_id;
+    pServer->disconnect(last_conn_id);
+    return;
+  }
   BLE_DEBUG_PRINTLN("onConnect(), conn_id=%d, mtu=%d", param->connect.conn_id, pServer->getPeerMTU(param->connect.conn_id));
   last_conn_id = param->connect.conn_id;
   deviceConnected = false;  // becomes usable only after authentication completes
@@ -734,6 +881,7 @@ void SerialBLEInterface::onDisconnect(BLEServer* pServer, NimBLEConnInfo& info,
 #else
 void SerialBLEInterface::onDisconnect(BLEServer* pServer) {
 #endif
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return;
   BLE_DEBUG_PRINTLN("onDisconnect()");
   deviceConnected = false;
   notifySucceeded = false;
@@ -763,6 +911,7 @@ void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic,
                                  esp_ble_gatts_cb_param_t* param) {
   (void)param;
 #endif
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return;
   if (_tx_disconnect_recovery.pending()) {
     BLE_DEBUG_PRINTLN("onWrite(): dropping frame while BLE reconnect is pending");
     return;
@@ -801,6 +950,7 @@ void SerialBLEInterface::onSubscribe(BLECharacteristic* pCharacteristic,
   (void)desc;
 #endif
 #if MESH_BLE_USES_NIMBLE
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return;
   if (pCharacteristic == pTxCharacteristic) {
     // NimBLE uses bit 0 for notification subscriptions.
     notificationsEnabled.store((subValue & 0x0001u) != 0,
@@ -812,6 +962,7 @@ void SerialBLEInterface::onSubscribe(BLECharacteristic* pCharacteristic,
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
 void SerialBLEInterface::onStatus(BLECharacteristic* pCharacteristic, Status status, uint32_t code) {
   (void)pCharacteristic;
+  if (!_callbacksEnabled.load(std::memory_order_acquire)) return;
   notifySucceeded = status == SUCCESS_NOTIFY;
   if (!notifySucceeded) {
     BLE_DEBUG_PRINTLN("notify failed, status=%d, code=%u; retaining frame",
@@ -926,46 +1077,89 @@ void SerialBLEInterface::recoverStalledTx(const char* cause) {
   serviceTxRecovery((uint32_t)millis());
 }
 
-void SerialBLEInterface::enable() { 
-  if (_isEnabled) return;
-
-  _isEnabled = true;
+void SerialBLEInterface::startServiceAndAdvertising() {
+  if (pServer == NULL || pService == NULL) return;
   clearBuffers();
-
-  // Start the service
 #if defined(MESH_USE_NIMBLE_ARDUINO)
   if (!pServer->start()) {
-    _isEnabled = false;
+    _isEnabled = _enableRequested = false;
+    _shutdownPending = true;
+    _callbacksEnabled.store(false, std::memory_order_release);
     return;
   }
 #else
   pService->start();
 #endif
-
-  // Start advertising
-
-  //pServer->getAdvertising()->setMinInterval(500);
-  //pServer->getAdvertising()->setMaxInterval(1000);
-
+  _isEnabled = true;
   if (advertisingAllowed()) {
+#if defined(MESH_USE_NIMBLE_ARDUINO)
+    if (!pServer->getAdvertising()->start()) {
+      _isEnabled = _enableRequested = false;
+      _shutdownPending = true;
+      _callbacksEnabled.store(false, std::memory_order_release);
+      pServer->getAdvertising()->stop();
+    }
+#else
     pServer->getAdvertising()->start();
+#endif
   }
   _adv_restart_pending = false;
 }
 
+void SerialBLEInterface::enable() {
+  if (_isEnabled || !_configured) return;
+  _enableRequested = true;
+  if (_shutdownPending) {
+    // Finish a previously requested disconnect/stop before rebuilding. A
+    // second toggle must never revive half of a stopped host.
+    servicePowerState();
+    return;
+  }
+  if (!_stackActive && !startBluetoothStack(false)) {
+    servicePowerState();
+    return;
+  }
+  startServiceAndAdvertising();
+}
+
 void SerialBLEInterface::disable() {
-  _isEnabled = false;
-
-  BLE_DEBUG_PRINTLN("SerialBLEInterface::disable");
-
-  pServer->getAdvertising()->stop();
-  pServer->disconnect(last_conn_id);
-#if !defined(MESH_USE_NIMBLE_ARDUINO)
-  pService->stop();
-#endif
-  oldDeviceConnected = deviceConnected = false;
-  clearBuffers();
+  _isEnabled = _enableRequested = false;
   _adv_restart_pending = false;
+  // The caller drains its command reply before this point. Only stop
+  // advertising/disconnect here; the host is stopped in the loop task after
+  // its asynchronous disconnect has completed.
+  servicePowerState();
+}
+
+void SerialBLEInterface::servicePowerState() {
+  const uint32_t now = (uint32_t)millis();
+  if (!_enableRequested && _stackActive && !_shutdownPending) {
+    _shutdownPending = true;
+    _powerAttempted = false;
+    _callbacksEnabled.store(false, std::memory_order_release);
+    _adv_restart_pending = false;
+    if (pServer != NULL) pServer->getAdvertising()->stop();
+    oldDeviceConnected = deviceConnected = false;
+  }
+  if (!_shutdownPending) return;
+  if (_powerAttempted
+      && !mesh::bleElapsedAtLeast(now, _lastPowerAttempt, BLE_POWER_RETRY_MS))
+    return;
+  _powerAttempted = true;
+  _lastPowerAttempt = now;
+  if (pServer != NULL && pServer->getConnectedCount() != 0) {
+    pServer->disconnect(last_conn_id);
+    return;
+  }
+  if (!stopBluetoothStack()) return;
+  _stackActive = false;
+  _shutdownPending = false;
+  _powerAttempted = false;
+  clearBuffers();
+  _pairingRequestPending.store(false, std::memory_order_release);
+  _successfulConnectionPending.store(false, std::memory_order_release);
+  _successfulConnectionStarted.store(0, std::memory_order_relaxed);
+  if (_enableRequested && startBluetoothStack(false)) startServiceAndAdvertising();
 }
 
 size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
@@ -1026,6 +1220,7 @@ bool SerialBLEInterface::isWriteBusy() const {
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   const uint32_t now = (uint32_t)millis();
+  if (!_isEnabled || !_stackActive || _shutdownPending) return 0;
   servicePendingTxReset();
   if (_tx_disconnect_recovery.pending()) {
     serviceTxRecovery(now);
@@ -1137,5 +1332,6 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
 }
 
 bool SerialBLEInterface::isConnected() const {
-  return !_tx_disconnect_recovery.pending() && deviceConnected;
+  return _isEnabled && _stackActive && !_shutdownPending
+      && !_tx_disconnect_recovery.pending() && deviceConnected;
 }

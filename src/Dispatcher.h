@@ -663,6 +663,18 @@ public:
     return radio_available && _radio->getProfileIdleDelay(delay_millis)
         && delay_millis > 0;
   }
+  // A timed-sleep caller must use the remaining visit budget, not just the
+  // boolean admission. Single-profile radios retain their existing policy.
+  // Read the sleep clock before calling, cap the caller's absolute deadline,
+  // and fail closed if setup/preemption consumes that budget before sleeping.
+  bool getDualRadioIdleDelay(uint32_t& delay_millis) const {
+    delay_millis = 0;
+    uint32_t profile_millis = 0;
+    if (!isDualRadioActive() || !radio_available
+        || !_radio->getProfileIdleDelay(profile_millis) || !profile_millis) return false;
+    delay_millis = profile_millis;
+    return true;
+  }
 
   Packet* obtainNewPacket();
   void releasePacket(Packet* packet);

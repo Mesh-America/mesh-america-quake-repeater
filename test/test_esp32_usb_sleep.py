@@ -58,6 +58,10 @@ static void attachHost(bool attached) {
 namespace mesh {
 static bool logging_enabled = false;
 bool isUsbLoggingEnabled() { return logging_enabled; }
+namespace esp32 {
+static powerdiag::Reason wireless_blocker = powerdiag::Reason::Count;
+powerdiag::Reason manualLightSleepBlocker() { return wireless_blocker; }
+}
 }
 
 using gpio_num_t = int;
@@ -71,6 +75,9 @@ constexpr int GPIO_INTR_DISABLE = 0;
 static unsigned sleep_calls = 0;
 static uint64_t timer_us = 0;
 static int timer_error = ESP_OK;
+static int radio_wake_error = ESP_OK, button_wake_error = ESP_OK, gpio_wake_error = ESP_OK;
+static unsigned gpio_setup_us = 0;
+static bool irq_during_setup = false;
 static bool radio_irq_high = false;
 static int critical_depth = 0;
 static int wake_pin = -1;
@@ -98,11 +105,17 @@ static int esp_light_sleep_start() {
   }
   return ESP_OK;
 }
-static int esp_sleep_enable_gpio_wakeup() { return ESP_OK; }
+static int esp_sleep_enable_gpio_wakeup() {
+  mock_millis += gpio_setup_us / 1000U;
+  if (irq_during_setup) radio_irq_high = true;
+  return gpio_wake_error;
+}
 static int gpio_get_level(gpio_num_t pin) {
   return pin == 38 ? (button_pressed ? LOW : HIGH) : (radio_irq_high ? HIGH : LOW);
 }
 static int gpio_wakeup_enable(gpio_num_t pin, int level) {
+  if (pin == 48 && radio_wake_error != ESP_OK) return radio_wake_error;
+  if (pin == 38 && button_wake_error != ESP_OK) return button_wake_error;
   wake_pin = pin;
   wake_levels.at(pin) = level;
   return ESP_OK;
@@ -267,7 +280,9 @@ def board_sleep_methods() -> str:
     return "\n".join(board_method(signature) for signature in (
         "void sleep(uint32_t secs) override",
         "void sleepMilliseconds(uint32_t millisecs) override",
-        "void sleepMicroseconds(uint64_t wake_us, bool require_timer = false)"))
+        "void sleepMicroseconds(uint64_t wake_us, bool require_timer = false)",
+        "void sleepUntilMicroseconds(uint32_t deadline_us)",
+        "void sleepMicrosecondsImpl(uint64_t wake_us, bool require_timer,"))
 
 
 def v4_profile_config():
@@ -345,6 +360,9 @@ struct SerialPort {
 } Serial;
 namespace mesh {
 bool isUsbLoggingEnabled() { return false; }
+namespace esp32 {
+powerdiag::Reason manualLightSleepBlocker() { return powerdiag::Reason::Count; }
+}
 struct Console { void printf(const char*) {} };
 static Console console;
 Console& usbConsolePort() { return console; }
@@ -502,6 +520,101 @@ int main() {
 
 
 class Esp32UsbSleepTest(unittest.TestCase):
+    def test_physical_wireless_vetoes_and_deadline_gpio_failures(self):
+        methods = board_sleep_methods() + "\n" + "\n".join(board_method(signature) for signature in (
+            "bool isUsbDataConnected() override", "bool isUsbHostConnected() override",
+            "bool isUsbSleepHeld()"))
+        harness = HARNESS.split("int main()", 1)[0] + r'''
+int main() {
+  try {
+    ESP32Board board;
+    attachHost(false);
+    Serial.end();
+    for (auto reason : {mesh::powerdiag::Reason::Network,
+                        mesh::powerdiag::Reason::Wireless}) {
+      mesh::esp32::wireless_blocker = reason;
+      mesh::powerdiag::setEnabled(true, millis());
+      board.sleepMilliseconds(10);
+      require(sleep_calls == 0 && timer_us == 0 && critical_depth == 0,
+              "physical wireless veto configured wake or slept");
+      require(mesh::powerdiag::snapshot(millis()).current & mesh::powerdiag::mask(reason),
+              "physical wireless veto lost its actual diagnostic reason");
+      const unsigned before_yield = yield_ms;
+      board.sleepUntilMicroseconds(micros() + 10000U);
+      require(yield_ms == before_yield && sleep_calls == 0,
+              "blocked profile sleep yielded beyond the scanner's safe visit");
+      mesh::powerdiag::setEnabled(false, millis());
+    }
+    mesh::esp32::wireless_blocker = mesh::powerdiag::Reason::Count;
+    for (bool diagnostics : {false, true}) {
+      mesh::powerdiag::setEnabled(diagnostics, millis());
+      for (int source : {0, 1, 2, 3}) {
+        radio_wake_error = source == 0 ? 31 : ESP_OK;
+        button_wake_error = source == 1 ? 32 : ESP_OK;
+        gpio_wake_error = source == 2 ? 33 : ESP_OK;
+        timer_error = source == 3 ? 34 : ESP_OK;
+        const unsigned before = sleep_calls;
+        const uint64_t before_timer = timer_us;
+        board.sleepUntilMicroseconds(micros() + 10000U);
+        require(sleep_calls == before && timer_us == before_timer && critical_depth == 0,
+                "failed timed wake setup slept or reused an old timer");
+        require(wake_levels[48] == 0 && wake_levels[38] == 0
+                && restored_interrupts[48] == GPIO_INTR_POSEDGE
+                && restored_interrupts[38] == GPIO_INTR_DISABLE,
+                "failed timed wake setup left level IRQ or wake pin armed");
+      }
+      radio_wake_error = button_wake_error = gpio_wake_error = timer_error = ESP_OK;
+      gpio_setup_us = 3000;
+      const unsigned before = sleep_calls;
+      board.sleepUntilMicroseconds(micros() + 10000U);
+      require(sleep_calls == before + 1 && timer_us == 7000U,
+              "absolute timer restarted the full visit after wake setup work");
+      gpio_setup_us = 0;
+      const uint64_t last_timer = timer_us;
+      for (uint32_t delta : {0U, 1U, 1999U, UINT32_MAX}) {
+        board.sleepUntilMicroseconds(micros() + delta);
+        require(sleep_calls == before + 1 && timer_us == last_timer && critical_depth == 0,
+                "expired or subminimum deadline slept or inherited an old timer");
+      }
+      board.sleepUntilMicroseconds(micros() + 2000U);
+      require(sleep_calls == before + 2 && timer_us == 2000U,
+              "minimum useful absolute deadline did not sleep");
+      mock_millis = 4294967U;
+      board.sleepUntilMicroseconds(micros() + 5000U);
+      require(sleep_calls == before + 3 && timer_us == 5000U,
+              "microsecond clock wrap corrupted a valid absolute deadline");
+      board.irq = UINT32_MAX;
+      board.sleepUntilMicroseconds(micros() + 10000U);
+      require(sleep_calls == before + 3 && timer_us == 5000U,
+              "profile deadline accepted a timer without a radio IRQ wake");
+      board.irq = 48;
+      irq_during_setup = true;
+      board.sleepUntilMicroseconds(micros() + 10000U);
+      require(sleep_calls == before + 3 && timer_us == 5000U && critical_depth == 0,
+              "profile wait slept over an IRQ arriving during wake setup");
+      irq_during_setup = radio_irq_high = false;
+      mesh::powerdiag::setEnabled(false, millis());
+    }
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n'; return 1;
+  }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="meshcore-esp32-profile-deadline-") as directory:
+            cpp = Path(directory) / "sleep.cpp"
+            exe = Path(directory) / "sleep"
+            cpp.write_text(harness.replace("@METHODS@", methods), encoding="ascii")
+            result = subprocess.run([
+                os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
+                "-DARDUINO_USB_MODE=1", "-DARDUINO_USB_CDC_ON_BOOT=1",
+                "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=0", "-DMESH_USB_LOGGING_AVAILABLE=0",
+                "-DMOMENTARY_BUTTON_WAKE_FROM_SLEEP=1", "-DPIN_USER_BTN=38",
+                "-I", str(ROOT / "src"), str(cpp), "-o", str(exe)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_v4_profiles_inherit_button_wake_with_the_actual_gpio_pins(self):
         config = v4_profile_config()
         # These standalone partition-migration utilities deliberately bypass

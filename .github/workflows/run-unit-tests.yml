@@ -699,6 +699,10 @@ jobs:
       - name: Verify ESP32 USB reboot sleep grace and G3 button wake
         run: |
           python3 -B test/test_usb_host_sleep_policy.py
+          python3 -B test/test_esp32_light_sleep_policy.py -v
+          python3 -B test/test_esp32_profile_idle_sleep.py -v
+          python3 -B test/test_profile_idle_esp32.py -v
+          python3 -B test/test_profile_idle.py -v
           python3 -B test/test_esp32_usb_sleep.py
           python3 -B test/test_esp32_full_sleep.py
           python3 -B test/test_esp32_full_power_lifecycle.py
@@ -997,6 +1001,7 @@ jobs:
           python3 -B test/test_voice_prefixes.py -v
           MESH_VOICE_TEST_SANITIZERS=1 python3 -B test/test_voice_prefixes.py -v
           python3 -B test/test_nimble_companion.py
+          python3 -B test/test_esp32_ble_power.py -v
           python3 -B test/test_bluetooth_pairing_ui.py
           python3 -B test/test_companion_pairing_display.py
           python3 -B test/test_companion_identity_startup.py
