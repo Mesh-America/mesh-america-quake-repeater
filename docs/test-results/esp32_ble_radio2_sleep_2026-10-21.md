@@ -9,11 +9,12 @@ reversibly stopping the Bluetooth host/controller, and allowing bounded MCU
 light-sleep during a settled secondary-radio receive visit. This report
 separates host/build coverage, SDK wait measurements and physical packet tests.
 
-Bluetooth and SDK wait checks pass. Three strict sleeping RF trials with
+Bluetooth transitions and quiet-window SDK wait checks pass. Three strict RF trials with
+power saving on and
 matched preambles received five of six packets, including the trial after the IRQ fix. They remain
 failures; radio2 is not fully qualified.
 
-The subsequent V3 CPU-clock sweep stopped during setup, before any of its
+The first V3 CPU-clock sweep stopped during setup, before any of its
 20-packet-per-frequency cases transmitted. Switching Bluetooth off exposed a
 NimBLE-Arduino 2.5.1 shutdown crash: PC zero in the host task, with the event
 address resolving to `ble_hs_timer + 8`. This matches upstream
@@ -24,6 +25,29 @@ cleanup intact. The earlier V4 Bluedroid checks do not qualify V3 NimBLE.
 The regression reproduces the original null callback, then passes 1,000
 shutdown/cleanup cycles under ASan/UBSan for each timer backend. Library
 version, source hash and build-local middleware checks also pass.
+
+Full Companion source
+[`6236eec3`](https://github.com/mikecarper/MeshCore/commit/6236eec386b5450b739a206923a442692eb74f90)
+includes that repair and a preferences-reader fix for a truncated timezone
+record colliding with the new CPU footer length. Both timezone and CPU suites
+pass; damaged CPU overrides still fall back to Auto. V3 and V4.3 OLED FEM-off
+builds pass all 24 capability markers and their memory gates, at 2,118,680 and
+2,556,504 application bytes respectively.
+
+The V3 received one application-only update after its old application hash
+was verified. Complete new-image readback passed, with its partition table
+and OTA metadata unchanged. Starting with Bluetooth saved off, it restored
+Bluetooth on and completed three off/on cycles without a reboot or core
+error. Uptime advanced from 32 to 58 seconds across 20 health samples. Every
+Binary handoff revalidated board identity and source version. The final
+checked configuration and credential hashes matched the baseline, and the
+active PIN stayed unchanged. This physical check covers Bluetooth power
+transitions, USB control and checked preference preservation.
+
+The recovery also exposed an already-ROM ESP32-S3 UART finish gap. The flasher
+now explicitly releases the boot strap before its final reset; its regression
+passes with both esptool command spellings. That separate fix is published in
+[meshfirmware `f9d03d1`](https://github.com/mikecarper/meshfirmware/commit/f9d03d1).
 
 ## Behavior and safeguards
 
@@ -260,9 +284,40 @@ channel names and every key byte matched across two reads, both temporary
 slots were empty with zero keys, and every V4 name field had zero padding.
 The peer's firmware was not changed.
 
+## V3 fixed-clock comparison with 20 packets per frequency
+
+After the NimBLE repair, the V3 completed all four predeclared cases on
+`6236eec3`. Every case sent 20 unique packets per frequency once, with the same
+32-symbol preambles, 2 dBm peer TX power and default 10/4/2 ms sleep dials.
+Power saving stayed on; CPU speed and the temporary manual sleep switch were
+controlled independently. RX power saving was saved off for these comparisons;
+the profile scanner itself uses continuous RX during each visit.
+
+| CPU | Manual CPU sleep | Primary received | Secondary received | SDK calls/returns over the whole diagnostic window |
+| --- | --- | --- | --- | --- |
+| 80 MHz | Off | 18/20 | 17/20 | 0/0 |
+| 80 MHz | On | 20/20 | 19/20 | 270/270 |
+| 160 MHz | On | 18/20 | 14/20 | 18/18 |
+| 160 MHz | Off | 19/20 | 16/20 | 0/0 |
+
+All 160 transmissions reached TX_DONE, with no packet retries or duplicates.
+All four strict delivery checks failed. Settings, channels and credential
+hashes were restored; both radios finished with zero core error flags.
+Losses with manual sleep off show that sleep is not required for the observed
+failure. Ambient traffic differed between cases, and these samples do not
+establish a CPU-speed relationship or a packet-loss cause.
+
+The On rows do not yet prove sleep during packet traffic. The UART quiet
+control stopped the driver but left its Companion session logically connected.
+Incoming messages then queued push notifications to that stopped transport;
+the existing pending-output guard correctly prevented sleep. Whole-window SDK
+calls could have occurred before traffic began. The delivery counts remain
+valid, but sleep comparison qualification requires retiring that UART session
+and timing evidence inside the RF sequence. No pending-work guard is bypassed.
+
 ## Final handback and limits
 
-The V4 remains on `1ba4e2830`. Its original radio, RX power-saving, Bluetooth,
+Both V3 and V4 now run `6236eec3`. Its original radio, RX power-saving, Bluetooth,
 WiFi, MQTT, logging, diagnostics and USB-watchdog settings were restored and
 checked against the frozen baseline, including credential digests. Radio2 is
 `off (automatic allowed)`, preserving its original automatic permission.
@@ -278,6 +333,7 @@ electrical power savings. Unchanged Bluetooth and quiet-wait checks were not
 repeated for padding, version, documentation or fixture-only changes.
 
 Private artifacts, receipts and traces are retained under
-`/home/mesh/hwtest/esp32-ble-radio2-sleep-cd4ea053-20261021/`.
+`/home/mesh/hwtest/esp32-ble-radio2-sleep-cd4ea053-20261021/` and
+`/home/mesh/hwtest/esp32-radio2-pson-v3-v4-20261021/`.
 See [power-saving diagnostics](../power_saving_diagnostics.md) for the controls
 and the limits of interpreting wait counters as energy savings.

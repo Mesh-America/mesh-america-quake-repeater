@@ -20,6 +20,17 @@ not override any sleep guard. The production USB/DTR policy is unchanged.
    `get powersaving.diag time` and pages `3` through `8`.
 6. If necessary, clear and repeat with only one feature changed.
 
+On ESP32, pages `9` and `10` also show SDK call-entry counts in sixteen
+16-second buckets starting at `start_ms`. These cover the first 256 seconds;
+`outside` counts later entries. Flag 1 marks entries outside that horizon,
+flag 2 marks saturation and flag 4 marks a call without a millisecond timestamp.
+A bucket with calls can establish activity within an independently timed test
+interval only when its whole time range fits inside that interval. Whole-window
+calls alone can all precede packet traffic. Buckets count SDK entries, not
+successful returns, physical residency or a particular packet's wake event.
+Check the existing call/return/error counters too. Other platforms keep pages
+`0` through `8`.
+
 Reconnecting/reading creates real USB or serial work and can affect the final
 decision and counters. Prefer accumulated time over that final `why` value;
 check its age. Off freezes recorded values, not the node itself. Re-enabling
@@ -136,8 +147,11 @@ allowed, leaving radio calibration timing unchanged.
 
 UART quiet is available only for an ordinary hardware UART console, such as
 the V3's external USB bridge. After draining its acknowledgement, it stops the
-UART driver and automatically restores the console at 115200 baud after the
-chosen interval. USB logging and OTA must be off. Native USB boards reject
+UART driver and parks its Companion session, preventing new push notifications
+to the stopped UART from holding the CPU awake. Received messages remain in
+the offline inbox; other transports keep their own sessions. It automatically
+restores the console at 115200 baud with a fresh, silent protocol session after
+the chosen interval. USB logging and OTA must be off. Native USB boards reject
 this command. A reboot also restores the console.
 
 To separate clock speed from CPU sleep, hold the clock at 80 or 160 MHz and

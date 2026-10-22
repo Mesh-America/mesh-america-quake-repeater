@@ -2854,6 +2854,13 @@ due wake are distinguished where those guards apply. USB power from a charger
 is not a host session. Logging enabled alone is not an nRF52 MCU sleep veto;
 on ESP32, the existing logging and raw-console guards can veto light sleep.
 
+ESP32 pages `9` and `10` count SDK call entries in sixteen 16-second buckets
+starting at `start_ms`. They also report entries outside the first 256 seconds
+and flags for outside entries (1), saturation (2) or missing timestamps (4).
+Use a whole bucket contained within an independently timed interval to prove
+SDK calls occurred during that interval; whole-window totals are insufficient.
+See [power-saving diagnostics](power_saving_diagnostics.md) for the timing limits.
+
 The `calls` page counts actual instrumented wait calls, returns, short returns,
 board vetoes and SDK errors. `time` reports time spent inside those wait calls
 in microseconds, including SDK and interrupt work, **not CPU sleep residency

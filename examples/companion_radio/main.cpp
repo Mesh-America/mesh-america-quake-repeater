@@ -1167,6 +1167,56 @@ static void beginUsbDefaultSession() {
   serviceUsbAsciiSessionDefault();
 }
 
+#if defined(ESP32_PLATFORM) \
+    && (!defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT) \
+    && !defined(SERIAL_RX) && !defined(SERIAL_TX)
+static bool usb_uart_quiet_parked = false;
+static bool usb_uart_quiet_restore_enabled = false;
+
+static bool transitionCompanionUartQuietSession(
+    void*, mesh::esp32::UartQuietSessionAction action) {
+  if (action == mesh::esp32::UartQuietSessionAction::Park) {
+    if (usb_uart_quiet_parked) return true;
+    if (!usb_protocol_initialized || usb_serial_interface.hasPendingIO()
+        || mesh::hasPendingUsbTerminalOutput()) return false;
+#if COMPANION_FEATURE_USB_MOTA_SOURCE
+    if (usb_mota_mode
+        || mesh::ota::OtaContext::serialFolderSource().hasPendingResponse()) return false;
+#endif
+    usb_uart_quiet_restore_enabled = usb_serial_interface.isEnabled();
+    // End only this host's ownership. The inbox and BLE/WiFi transactions
+    // remain live while the physical UART is unavailable.
+    cancelUsbSerialOperations();
+#if COMPANION_FEATURE_READER
+    mesh::cancelReaderCommand(&mesh::usbTerminalPort());
+#endif
+    the_mesh.resetUsbHostSessionInput();
+    if (the_mesh.isTerminalMode()) leaveUsbTerminalMode(false);
+    usb_binary_startup_probe.cancel();
+    usb_ascii_session_default.cancel();
+    mesh::discardUsbTerminalOutput();
+    clearUsbTerminalLine();
+    usb_terminal_discard_line = false;
+    usb_logging_terminal_mode = false;
+    usb_serial_interface.disable();
+    usb_uart_quiet_parked = true;
+    return true;
+  }
+
+  if (!usb_uart_quiet_parked) return true;
+  if (!Serial) return false; // The board must restore the driver first.
+  if (usb_uart_quiet_restore_enabled && interface_manager.isEnabled()) {
+    usb_serial_interface.enable();
+    // A new session must not inherit old parser bytes or reply destinations.
+    // Default ASCII is silent until input, so a framed client gets no banner.
+    beginUsbDefaultSession();
+  }
+  usb_uart_quiet_parked = false;
+  usb_uart_quiet_restore_enabled = false;
+  return true;
+}
+#endif
+
 static void serviceUsbLoggingOwnership(bool logging_enabled);
 
 static void serviceUsbTerminal() {
@@ -4038,6 +4088,12 @@ void setup() {
 #endif
   interface_manager.addInterface(InterfaceType::USB, &usb_serial_interface);
   usb_protocol_initialized = true;
+#if defined(ESP32_PLATFORM) \
+    && (!defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT) \
+    && !defined(SERIAL_RX) && !defined(SERIAL_TX)
+  mesh::esp32::registerUartQuietSessionControl(
+      nullptr, transitionCompanionUartQuietSession);
+#endif
   // Select ASCII before any framed dispatch, including non-Full USB builds.
   // BLE/WiFi/Ethernet keep their existing Binary Companion transports.
   beginUsbDefaultSession();
@@ -4342,7 +4398,7 @@ void loop() {
     } else {
       esp_err_t error = esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(idle_slice_ms) * 1000ULL);
       if (error == ESP_OK) {
-        if (mesh::powerdiag::enabled()) mesh::powerdiag::sleepBegin(micros());
+        if (mesh::powerdiag::enabled()) mesh::powerdiag::sleepBegin(micros(), millis());
         error = esp_light_sleep_start();
         if (mesh::powerdiag::enabled()) mesh::powerdiag::sleepEnd(micros());
       }

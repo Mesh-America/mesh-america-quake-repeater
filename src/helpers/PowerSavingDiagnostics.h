@@ -26,6 +26,13 @@ constexpr Mask mask(Reason reason) {
 constexpr Mask ValidMask = (Mask(1) << ReasonCount) - 1;
 // This identifies a short wait call, not proof that the CPU did not sleep.
 constexpr uint32_t ShortReturnMicros = 100;
+#if defined(ESP32_PLATFORM)
+constexpr size_t SdkBucketCount = 16;
+constexpr uint32_t SdkBucketMillis = 16000;
+enum SdkBucketFlags : uint8_t {
+  SdkBucketOutside = 1, SdkBucketSaturated = 2, SdkBucketMissingClock = 4
+};
+#endif
 
 inline const char* reasonName(Reason reason) {
   static const char* const names[] = {
@@ -58,6 +65,14 @@ struct Snapshot {
   uint32_t last_call_us = 0;
   uint32_t call_begin_us = 0;
   int32_t detail = 0;
+#if defined(ESP32_PLATFORM)
+  // SDK entry counts over time, not physical sleep residency. Keep timestamps
+  // in the millis domain so micros wrap cannot move an entry into another bin.
+  uint32_t bucket_start_ms = 0;
+  uint32_t bucket_outside_calls = 0;
+  uint16_t sdk_call_bins[SdkBucketCount] = {};
+  uint8_t bucket_flags = 0;
+#endif
   bool enabled = false;
   bool observed = false;
   bool pending = false;
@@ -100,6 +115,9 @@ inline void setEnabled(bool on, uint32_t now_ms) {
     value = Snapshot();
     value.enabled = true;
     value.last_ms = now_ms;
+#if defined(ESP32_PLATFORM)
+    value.bucket_start_ms = now_ms;
+#endif
   } else {
     account(value, now_ms);
     value.enabled = false;
@@ -112,6 +130,9 @@ inline void reset(uint32_t now_ms) {
   value = Snapshot();
   value.enabled = was_enabled;
   value.last_ms = now_ms;
+#if defined(ESP32_PLATFORM)
+  value.bucket_start_ms = now_ms;
+#endif
 }
 
 inline void decision(Mask reasons, uint32_t now_ms) {
@@ -133,12 +154,43 @@ inline void decision(Mask reasons, uint32_t now_ms) {
 // Instrument the actual SDK/event wait, not an outer board.sleep() which can
 // decline the request or yield instead. Durations include ISR/SDK work and are
 // explicitly not physical sleep residency or a current measurement.
-inline void sleepBegin(uint32_t now_us) {
-  Snapshot& value = state();
-  if (!value.enabled) return;
+inline void sleepBeginCounters(Snapshot& value, uint32_t now_us) {
   increment(value.calls);
   value.call_begin_us = now_us;
   value.pending = true;
+}
+inline void sleepBegin(uint32_t now_us) {
+  Snapshot& value = state();
+  if (!value.enabled) return;
+  sleepBeginCounters(value, now_us);
+#if defined(ESP32_PLATFORM)
+  // Preserve old callers' counters while making an omitted millis clock
+  // explicit. Unknown timestamps must never become invented overlap proof.
+  value.bucket_flags |= SdkBucketMissingClock;
+#endif
+}
+inline void sleepBegin(uint32_t now_us, uint32_t now_ms) {
+#if defined(ESP32_PLATFORM)
+  Snapshot& value = state();
+  if (!value.enabled) return;
+  if (value.calls == UINT32_MAX) value.bucket_flags |= SdkBucketSaturated;
+  sleepBeginCounters(value, now_us);
+  const uint32_t elapsed = now_ms - value.bucket_start_ms;
+  const uint32_t index = elapsed / SdkBucketMillis;
+  if (index >= SdkBucketCount) {
+    value.bucket_flags |= SdkBucketOutside;
+    if (value.bucket_outside_calls == UINT32_MAX)
+      value.bucket_flags |= SdkBucketSaturated;
+    increment(value.bucket_outside_calls);
+  } else if (value.sdk_call_bins[index] == UINT16_MAX) {
+    value.bucket_flags |= SdkBucketSaturated;
+  } else {
+    ++value.sdk_call_bins[index];
+  }
+#else
+  (void)now_ms;
+  sleepBegin(now_us);
+#endif
 }
 inline void sleepEnd(uint32_t now_us) {
   Snapshot& value = state();
@@ -223,6 +275,23 @@ inline void formatPage(unsigned page, char* reply, size_t capacity,
         (unsigned long)value.call_us, (unsigned long)value.max_call_us,
         (unsigned long)value.last_call_us, (long)value.detail,
         (unsigned long)ShortReturnMicros);
+#if defined(ESP32_PLATFORM)
+  } else if (page == 9 || page == 10) {
+    const size_t first = page == 9 ? 0 : 8;
+    const int initial = snprintf(reply, capacity,
+        "> bucket_ms=%lu start_ms=%lu now_ms=%lu outside=%lu flags=%u bins%u=",
+        (unsigned long)SdkBucketMillis, (unsigned long)value.bucket_start_ms,
+        (unsigned long)now_ms, (unsigned long)value.bucket_outside_calls,
+        (unsigned)value.bucket_flags, (unsigned)first);
+    if (initial < 0 || static_cast<size_t>(initial) >= capacity) return;
+    size_t used = static_cast<size_t>(initial);
+    for (size_t i = first; i < first + 8; ++i) {
+      const int count = snprintf(reply + used, capacity - used, "%s%u",
+          i == first ? "" : ",", (unsigned)value.sdk_call_bins[i]);
+      if (count < 0 || static_cast<size_t>(count) >= capacity - used) return;
+      used += static_cast<size_t>(count);
+    }
+#endif
   } else {
     size_t used = 0;
     const int initial = snprintf(reply, capacity, "> transitions/blocked_ms:");
@@ -266,6 +335,10 @@ inline bool handleCommand(const char* command, char* reply, size_t capacity,
   else if (argument(tail, "calls")) page = 1;
   else if (argument(tail, "time")) page = 2;
   else if (*tail >= '0' && *tail <= '8' && argument(tail + 1, "")) page = *tail - '0';
+#if defined(ESP32_PLATFORM)
+  else if (argument(tail, "9")) page = 9;
+  else if (argument(tail, "10")) page = 10;
+#endif
   else {
     for (size_t i = 0; i < ReasonCount; ++i) {
       const Reason reason = static_cast<Reason>(i);
@@ -280,7 +353,11 @@ inline bool handleCommand(const char* command, char* reply, size_t capacity,
         return true;
       }
     }
+#if defined(ESP32_PLATFORM)
+    snprintf(reply, capacity, "Error: get powersaving.diag [0-10|state|calls|time|reason]; reason pages 3-8; SDK buckets 9-10");
+#else
     snprintf(reply, capacity, "Error: get powersaving.diag [0-8|state|calls|time|reason]; reason pages 3-8");
+#endif
     return true;
   }
   formatPage(page, reply, capacity, now_ms);

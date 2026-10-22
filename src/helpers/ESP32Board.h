@@ -198,6 +198,13 @@ public:
           snprintf(reply, capacity, "Error: UART restore failed; retrying automatically");
           return false;
         }
+        if (!mesh::esp32::transitionUartQuietSession(
+                mesh::esp32::UartQuietSessionAction::Resume)) {
+          uart_quiet_restore_at = millis() + 1000;
+          if (!uart_quiet_restore_at) uart_quiet_restore_at = 1;
+          snprintf(reply, capacity, "Error: UART session restore failed; retrying automatically");
+          return false;
+        }
         uart_quiet_restore_at = 0;
       }
       uart_quiet_seconds = 0;
@@ -242,6 +249,8 @@ public:
     }
     if (!replies_drained || mesh::hasPendingUsbTerminalOutput()) return;
     Serial.flush();  // drain the hardware FIFO containing the acknowledgement
+    if (!mesh::esp32::transitionUartQuietSession(
+            mesh::esp32::UartQuietSessionAction::Park)) return;
     Serial.end();
     uart_quiet_restore_at = millis() + uint32_t(uart_quiet_seconds) * 1000;
     if (!uart_quiet_restore_at) uart_quiet_restore_at = 1;
@@ -386,7 +395,7 @@ public:
 #endif
     if (!radio_wakeup && button_gpio < 0) {
       if (wake_us > 0) {
-        if (diagnostics) mesh::powerdiag::sleepBegin(micros());
+        if (diagnostics) mesh::powerdiag::sleepBegin(micros(), millis());
         const esp_err_t error = esp_light_sleep_start();
         if (diagnostics) {
           mesh::powerdiag::sleepEnd(micros());
@@ -448,7 +457,7 @@ public:
     }
     esp_err_t sleep_error = ESP_OK;
     if (gpio_error == ESP_OK && !pending_after_setup && !deadline_expired) {
-      if (diagnostics) mesh::powerdiag::sleepBegin(micros());
+      if (diagnostics) mesh::powerdiag::sleepBegin(micros(), millis());
       sleep_error = esp_light_sleep_start();
       if (diagnostics) mesh::powerdiag::sleepEnd(micros());
     }

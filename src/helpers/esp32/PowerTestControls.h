@@ -38,6 +38,28 @@ inline void registerUartQuietControl(void* owner, UartQuietHandler handle) {
   uartQuietControl().handle = handle;
 }
 
+// The physical UART and its role's protocol session must stop together. A
+// failed Park callback must leave that session intact so the console remains
+// usable. Infrastructure roles without a framed session need no callback.
+enum class UartQuietSessionAction : uint8_t { Park, Resume };
+using UartQuietSessionHandler = bool (*)(void*, UartQuietSessionAction);
+struct UartQuietSessionControl {
+  void* owner = nullptr;
+  UartQuietSessionHandler handle = nullptr;
+};
+inline UartQuietSessionControl& uartQuietSessionControl() {
+  static UartQuietSessionControl value;
+  return value;
+}
+inline void registerUartQuietSessionControl(void* owner, UartQuietSessionHandler handle) {
+  uartQuietSessionControl().owner = owner;
+  uartQuietSessionControl().handle = handle;
+}
+inline bool transitionUartQuietSession(UartQuietSessionAction action) {
+  const auto& control = uartQuietSessionControl();
+  return !control.handle || control.handle(control.owner, action);
+}
+
 inline bool manualCpuSleepEnabled() { return powerTestControls().sleep_enabled; }
 inline uint32_t profileSleepSliceMillis() { return powerTestControls().slice_ms; }
 inline uint32_t profileSleepGuardMicros() { return uint32_t(powerTestControls().guard_ms) * 1000; }

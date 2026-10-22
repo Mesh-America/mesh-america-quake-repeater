@@ -113,8 +113,8 @@ int main(){
             "bool handleUartQuiet(","void servicePowerTestControls("))
         code=HARNESS.split("int main()",1)[0]
         code=code.replace("  void end() { driver_initialized = false; }",r'''
-  unsigned begins=0,ends=0,flushes=0;
-  void begin(unsigned baud){assert(baud==115200);++begins;driver_initialized=true;}
+  unsigned begins=0,ends=0,flushes=0,fail_begins=0;
+  void begin(unsigned baud){assert(baud==115200);++begins;driver_initialized=fail_begins==0;if(fail_begins)--fail_begins;}
   void flush(){++flushes;}
   void end(){++ends;driver_initialized=false;}
 ''')
@@ -164,10 +164,59 @@ int main(){
 }
 '''],["-DESP32_PLATFORM=1","-DARDUINO_USB_CDC_ON_BOOT=0","-DMESH_USB_LOGGING_AVAILABLE=1"])
 
-    def test_native_usb_quiet_is_unsupported_and_never_ends_driver(self):
+    def test_role_hook_failures_keep_session_and_bounded_recovery(self):
         compile_run([self.quiet_harness()+r'''
+struct Session {
+ bool parked=false,refuse_park=true,refuse_resume=false;
+ unsigned parks=0,resumes=0;
+};
+int main(){
+ ESP32Board board;Session session;char reply[160]={};
+ using mesh::esp32::UartQuietAction;using mesh::esp32::UartQuietSessionAction;
+ mesh::esp32::registerUartQuietSessionControl(&session,
+   [](void* owner,UartQuietSessionAction action){
+     auto& state=*static_cast<Session*>(owner);
+     assert(Serial); // Park precedes end; Resume follows a ready begin.
+     if(action==UartQuietSessionAction::Park){
+       ++state.parks;assert(Serial.flushes>0);
+       if(state.refuse_park)return false;
+       state.parked=true;
+     }else{
+       ++state.resumes;
+       if(state.refuse_resume)return false;
+       state.parked=false;
+     }
+     return true;
+   });
+ assert(board.handleUartQuiet(UartQuietAction::Schedule,5,reply,sizeof(reply)));
+ assert(board.handleUartQuiet(UartQuietAction::Cancel,0,reply,sizeof(reply)));
+ assert(session.parks==0&&session.resumes==0&&Serial.ends==0);
+ assert(board.handleUartQuiet(UartQuietAction::Schedule,5,reply,sizeof(reply)));
+ mock_millis+=100;board.servicePowerTestControls();
+ assert(session.parks==1&&!session.parked&&Serial&&Serial.ends==0);
+ mock_millis+=1900;board.servicePowerTestControls();
+ assert(!board.uart_quiet_start_at&&session.parks==1&&Serial.ends==0);
+ session.refuse_park=false;
+ assert(board.handleUartQuiet(UartQuietAction::Schedule,5,reply,sizeof(reply)));
+ mock_millis+=100;board.servicePowerTestControls(false);assert(session.parks==1);
+ board.servicePowerTestControls();assert(session.parked&&!Serial&&Serial.ends==1);
+ Serial.fail_begins=1;
+ assert(!board.handleUartQuiet(UartQuietAction::Cancel,0,reply,sizeof(reply)));
+ assert(session.parked&&session.resumes==0&&!Serial&&board.uart_quiet_restore_at);
+ session.refuse_resume=true;mock_millis+=1000;board.servicePowerTestControls();
+ assert(session.parked&&Serial&&session.resumes==1&&board.uart_quiet_restore_at);
+ session.refuse_resume=false;mock_millis+=1000;board.servicePowerTestControls();
+ assert(!session.parked&&Serial&&session.resumes==2&&!board.uart_quiet_restore_at);
+}
+'''],["-DESP32_PLATFORM=1","-DARDUINO_USB_CDC_ON_BOOT=0","-DMESH_USB_LOGGING_AVAILABLE=1"])
+
+    def test_native_usb_and_extra_uart_quiet_never_park_the_session(self):
+        source = self.quiet_harness()+r'''
+static unsigned session_actions=0;
 int main(){
  ESP32Board board;char reply[160]={};
+ mesh::esp32::registerUartQuietSessionControl(nullptr,
+   [](void*,mesh::esp32::UartQuietSessionAction){++session_actions;return true;});
  assert(!board.handleUartQuiet(mesh::esp32::UartQuietAction::Schedule,5,reply,sizeof(reply)));
  assert(strstr(reply,"Error:")&&Serial.ends==0);
  board.servicePowerTestControls();assert(Serial.ends==0);
@@ -178,8 +227,13 @@ int main(){
  mesh::esp32::powerTestControls().guard_ms=15;
  assert(mesh::esp32::handlePowerTestCommand("set powersaving.test reset",reply,sizeof(reply),true));
  assert(mesh::esp32::profileSleepGuardMicros()==4000&&strstr(reply,"uart=unsupported"));
+ assert(session_actions==0);
 }
-'''],["-DESP32_PLATFORM=1","-DARDUINO_USB_CDC_ON_BOOT=1","-DMESH_USB_LOGGING_AVAILABLE=1"])
+'''
+        for defines in (("ARDUINO_USB_CDC_ON_BOOT=1",), ("SERIAL_RX=1",), ("SERIAL_TX=1",)):
+            with self.subTest(defines=defines):
+                compile_run([source],["-DESP32_PLATFORM=1","-DMESH_USB_LOGGING_AVAILABLE=1",
+                                      *["-D"+value for value in defines]])
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)
