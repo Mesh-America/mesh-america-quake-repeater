@@ -22,7 +22,7 @@ static void repairChecksum(uint8_t* bytes) {
 static void settingsRoundTrip() {
   Settings value;
   assert(settingsValid(value));
-  assert(idleMillis(value) == 60000 && refreshCount(value) == 30);
+  assert(idleMillis(value) == 60000 && refreshCount(value) == 10);
   assert(nameCharacters(value) == 5 && mapHeightKm(value) == 200);
 
   uint8_t bytes[SETTINGS_RECORD_SIZE];
@@ -73,13 +73,30 @@ static void settingsRoundTrip() {
   // A record with a valid CRC still cannot select invalid enum values, a
   // missing channel, an unknown format or reserved bits.
   const unsigned bad_offsets[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-  const unsigned bad_values[] = {'X', 'X', 2, 40, 2, 4, 4, 4, 4, 9, 1};
+  const unsigned bad_values[] = {'X', 'X', 3, 40, 2, 4, 4, 4, 4, 9, 1};
   for (size_t test = 0; test < sizeof(bad_offsets) / sizeof(*bad_offsets); ++test) {
     uint8_t changed[sizeof(bytes)];
     std::memcpy(changed, bytes, sizeof(bytes));
     changed[bad_offsets[test]] = bad_values[test];
     repairChecksum(changed);
     rejects(changed, sizeof(changed));
+  }
+
+  // Migrate each old cleanup choice without resetting any other settings.
+  for (unsigned old_refresh = 0; old_refresh < 4; ++old_refresh) {
+    Settings old{39, 1, 3, 1, 1, 2, static_cast<uint8_t>(old_refresh), 8};
+    assert(encodeSettings(old, bytes, sizeof(bytes)));
+    bytes[2] = 1;
+    repairChecksum(bytes);
+    Settings migrated;
+    assert(decodeSettings(migrated, bytes, sizeof(bytes)));
+    old.refresh = 3;
+    assert(equal(migrated, old) && refreshCount(migrated) == 10);
+  }
+  const int cleanup_counts[] = {1, 3, 5, 10};
+  for (unsigned choice = 0; choice < 4; ++choice) {
+    value.refresh = choice;
+    assert(refreshCount(value) == cleanup_counts[choice]);
   }
 
   value.channel = 39;
@@ -105,7 +122,7 @@ static void settingsRoundTrip() {
 
   for (unsigned bad = 4; bad <= 255; ++bad) {
     value.idle = value.refresh = value.name_len = static_cast<uint8_t>(bad);
-    assert(idleMillis(value) == 60000 && refreshCount(value) == 30);
+    assert(idleMillis(value) == 60000 && refreshCount(value) == 10);
     assert(nameCharacters(value) == 5);
   }
   for (unsigned bad = 9; bad <= 255; ++bad) {

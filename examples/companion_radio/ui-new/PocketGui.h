@@ -335,7 +335,7 @@ public:
     header("Settings", editing ? "editing" : nullptr);
     static const char* const names[] = {"Channel", "Text", "Names", "Screen", "Theme", "Return", "Clean", "Map zoom"};
     static const char* const idle[] = {"30 seconds", "1 minute", "5 minutes", "Never"};
-    static const char* const clean[] = {"10 updates", "30 updates", "60 updates", "Manual"};
+    static const char* const clean[] = {"1 update", "3 updates", "5 updates", "10 updates"};
     for (unsigned row = 0; row < SETTINGS_COUNT; ++row) {
       const int y = bodyTop() + row * 11;
       if (row == selected && editing) { fill(1, y - 1, _width - 2, 11); inverse(); }
@@ -357,7 +357,7 @@ public:
         case 3: snprintf(value, sizeof(value), "%s", _settings.flip ? "Flipped" : "Normal"); break;
         case 4: snprintf(value, sizeof(value), "%s", _settings.dark ? "Dark" : "Light"); break;
         case 5: snprintf(value, sizeof(value), "%s", idle[_settings.idle <= 3 ? _settings.idle : 1]); break;
-        case 6: snprintf(value, sizeof(value), "%s", clean[_settings.refresh <= 3 ? _settings.refresh : 1]); break;
+        case 6: snprintf(value, sizeof(value), "%s", clean[_settings.refresh <= 3 ? _settings.refresh : 3]); break;
         default: snprintf(value, sizeof(value), "%u km", (unsigned)mapHeightKm(_settings)); break;
       }
       textRight(_width - 4, y + 8, value);

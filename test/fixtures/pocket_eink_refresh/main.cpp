@@ -22,6 +22,8 @@ static void cleanBaseline(GxEPDDisplay& display, int interval = 2) {
   frame(display, "Network");
   assert(panel::updates(Call::Full) == 1 && panel::updates(Call::Partial) == 0);
   assert(panel::images.back() == "Network");
+  assert(panel::updates(Call::PrepareFull) == 1 && panel::updates(Call::Finish) == 1);
+  assert(panel::updates(Call::PowerOff) == 0);
 }
 
 int main(int argc, char** argv) {
@@ -96,11 +98,11 @@ int main(int argc, char** argv) {
       const std::string value = "tick " + std::to_string(i);
       frame(display, value.c_str());
     }
-    assert(panel::updates(Call::Full) == full && "manual mode allows partial updates until explicitly cleaned");
-    assert(panel::updates(Call::Partial) == 70);
+    assert(panel::updates(Call::Full) == full + 6 && "manual mode must also honor the ten-partial hardware limit");
+    assert(panel::updates(Call::Partial) == 64);
   } else if (scenario == "wake") {
     display.turnOff();
-    assert(!display.isOn() && panel::updates(Call::Hibernate) == 1);
+    assert(!display.isOn() && panel::updates(Call::Finish) == 2);
     const auto full = panel::updates(Call::Full);
     const auto partial = panel::updates(Call::Partial);
     display.turnOn();

@@ -28,7 +28,9 @@ Existing node, channel and contact formats are unchanged. Timezone comes from
 the existing node preferences.
 
 Changing pages or map zoom uses a full clean refresh to clear the previous
-image. Updates within the same page keep the faster partial refresh.
+image. Updates within the same page keep the faster partial refresh, with a
+clean refresh after at most ten partial updates. Settings allow shorter
+intervals of one, three or five updates.
 
 The idle screen-off timer defaults to 15 minutes on battery and USB. Existing
 saved timeouts are retained; set `display.timeout` and `display.usb.timeout` to

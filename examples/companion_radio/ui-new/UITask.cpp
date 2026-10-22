@@ -136,6 +136,9 @@ static mesh::ui::RadioProfileSystemStatus radioProfileSystemStatus(
 
 #if COMPANION_FEATURE_READER
 #include "ReaderScreen.h"
+#if UI_POCKET_GUI
+#include "PocketReaderDisplay.h"
+#endif
 #include <new>
 #endif
 
@@ -761,7 +764,7 @@ class HomeScreen : public UIScreen {
     if (_pocket_browsing) frame.hint = "1x older  2x newer  hold exit";
     else if (_pocket_zooming) frame.hint = "1x zoom in  2x out  hold done";
     else if (_pocket_editing) frame.hint = "1x value  2x field  hold save";
-    else if (isRadioPage()) frame.hint = "click next  2x back  hold Reader";
+    else if (isRadioPage()) frame.hint = "click next  2x back";
     else if (_page == HomePage::FIRST) frame.hint = "click next  2x back  hold browse";
     else if (_page == HomePage::MAP) frame.hint = "click next  2x back  hold zoom";
     else if (_page == HomePage::SETTINGS) frame.hint = "click next  2x back  hold edit";
@@ -2390,7 +2393,13 @@ void UITask::showMessages() {
 void UITask::showReader() {
   if (!_display || isPairingScreenActive()) return;
   if (!_display->isOn()) _display->wake(mesh::ui::DisplayWake::Button);
+#if UI_POCKET_GUI
+  static mesh::ui::pocket::PocketReaderDisplay reader_display(
+      *static_cast<GxEPDDisplay*>(_display));
+  if (!reader) reader = new (std::nothrow) ReaderScreen(this, &reader_display);
+#else
   if (!reader) reader = new (std::nothrow) ReaderScreen(this, _display);
+#endif
   if (!reader) { showAlert("Reader: no memory", 1500); return; }
   static_cast<ReaderScreen*>(reader)->open();
   setCurrScreen(reader);

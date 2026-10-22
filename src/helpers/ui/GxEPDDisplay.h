@@ -16,6 +16,9 @@
 
 #include "DisplayDriver.h"
 #include "PocketGuiConfig.h"
+#if UI_POCKET_GUI
+  #include "MeshPocketEinkPanel.h"
+#endif
 
 #ifndef EINK_MAX_PARTIAL_REFRESH
   // 60 to prevent ghosting when refreshing every minute ...
@@ -34,16 +37,15 @@
 
 class GxEPDDisplay : public DisplayDriver {
 
-#if defined(EINK_DISPLAY_MODEL)
-  GxEPD2_BW<EINK_DISPLAY_MODEL, EINK_DISPLAY_MODEL::HEIGHT> display;
-#else
-  GxEPD2_BW<GxEPD2_150_BN, 200> display;
-#endif
-#if defined(EINK_DISPLAY_MODEL)
+#if UI_POCKET_GUI
+  using Panel = MeshPocketEinkPanel;
+  static int partialRefreshLimit(int count) { return count < 0 || count > 10 ? 10 : count; }
+#elif defined(EINK_DISPLAY_MODEL)
   using Panel = EINK_DISPLAY_MODEL;
 #else
   using Panel = GxEPD2_150_BN;
 #endif
+  GxEPD2_BW<Panel, Panel::HEIGHT> display;
   static constexpr int kWidth = (DISPLAY_ROTATION & 1) ? Panel::HEIGHT : Panel::WIDTH;
   static constexpr int kHeight = (DISPLAY_ROTATION & 1) ? Panel::WIDTH : Panel::HEIGHT;
   int _text_ascent = 13;
@@ -57,15 +59,20 @@ class GxEPDDisplay : public DisplayDriver {
   uint16_t _curr_color;
   CRC32 display_crc;
   int last_display_crc_value = 0;
+#if UI_POCKET_GUI
+  int _cycles_before_full_refresh = partialRefreshLimit(EINK_MAX_PARTIAL_REFRESH);
+  int max_partial_refresh = partialRefreshLimit(EINK_MAX_PARTIAL_REFRESH);
+#else
   int _cycles_before_full_refresh = EINK_MAX_PARTIAL_REFRESH;
-  int max_partial_refresh = EINK_MAX_PARTIAL_REFRESH; // so this can be changed by an option after
+  int max_partial_refresh = EINK_MAX_PARTIAL_REFRESH;
+#endif
 #if UI_POCKET_GUI
   bool _full_frame = false;
 #endif
 
 public:
 #if defined(EINK_DISPLAY_MODEL)
-  GxEPDDisplay() : DisplayDriver(kWidth, kHeight), display(EINK_DISPLAY_MODEL(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_BUSY)) {}
+  GxEPDDisplay() : DisplayDriver(kWidth, kHeight), display(Panel(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_BUSY)) {}
 #else
   GxEPDDisplay() : DisplayDriver(kWidth, kHeight), display(GxEPD2_150_BN(DISP_CS, DISP_DC, DISP_RST, DISP_BUSY)) {}
 #endif
@@ -77,6 +84,7 @@ public:
     display_crc.update(static_cast<const uint8_t*>(bytes), length);
   }
   void setMaxPartialRefresh(int count) {
+    count = partialRefreshLimit(count);
     if (count == max_partial_refresh) return;
     max_partial_refresh = count;
     // Keep a clean refresh that is already due or explicitly requested.

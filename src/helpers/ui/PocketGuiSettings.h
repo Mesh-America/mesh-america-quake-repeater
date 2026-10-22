@@ -16,7 +16,7 @@ struct Settings {
   uint8_t flip = 0;
   uint8_t dark = 0;
   uint8_t idle = 1;
-  uint8_t refresh = 1;
+  uint8_t refresh = 3;
   uint8_t map_zoom = 3;
 };
 
@@ -44,7 +44,7 @@ inline uint16_t settingsChecksum(const uint8_t* bytes, size_t length) {
 inline bool encodeSettings(const Settings& value, uint8_t* bytes, size_t size,
                            unsigned channel_count = 40) {
   if (bytes == nullptr || size != SETTINGS_RECORD_SIZE || !settingsValid(value, channel_count)) return false;
-  bytes[0] = 'P'; bytes[1] = 'G'; bytes[2] = 1;
+  bytes[0] = 'P'; bytes[1] = 'G'; bytes[2] = 2;
   bytes[3] = value.channel;
   bytes[4] = value.text_large;
   bytes[5] = value.name_len;
@@ -62,7 +62,7 @@ inline bool encodeSettings(const Settings& value, uint8_t* bytes, size_t size,
 inline bool decodeSettings(Settings& value, const uint8_t* bytes, size_t size,
                            unsigned channel_count = 40) {
   if (bytes == nullptr || size != SETTINGS_RECORD_SIZE
-      || bytes[0] != 'P' || bytes[1] != 'G' || bytes[2] != 1
+      || bytes[0] != 'P' || bytes[1] != 'G' || (bytes[2] != 1 && bytes[2] != 2)
       || (bytes[6] & ~3U) != 0 || bytes[10] != 0
       || settingsChecksum(bytes, 11) != (uint16_t)(bytes[11] | (uint16_t)bytes[12] << 8)) return false;
   Settings next;
@@ -70,6 +70,9 @@ inline bool decodeSettings(Settings& value, const uint8_t* bytes, size_t size,
   next.flip = bytes[6] & 1; next.dark = (bytes[6] >> 1) & 1;
   next.idle = bytes[7]; next.refresh = bytes[8]; next.map_zoom = bytes[9];
   if (!settingsValid(next, channel_count)) return false;
+  // Older choices were 10/30/60/manual. Keep their other preferences while
+  // applying the Pocket panel's ten-partial-update cleanup limit.
+  if (bytes[2] == 1) next.refresh = 3;
   value = next;
   return true;
 }
@@ -80,8 +83,8 @@ inline uint32_t idleMillis(const Settings& value) {
 }
 
 inline int refreshCount(const Settings& value) {
-  static const int values[] = {10, 30, 60, -1};
-  return values[value.refresh <= 3 ? value.refresh : 1];
+  static const int values[] = {1, 3, 5, 10};
+  return values[value.refresh <= 3 ? value.refresh : 3];
 }
 
 inline unsigned nameCharacters(const Settings& value) {

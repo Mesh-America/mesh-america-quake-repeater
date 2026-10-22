@@ -120,13 +120,20 @@ void GxEPDDisplay::turnOff() {
   expander.digitalWrite(EXP_PIN_BACKLIGHT, LOW);
 #endif
   _isOn = false;
-  // do full refresh before powering off to clear screen
-  // no full refresh needed at wakeup
-  display.clearScreen(0xFF); // Clears microcontroller side RAM
-  display.writeScreenBuffer(0xFF); // Forces 0xFF (White) into the display controller's history registers
+  // Clear the visible image when the idle screen timer expires.
+#if UI_POCKET_GUI
+  display.epd2.prepareRefresh(false);
+#endif
+  display.clearScreen(0xFF); // Clear the panel and both controller image banks.
+  display.writeScreenBuffer(0xFF);
   resetPartialRefreshCounter();
   last_display_crc_value=0;
+#if UI_POCKET_GUI
+  _full_frame = false;
+  display.epd2.finishRefresh();
+#else
   display.hibernate();
+#endif
 }
 
 void GxEPDDisplay::clear() {
@@ -264,15 +271,17 @@ void GxEPDDisplay::endFrame() {
   uint32_t crc = display_crc.finalize();
 #if UI_POCKET_GUI
   if (_full_frame) {
+    display.epd2.prepareRefresh(false);
     display.display(false);
     display.setPartialWindow(0, 0, display.width(), display.height());
     resetPartialRefreshCounter();
     _full_frame = false;
-    display.powerOff();
+    display.epd2.finishRefresh();
   } else if (crc != last_display_crc_value) {
+    display.epd2.prepareRefresh(true);
     display.display(true);
     if (_cycles_before_full_refresh > 0) --_cycles_before_full_refresh;
-    display.powerOff();
+    display.epd2.finishRefresh();
   }
 #else
   if (crc != last_display_crc_value) {

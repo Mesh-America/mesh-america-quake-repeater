@@ -5,7 +5,8 @@
 #define GxEPD_WHITE 1
 
 namespace panel {
-enum class Call { Full, Partial, PowerOff, Clear, WriteWhite, Hibernate };
+enum class Call { Full, Partial, PowerOff, Clear, WriteWhite, Hibernate,
+                  PrepareFull, PreparePartial, Finish };
 inline std::vector<Call> calls;
 inline std::vector<std::string> images;
 inline bool valid_history = false;
@@ -56,6 +57,9 @@ public:
   void drawRect(int, int, int, int, int) {}
   void drawBitmap(int, int, const uint8_t*, int, int, int) {}
   void display(bool partial) {
+    assert(!panel::calls.empty());
+    assert(panel::calls.back() == (partial ? panel::Call::PreparePartial : panel::Call::PrepareFull)
+           && "reset / configure immediately before uploading the drawn canvas");
     if (partial)
       assert(panel::valid_history && "partial refresh must follow a clean image after wake");
     panel::calls.push_back(partial ? panel::Call::Partial : panel::Call::Full);
