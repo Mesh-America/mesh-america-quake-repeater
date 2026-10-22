@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/mesh_pocket_gui/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # MeshPocket Full Companion display
 
 Full Companion on MeshPocket includes a channel message board, a worldwide
