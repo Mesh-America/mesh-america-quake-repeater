@@ -1145,17 +1145,17 @@ saved settings. The WebConfig **Display** card exposes the same controls:
 | Setting | CLI | Default |
 | --- | --- | --- |
 | Battery mode | `get/set display.mode` | `button-pairing` on BLE Companions; `button` elsewhere |
-| Battery timeout, seconds | `get/set display.timeout` | `15` |
+| Battery timeout, seconds | `get/set display.timeout` | `900` on e-paper; `15` elsewhere |
 | USB mode | `get/set display.usb.mode` | Same as battery mode |
-| USB timeout, seconds | `get/set display.usb.timeout` | `15` |
+| USB timeout, seconds | `get/set display.usb.timeout` | `900` on e-paper; `15` elsewhere |
 
 Modes are `off`, `on`, `button`, `pairing`, `button-pairing`, and `automatic`.
 Pairing modes are available only on builds supporting BLE pairing.
 
 All display-equipped Companion builds show the screen at boot in the default
 `button` or `button-pairing` mode, on battery or USB power. It stays on for the
-selected profile's timeout (15 seconds by default); button input restarts that
-timer. This also applies to previously saved button modes. Saved `off` and
+selected profile's timeout (15 minutes on e-paper, 15 seconds elsewhere).
+Button input restarts that timer. This also applies to previously saved button modes. Saved `off` and
 pairing-only modes still suppress the boot screen. Repeaters, room servers,
 and sensors do not gain this Companion-only normal-UI boot wake.
 
@@ -1201,6 +1201,10 @@ display rather than timeout `0`. The timeout is retained but unused in `off`,
 changing power source applies the other profile without carrying over a wake
 from the previous profile. Settings survive reboot and filesystem-preserving
 updates in `/display_prefs`; erasing the filesystem restores the defaults.
+The 15-minute e-paper default applies to battery and USB profiles on all roles.
+Existing saved timeouts stay unchanged. To use 15 minutes on an existing node,
+set both `display.timeout` and `display.usb.timeout` to `900`; choose a timed
+mode such as `button` or `button-pairing` if the current mode is `on` or `off`.
 An existing observer timeout that differs from its old 60-second default is
 migrated once to both power profiles; an old zero timeout becomes mode `on`.
 

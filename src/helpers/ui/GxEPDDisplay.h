@@ -57,7 +57,7 @@ class GxEPDDisplay : public DisplayDriver {
   uint16_t _curr_color;
   CRC32 display_crc;
   int last_display_crc_value = 0;
-  int _cycles_before_full_refresh;
+  int _cycles_before_full_refresh = EINK_MAX_PARTIAL_REFRESH;
   int max_partial_refresh = EINK_MAX_PARTIAL_REFRESH; // so this can be changed by an option after
 #if UI_POCKET_GUI
   bool _full_frame = false;
@@ -79,7 +79,8 @@ public:
   void setMaxPartialRefresh(int count) {
     if (count == max_partial_refresh) return;
     max_partial_refresh = count;
-    resetPartialRefreshCounter();
+    // Keep a clean refresh that is already due or explicitly requested.
+    if (!_full_frame && _cycles_before_full_refresh != 0) resetPartialRefreshCounter();
   }
   void setNativeRotation(int rotation) {
     rotation &= 3;
@@ -97,7 +98,13 @@ public:
 
   bool isOn() override { return _isOn; }
   bool isEink() override { return true; }
-  void forceFullRefresh() override { _cycles_before_full_refresh = 0; };
+  void forceFullRefresh() override {
+    _cycles_before_full_refresh = 0;
+#if UI_POCKET_GUI
+    // Rotation and GUI changes can request this after startFrame().
+    _full_frame = true;
+#endif
+  }
   void resetPartialRefreshCounter() { _cycles_before_full_refresh = max_partial_refresh; };
   void turnOn() override;
   void turnOff() override;

@@ -66,8 +66,9 @@ int main() {
   assert(task.settings.channel == 0);
   key(home, KEY_ENTER);
   assert(!home._pocket_browsing);
+  assert(home.clean_count == 0);
   key(home, KEY_NEXT);
-  assert(home._page == HomeScreen::MAP);
+  assert(home._page == HomeScreen::MAP && home.clean_count == 1);
   key(home, KEY_ENTER);
   assert(home._pocket_zooming);
   key(home, KEY_NEXT);
@@ -86,14 +87,16 @@ int main() {
   key(home, KEY_NEXT);
   assert(task.settings.text_large == 1 && home._pocket_dirty);
   home._pocket_setting = 4;
+  const int before_theme = home.clean_count;
   key(home, KEY_NEXT);
-  assert(task.settings.dark == 1 && home.clean_count == 1);
+  assert(task.settings.dark == 1 && home.clean_count == before_theme + 1);
   key(home, KEY_ENTER);
   assert(!home._pocket_editing && !home._pocket_dirty);
   key(home, KEY_PREV);
   assert(home._page == HomeScreen::STATUS);
+  const int before_status = home.clean_count;
   key(home, KEY_ENTER);
-  assert(home._radio_status_page == 1 && task.reader_opens == 0);
+  assert(home._radio_status_page == 1 && task.reader_opens == 0 && home.clean_count == before_status + 1);
 
   // Pairing can interrupt any editing/browsing mode. Returning to the first
   // page saves settings and leaves the next click free to navigate normally.
@@ -104,12 +107,14 @@ int main() {
     home._pocket.state.scroll = 2;
     home._pocket_last_input = 0;
     const int saves = home.save_count;
+    const int cleans = home.clean_count;
     clock_millis += 1000;
     home.showFirstPage();
     assert(home._page == HomeScreen::FIRST && home.save_count == saves + 1);
     assert(!home._pocket_editing && !home._pocket_browsing && !home._pocket_zooming);
     assert(!home._pocket_dirty && home._pocket.state.scroll == 0);
     assert(home._pocket_last_input == clock_millis);
+    assert(home.clean_count == cleans + (interrupted != HomeScreen::FIRST));
     key(home, KEY_NEXT);
     assert(home._page == HomeScreen::MAP);
   }

@@ -642,6 +642,7 @@ class HomeScreen : public UIScreen {
 #if UI_POCKET_GUI
     flushPocketSettings();
     _pocket_editing = _pocket_browsing = _pocket_zooming = false;
+    displayForceClean();
 #endif
     do {
       _page = (_page + HomePage::Count + direction) % HomePage::Count;
@@ -939,6 +940,7 @@ public:
   void showFirstPage() {
 #if UI_POCKET_GUI
     flushPocketSettings();
+    if (_page != HomePage::FIRST) displayForceClean();
     _pocket_editing = _pocket_browsing = _pocket_zooming = false;
     _pocket.resetScroll();
     _pocket_last_input = millis();
@@ -971,10 +973,7 @@ public:
     const uint32_t idle = mesh::ui::pocket::idleMillis(_task->pocketSettings());
     if (idle && uint32_t(pocket_now - _pocket_last_input) >= idle
         && (_page != HomePage::FIRST || _pocket_browsing)) {
-      flushPocketSettings();
-      _pocket_editing = _pocket_browsing = _pocket_zooming = false;
-      _pocket.resetScroll();
-      _page = HomePage::FIRST;
+      showFirstPage();
       _task->gotoHomeScreen();
     }
 #endif
@@ -983,6 +982,9 @@ public:
     }
     if (!isPageVisible(_page)) {
       _page = HomePage::RADIO;
+#if UI_POCKET_GUI
+      displayForceClean();
+#endif
       resetRadioProfileDisplayPage();
     }
 #if UI_WIFI_SETUP_HOME_PAGE == 1
@@ -1673,10 +1675,12 @@ public:
         return true;
       }
       if (_pocket_zooming && (key == KEY_NEXT || key == KEY_RIGHT || key == KEY_PREV || key == KEY_LEFT)) {
+        const uint8_t previous_zoom = settings.map_zoom;
         const bool closer = key == KEY_NEXT || key == KEY_RIGHT;
         if (closer && settings.map_zoom < 8) ++settings.map_zoom;
         if (!closer && settings.map_zoom > 0) --settings.map_zoom;
         _pocket_dirty = true;
+        if (previous_zoom != settings.map_zoom) displayForceClean();
         return true;
       }
     }
@@ -1709,6 +1713,9 @@ public:
 #endif
                             )) {
       _radio_status_page++;
+#if UI_POCKET_GUI
+      displayForceClean();
+#endif
       return true;
     }
 #ifdef COMPANION_EXCLUSIVE_WIFI_BLE
@@ -2565,7 +2572,7 @@ void UITask::userLedHandler() {
 void UITask::setCurrScreen(UIScreen* c) {
 #if UI_POCKET_GUI
   if (curr == home && c != home) static_cast<HomeScreen*>(home)->flushPocketSettings();
-  if (curr != c && _pocket_settings.dark && _display) _display->forceFullRefresh();
+  if (curr != c && _display) _display->forceFullRefresh();
 #endif
 #if COMPANION_FEATURE_READER
   if (isReaderActive() && c != reader

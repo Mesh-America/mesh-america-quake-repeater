@@ -27,6 +27,13 @@ They use a separate checked, atomically replaced record in primary storage.
 Existing node, channel and contact formats are unchanged. Timezone comes from
 the existing node preferences.
 
+Changing pages or map zoom uses a full clean refresh to clear the previous
+image. Updates within the same page keep the faster partial refresh.
+
+The idle screen-off timer defaults to 15 minutes on battery and USB. Existing
+saved timeouts are retained; set `display.timeout` and `display.usb.timeout` to
+`900` to use 15 minutes. The return-to-board delay is a separate setting.
+
 The map centres on this node's location, or the first contact with a location.
 With no locations it shows a world overview. Contacts appear as dots, with
 nearby names at closer zooms. The view spans 20,000 km down to 5 km vertically;

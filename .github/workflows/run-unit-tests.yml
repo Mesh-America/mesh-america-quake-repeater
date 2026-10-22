@@ -854,7 +854,7 @@ jobs:
         run: >-
           python3 -B -m unittest
           test_message_navigation test_companion_reader test_reader_touch_coordinates
-          test_pocket_gui test_pocket_world_map
+          test_pocket_gui test_pocket_world_map test_pocket_eink_refresh
           test_touch_debug_overlay test_touch_debug_cli test_color_theme
           test_indicator_messages_profile test_t096_message_footer_profile
           test_indicator_display_profile test_indicator_render_profile

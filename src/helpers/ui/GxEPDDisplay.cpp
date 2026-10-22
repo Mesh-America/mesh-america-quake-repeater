@@ -71,7 +71,11 @@ bool GxEPDDisplay::begin() {
   }
 
   display.setPartialWindow(0, 0, display.width(), display.height());
+#if UI_POCKET_GUI
+  forceFullRefresh();
+#else
   resetPartialRefreshCounter();
+#endif
 
   #if DISP_BACKLIGHT
   digitalWrite(DISP_BACKLIGHT, LOW);
@@ -97,10 +101,16 @@ void GxEPDDisplay::turnOn() {
 #endif
   if (!_isOn) {
     _isOn = true;
+#if UI_POCKET_GUI
+    forceFullRefresh();
+#endif
   }
 }
 
 void GxEPDDisplay::turnOff() {
+#if UI_POCKET_GUI
+  if (!_init || !_isOn) return;
+#endif
 #ifdef MESHCORE_TECHO_LITE_DISPLAY_DETECTION
   if (!_init || !_present || !_isOn) return;
 #endif

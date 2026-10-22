@@ -486,7 +486,87 @@ int main() {
 '''
 
 
+EINK_TEST = r'''
+#include <cassert>
+#include <helpers/ui/DisplayPowerSettings.h>
+using namespace mesh::ui;
+int main() {
+  for (bool ble : {false, true}) for (bool companion : {false, true}) {
+    FakeFS fs;
+    assert(!loadDisplayPowerSettings(&fs, ble, companion));
+    const auto& prefs = displayPowerPrefs();
+    assert(prefs.battery.seconds == 900 && prefs.usb.seconds == 900);
+    for (bool usb : {false, true}) {
+      DisplayPowerPolicy policy;
+      const uint32_t start = UINT32_MAX - 1000;
+      policy.update(prefs, usb, false, false, start);
+      assert(policy.on() == companion);
+      assert(policy.wake(DisplayWake::Button, start));
+      // Redraw/service calls and an app connection do not count as input.
+      policy.update(prefs, usb, true, false, start + 899999);
+      assert(policy.on());
+      policy.update(prefs, usb, true, false, start + 900000);
+      assert(!policy.on());
+      assert(policy.wake(DisplayWake::Button, start + 900001));
+      assert(policy.on());
+    }
+    char reply[160];
+    for (const char* command : {"set display.timeout 27", "set display.usb.timeout 123"}) {
+      assert(handleDisplayPowerCommand(command, reply, sizeof(reply)));
+      assert(std::string(reply) == "OK");
+    }
+    const auto saved = fs.files.at("/display_prefs");
+    assert(saved.size() == 12 && saved[2] == 2);
+    assert(loadDisplayPowerSettings(&fs, ble, companion));
+    assert(prefs.battery.seconds == 27 && prefs.usb.seconds == 123);
+    assert(fs.files.at("/display_prefs") == saved);
+    for (bool usb : {false, true}) {
+      DisplayPowerPolicy policy;
+      policy.update(prefs, usb, false, false, 0);
+      policy.wake(DisplayWake::Button, 0);
+      const uint32_t timeout = usb ? 123000 : 27000;
+      policy.update(prefs, usb, false, false, timeout - 1);
+      assert(policy.on());
+      policy.update(prefs, usb, false, false, timeout);
+      assert(!policy.on());
+    }
+    // A legacy explicit always-on setting must not become a timed profile.
+    migrateLegacyDisplayTimeout(0);
+    assert(loadDisplayPowerSettings(&fs, ble, companion));
+    for (bool usb : {false, true}) {
+      DisplayPowerPolicy policy;
+      policy.update(prefs, usb, false, false, 0);
+      policy.update(prefs, usb, false, false, 3600000);
+      assert(policy.on());
+    }
+  }
+}
+'''
+
+
 class DisplayPowerTest(unittest.TestCase):
+    def test_all_eink_drivers_default_to_fifteen_minute_idle_without_overriding_saved_profiles(self):
+        compiler = shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler, "host C++ compiler required")
+        with tempfile.TemporaryDirectory(prefix="mesh-eink-timeout-test-") as name:
+            work = Path(name)
+            (work / "helpers").mkdir()
+            (work / "helpers/IdentityStore.h").write_text(FS_STUB)
+            (work / "test.cpp").write_text(EINK_TEST)
+            for driver in ("GxEPDDisplay", "E213Display", "E290Display"):
+                with self.subTest(driver=driver):
+                    executable = work / (driver + ".exe")
+                    result = subprocess.run([
+                        compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                        "-DDISPLAY_CLASS=" + driver, "-I" + str(work),
+                        "-I" + str(ROOT / "src"), str(work / "test.cpp"),
+                        str(ROOT / "src/helpers/ui/DisplayPowerSettings.cpp"),
+                        "-o", str(executable),
+                    ], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_companion_boot_wake_is_transport_and_layout_independent(self):
         mesh = (ROOT / "examples/companion_radio/MyMesh.cpp").read_text()
         self.assertRegex(mesh, re.compile(
