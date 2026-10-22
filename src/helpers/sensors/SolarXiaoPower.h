@@ -12,6 +12,8 @@ void service();
 bool handleCommand(const char* command, char* reply, size_t capacity, bool local);
 void addTelemetry(CayenneLPP& telemetry);
 uint8_t voltageChannels(uint8_t* channels, uint8_t capacity);
+// The channel list reserves history schema without I/O; only queryVoltages
+// returns measured samples, and remains gated by the active power profile.
 uint8_t queryVoltages(SensorManager::VoltageSensorReading* readings, uint8_t capacity);
 }}
 #endif

@@ -214,6 +214,14 @@ def requirements(platform, defines, target):
     if platform == "NRF52_PLATFORM":
         parts["loop_and_callback_stacks"] = integer(defines, "MESH_NRF52_LOOP_STACK_WORDS", 2048) * 4 + 3072
         parts["core_usb_filesystems_sensors"] = 12288
+        if (integer(defines, "MESH_SOLARXIAO_POWER", 0)
+                and integer(defines, "MESH_ENABLE_TELEMETRY_HISTORY", 1)):
+            # History reserves native channels before Auto detection. Its
+            # 16-channel ceiling includes native and optional monitors, not
+            # 16 optional channels plus four native ones. Bind these values
+            # to the real ExternalVoltageHistory allocation in the host test.
+            # Retain the existing core allowance and add allocator overhead.
+            parts["solarxiao_voltage_history"] = 16 * 360 + 32
         if "OTA_RAK15002_SD_STORE" in defines:
             # New optional RAK SD allocates one SdFs volume and separate
             # staging/archive FsFile handles lazily; production bounds the
@@ -406,6 +414,7 @@ def requirements(platform, defines, target):
     if "expanded_message_previews" in parts:
         largest = max(largest, 8192 + parts["expanded_message_previews"])
     for name in ("client_table", "flood_filter_table", "room_flood_rule_table", "neighbor_history",
+                 "solarxiao_voltage_history",
                  "ota_context", "screen_objects_and_history", "ota_encoder_workspace",
                  "ota_generic_source_buffers", "ethernet_or_external_ota_workspaces", "ota_target_name_lookup",
                  "ethernet_companion_worker"):

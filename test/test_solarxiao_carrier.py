@@ -371,9 +371,10 @@ void nativeSilent(bool periodic=true) {
   uint8_t channels[]={99,99,99,99,99};
   SensorManager::VoltageSensorReading values[5];
   for(auto& value:values)value={99,99,true};
-  assert(!voltageChannels(channels,5));assert(!queryVoltages(values,5));
+  assert(voltageChannels(channels,5)==4);assert(!queryVoltages(values,5));
   assert(!voltageChannels(nullptr,0));assert(!queryVoltages(nullptr,0));
-  for(auto c:channels)assert(c==99);
+  for(unsigned i=0;i<4;++i)assert(channels[i]==i+2);
+  assert(channels[4]==99);
   for(auto value:values)assert(value.channel==99 && value.voltage==99 && value.valid);
   assert(calls==Wire.calls && reads==Wire.reads && writes==Wire.writes);
 }

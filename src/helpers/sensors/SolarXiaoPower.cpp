@@ -146,7 +146,8 @@ void addTelemetry(CayenneLPP& lpp) {
   for (unsigned i=0;i<3;++i) lpp.addGenericSensor(11+i,s.alerts[i]);
 }
 uint8_t voltageChannels(uint8_t* channels,uint8_t capacity) {
-  if (!selection.nativeAllowed()) return 0;
+  // History allocates its schema once at boot, before Auto can verify MPPT.
+  // Reserve stable IDs without I/O; inactive/unavailable samples stay missing.
   const uint8_t count=capacity<4 ? capacity : 4;
   for (uint8_t i=0;channels && i<count;++i) channels[i]=2+i;
   return count;

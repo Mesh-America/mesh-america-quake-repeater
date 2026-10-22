@@ -1,7 +1,8 @@
 # SolarXiao carrier profiles, MPPT and battery controls
 
-SolarXiao Repeater firmware supports the CN3791 Base, older BQ24650 Advanced and
-LTC4162/INA260 MPPT carriers in Full and Reduced builds. Use USB CLI or the
+SolarXiao Repeater and QSPI OTA Room Server firmware support the CN3791 Base,
+older BQ24650 Advanced and LTC4162/INA260 MPPT carriers in Full and Reduced builds.
+Use USB CLI or the
 authenticated administrator CLI over LoRa. Ship mode and
 saved-policy reset require local USB. Commands do not change RF settings.
 
@@ -82,13 +83,21 @@ resistors, switches and a solder jumper. An OTA update cannot measure those
 signals or change those setpoints without additional hardware connections.
 
 Manual Basic mode suppresses native LTC4162/INA260 polling, register reads/writes,
-replay and telemetry/history channels 2..13. `get mppt`, `set mppt ...` and
+replay and native measurements on channels 2..13. `get mppt`, `set mppt ...` and
 `mppt ...` explain that Basic Base/Advanced layouts have no digital charger interface.
 Pending auto mode only probes INA260 identity; it does not access the charger.
 The generic sensor scanner still reserves native addresses 0x40 and 0x68, so it
 cannot bypass that policy. Optional external sensor channels still start at 14.
 Historical samples retained from a previous carrier selection describe the old
 samples, not current sensor availability.
+
+Voltage history reserves native channel IDs 2..5 at boot, even while Auto is
+pending or Basic is selected. This is schema allocation, not chip access or a
+measurement. It lets later detection, charger input power or a manual mode
+change supply valid samples without restarting or clearing unrelated history.
+Inactive readings remain missing, and empty channels do not appear in populated
+history results. Native and optional I2C voltage history use the existing
+`get telemetry.volt.i2c <channel> [1-4]` reader: four days of 30-minute RAM samples.
 
 Where telemetry history is included, `get solar history` points to the existing
 `get telemetry.volt [1-7]` and `get telemetry.temp [1-7]` commands: 30-minute
@@ -110,9 +119,20 @@ carrier does not erase those overrides, change RF/PA settings, modify battery
 protection, or write charger defaults. The INA260 identity verifies the monitor;
 LTC4162 chemistry and cell-count checks still independently guard charger writes.
 
-Radio target selection remains separate. Choose the existing
-`solarxiao_30S_repeater` or `solarxiao_33S_repeater` firmware target to match the
-fitted E22 radio module. The
+Radio target and role selection remain separate from the power profile:
+
+| Fitted module | Repeater | Room Server |
+| --- | --- | --- |
+| E22 M30S | `solarxiao_30S_repeater` | `solarxiao_30S_room_server_lora_ota` |
+| E22 M33S | `solarxiao_33S_repeater` | `solarxiao_33S_room_server_lora_ota` |
+
+All three power profiles work in these role builds. Room uses its existing
+onboard-QSPI OTA target, identity and application layout, with the matching
+board/storage-aware OTAFIX bootloader. The older plain `*_room_server` targets
+remain separate compatibility/recovery recipes; this native interface is
+qualified on the QSPI OTA Room targets. No legacy identity is remapped.
+
+The
 published Base Standard schematic specifies M30S; the pictured 2W Advanced
 uses M33S. Charger detection cannot identify the PA variant or select its TX
 power limits.
