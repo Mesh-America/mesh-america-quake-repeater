@@ -1467,6 +1467,10 @@ bool DataStore::loadPrefsInt(const char *filename,
     if (has_cpu_footer) {
       uint8_t cpu_footer[mesh::esp32::cpuclock::FooterSize] = {};
       const size_t length = file.read(cpu_footer, sizeof(cpu_footer));
+      // Eight bytes of a torn TZF record have the same declared image size
+      // as a CPU footer. Never reinterpret that known timezone tag as a bad
+      // CPU override and silently lose the fractional timezone.
+      success = success && (length < 3 || memcmp(cpu_footer, "TZF", 3) != 0);
       // A bad CPU selection must not discard valid identity/radio preferences.
       // Missing or corrupt CPU metadata alone falls back to Auto.
       mesh::esp32::cpuclock::decodeFooter(cpu_footer, length, loaded_prefs.cpu_freq_mhz);

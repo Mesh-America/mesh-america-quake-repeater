@@ -133,6 +133,19 @@ int main() {
         assert(loaded.cpu_freq_mhz==0&&loaded.freq==prefs.freq&&loaded.tz_offset==timezone);
         assert(loaded.ble_pin==123456&&loaded.tx_media==mesh::RADIO_TX_SECONDARY);
       }
+      // Unsupported selections still preserve the independently checked
+      // timezone/radio data when their CPU record has a valid header and CRC.
+      {
+        DataStore bad;auto unsupported=image;
+        uint8_t* footer=unsupported.data()+legacy.size();
+        footer[4]=0;footer[5]=200;
+        const uint16_t crc=footerChecksum(footer,6);
+        footer[6]=uint8_t(crc>>8);footer[7]=uint8_t(crc);
+        bad.fs.files["/new_prefs"]=unsupported;loaded.cpu_freq_mhz=240;
+        assert(bad.loadPrefsInt("/new_prefs",loaded,lat,lon));
+        assert(loaded.cpu_freq_mhz==0&&loaded.freq==prefs.freq&&loaded.tz_offset==timezone);
+        assert(loaded.ble_pin==123456&&loaded.tx_media==mesh::RADIO_TX_SECONDARY);
+      }
       for(size_t quota=0;quota<image.size();++quota) {
         DataStore failed;failed.fs.files["/new_prefs"]=legacy;
         failed.fs.fail_write_after=int(quota);

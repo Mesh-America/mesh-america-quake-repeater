@@ -111,6 +111,11 @@ The selection applies immediately; a failed apply or save reports an error and
 attempts to restore the previous selection. Returning to Auto clears the saved
 override. Existing preferences load as Auto.
 
+A damaged CPU override falls back to Auto without discarding other valid
+preferences. An identifiable truncated timezone record is rejected as an
+incomplete preferences image, so it cannot silently replace a fractional
+timezone with an integer value.
+
 Local USB/Bluetooth console commands provide temporary controls for controlled
 radio2 experiments. They are held in RAM and reset at reboot:
 

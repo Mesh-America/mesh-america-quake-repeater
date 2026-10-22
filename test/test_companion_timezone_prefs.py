@@ -155,6 +155,9 @@ static void seedLive(CompanionNodePrefs& prefs) {
   prefs.tz_offset = 11.25f; prefs.tz_offset_legacy = -11;
   prefs.flood_retry_attempts = 9; prefs.gps_sync_interval_hours = 12;
   prefs.tx_media = mesh::RADIO_TX_BOTH; prefs.tx_ssh = mesh::RADIO_TX_PRIMARY;
+#if defined(ESP32_PLATFORM)
+  prefs.cpu_freq_mhz = 240;
+#endif
   tag(prefs, "live adapter");
 }
 
@@ -164,6 +167,9 @@ static void expectLive(CompanionNodePrefs& prefs, double lat, double lon) {
   assert(prefs.tz_offset == 11.25f && prefs.tz_offset_legacy == -11);
   assert(prefs.flood_retry_attempts == 9 && prefs.gps_sync_interval_hours == 12);
   assert(prefs.tx_media == mesh::RADIO_TX_BOTH && prefs.tx_ssh == mesh::RADIO_TX_PRIMARY);
+#if defined(ESP32_PLATFORM)
+  assert(prefs.cpu_freq_mhz == 240);
+#endif
   assert(lat == 1 && lon == 2);
   expectTag(prefs, "live adapter");
 }
@@ -304,6 +310,21 @@ int main() {
   const std::vector<uint8_t> fraction = @FIVE_SEVENTY_FIVE@;
   complete.insert(complete.end(), fraction.begin(), fraction.end());
   const size_t extension = sizeof(LEGACY_IMAGE);
+#if defined(ESP32_PLATFORM)
+  // A TZF record torn at eight bytes aliases the length of an integer image
+  // with a CPU override. It must fail atomically, retaining all live values.
+  static_assert(mesh::esp32::cpuclock::FooterSize == 8, "CPU/TZF length collision");
+  for (const FractionVector& vector : FRACTIONS) {
+    auto torn = legacyImage(static_cast<int8_t>(vector.hours));
+    torn.insert(torn.end(), vector.footer.begin(), vector.footer.begin() + 8);
+    rejectImage(torn);
+  }
+  // A second partial TZF after a complete fractional image is foreign data,
+  // even though its size also resembles an optional CPU override.
+  auto duplicate_torn = complete;
+  duplicate_torn.insert(duplicate_torn.end(), fraction.begin(), fraction.begin() + 8);
+  rejectImage(duplicate_torn);
+#endif
   // A declared fractional image must not silently fall back to its legacy
   // byte when a stream prematurely reports EOF before the checked footers.
   for (size_t cutoff : {size_t(84), extension - size_t(8), extension}) {
