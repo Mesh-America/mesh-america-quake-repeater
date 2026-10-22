@@ -420,7 +420,12 @@ class CustomLR1110 : public LR1110 {
 
       // Send the already converted values. RadioLib 7.7.1 converts them again
       // with 32-bit arithmetic, which overflows for periods above about 131 ms.
-      return this->setRxDutyCycle(rxPeriodRaw, sleepPeriodRaw, RADIOLIB_LR11X0_RX_DUTY_CYCLE_MODE_RX);
+      state = this->setRxDutyCycle(rxPeriodRaw, sleepPeriodRaw, RADIOLIB_LR11X0_RX_DUTY_CYCLE_MODE_RX);
+      if (state == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
+      return state;
     }
 
     int16_t setRxBoostedGainMode(bool en) {
@@ -479,7 +484,11 @@ class CustomLR1110 : public LR1110 {
         fastSetRxCycles += DWT->CYCCNT - segment;
 #endif
         stagedMode = RADIOLIB_RADIO_MODE_NONE;
-        if (rc == RADIOLIB_ERR_NONE) ++_profileFastResumes;
+        if (rc == RADIOLIB_ERR_NONE) {
+          ++_profileFastResumes;
+          _activityAt = 0;
+          _headerSeen = false;
+        }
         if (rc == RADIOLIB_ERR_NONE) _profilePacketDirty = false;
         _profileSwitch.rxResult(rc, true);
         return rc;
@@ -490,6 +499,10 @@ class CustomLR1110 : public LR1110 {
           RADIOLIB_LR11X0_RX_TIMEOUT_INF,
           RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
           RADIOLIB_IRQ_RX_DEFAULT_MASK | (1UL << RADIOLIB_IRQ_HEADER_ERR), 0);
+      if (rc == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
       _profileSwitch.rxResult(rc, true);
       if (rc == RADIOLIB_ERR_NONE) _profilePacketDirty = false;
       return rc;

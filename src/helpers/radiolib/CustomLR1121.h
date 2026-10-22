@@ -123,7 +123,12 @@ class CustomLR1121 : public LR1121 {
 
     int16_t startReceive() override {
       // include the PREAMBLE_DETECTED irq bit in reported flags.
-      return LR1121::startReceive(RADIOLIB_LR11X0_RX_TIMEOUT_INF, RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED), RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      const int16_t status = LR1121::startReceive(RADIOLIB_LR11X0_RX_TIMEOUT_INF, RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED), RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      if (status == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
+      return status;
     }
 
     bool isReceiving() {

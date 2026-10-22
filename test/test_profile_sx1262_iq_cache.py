@@ -130,6 +130,7 @@ struct SX1262 {
   int16_t setRx(uint32_t timeout) { assert(timeout==0xffffff);return call('R'); }
 };
 struct Radio : SX1262 {
+  uint32_t _activityAt=0;bool _headerSeen=false;
   SX1262ProfileSwitchState _profileSwitch{true};
   bool _coldStandby=true,_tcxoWakePending=false,_rx_ps_rf_rx_disabled=false;
   uint32_t _profileFastResumes=0;

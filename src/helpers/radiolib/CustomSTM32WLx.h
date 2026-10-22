@@ -33,7 +33,12 @@ class CustomSTM32WLx : public STM32WLx {
 
     int16_t startReceive() override {
       // include the PREAMBLE_DETECTED irq bit in reported flags
-      return STM32WLx::startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF, RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED), RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      const int16_t status = STM32WLx::startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF, RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED), RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      if (status == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
+      return status;
     }
 
     bool isReceiving() {

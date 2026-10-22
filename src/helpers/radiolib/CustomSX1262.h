@@ -550,6 +550,10 @@ class CustomSX1262 : public SX1262 {
         // while the SX1262 alternates between its RX and sleep windows.
         this->mod->setRfSwitchState(Module::MODE_RX);
       }
+      if (state == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
       return state;
     }
 
@@ -712,7 +716,11 @@ class CustomSX1262 : public SX1262 {
           rc = setRx(rxTimeout);  // original BUSY waits and status checks
         }
         stagedMode = RADIOLIB_RADIO_MODE_NONE;
-        if (rc == RADIOLIB_ERR_NONE) ++_profileFastResumes;
+        if (rc == RADIOLIB_ERR_NONE) {
+          ++_profileFastResumes;
+          _activityAt = 0;
+          _headerSeen = false;
+        }
         _coldStandby = rc != RADIOLIB_ERR_NONE;
         _profileSwitch.rxResult(rc, true);
         return rc;
@@ -723,6 +731,12 @@ class CustomSX1262 : public SX1262 {
           RADIOLIB_SX126X_RX_TIMEOUT_INF,
           RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
           RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      // Acknowledged RX entry cleared the previous hardware IRQs. Its local
+      // activity latches must not classify the next packet as old activity.
+      if (rc == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
       const bool reusable = rc == RADIOLIB_ERR_NONE && _profileSwitch.enabled
           && getPacketType() == RADIOLIB_SX126X_PACKET_TYPE_LORA;
       _coldStandby = rc != RADIOLIB_ERR_NONE;

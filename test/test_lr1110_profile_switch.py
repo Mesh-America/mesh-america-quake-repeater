@@ -150,6 +150,7 @@ struct LR1110 {
   int16_t setRx(uint32_t timeout) { assert(timeout==0xffffff);return call('R'); }
 };
 struct Radio:LR1110 {
+  uint32_t _activityAt=0;bool _headerSeen=false;
   LR1110ProfileSwitchState _profileSwitch{true};
   bool _profileStandbyWarm=false,_profilePacketDirty=false;
   uint32_t _profileFastResumes=0;

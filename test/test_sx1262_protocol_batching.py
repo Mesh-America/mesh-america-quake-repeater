@@ -84,6 +84,7 @@ struct SX1262 {
   uint8_t getPacketType() { call('Q');return 1; }
 };
 struct Radio: SX1262 {
+  uint32_t _activityAt=0;bool _headerSeen=false;
   SX1262ProfileSwitchState _profileSwitch{true};
   bool _coldStandby=false;uint32_t _profileFastResumes=0;
   @METHODS@

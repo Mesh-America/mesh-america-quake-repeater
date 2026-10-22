@@ -124,10 +124,15 @@ class CustomSX1268 : public SX1268 {
     }
 
     int16_t startReceive() override {
-      return SX1268::startReceive(
+      const int16_t status = SX1268::startReceive(
           RADIOLIB_SX126X_RX_TIMEOUT_INF,
           RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
           RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+      if (status == RADIOLIB_ERR_NONE) {
+        _activityAt = 0;
+        _headerSeen = false;
+      }
+      return status;
     }
 
     bool isReceiving() {
