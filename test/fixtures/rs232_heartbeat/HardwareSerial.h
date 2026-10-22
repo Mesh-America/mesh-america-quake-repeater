@@ -19,6 +19,10 @@ public:
   std::function<void(const uint8_t*, size_t)> delivered;
 
   bool setPins(int16_t, int16_t) { return pins_ok; }
+  void setRX(int16_t) {}
+  void setTX(int16_t) {}
+  void setRx(int16_t) {}
+  void setTx(int16_t) {}
   void begin(uint32_t) { ++begin_calls; installed = begin_ok; rx.clear(); }
   void end() { ++end_calls; installed = false; rx.clear(); }
   explicit operator bool() const { return installed; }
@@ -45,3 +49,5 @@ public:
     if (installed) rx.insert(rx.end(), data, data + size);
   }
 };
+using Uart = HardwareSerial;
+using SerialUART = HardwareSerial;
