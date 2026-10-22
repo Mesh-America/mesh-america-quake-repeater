@@ -14,12 +14,16 @@ class Esp32BlePowerTests(unittest.TestCase):
                          ROOT / "test/fixtures/nimble_companion/mocks")
 
     def test_bluedroid_legacy_static_ownership_and_partial_stop_failures(self):
-        self.run_adapter("test_bluedroid_power.cpp", ["-DCONFIG_BLUEDROID_ENABLED=1"],
+        self.run_adapter("test_bluedroid_power.cpp", ["-DCONFIG_BLUEDROID_ENABLED=1", "-DCONFIG_BT_GATTS_SEND_SERVICE_CHANGE_AUTO=1"],
                          ROOT / "test/fixtures/esp32_ble_power/mocks")
 
     def test_bluedroid_new_library_ownership_and_partial_stop_failures(self):
         self.run_adapter("test_bluedroid_power.cpp", ["-DCONFIG_BLUEDROID_ENABLED=1",
-                         "-DTEST_BLE_OWNED_SERVER=1"],
+                         "-DTEST_BLE_OWNED_SERVER=1", "-DCONFIG_BT_GATTS_SEND_SERVICE_CHANGE_AUTO=1"],
+                         ROOT / "test/fixtures/esp32_ble_power/mocks")
+
+    def test_bluedroid_manual_mode_keeps_marker_dependency_disabled(self):
+        self.run_adapter("test_bluedroid_power.cpp", ["-DCONFIG_BLUEDROID_ENABLED=1"],
                          ROOT / "test/fixtures/esp32_ble_power/mocks")
 
     def run_adapter(self, fixture, flags, mocks):

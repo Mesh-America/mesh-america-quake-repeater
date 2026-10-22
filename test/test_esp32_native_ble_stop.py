@@ -182,7 +182,7 @@ class NativeNimbleStopTests(unittest.TestCase):
             cpp.write_text(harness)
             built = subprocess.run([
                 os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                "-fsanitize=address,undefined", "-DCONFIG_NIMBLE_ENABLED=1",
+                "-fsanitize=address,undefined", "-DCONFIG_NIMBLE_ENABLED=1", "-DMESH_BLE_USES_NIMBLE=1",
                 str(cpp), "-o", str(exe)], text=True, capture_output=True, timeout=30)
             self.assertEqual(built.returncode, 0, built.stderr)
             result = subprocess.run([str(exe)], text=True, capture_output=True, timeout=10)
@@ -193,7 +193,7 @@ class NativeNimbleStopTests(unittest.TestCase):
                                      "!_nativeHostStopped")
             cpp.write_text(broken)
             built = subprocess.run([
-                os.environ.get("CXX", "c++"), "-std=c++17", "-DCONFIG_NIMBLE_ENABLED=1",
+                os.environ.get("CXX", "c++"), "-std=c++17", "-DCONFIG_NIMBLE_ENABLED=1", "-DMESH_BLE_USES_NIMBLE=1",
                 str(cpp), "-o", str(exe)], text=True, capture_output=True, timeout=30)
             self.assertEqual(built.returncode, 0, built.stderr)
             result = subprocess.run([str(exe)], text=True, capture_output=True, timeout=10)

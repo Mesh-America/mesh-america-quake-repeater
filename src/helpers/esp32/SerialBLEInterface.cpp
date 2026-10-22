@@ -4,6 +4,7 @@
 #include "esp_mac.h"
 #include "esp_bt.h"
 #include <stdlib.h>
+#include <new>
 #if defined(CONFIG_BLUEDROID_ENABLED) && !defined(MESH_USE_NIMBLE_ARDUINO)
 #include "esp_gap_ble_api.h"
 #include "esp_bt_main.h"
@@ -33,6 +34,216 @@ extern "C" bool bleInUse(void) {
 #define BLE_BOND_PERSIST_TIMEOUT_MS 15000
 
 #define BLE_POWER_RETRY_MS 1000
+
+#if !MESH_BLE_USES_NIMBLE
+// Bluedroid's BLEService registers its std::map<BLECharacteristic*, ...> in
+// pointer order. Separate allocations can reverse TX/RX after a host restart,
+// invalidating a bonded phone's cached value/CCCD handles. Members of one
+// holder have a fixed address order, so retain the original TX-first layout.
+struct SerialBLEInterface::OrderedGattCharacteristics {
+  BLECharacteristic tx;
+  BLECharacteristic rx;
+  OrderedGattCharacteristics(uint32_t tx_properties, uint32_t rx_properties)
+      : tx(CHARACTERISTIC_UUID_TX, tx_properties),
+        rx(CHARACTERISTIC_UUID_RX, rx_properties) {}
+};
+#endif
+
+#if MESH_BLE_AUTO_CACHE_REFRESH
+std::atomic<SerialBLEInterface*> SerialBLEInterface::_cacheEventOwner{nullptr};
+
+// IDF's queued attribute-table request copies these pointers, not their bytes.
+// Keep every referenced value alive through its asynchronous callback.
+static uint16_t cachePrimaryServiceUuid = ESP_GATT_UUID_PRI_SERVICE;
+static uint8_t cacheMarkerUuid[16] = {
+  0x91, 0x6a, 0x63, 0x7d, 0x2d, 0x1b, 0x44, 0x96,
+  0x99, 0x61, 0x53, 0x43, 0x4d, 0x43, 0x00, 0x01
+};
+static const esp_gatts_attr_db_t cacheMarkerAttributes[] = {{
+  {ESP_GATT_AUTO_RSP},
+  {ESP_UUID_LEN_16, reinterpret_cast<uint8_t*>(&cachePrimaryServiceUuid),
+   ESP_GATT_PERM_READ, sizeof(cacheMarkerUuid), sizeof(cacheMarkerUuid),
+   cacheMarkerUuid}
+}};
+
+void SerialBLEInterface::installCacheGattHandler() {
+  SerialBLEInterface* expected = nullptr;
+  if (!_cacheEventOwner.compare_exchange_strong(expected, this)) return;
+  _previousGattsHandler = BLEDevice::m_customGattsHandler;
+  BLEDevice::setCustomGattsHandler(cacheGattEvent);
+}
+
+void SerialBLEInterface::retireCacheGattHandler() {
+  // The host is quiescent before this runs; no callback can still own us.
+  if (_cacheEventOwner.load(std::memory_order_acquire) != this) return;
+  if (BLEDevice::m_customGattsHandler == cacheGattEvent)
+    BLEDevice::setCustomGattsHandler(_previousGattsHandler);
+  _cacheEventOwner.store(nullptr, std::memory_order_release);
+  _cacheConnected.store(false, std::memory_order_release);
+  _cacheAuthenticated.store(false, std::memory_order_release);
+  _cacheConnection.store(0, std::memory_order_release);
+  _cacheNusVerifiedConnection.store(0, std::memory_order_release);
+  _cacheOperation.store(CacheOperation::None, std::memory_order_release);
+  _cacheEvent.store(CacheOperation::None, std::memory_order_release);
+  _cacheGattsIf = ESP_GATT_IF_NONE;
+  _cacheMarker = CacheMarker::Absent;
+  _cacheMarkerHandle = 0;
+  _cacheStalled = false;
+  _cacheVerifiedPeerValid = false;
+  _cacheAttemptConnection = _cacheEncryptedConnection = 0;
+  _cacheTriggeredConnection = _cacheOperationConnection = 0;
+  _cacheFailures = 0;
+}
+
+void SerialBLEInterface::cacheGattEvent(esp_gatts_cb_event_t event,
+    esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param) {
+  SerialBLEInterface* owner = _cacheEventOwner.load(std::memory_order_acquire);
+  if (owner == nullptr) return;
+  if (owner->_previousGattsHandler != nullptr
+      && owner->_previousGattsHandler != cacheGattEvent)
+    owner->_previousGattsHandler(event, gatts_if, param);
+  if (owner->_callbacksEnabled.load(std::memory_order_acquire) && param != nullptr)
+    owner->handleCacheGattEvent(event, gatts_if, param);
+}
+
+void SerialBLEInterface::handleCacheGattEvent(esp_gatts_cb_event_t event,
+    esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param) {
+  if (event == ESP_GATTS_CONNECT_EVT) {
+    if (!_cacheConnected.load(std::memory_order_acquire)) {
+      _cacheGattsIf = gatts_if;
+      for (size_t i = 0; i < sizeof(param->connect.remote_bda); ++i)
+        _cacheRemoteAddress[i].store(param->connect.remote_bda[i], std::memory_order_relaxed);
+      _cacheAuthenticated.store(false, std::memory_order_release);
+      _cacheConnection.fetch_add(1, std::memory_order_release);
+      _cacheConnected.store(true, std::memory_order_release);
+    }
+    return;
+  }
+  if (gatts_if != _cacheGattsIf) return;
+  if (event == ESP_GATTS_DISCONNECT_EVT) {
+    _cacheConnected.store(false, std::memory_order_release);
+    _cacheAuthenticated.store(false, std::memory_order_release);
+    return;
+  }
+  CacheOperation completed;
+  bool succeeded;
+  uint16_t handle = 0;
+  if (event == ESP_GATTS_CREAT_ATTR_TAB_EVT) {
+    if (param->add_attr_tab.svc_inst_id != 0
+        || param->add_attr_tab.svc_uuid.len != ESP_UUID_LEN_128
+        || memcmp(param->add_attr_tab.svc_uuid.uuid.uuid128, cacheMarkerUuid,
+                  sizeof(cacheMarkerUuid)) != 0) return;
+    completed = CacheOperation::Create;
+    succeeded = param->add_attr_tab.status == ESP_GATT_OK
+        && param->add_attr_tab.num_handle == 1
+        && param->add_attr_tab.handles != nullptr;
+    if (succeeded) {
+      handle = param->add_attr_tab.handles[0];
+      succeeded = handle != 0;
+    }
+    if (!succeeded && param->add_attr_tab.status == ESP_GATT_OK)
+      handle = UINT16_MAX; // Unknown successful allocation: do not create another.
+  } else if (event == ESP_GATTS_START_EVT) {
+    completed = CacheOperation::Start;
+    handle = param->start.service_handle;
+    succeeded = param->start.status == ESP_GATT_OK;
+  } else if (event == ESP_GATTS_DELETE_EVT) {
+    completed = CacheOperation::Delete;
+    handle = param->del.service_handle;
+    succeeded = param->del.status == ESP_GATT_OK;
+  } else return;
+  if (_cacheOperation.load(std::memory_order_acquire) != completed) return;
+  if (completed != CacheOperation::Create && handle != _cacheMarkerHandle) return;
+  CacheOperation expected = completed;
+  if (!_cacheOperation.compare_exchange_strong(expected, CacheOperation::Completing))
+    return; // Duplicate/unrelated callbacks must not advance the next action.
+  _cacheEventHandle = handle; // Copy; IDF releases the handles array on return.
+  _cacheEventSucceeded = succeeded;
+  _cacheEvent.store(completed, std::memory_order_release);
+}
+
+void SerialBLEInterface::serviceGattCacheRefresh(uint32_t now) {
+  if (_cacheEventOwner.load(std::memory_order_acquire) != this) return;
+  const CacheOperation event = _cacheEvent.exchange(
+      CacheOperation::None, std::memory_order_acq_rel);
+  if (event != CacheOperation::None) {
+    if (_cacheEventSucceeded) {
+      if (event == CacheOperation::Create) {
+        _cacheMarkerHandle = _cacheEventHandle;
+        _cacheMarker = CacheMarker::Created;
+      } else {
+        _cacheMarker = event == CacheOperation::Start
+            ? CacheMarker::Started : CacheMarker::Absent;
+        // The SDK accepted an AUTO database change, NOT an ATT acknowledgement.
+        // Only real client rediscovery/NUS traffic can prove cache recovery.
+        _cacheTriggeredConnection = _cacheOperationConnection;
+      }
+    } else {
+      ++_cacheFailures;
+      if (event == CacheOperation::Create && _cacheEventHandle == UINT16_MAX)
+        _cacheStalled = true;
+    }
+    _cacheOperation.store(CacheOperation::None, std::memory_order_release);
+  }
+  if (_cacheOperation.load(std::memory_order_acquire) != CacheOperation::None) {
+    if (mesh::bleElapsedAtLeast(now, _cacheOperationStarted, 5000))
+      _cacheStalled = true; // Never duplicate an accepted operation of unknown outcome.
+    return;
+  }
+  if (_cacheStalled || !_cacheConnected.load(std::memory_order_acquire)) return;
+  const uint32_t connection = _cacheConnection.load(std::memory_order_acquire);
+  if (_cacheAttemptConnection != connection) {
+    _cacheAttemptConnection = connection;
+    _cacheFailures = 0;
+    _cacheLastAttempt = now - BLE_POWER_RETRY_MS;
+  }
+  if (_cacheFailures >= 3
+      || !mesh::bleElapsedAtLeast(now, _cacheLastAttempt, BLE_POWER_RETRY_MS)) return;
+  uint8_t remote[6];
+  for (size_t i = 0; i < sizeof(remote); ++i)
+    remote[i] = _cacheRemoteAddress[i].load(std::memory_order_relaxed);
+  if (!_cacheConnected.load(std::memory_order_acquire)
+      || _cacheConnection.load(std::memory_order_acquire) != connection) return;
+  if (_cacheEncryptedConnection != connection) {
+    _cacheLastAttempt = now;
+    // A stale cached handle can fail before its security permissions are
+    // consulted. Request the same existing MITM security independently of NUS.
+    if (esp_ble_set_encryption(remote, ESP_BLE_SEC_ENCRYPT_MITM) == ESP_OK)
+      _cacheEncryptedConnection = connection;
+    else ++_cacheFailures;
+    return;
+  }
+  if (!_cacheAuthenticated.load(std::memory_order_acquire)) return;
+  if (_cacheNusVerifiedConnection.load(std::memory_order_acquire) == connection) {
+    memcpy(_cacheVerifiedPeer, remote, sizeof(remote));
+    _cacheVerifiedPeerValid = true;
+  }
+  if (_cacheTriggeredConnection == connection) return;
+  // Actual use of both NUS handles, rather than local marker completion,
+  // permits skipping rediscovery for the same peer in this host session.
+  if (_cacheVerifiedPeerValid
+      && memcmp(remote, _cacheVerifiedPeer, sizeof(remote)) == 0) {
+    _cacheTriggeredConnection = connection;
+    return;
+  }
+  _cacheLastAttempt = _cacheOperationStarted = now;
+  _cacheOperationConnection = connection;
+  const CacheOperation operation = _cacheMarker == CacheMarker::Absent
+      ? CacheOperation::Create : (_cacheMarker == CacheMarker::Created
+          ? CacheOperation::Start : CacheOperation::Delete);
+  _cacheOperation.store(operation, std::memory_order_release);
+  esp_err_t result;
+  if (operation == CacheOperation::Create)
+    result = esp_ble_gatts_create_attr_tab(cacheMarkerAttributes, _cacheGattsIf, 1, 0);
+  else if (operation == CacheOperation::Start)
+    result = esp_ble_gatts_start_service(_cacheMarkerHandle);
+  else result = esp_ble_gatts_delete_service(_cacheMarkerHandle);
+  if (result != ESP_OK) {
+    _cacheOperation.store(CacheOperation::None, std::memory_order_release);
+    ++_cacheFailures;
+  }
+}
+#endif
 
 static bool stopBluetoothController() {
   if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED
@@ -94,10 +305,18 @@ bool SerialBLEInterface::stopBluetoothStack() {
 #if defined(CONFIG_BLUEDROID_ENABLED)
   if (!stopBluetoothController()) return false;
 #endif
+#if MESH_BLE_AUTO_CACHE_REFRESH
+  retireCacheGattHandler();
+#endif
   BLEDevice::deinit(false);
   delete pTxDescriptor;
+#if !MESH_BLE_USES_NIMBLE
+  delete _orderedCharacteristics;
+  _orderedCharacteristics = nullptr;
+#else
   delete pRxCharacteristic;
   delete pTxCharacteristic;
+#endif
   const bool owns_server = cleanupBluetoothService<BLEDevice>(pService, 0);
   pTxDescriptor = NULL;
   pRxCharacteristic = pTxCharacteristic = NULL;
@@ -600,8 +819,17 @@ bool SerialBLEInterface::startBluetoothStack(bool clear_bonds) {
   rx_properties |= BLECharacteristic::PROPERTY_WRITE_AUTHEN;
 #endif
 #endif
+#if !MESH_BLE_USES_NIMBLE
+  _orderedCharacteristics = new (std::nothrow)
+      OrderedGattCharacteristics(tx_properties, rx_properties);
+  if (_orderedCharacteristics != nullptr) {
+    pTxCharacteristic = &_orderedCharacteristics->tx;
+    pService->addCharacteristic(pTxCharacteristic);
+  }
+#else
   pTxCharacteristic = pService->createCharacteristic(
       CHARACTERISTIC_UUID_TX, tx_properties);
+#endif
   if (pTxCharacteristic == NULL) {
     BLE_DEBUG_PRINTLN("BLEService::createCharacteristic(TX) failed");
     _isEnabled = _enableRequested = false;
@@ -624,8 +852,13 @@ bool SerialBLEInterface::startBluetoothStack(bool clear_bonds) {
   pTxCharacteristic->addDescriptor(pTxDescriptor);
 #endif
 
+#if !MESH_BLE_USES_NIMBLE
+  pRxCharacteristic = &_orderedCharacteristics->rx;
+  pService->addCharacteristic(pRxCharacteristic);
+#else
   pRxCharacteristic = pService->createCharacteristic(
       CHARACTERISTIC_UUID_RX, rx_properties);
+#endif
   if (pRxCharacteristic == NULL) {
     BLE_DEBUG_PRINTLN("BLEService::createCharacteristic(RX) failed");
     _isEnabled = _enableRequested = false;
@@ -650,6 +883,9 @@ bool SerialBLEInterface::startBluetoothStack(bool clear_bonds) {
     configureBondedOnlyAdvertising(_bondedPeer, true);
     if (suppressed) _advertisingSuppressed.store(true, std::memory_order_release);
   }
+#if MESH_BLE_AUTO_CACHE_REFRESH
+  installCacheGattHandler();
+#endif
   _callbacksEnabled.store(true, std::memory_order_release);
   return true;
 }
@@ -753,6 +989,15 @@ void SerialBLEInterface::onAuthenticationComplete(ble_gap_conn_desc* desc) {
 #else
 void SerialBLEInterface::onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
   if (!_callbacksEnabled.load(std::memory_order_acquire)) return;
+#if MESH_BLE_AUTO_CACHE_REFRESH
+  const uint32_t connection = _cacheConnection.load(std::memory_order_acquire);
+  bool current_peer = _cacheConnected.load(std::memory_order_acquire);
+  for (size_t i = 0; i < sizeof(cmpl.bd_addr); ++i)
+    current_peer = current_peer && cmpl.bd_addr[i]
+        == _cacheRemoteAddress[i].load(std::memory_order_relaxed);
+  if (current_peer && connection == _cacheConnection.load(std::memory_order_acquire))
+    _cacheAuthenticated.store(cmpl.success, std::memory_order_release);
+#endif
   if (cmpl.success) {
     BLE_DEBUG_PRINTLN(" - SecurityCallback - Authentication Success");
     deviceConnected = true;
@@ -926,6 +1171,16 @@ void SerialBLEInterface::onWrite(BLECharacteristic* pCharacteristic,
   int len = pCharacteristic->getLength();
 #endif
 
+#if MESH_BLE_AUTO_CACHE_REFRESH
+  // A stale CCCD write can land in RX after an old handle-order change.
+  // Only real use of BOTH current NUS handles establishes a valid cache.
+  if (pCharacteristic == pRxCharacteristic && len > 0 && len <= MAX_FRAME_SIZE
+      && _cacheAuthenticated.load(std::memory_order_acquire)
+      && pTxDescriptor != nullptr && pTxDescriptor->getNotifications()) {
+    _cacheNusVerifiedConnection.store(
+        _cacheConnection.load(std::memory_order_acquire), std::memory_order_release);
+  }
+#endif
   if (len > MAX_FRAME_SIZE) {
     BLE_DEBUG_PRINTLN("ERROR: onWrite(), frame too big, len=%d", len);
   } else {
@@ -1141,7 +1396,12 @@ void SerialBLEInterface::servicePowerState() {
     if (pServer != NULL) pServer->getAdvertising()->stop();
     oldDeviceConnected = deviceConnected = false;
   }
-  if (!_shutdownPending) return;
+  if (!_shutdownPending) {
+#if MESH_BLE_AUTO_CACHE_REFRESH
+    if (_isEnabled) serviceGattCacheRefresh(now);
+#endif
+    return;
+  }
   if (_powerAttempted
       && !mesh::bleElapsedAtLeast(now, _lastPowerAttempt, BLE_POWER_RETRY_MS))
     return;

@@ -17,6 +17,15 @@
 #else
   #define MESH_BLE_USES_NIMBLE 0
 #endif
+// Bluedroid AUTO mode rejects the manual Service Changed API. A small
+// asynchronous marker service requests its supported AUTO notification.
+#if defined(CONFIG_BLUEDROID_ENABLED) && !MESH_BLE_USES_NIMBLE && \
+    ((defined(CONFIG_BT_GATTS_SEND_SERVICE_CHANGE_AUTO) && CONFIG_BT_GATTS_SEND_SERVICE_CHANGE_AUTO) || \
+     (defined(CONFIG_GATTS_SEND_SERVICE_CHANGE_AUTO) && CONFIG_GATTS_SEND_SERVICE_CHANGE_AUTO))
+  #define MESH_BLE_AUTO_CACHE_REFRESH 1
+#else
+  #define MESH_BLE_AUTO_CACHE_REFRESH 0
+#endif
 #include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -30,8 +39,47 @@ class SerialBLEInterface : public BaseSerialInterface,
   BLEService *pService;
   BLECharacteristic * pTxCharacteristic;
   BLECharacteristic *pRxCharacteristic;
+#if !MESH_BLE_USES_NIMBLE
+  struct OrderedGattCharacteristics;
+  OrderedGattCharacteristics* _orderedCharacteristics = nullptr;
+#endif
 #if !defined(MESH_USE_NIMBLE_ARDUINO)
   BLE2902 *pTxDescriptor;
+#endif
+#if MESH_BLE_AUTO_CACHE_REFRESH
+  enum class CacheOperation : uint8_t { None, Create, Start, Delete, Completing };
+  enum class CacheMarker : uint8_t { Absent, Created, Started };
+  static std::atomic<SerialBLEInterface*> _cacheEventOwner;
+  gatts_event_handler _previousGattsHandler = nullptr;
+  std::atomic<CacheOperation> _cacheOperation{CacheOperation::None};
+  std::atomic<CacheOperation> _cacheEvent{CacheOperation::None};
+  std::atomic<uint32_t> _cacheConnection{0};
+  std::atomic<uint32_t> _cacheNusVerifiedConnection{0};
+  std::atomic<bool> _cacheConnected{false};
+  std::atomic<bool> _cacheAuthenticated{false};
+  std::atomic<esp_gatt_if_t> _cacheGattsIf{ESP_GATT_IF_NONE};
+  std::atomic<uint8_t> _cacheRemoteAddress[6] = {};
+  uint8_t _cacheVerifiedPeer[6] = {};
+  bool _cacheVerifiedPeerValid = false;
+  CacheMarker _cacheMarker = CacheMarker::Absent;
+  std::atomic<uint16_t> _cacheMarkerHandle{0};
+  uint16_t _cacheEventHandle = 0;
+  bool _cacheEventSucceeded = false;
+  bool _cacheStalled = false;
+  uint8_t _cacheFailures = 0;
+  uint32_t _cacheAttemptConnection = 0;
+  uint32_t _cacheEncryptedConnection = 0;
+  uint32_t _cacheTriggeredConnection = 0;
+  uint32_t _cacheOperationConnection = 0;
+  uint32_t _cacheLastAttempt = 0;
+  uint32_t _cacheOperationStarted = 0;
+  static void cacheGattEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                             esp_ble_gatts_cb_param_t* param);
+  void handleCacheGattEvent(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                            esp_ble_gatts_cb_param_t* param);
+  void installCacheGattHandler();
+  void retireCacheGattHandler();
+  void serviceGattCacheRefresh(uint32_t now);
 #endif
   bool deviceConnected;
   bool oldDeviceConnected;

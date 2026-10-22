@@ -130,6 +130,10 @@ TIMER = r'''
 #include <cassert>
 #include <helpers/PowerSavingDiagnostics.h>
 #include <helpers/PowerManagementUtils.h>
+#if defined(ESP32_PLATFORM)
+int64_t esp_timer_get_time(){return static_cast<int64_t>(millis())*1000;}
+#include <helpers/esp32/ProfileIdleSleep.h>
+#endif
 using TimerHandle_t=void*;
 using TickType_t=uint32_t;
 bool allocate=true,queue_ok=true,active=false;
@@ -159,16 +163,21 @@ public:
 static SoftwareTimer tracker_wake_timer;
 static void trackerWakeCallback(TimerHandle_t){}
 @ARM@
-struct Mesh {bool tracker=true;uint32_t sleep_secs=30;
+struct Mesh {bool tracker=true,dual=false,profile_ready=false;uint32_t sleep_secs=30;
+ uint32_t profile_ms=3;unsigned profile_queries=0;
  bool isTrackerModeEnabled()const{return tracker;}
+ bool isDualRadioActive()const{return dual;}
+ bool getDualRadioIdleDelay(uint32_t& out){++profile_queries;out=profile_ms;return profile_ready;}
  bool canIdleDualRadio()const{return true;}
  uint32_t getPowerSaveSleepMilliseconds(uint32_t max)const{assert(max==30000);return sleep_secs*1000;}
  bool getNextNoiseFloorWakeDelay(uint32_t&)const{return false;}
  bool millisHasNowPassed(uint32_t deadline)const{return (int32_t)(millis()-deadline)>=0;}
 } the_mesh;
 struct Board {unsigned sleeps=0,last=0;
+ unsigned absolute_calls=0;uint32_t deadline=0;
  void sleep(unsigned value){++sleeps;last=value;}
  void sleepMilliseconds(unsigned value){++sleeps;last=value;}
+ void sleepUntilMicroseconds(uint32_t value){++sleeps;++absolute_calls;deadline=value;}
 } board;
 static const unsigned long POWERSAVING_FIRST_SLEEP_SECS=120;
 void sleepGate(bool can_power_save){
@@ -192,6 +201,21 @@ int main(){
  now_ms=119999;sleepGate(true);assert(board.sleeps==0);
  now_ms=120000;sleepGate(true);assert(board.sleeps==1&&board.last==30000);
  the_mesh.sleep_secs=0;sleepGate(true);assert(board.sleeps==1);
+#if defined(ESP32_PLATFORM)
+ // Execute the real ESP32 profile helper through the extracted Sensor gate.
+ // A refused scanner slice must retain polling, without a legacy long sleep.
+ the_mesh.sleep_secs=30;the_mesh.dual=true;sleepGate(true);
+ assert(the_mesh.profile_queries==1&&board.sleeps==1&&board.absolute_calls==0);
+ the_mesh.profile_ready=true;the_mesh.profile_ms=1;sleepGate(true);
+ assert(board.sleeps==1&&board.absolute_calls==0);
+ the_mesh.profile_ms=3;sleepGate(true);
+ assert(board.sleeps==2&&board.absolute_calls==1);
+ assert(board.deadline==120003000);
+ the_mesh.profile_ms=11;sleepGate(true);
+ assert(board.sleeps==2&&board.absolute_calls==1);
+ unsigned queries=the_mesh.profile_queries;sleepGate(false);
+ assert(the_mesh.profile_queries==queries&&board.sleeps==2);
+#endif
 #endif
 }
 '''
@@ -269,6 +293,9 @@ class SensorTrackerSleepTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="meshcore-tracker-sleep-") as directory:
             path = Path(directory)
             (path / "Arduino.h").write_text(ARDUINO, encoding="ascii")
+            (path / "esp_timer.h").write_text(
+                "#pragma once\n#include <stdint.h>\nint64_t esp_timer_get_time();\n",
+                encoding="ascii")
             cpp, binary = path / "test.cpp", path / "test"
             cpp.write_text(source, encoding="ascii")
             result = subprocess.run([
