@@ -32,10 +32,25 @@ class CompanionOtaIncludeTest(unittest.TestCase):
                 "Mesh.h", "helpers/BluetoothMac.h", "CompanionBluetooth.h",
                 "CompanionWireless.h", "CompanionWiFi.h", "esp_bt.h", "esp_pm.h",
                 "esp_sleep.h", "esp_system.h", "esp_heap_caps.h",
+                "sdkconfig.h",
             ):
                 path = directory / header
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("#pragma once\n")
+            # Keep the real sleep-policy headers in the include block. Supply
+            # only their SDK declarations, as this host test has no ESP-IDF.
+            (directory / "esp_timer.h").write_text(
+                "#pragma once\n#include <stdint.h>\n"
+                "int64_t esp_timer_get_time();\n"
+            )
+            (directory / "esp_wifi.h").write_text(
+                "#pragma once\nusing esp_err_t = int;\n"
+                "enum wifi_mode_t { WIFI_MODE_NULL, WIFI_MODE_STA, "
+                "WIFI_MODE_AP, WIFI_MODE_APSTA };\n"
+                "constexpr esp_err_t ESP_OK = 0, ESP_ERR_WIFI_NOT_INIT = 1, "
+                "ESP_ERR_WIFI_NOT_STARTED = 2;\n"
+                "esp_err_t esp_wifi_get_mode(wifi_mode_t*);\n"
+            )
             (directory / "MyMesh.h").write_text(
                 '#pragma once\n#include "CompanionFeatures.h"\n'
             )

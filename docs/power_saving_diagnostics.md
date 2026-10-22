@@ -88,6 +88,10 @@ Bluetooth or WiFi connection. Such connections require SDK-managed modem and
 automatic sleep; lowering CPU frequency or yielding alone is not proof of
 light sleep.
 
+The [ESP32 Bluetooth and radio2 qualification report](test-results/esp32_ble_radio2_sleep_2026-10-21.md)
+records the tested firmware, saved-pairing checks, SDK wait measurements and
+packet-test failures. SDK wait time is not a current measurement.
+
 ## Noise-floor sampling and sleep
 
 Startup still collects a complete baseline promptly: 64 accepted samples,
