@@ -991,6 +991,9 @@ bool Dispatcher::tryParsePacket(Packet* pkt, const uint8_t* raw, int len) {
   pkt->radio_local = false;
   pkt->tx_radio = RADIO_TX_AUTO;
   pkt->radio_reply = pkt->radio_reply_force = false;
+#if defined(WITH_UDP_BRIDGE)
+  pkt->udp_bridge_ingress = false;
+#endif
   pkt->radio_generation = pkt->radio_origin_generation = _radio->receiveProfileGeneration();
   pkt->header = raw[i++];
   if (pkt->getPayloadVer() > PAYLOAD_VER_1) {
@@ -1368,6 +1371,9 @@ Packet* Dispatcher::obtainNewPacket() {
     pkt->tx_radio = RADIO_TX_AUTO;
     pkt->radio_reply = receive_context_active;
     pkt->radio_reply_force = false;
+#if defined(WITH_UDP_BRIDGE)
+    pkt->udp_bridge_ingress = false;
+#endif
   }
   return pkt;
 }

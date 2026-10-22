@@ -216,7 +216,7 @@ int main() {
 # Importers use this shared harness directly, so expand its production hook
 # here rather than leaving fixture setup to one test's compilation path.
 _base_header = (ROOT / 'src/helpers/bridges/BridgeBase.h').read_text(encoding='ascii')
-_ingress_hook = '#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE)\n'
+_ingress_hook = '#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(WITH_UDP_BRIDGE)\n'
 _ingress_hook += method(_base_header, 'enum class IngressResult') + ';\n'
 _ingress_hook += method(_base_header, 'virtual void onIngressResult(') + '\n#endif\n'
 HARNESS = HARNESS.replace('@INGRESS_HOOK@', _ingress_hook)
@@ -410,7 +410,7 @@ int main() {
             (work/'Mesh.h').write_text(PACKET)
             code = '#include <initializer_list>\n' + HARNESS.replace('@METHODS@', '\n'.join(methods))
             (work/'test.cpp').write_text(code)
-            for macros in [[], ['-DWITH_ESPNOW_BRIDGE=1']]:
+            for macros in [[], ['-DWITH_ESPNOW_BRIDGE=1'], ['-DWITH_UDP_BRIDGE=1']]:
                 with self.subTest(macros=macros):
                     result = subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
                         *macros, '-I', str(work), '-I', str(ROOT/'src'), str(work/'test.cpp'),

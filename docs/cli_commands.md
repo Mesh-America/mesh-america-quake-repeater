@@ -5570,7 +5570,73 @@ still overrides the first-boot default after an update.
 
 For a two-repeater setup and diagnostic flow, see the
 [ESP-NOW bridge setup guide](espnow_bridge_setup.md) or
-[RS-232/UART bridge guide](rs232_bridge_setup.md).
+[RS-232/UART bridge guide](rs232_bridge_setup.md). For an existing WiFi network,
+see the [eight-peer UDP bridge guide](udp_bridge_setup.md).
+
+#### WiFi UDP bridge
+
+Available on supported ESP32 repeater images with `WITH_UDP_BRIDGE`. UDP starts
+off on new/upgraded installs. It requires an existing station WiFi connection,
+and pauses during AP/AP+STA operation, disconnection, browser OTA and ownership
+transitions. It does not start a network or require an MQTT broker.
+
+```text
+get udp.enabled
+set udp.enabled on
+set udp.enabled off
+get udp.port
+set udp.port 4404
+get udp.peer.1
+set udp.peer.1 192.168.1.51:4404
+set udp.peer.1 off
+get udp.status
+get udp.stats
+get udp.stats rx
+get udp.stats tx
+get udp.stats drops
+get udp.stats test
+```
+
+Peer slots are `udp.peer.1` through `udp.peer.8`. Each destination is one
+numeric unicast IPv4 address plus a port `1..65535`. The listening port defaults
+to `4404`. Multicast, loopback, unspecified/broadcast and duplicate endpoints
+are rejected. Both boards must list each other's listening address/port.
+Reserve DHCP addresses so the stored destinations remain valid.
+
+The transport reuses `bridge.secret` for authenticated sessions and packet
+integrity; no additional password is introduced. UDP payloads are not
+encrypted. Counter/status output does not reveal the secret. Config writes
+use the existing authenticated CLI policy and a separate checked preferences
+file; a successful save reports intent rather than reachability.
+
+Local-only diagnostic actions:
+
+```text
+udp test 1
+udp test 1 A1B2C3D4
+udp resetstats
+```
+
+The peer number is `1..8`; the optional ID is exactly eight hexadecimal digits
+without `0x`. A queued/sent probe is not a delivery acknowledgement. On the
+destination, check `get udp.stats test` for an increased `rx` and matching
+`rxid`, then reverse the test. An authenticated peer session must be ready.
+The status `ready` count records established sessions, not current liveness;
+use a fresh received probe to confirm reachability. Incoming UDP enters the
+local LoRa mesh and is not relayed to other UDP peers.
+Probes do not echo, retry, allocate mesh packets or transmit on LoRa. Resetting
+statistics does not write preferences or restart the bridge.
+
+Both `set usb.logging on` and `set usb.debug on` enable bounded runtime USB
+summaries without requiring a special debug build. Restore both previous
+settings after capture. CLI pages/probes work with logging disabled.
+
+WiFi client isolation and firewall rules must allow peer-to-peer UDP; the
+firmware cannot bypass an isolating guest network. Isolation is an optional
+network policy, not an intrinsic WiFi restriction. See the
+[setup and troubleshooting guide](udp_bridge_setup.md).
+
+---
 
 #### View the compiled bridge type
 **Usage:** `get bridge.type`

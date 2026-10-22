@@ -412,6 +412,10 @@ jobs:
           python3 -B test/test_rs232_bridge_diagnostics.py -v
           python3 -B test/test_rs232_diagnostic_cli.py -v
           python3 -B test/test_bridge_debug_formatter.py -v
+          python3 -B test/test_udp_bridge_config.py -v
+          python3 -B test/test_udp_packet_origin.py -v
+          python3 -B test/test_udp_bridge.py -v
+          python3 -B test/test_udp_bridge_integration.py -v
 
       - name: Verify saved repeat-off trace exception and relay guards
         run: |

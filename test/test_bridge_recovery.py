@@ -139,7 +139,7 @@ def code():
                       "int esp_now_deinit() { assert(espnow_active); if(failure==18)return -1; espnow_active=false; return ESP_OK; }")
     base = (ROOT / "src/helpers/bridges/BridgeBase.cpp").read_text()
     base_header = (ROOT / "src/helpers/bridges/BridgeBase.h").read_text()
-    ingress_hook = "#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE)\n"
+    ingress_hook = "#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(WITH_UDP_BRIDGE)\n"
     ingress_hook += method(base_header, "enum class IngressResult") + ";\n"
     ingress_hook += method(base_header, "virtual void onIngressResult(") + "\n#endif\n"
     base_methods = "\n".join(method(base, signature) for signature in (

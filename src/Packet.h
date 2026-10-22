@@ -69,6 +69,10 @@ public:
   uint8_t tx_radio = RADIO_TX_AUTO;  // local policy, never sent over the air
   bool radio_reply = false;  // locally generated response, never a forwarded packet
   bool radio_reply_force = false;  // captured reply-only RX-mode override
+#if defined(WITH_UDP_BRIDGE)
+  // Volatile origin marker, copied with radio retries but never serialized.
+  bool udp_bridge_ingress = false;
+#endif
 
   /**
    * \brief calculate the hash of payload + type

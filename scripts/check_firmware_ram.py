@@ -251,12 +251,17 @@ def requirements(platform, defines, target):
         # MQTT joins with saved runtime credentials even without a compiled SSID
         # or OTA seeder. Count its mandatory WiFi stack once with other WiFi uses.
         wifi = 49152 if any(name in defines for name in (
-            "WIFI_SSID", "WIFI_OTA_SEEDER", "WITH_MQTT_BRIDGE")) else 0
+            "WIFI_SSID", "WIFI_OTA_SEEDER", "WITH_MQTT_BRIDGE", "WITH_UDP_BRIDGE")) else 0
         ble = 32768 if "BLE_PIN_CODE" in defines else 0
         parts["wireless_stacks"] = max(wifi, ble) if "COMPANION_EXCLUSIVE_WIFI_BLE" in defines else wifi + ble
         if "WITH_MQTT_BRIDGE" in defines:
             mqtt = mqtt_requirements(defines)
             parts["mqtt_startup_allowance"] = mqtt["startup_allowance_bytes"]
+        if "WITH_UDP_BRIDGE" in defines:
+            # Lazy object plus one bounded raw UDP socket. Count the enabled
+            # service alongside MQTT/UART even though fresh installs default off.
+            # UDPBridge.cpp enforces the matching 3072-byte object boundary.
+            parts["udp_bridge_and_socket"] = 3072 + 2048
         if "WITH_RS232_BRIDGE" in defines:
             # The UART bridge is allocated on enable, alongside WiFi/MQTT.
             # RS232Bridge.cpp bounds its object to 2816 bytes. Reserve 3072

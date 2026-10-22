@@ -1364,6 +1364,23 @@ apply_esp32_full_shared_bridge_profile Station_G2_repeater_observer_mqtt
   || fail "Station G2 Full MQTT image did not report ESP-NOW capability"
 [[ "$PLATFORMIO_BUILD_FLAGS" != *"ESPNOW_BRIDGE_MERGED"* ]] \
   || fail "Station G2 existing MQTT default changed during ESP-NOW composition"
+[[ "$PLATFORMIO_BUILD_FLAGS" == *"-DWITH_UDP_BRIDGE=1"* ]] \
+  || fail "Station G2 Full repeater did not enable UDP bridge support"
+[[ "$PLATFORMIO_BUILD_SRC_FILTER" == *"helpers/bridges/UDPBridge.cpp"* \
+    && "$PLATFORMIO_BUILD_SRC_FILTER" == *"helpers/UDPBridgeSettings.cpp"* ]] \
+  || fail "Station G2 Full repeater did not include UDP bridge and settings sources"
+[[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.udp "* ]] \
+  || fail "Station G2 Full repeater omitted the UDP capability"
+(
+  PLATFORMIO_BUILD_FLAGS=""
+  PLATFORMIO_BUILD_SRC_FILTER=""
+  BUILD_CAPABILITIES=()
+  apply_esp32_full_shared_bridge_profile Station_G2_room_server_observer_mqtt
+  [[ "$PLATFORMIO_BUILD_FLAGS" != *"WITH_UDP_BRIDGE"* \
+      && "$PLATFORMIO_BUILD_SRC_FILTER" != *"UDPBridge"* ]] \
+    || fail "room server acquired unsupported UDP repeater wiring"
+)
+
 [[ "$(get_unified_full_infrastructure_target Station_G2_repeater_bridge_espnow)" \
     = "Station_G2_repeater_observer_mqtt" ]] \
   || fail "Station G2 Full ESP-NOW target did not resolve to the combined MQTT recipe"
@@ -1389,12 +1406,20 @@ for plain_target in heltec_v4_tft_repeater Heltec_v2_repeater \
     || fail "$plain_target Full image omitted the actual ESP-NOW driver source"
   [[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.espnow "* ]] \
     || fail "$plain_target Full image omitted the ESP-NOW capability"
+  [[ "$PLATFORMIO_BUILD_FLAGS" == *"-DWITH_UDP_BRIDGE=1"* \
+      && "$PLATFORMIO_BUILD_SRC_FILTER" == *"helpers/bridges/UDPBridge.cpp"* ]] \
+    || fail "$plain_target Full image omitted default-off UDP support"
+  [[ " ${BUILD_CAPABILITIES[*]} " == *" bridge.udp "* ]] \
+    || fail "$plain_target Full image omitted UDP capability"
+
   (
     BUILD_PROFILE_FOR_TARGET=full
     BUILD_EXPECTATIONS=()
     declare_build_capability_contract "$plain_target" ESP32_PLATFORM
     [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.espnow=_ZN12ESPNowBridge5beginEv"* ]] \
       || fail "$plain_target Full image does not require a linked ESP-NOW driver"
+    [[ " ${BUILD_EXPECTATIONS[*]} " == *"bridge.udp=_ZN9UDPBridge5beginEv"* ]] \
+      || fail "$plain_target Full image does not require a linked UDP driver"
   )
 done
 for existing_target in Heltec_v2_repeater_bridge_espnow \

@@ -3175,9 +3175,92 @@ bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
 }
 #endif
 
+#if defined(WITH_UDP_BRIDGE)
+bool CommonCLI::handleUDPBridgeCommand(uint32_t sender_timestamp,
+                                        const char* command, char* reply) {
+  constexpr size_t capacity = 157;
+  using namespace mesh::bridge::udp;
+  const bool get = strncmp(command, "get udp.", 8) == 0;
+  const bool set = strncmp(command, "set udp.", 8) == 0;
+  if (get || set) {
+    const char* key = command + 8;
+    if (get && strcmp(key, "status") == 0) {
+      _callbacks->formatUDPBridgeStatus(reply, capacity);
+      return true;
+    }
+    if (get && strncmp(key, "stats", 5) == 0) {
+      const char* page = key + 5;
+      if (*page == 0) _callbacks->formatUDPBridgeStats("", reply, capacity);
+      else if (strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
+          || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0)
+        _callbacks->formatUDPBridgeStats(page + 1, reply, capacity);
+      else snprintf(reply, capacity, "Error: use get udp.stats [rx|tx|drops|test]");
+      return true;
+    }
+    const Prefs* current = _callbacks->getUDPBridgePrefs();
+    if (!current) { snprintf(reply, capacity, "Error: UDP bridge unavailable"); return true; }
+    Prefs candidate = *current;
+    if (strcmp(key, "enabled") == 0 && get) {
+      snprintf(reply, capacity, "%s", current->enabled ? "on" : "off"); return true;
+    }
+    if (strcmp(key, "port") == 0 && get) {
+      snprintf(reply, capacity, "%u", current->port); return true;
+    }
+    if (strncmp(key, "peer.", 5) == 0 && key[5] >= '1' && key[5] <= '8'
+        && (key[6] == 0 || key[6] == ' ')) {
+      const uint8_t index = static_cast<uint8_t>(key[5] - '1');
+      if (get && key[6] == 0) { formatPeer(current->peers[index], reply, capacity); return true; }
+      if (!set || key[6] != ' ' || !parsePeer(key + 7, candidate.peers[index])) {
+        snprintf(reply, capacity, "Error: use set udp.peer.1..8 <IPv4:port|off>"); return true;
+      }
+    } else if (set && strncmp(key, "enabled ", 8) == 0) {
+      if (strcmp(key + 8, "on") == 0) candidate.enabled = 1;
+      else if (strcmp(key + 8, "off") == 0) candidate.enabled = 0;
+      else { snprintf(reply, capacity, "Error: use set udp.enabled on|off"); return true; }
+    } else if (set && strncmp(key, "port ", 5) == 0) {
+      if (!parsePort(key + 5, candidate.port)) {
+        snprintf(reply, capacity, "Error: UDP port must be 1..65535"); return true;
+      }
+    } else {
+      snprintf(reply, capacity, "Error: use udp.enabled, udp.port, udp.peer.1..8, udp.status or udp.stats");
+      return true;
+    }
+    if (!validPrefs(candidate)) {
+      snprintf(reply, capacity, "Error: invalid or duplicate UDP peer"); return true;
+    }
+    snprintf(reply, capacity, "%s", _callbacks->setUDPBridgePrefs(candidate)
+        ? "OK - UDP settings saved; use get udp.status" : "Error: UDP settings not saved");
+    return true;
+  }
+  if (strncmp(command, "udp", 3) != 0 || (command[3] != 0 && command[3] != ' ')) return false;
+  if (sender_timestamp != 0) {
+    snprintf(reply, capacity, "Error: UDP test/reset requires a local connection"); return true;
+  }
+  if (strcmp(command, "udp resetstats") == 0) {
+    snprintf(reply, capacity, "%s", _callbacks->resetUDPBridgeStats()
+        ? "OK - UDP statistics reset" : "Error: UDP bridge unavailable"); return true;
+  }
+  if (strncmp(command, "udp test ", 9) != 0 || command[9] < '1' || command[9] > '8'
+      || (command[10] != 0 && command[10] != ' ')) {
+    snprintf(reply, capacity, "Error: use udp test <1..8> [8 hex digits] or udp resetstats"); return true;
+  }
+  uint32_t nonce = millis();
+  if (command[10] != 0 && !parseNonce(command + 11, nonce)) {
+    snprintf(reply, capacity, "Error: use udp test <1..8> [8 hex digits] or udp resetstats"); return true;
+  }
+  if (_callbacks->sendUDPBridgeTest(static_cast<uint8_t>(command[9] - '1'), nonce))
+    snprintf(reply, capacity, "OK - test queued id=%08lX; confirm on peer", static_cast<unsigned long>(nonce));
+  else snprintf(reply, capacity, "Error: UDP test not queued; check status/stats");
+  return true;
+}
+#endif
+
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     PrefsSaveReplyGuard save_reply(_prefs_save_failures, reply);
     mesh::cli::normalizeCommandVerb(command);
+#if defined(WITH_UDP_BRIDGE)
+    if (handleUDPBridgeCommand(sender_timestamp, command, reply)) return;
+#endif
 #if defined(WITH_RS232_BRIDGE)
     if (handleRs232DiagnosticCommand(sender_timestamp, command, reply)) return;
 #endif
@@ -3328,7 +3411,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         return;
       }
 #endif
-#if defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE)
       const bool ota_was_running = _board->isOTAUpdateRunning();
       // Keep an outstanding pause if an earlier resume failed. Only a
       // successful resume or an explicitly disabled saved intent clears it.
@@ -3353,9 +3436,21 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       }
       _wifi_ota_resume_espnow = _wifi_ota_resume_espnow || espnow_paused;
 #endif
+#if defined(WITH_UDP_BRIDGE)
+      // Close the UDP socket before the browser uploader owns the driver.
+      const bool udp_paused = _callbacks->isUDPBridgeNetworkEnabled();
+      if (udp_paused) _callbacks->setUDPBridgeNetworkState(false);
+      _wifi_ota_resume_udp = _wifi_ota_resume_udp || udp_paused;
+#endif
       reply[0] = 0;
       if (!_board->startOTAUpdate(_prefs->node_name, reply, force_ap)) {
         if (!reply[0]) strcpy(reply, "Error");
+#if defined(WITH_UDP_BRIDGE)
+        if (udp_paused && !ota_was_running) {
+          _callbacks->setUDPBridgeNetworkState(true);
+          _wifi_ota_resume_udp = false;
+        }
+#endif
 #if defined(WITH_ESPNOW_BRIDGE)
         if (espnow_paused && !ota_was_running) {
           if (_callbacks->setEspNowBridgeState(true)) {
@@ -3420,6 +3515,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
           snprintf(reply + used, 160 - used, resumed
               ? "; ESP-NOW resumed" : "; ESP-NOW resume failed");
         }
+      }
+#endif
+#if defined(WITH_UDP_BRIDGE)
+      if (ota_stopped && !_board->isOTAUpdateRunning() && _wifi_ota_resume_udp) {
+        const auto* udp_prefs = _callbacks->getUDPBridgePrefs();
+        if (udp_prefs && udp_prefs->enabled) _callbacks->setUDPBridgeNetworkState(true);
+        _wifi_ota_resume_udp = false;
       }
 #endif
     } else if (memcmp(command, "clock", 5) == 0) {
@@ -6044,7 +6146,9 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _callbacks->getRole());
   } else if (configKeyEquals(config, "bridge.type")) {
     sprintf(reply, "> %s",
-#if defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
+#if defined(WITH_UDP_BRIDGE) && !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE) && !defined(WITH_ESPNOW_BRIDGE)
+            "udp"
+#elif defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE) && defined(WITH_ESPNOW_BRIDGE)
             "mqtt+rs232+espnow"
 #elif defined(WITH_MQTT_BRIDGE) && defined(WITH_RS232_BRIDGE)
             "mqtt+rs232"
@@ -6060,6 +6164,9 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
             "mqtt"
 #else
             "none"
+#endif
+#if defined(WITH_UDP_BRIDGE) && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE))
+            "+udp"
 #endif
     );
 #ifdef WITH_BRIDGE

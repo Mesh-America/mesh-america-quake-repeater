@@ -65,7 +65,8 @@ private:
 enum class NetworkPowerHold : uint8_t {
   CompanionClient = 1,
   WebConfig = 2,
-  OtaSeeder = 4
+  OtaSeeder = 4,
+  UdpBridge = 8
 };
 
 // One program-wide handoff between the MQTT owner task and the station/UI

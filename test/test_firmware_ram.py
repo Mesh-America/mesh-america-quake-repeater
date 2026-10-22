@@ -516,6 +516,19 @@ int main() {
         }, "v3_repeater")
         self.assertEqual(alternate, combined)
 
+    def test_udp_bridge_budget_counts_enabled_case_alongside_existing_owners(self):
+        flags = {"WITH_MQTT_BRIDGE": 1, "WITH_RS232_BRIDGE": "Serial2"}
+        previous = ram.requirements("ESP32_PLATFORM", flags, "v3_repeater")
+        udp = ram.requirements("ESP32_PLATFORM", {**flags, "WITH_UDP_BRIDGE": 1}, "v3_repeater")
+        self.assertEqual(udp["required_heap_bytes"] - previous["required_heap_bytes"], 5120)
+        self.assertEqual(udp["components"]["udp_bridge_and_socket"], 3072 + 2048)
+        self.assertEqual(udp["components"]["wireless_stacks"], previous["components"]["wireless_stacks"])
+        self.assertEqual(udp["components"]["uart_bridge_and_driver"], previous["components"]["uart_bridge_and_driver"])
+        # UDP without MQTT must still reserve the shared WiFi stack.
+        udp_only = ram.requirements("ESP32_PLATFORM", {"WITH_UDP_BRIDGE": 1}, "v4_repeater")
+        self.assertEqual(udp_only["components"]["wireless_stacks"], 49152)
+        self.assertEqual(udp_only["components"]["udp_bridge_and_socket"], 5120)
+
     def test_mqtt_startup_gate_distinguishes_maximum_slot_stack_buffer_capacity(self):
         flags = {"WITH_MQTT_BRIDGE": 1}
         plain = ram.requirements("ESP32_PLATFORM", flags, "v4_companion")
@@ -890,6 +903,10 @@ int main() {
             ("src/helpers/bridges/RS232Bridge.cpp", "RS232Bridge::RS232Bridge(",
              "struct RS232Bridge { unsigned char bytes[OBJECT_BYTES]; };\n",
              ((2816, 0, True), (2817, 0, False))),
+            ("src/helpers/bridges/UDPBridge.cpp", "UDPBridge::UDPBridge(",
+             "namespace mesh { namespace bridge { namespace udp {} } }\n"
+             "struct UDPBridge { unsigned char bytes[OBJECT_BYTES]; };\n",
+             ((3072, 0, True), (3073, 0, False))),
             ("src/helpers/ui/SSD1306Display.cpp", "bool SSD1306Display::i2c_probe(",
              "struct SSD1306Display { unsigned char bytes[OBJECT_BYTES]; "
              "static constexpr unsigned FRAMEBUFFER_BYTES = FRAME_BYTES; };\n",
@@ -904,8 +921,8 @@ int main() {
             prefix = (ROOT / path).read_text().split(end, 1)[0]
             prefix = "\n".join(line for line in prefix.splitlines()
                                if not line.lstrip().startswith("#include"))
-            if path.endswith("RS232Bridge.cpp"):
-                prefix += "\n#endif\n"  # WITH_RS232_BRIDGE also encloses the methods below.
+            if path.endswith(("RS232Bridge.cpp", "UDPBridge.cpp")):
+                prefix += "\n#endif\n"  # The feature guard also encloses the methods below.
             for platform in (("ESP32=1", "ESP32_PLATFORM=1"),
                              ("NRF52_PLATFORM=1", "RAK4631_COMBINED_ETHERNET=1"),
                              ("NRF52_PLATFORM=1",)):
@@ -913,12 +930,12 @@ int main() {
                     with self.subTest(path=path, platform=platform, size=size, frame=frame):
                         result = subprocess.run([
                             "c++", "-std=c++17", "-fsyntax-only", "-x", "c++", "-",
-                            "-DWITH_RS232_BRIDGE=1", f"-DOBJECT_BYTES={size}",
+                            "-DWITH_RS232_BRIDGE=1", "-DWITH_UDP_BRIDGE=1", f"-DOBJECT_BYTES={size}",
                             f"-DFRAME_BYTES={frame}", *["-D" + flag for flag in platform],
                         ], input=stand_in + prefix, text=True, capture_output=True)
                         enforced = "ESP32=1" in platform or (
                             "RAK4631_COMBINED_ETHERNET=1" in platform
-                            and not path.endswith("SH1106Display.cpp"))
+                            and not path.endswith(("SH1106Display.cpp", "UDPBridge.cpp")))
                         self.assertEqual(result.returncode == 0, bounded or not enforced,
                                          result.stderr)
 

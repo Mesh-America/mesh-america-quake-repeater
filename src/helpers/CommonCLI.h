@@ -17,6 +17,9 @@
 #include <helpers/MorseReplyHandoff.h>
 #include <helpers/WirelessControl.h>
 #include <helpers/FleetCommand.h>
+#if defined(WITH_UDP_BRIDGE)
+#include <helpers/UDPBridgePrefs.h>
+#endif
 #if MESH_ENABLE_FLEET_CONTROL
 #include <helpers/FleetChannel.h>
 #endif
@@ -32,7 +35,7 @@
 #include <helpers/UserGpio.h>
 #endif
 
-#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE)
+#if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE) || defined(WITH_UDP_BRIDGE)
 #define WITH_BRIDGE
 #endif
 
@@ -645,6 +648,25 @@ public:
   virtual bool restartRs232Bridge() { return restartBridge(); }
   virtual bool isEspNowBridgeRunning() { return isBridgeRunning(); }
   virtual bool isRs232BridgeRunning() const { return isBridgeRunning(); }
+#if defined(WITH_UDP_BRIDGE)
+  virtual const mesh::bridge::udp::Prefs* getUDPBridgePrefs() const { return nullptr; }
+  virtual bool setUDPBridgePrefs(const mesh::bridge::udp::Prefs& prefs) {
+    (void)prefs; return false;
+  }
+  virtual void formatUDPBridgeStatus(char* reply, size_t capacity) {
+    snprintf(reply, capacity, "Error: UDP bridge unavailable");
+  }
+  virtual void formatUDPBridgeStats(const char* page, char* reply, size_t capacity) {
+    (void)page;
+    snprintf(reply, capacity, "Error: UDP bridge unavailable");
+  }
+  virtual bool sendUDPBridgeTest(uint8_t peer_index, uint32_t nonce) {
+    (void)peer_index; (void)nonce; return false;
+  }
+  virtual bool resetUDPBridgeStats() { return false; }
+  virtual bool setUDPBridgeNetworkState(bool enabled) { (void)enabled; return false; }
+  virtual bool isUDPBridgeNetworkEnabled() const { return false; }
+#endif
   virtual void formatRs232Status(char* reply) { strcpy(reply, "RS232 unavailable"); }
 #if defined(WITH_RS232_BRIDGE)
   virtual void formatRs232Transport(char* reply, size_t capacity) {
@@ -856,6 +878,9 @@ class CommonCLI {
   bool _wifi_ota_resume_mqtt = false;
   bool _wifi_ota_resume_espnow = false;
 #endif
+#if defined(WITH_UDP_BRIDGE)
+  bool _wifi_ota_resume_udp = false;
+#endif
 #if defined(ESP32_PLATFORM) || defined(USER_GPIO_CONTROL)
   UserGpio _user_gpio;
 #endif
@@ -924,6 +949,9 @@ class CommonCLI {
 #endif
 #if defined(WITH_ESPNOW_BRIDGE)
   bool handleEspNowDiagnosticCommand(uint32_t sender_timestamp, const char* command, char* reply);
+#endif
+#if defined(WITH_UDP_BRIDGE)
+  bool handleUDPBridgeCommand(uint32_t sender_timestamp, const char* command, char* reply);
 #endif
   void handleDelCmd(char* command, char* reply);
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)

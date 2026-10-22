@@ -6,11 +6,15 @@
 #if defined(ESP32_PLATFORM)
 #include <helpers/esp32/BootFileSystem.h>
 #include <helpers/WiFiNetworkPowerPolicy.h>
-#if defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+#if defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE) \
     || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))
 #include <WiFi.h>
 #include <esp_wifi.h>
 #endif
+#endif
+#if defined(WITH_UDP_BRIDGE)
+#include <helpers/esp32/WiFiCredentials.h>
+#include <helpers/esp32/WiFiStationPolicy.h>
 #endif
 #include <helpers/UsbLogging.h>
 #include <helpers/MorseLoopPolicy.h>
@@ -763,7 +767,7 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
     if (isEspNowBridgeRunning()) reply_data[8] |= 0x03;  // ESP-NOW may run alongside UART
 #endif
 #elif WITH_ESPNOW_BRIDGE
-    if (isBridgeRunning()) reply_data[8] |= 0x03;  // is bridge, type ESP-NOW
+    if (isEspNowBridgeRunning()) reply_data[8] |= 0x03;  // is bridge, type ESP-NOW
 #endif
     if (_prefs.disable_fwd) {   // is this repeater currently disabled
       reply_data[8] |= 0x80;  // is disabled
@@ -1237,6 +1241,9 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
+#ifdef WITH_UDP_BRIDGE
+  if (_prefs.bridge_pkt_src == 1 && isUDPBridgeRunning()) udp_bridge->sendPacket(pkt);
+#endif
 #ifdef DISPLAY_ACTIVITY_DASHBOARD
   // Count valid, parsed RF packets before role-level filtering. The dashboard
   // intentionally reflects radio activity, including packets this role later
@@ -1292,6 +1299,9 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+#ifdef WITH_UDP_BRIDGE
+  if (_prefs.bridge_pkt_src == 0 && isUDPBridgeRunning()) udp_bridge->sendPacket(pkt);
+#endif
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
       && neighbor_discover_next < neighbor_discover_count) {
@@ -3885,6 +3895,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   mesh::hilStartupTrace("mesh_prefs_begin");
   _cli.loadPrefs(_fs);
+#ifdef WITH_UDP_BRIDGE
+  udp_bridge_settings.begin(_fs);
+#endif
   mesh::hilStartupTrace("mesh_prefs_ready");
   mesh::hilStartupTrace("mesh_management_begin");
   _cli.beginManagement(*this, _fs);
@@ -4049,6 +4062,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE))
   if (_prefs.espnow_bridge_enabled) setEspNowBridgeState(true);
+#endif
+#ifdef WITH_UDP_BRIDGE
+  serviceUDPBridge();
 #endif
   mesh::hilStartupTrace("mesh_bridge_ready");
 
@@ -11531,6 +11547,11 @@ bool MyMesh::startWebConfigImpl(bool force_ap, char* reply, bool automatic_setup
       || (!mqtt_bridge->isRunning() && !mqtt_bridge->isStopping()));
 #endif
 
+#ifdef WITH_UDP_BRIDGE
+  // The portal may switch to AP/setup mode synchronously. Close the station
+  // socket before that transition; saved UDP intent resumes in a later STA loop.
+  if (udp_bridge) udp_bridge->serviceNetwork(false);
+#endif
   bool started;
   if (force_ap) {
     started = _webconfig->startSetupMode(reply);
@@ -13497,6 +13518,10 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
   expireRecentRepeatersIfDue();
 #endif
 
+#ifdef WITH_UDP_BRIDGE
+  // The UDP socket belongs to this loop and follows station/OTA ownership.
+  serviceUDPBridge();
+#endif
 #if defined(WITH_MQTT_BRIDGE)
   // MQTT owns TLS on Core 0; the radio loop only reaps an acknowledged stop.
   if (mqtt_bridge && mqtt_bridge->isRunning()) mqtt_bridge->loop();
@@ -13550,11 +13575,18 @@ void __attribute__((noinline)) MyMesh::servicePostMeshLoop() {
     // duty-limited channel) is lost when the flash spins the loop and reboots.
     drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
     const bool mqtt_was_running = mqtt_bridge && mqtt_bridge->isRunning();
+#ifdef WITH_UDP_BRIDGE
+    const bool udp_was_enabled = isUDPBridgeNetworkEnabled();
+    setUDPBridgeNetworkState(false);
+#endif
 #ifdef WITH_ESPNOW_BRIDGE
     const bool espnow_was_running = espnow_bridge.isRunning();
 #endif
     auto resume_paused_bridges = [&]() {
       if (mqtt_was_running) setMqttBridgeState(true);
+#ifdef WITH_UDP_BRIDGE
+      if (udp_was_enabled) setUDPBridgeNetworkState(true);
+#endif
 #ifdef WITH_ESPNOW_BRIDGE
       if (espnow_was_running) setEspNowBridgeState(true);
 #endif
@@ -14194,14 +14226,173 @@ bool MyMesh::startNeighborDiscover(char* reply) {
 }
 #endif // WITH_MQTT_NEIGHBORS
 
+#ifdef WITH_UDP_BRIDGE
+bool MyMesh::ensureUDPBridge() {
+  if (!udp_bridge) {
+    udp_bridge = new (std::nothrow) UDPBridge(
+        &_prefs, _mgr, getRTCClock(), &udp_bridge_settings.prefs());
+    if (!udp_bridge) return false;
+    configureBridgeFilter(udp_bridge);
+  }
+  return true;
+}
+
+bool MyMesh::isUDPBridgeNetworkEnabled() const {
+  if (!udp_bridge_settings.healthy() || !udp_bridge_settings.prefs().enabled
+      || udp_network_paused || mesh::wireless::control().masterOff()
+      || mesh::wireless::control().pendingDisable(mesh::wireless::WiFi)
+      || mesh::wireless::control().blocked(mesh::wireless::WiFi)) return false;
+  const size_t secret_length = strnlen(_prefs.bridge_secret, sizeof(_prefs.bridge_secret));
+  if (secret_length == 0 || secret_length >= sizeof(_prefs.bridge_secret)) return false;
+  for (const auto& peer : udp_bridge_settings.prefs().peers) {
+    if (peer.enabled()) return true;
+  }
+  return false;
+}
+
+bool MyMesh::setUDPBridgeNetworkState(bool enabled) {
+  udp_network_paused = !enabled;
+  udp_station_retry_at = 0;
+  if (!enabled) {
+    if (udp_bridge) udp_bridge->serviceNetwork(false);
+    mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::UdpBridge, false);
+  } else {
+    serviceUDPBridge();
+  }
+  return true;  // Saved intent may wait for WiFi, credentials or OTA ownership.
+}
+
+bool MyMesh::setUDPBridgePrefs(const mesh::bridge::udp::Prefs& value) {
+  if (!mesh::bridge::udp::validPrefs(value)) return false;
+  // Allocate before committing enabled intent. A failed allocation must not
+  // report a working saved change or disturb the old socket and preferences.
+  const bool had_transport = udp_bridge != nullptr;
+  if (value.enabled && !ensureUDPBridge()) return false;
+  if (!udp_bridge_settings.setPrefs(value)) {
+    if (!udp_bridge_settings.healthy()) setUDPBridgeNetworkState(false);
+    if (!had_transport) { delete udp_bridge; udp_bridge = nullptr; }
+    return false;
+  }
+  if (udp_bridge) udp_bridge->end();
+  if (!value.enabled) {
+    delete udp_bridge;
+    udp_bridge = nullptr;
+  }
+  udp_station_retry_at = 0;
+  udp_network_paused = false;
+  serviceUDPBridge();
+  return true;
+}
+
+void MyMesh::formatUDPBridgeStatus(char* reply, size_t capacity) {
+  if (!reply || !capacity) return;
+  const auto& prefs = udp_bridge_settings.prefs();
+  uint8_t peers = 0;
+  for (const auto& peer : prefs.peers) if (peer.enabled()) ++peers;
+  const size_t secret_length = strnlen(_prefs.bridge_secret, sizeof(_prefs.bridge_secret));
+  const auto& control = mesh::wireless::control();
+  const char* reason = !udp_bridge_settings.healthy() ? "prefs-error"
+      : !prefs.enabled ? "off"
+      : control.masterOff() || control.pendingDisable(mesh::wireless::WiFi)
+          || control.blocked(mesh::wireless::WiFi) ? "wifi-paused"
+      : _cli.getBoard()->isOTAUpdateRunning() ? "ota-paused"
+      : udp_network_paused ? "paused"
+      : !secret_length || secret_length >= sizeof(_prefs.bridge_secret) ? "no-secret"
+      : !peers ? "no-peers"
+      : (WiFi.getMode() & WIFI_AP) ? "ap-mode"
+      : WiFi.getMode() != WIFI_STA || WiFi.status() != WL_CONNECTED
+          || static_cast<uint32_t>(WiFi.localIP()) == 0 ? "disconnected"
+      : !udp_bridge ? "no-memory" : nullptr;
+  const auto ip = WiFi.localIP();
+  const uint32_t address = static_cast<uint32_t>(ip);
+  const auto* octets = reinterpret_cast<const uint8_t*>(&address);
+  if (reason) {
+    snprintf(reply, capacity, "> %s ip=%u.%u.%u.%u port=%u peers=%u", reason,
+        octets[0], octets[1], octets[2], octets[3], unsigned(prefs.port), unsigned(peers));
+  } else {
+    udp_bridge->formatStatus(reply, capacity);
+  }
+}
+
+void MyMesh::formatUDPBridgeStats(const char* page, char* reply, size_t capacity) {
+  if (udp_bridge) udp_bridge->formatStats(page, reply, capacity);
+  else snprintf(reply, capacity, "> off; no UDP bridge counters allocated");
+}
+
+bool MyMesh::sendUDPBridgeTest(uint8_t peer_index, uint32_t nonce) {
+  serviceUDPBridge();
+  return udp_bridge && udp_bridge->sendTest(peer_index, nonce);
+}
+
+bool MyMesh::resetUDPBridgeStats() {
+  if (udp_bridge) udp_bridge->resetStats();
+  return true;
+}
+
+void MyMesh::serviceUDPBridge() {
+  const bool requested = isUDPBridgeNetworkEnabled()
+      && !_cli.getBoard()->isOTAUpdateRunning();
+  // MQTT's broker outage clock does not describe this independent LAN bridge.
+  // Publish a separate hold before asking its worker to resume a parked STA.
+  mesh::wifi::networkPower().setHold(mesh::wifi::NetworkPowerHold::UdpBridge, requested);
+  if (!requested) {
+    if (udp_bridge) udp_bridge->serviceNetwork(false);
+    return;
+  }
+  if (!ensureUDPBridge()) return;
+  wifi_mode_t sdk_mode = WIFI_MODE_NULL;
+  const bool station_ready = WiFi.getMode() == WIFI_STA
+      && esp_wifi_get_mode(&sdk_mode) == ESP_OK && sdk_mode == WIFI_MODE_STA
+      && WiFi.status() == WL_CONNECTED && static_cast<uint32_t>(WiFi.localIP()) != 0;
+  udp_bridge->serviceNetwork(station_ready, static_cast<uint32_t>(WiFi.localIP()),
+      static_cast<uint32_t>(WiFi.subnetMask()));
+  if (station_ready) {
+    udp_bridge->loop();
+    return;
+  }
+  // An AP, setup portal, OTA uploader or MQTT worker owns its WiFi lifecycle.
+  // UDP may share its connected station, but never reconnects underneath it.
+  if (!mesh::wifi::stationMutationAllowed()) return;
+#ifdef WITH_WEBCONFIG
+  if (isWebConfigActive() || isWebConfigStopping()) return;
+#endif
+#ifdef WITH_MQTT_BRIDGE
+  if (mqtt_bridge && (mqtt_bridge->isRunning() || mqtt_bridge->isStopping())) return;
+#endif
+  if (!millisHasNowPassed(udp_station_retry_at)) return;
+  udp_station_retry_at = millis() + 15000U;
+  mesh::wifi::Credentials credentials;
+#ifdef WITH_MQTT_BRIDGE
+  const auto* legacy = _cli.getObserverPrefs();
+  const auto state = mesh::wifi::resolveCredentials(credentials,
+      legacy ? legacy->wifi_ssid : nullptr, legacy ? legacy->wifi_password : nullptr,
+      legacy ? legacy->wifi_power_save : mesh::wifi::kDefaultPowerSave);
+#else
+  const auto state = mesh::wifi::resolveCredentials(credentials);
+#endif
+  if (state != mesh::wifi::CredentialState::Ready) return;
+  WiFi.persistent(false);
+  if (!WiFi.mode(WIFI_STA) || mesh::wifi::applyProtocolMask(WIFI_IF_STA) != ESP_OK) return;
+  mesh::wifi::setStationAutoReconnect(true);
+  mesh::wifi::beginStation(credentials.ssid, credentials.password);
+  const uint8_t power_save = mesh::wifi::effectivePowerSave(credentials.power_save, false,
+      mesh::wifi::espNowChannelConstrained());
+  esp_wifi_set_ps(power_save == mesh::wifi::kPowerSaveNone ? WIFI_PS_NONE
+      : power_save == mesh::wifi::kPowerSaveMax ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM);
+}
+#endif
+
 // To check if there is pending work
 #if defined(ESP32_PLATFORM)
 void MyMesh::serviceIdleWiFi() {
-#if (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+#if (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE) \
     || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
     && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
     && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)
   if (_cli.getBoard()->isOTAUpdateRunning()) return;
+#ifdef WITH_UDP_BRIDGE
+  if (isUDPBridgeNetworkEnabled()) return;
+#endif
   if (mesh::wifi::networkPower().foregroundActive()) return;
 #ifdef WITH_WEBCONFIG
   if (isWebConfigActive() && (!mesh::wifi::networkPower().backgroundSuspended()
@@ -14247,6 +14438,9 @@ mesh::powerdiag::Mask MyMesh::pendingWorkReason() const {
   // probe additional hardware or change which work keeps the MCU awake.
   if (!canIdleDualRadio()) return mask(Reason::DualRadio);
   if (hasPendingOtaApply()) return mask(Reason::Ota);
+#ifdef WITH_UDP_BRIDGE
+  if (isUDPBridgeRunning()) return mask(Reason::Bridge);
+#endif
 #if defined(ESP32_PLATFORM)
   if (mesh::wifi::networkPower().foregroundActive()) return mask(Reason::Network);
 #endif
@@ -14255,7 +14449,7 @@ mesh::powerdiag::Mask MyMesh::pendingWorkReason() const {
       || _webconfig->isNetworkForegroundActive(millis()))) return mask(Reason::Network);
 #endif
 #if defined(ESP32_PLATFORM) \
-    && (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+    && (defined(WITH_WEBCONFIG) || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE) \
         || defined(LIGHTWEIGHT_WIFI_OTA) || (defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA))) \
     && (!defined(MESH_PRIMARY_ESPNOW) || !MESH_PRIMARY_ESPNOW) \
     && (!defined(MESH_ESPNOW_RADIO) || !MESH_ESPNOW_RADIO)

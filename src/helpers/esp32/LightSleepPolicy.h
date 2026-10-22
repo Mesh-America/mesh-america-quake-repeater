@@ -7,7 +7,7 @@
 // WiFi SDK check when a compiled service can own that driver. Use build flags,
 // rather than WITH_WEBCONFIG, which is defined by header inclusion order.
 #if defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE) \
-    || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) \
+    || defined(WITH_MQTT_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_UDP_BRIDGE) \
     || (defined(MESH_PRIMARY_ESPNOW) && MESH_PRIMARY_ESPNOW) \
     || defined(WIFI_OTA_SEEDER) || defined(ADMIN_PASSWORD) \
     || defined(COMPANION_RADIO_FULL)

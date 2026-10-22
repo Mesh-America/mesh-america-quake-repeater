@@ -75,6 +75,11 @@
 #define WITH_BRIDGE
 #endif
 
+#ifdef WITH_UDP_BRIDGE
+#include "helpers/bridges/UDPBridge.h"
+#include "helpers/UDPBridgeSettings.h"
+#endif
+
 #ifdef WITH_MQTT_BRIDGE
 #include "helpers/bridges/MQTTBridge.h"
 #define WITH_BRIDGE
@@ -629,6 +634,22 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   ESPNowBridge bridge;
   uint32_t shared_espnow_retry_at = 0;
 #endif
+#ifdef WITH_UDP_BRIDGE
+  mesh::bridge::udp::Settings udp_bridge_settings;
+  UDPBridge* udp_bridge = nullptr;
+  uint32_t udp_station_retry_at = 0;
+  bool udp_network_paused = false;
+  void serviceUDPBridge();
+  bool ensureUDPBridge();
+  const mesh::bridge::udp::Prefs* getUDPBridgePrefs() const override {
+    return &udp_bridge_settings.prefs();
+  }
+  bool setUDPBridgePrefs(const mesh::bridge::udp::Prefs& value) override;
+  void formatUDPBridgeStatus(char* reply, size_t capacity) override;
+  void formatUDPBridgeStats(const char* page, char* reply, size_t capacity) override;
+  bool sendUDPBridgeTest(uint8_t peer_index, uint32_t nonce) override;
+  bool resetUDPBridgeStats() override;
+#endif
 #ifdef WITH_BRIDGE
   AbstractBridge* activeBridge() {
 #ifdef WITH_MQTT_BRIDGE
@@ -651,6 +672,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
 
 #if defined(WITH_ESPNOW_BRIDGE)
+#if !defined(WITH_MQTT_BRIDGE) && !defined(WITH_RS232_BRIDGE)
+  bool isEspNowBridgeRunning() override { return bridge.isRunning(); }
+#endif
   ESPNowBridge& diagnosticEspNowBridge() {
 #if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE)
     return espnow_bridge;
@@ -1099,8 +1123,19 @@ protected:
   bool sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
 public:
+#ifdef WITH_UDP_BRIDGE
+  bool setUDPBridgeNetworkState(bool enabled) override;
+  bool isUDPBridgeNetworkEnabled() const override;
+  bool isUDPBridgeConfigured() const { return udp_bridge_settings.prefs().enabled != 0; }
+  bool isUDPBridgeRunning() const { return udp_bridge && udp_bridge->isRunning(); }
+#endif
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
-  ~MyMesh() { delete[] flood_packet_filters; }
+  ~MyMesh() {
+#ifdef WITH_UDP_BRIDGE
+    delete udp_bridge;
+#endif
+    delete[] flood_packet_filters;
+  }
   MyMesh(const MyMesh&) = delete;
   MyMesh& operator=(const MyMesh&) = delete;
 
@@ -1489,6 +1524,9 @@ public:
 #endif
 
   bool isBridgeRunning() const override {
+#ifdef WITH_UDP_BRIDGE
+    if (isUDPBridgeRunning()) return true;
+#endif
 #if defined(WITH_MQTT_BRIDGE)
     return (mqtt_bridge && mqtt_bridge->isRunning())
 #ifdef WITH_ESPNOW_BRIDGE

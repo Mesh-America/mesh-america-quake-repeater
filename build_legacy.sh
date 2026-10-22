@@ -2584,6 +2584,14 @@ apply_esp32_full_shared_bridge_profile() {
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DWITH_ESPNOW_BRIDGE=1"
   append_platformio_build_src_filter "+<helpers/bridges/ESPNowBridge.cpp>"
   record_build_capability "bridge.espnow"
+  # UDP is a default-off infrastructure repeater service. It shares saved
+  # station credentials and never belongs to companions or room servers.
+  if is_repeater_role_target "$env_name"; then
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DWITH_UDP_BRIDGE=1"
+    append_platformio_build_src_filter "+<helpers/bridges/UDPBridge.cpp>"
+    append_platformio_build_src_filter "+<helpers/UDPBridgeSettings.cpp>"
+    record_build_capability "bridge.udp"
+  fi
 }
 
 configure_unified_full_infrastructure_output() {
@@ -3544,6 +3552,10 @@ declare_build_capability_contract() {
     # Verify that the actual ESP-NOW driver survived linking in every Full
     # repeater/observer that claims it, including exact-identity source bases.
     record_build_expectation "bridge.espnow" "_ZN12ESPNowBridge5beginEv"
+    if is_repeater_role_target "$pio_env_name"; then
+      record_build_expectation "bridge.udp" "_ZN9UDPBridge5beginEv"
+      record_application_expectation "bridge.udp.configuration" "udp.enabled"
+    fi
   elif [ "$env_name_lc" = mke_s3_repeater ]; then
     record_build_expectation "bridge.espnow" "_ZN12ESPNowBridge5beginEv"
   fi

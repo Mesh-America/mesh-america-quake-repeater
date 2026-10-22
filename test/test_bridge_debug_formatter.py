@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BridgeDebugFormatterTests(unittest.TestCase):
-    def test_rs232_only_native_usb_has_bounded_runtime_gated_output(self):
+    def test_bridge_only_native_usb_has_bounded_runtime_gated_output(self):
         compiler = shutil.which("g++") or shutil.which("clang++")
         self.assertIsNotNone(compiler)
         header = (ROOT / "src/MeshCore.h").read_text(encoding="ascii")
@@ -68,15 +68,16 @@ int main() {
             source = work / "main.cpp"
             source.write_text(harness, encoding="ascii")
             for name, flags in (
-                ("nrf52", ["-DNRF52_PLATFORM=1"]),
-                ("esp32", ["-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=1"]),
+                ("nrf52-rs232", ["-DNRF52_PLATFORM=1", "-DWITH_RS232_BRIDGE=1"]),
+                ("esp32-rs232", ["-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=1", "-DWITH_RS232_BRIDGE=1"]),
+                ("esp32-udp", ["-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=1", "-DWITH_UDP_BRIDGE=1"]),
             ):
                 with self.subTest(platform=name):
                     binary = work / name
                     built = subprocess.run([
                         compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                         "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
-                        "-fno-pie", "-no-pie", "-DARDUINO=1", "-DWITH_RS232_BRIDGE=1",
+                        "-fno-pie", "-no-pie", "-DARDUINO=1",
                         "-DMESH_DEBUG=0", "-DBRIDGE_DEBUG=0", "-DPOWERSAVING_DEBUG=0",
                         *flags, "-I" + str(work), str(source), "-o", str(binary),
                     ], capture_output=True, text=True, timeout=30)
