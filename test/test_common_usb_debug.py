@@ -37,6 +37,9 @@ class TestFS : public MemoryFS {
 #include <helpers/CLICommandUtils.h>
 #include <helpers/RepeaterRadioTiming.h>
 #include <helpers/GpsPowerPolicy.h>
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#endif
 #include <helpers/bridges/ESPNowBridgeFormat.h>
 #include <helpers/radiolib/LR2021SideDetectorConfig.h>
 #define MIN_LORA_TX_POWER -9
@@ -87,6 +90,14 @@ struct Callbacks {
   void updateAdvertTimer() {}
 };
 struct CommonCLI {
+#if defined(ESP32_PLATFORM)
+  struct CpuBoard {
+    bool supportsCpuFrequencyMHz(uint16_t mhz) const {
+      return mhz == 80 || mhz == 160 || mhz == 240;
+    }
+  } cpu_board;
+  CpuBoard* _board = &cpu_board;
+#endif
   FILESYSTEM fs;
   NodePrefs prefs;
   NodePrefs* _prefs = &prefs;

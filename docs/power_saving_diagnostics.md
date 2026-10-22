@@ -110,11 +110,11 @@ radio2 experiments. They are held in RAM and reset at reboot:
 | Command | Values | Default |
 | --- | --- | --- |
 | `set powersaving.test sleep VALUE` | `on`, `off` | `on` |
-| `set powersaving.test slice_ms VALUE` | 2–20 ms | 10 ms |
-| `set powersaving.test guard_ms VALUE` | 0–20 ms | 4 ms |
-| `set powersaving.test min_ms VALUE` | 1–10 ms | 2 ms |
-| `set powersaving.test settle_ms VALUE` | `auto`, 1–50 ms | `auto` |
-| `set powersaving.test uart_quiet VALUE` | 5–300 seconds, `off` | inactive |
+| `set powersaving.test slice_ms VALUE` | 2-20 ms | 10 ms |
+| `set powersaving.test guard_ms VALUE` | 0-20 ms | 4 ms |
+| `set powersaving.test min_ms VALUE` | 1-10 ms | 2 ms |
+| `set powersaving.test settle_ms VALUE` | `auto`, 1-50 ms | `auto` |
+| `set powersaving.test uart_quiet VALUE` | 5-300 seconds, `off` | inactive |
 
 `get powersaving.test` shows the current controls; `set powersaving.test reset`
 restores their defaults. Sleep on permits existing power-saving decisions; the

@@ -19,7 +19,6 @@ def compile_run(code, macros=(), *, serializers=False):
         work = Path(directory)
         (work / "helpers").mkdir()
         fs = (ROOT / "test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h").read_text()
-        fs = fs.replace("  size_t available() const", "  bool seek(size_t p) { if (p > size()) return false; cursor_ = p; return true; }\n  size_t available() const")
         (work / "helpers/IdentityStore.h").write_text(fs)
         (work / "Utils.h").write_text("""#pragma once
 #include <Arduino.h>

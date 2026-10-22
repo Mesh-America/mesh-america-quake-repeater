@@ -20,6 +20,9 @@ HARNESS = r'''
 #include <helpers/AtomicFileWriter.h>
 #include <helpers/PrefsSaveRouting.h>
 #include <helpers/GpsPowerPolicy.h>
+#if defined(ESP32_PLATFORM)
+#include <helpers/esp32/CpuClockPolicy.h>
+#endif
 #define MESH_DEBUG_PRINTLN(...) ((void)0)
 #define MIN_LORA_TX_POWER -9
 #define MAX_LORA_TX_POWER 22
@@ -44,6 +47,14 @@ struct Callbacks {
   void savePrefs(PrefsSaveRouting::Scope scope);
 };
 struct CommonCLI {
+#if defined(ESP32_PLATFORM)
+  struct CpuBoard {
+    bool supportsCpuFrequencyMHz(uint16_t mhz) const {
+      return mhz == 80 || mhz == 160 || mhz == 240;
+    }
+  } cpu_board;
+  CpuBoard* _board = &cpu_board;
+#endif
   MemoryFS fs;
   NodePrefs prefs{};
   NodePrefs* _prefs=&prefs;
