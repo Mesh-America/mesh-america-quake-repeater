@@ -46,6 +46,13 @@ WiFi network using the normal [WiFi settings](WiFi.md). Read `get wifi.status`
 on each board to find its local address once connected. The commands below use
 example addresses; substitute the actual reserved addresses.
 
+For a LoRa-capable SenseCAP Indicator, use the Full
+`SenseCapIndicator-LoRa_repeater` target on the original 8 MiB/OPI-PSRAM board.
+The distinct `SenseCapIndicator-LoRa-N16R2_repeater` target is for 16 MiB/QSPI
+PSRAM hardware. Both retain the LoRa expander and display; their PSRAM modes
+are selected before app startup and the images are not interchangeable.
+The Indicator Companion and primary-ESP-NOW images do not provide this bridge.
+
 Both boards use the existing `bridge.secret` as their shared authentication
 secret. Set the same strong secret on both before enabling the transport. Do
 not paste it into shared diagnostic captures. The transport authenticates

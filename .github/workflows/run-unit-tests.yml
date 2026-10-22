@@ -416,6 +416,7 @@ jobs:
           python3 -B test/test_udp_packet_origin.py -v
           python3 -B test/test_udp_bridge.py -v
           python3 -B test/test_udp_bridge_integration.py -v
+          python3 -B test/test_indicator_repeater_profile.py -v
 
       - name: Verify saved repeat-off trace exception and relay guards
         run: |

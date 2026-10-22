@@ -2564,8 +2564,11 @@ supports_esp32_full_shared_espnow() {
     && { is_mqtt_bridge_target "$env_name" || is_repeater_role_target "$env_name"; } || return 1
   # Primary ESP-NOW radios already own the SDK callbacks and packet transport.
   # A second bridge instance would conflict with that radio, not add a mode.
-  ! pio_env_option_contains "$env_name" build_flags "MESH_PRIMARY_ESPNOW" \
-    && ! pio_env_option_contains "$env_name" build_flags "MESH_ESPNOW_RADIO"
+  # The Indicator LoRa board inherits the ESP-NOW board's original declaration
+  # followed by -UMESH_PRIMARY_ESPNOW. Inspect effective definitions rather
+  # than mistaking that overridden declaration for a live radio owner.
+  ! pio_env_has_effective_define "$env_name" MESH_PRIMARY_ESPNOW \
+    && ! pio_env_has_effective_define "$env_name" MESH_ESPNOW_RADIO
 }
 
 apply_esp32_full_shared_bridge_profile() {
@@ -3402,7 +3405,7 @@ is_esp32_full_only_bulk_target() {
     station_g3_esp32_repeater|station_g3_esp32_logging_repeater|station_g3_esp32_room_server|station_g3_esp32_sensor|station_g3_esp32_r2_sensor|station_g3_esp32_repeater_observer_mqtt|station_g3_esp32_room_server_observer_mqtt|\
     rak_3112_repeater|rak_3112_repeater_bridge_rs232|rak_3112_repeater_bridge_espnow|rak_3112_repeater_observer_mqtt|rak_3112_room_server|rak_3112_room_server_observer_mqtt|rak_3112_sensor|\
     xiao_s3_wio_repeater|xiao_s3_wio_repeater_bridge_espnow|xiao_s3_wio_repeater_observer_mqtt|xiao_s3_wio_room_server|xiao_s3_wio_room_server_observer_mqtt|xiao_s3_wio_sensor|\
-    lilygo_tdeck_repeater|\
+    lilygo_tdeck_repeater|sensecapindicator-lora_repeater|sensecapindicator-lora-n16r2_repeater|\
     thinknode_m7_repeater|thinknode_m7_room_server|thinknode_m7_repeater_observer_mqtt|thinknode_m7_room_server_observer_mqtt|\
     heltec_v4_r8_repeater|heltec_v4_r8_repeater_observer_mqtt|heltec_v4_r8_room_server|heltec_v4_r8_room_server_observer_mqtt|heltec_v4_r8_sensor|\
     heltec_v4_r8_tft_repeater|heltec_v4_r8_tft_repeater_observer_mqtt|heltec_v4_r8_tft_portrait_repeater_observer_mqtt|heltec_v4_r8_tft_room_server|heltec_v4_r8_tft_room_server_observer_mqtt|heltec_v4_r8_tft_portrait_room_server_observer_mqtt|heltec_v4_r8_tft_sensor)
@@ -4141,6 +4144,26 @@ for section, options in json.load(sys.stdin):
     break
 sys.exit(1)
 ' "$env_name" "$option_name" "$needle" <<<"$PIO_CONFIG_JSON"
+}
+
+pio_env_has_effective_define() {
+  local env_name=$1
+  local define_name=$2
+  python3 -c '
+import json, re, sys
+rows = {name: dict(options) for name, options in json.load(sys.stdin)}
+options = rows.get("env:" + sys.argv[1], {})
+flags = options.get("build_flags", [])
+if not isinstance(flags, list): flags = str(flags).splitlines()
+definitions = {}
+for flag in flags:
+    match = re.fullmatch(r"-([DU])\s*(\w+)(?:=(.*))?", str(flag).strip())
+    if not match: continue
+    kind, name, value = match.groups()
+    if kind == "U": definitions.pop(name, None)
+    else: definitions[name] = "1" if value is None else value
+sys.exit(0 if sys.argv[2] in definitions else 1)
+' "$env_name" "$define_name" <<<"$PIO_CONFIG_JSON"
 }
 
 append_platformio_build_src_filter() {
