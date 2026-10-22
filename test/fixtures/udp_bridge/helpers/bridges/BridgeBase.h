@@ -15,7 +15,7 @@ struct NodePrefs { uint8_t bridge_pkt_src = 1; uint32_t bridge_delay = 0; char b
 
 namespace mesh {
 #if defined(ARDUINO)
-inline bool logging_enabled = false, debug_enabled = false;
+extern bool logging_enabled, debug_enabled;
 class DebugStream : public Stream {
 public:
   int capacity = 4096;
@@ -30,7 +30,7 @@ public:
     bytes.insert(bytes.end(), data, data + size); return size;
   }
 };
-inline DebugStream debug_stream;
+extern DebugStream debug_stream;
 inline bool isUsbDebugLoggingEnabled() { return logging_enabled && debug_enabled; }
 inline Stream& usbLoggingPort() { return debug_stream; }
 inline size_t nrf52DebugPrintf(const char* format, ...) {

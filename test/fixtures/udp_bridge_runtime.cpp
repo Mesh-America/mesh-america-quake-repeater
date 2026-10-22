@@ -9,6 +9,19 @@
 #include "lwip/sockets.h"
 #include "helpers/bridges/UDPBridge.h"
 #include <SHA256.h>
+uint32_t test_now = 0;
+uint32_t random_state = 0x1678abcd;
+namespace mesh {
+bool logging_enabled = false, debug_enabled = false;
+DebugStream debug_stream;
+}
+namespace udp_test {
+Socket sockets[64];
+int next_socket = 0, opens = 0, receives = 0, sends = 0, receive_cap = 0;
+uint32_t creating_ip = 0;
+bool fail_send = false, fail_rcvbuf = false;
+std::vector<Datagram> sent;
+}
 namespace udp = mesh::bridge::udp;
 static bool hmac(void* context, const uint8_t* bytes, size_t size, uint8_t digest[32]) {
   const char* key = static_cast<const char*>(context);

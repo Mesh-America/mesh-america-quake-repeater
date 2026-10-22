@@ -123,7 +123,13 @@ bool UDPBridge::sendFrame(uint8_t peer, udp::Kind kind, uint64_t recipient,
   if (!_initialized || peer >= udp::MAX_PEERS || !_active.peers[peer].port) return false;
   if (!sequence) sequence = nextSequence();
   if (!_initialized || !sequence) return false;
-  const udp::Frame frame{kind, _boot, recipient, sequence, payload, length};
+  udp::Frame frame;
+  frame.kind = kind;
+  frame.sender = _boot;
+  frame.recipient = recipient;
+  frame.sequence = sequence;
+  frame.payload = payload;
+  frame.length = length;
   uint8_t bytes[udp::MAX_FRAME];
   const size_t size = udp::encode(bytes, sizeof(bytes), frame, authenticate, this);
   if (!size) { error(EINVAL); return false; }

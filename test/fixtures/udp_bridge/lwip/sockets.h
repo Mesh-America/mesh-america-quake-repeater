@@ -11,11 +11,11 @@
 namespace udp_test {
 struct Datagram { sockaddr_in source{}, target{}; std::vector<uint8_t> bytes; };
 struct Socket { bool open = false; uint32_t ip = 0; uint16_t port = 0; std::deque<Datagram> rx; };
-inline Socket sockets[64];
-inline int next_socket = 0, opens = 0, receives = 0, sends = 0, receive_cap = 0;
-inline uint32_t creating_ip = 0;
-inline bool fail_send = false, fail_rcvbuf = false;
-inline std::vector<Datagram> sent;
+extern Socket sockets[64];
+extern int next_socket, opens, receives, sends, receive_cap;
+extern uint32_t creating_ip;
+extern bool fail_send, fail_rcvbuf;
+extern std::vector<Datagram> sent;
 inline void inject(int index, const Datagram& packet) { sockets[index].rx.push_back(packet); }
 }
 inline int udpTestSocket(int, int, int) {

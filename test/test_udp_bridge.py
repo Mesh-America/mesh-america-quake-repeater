@@ -21,18 +21,28 @@ class UDPBridgeTests(unittest.TestCase):
         cls.binaries = []
         for cooperative in (0, 1):
             binary = Path(cls.temporary.name) / f'bridge-{cooperative}'
-            built = subprocess.run([
-                compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-O1',
+            flags = [
+                compiler, '-Wall', '-Wextra', '-Werror', '-O1',
                 '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                 '-fno-pie', '-no-pie', '-DARDUINO=1', '-DESP32=1', '-DWITH_UDP_BRIDGE=1',
                 f'-DMESH_ESP32_USB_CONSOLE_COOPERATIVE={cooperative}',
                 '-I' + str(FIXTURES), '-I' + str(ROOT / 'test/mocks'), '-I' + str(ROOT / 'src'),
-                str(ROOT / 'test/fixtures/udp_bridge_runtime.cpp'),
-                str(ROOT / 'src/helpers/bridges/UDPBridge.cpp'), '-o', str(binary),
-            ], capture_output=True, text=True, timeout=60)
-            if built.returncode:
-                cls.temporary.cleanup()
-                raise AssertionError(built.stdout + built.stderr)
+            ]
+            core = Path(cls.temporary.name) / f'core-{cooperative}.o'
+            # The pinned ESP32 GCC 8 firmware builds use C++11. Compile the
+            # actual implementation with that language level, even though the
+            # test driver uses C++17 aggregate initialization for test vectors.
+            commands = [
+                flags + ['-std=c++11', '-pedantic-errors', '-c',
+                         str(ROOT / 'src/helpers/bridges/UDPBridge.cpp'), '-o', str(core)],
+                flags + ['-std=c++17', str(ROOT / 'test/fixtures/udp_bridge_runtime.cpp'),
+                         str(core), '-o', str(binary)],
+            ]
+            for command in commands:
+                built = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                if built.returncode:
+                    cls.temporary.cleanup()
+                    raise AssertionError(built.stdout + built.stderr)
             cls.binaries.append(binary)
 
     @classmethod
