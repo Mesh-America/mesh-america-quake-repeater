@@ -31,6 +31,7 @@ PRELUDE = r'''
 #include <cstdint>
 #include <initializer_list>
 #include <helpers/radiolib/RadioInterruptEvents.h>
+#include <helpers/radiolib/RadioProfileChip.h>
 #define STATE_IDLE 0
 #define STATE_RX 1
 #define STATE_TX_WAIT 3
@@ -60,11 +61,14 @@ PRELUDE = r'''
 #define GPIO_IS_VALID_GPIO(pin) (((UINT64_C(0x1fffffc3fffff) >> (pin)) & 1) != 0)
 static bool gpio_levels[SOC_GPIO_PIN_COUNT]={};
 static unsigned gpio_reads=0;
+static void (*gpio_read_hook)()=nullptr;
 struct RadioLibHal {
  const uint32_t GpioLevelHigh=1;
  uint32_t digitalRead(uint32_t pin) {
    assert(pin<SOC_GPIO_PIN_COUNT && GPIO_IS_VALID_GPIO(pin));
-   ++gpio_reads;return gpio_levels[pin];
+   ++gpio_reads;
+   if(gpio_read_hook){auto hook=gpio_read_hook;gpio_read_hook=nullptr;hook();}
+   return gpio_levels[pin];
  }
 };
 struct Module {
@@ -268,7 +272,7 @@ int main(){
 }
 ''')
 
-    def source(self):
+    def source(self, sx126x=False):
         wrapper = (ROOT / "src/helpers/radiolib/RadioLibWrappers.cpp").read_text()
         custom = (ROOT / "src/helpers/radiolib/CustomLR2021.h").read_text()
         owners = wrapper.index("static RadioLibWrapper* radio_interrupt_owners")
@@ -287,6 +291,16 @@ int main(){
                             for kind, name in names)
         lr_methods = "\n".join(method(custom, signature) for signature in
                                ("int16_t readData(", "bool isReceiving()", "int16_t startReceive()"))
+        if sx126x:
+            # Keep the selected production activity timers and IRQ decisions.
+            # Only SPI/FIFO transport and the destructive RX rearm are mocked.
+            family = "CustomSX1262" if sx126x is True else sx126x
+            sx = (ROOT / f"src/helpers/radiolib/{family}.h").read_text()
+            lr_methods = r'''
+ unsigned activity_probes=0;
+ uint32_t getIrqFlags(){++activity_probes;return irq;}
+ int clearIrqFlags(uint32_t flags){++irq_clears;irq &= ~flags;return 0;}
+ ''' + method(sx, "bool isReceiving()")
         concrete = []
         for name in ("CustomLLCC68Wrapper", "CustomLR1110Wrapper", "CustomLR1121Wrapper",
                      "CustomLR2021Wrapper", "CustomSTM32WLxWrapper", "CustomSX1262Wrapper",
@@ -299,8 +313,26 @@ int main(){
             import re
             declaration = re.search(r"class (\w+) : public (\w+)", file.read_text())
             concrete.append(f"struct {declaration[1]} : {declaration[2]} {{}};")
-        return (PRELUDE.replace("@LR_METHODS@", lr_methods).replace("@CALLBACKS@", callbacks)
-                .replace("@METHODS@", methods).replace("@CONCRETE_CLASSES@", "\n".join(concrete)))
+        result = (PRELUDE.replace("@LR_METHODS@", lr_methods).replace("@CALLBACKS@", callbacks)
+                  .replace("@METHODS@", methods).replace("@CONCRETE_CLASSES@", "\n".join(concrete)))
+        if sx126x:
+            result = result.replace("#define NF_CALIB_SETTLE_MS 7", r'''
+#define NF_CALIB_SETTLE_MS 7
+#define RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED 4
+#define RADIOLIB_SX126X_IRQ_HEADER_VALID 16
+#define RADIOLIB_SX126X_IRQ_HEADER_ERR 32
+#define RADIOLIB_SX126X_IRQ_SYNC_WORD_VALID 8
+''')
+            result = result.replace("bool isReceivingPacket(){return false;}",
+                                    "bool isReceivingPacket(){return chip.isReceiving();}")
+            result = result.replace("bool isChipBusy(){return false;}\n bool isReceivingPacket()",
+                                    "bool chip_busy=false;\n bool isChipBusy(){return chip_busy;}\n bool isReceivingPacket()")
+            result = result.replace("++reads;\n#if defined(USE_LR2021)",
+                                    "++reads;irq=0;\n#if defined(USE_LR2021)")
+            result = result.replace(
+                "virtual int16_t startReceive(){++arms;stopped=false;return 0;}",
+                "virtual int16_t startReceive(){++arms;irq=0;rx_status=0;stopped=false;return 0;}")
+        return result
 
     def test_mode_changes_lifecycle_late_callbacks_and_tx_status_retry(self):
         compile_run(self.source() + r'''
@@ -531,6 +563,120 @@ int main(){
 '''
         for defines in ([], ["-DNRF52_PLATFORM=1"], ["-DSTM32_PLATFORM=1"]):
             with self.subTest(defines=defines): compile_run(checks,defines)
+
+    def sx126x_late_irq_checks(self):
+        return r'''
+static CustomSX1262Wrapper* staleEvent(){
+ now_ms=100;uint8_t bytes[16]={};
+ auto* w=new CustomSX1262Wrapper;assert(w->registerInterruptAction());
+ w->chip.module.irq=3;w->chip.rx_status=1;w->chip.irq=1;gpio_levels[3]=true;
+ // The edge ISR publishes after software claim, during observation of the
+ // same completed packet's DIO. Actual claim/read/rearm leaves it pending.
+ gpio_read_hook=w->chip.callback;
+ assert(w->recvRaw(bytes,sizeof(bytes))==4);
+ assert(w->n_recv==1&&w->chip.reads==1&&w->chip.arms==1);
+ assert(w->hasPendingRadioInterrupt());
+ assert(w->recvRaw(bytes,sizeof(bytes))==0&&w->_irq_probe_failures==1);
+ assert(w->recvRaw(bytes,sizeof(bytes))==0&&w->_irq_probe_failures==2);
+ return w;
+}
+int main(){
+ uint8_t bytes[16]={};
+ for(uint32_t activity:{uint32_t(4),uint32_t(16)}){
+   auto* w=staleEvent();w->chip.irq=activity;
+   // A new packet has entered preamble/header during the bounded stale-IRQ
+   // probes. Rearming here does standby/clear IRQ/SetRx on the pinned SX1262.
+   assert(w->isReceivingPacket());
+   assert(w->recvRaw(bytes,sizeof(bytes))==0);
+   assert(w->chip.arms==1&&"late IRQ must not rearm over a newer packet");
+   assert(w->chip.irq==activity&&w->chip.reads==1&&w->state==STATE_RX);
+   assert(w->_irq_probe_failures==0&&!w->hasPendingRadioInterrupt());
+   // Its real later RX_DONE remains readable exactly once.
+   w->chip.rx_status=1;w->chip.irq|=1;gpio_levels[3]=true;w->chip.callback();
+   assert(w->recvRaw(bytes,sizeof(bytes))==4);
+   assert(w->n_recv==2&&w->chip.reads==2&&w->chip.arms==2);
+   assert(!w->hasPendingRadioInterrupt());
+   assert(w->recvRaw(bytes,sizeof(bytes))==0&&w->chip.reads==2);
+   delete w;
+ }
+ // Inactive and expired false activity still get the original recovery.
+ for(uint32_t activity:{uint32_t(0),uint32_t(4),uint32_t(16)}){
+   auto* w=staleEvent();w->chip.irq=activity;
+   if(activity){
+     assert(w->isReceivingPacket());
+     now_ms+=activity==4?w->chip._preambleMillis+1:w->chip._maxPayloadMillis+1;
+   }
+   assert(w->recvRaw(bytes,sizeof(bytes))==0);
+   assert(w->chip.arms==2&&w->chip.irq==0&&w->state==STATE_RX);
+   assert(!w->hasPendingRadioInterrupt()&&w->n_recv==1);
+   assert(w->recvRaw(bytes,sizeof(bytes))==0&&w->chip.arms==2);
+   delete w;
+ }
+ // A current header error is failed activity, even when HEADER_VALID is
+ // still latched. The activity probe clears it and recovery proceeds once.
+ {
+   auto* w=staleEvent();w->chip.irq=32|16|4;
+   assert(w->recvRaw(bytes,sizeof(bytes))==0);
+   assert(w->chip.arms==2&&w->chip.irq==0&&w->chip.irq_clears==1);
+   assert(w->chip.reads==1&&w->n_recv==1&&!w->hasPendingRadioInterrupt());
+   assert(w->recvRaw(bytes,sizeof(bytes))==0&&w->chip.arms==2);delete w;
+ }
+ // A genuine RX_DONE with empty metadata or FIFO read error still retires
+ // its event. An activity bit must not turn it into an indefinite hold.
+ for(bool empty:{false,true}){
+   auto* w=staleEvent();w->chip.irq=16|1;w->chip.rx_status=1;
+   if(empty)w->chip.packet_length=0;else w->chip.base_status=-88;
+   assert(w->recvRaw(bytes,sizeof(bytes))==0);
+   assert(w->chip.arms==2&&w->chip.irq==0&&w->n_recv==1);
+   assert(w->n_recv_errors==(empty?0U:1U));
+   assert(w->chip.activity_probes==0);
+   delete w;
+ }
+ // Keep duty-cycle and idle/error-mode recovery outside this continuous-RX
+ // workaround. BUSY also prevents a second activity-status SPI probe.
+ for(unsigned bypass=0;bypass<3;++bypass){
+   auto* w=staleEvent();w->chip.irq=16;
+   if(bypass==0)w->_rx_ps_armed=true;
+   if(bypass==1)w->state=STATE_IDLE;
+   if(bypass==2)w->chip_busy=true;
+   assert(w->recvRaw(bytes,sizeof(bytes))==0&&w->chip.arms==2);
+   assert(w->chip.activity_probes==0);delete w;
+ }
+}
+'''
+
+    def test_sx126x_stale_irq_preserves_new_continuous_receive(self):
+        for chip in ("CustomSX1262", "CustomSX1268", "CustomLLCC68"):
+            with self.subTest(chip=chip):
+                compile_run(self.source(sx126x=chip)+self.sx126x_late_irq_checks(),
+                            ["-DESP32_PLATFORM=1", f"-DRADIO_CLASS={chip}"])
+
+    def test_removed_sx126x_stale_irq_guard_aborts_new_receive(self):
+        source = self.source(sx126x=True)
+        guard = ("    if (!packet_ready && state == STATE_RX && !_rx_ps_armed\n"
+                 "        && !isChipBusy() && isReceivingPacket()) return 0;\n")
+        self.assertEqual(source.count(guard), 1)
+        with self.assertRaises(AssertionError) as failure:
+            compile_run(source.replace(guard, "")+self.sx126x_late_irq_checks(),
+                        ["-DESP32_PLATFORM=1", "-DRADIO_CLASS=CustomSX1262"])
+        self.assertIn("late IRQ must not rearm over a newer packet", str(failure.exception))
+
+    def test_stale_irq_guard_does_not_change_other_platforms_or_phys(self):
+        checks = r'''
+int main(){
+ CustomSX1262Wrapper w;assert(w.registerInterruptAction());uint8_t bytes[16]={};
+ w.chip.rx_status=0;w.chip.irq=16;w.chip.callback();
+ assert(w.recvRaw(bytes,sizeof(bytes))==0&&w.chip.arms==0);
+ assert(w.recvRaw(bytes,sizeof(bytes))==0&&w.chip.arms==0);
+ assert(w.recvRaw(bytes,sizeof(bytes))==0&&w.chip.arms==1);
+ assert(w.chip.activity_probes==0);
+}
+'''
+        for defines in ([], ["-DNRF52_PLATFORM=1"], ["-DSTM32_PLATFORM=1"],
+                        ["-DESP32_PLATFORM=1", "-DRADIO_CLASS=CustomSX1276"],
+                        ["-DESP32_PLATFORM=1", "-DRADIO_CLASS=CustomLR1110"]):
+            with self.subTest(defines=defines):
+                compile_run(self.source(sx126x=True)+checks,defines)
 
     def test_lr2021_fifo_guards_stopped_snapshot_cleanup_and_recovery(self):
         compile_run(self.source() + r'''
