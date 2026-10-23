@@ -10,6 +10,10 @@
 #include <stdint.h>
 #include "NrfRadioIrqObserver.h"
 
+#ifndef MESH_HIL_PROFILE_HISTOGRAM_COUNT
+#define MESH_HIL_PROFILE_HISTOGRAM_COUNT 16
+#endif
+
 namespace mesh {
 namespace profiletiming {
 
@@ -20,7 +24,9 @@ enum Stage : uint32_t {
 enum Result : uint32_t { Success = 0, Busy = 1, Failure = 2 };
 static constexpr uint32_t Magic = 0x4d435054; // MCPT
 static constexpr uint32_t Version = 3;
-static constexpr uint32_t HistogramCount = 16;
+static constexpr uint32_t HistogramCount = MESH_HIL_PROFILE_HISTOGRAM_COUNT;
+static_assert(HistogramCount == 8 || HistogramCount == 16,
+              "Private profile timing supports eight or sixteen histogram bins");
 static constexpr uint32_t HistogramWidthUs = 64;
 #if defined(NRF52_PLATFORM)
 static constexpr uint32_t ClockDivisor = 64;
@@ -33,7 +39,8 @@ static constexpr uint32_t ClockHz = ClockDivisor * 1000000;
 // MCU; sums are split low/high words rather than ABI-dependent uint64_t.
 struct StageStats {
   uint32_t count, sum_low_us, sum_high_us, min_us, max_us, last_us;
-  uint32_t histogram[HistogramCount]; // final bucket includes >= 960 us
+  // Final bucket includes >= (HistogramCount - 1) * HistogramWidthUs.
+  uint32_t histogram[HistogramCount];
 };
 struct DirectionStats {
   uint32_t successes, busy, failures, last_result, last_mask;
@@ -190,10 +197,10 @@ inline void finish(Result result, uint32_t now_ticks) {
   ++capture.sequence;
 }
 
-static_assert(sizeof(Capture) == 40 + 2 * (20 + StageCount * (8 + 88)),
+static_assert(sizeof(Capture) == 40 + 2 * (20 + StageCount * (32 + 4 * HistogramCount)),
               "Unexpected profile timing ABI");
-static_assert(StageCount == 11 && sizeof(Capture) == 2192,
-              "Profile timing version 3 requires eleven stages and 2192 bytes");
+static_assert(StageCount == 11 && sizeof(Capture) == (HistogramCount == 16 ? 2192 : 1488),
+              "Profile timing version 3 requires eleven stages and matching bin metadata");
 
 } // namespace profiletiming
 } // namespace mesh

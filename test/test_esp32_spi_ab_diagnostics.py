@@ -13,6 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class Esp32SpiABDiagnosticsTests(unittest.TestCase):
     def test_commands_reach_diagnostics_through_production_cli(self):
+        self.check_production_cli()
+
+    def test_eight_bin_capture_preserves_stages_sums_and_rejects_a_second_page(self):
+        self.check_production_cli(8)
+
+    def check_production_cli(self, histogram_count=None):
         fixture = (ROOT / 'test/fixtures/radio_profiles/switch_tuning_test.cpp').read_text()
         fixture = fixture.rsplit('\nint main() {', 1)[0]
         fixture += r'''
@@ -29,11 +35,41 @@ int main() {
   mesh::esp_spiab::recordClock(0x1000,8888888);
   assert(!strcmp(f.cmd("get radio.fast.hw"),"> divider=0x00001000 hz=8888888 changes=1"));
   assert(strstr(f.cmd("get radio.fast.time 1 10"),"d=1 s=10 count=0"));
+#if MESH_HIL_PROFILE_HISTOGRAM_COUNT == 8
+  static_assert(sizeof(mesh::profiletiming::Capture)==1488,"compact HIL capture");
+  assert(strstr(f.cmd("get radio.fast.hist 0 10 1"),"Error:"));
+  assert(strstr(f.cmd("get radio.fast.hist 0 10 0"),"p=0 bins=0,0,0,0,0,0,0,0"));
+  assert(strstr(f.cmd("get radio.fast.hil"),"bytes=1488"));
+  assert(strstr(f.cmd("get radio.fast.hil"),"stages=11 bins=8 width=64"));
+#else
   assert(strstr(f.cmd("get radio.fast.hist 0 10 1"),"p=1 bins=0,0,0,0,0,0,0,0"));
   assert(strstr(f.cmd("get radio.fast.hil"),"bytes=2192"));
+  assert(strstr(f.cmd("get radio.fast.hil"),"stages=11 bins=16 width=64"));
+#endif
   assert(strstr(f.cmd("set radio.fast.hw 8",false),"read-only"));
   assert(strstr(f.cmd("get radio.fast.time 2 10"),"Error:"));
   assert(!strcmp(f.cmd("get radio.fast.buffer"),"> on"));
+  assert(f.radio.attempts==0 && f.fs.files.empty());
+  // Compact histograms coarsen only the tail. All eleven stage rows and
+  // full-resolution sums/min/max remain unchanged for the same real sample.
+  using namespace mesh::profiletiming;
+  static_assert(StageCount==11,"all timing stages retained");
+  begin(0,1,100);mark(Admission,132);finish(Success,1000);
+  const auto& stats=mesh_hil_profile_timing.direction[0].stage[Whole];
+  assert(stats.count==1 && stats.sum_low_us==900 && stats.sum_high_us==0);
+  assert(stats.min_us==900 && stats.max_us==900 && stats.last_us==900);
+  const unsigned bucket=900/HistogramWidthUs;
+  assert(stats.histogram[bucket<HistogramCount?bucket:HistogramCount-1]==1);
+  assert(strstr(f.cmd("get radio.fast.time 0 10"),"count=1 sum_hi=0 sum_lo=900"));
+#if MESH_HIL_PROFILE_HISTOGRAM_COUNT == 8
+  assert(strstr(f.cmd("get radio.fast.hist 0 10 0"),"bins=0,0,0,0,0,0,0,1"));
+  for(unsigned size=0;size<=160;++size) {
+    char guarded[162];memset(guarded,0x55,sizeof(guarded));
+    assert(mesh::esp_spiab::handle("hist","0 10 0",0,guarded+1,size));
+    assert(guarded[0]==0x55 && guarded[size+1]==0x55);
+    if(size) assert(memchr(guarded+1,0,size));
+  }
+#endif
   assert(f.radio.attempts==0 && f.fs.files.empty());
 }
 '''
@@ -44,9 +80,15 @@ int main() {
                                encoding='ascii')
             cpp, binary = work / 'cli.cpp', work / 'cli'
             cpp.write_text(fixture, encoding='ascii')
+            extra_flags = []
+            if histogram_count is not None:
+                extra_flags.append('-DMESH_HIL_PROFILE_HISTOGRAM_COUNT='+str(histogram_count))
+                if os.name != 'nt':
+                    extra_flags += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+                                    '-fno-pie', '-no-pie']
             built = subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++17',
                 '-Wall', '-Wextra', '-DESP32_PLATFORM=1', '-DMESH_HIL_PROFILE_TIMING=1',
-                '-DMESH_HIL_ESP_SPI_AB=1', '-include', str(prelude),
+                '-DMESH_HIL_ESP_SPI_AB=1', *extra_flags, '-include', str(prelude),
                 '-I', str(ROOT / 'test/fixtures/radio_profiles'),
                 '-I', str(ROOT / 'test/fixtures/radio_profiles/mocks'),
                 '-I', str(ROOT / 'test/mocks'), '-I', str(ROOT / 'src'),
@@ -54,6 +96,25 @@ int main() {
                 capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             subprocess.run([str(binary)], check=True)
+
+    def test_histogram_geometry_is_private_and_rejects_unsupported_counts(self):
+        source = ('#include <cstdint>\ninline uint32_t micros() { return 0; }\n'
+                  '#include <helpers/radiolib/ProfileSwitchTiming.h>\nint main() {}\n')
+        for count in (0, 7, 9, 32):
+            with self.subTest(count=count):
+                built = subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++11',
+                    '-DMESH_HIL_PROFILE_TIMING=1', '-DMESH_HIL_PROFILE_HISTOGRAM_COUNT='+str(count),
+                    '-x', 'c++', '-fsyntax-only', '-I', str(ROOT / 'src'), '-'],
+                    input=source, capture_output=True, text=True)
+                self.assertNotEqual(built.returncode,0)
+                self.assertIn('supports eight or sixteen histogram bins',built.stderr)
+        source = ('#include <helpers/radiolib/ProfileSwitchTiming.h>\n'
+                  '#ifdef MESH_HIL_PROFILE_HISTOGRAM_COUNT\n#error HIL geometry leaked\n#endif\n'
+                  'int main() {}\n')
+        built = subprocess.run([os.environ.get('CXX', 'g++'), '-std=c++11',
+            '-x', 'c++', '-fsyntax-only', '-I', str(ROOT / 'src'), '-'],
+            input=source, capture_output=True, text=True)
+        self.assertEqual(built.returncode,0,built.stderr)
 
     def test_live_divider_after_transaction_and_read_only_bounded_snapshots(self):
         fixture = r'''

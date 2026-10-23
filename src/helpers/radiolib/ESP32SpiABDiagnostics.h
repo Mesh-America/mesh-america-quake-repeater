@@ -48,7 +48,8 @@ inline bool handle(const char* suffix, const char* args, int verb,
       || (timing && (sscanf(args, "%u %u %c", &direction, &stage, &extra) != 2
           || direction > 1 || stage >= profiletiming::StageCount))
       || (hist && (sscanf(args, "%u %u %u %c", &direction, &stage, &page, &extra) != 3
-          || direction > 1 || stage >= profiletiming::StageCount || page > 1))) {
+          || direction > 1 || stage >= profiletiming::StageCount
+          || page >= profiletiming::HistogramCount / 8))) {
     snprintf(reply, capacity, "Error: get radio.fast.hw|hil; time D S; hist D S P");
     return true;
   }
