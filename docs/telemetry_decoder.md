@@ -38,6 +38,15 @@ set data.tx path A1B2,C3D4
 send telemetry.tx now
 ```
 
+Telemetry with a non-empty hop path uses the existing direct-message echo
+retries, following `direct.retry`, `direct.retry.count`, `direct.retry.heard`,
+and the direct-retry coding-rate policy. Retries stop when a matching downstream
+forwarding echo is heard. The default zero-hop `direct` route does not use echo retries.
+Updated relays can retry their own forwarding hop; stock relays remain compatible
+and their forwarding can provide the echo. This adds no packet format or ACK:
+an echo confirms forwarding, not final delivery to the observer. A queue failure
+still retries only the packet that failed to queue, after 30 minutes.
+
 The shared route does not enable telemetry. Automatic telemetry is off on a
 fresh install; to explicitly keep the route manual-only before sending:
 

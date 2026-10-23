@@ -58,6 +58,29 @@ static bool hasValidEncryptedPayloadLength(uint16_t payload_len, uint16_t clear_
   return ((payload_len - overhead) % CIPHER_BLOCK_SIZE) == 0;
 }
 
+static bool isTelemetryHistoryPayload(const Packet* packet) {
+  const uint8_t* data = packet->payload;
+  const uint16_t length = packet->payload_len;
+  if ((uint16_t)(length - 20U) > MAX_PACKET_PAYLOAD - 20U
+      || data[2] != 'B' || data[3] != '1'
+      || (data[16] | data[17]) == 0 || data[18] == 0) return false;
+
+  // Recognize complete B1 history envelopes, not arbitrary custom traffic
+  // which happens to begin with a telemetry tag.
+  const uint16_t count = data[18];
+  if (data[0] == 'T' && (data[1] == 'T' || data[1] == 'V')) {
+    // The payload-size bound also caps these one-byte samples at 165.
+    return length == 19U + count;
+  }
+  if (data[0] == 'I' && data[1] == 'V') {
+    const uint16_t samples = data[19];
+    return samples != 0 && samples <= 64
+        && length == 20U + (samples * 15U + 7U) / 8U;
+  }
+  return data[0] == 'N' && (uint8_t)(data[1] - '1') <= 1
+      && length == 19U + (count * 5U + 7U) / 8U;
+}
+
 static uint8_t decodeTraceHashSize(uint8_t flags, uint8_t route_bytes) {
   uint8_t code = flags & 0x03;
   uint8_t size_pow2 = (uint8_t)(1U << code);   // legacy TRACE interpretation
@@ -301,31 +324,7 @@ void Mesh::begin() {
   _next_recent_advert_echo = 0;
   _next_direct_retry_timeout = 0;
   _next_flood_retry_timeout = 0;
-  for (int i = 0; i < TOTAL_DIRECT_RETRY_SLOTS; i++) {
-    _direct_retries[i].packet = NULL;
-    _direct_retries[i].trigger_packet = NULL;
-    _direct_retries[i].retry_started_at = 0;
-    _direct_retries[i].echo_wait_started_at = 0;
-    _direct_retries[i].retry_at = 0;
-    _direct_retries[i].retry_delay = 0;
-    _direct_retries[i].message_timestamp = 0;
-    _direct_retries[i].retry_attempts_sent = 0;
-    memset(_direct_retries[i].retry_key, 0, sizeof(_direct_retries[i].retry_key));
-    memset(_direct_retries[i].trace_replacement_key, 0, sizeof(_direct_retries[i].trace_replacement_key));
-    memset(_direct_retries[i].message_replacement_key, 0,
-           sizeof(_direct_retries[i].message_replacement_key));
-    memset(_direct_retries[i].next_hop_hash, 0, sizeof(_direct_retries[i].next_hop_hash));
-    _direct_retries[i].next_hop_hash_len = 0;
-    _direct_retries[i].payload_type = 0;
-    _direct_retries[i].priority = 0;
-    _direct_retries[i].progress_marker = 0;
-    _direct_retries[i].expect_path_growth = false;
-    _direct_retries[i].final_hop_retry = false;
-    _direct_retries[i].waiting_final_echo = false;
-    _direct_retries[i].queued = false;
-    _direct_retries[i].has_message_replacement_key = false;
-    _direct_retries[i].active = false;
-  }
+  memset(_direct_retries, 0, sizeof(_direct_retries));
   for (int i = 0; i < TOTAL_FLOOD_RETRY_SLOTS; i++) {
     _flood_retries[i].packet = NULL;
     _flood_retries[i].trigger_packet = NULL;
@@ -1645,29 +1644,7 @@ void Mesh::clearDirectRetrySlot(int idx) {
   if (_direct_retries[idx].active && _active_direct_retry_count > 0) {
     _active_direct_retry_count--;
   }
-  _direct_retries[idx].packet = NULL;
-  _direct_retries[idx].trigger_packet = NULL;
-  _direct_retries[idx].retry_started_at = 0;
-  _direct_retries[idx].echo_wait_started_at = 0;
-  _direct_retries[idx].retry_at = 0;
-  _direct_retries[idx].retry_delay = 0;
-  _direct_retries[idx].message_timestamp = 0;
-  _direct_retries[idx].retry_attempts_sent = 0;
-  memset(_direct_retries[idx].retry_key, 0, sizeof(_direct_retries[idx].retry_key));
-  memset(_direct_retries[idx].trace_replacement_key, 0, sizeof(_direct_retries[idx].trace_replacement_key));
-  memset(_direct_retries[idx].message_replacement_key, 0,
-         sizeof(_direct_retries[idx].message_replacement_key));
-  memset(_direct_retries[idx].next_hop_hash, 0, sizeof(_direct_retries[idx].next_hop_hash));
-  _direct_retries[idx].next_hop_hash_len = 0;
-  _direct_retries[idx].payload_type = 0;
-  _direct_retries[idx].priority = 0;
-  _direct_retries[idx].progress_marker = 0;
-  _direct_retries[idx].expect_path_growth = false;
-  _direct_retries[idx].final_hop_retry = false;
-  _direct_retries[idx].waiting_final_echo = false;
-  _direct_retries[idx].queued = false;
-  _direct_retries[idx].has_message_replacement_key = false;
-  _direct_retries[idx].active = false;
+  memset(&_direct_retries[idx], 0, sizeof(_direct_retries[idx]));
   if (rebuild_timeout) rebuildNextDirectRetryTimeout();
 }
 
@@ -2028,6 +2005,11 @@ void Mesh::clearPendingDirectRetryOnSendFail(const Packet* packet) {
 bool Mesh::getDirectRetryTarget(const Packet* packet, const uint8_t*& next_hop_hash, uint8_t& next_hop_hash_len,
                                 uint8_t& progress_marker, bool& expect_path_growth) const {
   switch (packet->getPayloadType()) {
+    case PAYLOAD_TYPE_RAW_CUSTOM:
+      if (!isTelemetryHistoryPayload(packet)) return false;
+      // Telemetry uses the same shrinking-path echo as other direct packets.
+      // Zero-hop sends have no forwarding echo and remain excluded below.
+      // fall through
     case PAYLOAD_TYPE_ACK:
     case PAYLOAD_TYPE_PATH:
     case PAYLOAD_TYPE_REQ:
@@ -2036,24 +2018,13 @@ bool Mesh::getDirectRetryTarget(const Packet* packet, const uint8_t*& next_hop_h
     case PAYLOAD_TYPE_ANON_REQ:
       // Allow retries even when only one downstream hop remains so fixed direct paths
       // (e.g. remote admin/login over 2-hop chains) use the same retry policy.
-      if (packet->getPathHashCount() == 0) {
-        return false;
-      }
-      next_hop_hash = packet->path;
-      next_hop_hash_len = packet->getPathHashSize();
-      progress_marker = packet->getPathHashCount();
-      expect_path_growth = false;
-      return true;
+      break;
 
     case PAYLOAD_TYPE_MULTIPART:
-      if (packet->payload_len < 1 || (packet->payload[0] & 0x0F) != PAYLOAD_TYPE_ACK || packet->getPathHashCount() == 0) {
+      if (packet->payload_len < 1 || (packet->payload[0] & 0x0F) != PAYLOAD_TYPE_ACK) {
         return false;
       }
-      next_hop_hash = packet->path;
-      next_hop_hash_len = packet->getPathHashSize();
-      progress_marker = packet->getPathHashCount();
-      expect_path_growth = false;
-      return true;
+      break;
 
     case PAYLOAD_TYPE_TRACE: {
       if (packet->payload_len < 9) {
@@ -2077,6 +2048,13 @@ bool Mesh::getDirectRetryTarget(const Packet* packet, const uint8_t*& next_hop_h
     default:
       return false;
   }
+
+  if (packet->getPathHashCount() == 0) return false;
+  next_hop_hash = packet->path;
+  next_hop_hash_len = packet->getPathHashSize();
+  progress_marker = packet->getPathHashCount();
+  expect_path_growth = false;
+  return true;
 }
 
 bool Mesh::canDecodeDirectPayloadForSelf(const Packet* packet) {
@@ -2202,27 +2180,21 @@ void Mesh::maybeScheduleDirectRetry(const Packet* packet, uint8_t priority, bool
 
   // Only store retry metadata here; allocate the retry packet after the initial TX really completes.
   uint32_t retry_delay = getDirectRetryAttemptDelay(packet, 0);
-  memcpy(_direct_retries[slot_idx].retry_key, retry_key, sizeof(retry_key));
-  memcpy(_direct_retries[slot_idx].trace_replacement_key, trace_replacement_key,
+  DirectRetryEntry& entry = _direct_retries[slot_idx];
+  memset(&entry, 0, sizeof(entry));
+  memcpy(entry.retry_key, retry_key, sizeof(retry_key));
+  memcpy(entry.trace_replacement_key, trace_replacement_key,
          sizeof(trace_replacement_key));
-  _direct_retries[slot_idx].packet = NULL;
-  _direct_retries[slot_idx].trigger_packet = const_cast<Packet*>(packet);
-  _direct_retries[slot_idx].retry_started_at = 0;
-  _direct_retries[slot_idx].echo_wait_started_at = 0;
-  _direct_retries[slot_idx].retry_at = 0;
-  _direct_retries[slot_idx].retry_delay = retry_delay;
-  _direct_retries[slot_idx].retry_attempts_sent = 0;
-  memset(_direct_retries[slot_idx].next_hop_hash, 0, sizeof(_direct_retries[slot_idx].next_hop_hash));
-  memcpy(_direct_retries[slot_idx].next_hop_hash, next_hop_hash, next_hop_hash_len);
-  _direct_retries[slot_idx].next_hop_hash_len = next_hop_hash_len;
-  _direct_retries[slot_idx].payload_type = packet->getPayloadType();
-  _direct_retries[slot_idx].priority = priority;
-  _direct_retries[slot_idx].progress_marker = progress_marker;
-  _direct_retries[slot_idx].expect_path_growth = expect_path_growth;
-  _direct_retries[slot_idx].final_hop_retry = final_hop_retry;
-  _direct_retries[slot_idx].waiting_final_echo = false;
-  _direct_retries[slot_idx].queued = false;
-  _direct_retries[slot_idx].active = true;
+  entry.trigger_packet = const_cast<Packet*>(packet);
+  entry.retry_delay = retry_delay;
+  memcpy(entry.next_hop_hash, next_hop_hash, next_hop_hash_len);
+  entry.next_hop_hash_len = next_hop_hash_len;
+  entry.payload_type = packet->getPayloadType();
+  entry.priority = priority;
+  entry.progress_marker = progress_marker;
+  entry.expect_path_growth = expect_path_growth;
+  entry.final_hop_retry = final_hop_retry;
+  entry.active = true;
   _active_direct_retry_count++;
 }
 

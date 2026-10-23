@@ -865,8 +865,16 @@ history is still sent. It uses all currently available base
 positions up to 165 and all available I2C positions up to 192 per populated
 channel, plus the latest 255 positions per noise profile (63 hours 45 minutes).
 It works while the schedule is off and does not move the next
-scheduled send time. RAW_CUSTOM direct packets do not enter the normal
-encrypted direct-message retry mechanism.
+scheduled send time.
+
+With a non-empty hop path, `TTB1`, `TVB1`, `IVB1`, `N1B1`, and `N2B1` telemetry
+use the existing direct-message echo retries. They follow `direct.retry`,
+`direct.retry.count`, `direct.retry.heard`, and the direct-retry coding-rate
+policy. A matching downstream forwarding echo stops retries. The default
+zero-hop `direct` route has no forwarding echo and does not use these retries.
+Updated relays can retry their own forwarding hop; stock relays remain compatible
+and their forwarded packets can provide the echo. The packet format is unchanged:
+there is no new ACK or confirmation that the final observer received the data.
 
 Full temperature and battery snapshots are 184-byte RAW_CUSTOM payloads.
 Manual tests can be shorter while history fills. Both formats are binary,
@@ -5038,7 +5046,10 @@ region save
 ---
 ### Direct Retry
 
-Direct retry resends direct-routed packets when the downstream echo is not heard. It applies to direct messages, ACK packets, multipart packets carrying ACK payloads, and TRACE packets.
+Direct retry resends direct-routed packets when the downstream echo is not heard.
+It applies to direct messages, ACK packets, multipart packets carrying ACK
+payloads, TRACE packets, and recognized RAW_CUSTOM telemetry (`TTB1`, `TVB1`,
+`IVB1`, `N1B1`, `N2B1`) with a non-empty hop path.
 
 The shared state, count, base, and step controls work on repeater, room-server,
 and sensor firmware. Recent-repeater/SNR controls are repeater-only because the
@@ -5396,8 +5407,8 @@ set flood.retry.bucket 2 none
 **Default:** `15` with the `rooftop` preset
 
 **Note:** This setting limits retries for eligible direct-routed packets such as
-traces, requests, responses, and ACKs. Direct-routed **text messages (type 2)**
-are an exception: they allow **up to 21 retries after the original send**,
+traces, requests, responses, ACKs, and recognized telemetry. Direct-routed
+**text messages (type 2)** are an exception: they allow **up to 21 retries after the original send**,
 regardless of `direct.retry.count` or the repeater short-path cap. For example,
 `set direct.retry.count 1` limits eligible non-text packets to one retry, but
 does not reduce the text-message limit.
