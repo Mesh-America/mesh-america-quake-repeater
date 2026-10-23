@@ -1,5 +1,6 @@
 """Execute actual repeater trace gates with the production Packet definition."""
 from pathlib import Path
+from itertools import product
 import os
 import shutil
 import subprocess
@@ -247,13 +248,14 @@ class RepeaterTraceForwardingTest(unittest.TestCase):
             cpp = work / 'test.cpp'
             cpp.write_text(code, encoding='utf-8')
             (work / 'Dispatcher.h').write_text(portable_radio_header(), encoding='utf-8')
-            for portable, morse_rx in ((False, 1), (True, 1), (False, 0), (True, 0)):
-                with self.subTest(portable=portable, morse_rx=morse_rx):
+            for portable, morse_rx, history in product((False, True), (0, 1), (0, 1)):
+                with self.subTest(portable=portable, morse_rx=morse_rx, history=history):
                     binary = work / 'test'
                     built = subprocess.run([
                         compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
                         '-Wno-unused-parameter',
                         f'-DMESH_ENABLE_MORSE_RX={morse_rx}',
+                        f'-DMESH_ENABLE_TELEMETRY_HISTORY={history}',
                         '-DMESH_ENABLE_FLOOD_GROUP_MODERATION=1', '-DMESH_ENABLE_CLOCK_SYNC=1',
                         *(['-DPORTABLE_MQTT_OBSERVER=1'] if portable else []), *flags,
                         '-I' + str(work), '-I' + str(ROOT / 'test/mocks'),

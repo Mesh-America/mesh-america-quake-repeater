@@ -1449,7 +1449,7 @@ done
 )
 for primary_flag in MESH_PRIMARY_ESPNOW MESH_ESPNOW_RADIO; do
   (
-    pio_env_option_contains() { [ "$3" = "$primary_flag" ]; }
+    pio_env_has_effective_define() { [ "$2" = "$primary_flag" ]; }
     PLATFORMIO_BUILD_FLAGS=""
     PLATFORMIO_BUILD_SRC_FILTER=""
     if supports_esp32_full_shared_espnow heltec_v4_tft_repeater; then

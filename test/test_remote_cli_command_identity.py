@@ -26,6 +26,9 @@ class RemoteCliCommandIdentityTest(unittest.TestCase):
         normalize_end = source.index("  mesh::cli::normalizeCommandVerb(command);", normalize_start)
         normalize_end += len("  mesh::cli::normalizeCommandVerb(command);")
         mutation = source[trim_start:trim_end] + "\n" + source[normalize_start:normalize_end]
+        # The full handler consumes this flag in its later telemetry reply
+        # branch, outside this normalization-only boundary.
+        mutation += "\n#if MESH_ENABLE_TELEMETRY_HISTORY\n(void)prefixed_reply;\n#endif\n"
         # setperm splits the argument in the same buffer; retain its real
         # delimiter mutation without pulling ACL/filesystem hardware into this test.
         setperm = source.index('char* hex = &command[8];', normalize_end)
