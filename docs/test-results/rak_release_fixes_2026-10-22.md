@@ -122,6 +122,11 @@ integration and eight Mini-profile tests passed. Other platforms select their
 unchanged messages.
 
 The updated [CI run](https://github.com/mikecarper/MeshCore/actions/runs/39909897061)
-was still running when this report was prepared. These targeted checks do not
-claim a new all-board campaign, RS232 cable traffic, physical OTA installation,
-maximum-load operation or a long RF soak.
+passed all 12 firmware and support jobs, including both new RAK build pairs.
+The main test job exposed an outdated trace-timing extraction fixture: it
+omitted the dispatcher's new queue helpers. The fixture now extracts those
+production methods and supplies their state dependencies; all five test
+methods and ten normal/mutation invocations pass with ASan/UBSan. This
+fixture-only correction requires no repeated firmware or hardware checks.
+These targeted checks do not claim a new all-board campaign, RS232 cable
+traffic, physical OTA installation, maximum-load operation or a long RF soak.
