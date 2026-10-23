@@ -18,7 +18,9 @@ class LR1110ProfileSwitchTests(unittest.TestCase):
             "t1000-e": "Nrf52BufferedRadioHal",
             "wio_wm1110": "Nrf52BufferedRadioHal",
             "thinknode_m3": "Nrf52BufferedRadioHal",
-            "thinknode_m4": "Nrf52BufferedRadioHal",
+            # Fast RX ownership is independent of the SPI transport. Keep M4
+            # on its prior bus until its SPIM3/BLE transfer path is qualified.
+            "thinknode_m4": None,
             "minewsemi_me25ls01": "Nrf52BufferedRadioHal",
             "thinknode_m7": "ESP32BufferedRadioHal",
             "thinknode_m9": "ESP32BufferedRadioHal",
@@ -30,8 +32,14 @@ class LR1110ProfileSwitchTests(unittest.TestCase):
                 target_source = (variant / "target.cpp").read_text()
                 self.assertIn("-D RADIO_CLASS=CustomLR1110", config)
                 self.assertIn("-D WRAPPER_CLASS=CustomLR1110Wrapper", config)
-                self.assertIn(f"{hal} radioHal(", target_source)
-                self.assertIn("new Module(&radioHal,", target_source)
+                if hal is not None:
+                    self.assertIn(f"{hal} radioHal(", target_source)
+                    self.assertIn("new Module(&radioHal,", target_source)
+                else:
+                    self.assertNotIn("BufferedRadioHal", target_source)
+                    self.assertIn(
+                        "new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI)",
+                        target_source)
 
         esp32_hal = (ROOT / "src/helpers/radiolib/ESP32BufferedRadioHal.h").read_text()
         nrf52_hal = (ROOT / "src/helpers/radiolib/Nrf52BufferedRadioHal.h").read_text()
