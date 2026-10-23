@@ -128,6 +128,10 @@ void check() {{
                 # Its separate constructor test executes the default-off
                 # candidate gate and actual legacy/opt-in branches.
                 self.assertIn("#if MC_XIAO_NRF52_HIL_FAST_SPI",text)
+            elif source.parent.name in {"rak_wismesh_tag", "heltec_tower_v2"}:
+                # Their SPIM1 candidate is also default-off, with the actual
+                # global SDK binding exercised by its separate native test.
+                self.assertIn("#if MC_NRF52_HIL_SPIM1_RADIO",text)
             else:
                 self.assertNotIn("BufferedRadioHal",text,str(source))
             constructions=re.findall(r"^RADIO_CLASS radio = new Module\(P_LORA_NSS[^;]+;",text,re.MULTILINE)

@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include "target.h"
 #include <helpers/ArduinoHelpers.h>
+#include <helpers/nrf52/Nrf52HilSpim1Owner.h>
+#if MC_NRF52_HIL_SPIM1_RADIO
+#include <helpers/radiolib/Nrf52BufferedRadioHal.h>
+#endif
 
 RAKWismeshTagBoard board;
 
@@ -13,7 +17,12 @@ RAKWismeshTagBoard board;
   MomentaryButton user_btn(PIN_USER_BTN, 1000, true, true);
 #endif
 
+#if MC_NRF52_HIL_SPIM1_RADIO
+static Nrf52BufferedRadioHal radioHal(SPI, 8000000);
+RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+#else
 RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+#endif
 
 WRAPPER_CLASS radio_driver(radio, board);
 
