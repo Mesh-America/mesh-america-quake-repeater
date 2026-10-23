@@ -19,10 +19,12 @@ class TelemetryPersistenceTests(unittest.TestCase):
         source = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text(encoding="ascii")
         common = (ROOT / "src/helpers/CommonCLI_Management.cpp").read_text(encoding="ascii")
         packet = (ROOT / "src/Packet.cpp").read_text(encoding="ascii")
+        mesh = (ROOT / "src/Mesh.cpp").read_text(encoding="ascii")
         utils = (ROOT / "src/Utils.cpp").read_text(encoding="ascii")
         state = common[common.index("static constexpr char DATA_ROUTE_FILE[]"):
                        common.index("static uint32_t readRoute32(")]
         generated = "namespace mesh {\n" + state + "\n"
+        generated += extract_braced(mesh, "bool Mesh::isTelemetryHistoryPayload(") + "\n"
         generated += "\n".join(extract_braced(packet, signature) for signature in (
             "bool Packet::isValidPathLen(", "size_t Packet::writePath(",
             "uint8_t Packet::copyPath(")) + "\n"
@@ -46,6 +48,7 @@ class TelemetryPersistenceTests(unittest.TestCase):
             "static bool recoverTelemetryHistoryTxPrefs(",
             "static bool readTelemetryHistoryTxPrefsImage(", "void MyMesh::loadTelemetryHistoryTxPrefs(",
             "bool MyMesh::saveTelemetryHistoryTxPrefs(", "bool MyMesh::sendTelemetryHistorySnapshot(",
+            "void MyMesh::recordTelemetryHistoryTx(",
             "bool MyMesh::sendNoiseFloorHistorySnapshot(",
             "bool MyMesh::sendExternalVoltageHistorySnapshot(", "void MyMesh::serviceTelemetryHistoryTx(",
             "void MyMesh::formatTelemetryHistoryTxStatus(", "static char* trimSpaces(")) + "\n"
@@ -80,6 +83,20 @@ class TelemetryPersistenceTests(unittest.TestCase):
                     executed = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
                     self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
                     self.assertIn("telemetry persistence checks passed", executed.stdout)
+
+    def test_last_tx_only_uses_the_successful_radio_hook(self):
+        source = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text(encoding="ascii")
+        completed = extract_braced(source, "void MyMesh::logTx(")
+        self.assertRegex(completed, r"#if MESH_ENABLE_TELEMETRY_HISTORY\s+"
+                                   r"recordTelemetryHistoryTx\(pkt\);\s+#endif")
+        self.assertNotIn("recordTelemetryHistoryTx(",
+                         extract_braced(source, "void MyMesh::onSendComplete("))
+        # Echo delivery may invoke onSendComplete without another RF send.
+        self.assertEqual(source.count("recordTelemetryHistoryTx(pkt);"), 1)
+        constructor = extract_braced(source, "MyMesh::MyMesh(")
+        self.assertIn("telemetry_history_last_tx_uptime = UINT64_MAX;", constructor)
+        loader = extract_braced(source, "void MyMesh::loadTelemetryHistoryTxPrefs(")
+        self.assertNotIn("telemetry_history_last_tx_uptime", loader)
 
 
 if __name__ == "__main__":

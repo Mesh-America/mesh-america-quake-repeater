@@ -58,7 +58,7 @@ static bool hasValidEncryptedPayloadLength(uint16_t payload_len, uint16_t clear_
   return ((payload_len - overhead) % CIPHER_BLOCK_SIZE) == 0;
 }
 
-static bool isTelemetryHistoryPayload(const Packet* packet) {
+bool Mesh::isTelemetryHistoryPayload(const Packet* packet) {
   const uint8_t* data = packet->payload;
   const uint16_t length = packet->payload_len;
   if ((uint16_t)(length - 20U) > MAX_PACKET_PAYLOAD - 20U

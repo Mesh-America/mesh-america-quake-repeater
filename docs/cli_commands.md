@@ -856,6 +856,20 @@ battery packet overlaps its predecessor by 34.5 hours. Packets are paced two
 seconds apart. A queue failure is retried after 30 minutes only for the packet
 that did not queue; successfully queued packets are not duplicated.
 
+`get telemetry.tx` includes the source ID, path, and age of this node's last
+completed telemetry transmission:
+
+```text
+> on 2d id=0123456789ABCDEF i2c=0 last=30m p=direct
+```
+
+`last` uses seconds, minutes, or hours (`30s`, `30m`, `2h`; two days is `48h`).
+It counts completed sends and retries of this node's `TTB1`, `TVB1`, `IVB1`,
+`N1B1`, or `N2B1` packets, including manual sends while the schedule is off.
+Queue acceptance and relayed telemetry do not update it, and it does not confirm
+observer receipt. It shows `last=never` until the first completed send after a
+reboot. The age uses uptime, so clock corrections do not affect it.
+
 `send telemetry.tx now` is an administrator-only test action. It queues
 temperature and battery-voltage snapshots plus the available I2C voltage
 chunks over the configured path. It also queues one main-radio `N1B1` packet

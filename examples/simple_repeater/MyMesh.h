@@ -595,6 +595,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   uint8_t telemetry_history_tx_external_chunk;
   uint64_t telemetry_history_next_tx_uptime;
   uint64_t telemetry_history_tx_resume_uptime;
+  uint64_t telemetry_history_last_tx_uptime;
 #endif
   unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
   float active_bw;  // live BW, including temporary radio overrides
@@ -883,6 +884,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool sendExternalVoltageHistorySnapshot(uint8_t channel_index,
                                           uint8_t chunk_index);
   void formatTelemetryHistoryTxStatus(char* reply, size_t reply_size) const;
+  void recordTelemetryHistoryTx(const mesh::Packet* packet);
 #endif
   void sendSelfAdvertisementNow(uint32_t delay_millis, bool flood);
   bool sendRepeatersFloodText(const char* text, const TransportKey* scope = nullptr,

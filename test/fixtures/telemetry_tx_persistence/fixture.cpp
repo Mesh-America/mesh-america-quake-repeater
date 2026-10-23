@@ -11,12 +11,15 @@
 #include <helpers/TelemetryHistory.h>
 #include <helpers/ExternalVoltageHistory.h>
 #include <helpers/NoiseFloorHistory.h>
+#include <helpers/CLICommandUtils.h>
 #include <array>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
 
 #define MAX_PATH_SIZE 64
+#define MAX_PACKET_PAYLOAD 184
+#define PAYLOAD_TYPE_RAW_CUSTOM 15
 #define OUT_PATH_UNKNOWN 0xff
 #define OUT_PATH_FORCE_FLOOD 0xfe
 #define MESH_DEBUG_PRINTLN(...) do {} while (0)
@@ -39,9 +42,16 @@ struct Packet {
   uint8_t payload[184] = {};
   size_t payload_len = 0;
   uint8_t path_len = 0, path[MAX_PATH_SIZE] = {};
+  uint8_t payload_type = PAYLOAD_TYPE_RAW_CUSTOM;
+  bool forwarded = false;
+  uint8_t getPayloadType() const { return payload_type; }
   static bool isValidPathLen(uint8_t);
   static size_t writePath(uint8_t*, const uint8_t*, uint8_t);
   static uint8_t copyPath(uint8_t*, const uint8_t*, uint8_t);
+};
+class Mesh {
+protected:
+  static bool isTelemetryHistoryPayload(const Packet*);
 };
 struct Utils { static void toHex(char*, const uint8_t*, size_t); };
 struct DataRouteState;
@@ -75,7 +85,7 @@ public:
   }
 };
 struct ClientInfo { bool admin = true; bool isAdmin() const { return admin; } };
-class MyMesh {
+class MyMesh : public mesh::Mesh {
 public:
   FILESYSTEM* _fs;
   CommonCLI _cli;
@@ -94,6 +104,7 @@ public:
   uint8_t telemetry_history_tx_external_chunk = 0;
   uint64_t telemetry_history_next_tx_uptime = 0;
   uint64_t telemetry_history_tx_resume_uptime = 0;
+  uint64_t telemetry_history_last_tx_uptime = UINT64_MAX;
   uint64_t uptime_millis = 0;
   uint32_t last_millis = 0;
   std::vector<mesh::Packet> packets;
@@ -108,6 +119,7 @@ public:
   bool sendExternalVoltageHistorySnapshot(uint8_t, uint8_t);
   bool sendNoiseFloorHistorySnapshot(uint8_t);
   void formatTelemetryHistoryTxStatus(char*, size_t) const;
+  void recordTelemetryHistoryTx(const mesh::Packet*);
   void handle(char*, char*, ClientInfo*);
   // Radio queue boundary. Payload formatting and producer scheduling are real.
   mesh::Packet* createRawData(const uint8_t* data, size_t size) {
@@ -670,6 +682,158 @@ static void checkNoiseHistoryRetries() {
   assert(disabled.node.packets.size() == 3);
 }
 
+static std::string txStatus(const MyMesh& node) {
+  char reply[160];
+  node.formatTelemetryHistoryTxStatus(reply, sizeof(reply));
+  return reply;
+}
+
+static void expectLastTx(const MyMesh& node, const char* age) {
+  assert(txStatus(node).find(std::string(" last=") + age + " ") != std::string::npos);
+}
+
+static std::vector<mesh::Packet> historyPackets(Fixture& f) {
+  f.history(); f.noiseHistory();
+  const uint8_t channel = 7;
+  assert(f.node.external_voltage_history.configure(&channel, 1));
+  const mesh::ExternalVoltageHistory::Reading reading = {channel, 12.5f, true};
+  f.node.external_voltage_history.record(1000000, &reading, 1);
+  assert(f.node.sendTelemetryHistorySnapshot(mesh::TelemetryHistory::SERIES_TEMPERATURE));
+  assert(f.node.sendTelemetryHistorySnapshot(mesh::TelemetryHistory::SERIES_VOLTAGE));
+  assert(f.node.sendExternalVoltageHistorySnapshot(0, 0));
+  assert(f.node.sendNoiseFloorHistorySnapshot(0));
+  assert(f.node.sendNoiseFloorHistorySnapshot(1));
+  assert(f.node.packets.size() == 5);
+  return f.node.packets;
+}
+
+static void checkLastTxCompletionAndOwnership() {
+  Fixture f; f.boot();
+  for (unsigned i = 0; i < 8; ++i) f.node.self_id.pub_key[i] = uint8_t(0x90 + i);
+  expectLastTx(f.node, "never");
+  const auto packets = historyPackets(f);
+  expectLastTx(f.node, "never"); // queue acceptance is not a completed RF send
+  for (const auto& packet : packets) {
+    f.node.uptime_millis += 1000;
+    f.node.last_millis = test_millis;
+    f.node.recordTelemetryHistoryTx(&packet);
+    assert(f.node.telemetry_history_last_tx_uptime == f.node.uptime_millis);
+    expectLastTx(f.node, "0s");
+  }
+
+  const uint64_t completed = f.node.telemetry_history_last_tx_uptime;
+  f.node.uptime_millis += 30000;
+  for (const auto& valid : packets) {
+    auto other = valid;
+    other.payload_type = 5;
+    f.node.recordTelemetryHistoryTx(&other);
+    other = valid; other.forwarded = true;
+    f.node.recordTelemetryHistoryTx(&other);
+    other = valid; other.payload[4] ^= 1;
+    f.node.recordTelemetryHistoryTx(&other);
+    for (const unsigned offset : {2U, 3U, 16U, 18U}) {
+      other = valid;
+      if (offset == 16) other.payload[16] = other.payload[17] = 0;
+      else other.payload[offset] = 0;
+      f.node.recordTelemetryHistoryTx(&other);
+    }
+    other = valid; --other.payload_len;
+    f.node.recordTelemetryHistoryTx(&other);
+    other = valid; other.payload_len = 0;
+    f.node.recordTelemetryHistoryTx(&other);
+    other = valid; other.payload_len = MAX_PACKET_PAYLOAD + 1;
+    f.node.recordTelemetryHistoryTx(&other);
+    assert(f.node.telemetry_history_last_tx_uptime == completed);
+  }
+  expectLastTx(f.node, "30s");
+
+  f.node.reject_magic = "TTB1"; f.node.rejected_sends = 1;
+  assert(!f.node.sendTelemetryHistorySnapshot(mesh::TelemetryHistory::SERIES_TEMPERATURE));
+  assert(f.node.telemetry_history_last_tx_uptime == completed);
+  expectLastTx(f.node, "30s");
+  // A completed echo retry is another RF transmission and refreshes the age.
+  f.node.recordTelemetryHistoryTx(&packets.front());
+  expectLastTx(f.node, "0s");
+  assert(f.node.telemetry_history_last_tx_uptime == completed + 30000);
+}
+
+static void checkLastTxAgeAndClockWrap() {
+  Fixture f; f.boot();
+  const auto packets = historyPackets(f);
+  f.node.uptime_millis = 100000;
+  f.node.last_millis = test_millis;
+  f.node.recordTelemetryHistoryTx(&packets.front());
+  struct AgeCase { uint32_t seconds; const char* text; };
+  for (const auto& age : {AgeCase{0, "0s"}, {30, "30s"}, {59, "59s"},
+                           {60, "1m"}, {1800, "30m"}, {3600, "1h"},
+                           {7200, "2h"}, {172800, "48h"}}) {
+    f.node.uptime_millis = 100000 + uint64_t(age.seconds) * 1000;
+    expectLastTx(f.node, age.text);
+  }
+
+  // Account for the time since the main loop last sampled millis(), across
+  // its 32-bit wrap, using the accumulated boot uptime rather than RTC time.
+  f.node.uptime_millis = (uint64_t(1) << 32) + 4000;
+  f.node.last_millis = UINT32_MAX - 999;
+  test_millis = 500;
+  const uint64_t sent = f.node.uptime_millis + 1500;
+  f.node.recordTelemetryHistoryTx(&packets[1]);
+  assert(f.node.telemetry_history_last_tx_uptime == sent);
+  expectLastTx(f.node, "0s");
+  test_millis += 30000;
+  expectLastTx(f.node, "30s");
+
+  // RTC jumps clear/rebuild the sample histories without changing the age.
+  f.node.telemetry_history.record(2000000000, 21, true, 3750, 0, 0, false);
+  f.node.telemetry_history.record(1000000, 21, true, 3750, 0, 0, false);
+  f.node.noise_floor_history.advance(2000000000);
+  f.node.noise_floor_history.advance(1000000);
+  expectLastTx(f.node, "30s");
+  f.node.uptime_millis = sent + 172800000;
+  f.node.last_millis = test_millis;
+  expectLastTx(f.node, "48h");
+  test_millis = 0;
+}
+
+static void checkLastTxSurvivesScheduleAndStatusTruncation() {
+  Fixture f; f.boot();
+  const auto packets = historyPackets(f);
+  f.node.uptime_millis = 1000;
+  f.node.last_millis = test_millis;
+  f.node.recordTelemetryHistoryTx(&packets.front());
+  const uint64_t sent = f.node.telemetry_history_last_tx_uptime;
+  for (const char* command : {"set telemetry.tx schedule 1d", "set telemetry.tx schedule off"}) {
+    assert(f.node.command(command).find("OK - telemetry.tx schedule=") == 0);
+    assert(f.node.telemetry_history_last_tx_uptime == sent);
+    f.boot();
+    assert(f.node.telemetry_history_last_tx_uptime == sent);
+  }
+  assert(f.node.command("send telemetry.tx now").find("OK - telemetry.tx queued") == 0);
+  assert(f.node.telemetry_history_last_tx_uptime == sent);
+  f.fs.fail_read_open.insert(target);
+  f.node.loadTelemetryHistoryTxPrefs();
+  assert(!f.node.telemetry_history_tx_prefs_healthy);
+  f.node.uptime_millis += 1800000;
+  expectLastTx(f.node, "30m");
+  assert(txStatus(f.node).find("last=30m fault=prefs p=") != std::string::npos);
+
+  f.fs.clearFaults(); f.boot();
+  f.route.path_len = 63;
+  memset(f.route.path, 0xab, sizeof(f.route.path));
+  const auto reply = txStatus(f.node);
+  assert(reply.size() == 159); // longest learned route exceeds the CLI reply
+  assert(reply.find("last=30m") < reply.find(" p="));
+  assert(reply.find("last=30m p=ABAB") != std::string::npos);
+  char prefixed[161];
+  memset(prefixed, '#', sizeof(prefixed));
+  memcpy(prefixed, " > ", 3);
+  f.node.formatTelemetryHistoryTxStatus(prefixed + 3, 157);
+  assert(prefixed[159] == 0 && prefixed[160] == '#');
+  assert(strstr(prefixed, "last=30m p=ABAB"));
+  Fixture restarted; restarted.fs.files = f.fs.files; restarted.boot();
+  expectLastTx(restarted.node, "never"); // boot-local; do not invent a timestamp
+}
+
 int main() {
   checkFreshAndValid();
   checkLoadFailures();
@@ -681,5 +845,8 @@ int main() {
   checkRouteReadbackAndRetry();
   checkNoiseHistoryTransmission();
   checkNoiseHistoryRetries();
+  checkLastTxCompletionAndOwnership();
+  checkLastTxAgeAndClockWrap();
+  checkLastTxSurvivesScheduleAndStatusTruncation();
   puts("telemetry persistence checks passed");
 }

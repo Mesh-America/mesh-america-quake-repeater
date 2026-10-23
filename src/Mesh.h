@@ -219,6 +219,8 @@ class Mesh : public Dispatcher {
   DispatcherAction forwardMultipartDirect(Packet* pkt, uint32_t delay_millis);
 
 protected:
+  static bool isTelemetryHistoryPayload(const Packet* packet);
+
   // Roles with lazily persisted state can veto an OTA reset until that state
   // is durable. The OTA apply remains armed and is retried later.
   virtual bool prepareForOtaReboot() { return true; }

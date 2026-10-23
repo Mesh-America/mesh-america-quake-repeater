@@ -1289,6 +1289,9 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+#if MESH_ENABLE_TELEMETRY_HISTORY
+  recordTelemetryHistoryTx(pkt);
+#endif
 #ifdef WITH_UDP_BRIDGE
   if (_prefs.bridge_pkt_src == 0 && isUDPBridgeRunning()) udp_bridge->sendPacket(pkt);
 #endif
@@ -3742,6 +3745,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   telemetry_history_tx_external_chunk = 0;
   telemetry_history_next_tx_uptime = 0;
   telemetry_history_tx_resume_uptime = 0;
+  telemetry_history_last_tx_uptime = UINT64_MAX;
 #endif
 
 #if MAX_NEIGHBOURS
@@ -12434,7 +12438,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
     if (sender != NULL && !sender->isAdmin()) {
       strcpy(reply, "Err - not permitted");
     } else {
-      formatTelemetryHistoryTxStatus(reply, 160);
+      formatTelemetryHistoryTxStatus(reply, prefixed_reply ? 157 : 160);
     }
     return;
   }
@@ -13341,6 +13345,15 @@ bool MyMesh::saveTelemetryHistoryTxPrefs() {
   return success;
 }
 
+void MyMesh::recordTelemetryHistoryTx(const mesh::Packet* packet) {
+  if (packet->getPayloadType() != PAYLOAD_TYPE_RAW_CUSTOM || packet->forwarded
+      || !isTelemetryHistoryPayload(packet)
+      || memcmp(packet->payload + 4, self_id.pub_key,
+                mesh::TelemetryHistory::BINARY_SOURCE_ID_SIZE) != 0) return;
+  telemetry_history_last_tx_uptime =
+      uptime_millis + (uint32_t)(millis() - last_millis);
+}
+
 void MyMesh::formatTelemetryHistoryTxStatus(char* reply,
                                             size_t reply_size) const {
   char source_id[mesh::TelemetryHistory::BINARY_SOURCE_ID_SIZE * 2U + 1U];
@@ -13352,11 +13365,18 @@ void MyMesh::formatTelemetryHistoryTxStatus(char* reply,
   char path_reply[132];
   formatPathReply(data_path, have_path ? data_path_len : OUT_PATH_UNKNOWN,
                   path_reply, sizeof(path_reply));
-  snprintf(reply, reply_size, "> %s%ud id=%s i2c=%u%s p=%s",
+  char last[16] = "never";
+  if (telemetry_history_last_tx_uptime != UINT64_MAX) {
+    const uint64_t now = uptime_millis + (uint32_t)(millis() - last_millis);
+    mesh::cli::formatRecentRepeaterAge(last, sizeof(last),
+        (uint32_t)((now - telemetry_history_last_tx_uptime) / 1000U));
+  }
+  snprintf(reply, reply_size, "> %s%ud id=%s i2c=%u last=%s%s p=%s",
            telemetry_history_tx_enabled ? "on " : "off ",
            (unsigned)telemetry_history_tx_interval_days,
            source_id,
            (unsigned)external_voltage_history.populatedChannelCount(),
+           last,
            telemetry_history_tx_prefs_healthy ? "" : " fault=prefs",
            path_reply[0] == '>' && path_reply[1] == ' '
                ? path_reply + 2 : path_reply);
