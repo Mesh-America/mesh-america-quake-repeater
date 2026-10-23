@@ -109,6 +109,7 @@ class RakSdContextHandoffTests(unittest.TestCase):
         methods = 'namespace mesh { namespace cli {\n' + '\n'.join(
             extract_braced(source, signature) for signature in (
                 'static bool sdCardBusAvailable(', 'static void formatSdCardElapsed(',
+                'static __attribute__((noinline)) bool finishSdCardFailure(',
                 'bool handleSdCardSet(')) + '\n} }\n'
         fixture = (ROOT / 'test/fixtures/rak15002_sd_seeder/maintenance.cpp').read_text()
         for profile in (

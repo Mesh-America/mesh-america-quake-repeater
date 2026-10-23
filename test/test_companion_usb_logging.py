@@ -319,7 +319,8 @@ class CompanionUsbLoggingTests(unittest.TestCase):
             '-include', str(work / 'platform_shim.h'),
             '-I', str(work), '-I', str(ROOT / 'test/fixtures/radio_profiles/mocks'),
             '-I', str(ROOT / 'test/mocks'), '-I', str(ROOT / 'src'),
-            '-I', str(ROOT / 'src/helpers'), '-I', str(ROOT), str(source),
+            '-I', str(ROOT / 'src/helpers'),
+            '-I', str(ROOT / 'examples/companion_radio'), '-I', str(ROOT), str(source),
             *[str(ROOT / 'src/helpers' / name) for name in extra],
             '-o', str(binary)], capture_output=True, text=True)
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
@@ -454,11 +455,12 @@ int main(){
  }
 }
 '''.replace('@HELP@', source[start:end])
-        # These hashes were captured from the unmodified c46 help branch.
+        # These reviewed hashes cover the production shared help fragments.
         # Compare the complete output bytes, including every conditional line,
         # rather than duplicating a second help implementation in this test.
         fixture = json.loads((ROOT / 'test/fixtures/companion_help_output.sha256.json').read_text())
         self.assertEqual(fixture['schema'], 1)
+        self.assertEqual(len(fixture['profiles']), 16)
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             self.prepare(work)

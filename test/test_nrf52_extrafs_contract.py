@@ -1033,9 +1033,18 @@ class Nrf52ExtraFsContractTest(unittest.TestCase):
         terminal = function_body(mesh, "void MyMesh::handleTerminalCommand(")
         self.assertIn('strcmp(command, "repair extrafs")', terminal)
         self.assertIn("repairInternalExtraFS(terminalOutput());", terminal)
+        self.assertIn('#include "CompanionHelp.inc"', terminal)
+        self.assertIn("mesh::companion::writePackedCompanionHelp(output);", terminal)
+        help_fragments = (MESH.parent / "CompanionHelp.inc").read_text(encoding="ascii")
         self.assertIn(
-            "repair extrafs (erases/rebuilds internal ExtraFS)", terminal
+            "repair extrafs (erases/rebuilds internal ExtraFS)", help_fragments
         )
+        self.assertRegex(help_fragments,
+            r"#if defined\(NRF52_PLATFORM\) && defined\(EXTRAFS\) && !defined\(QSPIFLASH\)"
+            r"\s+MESH_COMPANION_HELP_BEGIN\s+"
+            r'"  repair extrafs \(erases/rebuilds internal ExtraFS\)\\r\\n"')
+        packed_help = (MESH.parent / "CompanionHelpPacked.cpp").read_text(encoding="ascii")
+        self.assertIn('#include "CompanionHelp.inc"', packed_help)
 
     def test_rescue_rebuild_reports_success_only_after_every_save_succeeds(self):
         mesh = MESH.read_text(encoding="utf-8")

@@ -19,6 +19,22 @@ HARNESS = r'''
 #include <string>
 #include <vector>
 #include <Identity.h>
+#include <helpers/CompanionPowerDiagnostics.h>
+
+// Keep the production diagnostics delegate in the command path. Identity
+// requests must not consult board power state or trigger a hardware query.
+struct IdentityBoard {
+ bool hasUsbPowerDetect(){assert(false);return false;}
+ bool isUsbPowered(){assert(false);return false;}
+ bool hasSolarChargerDetect(){assert(false);return false;}
+ bool isSolarChargerActive(){assert(false);return false;}
+ uint16_t getBattMilliVolts(){assert(false);return 0;}
+ bool isExternalPowered(){assert(false);return false;}
+ bool isChargerActive(){assert(false);return false;}
+ bool supportsPowerManagement(){assert(false);return false;}
+ uint16_t getBootVoltage(){assert(false);return 0;}
+ bool getSystemWatchdogRunning(bool&){assert(false);return false;}
+} board;
 
 namespace mesh {
 @HEX_CHARS@
@@ -184,7 +200,13 @@ class CompanionIdentityCliTests(unittest.TestCase):
         terminal = method(source, 'void MyMesh::handleTerminalCommand(')
         self.assertIn('handleLocalControlCommand(command, local_reply, sizeof(local_reply))', terminal)
         self.assertIn('terminalOutput().printf("  -> %s\\r\\n", local_reply);', terminal)
-        self.assertIn('"  get public.key\\r\\n"', terminal)
+        help_branch = method(terminal, 'else if (strcmp(command, "help") == 0)')
+        self.assertIn('#include "CompanionHelp.inc"', help_branch)
+        self.assertIn('mesh::companion::writePackedCompanionHelp(output);', help_branch)
+        help_fragments = (ROOT / 'examples/companion_radio/CompanionHelp.inc').read_text()
+        self.assertIn('"  get public.key\\r\\n"', help_fragments)
+        packed_help = (ROOT / 'examples/companion_radio/CompanionHelpPacked.cpp').read_text()
+        self.assertIn('#include "CompanionHelp.inc"', packed_help)
         shared = method(source, 'bool MyMesh::handleCommand(')
         self.assertIn('if (handleLocalControlCommand(command, reply, reply_capacity)) return true;', shared)
         self.assertIn('return handleCommand(command, 0, reply);',

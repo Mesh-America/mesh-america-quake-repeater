@@ -203,6 +203,7 @@ class CLISettingsContractTest(unittest.TestCase):
         shared = extract_braced(companion, 'static bool isCompanionRadioPrefsCommand(')
         sets |= {k for verb, k in re.findall(r'"(get|set) ([\w.]+) ?"', shared) if verb == 'set'}
         self.assertEqual(gets - sets, {
+            'bootloader.ver',                        # Installed bootloader identity
             'contact.cache', 'contact.cache.timing',  # Contact-storage diagnostics
             'display.wifi',                          # Connection/display status
             'wifi.tcp',                              # Read-only app listener/traffic diagnostic

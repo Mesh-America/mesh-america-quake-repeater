@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+from test_sx126x_buffered_radio_hal import MOCK as ARDUINO_HAL_MOCK
+
 ROOT = Path(__file__).resolve().parents[1]
 
 IDENTITY = r"""#pragma once
@@ -27,7 +29,9 @@ TARGET = r"""#pragma once
 #include <cassert>
 #include <memory>
 #include <stdexcept>
-int SPI, Wire;
+#include <hal/Arduino/ArduinoHal.h>
+SPIClass SPI;
+int Wire;
 unsigned radio_bytes, prng_bytes, crypto_calls, progress_calls, init_calls, rtc_calls;
 long random(long minimum, long maximum) {
   assert(minimum == 0 && maximum == 256); ++prng_bytes; return 0x3c;
@@ -41,12 +45,19 @@ public:
   }
 };
 @RADIO_NOISE_LISTENER@
-struct Module { Module(int, int, int, int, int&) {} };
+struct Module {
+  ArduinoHal* hal;
+  Module(ArduinoHal* adapter, int cs, int irq, int reset, int busy) : hal(adapter) {
+    assert(cs == 4 && irq == 1 && reset == 2 && busy == 3);
+    assert(hal->spi == &SPI && hal->spiSettings.hz == 8000000);
+    assert(!hal->initInterface);
+  }
+};
 struct FakeRadio : PhysicalLayer {
   std::unique_ptr<Module> module;
   bool next_result = false;
   FakeRadio(Module* m) : module(m) {}
-  bool std_init(int* spi) {
+  bool std_init(SPIClass* spi) {
     assert(spi == &SPI); ++init_calls; available = next_result; return next_result;
   }
 };
@@ -94,11 +105,15 @@ static void freshIdentity(bool radio_ready) {
   for (uint8_t value : identity.pub_key) assert(value == expected);
 }
 int main() {
+  auto* hal = TunableRadioHal::find(radio.module->hal);
+  assert(hal && hal->spi == &SPI && hal->defaultHz() == 8000000);
+  assert(hal->capabilities().flags == 0); // The default XIAO byte path is retained.
   freshIdentity(false); // No successful initialization has occurred yet.
   radio.next_result = true; assert(radio_init()); freshIdentity(true);
   radio.next_result = false; assert(!radio_init()); freshIdentity(false);
   radio.next_result = true; assert(radio_init()); freshIdentity(true);
   assert(init_calls == 3);
+  assert(radio.module->hal == hal && hal->spi == &SPI);
 #ifdef DISABLE_I2C_RTC_SCAN
   assert(rtc_calls == 0);
 #else
@@ -120,13 +135,17 @@ class XiaoIdentityRecoveryTests(unittest.TestCase):
                 with self.subTest(crypto=crypto, rtc_scan=rtc_scan), tempfile.TemporaryDirectory(prefix="xiao-identity-") as temp:
                     work = Path(temp)
                     (work / "helpers").mkdir()
+                    (work / "hal/Arduino").mkdir(parents=True)
+                    (work / "hal/Arduino/ArduinoHal.h").write_text(ARDUINO_HAL_MOCK, encoding="ascii")
                     (work / "Arduino.h").write_text("#pragma once\n", encoding="ascii")
                     (work / "Identity.h").write_text(IDENTITY, encoding="ascii")
                     (work / "helpers/ArduinoHelpers.h").write_text("#pragma once\n", encoding="ascii")
                     (work / "target.h").write_text(TARGET.replace("@RADIO_NOISE_LISTENER@", listener), encoding="ascii")
                     (work / "target.cpp").write_bytes((ROOT / "variants/xiao_nrf52/target.cpp").read_bytes())
+                    (work / "XiaoRadioSpiConfig.h").write_bytes((ROOT / "variants/xiao_nrf52/XiaoRadioSpiConfig.h").read_bytes())
                     (work / "check.cpp").write_text(HARNESS, encoding="ascii")
-                    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(work), "-I", str(ROOT / "src")]
+                    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-DNRF52_PLATFORM=1",
+                             "-I", str(work), "-I", str(ROOT / "src")]
                     if os.name != "nt":
                         flags += ["-fsanitize=address,undefined", "-fno-pie", "-no-pie"]
                     if crypto:

@@ -204,6 +204,7 @@ int main() { EnvironmentSensorManager sensors; assert(sensors.detectWisBlockStor
         methods = "namespace mesh { namespace cli {\n" + "\n".join(
             extract_braced(source, signature) for signature in (
                 "static bool sdCardBusAvailable(", "static void formatSdCardElapsed(",
+                "static __attribute__((noinline)) bool finishSdCardFailure(",
                 "bool handleSdCardSet(", "bool handleSdCardGet(")) + "\n} }\n"
         fixture = (FIXTURES / "cli.cpp").read_text()
         build(self, fixture.replace("@METHODS@", methods), ["NRF52_PLATFORM", "OTA_SD_STORE"])

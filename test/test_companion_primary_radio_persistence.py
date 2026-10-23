@@ -29,9 +29,19 @@ HARNESS = r'''
 static MemoryFS* profile_metadata_fs = nullptr;
 static bool profile_metadata_error = false;
 static unsigned profile_metadata_probes = 0;
+static unsigned fast_metadata_probes = 0;
+static bool isProfileMetadataPath(const char* path) {
+  for (const char* expected : {"/spiffs/radio_profiles", "/spiffs/radio_profiles.bak",
+      "/spiffs/radio_profiles.tmp", "/spiffs/radio_profiles.reply",
+      "/spiffs/radio_fast", "/spiffs/radio_fast.bak", "/spiffs/radio_fast.tmp"}) {
+    if (!strcmp(path, expected)) return true;
+  }
+  return false;
+}
 int stat(const char* path, struct stat* info) {
-  assert(profile_metadata_fs && !strncmp(path, "/spiffs/radio_profiles", 22));
+  assert(profile_metadata_fs && isProfileMetadataPath(path));
   ++profile_metadata_probes;
+  if (!strncmp(path, "/spiffs/radio_fast", 18)) ++fast_metadata_probes;
   if (profile_metadata_error) { errno = EIO; return -1; }
   if (!profile_metadata_fs->exists(path + 7)) { errno = ENOENT; return -1; }
   info->st_mode = 0100000;
@@ -131,6 +141,15 @@ struct Infrastructure {
 static bool error(const char* reply) { return strstr(reply,"Error") || strstr(reply,"ERROR"); }
 int main() {
   unsigned checks=0;
+  // The shared CLI probes both stores at startup. Match only their actual
+  // committed, rollback and staging names, rather than accepting any prefix.
+  for (const char* path : {"/spiffs/radio_profiles", "/spiffs/radio_profiles.bak",
+      "/spiffs/radio_profiles.tmp", "/spiffs/radio_profiles.reply",
+      "/spiffs/radio_fast", "/spiffs/radio_fast.bak", "/spiffs/radio_fast.tmp"})
+    assert(isProfileMetadataPath(path));
+  for (const char* path : {"/spiffs/radio_profiles_extra", "/spiffs/radio_fast_extra",
+      "/spiffs/radio_fast.reply", "/radio_profiles", "/spiffs/new_prefs"})
+    assert(!isProfileMetadataPath(path));
   // App radio settings require exactly the upstream four-field CSV, even
   // with an explicit preamble or an active temporary/secondary profile.
   for(uint32_t timestamp:{0U,1700000000U})for(uint16_t preamble:{0U,48U}) {
@@ -224,6 +243,7 @@ int main() {
     m.expectOriginal();++checks;
   }
   assert(profile_metadata_probes>0);
+  assert(fast_metadata_probes>0);
   printf("%u production primary-radio persistence scenarios passed\n",checks);
 }
 '''

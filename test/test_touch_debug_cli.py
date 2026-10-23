@@ -161,7 +161,12 @@ int main() {
         terminal = extract_braced(mesh, "void MyMesh::handleTerminalCommand(")
         self.assertIn("handleLocalControlCommand(command, local_reply, sizeof(local_reply))", terminal)
         help_body = extract_braced(terminal, 'else if (strcmp(command, "help") == 0)')
-        self.assertIn('get/set display.touch <on|off> (this boot)\\r\\n', help_body)
+        self.assertIn('#include "CompanionHelp.inc"', help_body)
+        self.assertIn('mesh::companion::writePackedCompanionHelp(output);', help_body)
+        help_fragments = (ROOT / 'examples/companion_radio/CompanionHelp.inc').read_text()
+        self.assertIn('get/set display.touch <on|off> (this boot)\\r\\n', help_fragments)
+        packed_help = (ROOT / 'examples/companion_radio/CompanionHelpPacked.cpp').read_text()
+        self.assertIn('#include "CompanionHelp.inc"', packed_help)
         # No persistent preference schema or write is involved.
         setter = extract_braced(local, 'if (strncmp(command, "set display.touch", 17) == 0')
         self.assertNotIn("savePrefs", setter)

@@ -123,7 +123,8 @@ assert "#elif defined(BLE_PIN_CODE)" in power_helper
 assert re.search(
     r"static bool bluetoothWiFiCoexistenceRequired\(\) \{\s+"
     r"#if defined\(COMPANION_EXCLUSIVE_WIFI_BLE\)\s+.*?return false;\s+"
-    r"#elif defined\(BLE_PIN_CODE\) && defined\(WIFI_SSID\)",
+    r"#elif defined\(BLE_PIN_CODE\) && \(defined\(WIFI_SSID\)"
+    r" \|\| defined\(ENABLE_WIFI_INTERFACE\)\)",
     webconfig,
     re.DOTALL,
 )
@@ -151,14 +152,20 @@ help_body = mesh[help_start:help_end]
 # bounded. Keep both policy-specific commands on that same selected stream.
 help_output = re.search(r"auto& (\w+) = terminalOutput\(\);", help_body)
 assert help_output
+assert f"#define MESH_COMPANION_HELP_BEGIN {help_output[1]}.print(" in help_body
+assert '#include "CompanionHelp.inc"' in help_body
+assert f"mesh::companion::writePackedCompanionHelp({help_output[1]});" in help_body
+help_fragments = (root / "examples/companion_radio/CompanionHelp.inc").read_text()
+packed_help = (root / "examples/companion_radio/CompanionHelpPacked.cpp").read_text()
+assert '#include "CompanionHelp.inc"' in packed_help
 help_transport = re.search(
     r"#if defined\(COMPANION_EXCLUSIVE_WIFI_BLE\)(.*?)#endif",
-    help_body,
+    help_fragments,
     re.DOTALL,
 )
 assert help_transport
 for text in ("  get companion.transport\\r\\n", "  set companion.transport <wifi|ble>\\r\\n"):
-    assert f'{help_output[1]}.print("{text}")' in help_transport[1]
+    assert f'"{text}"' in help_transport[1]
 assert "WebUI unavailable while Bluetooth transport is active" in mesh
 
 

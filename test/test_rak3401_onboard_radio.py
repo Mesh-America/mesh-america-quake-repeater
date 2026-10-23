@@ -468,8 +468,11 @@ class Rak3401OnboardRadioTests(unittest.TestCase):
         self.assertIn("digitalWrite(SX126X_POWER_EN, HIGH);", begin)
         init = extract_braced(target, "bool radio_init()")
         self.assertIn("radio.std_init(&SPI)", init)
-        self.assertIn("SX126xBufferedRadioHal radioHal(SPI)", target)
-        self.assertIn("new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, "
+        # The normal nRF52 path keeps byte-wise transfers while allowing its
+        # saved SPI clock selection; onboard-radio probing must not replace it.
+        self.assertNotIn("BufferedRadioHal", target)
+        self.assertIn("static TunableRadioHal radio_hal(SPI);", target)
+        self.assertIn("new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, "
                       "P_LORA_RESET, P_LORA_BUSY)", target)
         # External-radio construction and retry must retain their SPI1 owner.
         external_target = (VARIANT / "target.cpp").read_text()

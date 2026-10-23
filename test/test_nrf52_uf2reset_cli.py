@@ -42,11 +42,18 @@ help_body = companion[help_start:help_end]
 help_output = re.search(r"auto& (\w+) = terminalOutput\(\);", help_body)
 assert help_output
 # Bounded help writes use the cached selected stream; UF2 help stays nRF-only.
+assert '#include "CompanionHelp.inc"' in help_body
+assert (f'#define MESH_COMPANION_HELP_LINE_BEGIN {help_output[1]}.println('
+        in help_body)
+assert 'mesh::companion::writePackedCompanionHelp(output);' in help_body
+help_fragments = (ROOT / "examples/companion_radio/CompanionHelp.inc").read_text()
+packed_help = (ROOT / "examples/companion_radio/CompanionHelpPacked.cpp").read_text()
+assert '#include "CompanionHelp.inc"' in packed_help
 assert re.search(
     r"#if defined\(NRF52_PLATFORM\)\s+"
-    + re.escape(f'{help_output[1]}.println("  uf2reset");')
-    + r"\s+#endif",
-    help_body,
+    r'MESH_COMPANION_HELP_LINE_BEGIN\s+"  uf2reset"\s+'
+    r"MESH_COMPANION_HELP_LINE_END\s+#endif",
+    help_fragments,
 )
 
 assert "mesh::cli::isUf2ResetCommand(command)" in chat
