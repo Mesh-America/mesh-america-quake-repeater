@@ -24,7 +24,8 @@ protected:
   void endProfileRetune(bool success) override {
     static_cast<CustomSX1262*>(_radio)->endProfileSwitch(success);
   }
-#if defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY
+#if (defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY) \
+    || (defined(MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD) && MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD)
   bool ownsWarmProfileRetune() const override {
     return static_cast<const CustomSX1262*>(_radio)->hilOwnsWarmProfileRetune();
   }

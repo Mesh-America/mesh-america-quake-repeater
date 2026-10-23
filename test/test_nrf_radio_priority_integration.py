@@ -14,6 +14,12 @@ class NrfRadioPriorityIntegrationTests(unittest.TestCase):
     compile_run=timing.ProfileSwitchTimingTest.compile_run
 
     def test_real_transaction_includes_entry_cost_and_releases_before_stats_or_rollback(self):
+        self.exercise_real_transaction('MC_NRF_RADIO_PROFILE_PRIORITY', 'radiopriority', 'Lease')
+
+    def test_usb_irq_guard_uses_same_measured_endpoint_and_failure_release_contract(self):
+        self.exercise_real_transaction('MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD', 'radiousb', 'Guard')
+
+    def exercise_real_transaction(self, flag, namespace, guard_type):
         source=(ROOT/"src/helpers/radiolib/RadioLibWrappers.cpp").read_text()
         methods="\n".join(method(source,signature) for signature in (
             "uint8_t RadioLibWrapper::beginReconfigure(",
@@ -38,11 +44,11 @@ static uint32_t sequence_at_start=0;
         lease=r'''
 #include <helpers/radiolib/ProfileSwitchTiming.h>
 @GLOBALS@
-namespace mesh { namespace radiopriority {
-class Lease {
+namespace mesh { namespace @NAMESPACE@ {
+class @GUARD_TYPE@ {
   bool admitted=false;
  public:
-  explicit Lease(bool owned) {
+  explicit @GUARD_TYPE@(bool owned) {
     assert(owned==expected_owned);
     if(!owned) return;
     assert(!priority_active);
@@ -57,14 +63,14 @@ class Lease {
     admitted=priority_active=false;++releases;
     elapsed_us+=1000; // Model immediate USB scheduling during restoration.
   }
-  ~Lease() { release(); }
+  ~@GUARD_TYPE@() { release(); }
 };
 } }
-'''.replace("@GLOBALS@",globals_source)
+'''.replace("@GLOBALS@",globals_source).replace('@NAMESPACE@',namespace).replace('@GUARD_TYPE@',guard_type)
         fixture=fixture.replace("@METHODS@",lease+methods)
         fixture=r'''#define MESH_HIL_PROFILE_TIMING 1
-#define MC_NRF_RADIO_PROFILE_PRIORITY 1
-'''+fixture+r'''
+#define @FLAG@ 1
+'''.replace('@FLAG@',flag)+fixture+r'''
 int main() {
   using Result=mesh::RadioParamApplyResult;
   for(unsigned scenario=0;scenario<8;++scenario) {

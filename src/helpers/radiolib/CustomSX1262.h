@@ -120,7 +120,8 @@ class CustomSX1262 : public SX1262 {
     void beginProfileSwitch(bool continuousRx) { _profileSwitch.begin(continuousRx, standbyXOSC); }
     void endProfileSwitch(bool success) { _profileSwitch.end(success); }
     bool profileSwitchFailed() const { return _profileSwitch.failed(); }
-#if defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY
+#if (defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY) \
+    || (defined(MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD) && MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD)
     bool hilOwnsWarmProfileRetune() const {
       return _profileSwitch.open && _profileSwitch.active
           && _profileSwitch.rxValid && !_coldStandby;

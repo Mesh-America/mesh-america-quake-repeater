@@ -818,6 +818,8 @@ jobs:
           python3 -B test/test_nrf_radio_yield_budget.py -v
           python3 -B test/test_nrf_radio_priority_lease.py -v
           python3 -B test/test_nrf_radio_priority_integration.py -v
+          python3 -B test/test_nrf_radio_usb_irq_guard.py -v
+          python3 -B test/test_nrf_radio_spi_startup_diag.py -v
           python3 -B test/test_sx126x_nrf_rp_constructors.py -v
           python3 -B test/test_esp32_buffered_radio_targets.py -v
           python3 -B test/test_xiao_battery_safety.py -v
