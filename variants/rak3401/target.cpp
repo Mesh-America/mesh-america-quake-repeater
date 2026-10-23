@@ -3,6 +3,7 @@
 #include "OnboardRadioSleep.h"
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/radiolib/Nrf52BufferedRadioHal.h>
+#include <helpers/radiolib/NrfRadioSpiStartupDiagHal.h>
 #include <nrf_gpio.h>
 #ifdef USE_CC310_HW_CRYPTO
   #include <helpers/NRF52Crypto.h>
@@ -12,7 +13,13 @@
 #define MC_RAK3401_SPI_HZ 8000000
 #endif
 #if MC_RAK3401_SPI_HZ > 8000000
-#error "RAK3401 SPI above 8 MHz needs an unimplemented SoftDevice-compatible SPIM3 mitigation"
+#if MC_RAK3401_SPI_HZ != 16000000 || !MESH_HIL_SPI_STARTUP_DIAG \
+    || !defined(MESH_HIL_PROFILE_TIMING) || MESH_HIL_PROFILE_TIMING != 1 \
+    || !defined(SPI_32MHZ_INTERFACE) || SPI_32MHZ_INTERFACE != 1 \
+    || !defined(NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED) \
+    || NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED != 1
+#error "RAK3401 SPI above 8 MHz requires the explicit 16 MHz startup diagnostic and nrfx workaround"
+#endif
 #elif MC_RAK3401_SPI_HZ != 2000000 && MC_RAK3401_SPI_HZ != 4000000 \
     && MC_RAK3401_SPI_HZ != 8000000
 #error "RAK3401 radio SPI clock must be 2, 4 or 8 MHz"
@@ -136,10 +143,15 @@ RAK3401Board board;
 // controller instance for startup and watchdog recovery; resetting the radio
 // must not replace or tear down the SPI object used by its Module.
 // Batch each RadioLib command into one SPIM transfer rather than starting a
-// transfer per byte. Keep 8 MHz by default on SPI1/SPIM2. Higher speeds need
-// a separate SPIM3/SoftDevice mitigation before they can be offered safely.
+// transfer per byte. Keep 8 MHz by default on SPI1/SPIM2. The explicit HIL-only
+// 16 MHz startup diagnostic refuses frames unless SoftDevice is disabled;
+// this is not a production SPIM3/SoftDevice mitigation.
 // Changing the speed never replaces this bus or its recovery/handoff path.
+#if MESH_HIL_SPI_STARTUP_DIAG
+static NrfRadioSpiStartupDiagHal radioHal(SPI1, MC_RAK3401_SPI_HZ);
+#else
 static Nrf52BufferedRadioHal radioHal(SPI1, MC_RAK3401_SPI_HZ);
+#endif
 RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);

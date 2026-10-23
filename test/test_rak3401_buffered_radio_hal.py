@@ -53,6 +53,7 @@ HARNESS = r'''
 #include <array>
 #include <initializer_list>
 #include <helpers/radiolib/Nrf52BufferedRadioHal.h>
+#include <helpers/radiolib/NrfRadioSpiStartupDiagHal.h>
 @CLOCK_POLICY@
 SPIClass SPI, SPI1;
 constexpr unsigned P_LORA_NSS=1, P_LORA_DIO_1=2, P_LORA_RESET=3, P_LORA_BUSY=4;
@@ -97,15 +98,18 @@ int main() {
 '''
 
 
+def construction_from_target(target):
+    start=target.index("#if MESH_HIL_SPI_STARTUP_DIAG",target.index("RAK3401Board board;"))
+    end=target.index("RADIO_CLASS radio = new Module(",start)
+    return target[start:target.index(";",end)+1]
+
+
 class Rak3401BufferedRadioHalTests(unittest.TestCase):
     def test_actual_target_uses_one_transfer_per_command_on_same_spi1_at_8mhz(self):
         target = (ROOT / "variants/rak3401/target.cpp").read_text(encoding="ascii")
         clock_policy = target[target.index("#ifndef MC_RAK3401_SPI_HZ"):
                               target.index("\nnamespace {")]
-        construction = "\n".join(re.findall(
-            r"^(?:static Nrf52BufferedRadioHal radioHal\([^;]+;|"
-            r"RADIO_CLASS radio = new Module\([^;]+;)$", target, re.MULTILINE))
-        self.assertEqual(len(construction.splitlines()), 2)
+        construction = construction_from_target(target)
         helper = (ROOT / "src/helpers/radiolib/Nrf52BufferedRadioHal.h").read_text(
             encoding="ascii")
         # Removing the real override reinstates ArduinoHal's per-byte path.
@@ -128,7 +132,8 @@ class Rak3401BufferedRadioHalTests(unittest.TestCase):
                     (base / "helpers/radiolib/Nrf52BufferedRadioHal.h").write_text(
                         implementation, encoding="ascii")
                     built = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra",
-                        "-Werror", "-I", str(base), str(cpp), "-o", str(executable)],
+                        "-Werror", "-I", str(base), "-I", str(ROOT / "src"),
+                        "-I",str(ROOT / "src/helpers/radiolib"),str(cpp), "-o", str(executable)],
                         capture_output=True, text=True, timeout=60)
                     self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
                     ran = subprocess.run([str(executable)], capture_output=True,
@@ -143,14 +148,15 @@ class Rak3401BufferedRadioHalTests(unittest.TestCase):
         target = (ROOT / "variants/rak3401/target.cpp").read_text(encoding="ascii")
         policy = target[target.index("#ifndef MC_RAK3401_SPI_HZ"):
                         target.index("\nnamespace {")]
-        construction = "\n".join(re.findall(
-            r"^(?:static Nrf52BufferedRadioHal radioHal\([^;]+;|"
-            r"RADIO_CLASS radio = new Module\([^;]+;)$", target, re.MULTILINE))
+        construction = construction_from_target(target)
         fixture = HARNESS.replace("@CLOCK_POLICY@", policy).replace("@CONSTRUCTION@", construction)
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
             (folder / "hal/Arduino").mkdir(parents=True)
             (folder / "hal/Arduino/ArduinoHal.h").write_text(MOCK_HAL, encoding="ascii")
+            (folder / "nrf_sdm.h").write_text(
+                "#pragma once\n#include <cstdint>\ninline uint32_t sd_softdevice_is_enabled(uint8_t* enabled)"
+                "{*enabled=0;return 0;}\n",encoding="ascii")
             cpp, binary = folder / "test.cpp", folder / "test.exe"
             cpp.write_text(fixture, encoding="ascii")
             cases = [([], True)] + [
@@ -166,11 +172,22 @@ class Rak3401BufferedRadioHalTests(unittest.TestCase):
                   "NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED=0"], False),
                 (["MC_RAK3401_SPI_HZ=12000000"], False),
                 (["MC_RAK3401_SPI_HZ=32000000"], False)]
+            diagnostic=["MC_RAK3401_SPI_HZ=16000000","MESH_HIL_SPI_STARTUP_DIAG=1",
+                "MESH_HIL_PROFILE_TIMING=1","SPI_32MHZ_INTERFACE=1",
+                "NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED=1","NRF52_PLATFORM=1"]
+            cases.append((diagnostic,True))
+            for required in diagnostic[1:-1]:
+                cases.append(([flag for flag in diagnostic if flag!=required],False))
+            cases.append(([flag if flag!="MESH_HIL_PROFILE_TIMING=1" else "MESH_HIL_PROFILE_TIMING=0"
+                           for flag in diagnostic],False))
+            cases.append(([flag if flag!="MC_RAK3401_SPI_HZ=16000000" else "MC_RAK3401_SPI_HZ=32000000"
+                           for flag in diagnostic],False))
             for flags, valid in cases:
                 with self.subTest(flags=flags):
                     built = subprocess.run([os.environ.get("CXX", "g++"), "-std=c++17",
                         "-Wall", "-Wextra", "-Werror", *["-D" + flag for flag in flags],
                         "-I", str(folder), "-I", str(ROOT / "src"), str(cpp),
+                        str(ROOT/"src/helpers/radiolib/NrfRadioSpiStartupDiagHal.cpp"),
                         "-o", str(binary)], capture_output=True, text=True)
                     if valid:
                         self.assertEqual(built.returncode, 0, built.stderr)
