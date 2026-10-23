@@ -201,17 +201,17 @@ def compile_packed_help(build_env, node):
     expected = Path(build_env.subst("$PROJECT_DIR/examples/companion_radio/CompanionHelpPacked.cpp")).resolve()
     if source != expected:
         return node
-    private_env = build_env.Clone()
     # The framework appends gnu++11 after pre-scripts. Override only this
     # source's final environment, leaving MyMesh, libraries and all other
     # targets on their original language standard and feature context.
-    flags = {name: [value for value in private_env.get(name, ())
+    flags = {name: [value for value in build_env.get(name, ())
                     if not str(value).startswith("-std=")]
              for name in ("CCFLAGS", "CXXFLAGS")}
     flags["CXXFLAGS"].append("-std=gnu++17")
-    private_env.Replace(**flags)
     print("nRF52 Companion help: isolated C++17 source")
-    return private_env.Object(node)
+    # Builder overrides stay attached to this object even when PlatformIO
+    # collects it through the parent construction environment afterward.
+    return build_env.Object(node, **flags)
 
 
 def install(build_env):

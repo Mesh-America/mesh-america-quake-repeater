@@ -15,23 +15,21 @@ class HelpBuildPolicy(unittest.TestCase):
    with self.subTest(key=key,value=value):
     no=dict(yes);no[key]=value;self.assertFalse(m.packed_help_policy(**no))
   self.assertTrue(m.packed_help_policy('nordicnrf52','nrf52840','+<../examples/companion_radio>',cppdefines=[('RAK_4631',1),('COMPANION_RADIO_FULL',1)]))
- def test_final_object_clone_changes_only_that_translation_units_language(self):
+ def test_object_overrides_change_only_that_translation_units_language(self):
   class Node:
    def __init__(self,path):self.path=path
    def srcnode(self):return self
    def get_abspath(self):return str(self.path)
   class Env(dict):
    def subst(self,text):return text.replace('$PROJECT_DIR',str(ROOT))
-   def Clone(self):self.clone=Env(copy.deepcopy(dict(self)));return self.clone
-   def Replace(self,**values):self.update(values)
-   def Object(self,node):self.object=node;return ('compiled17',node)
+   def Object(self,node,**overrides):self.object=node;self.overrides=overrides;return ('compiled17',node)
   env=Env(CXXFLAGS=['-fno-exceptions','-std=gnu++11','-fno-rtti'],CCFLAGS=['-Os','-flto','-std=gnu++11'],CPPDEFINES=[('FEATURE',1)])
   before=copy.deepcopy(dict(env));other=Node(ROOT/'examples/companion_radio/MyMesh.cpp')
-  self.assertIs(m.compile_packed_help(env,other),other);self.assertFalse(hasattr(env,'clone'))
+  self.assertIs(m.compile_packed_help(env,other),other);self.assertFalse(hasattr(env,'overrides'))
   node=Node(ROOT/'examples/companion_radio/CompanionHelpPacked.cpp');result=m.compile_packed_help(env,node)
   self.assertEqual(result,('compiled17',node));self.assertEqual(dict(env),before)
-  self.assertEqual(env.clone['CXXFLAGS'],['-fno-exceptions','-fno-rtti','-std=gnu++17'])
-  self.assertEqual(env.clone['CCFLAGS'],['-Os','-flto']);self.assertEqual(env.clone['CPPDEFINES'],before['CPPDEFINES'])
+  self.assertEqual(env.overrides['CXXFLAGS'],['-fno-exceptions','-fno-rtti','-std=gnu++17'])
+  self.assertEqual(env.overrides['CCFLAGS'],['-Os','-flto']);self.assertEqual(env['CPPDEFINES'],before['CPPDEFINES'])
  def test_producer_uses_same_feature_context_and_single_help_source(self):
   cpp=(ROOT/'examples/companion_radio/CompanionHelpPacked.cpp').read_text();mesh=(ROOT/'examples/companion_radio/MyMesh.cpp').read_text()
   self.assertLess(cpp.index('#include "MyMesh.h"'),cpp.index('#include "CompanionHelp.inc"'))
