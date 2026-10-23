@@ -368,6 +368,9 @@ bool RadioLibWrapper::setTxPower(int8_t dbm) {
 }
 
 uint8_t RadioLibWrapper::beginReconfigure() {
+#if MESH_HIL_PROFILE_TIMING
+  mesh::profiletiming::ReconfigureScope profile_timing;
+#endif
 #if MESH_RADIO_TRACE_ENABLED
   mesh::radiotrace::trace().context(_radio, _active_profile, _profile_generation);
 #endif
@@ -382,7 +385,16 @@ uint8_t RadioLibWrapper::beginReconfigure() {
     if (base_state == STATE_TX_WAIT || isChipBusy()) return 2;
     claimRadioInterrupt();
     _rx_hold_continuous = false;
-    if (_radio->standby() != RADIOLIB_ERR_NONE) {
+#if MESH_HIL_PROFILE_TIMING
+    profile_timing.admissionComplete();
+#endif
+    if (
+#if MESH_HIL_PROFILE_TIMING
+        profile_timing.standbyResult(_radio->standby())
+#else
+        _radio->standby()
+#endif
+        != RADIOLIB_ERR_NONE) {
       state = STATE_IDLE;
       return 3;
     }
@@ -399,9 +411,18 @@ uint8_t RadioLibWrapper::beginReconfigure() {
     return 2;
   }
 
+#if MESH_HIL_PROFILE_TIMING
+  profile_timing.admissionComplete();
+#endif
   const bool resume_rx = base_state == STATE_RX;
   if (_rx_ps_armed || resume_rx) {
-    if (_radio->standby() != RADIOLIB_ERR_NONE) {
+    if (
+#if MESH_HIL_PROFILE_TIMING
+        profile_timing.standbyResult(_radio->standby())
+#else
+        _radio->standby()
+#endif
+        != RADIOLIB_ERR_NONE) {
       state = STATE_IDLE;
       _profile_refresh_required = _profile_repair_required = true;
       return 3;
@@ -617,9 +638,6 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
 #endif
   beginProfileRetune(isInRecvMode() && !_rx_ps_armed && !_rx_ps_enabled);
   const uint8_t resume = beginReconfigure();
-#if MESH_HIL_PROFILE_TIMING
-  mesh::profiletiming::mark(mesh::profiletiming::BeginReconfigure, mesh::profiletiming::readClock());
-#endif
   if (resume > 1) {
     endProfileRetune(resume == 2);  // Only a BUSY guard deferred before changing hardware.
 #if MESH_HIL_PROFILE_TIMING

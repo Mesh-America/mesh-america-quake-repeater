@@ -13,12 +13,12 @@ namespace mesh {
 namespace profiletiming {
 
 enum Stage : uint32_t {
-  BeginReconfigure = 0, Frequency, Modulation, Preamble, GuardMath,
+  Admission = 0, Standby, PostStandby, Frequency, Modulation, Preamble, GuardMath,
   ProtocolAndCache, RxResume, Tail, Whole, StageCount
 };
 enum Result : uint32_t { Success = 0, Busy = 1, Failure = 2 };
 static constexpr uint32_t Magic = 0x4d435054; // MCPT
-static constexpr uint32_t Version = 2;
+static constexpr uint32_t Version = 3;
 static constexpr uint32_t HistogramCount = 16;
 static constexpr uint32_t HistogramWidthUs = 64;
 #if defined(NRF52_PLATFORM)
@@ -109,6 +109,32 @@ inline void mark(Stage stage, uint32_t now_ticks) {
   work.mask |= uint32_t(1) << stage;
 }
 
+// Instrument beginReconfigure's existing operations without adding radio I/O.
+// Every exit records the admission and post-standby bookkeeping. If admission
+// defers or the receiver was idle, Standby is present with duration zero.
+class ReconfigureScope {
+  bool admission_marked_ = false;
+  bool standby_marked_ = false;
+ public:
+  void admissionComplete() {
+    mark(Admission, readClock());
+    admission_marked_ = true;
+  }
+  int16_t standbyResult(int16_t result) {
+    mark(Standby, readClock());
+    standby_marked_ = true;
+    return result;
+  }
+  ~ReconfigureScope() {
+    auto& work = mesh_hil_profile_timing_work;
+    if (!work.active) return;
+    const uint32_t now_ticks = readClock();
+    if (!admission_marked_) mark(Admission, now_ticks);
+    if (!standby_marked_) mark(Standby, work.previous_ticks);
+    mark(PostStandby, now_ticks);
+  }
+};
+
 inline void finish(Result result, uint32_t now_ticks) {
   auto& work = mesh_hil_profile_timing_work;
   if (!work.active) return;
@@ -149,6 +175,8 @@ inline void finish(Result result, uint32_t now_ticks) {
 
 static_assert(sizeof(Capture) == 40 + 2 * (20 + StageCount * (8 + 88)),
               "Unexpected profile timing ABI");
+static_assert(StageCount == 11 && sizeof(Capture) == 2192,
+              "Profile timing version 3 requires eleven stages and 2192 bytes");
 
 } // namespace profiletiming
 } // namespace mesh
