@@ -24,6 +24,7 @@ HARNESS = r'''
 #include <RadioProfiles.h>
 #include <helpers/radiolib/RadioInterruptEvents.h>
 #include <helpers/radiolib/NoiseFloorEstimator.h>
+#include <helpers/radiolib/RXPowerSaving.h>
 #include <helpers/TelemetryHistoryConfig.h>
 #define STATE_IDLE 0
 #define STATE_RX 1
@@ -91,6 +92,9 @@ struct RadioLibWrapper {
   uint16_t _rx_retry_delay_ms = 0;
   bool _rx_retry_pending = false;
   uint32_t _rx_mode_checked_at = 0, _rx_ps_rx_us = 50000, _rx_ps_sleep_us = 50000;
+  uint32_t _rx_ps_eff_rx_us = 50000, _rx_ps_eff_sleep_us = 50000;
+  int16_t _rx_ps_last_error = RADIOLIB_ERR_NONE;
+  RxPowerSavingArmRetryState _rx_ps_arm_retry;
   unsigned long _nf_last_calib = 0, _nf_calib_deadline = 0, _nf_sample_from = 0;
   unsigned long _wd_last_transition = 0, _wd_stuck_thresh = 0, _wd_observe_ms = 0;
   int16_t _threshold = 0, _noise_floor = -105;
@@ -129,6 +133,10 @@ struct RadioLibWrapper {
     ++arms;
     if (_nf_calib_active) ++calibration_arms;
     if (!arm_result) _rx_ps_armed = _rx_ps_enabled && !_rx_ps_continuous_fallback && !_nf_calib_active;
+    if (_rx_ps_armed) {
+      _rx_ps_eff_rx_us = _rx_ps_rx_us;
+      _rx_ps_eff_sleep_us = _rx_ps_sleep_us;
+    }
     if (inject_arm_irq) events.record();
     return arm_result;
   }
@@ -701,8 +709,7 @@ def transition_harness(source=None):
              ('void', 'requestPeriodicNoiseFloorRefresh'), ('void', 'recalibrateNoiseFloor'),
              ('bool', 'resetAGCIfIdle'), ('bool', 'tryResetAGC'), ('void', 'resetAGC'),
              ('bool', 'getNoiseFloorWakeDelay')]
-    methods = method(rxps, 'inline bool rxPowerSavingUsesContinuousFallback(') + '\n'
-    methods += '\n'.join(method(source, f'{kind} RadioLibWrapper::{name}(')
+    methods = '\n'.join(method(source, f'{kind} RadioLibWrapper::{name}(')
                          for kind, name in names)
     constants = '\n'.join(re.findall(r'^#define NF_\w+\s+[^\n]+', source, re.MULTILINE))
     constants += '\n' + re.search(

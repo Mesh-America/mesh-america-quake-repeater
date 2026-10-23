@@ -187,7 +187,8 @@ inline char* utoa(unsigned int value,char* output,int base){
                         '-I', str(ROOT / 'src/helpers'), '-I', str(ROOT), str(cpp),
                         *[str(ROOT / 'src/helpers' / name) for name in (
                             'ConfigSerializer.cpp', 'DynamicConfigSerializer.cpp',
-                            'CommonRadioPrefs.cpp', 'TxtDataHelpers.cpp')],
+                            'CommonRadioPrefs.cpp', 'radiolib/RXPowerSaving.cpp',
+                            'radiolib/RXPowerSavingCLI.cpp', 'TxtDataHelpers.cpp')],
                         '-o', str(binary)], capture_output=True, text=True)
                     self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
                     ran = subprocess.run([str(binary)], capture_output=True, text=True)

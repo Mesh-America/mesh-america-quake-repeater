@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ./build-iotthinks.sh
-export FIRMWARE_VERSION="PowerSaving17.1.6"
+export FIRMWARE_VERSION="PowerSaving18"
 
 ############# Repeaters #############
 # Commonly-used boards

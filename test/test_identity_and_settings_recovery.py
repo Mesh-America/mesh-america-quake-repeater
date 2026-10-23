@@ -47,7 +47,8 @@ def compile_run(program, platform, actual_node_prefs=False):
             (directory / 'Utils.h').write_text('#include <cassert>\n' + utils)
             helper_sources = [str(ROOT / 'src/helpers' / name) for name in (
                 'ConfigSerializer.cpp', 'DynamicConfigSerializer.cpp',
-                'CommonRadioPrefs.cpp', 'TxtDataHelpers.cpp')]
+                'CommonRadioPrefs.cpp', 'radiolib/RXPowerSaving.cpp',
+                'radiolib/RXPowerSavingCLI.cpp', 'TxtDataHelpers.cpp')]
         cpp, exe = directory / 'test.cpp', directory / 'test'
         cpp.write_text(program)
         compiled = subprocess.run([

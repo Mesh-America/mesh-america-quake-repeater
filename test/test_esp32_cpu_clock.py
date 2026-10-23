@@ -197,7 +197,8 @@ inline char* utoa(unsigned value,char* out,int base){
             if persistence:
                 command += [str(ROOT / "src/helpers" / name) for name in (
                     "ConfigSerializer.cpp", "DynamicConfigSerializer.cpp",
-                    "CommonRadioPrefs.cpp", "TxtDataHelpers.cpp")]
+                    "CommonRadioPrefs.cpp", "radiolib/RXPowerSaving.cpp",
+                    "radiolib/RXPowerSavingCLI.cpp", "TxtDataHelpers.cpp")]
             built = subprocess.run(command + ["-o", str(binary)], capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True)

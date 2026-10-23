@@ -94,6 +94,7 @@ struct RadioLibWrapper {
     uint16_t _rx_retry_delay_ms = 0;
     bool _rx_retry_pending = false;
     uint32_t _rx_ps_rx_us = 50000, _rx_ps_sleep_us = 50000;
+    uint32_t _rx_ps_eff_rx_us = 50000, _rx_ps_eff_sleep_us = 50000;
     uint32_t _wd_last_transition = 0, _wd_stuck_thresh = 0, _wd_observe_ms = 0;
     uint32_t n_wd_soft = 0, n_wd_hard = 0;
     unsigned long _nf_sample_from = 0;

@@ -256,6 +256,7 @@ public:
              f"-I{ROOT / 'test/mocks'}", f"-I{ROOT / 'src'}", f"-I{ROOT / 'src/helpers'}", f"-I{ROOT}",
              str(work / "radio.cpp"), *[str(ROOT / "src/helpers" / name) for name in (
                  "ConfigSerializer.cpp", "DynamicConfigSerializer.cpp", "CommonRadioPrefs.cpp",
+                 "radiolib/RXPowerSaving.cpp", "radiolib/RXPowerSavingCLI.cpp",
                  "TxtDataHelpers.cpp", "RadioProfileCLI.cpp")], "-o", str(binary)])
     output = checked([str(binary)], timeout=20)
     replies = [line.removeprefix("RADIO:") for line in output.splitlines() if line.startswith("RADIO:")]

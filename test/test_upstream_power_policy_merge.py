@@ -55,6 +55,20 @@ class Recipes:
 
 
 class UpstreamPowerPolicyMergeTests(unittest.TestCase):
+    def test_c6_keeps_arduino3_and_esp32_ota_guards(self):
+        recipes = Recipes()
+        self.assertIn("powersaving-arduino-lib/releases/download/2.0.17/",
+                      recipes.value("esp32_base", "platform_packages"))
+        self.assertEqual(recipes.value("esp32c6_base", "platform_packages"), "")
+        self.assertIn("53.03.13-1", recipes.value("esp32c6_base", "platform"))
+        for option, expected in (
+                ("build_flags", "-D ENABLE_OTA=1"),
+                ("build_src_filter", "+<helpers/ota/*.cpp>"),
+                ("extra_scripts", "pre:scripts/esp32_usb_session_fix.py"),
+                ("extra_scripts", "post:scripts/check_firmware_ram.py")):
+            with self.subTest(option=option, expected=expected):
+                self.assertIn(expected, recipes.value("esp32c6_base", option))
+
     def test_all_eleven_board_bases_keep_chemistry_power_policy(self):
         recipes = Recipes()
         for directory, section in BOARDS.items():

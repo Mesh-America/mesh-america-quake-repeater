@@ -63,6 +63,8 @@ struct RadioLibWrapper {
     return profile == 1 ? _secondary_floor_estimator : _floor_estimator;
   }
   uint32_t _rx_ps_rx_us=50000, _rx_ps_sleep_us=50000;
+  RxPowerSavingArmRetryState _rx_ps_arm_retry;
+  int16_t _rx_ps_last_error = RADIOLIB_ERR_NONE;
   uint8_t _active_profile=0, _cur_sf=7, _cur_cr=5;
   uint32_t _profile_generation=1, _profile_visit_stamp=0, _profile_retry_at=0;
   uint32_t _profile_scan_generation[2]={};

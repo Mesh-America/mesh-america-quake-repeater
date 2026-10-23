@@ -132,6 +132,23 @@ int main() {
 
 
 class RadioRegulatorTests(unittest.TestCase):
+    def test_thinknode_m4_recipe_uses_lr1110_capture_cost_before_target_headers(self):
+        recipe = (ROOT / 'variants/thinknode_m4/platformio.ini').read_text()
+        family_flags = ['-DUSE_LR1110=1'] if '  -D USE_LR1110' in recipe else []
+        compile_run(self, r'''
+#include <helpers/radiolib/RXPowerSaving.h>
+#include <cassert>
+int main() {
+  // CommonCLI includes its RXPS helpers before target.h can select a wrapper.
+  // The board recipe must therefore select the LR11x0 eight-symbol cost.
+  assert(rxPowerSavingDefaultCaptureCost() == 8.0f);
+  uint32_t family_rx=0, family_sleep=0, explicit_rx=0, explicit_sleep=0;
+  assert(calcRxPowerSavingLevel(9,8,62.5f,32,&family_rx,&family_sleep));
+  assert(calcRxPowerSavingLevel(9,8,62.5f,32,&explicit_rx,&explicit_sleep,8.0f));
+  assert(family_rx==explicit_rx && family_sleep==explicit_sleep);
+}
+''', flags=family_flags)
+
     def exercise(self, chip, flags=(), dcdc=True):
         source = (ROOT / f'src/helpers/radiolib/Custom{chip}.h').read_text()
         if chip == 'LR2021':

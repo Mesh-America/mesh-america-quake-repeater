@@ -47,6 +47,7 @@ inline char* utoa(unsigned int v,char* p,int b){if(b!=10)abort();sprintf(p,"%u",
         if serializers:
             command += [str(ROOT / "src/helpers/" / name) for name in (
                 "ConfigSerializer.cpp", "DynamicConfigSerializer.cpp", "CommonRadioPrefs.cpp",
+                "radiolib/RXPowerSaving.cpp", "radiolib/RXPowerSavingCLI.cpp",
                 "TxtDataHelpers.cpp")]
         build = subprocess.run(command + ["-o", str(binary)], capture_output=True, text=True, timeout=90)
         if build.returncode:

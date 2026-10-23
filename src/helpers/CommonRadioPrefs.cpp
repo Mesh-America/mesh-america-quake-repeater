@@ -1,6 +1,7 @@
 #include "CommonRadioPrefs.h"
 #include "TxtDataHelpers.h"
 #include "target.h"
+#include "radiolib/RXPowerSavingCLI.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -179,9 +180,36 @@ bool CommonRadioPrefs::setByKey(const char* key, const char* value) {
   return false;
 }
 
+void CommonRadioPrefs::formatRxPowerSavingStatus(char* reply, size_t reply_size) const {
+  auto config = readRxPowerSavingConfig();
+  uint8_t sf = getSpreadFactor();
+  float bw = getBandwidth();
+  uint16_t wire_preamble = 0;
+  RxPowerSavingStatus status;
+#ifdef WRAPPER_CLASS
+  // The primary profile includes an active tempradio lease. A status read
+  // must describe that hardware timing without modifying saved settings.
+  const auto* profiles = radio_driver.profiles();
+  if (profiles && profiles->primary.sf >= 5 && profiles->primary.sf <= 12
+      && profiles->primary.bw > 0.0f) {
+    sf = profiles->primary.sf;
+    bw = profiles->primary.bw;
+  }
+  radio_driver.getRxPowerSavingTimings(config.rx_us, config.sleep_us);
+  wire_preamble = radio_driver.currentPreambleLength();
+  status = radio_driver.getRxPowerSavingStatus();
+#endif
+  RXPowerSavingCLI::get(config, status, sf, bw, reply, reply_size, wire_preamble);
+}
+
 bool CommonRadioPrefs::handleCommand(const char* command, uint32_t sender_timestamp, char* reply) {
   (void)sender_timestamp;
   if (command == nullptr || reply == nullptr) return false;
+
+  if (strcmp(command, "get radio.rxps.status") == 0) {
+    formatRxPowerSavingStatus(reply, 160);
+    return true;
+  }
 
   if (strcmp(command, "get radio") == 0) {
     char freq[16], bw[16];

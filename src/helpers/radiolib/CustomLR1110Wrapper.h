@@ -13,6 +13,10 @@ class CustomLR1110Wrapper : public RadioLibWrapper {
   DeepInitCallback _deep_init;
 
 public:
+  static constexpr bool SupportsRxPowerSaving = true;
+  uint32_t rxPowerSavingTransitionUs() const override {
+    return static_cast<CustomLR1110*>(_radio)->getTcxoDelay() + 1000UL;
+  }
   uint8_t regulatorModes() const override { return static_cast<CustomLR1110*>(_radio)->regulatorModes(); }
   mesh::power::RegulatorMode defaultRegulatorMode() const override {
     return static_cast<CustomLR1110*>(_radio)->defaultRegulatorMode();
@@ -135,6 +139,7 @@ public:
   }
 
   bool isReceivingPacket() override {
+    if (_rx_ps_armed && isChipBusy()) return false;
     return ((CustomLR1110 *)_radio)->isReceiving();
   }
   bool isChipBusy() override {
@@ -156,10 +161,11 @@ public:
     _radio->setPreambleLength(currentPreambleLength()); // overcomes weird issues with small and big pkts
   }
 
-  bool supportsRxPowerSaving() const override { return true; }
+  bool supportsRxPowerSaving() const override { return SupportsRxPowerSaving; }
   void onReceiveProcessed() override { finishReceiveProcessing(); }
 
 protected:
+  int startReceiveMode() override { return startReceivePowerSaving(); }
   bool isPacketReady() override {
     // Header errors are recovery events, not packets. Handle them before the
     // generic duty-cycle readiness check can discard the IRQ or a stale buffer
@@ -178,51 +184,26 @@ protected:
     return RadioLibWrapper::isPacketReady();
   }
 
-  int startReceiveMode() override {
-    // Do not abort a frame that started while a calibration transition was
-    // being scheduled. recvRaw() will move it to continuous RX afterward.
-    if (_nf_calib_active && _rx_ps_armed && isPacketPendingOrReceiving()) {
-      return RADIOLIB_ERR_NONE;
-    }
-    if (_rx_ps_armed) {
-      // stop the previous duty-cycle sequence with an explicit standby before
-      // reconfiguring the radio
-      stopReceiveDutyCycle();
-    }
-    if (!_rx_ps_enabled || _nf_calib_active) {
-      // plain continuous RX: powersaving off, or a periodic noise-floor
-      // calibration window is in progress
-      if (!_rx_ps_enabled) _rx_ps_continuous_fallback = false;
-      return _radio->startReceive();
-    }
-
-    if (rxPowerSavingUsesContinuousFallback(_rx_ps_rx_us, _rx_ps_sleep_us)) {
-      _rx_ps_continuous_fallback = true;
-      return _radio->startReceive();
-    }
-
-    _rx_ps_continuous_fallback = false;
-
-    const RadioLibIrqFlags_t irqFlags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS;
-    // route RX timeout (false preamble detect) and error IRQs to the IRQ pin
-    // as well, so the wrapper re-arms RX instead of waiting forever
-    const RadioLibIrqFlags_t irqMask =
-        (1UL << RADIOLIB_IRQ_RX_DONE) |
-        (1UL << RADIOLIB_IRQ_TIMEOUT) |
-        (1UL << RADIOLIB_IRQ_CRC_ERR) |
-        (1UL << RADIOLIB_IRQ_HEADER_ERR);
-
-    int err = ((CustomLR1110 *)_radio)->startReceiveDutyCycle(_rx_ps_rx_us, _rx_ps_sleep_us, irqFlags, irqMask);
-    if (err == RADIOLIB_ERR_NONE) {
-      _rx_ps_armed = true;
-      return err;
-    }
-
-    _rx_ps_continuous_fallback = true;
-    MESH_DEBUG_PRINTLN("CustomLR1110Wrapper: error: startReceiveDutyCycle(%d), falling back to continuous RX", err);
-    return _radio->startReceive();
+  int16_t armDutyCycle(RadioLibIrqFlags_t irq_flags, RadioLibIrqFlags_t irq_mask,
+      uint32_t* effective_rx_us, uint32_t* effective_sleep_us) override {
+    *effective_sleep_us = _rx_ps_sleep_us;
+    return ((CustomLR1110*)_radio)->startReceiveDutyCycle(
+        _rx_ps_rx_us, _rx_ps_sleep_us, irq_flags, irq_mask, effective_rx_us);
   }
 
+  int16_t stopDutyCycleHardware() override {
+    const int16_t standby_error = _radio->standby();
+    const int16_t clock_error = ((CustomLR1110*)_radio)->restoreLfClock();
+    return standby_error != RADIOLIB_ERR_NONE ? standby_error : clock_error;
+  }
+
+  int16_t startContinuousReceive() override {
+    auto* radio = static_cast<CustomLR1110*>(_radio);
+    if (!radio->needsLfClockRestore()) return _radio->startReceive();
+    int16_t clock_error = _radio->standby();
+    if (clock_error == RADIOLIB_ERR_NONE) clock_error = radio->restoreLfClock();
+    return clock_error == RADIOLIB_ERR_NONE ? _radio->startReceive() : clock_error;
+  }
   bool radioDeepInit() override {
     return _deep_init != NULL && prepareRadioHardReset() && _deep_init()
         && _board->finishRadioHardReset();

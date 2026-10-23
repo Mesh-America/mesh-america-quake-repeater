@@ -1060,9 +1060,7 @@ public:
       display.setColor(UIColor::corp_blue);
     }
     int y = header_height + 2;
-    const int visible_pages = HomePage::Count
-        - (the_mesh.isDualRadioActive() ? 0 : 2);
-    int x = display.width() / 2 - 5 * (visible_pages - 1);
+    int x = 5;
     for (uint8_t i = 0; i < HomePage::Count; i++) {
       if (!isPageVisible(i)) continue;
       if (i == _page) {

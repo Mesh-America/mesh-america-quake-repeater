@@ -29,6 +29,7 @@ class CustomLR1110 : public LR1110 {
   uint32_t _activityAt = 0;
   bool _headerSeen = false;
   bool _rx_boosted = false;
+  bool _lfClockRestoreNeeded = false;
   LR1110ProfileSwitchState _profileSwitch{MC_LR1110_FAST_PROFILE_SWITCH != 0};
   uint8_t _profileSwitchFeatures = profileSwitchCapabilities();
   bool _profileStandbyWarm = false;
@@ -381,10 +382,22 @@ class CustomLR1110 : public LR1110 {
     }
 
     float getFreqMHz() const { return freqMHz; }
+    uint32_t getTcxoDelay() const { return tcxoDelay; }
+
+    // DIO11 also carries RadioLib's IRQ2, so retain the LF RC clock.
+    bool needsLfClockRestore() const { return _lfClockRestoreNeeded; }
+    int16_t restoreLfClock() {
+      if (!_lfClockRestoreNeeded) return RADIOLIB_ERR_NONE;
+      const int16_t state = configLfClock(
+          RADIOLIB_LR11X0_LF_BUSY_RELEASE_DISABLED | RADIOLIB_LR11X0_LF_CLK_RC);
+      if (state == RADIOLIB_ERR_NONE) _lfClockRestoreNeeded = false;
+      return state;
+    }
 
     int16_t startReceiveDutyCycle(uint32_t rxPeriod, uint32_t sleepPeriod,
                                   RadioLibIrqFlags_t irqFlags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS,
-                                  RadioLibIrqFlags_t irqMask = RADIOLIB_IRQ_RX_DEFAULT_MASK) {
+                                  RadioLibIrqFlags_t irqMask = RADIOLIB_IRQ_RX_DEFAULT_MASK,
+                                  uint32_t* effectiveRxPeriod = nullptr) {
       uint32_t symbolPeriod = (uint32_t)(((1000.0f * (float)(1UL << this->spreadingFactor)) /
                                           this->bandwidthKhz) + 0.999f);
       uint32_t transitionTime = this->tcxoDelay + 1000;
@@ -402,6 +415,7 @@ class CustomLR1110 : public LR1110 {
       if (extendedPeriod < requiredExtendedPeriod) {
         rxPeriod = (uint32_t)((requiredExtendedPeriod - programmedSleepPeriod + 1ULL) / 2ULL);
       }
+      if (effectiveRxPeriod) *effectiveRxPeriod = rxPeriod;
 
       uint32_t rxPeriodRaw = (uint32_t)(((uint64_t)rxPeriod * 32768UL) / 1000000UL);
       uint32_t sleepPeriodRaw =
@@ -419,6 +433,7 @@ class CustomLR1110 : public LR1110 {
       // before SetRxDutyCycle. RadioLib does neither in its LoRa RXPS path.
       int16_t state = standby(RADIOLIB_LR11X0_STANDBY_RC);
       RADIOLIB_ASSERT(state);
+      _lfClockRestoreNeeded = true;
       state = configLfClock(
           RADIOLIB_LR11X0_LF_CLK_RC | RADIOLIB_LR11X0_LF_BUSY_RELEASE_ENABLED);
       RADIOLIB_ASSERT(state);

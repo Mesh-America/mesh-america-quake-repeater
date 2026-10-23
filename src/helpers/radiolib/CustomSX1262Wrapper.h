@@ -53,6 +53,10 @@ protected:
   }
 
 public:
+  static constexpr bool SupportsRxPowerSaving = true;
+  uint32_t rxPowerSavingTransitionUs() const override {
+    return static_cast<CustomSX1262*>(_radio)->getTcxoDelay() + 1000UL;
+  }
   uint8_t regulatorModes() const override { return static_cast<CustomSX1262*>(_radio)->regulatorModes(); }
   mesh::power::RegulatorMode defaultRegulatorMode() const override {
     return static_cast<CustomSX1262*>(_radio)->defaultRegulatorMode();
@@ -182,6 +186,7 @@ public:
   }
 
   bool isReceivingPacket() override {
+    if (_rx_ps_armed && isChipBusy()) return false;
     return ((CustomSX1262 *)_radio)->isReceiving();
   }
   bool isChipBusy() override {
@@ -198,11 +203,12 @@ public:
   uint8_t getSpreadingFactor() const override { return ((CustomSX1262 *)_radio)->spreadingFactor; }
   void powerOff() {
     if (isCarrierWaveActive()) setCarrierWave(0, 0);
+    if (_rx_ps_armed) stopReceiveDutyCycle();
     ((CustomSX1262 *)_radio)->standby();
     ((CustomSX1262 *)_radio)->sleep(false);
   }
 
-  bool supportsRxPowerSaving() const override { return true; }
+  bool supportsRxPowerSaving() const override { return SupportsRxPowerSaving; }
   void onReceiveProcessed() override { finishReceiveProcessing(); }
 
   bool supportsRxPowerSavingRfRxDisable() const override {
@@ -261,57 +267,20 @@ public:
   }
 
 protected:
-  int startReceiveMode() override {
-    // Do not abort a frame that started while a calibration transition was
-    // being scheduled. recvRaw() will move it to continuous RX afterward.
-    if (_nf_calib_active && _rx_ps_armed && isPacketPendingOrReceiving()) {
-      return RADIOLIB_ERR_NONE;
-    }
-    if (_rx_ps_armed) {
-      // leaving duty-cycle mode (after RxDone or a reconfig): stop the
-      // sequencer and the still-running RTC, or its pending event can
-      // silently abort the RX we are about to start
-      stopReceiveDutyCycle();
-    }
-    if (!_rx_ps_enabled || _nf_calib_active) {
-      // plain continuous RX: powersaving off, or a periodic noise-floor
-      // calibration window is in progress
-      if (!_rx_ps_enabled) _rx_ps_continuous_fallback = false;
-      return _radio->startReceive();
-    }
-
-    if (!((CustomSX1262 *)_radio)->canUseRxPowerSavingDutyCycle(
-            _rx_ps_rx_us, _rx_ps_sleep_us)) {
-      _rx_ps_continuous_fallback = true;
-      return _radio->startReceive();
-    }
-
-    _rx_ps_continuous_fallback = false;
-
-    const RadioLibIrqFlags_t irqFlags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS;
-    const RadioLibIrqFlags_t irqMask =
-        (1UL << RADIOLIB_IRQ_RX_DONE) |
-        (1UL << RADIOLIB_IRQ_TIMEOUT) |
-        (1UL << RADIOLIB_IRQ_CRC_ERR) |
-        (1UL << RADIOLIB_IRQ_HEADER_ERR);
-
-    int err = ((CustomSX1262 *)_radio)->startReceiveDutyCycle(_rx_ps_rx_us, _rx_ps_sleep_us, irqFlags, irqMask);
-    if (err == RADIOLIB_ERR_NONE) {
-      _rx_ps_armed = true;
-      return err;
-    }
-
-    _rx_ps_continuous_fallback = true;
-    MESH_DEBUG_PRINTLN("CustomSX1262Wrapper: error: startReceiveDutyCycle(%d), falling back to continuous RX", err);
-    return _radio->startReceive();
+  int startReceiveMode() override { return startReceivePowerSaving(); }
+  int16_t armDutyCycle(RadioLibIrqFlags_t irq_flags, RadioLibIrqFlags_t irq_mask,
+      uint32_t* effective_rx_us, uint32_t* effective_sleep_us) override {
+    *effective_rx_us = _rx_ps_rx_us;
+    *effective_sleep_us = _rx_ps_sleep_us;
+    return ((CustomSX1262*)_radio)->startReceiveDutyCycle(
+        _rx_ps_rx_us, _rx_ps_sleep_us, irq_flags, irq_mask);
   }
 
-  void stopReceiveDutyCycle() override {
-    _radio->standby();   // also wakes the chip if it is in the sleep window
-    ((CustomSX1262 *)_radio)->stopRTC();
-    _rx_ps_armed = false;
+  int16_t stopDutyCycleHardware() override {
+    const int16_t standby_error = _radio->standby();
+    const int16_t rtc_error = ((CustomSX1262*)_radio)->stopRTC();
+    return standby_error != RADIOLIB_ERR_NONE ? standby_error : rtc_error;
   }
-
   bool radioDeepInit() override {
     // A board hook takes precedence over direct NRST because it may also need
     // to recover a regulator, SPI bus, or I/O expander. With neither mechanism

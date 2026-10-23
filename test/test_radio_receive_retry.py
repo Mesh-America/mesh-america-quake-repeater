@@ -53,8 +53,7 @@ class RadioReceiveRetryTests(unittest.TestCase):
                  ('void', 'onSendFinished'), ('void', 'begin'),
                  ('bool', 'getNoiseFloorWakeDelay'),
                  ('bool', 'getReceiveRetryDelay'), ('void', 'rxPsWatchdogCheck')]
-        methods = method(rxps, 'inline bool rxPowerSavingUsesContinuousFallback(') + '\n'
-        methods += '\n'.join(method(source, f'{kind} RadioLibWrapper::{name}(')
+        methods = '\n'.join(method(source, f'{kind} RadioLibWrapper::{name}(')
                              for kind, name in names)
         constants = '\n'.join(re.findall(r'^#define NF_\w+\s+[^\n]+', source, re.MULTILINE))
         constants += '\n' + re.search(

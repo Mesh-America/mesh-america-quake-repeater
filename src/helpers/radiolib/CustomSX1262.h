@@ -74,6 +74,7 @@ class CustomSX1262 : public SX1262 {
   bool _tcxoWakePending = false;
 
   public:
+    uint32_t getTcxoDelay() const { return tcxoDelay; }
     CustomSX1262(Module *mod) : SX1262(mod) { }
 
     uint8_t regulatorModes() const { return _regulator.modes(); }

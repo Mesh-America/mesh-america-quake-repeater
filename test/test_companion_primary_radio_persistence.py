@@ -332,7 +332,8 @@ public:
                 '-I',str(ROOT/'src/helpers'),'-I',str(ROOT),str(work/'test.cpp'),
                 *[str(ROOT/'src/helpers'/name) for name in (
                     'ConfigSerializer.cpp','DynamicConfigSerializer.cpp',
-                    'CommonRadioPrefs.cpp','TxtDataHelpers.cpp','RadioProfileCLI.cpp')],
+                    'CommonRadioPrefs.cpp','radiolib/RXPowerSaving.cpp',
+                    'radiolib/RXPowerSavingCLI.cpp','TxtDataHelpers.cpp','RadioProfileCLI.cpp')],
                 '-o',str(binary)],capture_output=True,text=True)
             self.assertEqual(build.returncode,0,build.stdout+build.stderr)
             run = subprocess.run([str(binary)],capture_output=True,text=True)

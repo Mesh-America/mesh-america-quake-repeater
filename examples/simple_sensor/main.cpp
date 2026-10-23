@@ -475,4 +475,8 @@ void loop() {
     delay(1); // Keep USB and the button wake interval serviced while idle.
   }
 #endif
+  if (the_mesh.getNodePrefs()->reboot_interval > 0 &&
+      the_mesh.millisHasNowPassed(the_mesh.getNodePrefs()->reboot_interval * 3600000UL)) {
+    board.reboot();
+  }
 }

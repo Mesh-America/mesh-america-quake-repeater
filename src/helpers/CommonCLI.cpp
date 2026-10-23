@@ -5,6 +5,9 @@
 #include "CarrierTools.h"
 #include "PacketFileLoggingConfig.h"
 #include "CommonCLI.h"
+#ifdef WRAPPER_CLASS
+#include "target.h"
+#endif
 #include "PrefsSaveReplyGuard.h"
 #include "UsbLoggingWatchdog.h"
 #include "PowerSavingDiagnostics.h"
@@ -466,6 +469,9 @@ static const char* retryPresetName(uint8_t preset) {
 
 bool CommonCLI::calculateRxPowerSavingLevel(uint32_t level, uint8_t sf, float bw, uint32_t preamble,
                                             uint32_t* rx_us, uint32_t* sleep_us) {
+#ifdef WRAPPER_CLASS
+  if (!WRAPPER_CLASS::SupportsRxPowerSaving) return false;
+#endif
   if (level < 1 || level > 10 || preamble > 0xFF
       || !isRxPowerSavingPreamble((uint8_t)preamble)) {
     return false;
@@ -477,6 +483,9 @@ bool CommonCLI::calculateRxPowerSavingLevel(uint32_t level, uint8_t sf, float bw
 
 static void appendRxPowerSavingAdjustmentNote(char* reply, const NodePrefs* prefs,
                                                uint8_t sf, float bw) {
+#ifdef WRAPPER_CLASS
+  if (!WRAPPER_CLASS::SupportsRxPowerSaving) return;
+#endif
   if (!reply || !prefs || !prefs->rx_powersaving_enabled
       || prefs->rx_ps_level < 1 || prefs->rx_ps_level > 10) {
     return;
@@ -520,6 +529,9 @@ static void appendRxPowerSavingAdjustmentNote(char* reply, const NodePrefs* pref
 // radio SF/BW. No-op (returns false) for manual timings (rx_ps_level == 0).
 // Lets level-based RX powersaving auto-retune when SF/BW change.
 bool CommonCLI::recalculateRxPowerSavingFromLevel(NodePrefs* prefs) {
+#ifdef WRAPPER_CLASS
+  if (!WRAPPER_CLASS::SupportsRxPowerSaving) return false;
+#endif
   return recalcRxPowerSavingFromLevel(prefs->rx_ps_level, prefs->sf, prefs->bw,
                                       prefs->rx_ps_preamble, &prefs->rx_ps_rx_us,
                                       &prefs->rx_ps_sleep_us);
@@ -1795,9 +1807,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       _prefs->rx_ps_preamble = 0;   // 0 = auto (derive from SF)
     }
     ensureRxPowerSavingDefaults(&_prefs->rx_ps_rx_us, &_prefs->rx_ps_sleep_us);
-    recalcRxPowerSavingFromLevel(_prefs->rx_ps_level, _prefs->sf, _prefs->bw, _prefs->rx_ps_preamble,
-                                 &_prefs->rx_ps_rx_us,
-                                 &_prefs->rx_ps_sleep_us); // retune level-based timings to the loaded SF/BW
+    recalculateRxPowerSavingFromLevel(_prefs); // retune supported level-based timings to loaded SF/BW
 
     // Read the footer independently of optional legacy UART tails/profile.
 #if defined(RAK_4631)
@@ -4739,6 +4749,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       return;
     }
     using mesh::cli::RxPowerSavingArgumentMode;
+#ifdef WRAPPER_CLASS
+    if (!WRAPPER_CLASS::SupportsRxPowerSaving) {
+      if (parsed.mode != RxPowerSavingArgumentMode::Off) {
+        strcpy(reply, "ERROR: RX powersaving unsupported");
+        return;
+      }
+    }
+#endif
     if (parsed.mode == RxPowerSavingArgumentMode::Off) {
       enable = 0;
     } else if (parsed.mode == RxPowerSavingArgumentMode::Manual) {
@@ -5880,6 +5898,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       sprintf(reply, "> %s", _callbacks->isRxPowerSavingRfRxDisabled() ? "on" : "off");
     }
+  } else if (strcmp(config, "radio.rxps.status") == 0) {
+    _prefs->getRadioPrefs()->formatRxPowerSavingStatus(reply, 157);
   } else if (strcmp(config, "radio.rxps.config") == 0) {
     ensureRxPowerSavingDefaults(&_prefs->rx_ps_rx_us, &_prefs->rx_ps_sleep_us);
     sprintf(reply, "> %s,level=%u,preamble=%u,rx=%lu,sleep=%lu",

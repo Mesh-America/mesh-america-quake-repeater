@@ -60,6 +60,7 @@ COMMON_QUERY_EXCEPTIONS = {
     'pwrmgt.source': 'Measured power source',
     'pwrmgt.support': 'Hardware power-management capabilities',
     'radio.rxps.config': 'Detailed view of set radio.rxps',
+    'radio.rxps.status': 'Live radio status for set radio.rxps',
     'role': 'Build-selected firmware role',
     'rxps.wd': 'Runtime RX power-saving recovery counters',
     'wifi.pwd': 'Setter is in the observer or standalone-WiFi delegate',

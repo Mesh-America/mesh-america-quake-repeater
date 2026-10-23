@@ -316,10 +316,19 @@ private:
       def("agc_int", _parent->agc_reset_interval);
       def("hash_mode", _parent->path_hash_mode);
       def("multi_ack", _parent->multi_acks);
+      def("rxps_en", _parent->rx_powersaving_enabled);
+      def("rxps_rx_us", _parent->rx_ps_rx_us);
+      def("rxps_sleep_us", _parent->rx_ps_sleep_us);
+      def("rxps_level", _parent->rx_ps_level);
+      def("rxps_preamble", _parent->rx_ps_preamble);
     }
 
   public:
     explicit RadioPrefs(NodePrefs* parent) : _parent(parent) { }
+    RxPowerSavingConfig readRxPowerSavingConfig() const override {
+      return {_parent->rx_powersaving_enabled, _parent->rx_ps_rx_us,
+              _parent->rx_ps_sleep_us, _parent->rx_ps_level, _parent->rx_ps_preamble};
+    }
     // CommonRadioPrefs interface
     float getFreq() const override { return _parent->freq; }
     void setFreq(float f) override { _parent->freq = f; markDirty(); }
@@ -408,6 +417,7 @@ private:
     void structure() override {
       def("adc_mult", _parent->adc_multiplier);
       def("pwr_sav_en", _parent->powersaving_enabled);
+      def("pwr_reboot_int", _parent->reboot_interval);
 #if defined(ESP32_PLATFORM)
       def("cpu_freq", _parent->cpu_freq_mhz);
 #endif
@@ -478,6 +488,7 @@ public:
         repeat(this), room(this), custom(&radio) { }
 
   CommonRadioPrefs* getRadioPrefs() { return &radio; }
+  const CommonRadioPrefs* getRadioPrefs() const { return &radio; }
   KeyValueStore* getCustom() { return &custom; }
 
   bool isDirty() const override { return ConfigSerializer::isDirty() || radio.isDirty() || custom.isDirty(); }

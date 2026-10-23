@@ -422,6 +422,8 @@ inline char* utoa(unsigned int value,char* output,int base){
                         str(ROOT / 'src/helpers/ConfigSerializer.cpp'),
                         str(ROOT / 'src/helpers/DynamicConfigSerializer.cpp'),
                         str(ROOT / 'src/helpers/CommonRadioPrefs.cpp'),
+                        str(ROOT / 'src/helpers/radiolib/RXPowerSaving.cpp'),
+                        str(ROOT / 'src/helpers/radiolib/RXPowerSavingCLI.cpp'),
                         str(ROOT / 'src/helpers/TxtDataHelpers.cpp'),
                         '-o', str(binary)], capture_output=True, text=True)
                     self.assertEqual(build.returncode, 0, build.stdout + build.stderr)

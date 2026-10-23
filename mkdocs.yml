@@ -74,6 +74,7 @@ nav:
           - host_cli_service.md
       - Radio, networking, and power:
           - radio_profiles.md
+          - radio_presets.md
           - fleet_management.md
           - room_services.md
           - carrier_wave.md

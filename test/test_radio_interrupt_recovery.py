@@ -140,6 +140,7 @@ struct RadioLibWrapper {
  bool _loop_event_pending=false, _cw_active=false, _profile_repair_required=false, _profile_refresh_required=false;
  bool _rx_ps_armed=false, _rx_hold_continuous=false, _rx_ps_enabled=false;
  bool _rx_ps_continuous_fallback=false, _nf_calib_active=false;
+ uint32_t _rx_ps_eff_rx_us=0, _rx_ps_eff_sleep_us=0;
  float _last_snr=0, _last_rssi=0;
  unsigned n_recv=0,n_recv_errors=0,n_sent=0;
  uint32_t _rx_retry_at=0;
@@ -223,7 +224,9 @@ class RadioInterruptRecoveryTests(unittest.TestCase):
 #define RADIOLIB_ERR_NONE 0
 #define RADIOLIB_ERR_INVALID_FREQUENCY -2
 #define RADIOLIB_ERR_UNKNOWN -16
+#define RADIOLIB_ERR_UNSUPPORTED -2
 #define RADIOLIB_NC 0xffffffff
+using RadioLibIrqFlags_t = uint32_t;
 class PhysicalLayer {
 public:
  int setOutputPower(int8_t){return 0;}

@@ -64,7 +64,7 @@ struct MyMesh {
   bool millisHasNowPassed(unsigned deadline) { return millis() > deadline; }
 } the_mesh;
 static ESP32Board board;
-static constexpr unsigned POWERSAVING_FIRSTSLEEP_SECS = 120;
+static constexpr unsigned POWERSAVING_FIRSTSLEEP_SECS = 300;
 static constexpr size_t LOCAL_SERIAL_COMMAND_MAX = 159;
 static char command[LOCAL_SERIAL_COMMAND_MAX + 2] = {};
 static bool command_overflow = false;

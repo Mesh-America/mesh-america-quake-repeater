@@ -1983,6 +1983,7 @@ Station G2/G3 targets default to `off`.
 **Usage:**
 - `get radio.rxps`
 - `get radio.rxps.config`
+- `get radio.rxps.status`
 - `get radio.rxps.rfrx_disabled`
 - `get rxps.wd`
 - `set radio.rxps.rfrx_disabled <state>`
@@ -2015,6 +2016,15 @@ Station G2/G3 targets default to `off`.
 - `get radio.rxps.config` adds the persisted level and preamble assumption to
   the on/off and timing values. Deployment tools use it to restore a
   level-based preference without converting it to fixed manual timings.
+- `get radio.rxps.status` reports the saved `desired` state, actual `effective`
+  state (`armed` or `continuous`), hardware support, last driver error (`err`),
+  arm failures (`fail`), level, preamble and requested RX/sleep
+  periods in microseconds. Levels `9` and `10` carry `(!)` to mark experimental
+  settings. It includes `catch` for armed, level-based settings and
+  `erx`/`eslp` when the driver clamps the periods and the reply has room.
+  Three consecutive failed arm attempts trigger continuous receive as a
+  fallback. Unsupported radios stay in continuous receive. Saved preferences
+  remain intact.
 - `radio.rxps.rfrx_disabled` is a runtime-only diagnostic setting and resets to `off` after reboot.
 - Its default `off` state keeps the host-controlled SX1262 receive path enabled during RX duty-cycle mode. Setting it to `on` reproduces the old missing-RF_RX behavior and can significantly reduce receive sensitivity, making remote commands harder to receive.
 - `radio.rxps.rfrx_disabled` is supported only on SX1262 targets with a host-controlled RX enable pin.
@@ -3085,6 +3095,10 @@ The G3 button also wakes the device for at least two minutes. See the
 for verification steps and the distinction between the fix and the published
 binaries.
 
+ESP32 builds with button wake stay awake for at least 30 seconds after a press;
+the G3 retains its longer two-minute hold. Repeaters wait five minutes after
+startup before allowing sleep.
+
 Companion firmware defaults this setting to `on`. Full Companion accepts the command from its local USB terminal and exposes the same setting in WebConfig. On ESP32 with processor speed set to Auto, it normally selects 80 MHz, enables idle yielding, and enables the configured GPS duty cycle. While a second radio profile is active, Auto holds the highest supported CPU speed for faster switching; SenseCAP Indicator retains its existing policy. Explicit processor speeds remain selected. USB and each active wireless transport remain available; SenseCAP Indicator Full keeps only its selected BLE or infrastructure-WiFi secondary transport active. `set powersaving off` restores the board's normal CPU clock and disables the GPS duty cycle. This device setting is separate from LoRa RXPS (`radio.rxps`) and WiFi modem power save (`wifi.powersave`). Infrastructure uses the same commands; its hardware and active-service sleep guards determine when the node can sleep.
 
 #### Diagnose what prevents power saving
@@ -3177,7 +3191,7 @@ the X1 is not opted in without that hardware confirmation.
 
 ---
 
-#### View or set the reboot interval (Repeater and room server)
+#### View or set the reboot interval (Repeater, Room Server and Sensor)
 **Usage:**
 - `get reboot.interval`
 - `set reboot.interval <hours>`

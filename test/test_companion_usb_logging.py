@@ -373,7 +373,8 @@ inline char* utoa(unsigned int value,char* output,int base){
                             [flag + '=1' for flag in platform.split(',')] +
                             ['MESH_USB_LOGGING_AVAILABLE=1', 'MESH_DEBUG=' + str(debug)],
                             ('ConfigSerializer.cpp', 'DynamicConfigSerializer.cpp',
-                             'CommonRadioPrefs.cpp', 'TxtDataHelpers.cpp'))
+                             'CommonRadioPrefs.cpp', 'radiolib/RXPowerSaving.cpp',
+                             'radiolib/RXPowerSavingCLI.cpp', 'TxtDataHelpers.cpp'))
 
     def test_real_raw_emitter_master_gate_compact_and_other_transports(self):
         source = (ROOT / 'examples/companion_radio/MyMesh.cpp').read_text()

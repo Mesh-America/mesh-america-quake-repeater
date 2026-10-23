@@ -3813,9 +3813,11 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.rx_ps_preamble = DEFAULT_RXPS_PREAMBLE;
   _prefs.rx_ps_rx_us = RX_POWERSAVING_DEFAULT_RX_US;
   _prefs.rx_ps_sleep_us = RX_POWERSAVING_DEFAULT_SLEEP_US;
-  recalcRxPowerSavingFromLevel(_prefs.rx_ps_level, _prefs.sf, _prefs.bw,
-                               _prefs.rx_ps_preamble, &_prefs.rx_ps_rx_us,
-                               &_prefs.rx_ps_sleep_us);
+  if (WRAPPER_CLASS::SupportsRxPowerSaving) {
+    recalcRxPowerSavingFromLevel(_prefs.rx_ps_level, _prefs.sf, _prefs.bw,
+                                 _prefs.rx_ps_preamble, &_prefs.rx_ps_rx_us,
+                                 &_prefs.rx_ps_sleep_us);
+  }
 
   // bridge defaults
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \

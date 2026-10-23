@@ -47,6 +47,7 @@ def build_source(family='CustomSX1262',remove_reset=False,include_duty=False):
 #define RADIOLIB_LR11X0_STANDBY_RC 0
 #define RADIOLIB_LR11X0_LF_CLK_RC 1
 #define RADIOLIB_LR11X0_LF_BUSY_RELEASE_ENABLED 2
+#define RADIOLIB_LR11X0_LF_BUSY_RELEASE_DISABLED 0
 #define RADIOLIB_RADIO_MODE_RX 1
 #define RADIOLIB_LR11X0_RX_DUTY_CYCLE_MODE_RX 0
 #define RADIOLIB_ASSERT(state) do { if((state)!=0)return(state); } while(0)
@@ -74,10 +75,10 @@ struct Chip : LR2021 {
  int16_t clearIrqState(uint32_t flags){irq &= ~flags;rx_status=0;gpio_levels[module.irq]=false;return clear_status;}
  int16_t setPacketParamsLoRa(size_t,uint8_t,uint8_t,uint8_t,uint8_t){return packet_failure;}
  int snapshot_failure=0,packet_failure=0;
- bool _rx_ps_rf_rx_disabled=false;
+ bool _rx_ps_rf_rx_disabled=false,_lfClockRestoreNeeded=false;
  uint8_t spreadingFactor=7;float bandwidthKhz=62.5;uint32_t tcxoDelay=0;
- int lf_failure=0,stage_failure=0;
- int16_t configLfClock(int){return lf_failure;}
+ int lf_failure=0,stage_failure=0;unsigned lf_calls=0;
+ int16_t configLfClock(int){++lf_calls;return lf_failure;}
  int16_t stageMode(int,RadioModeConfig_t*){return stage_failure;}
  int16_t setRxDutyCycle(uint32_t,uint32_t,int){return startDuty();}
  size_t preambleLengthLoRa=32;uint8_t crcTypeLoRa=1,implicitLen=255,headerType=0,invertIQEnabled=0;
@@ -145,6 +146,13 @@ struct Chip : LR2021 {
   'void RadioLibWrapper::serviceProfileScan('))
  if family=='CustomLR1110':
   source=source.replace('SX1262ProfileSwitchState _profileSwitch','LR1110ProfileSwitchState _profileSwitch')
+  clock_methods='\n'.join(method(chip,signature)for signature in (
+   'bool needsLfClockRestore()', 'int16_t restoreLfClock()'))
+  source=source.replace(' bool _rx_ps_rf_rx_disabled=',clock_methods+'\n bool _rx_ps_rf_rx_disabled=')
+  wrapper=(ROOT/'src/helpers/radiolib/CustomLR1110Wrapper.h').read_text()
+  continuous=method(wrapper,'int16_t startContinuousReceive()').replace(' override','')
+  continuous=continuous.replace('static_cast<CustomLR1110*>','static_cast<Chip*>')
+  source=source.replace(' int startReceiveMode(){return chip.startReceive();}',continuous+'\n int startReceiveMode(){return chip.startReceive();}')
  if family.startswith('CustomLR'):
   source+="\n#define ACTIVITY_PREAMBLE 16\n#define ACTIVITY_HEADER 32\n#define ACTIVITY_HEADER_ERROR 64\n"
  else:
@@ -268,7 +276,57 @@ int main(){
 }
 '''
 
+LR_CLOCK_CHECKS=r'''
+static void fastContext(Chip& chip){
+ chip._profileSwitch.rxResult(0,true);
+ chip._profileSwitch.begin(true,true);chip._profileSwitch.standbyResult(0);
+ assert(chip._profileSwitch.canResumeFast());
+}
+int main(){
+ auto* wrapper=new CustomLR1110Wrapper;
+ auto& chip=wrapper->chip;
+ fastContext(chip);
+ const unsigned standbys=chip.standbys,clocks=chip.lf_calls;
+ assert(wrapper->startContinuousReceive()==0);
+ assert(chip.standbys==standbys&&"ordinary profile RX must not add a standby");
+ assert(chip.lf_calls==clocks&&chip._profileFastResumes==1);
+ assert(!chip.needsLfClockRestore());
+
+ // Entering duty cycle changes BUSY release policy. Failed restoration must
+ // stay pending, and must not claim that continuous RX has restarted.
+ assert(chip.startReceiveDutyCycle(100000,100000)==0);
+ assert(chip.needsLfClockRestore());
+ chip.lf_failure=-88;
+ const unsigned arms=chip.arms;
+ assert(wrapper->startContinuousReceive()==-88);
+ assert(chip.needsLfClockRestore()&&chip.arms==arms);
+ chip.lf_failure=0;
+ assert(wrapper->startContinuousReceive()==0);
+ assert(!chip.needsLfClockRestore());
+
+ fastContext(chip);
+ const unsigned next_standbys=chip.standbys,next_clocks=chip.lf_calls;
+ assert(wrapper->startContinuousReceive()==0);
+ assert(chip.standbys==next_standbys&&chip.lf_calls==next_clocks);
+ assert(chip._profileFastResumes==2);
+ delete wrapper;
+}
+'''
+
 class RadioRxActivityEpochTests(unittest.TestCase):
+ def test_lr1110_clock_restore_keeps_ordinary_profile_rx_fast(self):
+  source=build_source('CustomLR1110',include_duty=True)
+  compile_run(source+LR_CLOCK_CHECKS,['-DESP32_PLATFORM=1','-DRADIO_CLASS=CustomLR1110'])
+
+ def test_lr1110_unconditional_clock_restore_breaks_profile_fast_path(self):
+  source=build_source('CustomLR1110',include_duty=True)
+  bypass='    if (!radio->needsLfClockRestore()) return _radio->startReceive();'
+  self.assertIn(bypass,source)
+  with self.assertRaises(AssertionError)as failure:
+   compile_run(source.replace(bypass,'')+LR_CLOCK_CHECKS,
+               ['-DESP32_PLATFORM=1','-DRADIO_CLASS=CustomLR1110'])
+  self.assertIn('ordinary profile RX must not add a standby',str(failure.exception))
+
  def test_actual_receive_rearm_preserves_new_preamble_at_due_scan(self):
   for family in FAMILIES:
    with self.subTest(family=family):

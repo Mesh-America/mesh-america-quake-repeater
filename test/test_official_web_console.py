@@ -178,7 +178,7 @@ class OfficialWebConsoleTests(unittest.TestCase):
         source = source.split("int main() {", 1)[0] + r'''
 int main() {
   attachHost(true); Serial.terminal_open = true;
-  prefs.powersaving_enabled = 1; mock_millis = 300000;
+  prefs.powersaving_enabled = 1; mock_millis = 300001;
   const unsigned before = yield_ms;
   the_mesh.dual_radio_active = true;
   power_loop();
@@ -219,7 +219,7 @@ int main() {
         source = firmware_harness().split("int main() {", 1)[0] + r'''
 int main() {
   attachHost(false); Serial.terminal_open = false;
-  prefs.powersaving_enabled = 1; mock_millis = 300000;
+  prefs.powersaving_enabled = 1; mock_millis = 300001;
   const unsigned before = yield_ms;
   radio_driver.tx = true;
   require(mesh::morseTimingActive(&radio_driver), "Morse TX ownership was lost");

@@ -588,6 +588,8 @@ mesh::RadioParamApplyResult RadioLibWrapper::trySetParams(float freq, float bw, 
       else _rx_ps_enabled = true;
       _rx_ps_rx_us = rx_ps_timings[0];
       _rx_ps_sleep_us = rx_ps_timings[1];
+      _rx_ps_arm_retry.reset();
+      _rx_ps_last_error = RADIOLIB_ERR_NONE;
       _rx_ps_continuous_fallback = rxPowerSavingUsesContinuousFallback(
           _rx_ps_rx_us, _rx_ps_sleep_us);
     }
@@ -2440,7 +2442,7 @@ void RadioLibWrapper::startRecv() {
       // plus a worst-case packet airtime, plus margin for TCXO/transitions.
       // Floored at 60s so a light-sleeping MCU (ESP32 wakes every ~30s) opens
       // an observation window every couple of wakeups instead of on each one.
-      uint32_t rx_ms = _rx_ps_rx_us / 1000, sleep_ms = _rx_ps_sleep_us / 1000;
+      uint32_t rx_ms = _rx_ps_eff_rx_us / 1000, sleep_ms = _rx_ps_eff_sleep_us / 1000;
       _wd_stuck_thresh = (rx_ms + sleep_ms) + 2 * (2 * rx_ms + sleep_ms)
                          + getEstAirtimeFor(MAX_TRANS_UNIT) + 1000;
       if (_wd_stuck_thresh < 60000) _wd_stuck_thresh = 60000;
@@ -2464,14 +2466,65 @@ void RadioLibWrapper::startRecv() {
 }
 
 int RadioLibWrapper::startReceiveMode() {
-  return _radio->startReceive();
+  return startContinuousReceive();
+}
+
+int RadioLibWrapper::startReceivePowerSaving() {
+  if (_nf_calib_active && _rx_ps_armed && isPacketPendingOrReceiving()) {
+    return RADIOLIB_ERR_NONE;
+  }
+  if (_rx_ps_armed) stopReceiveDutyCycle();
+  if (!_rx_ps_enabled || _nf_calib_active) {
+    if (!_rx_ps_enabled) _rx_ps_continuous_fallback = false;
+    const int16_t err = startContinuousReceive();
+    if (err != RADIOLIB_ERR_NONE || !_rx_ps_enabled) _rx_ps_last_error = err;
+    return err;
+  }
+  const bool planned_continuous = rxPowerSavingUsesContinuousFallback(_rx_ps_rx_us, _rx_ps_sleep_us);
+  const bool invalid_timing = !planned_continuous
+      && !canStartRxPowerSavingDutyCycle(_rx_ps_rx_us, _rx_ps_sleep_us, rxPowerSavingTransitionUs());
+  if (planned_continuous || invalid_timing || !_rx_ps_arm_retry.canAttempt()) {
+    _rx_ps_continuous_fallback = true;
+    if (invalid_timing) _rx_ps_last_error = RX_POWERSAVING_ERR_TIMING;
+    const int16_t err = startContinuousReceive();
+    if (err != RADIOLIB_ERR_NONE) _rx_ps_last_error = err;
+    return err;
+  }
+  const RadioLibIrqFlags_t irq_flags = RADIOLIB_IRQ_RX_DEFAULT_FLAGS
+      | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED);
+  const RadioLibIrqFlags_t irq_mask = (1UL << RADIOLIB_IRQ_RX_DONE)
+      | (1UL << RADIOLIB_IRQ_TIMEOUT) | (1UL << RADIOLIB_IRQ_CRC_ERR)
+      | (1UL << RADIOLIB_IRQ_HEADER_ERR);
+  uint32_t effective_rx_us = _rx_ps_rx_us, effective_sleep_us = _rx_ps_sleep_us;
+  const int16_t err = armDutyCycle(irq_flags, irq_mask, &effective_rx_us, &effective_sleep_us);
+  _rx_ps_last_error = err;
+  if (err == RADIOLIB_ERR_NONE) {
+    _rx_ps_armed = true;
+    _rx_ps_continuous_fallback = false;
+    _rx_ps_eff_rx_us = effective_rx_us;
+    _rx_ps_eff_sleep_us = effective_sleep_us;
+    _rx_ps_arm_retry.recordSuccess();
+    return err;
+  }
+  _rx_ps_armed = false;
+  _rx_ps_continuous_fallback = true;
+  _rx_ps_eff_rx_us = _rx_ps_eff_sleep_us = 0;
+  ++_rx_ps_arm_failures;
+  _rx_ps_arm_retry.recordFailure();
+  MESH_DEBUG_PRINTLN("RadioLibWrapper: startReceiveDutyCycle(%d), continuous RX fallback", err);
+  stopDutyCycleHardware();
+  const int16_t fallback_error = startContinuousReceive();
+  if (fallback_error != RADIOLIB_ERR_NONE) _rx_ps_last_error = fallback_error;
+  return fallback_error;
 }
 
 void RadioLibWrapper::stopReceiveDutyCycle() {
   // The duty-cycle sequencer only stops on RxDone or an explicit standby;
   // issuing other mode commands while it runs leads to undefined behaviour.
-  _radio->standby();
+  const int16_t err = stopDutyCycleHardware();
   _rx_ps_armed = false;
+  _rx_ps_eff_rx_us = _rx_ps_eff_sleep_us = 0;
+  if (err != RADIOLIB_ERR_NONE) _rx_ps_last_error = err;
 }
 
 bool RadioLibWrapper::isPacketReady() {
@@ -2547,12 +2600,17 @@ bool RadioLibWrapper::setRxPowerSaving(bool enabled, uint32_t rx_us, uint32_t sl
   if (_beacon_owned) return false;
 #endif
   if (_cw_active) return false;
+  if (enabled && (!isValidRxPowerSavingPeriod(rx_us) || !isValidRxPowerSavingPeriod(sleep_us))) {
+    return false;
+  }
   // A rejected request must not become the policy restored after radio2 ends.
   if (enabled && !supportsRxPowerSaving()) return false;
   if (_profile_rxps_suspended) {
     _profile_saved_rxps = enabled;
     _rx_ps_rx_us = rx_us;
     _rx_ps_sleep_us = sleep_us;
+    _rx_ps_arm_retry.reset();
+    _rx_ps_last_error = RADIOLIB_ERR_NONE;
     return true;
   }
 
@@ -2562,10 +2620,23 @@ bool RadioLibWrapper::setRxPowerSaving(bool enabled, uint32_t rx_us, uint32_t sl
   _rx_ps_enabled = enabled;
   _rx_ps_rx_us = rx_us;
   _rx_ps_sleep_us = sleep_us;
+  _rx_ps_arm_retry.reset();
+  _rx_ps_last_error = RADIOLIB_ERR_NONE;
   _rx_ps_continuous_fallback = enabled
       && rxPowerSavingUsesContinuousFallback(rx_us, sleep_us);
   endReconfigure(resume_rx);
   return true;
+}
+
+RxPowerSavingStatus RadioLibWrapper::getRxPowerSavingStatus() const {
+  RxPowerSavingStatus status;
+  status.supported = supportsRxPowerSaving();
+  status.armed = _rx_ps_armed;
+  status.last_error = _rx_ps_last_error;
+  status.arm_failures = _rx_ps_arm_failures;
+  status.effective_rx_us = _rx_ps_armed ? _rx_ps_eff_rx_us : 0;
+  status.effective_sleep_us = _rx_ps_armed ? _rx_ps_eff_sleep_us : 0;
+  return status;
 }
 
 int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {

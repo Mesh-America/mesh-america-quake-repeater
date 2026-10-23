@@ -51,6 +51,10 @@ class ESP32Board : public mesh::MainBoard {
 protected:
   uint8_t startup_reason;
   bool inhibit_sleep = false;
+#if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) && MOMENTARY_BUTTON_WAKE_FROM_SLEEP
+  bool button_wake_hold_active = false;
+  uint32_t button_wake_at = 0;
+#endif
   bool ota_started_ap = false;
   bool ota_started_radio = false;
   bool companion_cpu_clock_policy = false;
@@ -413,6 +417,12 @@ public:
     bool keep_awake = inhibit_sleep
         || hold(usb_sleep_held, Reason::UsbSession, 1)
         || hold(isRadioTestActive(), Reason::Board, 2);
+#if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) && MOMENTARY_BUTTON_WAKE_FROM_SLEEP
+    if (button_wake_hold_active) {
+      button_wake_hold_active = (uint32_t)(millis() - button_wake_at) < 30000UL;
+      keep_awake = hold(button_wake_hold_active, Reason::Button) || keep_awake;
+    }
+#endif
 #if !defined(ARDUINO_USB_CDC_ON_BOOT) || !ARDUINO_USB_CDC_ON_BOOT
     // External USB-to-UART chips cannot report host attachment here. Light
     // sleep loses their first input bytes; UART wake loses the wake character
@@ -541,6 +551,13 @@ public:
       gpio_wakeup_disable((gpio_num_t)button_gpio);
       // ESP32 MomentaryButton polls; only its sleep wake source is temporary.
       gpio_set_intr_type((gpio_num_t)button_gpio, GPIO_INTR_DISABLE);
+#if defined(MOMENTARY_BUTTON_WAKE_FROM_SLEEP) && MOMENTARY_BUTTON_WAKE_FROM_SLEEP
+      if (gpio_get_level((gpio_num_t)button_gpio) == USER_BTN_PRESSED) {
+        // Keep the UI responsive after the wake press has been released.
+        button_wake_at = millis();
+        button_wake_hold_active = true;
+      }
+#endif
     }
 
     // Enable CPU interrupt servicing

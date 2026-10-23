@@ -10451,7 +10451,8 @@ static bool isCompanionRadioPrefsCommand(const char* command) {
   static const char* const exact_commands[] = {
     "get radio", "get freq", "get af", "get dutycycle", "get tx",
     "get rxdelay", "get path.hash.mode", "get multi.acks",
-    "get txdelay", "get direct.txdelay", "get int.thresh", "get agc.reset.interval"
+    "get txdelay", "get direct.txdelay", "get int.thresh", "get agc.reset.interval",
+    "get radio.rxps.status"
   };
   for (const char* candidate : exact_commands) {
     if (strcmp(command, candidate) == 0) return true;

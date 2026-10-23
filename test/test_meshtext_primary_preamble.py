@@ -165,6 +165,7 @@ struct Lr1110DutyCycleProbe {
   uint16_t preambleLengthLoRa=32;
   uint32_t _activityAt=0;
   bool _headerSeen=false;
+  bool _lfClockRestoreNeeded=false;
   uint32_t rx_ticks=0,sleep_ticks=0;
   unsigned standby_calls=0,clock_calls=0,stage_calls=0,command_calls=0;
   int16_t standby(uint8_t mode) {assert(mode==0);++standby_calls;return 0;}

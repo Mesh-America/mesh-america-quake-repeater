@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Arduino.h>
+
 #include "NoiseFloorEstimator.h"
 #include "../TelemetryHistoryConfig.h"
 #include "../CarrierTools.h"
@@ -35,6 +37,8 @@ struct PacketMillis {
 };
 
 class RadioLibWrapper : public mesh::Radio {
+public:
+  static constexpr bool SupportsRxPowerSaving = false;
 protected:
   // Mode is owned by this loop, not by the ISR or another wrapper.
   uint8_t state = 0;
@@ -228,6 +232,12 @@ protected:
   unsigned long _nf_last_calib;       // millis of last completed/attempted window
   unsigned long _nf_calib_deadline;   // abort window if the batch can't complete
   unsigned long _nf_sample_from;      // no samples before this (RX entry settle)
+  // Append diagnostic state so existing radio hot fields retain their offsets.
+  uint32_t _rx_ps_eff_rx_us = 0;
+  uint32_t _rx_ps_eff_sleep_us = 0;
+  int16_t _rx_ps_last_error = RADIOLIB_ERR_NONE;
+  uint32_t _rx_ps_arm_failures = 0;
+  RxPowerSavingArmRetryState _rx_ps_arm_retry;
   // The T096 SX1262 bench test found RSSI valid and stable by 7 ms after RX
   // entry, including the 500 kHz/SF5 worst-case profile. Retain the
   // conservative 20 ms path for the other radio families.
@@ -318,7 +328,15 @@ protected:
   int16_t performChannelScanWithTimeout(unsigned long timeout_ms);
 #endif
   virtual int startReceiveMode();
+  int startReceivePowerSaving();
   virtual void stopReceiveDutyCycle();
+  virtual int16_t armDutyCycle(RadioLibIrqFlags_t irq_flags, RadioLibIrqFlags_t irq_mask,
+      uint32_t* effective_rx_us, uint32_t* effective_sleep_us) {
+    (void)irq_flags; (void)irq_mask; (void)effective_rx_us; (void)effective_sleep_us;
+    return RADIOLIB_ERR_UNSUPPORTED;
+  }
+  virtual int16_t stopDutyCycleHardware() { return _radio->standby(); }
+  virtual int16_t startContinuousReceive() { return _radio->startReceive(); }
   virtual bool isPacketReady();
   // true while the chip cannot service SPI (RX duty-cycle sleep window, or
   // briefly while processing a command); radios expose this via the BUSY pin
@@ -526,6 +544,13 @@ public:
   void onSendFinished() override;
   bool isInRecvMode() const override;
   bool setRxPowerSaving(bool enabled, uint32_t rx_us, uint32_t sleep_us) override;
+  bool supportsRxPowerSaving() const override { return SupportsRxPowerSaving; }
+  RxPowerSavingStatus getRxPowerSavingStatus() const;
+  virtual uint32_t rxPowerSavingTransitionUs() const { return rxPowerSavingDefaultTransitionUs(); }
+  void getRxPowerSavingTimings(uint32_t& rx_us, uint32_t& sleep_us) const {
+    rx_us = _rx_ps_rx_us;
+    sleep_us = _rx_ps_sleep_us;
+  }
   bool isRxPowerSavingContinuousFallback() const override {
     return _rx_ps_enabled && _rx_ps_continuous_fallback;
   }
@@ -639,7 +664,10 @@ public:
   bool getReceiveRetryDelay(uint32_t now, uint32_t& delay_ms) const override;
   bool getNoiseFloorWakeDelay(uint32_t now, uint32_t& delay_ms) const override;
   bool getProfileIdleDelay(uint32_t& delay_ms) const override;
-  void resetStats() { n_recv = n_sent = n_recv_errors = 0; }
+  void resetStats() {
+    n_recv = n_sent = n_recv_errors = _rx_ps_arm_failures = 0;
+    _rx_ps_arm_retry.reset();
+  }
 
   uint8_t getRadioState() const override;
   unsigned long getLastRecvMillis() const override { return last_recv_millis; }

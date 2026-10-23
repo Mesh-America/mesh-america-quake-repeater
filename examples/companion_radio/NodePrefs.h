@@ -162,6 +162,11 @@ private:
       def("agc_int", _parent->agc_reset_interval);
       def("hash_mode", _parent->path_hash_mode);
       def("multi_ack", _parent->multi_acks);
+      def("rxps_en", _parent->rx_powersaving_enabled);
+      def("rxps_rx_us", _parent->rx_ps_rx_us);
+      def("rxps_sleep_us", _parent->rx_ps_sleep_us);
+      def("rxps_level", _parent->rx_ps_level);
+      def("rxps_preamble", _parent->rx_ps_preamble);
       def("usb_debug", _parent->usb_debug_enabled);
 #ifdef TBEAM_1W
       def("fan", _parent->fan_mode, sizeof(_parent->fan_mode));
@@ -172,6 +177,10 @@ private:
 
   public:
     explicit RadioPrefs(CompanionNodePrefs* parent) : _parent(parent) { }
+    RxPowerSavingConfig readRxPowerSavingConfig() const override {
+      return {_parent->rx_powersaving_enabled, _parent->rx_ps_rx_us,
+              _parent->rx_ps_sleep_us, _parent->rx_ps_level, _parent->rx_ps_preamble};
+    }
 
     bool getByKey(const char* key, char* value, size_t max_len) override {
       if (key != nullptr && strcmp(key, "usb_debug") == 0) {
@@ -319,6 +328,7 @@ public:
   void setRepeatEn(bool enabled) { client_repeat = enabled ? 1 : 0; }
 
   CommonRadioPrefs* getRadioPrefs() { return &radio; }
+  const CommonRadioPrefs* getRadioPrefs() const { return &radio; }
   KeyValueStore* getCustom() { return &custom; }
 
   bool isDirty() const {

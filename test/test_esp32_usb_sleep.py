@@ -141,6 +141,8 @@ struct MainBoard {
 };
 struct ESP32Board : MainBoard {
   bool inhibit_sleep = false;
+  bool button_wake_hold_active = false;
+  uint32_t button_wake_at = 0;
   uint32_t uart_quiet_restore_at = 0;
 #if MESH_ESP32_USB_CONSOLE_COOPERATIVE
   mesh::UsbHostSleepPolicy usb_host_sleep_policy;
@@ -232,6 +234,12 @@ int main() {
     require(sleep_calls == 2 && critical_depth == 0,
             "held button was stranded before the UI could poll it");
     button_pressed = false;
+    board.sleep(30);
+    require(sleep_calls == 2, "released button lost its awake grace");
+    mock_millis += 29999U;
+    board.sleep(30);
+    require(sleep_calls == 2, "button awake grace expired early");
+    ++mock_millis;
     board.sleep(30);
     require(sleep_calls == 3, "released button permanently disabled sleep");
 #else
@@ -411,6 +419,8 @@ struct MainBoard {
 };
 struct ESP32Board : MainBoard {
   bool inhibit_sleep = false;
+  bool button_wake_hold_active = false;
+  uint32_t button_wake_at = 0;
   uint32_t uart_quiet_restore_at = 0;
   uint32_t getIRQGpio() { return P_LORA_DIO_1; }
   bool isExternalPowered() const { return false; }
@@ -510,10 +520,13 @@ int main() {
     timing_radio.rx = true;
     require(mesh::morseTimingActive(activeSensorMesh().getProfileRadio()), "RX ownership was not visible to UI");
     board.sleep(30);
-    require(sleep_calls == 2, "released button failed to allow sleep again");
+    require(sleep_calls == 1, "released button lost its awake grace");
     g_mock_millis += 15000;
     ui.loop();
     require(!display.isOn(), "button screen failed to expire normally");
+    g_mock_millis += 15000;
+    board.sleep(30);
+    require(sleep_calls == 2, "expired button awake grace failed to allow sleep again");
     timing_radio.rx = false;
     require(!mesh::morseTimingActive(the_mesh.getProfileRadio()), "Morse ownership failed to release");
   } catch (const std::exception& error) {
@@ -1017,6 +1030,54 @@ int main() {
                     result = subprocess.run([str(binary)], capture_output=True, text=True,
                                             timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_button_wake_grace_expires_across_millis_rollover(self):
+        methods = board_sleep_methods() + "\n" + "\n".join(board_method(signature) for signature in (
+            "bool isUsbDataConnected() override",
+            "bool isUsbHostConnected() override", "bool isUsbSleepHeld()"))
+        harness = HARNESS.split("int main()", 1)[0] + r'''
+int main() {
+  try {
+    attachHost(false);
+    Serial.end();
+    for (uint32_t start : {0U, UINT32_MAX - 15000U}) {
+      ESP32Board board;
+      mock_millis = start;
+      const unsigned before = sleep_calls;
+      board.sleep(30);
+      require(sleep_calls == before + 1, "fresh board gained an awake hold");
+      press_during_sleep = true;
+      board.sleep(30);
+      require(sleep_calls == before + 2 && button_pressed, "button failed to wake CPU");
+      button_pressed = false;
+      mock_millis = start + 29999U;
+      board.sleep(30);
+      require(sleep_calls == before + 2, "button grace ended early across rollover");
+      ++mock_millis;
+      board.sleep(30);
+      require(sleep_calls == before + 3, "button grace never expired");
+      mock_millis = start + 1U;
+      board.sleep(30);
+      require(sleep_calls == before + 4, "expired button hold revived across rollover");
+    }
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n'; return 1;
+  }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="meshcore-button-grace-") as directory:
+            cpp = Path(directory) / "grace.cpp"
+            binary = Path(directory) / "grace"
+            cpp.write_text(harness.replace("@METHODS@", methods), encoding="ascii")
+            result = subprocess.run([
+                os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
+                "-DARDUINO_USB_CDC_ON_BOOT=1", "-DMESH_ESP32_USB_CONSOLE_COOPERATIVE=0",
+                "-DMOMENTARY_BUTTON_WAKE_FROM_SLEEP=1", "-DPIN_USER_BTN=38",
+                "-DMESH_USB_LOGGING_AVAILABLE=0", "-I", str(ROOT / "src"),
+                str(cpp), "-o", str(binary)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_g3_enables_gesture_polling_after_gpio_wake(self):
         profile = (ROOT / "variants/station_g3_esp32/platformio.ini").read_text()
