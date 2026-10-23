@@ -102,10 +102,10 @@ public:
   bool isUsbDataConnected() override;
   bool isUsbHostConnected() override;
 
-#ifdef NRF52_POWER_MANAGEMENT
-  // Relative to each board's built-in ADC conversion; 1.000 is unchanged.
+  // Power-managed boards use the early-boot voltage policy; other ADC boards
+  // use the shared relative multiplier persisted with their role settings.
   uint16_t calibrateBatteryMillivolts(uint16_t raw_mv) const;
-#endif
+  float getAdcMultiplier() const override;
 
   void attachDynamicPrefs(KeyValueStore* prefs) { (void)prefs; }  // no-op
 

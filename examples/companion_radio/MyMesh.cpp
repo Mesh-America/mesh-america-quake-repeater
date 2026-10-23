@@ -9,6 +9,7 @@
 #include <helpers/ui/OLEDControllerSettings.h>
 #endif
 #include <helpers/BatteryChargeCLI.h>
+#include <helpers/BatteryCalibrationStore.h>
 #include <helpers/MorseCLI.h>
 #include <helpers/MorseLoopPolicy.h>
 #if defined(MESH_HIL_TX_FREQ_MHZ)
@@ -3026,6 +3027,13 @@ void MyMesh::begin(bool has_display, bool radio_available,
   // load persisted prefs
   const bool prefs_ready =
       _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  FILESYSTEM* battery_calibration_fs = _store->getPrimaryFS();
+#if defined(NRF52_PLATFORM)
+  if (_store->isVolatilePrimaryFS()) battery_calibration_fs = nullptr;
+#endif
+  if (!mesh::power::beginBatteryCalibrationStore(board, battery_calibration_fs)) {
+    MESH_DEBUG_PRINTLN("Battery calibration could not be restored; using board default");
+  }
 #if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
 #ifdef ADMIN_PASSWORD
   const char* management_default = ADMIN_PASSWORD;
@@ -10637,6 +10645,8 @@ static bool isCompanionRadioPrefsCommand(const char* command) {
 // Called only for directly attached USB/BLE/TCP/browser clients. Commands
 // received over LoRa use handleCommand() with a nonzero sender timestamp.
 bool MyMesh::handleDirectCommand(const char* command, char* reply, size_t reply_size) {
+  if (mesh::power::handleStoredBatteryCalibrationCommand(
+          board, command, reply, reply_size)) return true;
 #if MESH_ENABLE_LOST_REPLY
   if (mesh::companion::handleLostReplyCommand(
           _prefs, command, reply, reply_size, [this]() { return savePrefs(); })) return true;
@@ -10834,6 +10844,8 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp,
       && mesh::handleReaderReply(command, reply, reply_capacity)) return true;
 #endif
 
+  if (mesh::power::handleStoredBatteryCalibrationCommand(
+          board, command, reply, reply_capacity)) return true;
 #if defined(NRF52_POWER_MANAGEMENT)
   if (mesh::power::handleVoltagePolicyCommand(command, reply,
                                                reply_capacity)) return true;

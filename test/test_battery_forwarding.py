@@ -101,6 +101,7 @@ struct Board {
   float multiplier = 1.0f;
   bool adcSupported = true;
   uint16_t getBattMilliVolts() { ++reads; return uint16_t(float(mv) * multiplier); }
+  float getAdcMultiplier() const { return adcSupported ? multiplier : 0.0f; }
   bool setAdcMultiplier(float value) {
     if (!adcSupported) return false;
     multiplier = value == 0.0f ? 1.0f : value;
@@ -288,6 +289,75 @@ void CommonCLI::dispatchVoltage(char* command, char* reply) {
   assert(strcmp(reply, "fallthrough") == 0 && board.reads == 5);
 ''', prefix=prefix, flags=("-DNRF52_PLATFORM", "-DNRF52_POWER_MANAGEMENT"))
 
+    def test_actual_adc_get_set_fall_back_when_nrf52_voltage_policy_is_unavailable(self):
+        source = (ROOT / "src/helpers/CommonCLI.cpp").read_text(encoding="ascii")
+        setter = extract_braced(source, "void CommonCLI::handleSetCmd(")
+        getter = extract_braced(source, "void CommonCLI::handleGetCmd(")
+        def policy_route(method):
+            start = method.index("  const bool adc_multiplier_command =")
+            return method[start:method.index("#endif", start)]
+        set_branch = extract_braced(setter, 'if (memcmp(config, "adc.multiplier ", 15) == 0)')
+        get_branch = extract_braced(getter, 'if (configKeyEquals(config, "adc.multiplier"))')
+        prefix = self.runtime_prefix(r'''
+  struct Prefs { float adc_multiplier = 0.0f; } prefs;
+  Prefs* _prefs = &prefs;
+  unsigned prefsSaves = 0;
+  bool trySavePrefs() { ++prefsSaves; return true; }
+  bool applyAndSaveAdcMultiplier(float multiplier, char* reply, size_t capacity);
+  void dispatchSet(char* command, char* reply);
+  void dispatchGet(char* command, char* reply);
+''')
+        prefix += r'''
+#include <math.h>
+#include <helpers/CLICommandUtils.h>
+namespace mesh { namespace power {
+static bool policyAvailable = false;
+static unsigned policyCalls = 0;
+static bool voltagePolicySupported() { return policyAvailable; }
+static bool handleVoltagePolicyCommand(const char*, char* reply, size_t capacity) {
+  ++policyCalls;
+  snprintf(reply, capacity, "%s", policyAvailable ? "> policy" : "Error: voltage policy unsupported");
+  return true;
+}
+}}
+'''
+        prefix += extract_braced(source, "static bool configKeyEquals(") + "\n"
+        prefix += extract_braced(source, "bool CommonCLI::applyAndSaveAdcMultiplier(") + "\n"
+        prefix += "void CommonCLI::dispatchSet(char* command, char* reply) {\n"
+        prefix += "const char* config = command + 4;\n" + policy_route(setter) + set_branch + "\n}\n"
+        prefix += "void CommonCLI::dispatchGet(char* command, char* reply) {\n"
+        prefix += "const char* config = command + 4;\n" + policy_route(getter) + get_branch + "\n}\n"
+        self.exercise(r'''
+  Board board;
+  CommonCLI cli(board);
+  char reply[160];
+  char get[] = "get adc.multiplier";
+  cli.dispatchGet(get, reply);
+  assert(!strcmp(reply, "> 1.000") && mesh::power::policyCalls == 0);
+  char set[] = "set adc.multiplier 1.2";
+  cli.dispatchSet(set, reply);
+  assert(!strncmp(reply, "OK", 2) && cli.prefsSaves == 1);
+  assert(board.multiplier == 1.2f && cli.prefs.adc_multiplier == 1.2f);
+  assert(mesh::power::policyCalls == 0);
+  cli.dispatchGet(get, reply);
+  assert(!strcmp(reply, "> 1.200") && mesh::power::policyCalls == 0);
+  char profile[] = "set battery.profile lifepo4";
+  cli.dispatchSet(profile, reply);
+  assert(strstr(reply, "voltage policy unsupported") && mesh::power::policyCalls == 1);
+  char full[] = "get battery.full";
+  cli.dispatchGet(full, reply);
+  assert(strstr(reply, "voltage policy unsupported") && mesh::power::policyCalls == 2);
+  board.adcSupported = false;
+  cli.dispatchGet(get, reply);
+  assert(!strcmp(reply, "Error: unsupported") && mesh::power::policyCalls == 2);
+  cli.dispatchSet(set, reply);
+  assert(!strcmp(reply, "Error: unsupported") && mesh::power::policyCalls == 2);
+  board.adcSupported = true;
+  mesh::power::policyAvailable = true;
+  cli.dispatchGet(get, reply);
+  assert(!strcmp(reply, "> policy") && mesh::power::policyCalls == 3);
+''', prefix=prefix, flags=("-DNRF52_PLATFORM", "-DNRF52_POWER_MANAGEMENT"))
+
     def test_actual_set_command_adc_branch_resamples_success_and_skips_rejected_changes(self):
         source = (ROOT / "src/helpers/CommonCLI.cpp").read_text(encoding="ascii")
         setter = extract_braced(source, "void CommonCLI::handleSetCmd(")
@@ -298,10 +368,13 @@ void CommonCLI::dispatchVoltage(char* command, char* reply) {
   struct Prefs { float adc_multiplier = 0.0f; } prefs;
   Prefs* _prefs = &prefs;
   unsigned prefsSaves = 0;
-  void savePrefs() { ++prefsSaves; }
+  bool prefsSaveOk = true;
+  bool trySavePrefs() { ++prefsSaves; return prefsSaveOk; }
+  bool applyAndSaveAdcMultiplier(float multiplier, char* reply, size_t capacity);
   void dispatchAdc(char* command, char* reply);
 ''')
-        prefix += "\nnamespace mesh { namespace cli {\n" + parser + "\n}}\n"
+        prefix += "\n#include <math.h>\nnamespace mesh { namespace cli {\n" + parser + "\n}}\n"
+        prefix += extract_braced(source, "bool CommonCLI::applyAndSaveAdcMultiplier(") + "\n"
         prefix += "void CommonCLI::dispatchAdc(char* command, char* reply) {\n"
         prefix += "const char* config = &command[4];\n" + branch + "\n}\n"
         self.exercise(r'''
@@ -329,10 +402,17 @@ void CommonCLI::dispatchVoltage(char* command, char* reply) {
   assert(strcmp(reply, "Error: unsupported") == 0 && cli.prefsSaves == 1 && board.reads == 2);
   assert(cli.prefs.adc_multiplier == 1.2f && cli.batteryAllowsForward(false));
   board.adcSupported = true;
+  cli.prefsSaveOk = false;
+  char failed[] = "set adc.multiplier 1.0";
+  cli.dispatchAdc(failed, reply);
+  assert(strstr(reply, "save unconfirmed") && cli.prefsSaves == 2 && board.reads == 2);
+  assert(cli.prefs.adc_multiplier == 1.2f && board.multiplier == 1.2f);
+  assert(cli.batteryAllowsForward(false));
+  cli.prefsSaveOk = true;
   char reset[] = "set adc.multiplier 0";
   cli.dispatchAdc(reset, reply);
   assert(strcmp(reply, "OK - using default board multiplier") == 0);
-  assert(cli.prefsSaves == 2 && board.reads == 3 && cli._battery_forward_state.percentage == 41);
+  assert(cli.prefsSaves == 3 && board.reads == 3 && cli._battery_forward_state.percentage == 41);
   assert(!cli.batteryAllowsForward(false));
 ''', prefix=prefix, flags=("-DESP32_PLATFORM",))
 

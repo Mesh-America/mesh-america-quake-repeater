@@ -30,6 +30,8 @@ public:
 
 #define BATTERY_SAMPLES 8
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);
 
@@ -38,7 +40,7 @@ public:
       raw += analogRead(PIN_VBAT_READ);
     }
     raw = raw / BATTERY_SAMPLES;
-    return (ADC_MULTIPLIER * raw);
+    return calibrateBatteryMillivolts(ADC_MULTIPLIER * raw);
   }
 
   const char* getManufacturerName() const override {

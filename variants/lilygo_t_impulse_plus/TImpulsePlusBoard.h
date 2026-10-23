@@ -26,6 +26,8 @@ public:
   }
 #endif
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     // enable battery voltage measurement
     digitalWrite(BATTERY_MEASUREMENT_CONTROL, HIGH);
@@ -45,7 +47,7 @@ public:
     // disable battery voltage measurement
     digitalWrite(BATTERY_MEASUREMENT_CONTROL, LOW);
 
-    return ((adcvalue * ((3000.0 / 4096.0)))) * 2.0;
+    return calibrateBatteryMillivolts(((adcvalue * ((3000.0 / 4096.0)))) * 2.0);
   }
 
   const char* getManufacturerName() const override {

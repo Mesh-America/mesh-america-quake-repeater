@@ -28,6 +28,8 @@ public:
   }
 #endif
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     digitalWrite(VBAT_ENABLE, LOW);
     int adcvalue = 0;

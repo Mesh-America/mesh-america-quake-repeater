@@ -2526,6 +2526,49 @@ sessions. Setting the password to `off` makes it the literal password `off`.
 
 ---
 
+#### Calibrate the battery reading against a meter
+
+**Availability:** Repeater, Room Server, Sensor, Companion and Terminal Chat
+firmware on boards with a supported battery ADC. Use an administrative CLI
+connection; infrastructure roles also accept authenticated remote commands.
+
+```text
+battery calibrate 4.18
+get adc.multiplier
+battery calibrate reset
+```
+
+Measure the battery voltage with a voltmeter and enter that reading in volts.
+The firmware calculates `new multiplier = current multiplier * meter voltage /
+reported voltage`, applies it and saves it for restart. A reference is required;
+the command does not assume a chemistry or a 4.2 V full battery. Enter the voltage
+of the battery input the board actually measures, including pack voltage where
+that input supports a pack. For example, `battery calibrate 13.2` supplies a
+13.200 V reference; it does not change the board's measurement range.
+
+Calibration supports the ESP32, nRF52, RP2040 and STM32 boards with implemented
+battery-voltage ADC conversions, including the Wio Tracker L2's external ADS1115.
+An unsupported board or unavailable/saturated reading returns an error. Digital
+PMU/fuel-gauge and battery-module readings retain their hardware scaling; boards
+without a battery-voltage input cannot be calibrated through this command.
+
+The meter reference must be within 50% of the reported voltage. Newly supported
+ADCs accept a relative multiplier from `0.500` to `1.500`, where `1.000` retains
+their original conversion. Existing board-specific absolute multipliers and
+saved values keep their established meaning. The five legacy absolute drivers
+are Heltec V4, V4 R8, RC32, Meshnology W12 and ProMicro.
+
+`battery calibrate reset` restores and saves the board's default conversion.
+`set adc.multiplier 0` also resets it. A successful numeric calibration reply shows the effective
+multiplier, including any rounding by the board. A failed save reports an error
+and attempts to restore the previous runtime setting.
+
+Calibration corrects voltage reporting and the battery percentages/protection
+that use that reading. On nRF52 boards with voltage policy it also applies to
+the boot reading and running cutoff. It does not adjust charger hardware or
+create a current measurement. This is a single-point scale correction, not an
+ADC offset or nonlinear calibration.
+
 #### Fine-tune the battery reading
 **Usage:**
 - `get adc.multiplier`
@@ -2536,13 +2579,16 @@ sessions. Setting the password to `off` makes it the literal password `off`.
 
 **Default:** `0.0` (value defined by board)
 
-**Note:** On nRF52 boards with power management and a boot-voltage setting,
+**Note:** On newly supported ADC boards this is a relative `0.500`-`1.500`
+correction, with `0` restoring the default. Existing absolute-multiplier boards
+retain their coefficient units and accept `0` or a positive value up to `10`.
+On nRF52 boards with power management and a boot-voltage setting,
 this is a saved *relative* calibration: `1.000` keeps the board conversion,
 `1.050` raises all reported battery millivolts by 5%, and `0` resets to
 `1.000`. The allowed range is `0.500`-`1.500`. This affects boot protection,
 running cutoff, telemetry, battery alerts, and percentage. Calibrate against a
-voltmeter before enabling a low cutoff. Other boards retain their existing
-board-specific multiplier behavior, or return unsupported.
+voltmeter before enabling a low cutoff. Boards without a supported ADC return
+unsupported.
 
 ---
 

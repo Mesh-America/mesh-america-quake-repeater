@@ -79,6 +79,7 @@ uint16_t HeltecRC32Board::getBattMilliVolts() {
 }
 
 bool HeltecRC32Board::setAdcMultiplier(float multiplier) {
+    if (!isfinite(multiplier) || multiplier < 0.0f || multiplier > 10.0f) return false;
   adc_mult = multiplier == 0.0f ? ADC_MULTIPLIER : multiplier;
   return true;
 }

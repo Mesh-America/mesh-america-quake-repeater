@@ -162,6 +162,8 @@ public:
   }
   #endif
 
+  bool supportsBatteryCalibration() const override { return false; }
+
   uint16_t getBattMilliVolts(){
     if (!charge_pmu_ready) return 0;
 #if defined(PORTABLE_MQTT_OBSERVER) && !defined(TBEAM_SUPREME_SX1262)

@@ -204,5 +204,5 @@ uint16_t WioTrackerL2Board::getBattMilliVolts() {
   int16_t raw = adsReadRaw();
   if (raw < 0) return 0;
 
-  return (uint16_t)(raw * ADS_MV_PER_LSB);
+  return calibrateBatteryMillivolts((uint16_t)(raw * ADS_MV_PER_LSB));
 }

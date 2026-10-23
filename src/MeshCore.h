@@ -5,6 +5,7 @@
 #include <math.h>
 #include "helpers/UsbLogging.h"
 #include "helpers/BatteryChargeSupport.h"
+#include "helpers/BatteryCalibration.h"
 #include "helpers/RegulatorMode.h"
 #include "helpers/PowerSavingDiagnostics.h"
 #include "helpers/LedPolicy.h"
@@ -137,13 +138,28 @@ namespace mesh {
 
 class MainBoard {
   bool _radio_test_active = false;
+  float _battery_calibration_factor = 1.0f;
+protected:
+  uint16_t calibrateBatteryMillivolts(uint16_t raw_mv) const {
+    return mesh::power::scaleBatteryMillivolts(raw_mv, _battery_calibration_factor);
+  }
 public:
   void setRadioTestActive(bool active) { _radio_test_active = active; }
   bool isRadioTestActive() const { return _radio_test_active; }
   virtual uint16_t getBattMilliVolts() = 0;
   virtual float getMCUTemperature() { return NAN; }
-  virtual bool setAdcMultiplier(float multiplier) { return false; };
-  virtual float getAdcMultiplier() const { return 0.0f; }
+  virtual bool supportsBatteryCalibration() const { return false; }
+  // Relative to the board's built-in ADC conversion; zero restores its scale.
+  // Boards with an existing absolute ADC coefficient retain their overrides.
+  virtual bool setAdcMultiplier(float multiplier) {
+    if (!supportsBatteryCalibration()
+        || !mesh::power::validRelativeBatteryMultiplier(multiplier)) return false;
+    _battery_calibration_factor = multiplier == 0.0f ? 1.0f : multiplier;
+    return true;
+  }
+  virtual float getAdcMultiplier() const {
+    return supportsBatteryCalibration() ? _battery_calibration_factor : 0.0f;
+  }
   virtual const char* getManufacturerName() const = 0;
   virtual void onBeforeTransmit() { }
   virtual void onAfterTransmit() { }

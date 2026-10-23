@@ -12,6 +12,14 @@ public:
   MeshTrackerX1Board() : NRF52Board("X1_OTA") {}
   void begin();
 
+  bool supportsBatteryCalibration() const override {
+#ifdef BATTERY_PIN
+    return true;
+#else
+    return false;
+#endif
+  }
+
   uint16_t getBattMilliVolts() override {
   #ifdef BATTERY_PIN
    #ifdef PIN_BAT_ADC_EN
@@ -32,7 +40,7 @@ public:
 
     if (raw < 0 || raw > 4095) return 0;
     float volts = (raw * ADC_MULTIPLIER * AREF_VOLTAGE) / 4096;
-    return volts * 1000;
+    return calibrateBatteryMillivolts(volts * 1000);
   #else
     return 0;
   #endif

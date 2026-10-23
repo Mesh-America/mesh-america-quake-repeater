@@ -126,8 +126,8 @@ uint16_t TBeam1WBoard::getBattMilliVolts() {
     delayMicroseconds(100);
   }
   raw /= BATTERY_SENSE_SAMPLES;
-  return static_cast<uint16_t>(
-      (static_cast<float>(raw) / 4095.0f) * 3300.0f * ADC_MULTIPLIER);
+  return calibrateBatteryMillivolts(static_cast<uint16_t>(
+      (static_cast<float>(raw) / 4095.0f) * 3300.0f * ADC_MULTIPLIER));
 }
 
 const char* TBeam1WBoard::getManufacturerName() const {

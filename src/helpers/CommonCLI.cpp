@@ -22,6 +22,7 @@
 #include <helpers/ui/DisplayRotationSettings.h>
 #endif
 #include <helpers/BatteryChargeCLI.h>
+#include <helpers/BatteryCalibration.h>
 #if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
 #include <helpers/MorseCLI.h>
 #endif
@@ -1069,6 +1070,12 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   if (loaded) syncOtaConfigFromPrefs();   // persisted OTA policy/keys -> OtaContext (else keep safe defaults)
 #endif
   mesh::hilStartupTrace("prefs_apply_begin");
+#if defined(NRF52_POWER_MANAGEMENT)
+  // The startup voltage policy owns the relative calibration on these boards.
+  // Its checked record must not be replaced by the legacy infrastructure field.
+  if (!mesh::power::voltagePolicySupported())
+#endif
+    _board->setAdcMultiplier(_prefs->adc_multiplier);
 #if defined(RAK_4631)
   // Boot-time only. Later CLI saves must not cut a live peripheral/flash rail.
   _sensors->configureSharedPeripheralMode(_prefs->peripherals_shared != 0);
@@ -3018,6 +3025,47 @@ bool CommonCLI::saveCommonPrefs() {
   return _common_save_result_known && _common_save_succeeded;
 }
 
+bool CommonCLI::applyAndSaveAdcMultiplier(float multiplier, char* reply,
+                                         size_t capacity) {
+  if (!isfinite(multiplier) || multiplier < 0.0f || multiplier > 10.0f) {
+    snprintf(reply, capacity, "Error: multiplier must be 0-10");
+    return false;
+  }
+  if (_board->getAdcMultiplier() <= 0.0f) {
+    snprintf(reply, capacity, "Error: unsupported");
+    return false;
+  }
+#if defined(NRF52_POWER_MANAGEMENT)
+  if (mesh::power::voltagePolicySupported()) {
+    char command[48];
+    snprintf(command, sizeof(command), "set adc.multiplier %.3f", multiplier);
+    const bool saved = mesh::power::handleVoltagePolicyCommand(command, reply, capacity)
+        && strncmp(reply, "OK", 2) == 0;
+    if (saved) loopBatteryForwarding(true);
+    return saved;
+  }
+#endif
+  const float previous = _board->getAdcMultiplier();
+  const float previous_pref = _prefs->adc_multiplier;
+  if (!_board->setAdcMultiplier(multiplier)) {
+    snprintf(reply, capacity, "Error: multiplier rejected by board");
+    return false;
+  }
+  _prefs->adc_multiplier = multiplier;
+  if (!trySavePrefs()) {
+    _prefs->adc_multiplier = previous_pref;
+    const bool restored = _board->setAdcMultiplier(previous);
+    snprintf(reply, capacity, "%s", restored
+        ? "Error: save unconfirmed; reboot may differ"
+        : "Error: save unconfirmed; runtime restore failed; reboot may differ");
+    return false;
+  }
+  loopBatteryForwarding(true);
+  if (multiplier == 0.0f) snprintf(reply, capacity, "OK - using default board multiplier");
+  else snprintf(reply, capacity, "OK - multiplier set to %.3f", multiplier);
+  return true;
+}
+
 bool CommonCLI::savePrimaryRadioParams(float freq, float bw, uint8_t sf,
                                        uint8_t cr, uint16_t preamble) {
   if (!isfinite(freq) || !isfinite(bw) || freq < 150.0f || freq > 2500.0f
@@ -3264,6 +3312,10 @@ bool CommonCLI::handleUDPBridgeCommand(uint32_t sender_timestamp,
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     PrefsSaveReplyGuard save_reply(_prefs_save_failures, reply);
     mesh::cli::normalizeCommandVerb(command);
+    if (mesh::power::handleBatteryCalibrationCommand(*_board, command, reply, 160,
+          [this](float multiplier, char* result, size_t capacity) {
+            return applyAndSaveAdcMultiplier(multiplier, result, capacity);
+          })) return;
 #if MESH_ENABLE_BATTERY_FORWARDING
     if (handleBatteryForwardingCommand(command, reply)) return;
 #endif
@@ -4229,11 +4281,17 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     return;
   }
 #if defined(NRF52_POWER_MANAGEMENT)
-  if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) {
-#if MESH_ENABLE_BATTERY_FORWARDING
-    if (strncmp(reply, "OK", 2) == 0) loopBatteryForwarding(true);
-#endif
+  const bool adc_multiplier_command = strncmp(config, "adc.multiplier", 14) == 0
+      && (config[14] == 0 || config[14] == ' ' || config[14] == '\t');
+  if (adc_multiplier_command && _board->getAdcMultiplier() <= 0.0f) {
+    strcpy(reply, "Error: unsupported");
     return;
+  }
+  if (!adc_multiplier_command || mesh::power::voltagePolicySupported()) {
+    if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) {
+      if (strncmp(reply, "OK", 2) == 0) loopBatteryForwarding(true);
+      return;
+    }
   }
 #endif
   // Infrastructure roles dispatch here rather than through CommonRadioPrefs.
@@ -5721,19 +5779,8 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     float multiplier = 0.0f;
     if (!mesh::cli::parseDecimalStrict(&config[15], multiplier)) {
       strcpy(reply, "Error: invalid multiplier");
-    } else if (_board->setAdcMultiplier(multiplier)) {
-      _prefs->adc_multiplier = multiplier;
-      savePrefs();
-#if MESH_ENABLE_BATTERY_FORWARDING
-      loopBatteryForwarding(true);
-#endif
-      if (_prefs->adc_multiplier == 0.0f) {
-        strcpy(reply, "OK - using default board multiplier");
-      } else {
-        sprintf(reply, "OK - multiplier set to %.3f", _prefs->adc_multiplier);
-      }
     } else {
-      strcpy(reply, "Error: unsupported");
+      applyAndSaveAdcMultiplier(multiplier, reply, 160);
     };
   } else if (memcmp(config, "reboot.interval ", 16) == 0) {
     int hours = _atoi(&config[16]);
@@ -5804,7 +5851,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     return;
   }
 #if defined(NRF52_POWER_MANAGEMENT)
-  if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
+  const bool adc_multiplier_command = strncmp(config, "adc.multiplier", 14) == 0
+      && (config[14] == 0 || config[14] == ' ' || config[14] == '\t');
+  if (adc_multiplier_command && _board->getAdcMultiplier() <= 0.0f) {
+    strcpy(reply, "Error: unsupported");
+    return;
+  }
+  if (!adc_multiplier_command || mesh::power::voltagePolicySupported()) {
+    if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) return;
+  }
 #endif
   if (strcmp(config, "password") == 0) {
     if (sender_timestamp == 0) {

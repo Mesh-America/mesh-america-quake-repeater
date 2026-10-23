@@ -30,6 +30,7 @@ inline uint32_t analogReadMilliVolts(int) { return 830; }
 BASE_BOARD = r'''
 #pragma once
 #include <Arduino.h>
+#include <math.h>
 #include <helpers/LedPolicy.h>
 class ESP32Board {
 protected:
@@ -48,6 +49,7 @@ public:
   virtual uint16_t getBattMilliVolts() { return 0; }
   virtual bool isExternalPowered() { return false; }
   virtual bool isUsbHostConnected() { return false; }
+  virtual bool supportsBatteryCalibration() const { return false; }
   virtual bool setAdcMultiplier(float) { return false; }
   virtual float getAdcMultiplier() const { return 0; }
   virtual const char* getManufacturerName() const { return "test"; }

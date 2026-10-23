@@ -16,6 +16,8 @@ protected:
 public:
   ThinkNodeM3Board() : NRF52Board("THINKNODE_M3_OTA") {}
   void begin();
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
 
 #ifdef P_LORA_TX_LED

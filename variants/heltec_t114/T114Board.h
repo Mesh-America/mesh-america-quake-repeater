@@ -33,6 +33,8 @@ public:
   }
 #endif
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     int adcvalue = 0;
     analogReadResolution(12);

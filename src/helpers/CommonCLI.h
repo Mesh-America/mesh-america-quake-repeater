@@ -945,6 +945,7 @@ class CommonCLI {
       PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Common);
   bool trySavePrefs(
       PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Common);
+  bool applyAndSaveAdcMultiplier(float multiplier, char* reply, size_t capacity);
   bool saveObserverPrefs();
   void loadPrefsInt(FILESYSTEM* _fs, const char* filename);
 #ifdef WITH_MQTT_BRIDGE

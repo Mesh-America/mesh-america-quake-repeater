@@ -21,6 +21,8 @@ public:
     }
   }
 
+  bool supportsBatteryCalibration() const override { return false; }
+
   uint16_t getBattMilliVolts() override {
     return 0;
   }

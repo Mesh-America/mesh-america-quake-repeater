@@ -25,6 +25,8 @@ public:
   }
 #endif
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     // Please read before going further ;)
     // https://wiki.seeedstudio.com/XIAO_BLE#q3-what-are-the-considerations-when-using-xiao-nrf52840-sense-for-battery-charging
@@ -38,7 +40,7 @@ public:
     analogReference(AR_INTERNAL_3_0);
     delay(10);
     adcvalue = analogRead(PIN_VBAT);
-    return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
+    return calibrateBatteryMillivolts((adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096);
   }
 
   const char* getManufacturerName() const override {

@@ -26,6 +26,8 @@ public:
   }
   #endif
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() {
     #if defined(PIN_VBAT_READ) && defined(ADC_MULTIPLIER)
       analogReadResolution(12);
@@ -36,7 +38,7 @@ public:
       }
 
       raw = raw / BATTERY_SAMPLES;
-      return (ADC_MULTIPLIER * raw) / 4096;
+      return calibrateBatteryMillivolts((ADC_MULTIPLIER * raw) / 4096);
     #else
       return 0;
     #endif

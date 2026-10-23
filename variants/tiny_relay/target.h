@@ -23,6 +23,8 @@ class TinyRelayBoard : public STM32Board
 
     const char *getManufacturerName() const override { return "Tiny Relay"; }
 
+    bool supportsBatteryCalibration() const override { return true; }
+
     uint16_t getBattMilliVolts() override
     {
         analogReadResolution(12);
@@ -30,7 +32,7 @@ class TinyRelayBoard : public STM32Board
         for (int i = 0; i < 8; i++) {
             raw += analogRead(PIN_VBAT_READ);
         }
-        return ((double)raw) * ADC_MULTIPLIER / 8 / 4096;
+        return calibrateBatteryMillivolts(((double)raw) * ADC_MULTIPLIER / 8 / 4096);
     }
 
     void setGpio(uint32_t values) override

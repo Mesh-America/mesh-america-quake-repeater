@@ -51,6 +51,8 @@ public:
     }
   }
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     analogReadResolution(10);
     digitalWrite(PIN_ADC_CTRL, adc_active_state);
@@ -63,7 +65,7 @@ public:
 
     digitalWrite(PIN_ADC_CTRL, !adc_active_state);
 
-    return (ADC_MULTIPLIER * (3.3 / 1024.0) * raw) * 1000;
+    return calibrateBatteryMillivolts((ADC_MULTIPLIER * (3.3 / 1024.0) * raw) * 1000);
   }
 
   const char* getManufacturerName() const override {

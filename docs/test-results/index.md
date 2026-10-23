@@ -75,6 +75,7 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Build, storage, memory, and checklists
 
+- [Shared battery ADC calibration validation, 2026-10-22](battery_calibration_2026-10-22.md)
 - [Heltec V2 BLE RAM reserve repair, 2026-10-22](heltec_v2_ble_memory_2026-10-22.md)
 - [ESP32 Bluetooth shutdown and radio2 CPU idle, 2026-10-21](esp32_ble_radio2_sleep_2026-10-21.md)
 - [RAK3401 all firmware CPU sleep checks, 2026-10-21](rak3401_all_roles_cpu_sleep_2026-10-21.md)

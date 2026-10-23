@@ -74,6 +74,8 @@ public:
   void applyLedPolicy() override;
   void onBeforeTransmit() override;
   void onAfterTransmit() override;
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
   const char* getManufacturerName() const override;
   void powerOff() override;

@@ -30,8 +30,11 @@ public:
   bool setLoRaFemLnaEnabled(bool enable) override;
   bool canControlLoRaFemLna() const override;
   bool isLoRaFemLnaEnabled() const override;
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
   bool setAdcMultiplier(float multiplier) override {
+    if (!isfinite(multiplier) || multiplier < 0.0f || multiplier > 10.0f) return false;
     if (multiplier == 0.0f) {
       adc_mult = ADC_MULTIPLIER;
     } else {

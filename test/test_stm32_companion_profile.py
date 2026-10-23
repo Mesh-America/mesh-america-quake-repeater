@@ -139,6 +139,7 @@ class RAK3x72BatteryScaleTest(unittest.TestCase):
 #include <cassert>
 #include <cstdint>
 #include <limits>
+#include <helpers/BatteryCalibration.h>
 #define PIN_VBAT_READ 7
 #define ADC_MULTIPLIER @SCALE@
 static unsigned reads, resolutions;
@@ -151,7 +152,12 @@ int analogRead(int pin) {
   remaining -= value;
   return value;
 }
-class Board { public: @BODY@ };
+class Board {
+  uint16_t calibrateBatteryMillivolts(uint16_t raw) const {
+    return mesh::power::scaleBatteryMillivolts(raw, 1.0f);
+  }
+public: @BODY@
+};
 static_assert(ADC_MULTIPLIER == 8650, "revisit the fixed-point scale if calibration changes");
 static_assert(uint64_t(8) * 4095 * 8650 <= std::numeric_limits<uint32_t>::max(),
               "battery accumulation product must not overflow");
@@ -172,7 +178,8 @@ int main() {
             cpp.write_text(source)
             binary = root / "battery"
             subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                            *SANITIZER_FLAGS, str(cpp), "-o", str(binary)], check=True)
+                            *SANITIZER_FLAGS, "-I", str(ROOT / "src"),
+                            str(cpp), "-o", str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
 
 

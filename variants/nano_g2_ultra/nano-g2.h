@@ -39,6 +39,8 @@ class NanoG2Ultra : public NRF52BoardDCDC {
 public:
   NanoG2Ultra() : NRF52Board("NANO_G2_OTA") {}
   void begin();
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override;
 
   const char *getManufacturerName() const override { return "Nano G2 Ultra"; }

@@ -1,5 +1,6 @@
 #include <helpers/RadioProfileCLI.h>
 #include <helpers/BatteryChargeCLI.h>
+#include <helpers/BatteryCalibrationStore.h>
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #if MESH_PACKET_LOGGING
@@ -424,6 +425,10 @@ public:
     mesh::setUsbLoggingEnabled(_prefs.usb_logging_enabled != 0);
 #endif
 
+    if (!mesh::power::beginBatteryCalibrationStore(board, volatile_primary_fs ? nullptr : _fs)) {
+      MESH_DEBUG_PRINTLN("Battery calibration could not be restored; using board default");
+    }
+
     loadContacts();
     _public = addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   }
@@ -470,6 +475,12 @@ public:
   }
 
   void handleCommand(const char* command) {
+    char calibration_reply[160];
+    if (mesh::power::handleStoredBatteryCalibrationCommand(board, command,
+          calibration_reply, sizeof(calibration_reply))) {
+      Serial.println(calibration_reply);
+      return;
+    }
 #if MESH_BATTERY_CHARGE_CONTROL
     char charge_reply[160];
     if (mesh::power::handleBatteryChargeCommand(board, command, charge_reply,

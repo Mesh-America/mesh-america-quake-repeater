@@ -21,6 +21,8 @@ public:
 
   #define BATTERY_SAMPLES 8
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);
 

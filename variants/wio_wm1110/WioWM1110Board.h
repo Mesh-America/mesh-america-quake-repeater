@@ -31,13 +31,15 @@ public:
   }
 #endif
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     int adcvalue = 0;
     analogReadResolution(12);
     analogReference(AR_INTERNAL_3_0);
     delay(10);
     adcvalue = analogRead(BATTERY_PIN);
-    return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE * 1000.0) / 4096.0;
+    return calibrateBatteryMillivolts((adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE * 1000.0) / 4096.0);
   }
 
   const char* getManufacturerName() const override {

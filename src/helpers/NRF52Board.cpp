@@ -293,12 +293,24 @@ void NRF52Board::loop() {
 #endif
 }
 
-#ifdef NRF52_POWER_MANAGEMENT
 uint16_t NRF52Board::calibrateBatteryMillivolts(uint16_t raw_mv) const {
-  return mesh::power::calibratedMillivolts(
-      raw_mv, mesh::power::configuredAdcPermille());
-}
+#ifdef NRF52_POWER_MANAGEMENT
+  if (supportsBatteryCalibration() && mesh::power::voltagePolicySupported()) {
+    return mesh::power::calibratedMillivolts(
+        raw_mv, mesh::power::configuredAdcPermille());
+  }
 #endif
+  return mesh::MainBoard::calibrateBatteryMillivolts(raw_mv);
+}
+
+float NRF52Board::getAdcMultiplier() const {
+#ifdef NRF52_POWER_MANAGEMENT
+  if (supportsBatteryCalibration() && mesh::power::voltagePolicySupported()) {
+    return mesh::power::configuredAdcPermille() / 1000.0f;
+  }
+#endif
+  return mesh::MainBoard::getAdcMultiplier();
+}
 
 #if NRF52_WATCHDOG_TIMEOUT_SECONDS > 0
 static void reloadWatchdogChannels() {

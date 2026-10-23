@@ -34,6 +34,8 @@ public:
     }
   }
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);
 
@@ -43,7 +45,7 @@ public:
     }
     raw = raw / 4;
 
-    return (2 * raw);
+    return calibrateBatteryMillivolts((2 * raw));
   }
 
   const char* getManufacturerName() const override {

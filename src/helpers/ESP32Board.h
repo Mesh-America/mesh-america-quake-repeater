@@ -518,6 +518,14 @@ public:
   }
 #endif
 
+  bool supportsBatteryCalibration() const override {
+#ifdef PIN_VBAT_READ
+    return true;
+#else
+    return false;
+#endif
+  }
+
   uint16_t getBattMilliVolts() override {
     #ifdef PIN_VBAT_READ
     analogReadResolution(12);
@@ -528,7 +536,7 @@ public:
     }
     raw = raw / 4;
 
-    return (2 * raw);
+    return calibrateBatteryMillivolts(2 * raw);
   #else
     return 0;  // not supported
   #endif

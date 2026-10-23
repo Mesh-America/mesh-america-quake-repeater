@@ -32,6 +32,8 @@ public:
   void onAfterTransmit() override { digitalWrite(P_LORA_TX_LED, LOW); }
 #endif
 
+  bool supportsBatteryCalibration() const override { return true; }
+
   uint16_t getBattMilliVolts() override {
 #if defined(PIN_VBAT_READ) && defined(ADC_MULTIPLIER)
     analogReadResolution(12);
@@ -42,7 +44,7 @@ public:
     }
     raw = raw / BATTERY_SAMPLES;
 
-    return (ADC_MULTIPLIER * raw);
+    return calibrateBatteryMillivolts((ADC_MULTIPLIER * raw));
 #else
     return 0;
 #endif
