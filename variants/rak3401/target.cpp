@@ -11,18 +11,11 @@
 #ifndef MC_RAK3401_SPI_HZ
 #define MC_RAK3401_SPI_HZ 8000000
 #endif
-#if MC_RAK3401_SPI_HZ != 2000000 && MC_RAK3401_SPI_HZ != 4000000 \
-    && MC_RAK3401_SPI_HZ != 8000000 && MC_RAK3401_SPI_HZ != 16000000
-#error "RAK3401 radio SPI clock must be 2, 4, 8 or 16 MHz"
-#endif
-#if MC_RAK3401_SPI_HZ == 16000000
-#if !defined(SPI_32MHZ_INTERFACE) || SPI_32MHZ_INTERFACE != 1
-#error "RAK3401 16 MHz radio requires SPI1 on SPIM3 (SPI_32MHZ_INTERFACE=1)"
-#endif
-#if !defined(NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED) \
-    || NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED != 1
-#error "RAK3401 16 MHz radio requires the global nrfx SPIM3 anomaly 198 workaround"
-#endif
+#if MC_RAK3401_SPI_HZ > 8000000
+#error "RAK3401 SPI above 8 MHz needs an unimplemented SoftDevice-compatible SPIM3 mitigation"
+#elif MC_RAK3401_SPI_HZ != 2000000 && MC_RAK3401_SPI_HZ != 4000000 \
+    && MC_RAK3401_SPI_HZ != 8000000
+#error "RAK3401 radio SPI clock must be 2, 4 or 8 MHz"
 #endif
 
 namespace {
@@ -143,9 +136,9 @@ RAK3401Board board;
 // controller instance for startup and watchdog recovery; resetting the radio
 // must not replace or tear down the SPI object used by its Module.
 // Batch each RadioLib command into one SPIM transfer rather than starting a
-// transfer per byte. Keep 8 MHz by default. A 16 MHz HIL comparison must move
-// SPI1 to SPIM3 for the whole framework build and enable its DMA workaround;
-// changing the speed never replaces this bus or its recovery/handoff path.
+// transfer per byte. Keep 8 MHz by default on SPI1/SPIM2. Higher speeds need
+// a separate SPIM3/SoftDevice mitigation before they can be offered safely.
+// Changing the speed never replaces this bus or its recovery/handoff path.
 static Nrf52BufferedRadioHal radioHal(SPI1, MC_RAK3401_SPI_HZ);
 RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 

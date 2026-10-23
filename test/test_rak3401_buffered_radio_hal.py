@@ -139,7 +139,7 @@ class Rak3401BufferedRadioHalTests(unittest.TestCase):
                         self.assertNotEqual(ran.returncode, 0,
                                             "per-byte negative control did not fail")
 
-    def test_clock_dial_requires_correct_controller_and_global_dma_workaround(self):
+    def test_clock_dial_rejects_unqualified_spim3_speeds_and_workaround(self):
         target = (ROOT / "variants/rak3401/target.cpp").read_text(encoding="ascii")
         policy = target[target.index("#ifndef MC_RAK3401_SPI_HZ"):
                         target.index("\nnamespace {")]
@@ -157,7 +157,7 @@ class Rak3401BufferedRadioHalTests(unittest.TestCase):
                 ([f"MC_RAK3401_SPI_HZ={clock}"], True)
                 for clock in (2000000, 4000000, 8000000)] + [
                 (["MC_RAK3401_SPI_HZ=16000000", "SPI_32MHZ_INTERFACE=1",
-                  "NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED=1"], True),
+                  "NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED=1"], False),
                 (["MC_RAK3401_SPI_HZ=16000000"], False),
                 (["MC_RAK3401_SPI_HZ=16000000", "SPI_32MHZ_INTERFACE=1"], False),
                 (["MC_RAK3401_SPI_HZ=16000000", "SPI_32MHZ_INTERFACE=0",
