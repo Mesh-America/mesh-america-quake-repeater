@@ -34,6 +34,15 @@ inline uint16_t resolveMHz(uint16_t selected, bool powersaving, bool companion) 
   return companion && powersaving && nominal > 80 ? 80 : nominal;
 }
 
+inline bool profilePerformanceEnabled(bool profiles_enabled) {
+#if defined(SENSECAP_INDICATOR_LORA)
+  (void)profiles_enabled;
+  return false;
+#else
+  return profiles_enabled;
+#endif
+}
+
 static constexpr size_t FooterSize = 8;
 
 inline uint16_t footerChecksum(const uint8_t* bytes, size_t length) {

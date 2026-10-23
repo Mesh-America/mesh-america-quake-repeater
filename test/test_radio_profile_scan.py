@@ -31,7 +31,15 @@ uint32_t profileElapsedUs(uint32_t since, uint32_t now, bool) { return now - sin
 uint32_t millis() { return (uint32_t)(elapsed_us / 1000); }
 struct Chip { bool standbyXOSC=false; int standby() { return 0; } };
 using CustomSX1262 = Chip;
+#if defined(ESP32_PLATFORM)
+struct Board {
+  bool prepareRadioProfileCpuClock(bool, bool& changed) { changed=false;return true; }
+};
+#endif
 struct RadioLibWrapper {
+#if defined(ESP32_PLATFORM)
+  Board board; Board* _board=&board;
+#endif
   uint8_t state = STATE_RX;
   RadioInterruptEvents events;
   bool hasPendingRadioInterrupt() const { return events.pending(); }

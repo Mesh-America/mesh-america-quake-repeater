@@ -42,10 +42,16 @@ int esp_pm_configure(esp_pm_config_t* config){
 struct MainBoard {
  virtual uint16_t getCpuFrequencyMHz()const=0;
  virtual bool supportsCpuFrequencyMHz(uint16_t)const=0;
+ virtual void setCpuFrequencyRequest(uint16_t,bool){}
  virtual bool applyCpuFrequencyMHz(uint16_t,bool)=0;
+ virtual bool prepareRadioProfileCpuClock(bool,bool& changed){changed=false;return true;}
 };
 struct ESP32Board:MainBoard {
  bool companion_cpu_clock_policy=false;
+ bool radio_profile_cpu_clock_policy=false,applied_profile_cpu_clock_policy=false,applied_cpu_clock_valid=false;
+ uint16_t requested_cpu_clock_selection=0,sampled_profile_cpu_mhz=0;
+ bool requested_cpu_clock_powersaving=false;
+ uint32_t profile_cpu_clock_retry_at=0;
  unsigned quiet_services=0;
  void servicePowerTestControls(){++quiet_services;}
  @METHODS@
@@ -55,15 +61,17 @@ struct Console {void printf(const char*,...){}};
 Console& usbLoggingPort(){static Console value;return value;}
 }
 struct Prefs {uint16_t cpu_freq_mhz=0;bool powersaving_enabled=true;} prefs;
-struct Mesh {Prefs* getNodePrefs(){return &prefs;}} the_mesh;
+struct Mesh {bool dual=false;Prefs* getNodePrefs(){return &prefs;}bool isDualRadioActive(){return dual;}} the_mesh;
 '''
 
 
 class CpuClockBoardTest(unittest.TestCase):
     def fixture(self):
         methods="\n".join(board_method(signature) for signature in (
-            "void setCompanionCpuClockPolicy(","uint16_t getCpuFrequencyMHz() const override",
-            "bool supportsCpuFrequencyMHz(","bool applyCpuFrequencyMHz("))
+            "void setCompanionCpuClockPolicy(","void setRadioProfileCpuClockPolicy(",
+            "uint16_t getCpuFrequencyMHz() const override", "bool supportsCpuFrequencyMHz(",
+            "uint16_t resolveCpuFrequencyMHz(", "void setCpuFrequencyRequest(", "bool applyCpuFrequencyMHz(",
+            "bool prepareRadioProfileCpuClock("))
         return PRELUDE.replace("@METHODS@",methods)
 
     def run_fixture(self,main,defines=()):
@@ -153,6 +161,14 @@ int main(){
  prefs.powersaving_enabled=false;serviceCompanionPowerSaving();assert(actual_mhz==160);
  prefs.powersaving_enabled=true;serviceCompanionPowerSaving();assert(actual_mhz==160);
  prefs.cpu_freq_mhz=0;serviceCompanionPowerSaving();assert(actual_mhz==80);
+ the_mesh.dual=true;serviceCompanionPowerSaving();assert(actual_mhz==240);
+ writes=clock_writes;serviceCompanionPowerSaving();assert(clock_writes==writes);
+ // Repeated Auto commands use the same board policy, rather than dropping
+ // back to80 behind the role's unchanged request cache.
+ assert(board.applyCpuFrequencyMHz(0,true)&&actual_mhz==240);
+ prefs.cpu_freq_mhz=80;serviceCompanionPowerSaving();assert(actual_mhz==80);
+ prefs.cpu_freq_mhz=0;serviceCompanionPowerSaving();assert(actual_mhz==240);
+ the_mesh.dual=false;serviceCompanionPowerSaving();assert(actual_mhz==80);
  prefs.powersaving_enabled=false;serviceCompanionPowerSaving();assert(actual_mhz==240);
  // Failures retain the request and retry after the original bounded delay.
  prefs.cpu_freq_mhz=160;fail_clock=true;serviceCompanionPowerSaving();writes=clock_writes;
@@ -175,11 +191,249 @@ int main(){
  unsigned writes=clock_writes;role_service();assert(clock_writes==writes&&board.quiet_services==2);
  prefs.powersaving_enabled=false;role_service();assert(actual_mhz==160);
  prefs.cpu_freq_mhz=80;role_service();assert(actual_mhz==80);
+ prefs.cpu_freq_mhz=0;role_service();assert(actual_mhz==mesh::esp32::cpuclock::nominalMHz());
+ // Active profiles prefer the chip maximum over a low nominal or Auto+PS.
+ prefs.powersaving_enabled=true;the_mesh.dual=true;role_service();assert(actual_mhz==240);
+ prefs.cpu_freq_mhz=80;role_service();assert(actual_mhz==80);
  prefs.cpu_freq_mhz=0;role_service();assert(actual_mhz==240);
+ the_mesh.dual=false;role_service();assert(actual_mhz==mesh::esp32::cpuclock::nominalMHz());
 }
 '''
             with self.subTest(role=role):
                 self.run_fixture(tests,["-DCONFIG_IDF_TARGET_ESP32S3=1","-DCONFIG_PM_ENABLE=0"])
+                self.run_fixture(tests,["-DCONFIG_IDF_TARGET_ESP32S3=1","-DCONFIG_PM_ENABLE=0",
+                    "-DESP32_CPU_FREQ=80"])
+
+    def test_profile_auto_clock_limits_dials_timing_changes_and_failed_boost_retry(self):
+        tests=r'''
+int main(){
+ board.setCompanionCpuClockPolicy(true);
+ assert(board.applyCpuFrequencyMHz(0,true));
+ bool changed=true;
+ assert(board.prepareRadioProfileCpuClock(true,changed));
+ const unsigned fast=board.supportsCpuFrequencyMHz(240)?240:160;
+ assert(actual_mhz==fast);
+#if CONFIG_PM_ENABLE
+ assert(unsigned(applied_pm.min_freq_mhz)==fast&&unsigned(applied_pm.max_freq_mhz)==fast);
+ // Fixing the clock does not disable the existing CPU sleep permission.
+ assert(applied_pm.light_sleep_enable);
+#endif
+ unsigned writes=clock_writes;
+ assert(board.prepareRadioProfileCpuClock(true,changed)&&!changed&&clock_writes==writes);
+ for(uint16_t dial : {uint16_t(80),uint16_t(160)}){
+   assert(board.applyCpuFrequencyMHz(dial,true)&&actual_mhz==dial);
+   assert(board.prepareRadioProfileCpuClock(true,changed));
+   assert(changed);
+   assert(actual_mhz==dial);
+   assert(board.prepareRadioProfileCpuClock(true,changed)&&!changed);
+ }
+ assert(board.applyCpuFrequencyMHz(0,true)&&actual_mhz==fast);
+ assert(board.prepareRadioProfileCpuClock(true,changed));
+ assert(changed==(fast!=160));
+ assert(board.prepareRadioProfileCpuClock(false,changed)&&!changed);
+#if CONFIG_PM_ENABLE
+ assert(actual_mhz==40&&applied_pm.max_freq_mhz==80);
+#else
+ assert(actual_mhz==80);
+#endif
+ fail_clock=true;writes=clock_writes;
+ assert(!board.prepareRadioProfileCpuClock(true,changed)&&!changed);
+ assert(clock_writes==writes+1);
+ writes=clock_writes;
+ assert(!board.prepareRadioProfileCpuClock(true,changed)&&clock_writes==writes);
+ now_ms+=5000;fail_clock=false;
+ assert(board.prepareRadioProfileCpuClock(true,changed)&&actual_mhz==fast);
+ assert(board.prepareRadioProfileCpuClock(true,changed)&&!changed);
+}
+'''
+        for target in ("ESP32S3","ESP32C3","ESP32C6"):
+            for pm in (0,1):
+                with self.subTest(target=target,pm=pm):
+                    self.run_fixture("#include <initializer_list>\n"+tests,[
+                        f"-DCONFIG_IDF_TARGET_{target}=1",f"-DCONFIG_PM_ENABLE={pm}"])
+
+    def test_indicator_keeps_existing_auto_clock_policy_with_active_profiles(self):
+        tests=r'''
+int main(){
+ board.setCompanionCpuClockPolicy(true);
+ board.setRadioProfileCpuClockPolicy(true);
+ assert(board.applyCpuFrequencyMHz(0,true));
+ assert(!board.radio_profile_cpu_clock_policy);
+#if CONFIG_PM_ENABLE
+ assert(applied_pm.min_freq_mhz==40&&applied_pm.max_freq_mhz==80);
+#else
+ assert(actual_mhz==80);
+#endif
+ bool changed=true;
+ assert(board.prepareRadioProfileCpuClock(true,changed)&&!changed);
+ assert(board.applyCpuFrequencyMHz(160,true)&&actual_mhz==160);
+}
+'''
+        for pm in (0,1):
+            self.run_fixture(tests,["-DSENSECAP_INDICATOR_LORA=1",
+                "-DCONFIG_IDF_TARGET_ESP32S3=1",f"-DCONFIG_PM_ENABLE={pm}"])
+
+    def test_retune_entry_boosts_before_preamble_and_resets_only_pair_timing(self):
+        source=(ROOT/"src/helpers/radiolib/RadioLibWrappers.cpp").read_text()
+        entry=body(source,"mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(")
+        # Execute the production admission prefix through tuple validation.
+        # Stop before the measured hardware transaction; its SPI lifecycle has
+        # separate coverage. Clock application must precede even preamble math.
+        entry=entry[:entry.index("  const bool dual_profile =")]
+        entry=entry.replace("RadioLibWrapper::tuneProfile", "tuneProfile")
+        code=r'''
+#include <RadioProfiles.h>
+namespace mesh {enum class RadioParamApplyResult {APPLIED,BUSY,FAILED};}
+struct RadioLibWrapper {
+ ESP32Board* _board=&board;
+ mesh::RadioProfiles _profiles;
+ bool _cw_active=false,_profile_refresh_required=true,_profile_repair_required=false;
+ uint8_t _active_profile=0;
+ uint32_t _profile_generation=0;
+ uint16_t _physical_preamble=32;
+ unsigned preamble_reads=0,retunes=0;
+ uint16_t expected=240;
+ uint16_t profilePreamble(uint8_t){++preamble_reads;assert(actual_mhz==expected);return 32;}
+ bool validateProfile(const mesh::RadioProfileParams&)const{return true;}
+ @ENTRY@
+   ++retunes;return mesh::RadioParamApplyResult::APPLIED;
+ }
+};
+int main(){
+ board.setCompanionCpuClockPolicy(true);
+ assert(board.applyCpuFrequencyMHz(0,true)&&actual_mhz==80);
+ RadioLibWrapper radio;
+ mesh::RadioProfileConfig config;config.mode=mesh::RadioProfileMode::RxTx;
+ radio._profiles.setSecondary(config,false);
+ radio._profiles.switch_test_max_us[0]=99999;
+ radio._profiles.switch_test_samples[0]=4;
+ radio._profiles.switches=19;radio._profiles.switch_failures=3;
+ assert(radio.tuneProfile(1)==mesh::RadioParamApplyResult::APPLIED&&actual_mhz==240);
+ assert(!radio._profiles.switch_test_max_us[0]&&!radio._profiles.switch_test_samples[0]);
+ assert(radio._profiles.switches==19&&radio._profiles.switch_failures==3);
+ radio._profiles.switch_test_max_us[0]=1200;radio._profiles.switch_test_samples[0]=1;
+ unsigned writes=clock_writes;
+ assert(radio.tuneProfile(1)==mesh::RadioParamApplyResult::APPLIED&&clock_writes==writes);
+ assert(radio._profiles.switch_test_max_us[0]==1200&&radio._profiles.switch_test_samples[0]==1);
+ assert(board.applyCpuFrequencyMHz(160,true));radio.expected=160;
+ assert(radio.tuneProfile(1)==mesh::RadioParamApplyResult::APPLIED);
+ assert(!radio._profiles.switch_test_max_us[0]&&!radio._profiles.switch_test_samples[0]);
+ radio._profiles.switch_test_max_us[0]=1700;
+ assert(radio.tuneProfile(1)==mesh::RadioParamApplyResult::APPLIED);
+ assert(radio._profiles.switch_test_max_us[0]==1700);
+ // A failed boost defers before preamble math or hardware retuning.
+ bool changed=false;assert(board.prepareRadioProfileCpuClock(false,changed));
+ assert(board.applyCpuFrequencyMHz(0,true));fail_clock=true;
+ const unsigned previous=radio.retunes,reads=radio.preamble_reads;
+ assert(radio.tuneProfile(1)==mesh::RadioParamApplyResult::BUSY);
+ assert(radio.retunes==previous&&radio.preamble_reads==reads);
+}
+'''.replace("@ENTRY@",entry)
+        self.run_fixture(code,["-DESP32_PLATFORM=1","-DCONFIG_IDF_TARGET_ESP32S3=1","-DCONFIG_PM_ENABLE=0"])
+
+    def test_loaded_clock_choice_is_seeded_before_saved_radio_and_survives_apply_failure(self):
+        common=(ROOT/"src/helpers/CommonCLI.cpp").read_text()
+        load=body(common,"void CommonCLI::loadPrefs(")
+        seed=load[load.index("#if defined(ESP32_PLATFORM)",load.index('mesh::hilStartupTrace("prefs_apply_begin")')):]
+        seed=seed[:seed.index("#endif")]
+        seed=seed[seed.index("\n")+1:]
+        seed=seed.replace("_board->","board.").replace("_prefs->","prefs.")
+        companion=(ROOT/"examples/companion_radio/MyMesh.cpp").read_text()
+        begin=body(companion,"void MyMesh::begin(bool has_display,")
+        companion_seed=begin[begin.index("  if (!mesh::esp32::cpuclock::validSelection("):]
+        companion_seed=companion_seed[:companion_seed.index("#endif")]
+        companion_seed=companion_seed.replace("_prefs.","prefs.")
+        self.assertLess(begin.index("_store->loadPrefs("),begin.index("board.setCpuFrequencyRequest("))
+        self.assertLess(begin.index("board.setCpuFrequencyRequest("),begin.index("configureRadioFromPrefs();"))
+        self.assertLess(load.index("loadPrefsInt("),load.index("_board->setCpuFrequencyRequest("))
+        self.assertLess(load.index("_board->setCpuFrequencyRequest("),load.index("_radio_profiles.stagePrimary("))
+        for path,signature in (("simple_repeater/MyMesh.cpp","void MyMesh::begin(FILESYSTEM"),
+                               ("simple_room_server/MyMesh.cpp","void MyMesh::begin(FILESYSTEM"),
+                               ("simple_sensor/SensorMesh.cpp","void SensorMesh::begin(FILESYSTEM")):
+            role=body((ROOT/"examples"/path).read_text(),signature)
+            self.assertLess(role.index("_cli.loadPrefs("),role.index("applySavedRadioParams()"))
+        tests=r'''
+int main(){
+ board.setCompanionCpuClockPolicy(true);
+ prefs.cpu_freq_mhz=80;prefs.powersaving_enabled=true;
+ seed_request();
+ assert(clock_writes==0); // Seeding must not use unconfigured peripherals/SDK.
+ bool changed=false;
+ assert(board.prepareRadioProfileCpuClock(true,changed)&&actual_mhz==80);
+ assert(board.requested_cpu_clock_selection==80&&board.requested_cpu_clock_powersaving);
+ prefs.cpu_freq_mhz=160;prefs.powersaving_enabled=false;
+ seed_request();
+ fail_clock=true;const unsigned writes=clock_writes;
+ assert(!board.prepareRadioProfileCpuClock(true,changed));
+ assert(clock_writes==writes+1);
+ assert(board.requested_cpu_clock_selection==160&&!board.requested_cpu_clock_powersaving);
+ assert(!board.prepareRadioProfileCpuClock(true,changed)&&clock_writes==writes+1);
+ now_ms+=5000;fail_clock=false;
+ assert(board.prepareRadioProfileCpuClock(true,changed)&&actual_mhz==160);
+ // A direct CLI/role apply which fails also retains its requested clock;
+ // the retune gate must not retry the last successful160MHz selection.
+ fail_clock=true;assert(!board.applyCpuFrequencyMHz(80,true));fail_clock=false;
+ assert(board.prepareRadioProfileCpuClock(true,changed)&&actual_mhz==80);
+ assert(board.requested_cpu_clock_selection==80&&board.requested_cpu_clock_powersaving);
+}
+'''
+        for role,seed_code in (("infrastructure",seed),("companion",companion_seed)):
+            for pm in (0,1):
+                with self.subTest(role=role,pm=pm):
+                    self.run_fixture("void seed_request(){\n"+seed_code+"\n}\n"+tests,[
+                        "-DESP32_PLATFORM=1","-DCONFIG_IDF_TARGET_ESP32S3=1",f"-DCONFIG_PM_ENABLE={pm}"])
+
+    def test_rc32_post_boot_override_is_repaired_before_retune_with_cached_role_policy(self):
+        source=(ROOT/"src/helpers/radiolib/RadioLibWrappers.cpp").read_text()
+        entry=body(source,"mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(")
+        entry=entry[:entry.index("  const bool dual_profile =")]
+        entry=entry.replace("RadioLibWrapper::tuneProfile", "tuneProfile")
+        for role in ("simple_repeater","simple_room_server","simple_sensor"):
+            main=(ROOT/"examples"/role/"main.cpp").read_text()
+            setup=body(main,"void setup()")
+            # The role must not cache the loaded request before board-specific
+            # onBootComplete can select its post-startup clock (RC32:160MHz).
+            self.assertNotIn("serviceCpuFrequencyPolicy(",setup[:setup.index("board.onBootComplete();")])
+            start=main.index("  board.servicePowerTestControls();",main.index("void loop()"))
+            service=main[start:main.index("#endif",start)]
+            code=r'''
+#include <RadioProfiles.h>
+namespace mesh {enum class RadioParamApplyResult {APPLIED,BUSY,FAILED};}
+void role_service(){@SERVICE@}
+struct RadioLibWrapper {
+ ESP32Board* _board=&board;
+ mesh::RadioProfiles _profiles;
+ bool _cw_active=false,_profile_refresh_required=true,_profile_repair_required=false;
+ uint8_t _active_profile=0;uint32_t _profile_generation=0;
+ uint16_t _physical_preamble=32,expected=240;
+ uint16_t profilePreamble(uint8_t){assert(actual_mhz==expected);return 32;}
+ bool validateProfile(const mesh::RadioProfileParams&)const{return true;}
+ @ENTRY@
+   return mesh::RadioParamApplyResult::APPLIED;
+ }
+};
+int main(){
+ RadioLibWrapper radio;mesh::RadioProfileConfig config;config.mode=mesh::RadioProfileMode::RxTx;
+ radio._profiles.setSecondary(config,false);the_mesh.dual=true;
+ // Loaded profiles can apply before onBootComplete. A fixed requested clock
+ // must be respected both there and after the board's post-boot override.
+ for(uint16_t selected : {uint16_t(0),uint16_t(80),uint16_t(160),uint16_t(240)}){
+   prefs.cpu_freq_mhz=selected;prefs.powersaving_enabled=true;
+   board.setCpuFrequencyRequest(selected,true);
+   radio.expected=selected?selected:240;
+   assert(radio.tuneProfile(0)==mesh::RadioParamApplyResult::APPLIED);
+   role_service();assert(actual_mhz==radio.expected);
+   actual_mhz=160; // RC32::onBootComplete hardware change, outside role cache.
+   const unsigned writes=clock_writes;
+   role_service();assert(clock_writes==writes); // Same cached role request.
+   assert(radio.tuneProfile(1)==mesh::RadioParamApplyResult::APPLIED);
+   assert(actual_mhz==radio.expected);
+   assert(clock_writes==writes+(radio.expected!=160));
+ }
+}
+'''.replace("@SERVICE@",service).replace("@ENTRY@",entry)
+            self.run_fixture("#include <initializer_list>\n"+code,["-DESP32_PLATFORM=1",
+                "-DCONFIG_IDF_TARGET_ESP32S3=1","-DCONFIG_PM_ENABLE=0","-DESP32_POST_BOOT_CPU_FREQ=160"])
 
     def test_rc32_post_boot_nominal_survives_shared_policy_and_explicit_selection(self):
         main=(ROOT/"examples/companion_radio/main.cpp").read_text()

@@ -3196,6 +3196,7 @@ void MyMesh::begin(bool has_display, bool radio_available,
   if (!mesh::esp32::cpuclock::validSelection(_prefs.cpu_freq_mhz)
       || (_prefs.cpu_freq_mhz && !board.supportsCpuFrequencyMHz(_prefs.cpu_freq_mhz)))
     _prefs.cpu_freq_mhz = 0;
+  board.setCpuFrequencyRequest(_prefs.cpu_freq_mhz, _prefs.powersaving_enabled != 0);
 #endif
   _prefs.wifi_enabled = constrain(_prefs.wifi_enabled, 0, 1);
   _prefs.usb_logging_enabled = constrain(_prefs.usb_logging_enabled, 0, 2);

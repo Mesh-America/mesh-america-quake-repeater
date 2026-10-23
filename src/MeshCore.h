@@ -170,7 +170,12 @@ public:
   // preference layout and board vtable. Zero selects the role's Auto policy.
   virtual uint16_t getCpuFrequencyMHz() const { return 0; }
   virtual bool supportsCpuFrequencyMHz(uint16_t) const { return false; }
+  virtual void setCpuFrequencyRequest(uint16_t, bool) { }
   virtual bool applyCpuFrequencyMHz(uint16_t, bool) { return false; }
+  virtual bool prepareRadioProfileCpuClock(bool, bool& changed) {
+    changed = false;
+    return true;
+  }
 #endif
   virtual void reboot() = 0;
   MESH_REGULATOR_VIRTUAL uint8_t mcuRegulatorModes() const { return 0; }

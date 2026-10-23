@@ -626,6 +626,12 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
 #endif
   if (_cw_active) return mesh::RadioParamApplyResult::BUSY;
   if (profile > 1 || (profile == 1 && !_profiles.enabled())) return mesh::RadioParamApplyResult::FAILED;
+#if defined(ESP32_PLATFORM) && !defined(SENSECAP_INDICATOR_LORA)
+  bool clock_changed = false;
+  if (!_board->prepareRadioProfileCpuClock(_profiles.enabled(), clock_changed))
+    return mesh::RadioParamApplyResult::BUSY;
+  if (clock_changed) _profiles.resetSwitchTest();
+#endif
   const auto& p = _profiles.params(profile);
   const uint16_t preamble = profilePreamble(profile);
   if (!_profile_refresh_required && !_profile_repair_required && _active_profile == profile && _profile_generation == _profiles.generation[profile]

@@ -54,6 +54,13 @@ protected:
   bool ota_started_ap = false;
   bool ota_started_radio = false;
   bool companion_cpu_clock_policy = false;
+  bool radio_profile_cpu_clock_policy = false;
+  bool applied_profile_cpu_clock_policy = false;
+  bool applied_cpu_clock_valid = false;
+  uint16_t requested_cpu_clock_selection = 0;
+  bool requested_cpu_clock_powersaving = false;
+  uint16_t sampled_profile_cpu_mhz = 0;
+  uint32_t profile_cpu_clock_retry_at = 0;
   uint32_t uart_quiet_start_at = 0;
   uint32_t uart_quiet_restore_at = 0;
   uint16_t uart_quiet_seconds = 0;
@@ -121,6 +128,9 @@ public:
   void attachDynamicPrefs(KeyValueStore* prefs) { (void)prefs; }  // no-op
 
   void setCompanionCpuClockPolicy(bool enabled) { companion_cpu_clock_policy = enabled; }
+  void setRadioProfileCpuClockPolicy(bool enabled) {
+    radio_profile_cpu_clock_policy = mesh::esp32::cpuclock::profilePerformanceEnabled(enabled);
+  }
   uint16_t getCpuFrequencyMHz() const override { return ::getCpuFrequencyMhz(); }
   bool supportsCpuFrequencyMHz(uint16_t mhz) const override {
 #if CONFIG_IDF_TARGET_ESP32H2
@@ -145,15 +155,40 @@ public:
 #endif
   }
 
+  uint16_t resolveCpuFrequencyMHz(uint16_t selected, bool powersaving) const {
+    uint16_t maximum = mesh::esp32::cpuclock::resolveMHz(
+        selected, powersaving, companion_cpu_clock_policy);
+    if (!selected && radio_profile_cpu_clock_policy) {
+      const uint16_t candidates[] = {240, 160, 80};
+      for (uint16_t candidate : candidates) {
+        if (supportsCpuFrequencyMHz(candidate)) return candidate;
+      }
+    }
+    if (!selected && maximum == 240 && !supportsCpuFrequencyMHz(240)
+        && supportsCpuFrequencyMHz(160)) maximum = 160;
+    return maximum;
+  }
+
+  // Seed the loaded choice before saved profiles can retune the radio. Keep
+  // this request even when the SDK cannot apply it on the first attempt.
+  void setCpuFrequencyRequest(uint16_t selected, bool powersaving) override {
+    if (requested_cpu_clock_selection != selected || requested_cpu_clock_powersaving != powersaving) {
+      requested_cpu_clock_selection = selected;
+      requested_cpu_clock_powersaving = powersaving;
+      applied_cpu_clock_valid = false;
+      profile_cpu_clock_retry_at = 0;
+    }
+  }
+
   bool applyCpuFrequencyMHz(uint16_t selected, bool powersaving) override {
     if (!mesh::esp32::cpuclock::validSelection(selected)
         || (selected && !supportsCpuFrequencyMHz(selected))) return false;
-    uint16_t maximum = mesh::esp32::cpuclock::resolveMHz(
-        selected, powersaving, companion_cpu_clock_policy);
-    if (!selected && maximum == 240 && !supportsCpuFrequencyMHz(240)
-        && supportsCpuFrequencyMHz(160)) maximum = 160;
+    setCpuFrequencyRequest(selected, powersaving);
+    const uint16_t maximum = resolveCpuFrequencyMHz(selected, powersaving);
+    applied_cpu_clock_valid = false;
 #if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
-    const uint16_t minimum = !selected && companion_cpu_clock_policy && powersaving && maximum > 40
+    const uint16_t minimum = !selected && !radio_profile_cpu_clock_policy
+        && companion_cpu_clock_policy && powersaving && maximum > 40
         ? 40 : maximum;
 #if CONFIG_IDF_TARGET_ESP32C3
     esp_pm_config_esp32c3_t config;
@@ -175,7 +210,42 @@ public:
 #else
     if (!setCpuFrequencyMhz(maximum)) return false;
 #endif
-    return !selected || getCpuFrequencyMHz() == selected;
+    if ((selected || radio_profile_cpu_clock_policy) && getCpuFrequencyMHz() != maximum) return false;
+    applied_profile_cpu_clock_policy = radio_profile_cpu_clock_policy;
+    applied_cpu_clock_valid = true;
+    profile_cpu_clock_retry_at = 0;
+    return true;
+  }
+
+  bool prepareRadioProfileCpuClock(bool enabled, bool& changed) override {
+    changed = false;
+    setRadioProfileCpuClockPolicy(enabled);
+    uint16_t previous = 0;
+    const bool fixed_clock = requested_cpu_clock_selection || radio_profile_cpu_clock_policy;
+    const bool clock_drifted = fixed_clock && getCpuFrequencyMHz()
+        != resolveCpuFrequencyMHz(requested_cpu_clock_selection, requested_cpu_clock_powersaving);
+    if (!applied_cpu_clock_valid || applied_profile_cpu_clock_policy != radio_profile_cpu_clock_policy
+        || clock_drifted) {
+      const uint32_t now = millis();
+      if (profile_cpu_clock_retry_at && static_cast<int32_t>(now - profile_cpu_clock_retry_at) < 0)
+        return false;
+      previous = getCpuFrequencyMHz();
+      if (!applyCpuFrequencyMHz(requested_cpu_clock_selection, requested_cpu_clock_powersaving)) {
+        profile_cpu_clock_retry_at = now + 5000;
+        if (!profile_cpu_clock_retry_at) profile_cpu_clock_retry_at = 1;
+        return false;
+      }
+      profile_cpu_clock_retry_at = 0;
+    }
+    // Observe explicit clock changes too. Reset only the pair's timing proof,
+    // once per effective transition; hardware failure counters stay intact.
+    if (radio_profile_cpu_clock_policy) {
+      const uint16_t current = getCpuFrequencyMHz();
+      changed = (previous && previous != current)
+          || (sampled_profile_cpu_mhz && sampled_profile_cpu_mhz != current);
+      sampled_profile_cpu_mhz = current;
+    } else sampled_profile_cpu_mhz = 0;
+    return true;
   }
 
   bool handleUartQuiet(mesh::esp32::UartQuietAction action, uint16_t seconds,

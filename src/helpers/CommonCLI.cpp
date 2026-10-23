@@ -1070,6 +1070,12 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   if (loaded) syncOtaConfigFromPrefs();   // persisted OTA policy/keys -> OtaContext (else keep safe defaults)
 #endif
   mesh::hilStartupTrace("prefs_apply_begin");
+#if defined(ESP32_PLATFORM)
+  if (!mesh::esp32::cpuclock::validSelection(_prefs->cpu_freq_mhz)
+      || (_prefs->cpu_freq_mhz && !_board->supportsCpuFrequencyMHz(_prefs->cpu_freq_mhz)))
+    _prefs->cpu_freq_mhz = 0;
+  _board->setCpuFrequencyRequest(_prefs->cpu_freq_mhz, _prefs->powersaving_enabled != 0);
+#endif
 #if defined(NRF52_POWER_MANAGEMENT)
   // The startup voltage policy owns the relative calibration on these boards.
   // Its checked record must not be replaced by the legacy infrastructure field.

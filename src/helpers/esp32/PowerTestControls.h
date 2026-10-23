@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "CpuClockPolicy.h"
 
 namespace mesh {
 namespace esp32 {
@@ -72,14 +73,18 @@ inline uint32_t profileSleepSettleMillis(uint32_t normal) {
 // choice at boot and after preference changes without reconfiguring each loop.
 template <typename Board>
 bool serviceCpuFrequencyPolicy(Board& board, uint16_t selected, bool powersaving,
-                               uint32_t now_ms, bool force = false) {
+                               uint32_t now_ms, bool force = false, bool profiles_enabled = false) {
   struct State {
     uint16_t selected = UINT16_MAX;
     bool powersaving = false;
+    bool profiles_enabled = false;
     uint32_t retry_at = 0;
   };
   static State state;
-  if (!force && state.selected == selected && state.powersaving == powersaving) return true;
+  profiles_enabled = cpuclock::profilePerformanceEnabled(profiles_enabled);
+  board.setRadioProfileCpuClockPolicy(profiles_enabled);
+  if (!force && state.selected == selected && state.powersaving == powersaving
+      && state.profiles_enabled == profiles_enabled) return true;
   if (!force && state.retry_at && static_cast<int32_t>(now_ms - state.retry_at) < 0) return false;
   if (!board.applyCpuFrequencyMHz(selected, powersaving)) {
     state.retry_at = now_ms + 5000;
@@ -88,6 +93,7 @@ bool serviceCpuFrequencyPolicy(Board& board, uint16_t selected, bool powersaving
   }
   state.selected = selected;
   state.powersaving = powersaving;
+  state.profiles_enabled = profiles_enabled;
   state.retry_at = 0;
   return true;
 }

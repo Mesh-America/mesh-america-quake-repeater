@@ -561,16 +561,16 @@ static void applyCompanionBluetoothSleep(bool enabled,
 
 static bool applyCompanionPowerSaving(bool enabled) {
   const uint16_t selected = the_mesh.getNodePrefs()->cpu_freq_mhz;
-  uint32_t max_mhz = mesh::esp32::cpuclock::resolveMHz(selected, enabled, true);
+  board.setRadioProfileCpuClockPolicy(the_mesh.isDualRadioActive());
+  const uint32_t max_mhz = board.resolveCpuFrequencyMHz(selected, enabled);
   if (!board.applyCpuFrequencyMHz(selected, enabled)) {
     mesh::usbLoggingPort().printf("Device power saving failed: CPU clock policy rejected\r\n");
     return false;
   }
-  if (!selected && max_mhz == 240 && !board.supportsCpuFrequencyMHz(240)
-      && board.supportsCpuFrequencyMHz(160)) max_mhz = 160;
-
 #if COMPANION_IDF_PM_AVAILABLE
-  const uint32_t min_mhz = !selected && enabled && max_mhz > 40 ? 40 : max_mhz;
+  const uint32_t min_mhz = !selected && enabled && max_mhz > 40
+      && !mesh::esp32::cpuclock::profilePerformanceEnabled(the_mesh.isDualRadioActive())
+      ? 40 : max_mhz;
 #if (defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT) \
     || defined(ENABLE_USB_INTERFACE)
   // Automatic light sleep interrupts native USB CDC and USB companions.
@@ -604,7 +604,8 @@ static bool applyCompanionPowerSaving(bool enabled) {
 }
 
 static void serviceCompanionPowerSaving(bool force = false) {
-  const int8_t requested = the_mesh.getNodePrefs()->powersaving_enabled ? 1 : 0;
+  const int8_t requested = (the_mesh.getNodePrefs()->powersaving_enabled ? 1 : 0)
+      | (mesh::esp32::cpuclock::profilePerformanceEnabled(the_mesh.isDualRadioActive()) ? 2 : 0);
   const uint16_t selected = the_mesh.getNodePrefs()->cpu_freq_mhz;
   if (!force && applied_power_saving == requested && applied_cpu_frequency == selected) return;
 
@@ -617,7 +618,7 @@ static void serviceCompanionPowerSaving(bool force = false) {
 
   attempted_power_saving = requested;
   attempted_cpu_frequency = selected;
-  if (applyCompanionPowerSaving(requested != 0)) {
+  if (applyCompanionPowerSaving((requested & 1) != 0)) {
     applied_power_saving = requested;
     applied_cpu_frequency = selected;
     power_saving_retry_at = 0;

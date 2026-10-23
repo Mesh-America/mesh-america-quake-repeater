@@ -393,7 +393,7 @@ void loop() {
 #if defined(ESP32_PLATFORM)
   board.servicePowerTestControls();
   mesh::esp32::serviceCpuFrequencyPolicy(board, the_mesh.getNodePrefs()->cpu_freq_mhz,
-      the_mesh.getNodePrefs()->powersaving_enabled != 0, millis());
+      the_mesh.getNodePrefs()->powersaving_enabled != 0, millis(), false, the_mesh.isDualRadioActive());
 #endif
   const auto sleep_guard = [](bool allowed, mesh::powerdiag::Reason reason) {
     if (!allowed && mesh::powerdiag::enabled())
