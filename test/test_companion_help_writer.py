@@ -97,6 +97,39 @@ int main() {
   Output empty;
   assert(mesh::companion::writeHelpChunks(empty,nullptr,1)==0);
   assert(mesh::companion::writeHelpChunks(empty,"",0)==0 && empty.writes.empty());
+
+  constexpr char literal[] =
+      "  get/set radio.preamble on|off\r\n"
+      "  get bluetooth.name / get pwrmgt.source\r\n"
+      "  set radio.cad on (saved; default on)\r\n";
+  static_assert(mesh::companion::validHelpText(literal), "ASCII accepted");
+  static_assert(!mesh::companion::validHelpText("bad\x80"), "Token bytes reserved");
+  static_assert(!mesh::companion::validHelpText("a\0b"), "Embedded NUL rejected");
+  static constexpr auto packed = mesh::companion::packHelp<
+      mesh::companion::packedHelpSize(literal)>(literal);
+  static_assert(sizeof(packed) == mesh::companion::packedHelpSize(literal),
+                "No raw-size padding retained");
+  static_assert(sizeof(packed) + 40 < sizeof(literal), "Fragments compress");
+  Output decoded;
+  assert(mesh::companion::writePackedHelp(decoded,packed.bytes,sizeof(packed))==sizeof(literal)-1);
+  assert(decoded.text==literal);
+  Output slow;slow.throttle=3;
+  assert(mesh::companion::writePackedHelp(slow,packed.bytes,sizeof(packed))==sizeof(literal)-1);
+  assert(slow.text==literal && slow.writes.size()<=sizeof(literal)-1);
+  for (size_t credit : {size_t(0),size_t(1),size_t(13),size_t(63),size_t(64),size_t(65)}) {
+    Output blocked;blocked.credit=credit;
+    assert(mesh::companion::writePackedHelp(blocked,packed.bytes,sizeof(packed))==credit);
+    assert(blocked.text==std::string(literal,credit));
+    assert(blocked.writes.size()<=credit+1);
+  }
+  Output bad;bad.overreport=true;
+  assert(mesh::companion::writePackedHelp(bad,packed.bytes,sizeof(packed))==0);
+  assert(bad.writes.size()==1 && bad.text.empty());
+  Output unused;
+  assert(mesh::companion::writePackedHelp(unused,nullptr,1)==0);
+  assert(mesh::companion::writePackedHelp(unused,packed.bytes,0)==0 && unused.writes.empty());
+  const uint8_t invalid_token[]={0xff};
+  assert(mesh::companion::writePackedHelp(unused,invalid_token,1)==0 && unused.writes.empty());
 }
 '''
 
@@ -116,7 +149,7 @@ class CompanionHelpWriterTests(unittest.TestCase):
                 work = Path(folder);(work / 'test.cpp').write_text(harness)
                 sanitizer = ['-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                              '-fno-pie', '-no-pie'] if sys.platform.startswith('linux') else []
-                result = subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                result = subprocess.run([compiler, '-std=c++17', '-Os', '-Wall', '-Wextra', '-Werror',
                     *sanitizer, *['-D'+value for value in defines],
                     '-I'+str(ROOT/'examples/companion_radio'), str(work/'test.cpp'),
                     '-o', str(work/'test')], capture_output=True, text=True)
@@ -126,6 +159,9 @@ class CompanionHelpWriterTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(result.stdout).hexdigest(),GOLDEN[name]['text'])
                 if name != 'rak_full':
                     self.assertEqual(hashlib.sha256(result.stderr).hexdigest(),GOLDEN[name]['calls'])
+                else:
+                    image = (work / 'test').read_bytes()
+                    self.assertNotIn(b'Commands:\r\n  stats-core / stats-radio / stats-radio-diag',image)
 
 
 if __name__ == '__main__':

@@ -10405,8 +10405,10 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
   } else if (strcmp(command, "help") == 0) {
     auto& output = terminalOutput();
 #if defined(RAK_4631) && defined(COMPANION_RADIO_FULL)
-    // Keep every help byte and feature gate while sharing the printing code.
-    static const char help_text[] =
+    // Constant evaluation retains only the exact-sized packed help image.
+    // The source fragments and every feature gate remain shared below.
+    static constexpr auto packed_help = []() constexpr {
+      constexpr char help_text[] =
 #define MESH_COMPANION_HELP_BEGIN
 #define MESH_COMPANION_HELP_END
 #define MESH_COMPANION_HELP_LINE_BEGIN
@@ -10416,8 +10418,14 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
 #undef MESH_COMPANION_HELP_END
 #undef MESH_COMPANION_HELP_LINE_BEGIN
 #undef MESH_COMPANION_HELP_LINE_END
-        ;
-    mesh::companion::writeHelpChunks(output, help_text, sizeof(help_text) - 1);
+          ;
+      static_assert(mesh::companion::validHelpText(help_text),
+                    "Packed help requires ASCII without embedded NUL bytes");
+      return mesh::companion::packHelp<
+          mesh::companion::packedHelpSize(help_text)>(help_text);
+    }();
+    mesh::companion::writePackedHelp(output, packed_help.bytes,
+                                    sizeof(packed_help.bytes));
 #else
 #define MESH_COMPANION_HELP_BEGIN output.print(
 #define MESH_COMPANION_HELP_END );
