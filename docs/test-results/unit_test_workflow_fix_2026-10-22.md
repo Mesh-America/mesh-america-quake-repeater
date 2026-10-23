@@ -40,8 +40,8 @@ DISABLE_DEBUG=0 bash build.sh build-firmware wio-e5-mini_repeater \
 The exact Mini release-wrapper build passed with 245,376 of 245,760 application
 bytes used, leaving 384 bytes. Its runtime-memory gate also passed: 43,920 bytes
 available against 32,288 bytes required. The application boundary and existing
-16 KiB filesystem are unchanged. The complete GitHub workflow result remains
-pending.
+16 KiB filesystem are unchanged. The complete board matrix is tracked in the
+[unit-test workflow](https://github.com/mikecarper/MeshCore/actions/workflows/run-unit-tests.yml).
 
 ## RAK4631 Full Companion changes
 
@@ -67,7 +67,10 @@ The linked ARM crypto checks passed both RFC8032 vectors. Key generation used
 2,048-byte gate. These figures exclude caller, ISR and task stacks. Linked OTA
 workspace checks passed four acquisition/release lifetimes without touching
 the protected SD authentication range. Neither check is hardware qualification.
-The linked Reader reference run remains pending.
+The linked Reader check passed all 879 references (885 calls), comparing
+82,624 canonical bytes. Its maximum function-frame stack was 6,016 bytes;
+the check also reserves 1,536 caller bytes within the 8,192-byte loop stack.
+This excludes ISR/task stack and physical high-water measurements.
 
 Beacon frequency and bandwidth parsing now shares the radio CLI's plain
 decimal parser. This removes the general-purpose `strtof`/`strtod` conversion
@@ -78,7 +81,15 @@ hexadecimal numeric syntax is rejected, matching the ordinary radio CLI grammar.
 NaN, infinity, whitespace and trailing junk are rejected as well.
 
 Constant CLI error replies share their existing bounded formatter and prefix.
-Their user-visible text, reply capacities and termination are retained.
+The existing command replies retain their text, capacities and termination;
+new calibration replies use shorter wording while retaining the reading,
+effective multiplier and persistence result.
+
+The first rerun exposed an RS-232 packaging check that requires one complete
+error-message literal as evidence that the merged command handler survived
+linking. That handler retains its original literal. The capability check is
+unchanged. Both Full and Reduced T114 Repeater release-wrapper builds then
+passed all eight capability checks and their flash, RAM and DFU gates.
 
 Calibration coverage includes three command/scaling tests, three store tests
 (including four platform backends), 19 battery-forwarding tests and four power
@@ -112,6 +123,8 @@ add feature cuts or change flash and RAM qualification gates.
 ## Host regression results
 
 Passed checks:
+
+The complete native PlatformIO suite also passed all 1,897 test cases.
 
 | Check | Coverage |
 | --- | --- |

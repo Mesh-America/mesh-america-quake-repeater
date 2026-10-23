@@ -4576,7 +4576,9 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strncmp(config, "rs232.enabled ", 14) == 0) {
     bool enable = false;
     if (!parseOnOffStrict(config + 14, enable)) {
-      mesh::cli::formatError(reply, 160, "use set rs232.enabled on|off");
+      // The packaged RS-232 consolidation check verifies this handler's
+      // complete message. Keep its capability evidence as one literal.
+      strcpy(reply, "Error: use set rs232.enabled on|off");
       return;
     }
     if (enable && _sensors->gpsSerialTransportMayConflict(_prefs->bridge_uart)
