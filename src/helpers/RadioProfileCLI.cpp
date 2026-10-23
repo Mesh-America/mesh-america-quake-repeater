@@ -9,6 +9,9 @@
 #include "PersistentStoreFormat.h"
 #include "radiolib/RXPowerSaving.h"
 #include "radiolib/HilTxFrequencyGuard.h"
+#if defined(MESH_HIL_ESP_SPI_AB) && MESH_HIL_ESP_SPI_AB
+#include "radiolib/ESP32SpiABDiagnostics.h"
+#endif
 #include <Arduino.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -306,6 +309,9 @@ __attribute__((noinline)) bool RadioProfileCLI::handleFastSettings(const char* k
   const auto caps = radio_->switchTuningCapabilities();
   const auto current = radio_->switchTuning();
   const char* suffix = key + (key[10] ? 11 : 10);
+#if defined(MESH_HIL_ESP_SPI_AB) && MESH_HIL_ESP_SPI_AB
+  if (esp_spiab::handle(suffix, args, verb, reply, capacity)) return true;
+#endif
   static const char names[] = "warm\0fs\0packet\0iq\0modem\0batch\0buffer";
   const char* name = names;
   unsigned feature = 0;
