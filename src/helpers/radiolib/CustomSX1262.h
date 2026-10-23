@@ -28,14 +28,15 @@
 #endif
 
 #ifndef MC_SX1262_FAST_IQ_CACHE
-// An additional optimization, enabled per board only after hardware testing.
-#define MC_SX1262_FAST_IQ_CACHE 0
+// Reuse only acknowledged IQ state inside the owned warm RX path. Follow
+// the direct-I/O FS policy; explicit board opt-outs and overrides still win.
+#define MC_SX1262_FAST_IQ_CACHE MC_SX1262_FAST_FS
 #endif
 
 #ifndef MC_SX1262_FAST_MODEM_CACHE
 // Reuse the LoRa modem confirmation only inside an acknowledged owned RX hop.
-// Keep this board-qualified optimization off until its hardware comparison.
-#define MC_SX1262_FAST_MODEM_CACHE 0
+// Expander targets that opt out of FS retain their previous live-query path.
+#define MC_SX1262_FAST_MODEM_CACHE MC_SX1262_FAST_FS
 #endif
 
 #if (MC_SX1262_FAST_FS || MC_SX1262_FAST_PACKET_CACHE || MC_SX1262_FAST_IQ_CACHE || MC_SX1262_FAST_MODEM_CACHE) && !MC_SX1262_FAST_PROFILE_SWITCH

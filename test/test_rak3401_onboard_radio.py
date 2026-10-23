@@ -468,7 +468,9 @@ class Rak3401OnboardRadioTests(unittest.TestCase):
         self.assertIn("digitalWrite(SX126X_POWER_EN, HIGH);", begin)
         init = extract_braced(target, "bool radio_init()")
         self.assertIn("radio.std_init(&SPI)", init)
-        self.assertIn("P_LORA_RESET, P_LORA_BUSY, SPI)", target)
+        self.assertIn("SX126xBufferedRadioHal radioHal(SPI)", target)
+        self.assertIn("new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, "
+                      "P_LORA_RESET, P_LORA_BUSY)", target)
         # External-radio construction and retry must retain their SPI1 owner.
         external_target = (VARIANT / "target.cpp").read_text()
         self.assertIn("Nrf52BufferedRadioHal radioHal(SPI1, 8000000)", external_target)

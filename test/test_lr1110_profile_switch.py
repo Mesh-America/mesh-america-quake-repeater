@@ -18,6 +18,7 @@ class LR1110ProfileSwitchTests(unittest.TestCase):
             "t1000-e": "Nrf52BufferedRadioHal",
             "wio_wm1110": "Nrf52BufferedRadioHal",
             "thinknode_m3": "Nrf52BufferedRadioHal",
+            "thinknode_m4": "Nrf52BufferedRadioHal",
             "minewsemi_me25ls01": "Nrf52BufferedRadioHal",
             "thinknode_m7": "ESP32BufferedRadioHal",
             "thinknode_m9": "ESP32BufferedRadioHal",

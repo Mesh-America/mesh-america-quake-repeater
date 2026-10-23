@@ -14,15 +14,35 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProfileIqCacheTest(unittest.TestCase):
-    def test_only_qualified_recipes_opt_in(self):
-        opt_ins = []
-        for recipe in (ROOT / "variants").glob("*/platformio.ini"):
-            if re.search(r"^\s*-D\s+MC_SX1262_FAST_IQ_CACHE=1\s*$",
-                         recipe.read_text(), re.MULTILINE):
-                opt_ins.append(recipe.relative_to(ROOT).as_posix())
-        self.assertCountEqual(opt_ins, ["variants/sensecap_indicator-espnow/platformio.ini",
-                                       "variants/lilygo_tdeck/platformio.ini",
-                                       "variants/rak3401/platformio.ini"])
+    def test_shared_defaults_preserve_opt_outs_and_indicator_policy(self):
+        source = (ROOT / "src/helpers/radiolib/CustomSX1262.h").read_text()
+        defaults = source[source.index("#ifndef MC_SX1262_FAST_PROFILE_SWITCH"):
+                          source.index("#ifndef SX126X_TX_BUSY_TIMEOUT_MS")]
+        cases = (
+            ("", (1, 1, 1, 1, 1)),
+            ("#define MC_SX1262_FAST_PROFILE_SWITCH 0", (0, 0, 0, 0, 0)),
+            ("#define MC_SX1262_FAST_FS 0", (1, 0, 1, 0, 0)),
+            ("#define MC_SX1262_FAST_IQ_CACHE 0\n"
+             "#define MC_SX1262_FAST_MODEM_CACHE 0", (1, 1, 1, 0, 0)),
+            ("#define MC_SX1262_FAST_PACKET_CACHE 0", (1, 1, 0, 1, 1)),
+        )
+        # Use the real expander recipe: its explicit IQ reuse remains on,
+        # while its FS and packet opt-outs keep modem-query reuse off.
+        indicator = (ROOT / "variants/sensecap_indicator-espnow/platformio.ini").read_text()
+        section = indicator.split("[SenseCapIndicator-LoRa]", 1)[1].split("\n[", 1)[0]
+        flags = re.findall(r"^\s*-D\s+(MC_SX1262_FAST_\w+=\d+)\s*$",
+                           section, re.MULTILINE)
+        self.assertGreaterEqual(len(flags), 4)
+        cases += (("\n".join("#define " + flag.replace("=", " ") for flag in flags),
+                   (1, 0, 0, 1, 0)),)
+        names = ("PROFILE_SWITCH", "FS", "PACKET_CACHE", "IQ_CACHE", "MODEM_CACHE")
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                assertions = "\n".join(
+                    f'static_assert(MC_SX1262_FAST_{name} == {value}, "{name}");'
+                    for name, value in zip(names, expected))
+                self.compile_run(overrides + "\n" + defaults + "\n" + assertions
+                                 + "\nint main() {}\n")
 
     def compile_run(self, source):
         with tempfile.TemporaryDirectory() as folder:
@@ -246,12 +266,10 @@ int main() {
             with self.subTest(definitions=definitions):
                 self.compile_run(fixture.replace("@DEFINES@", definitions))
 
-    def test_unqualified_boards_keep_the_original_live_modem_query_and_iq_path(self):
+    def test_explicit_cache_opt_outs_keep_live_queries_and_owned_gates(self):
         source = (ROOT / "src/helpers/radiolib/CustomSX1262.h").read_text()
-        self.assertIn("#define MC_SX1262_FAST_IQ_CACHE 0", source)
-        self.assertIn("#define MC_SX1262_FAST_MODEM_CACHE 0", source)
-        # Execute the shared production-method fixture: default-off builds must
-        # query the modem, while opted-in/HIL reuse must retain all ownership,
+        # Execute the shared production-method fixture: explicit opt-outs must
+        # query the modem, while enabled/HIL reuse must retain all ownership,
         # initialization and failure gates. Do not depend on an if's spelling.
         modem_cache.ModemCacheTests.test_confirmed_modem_requires_owned_warm_rx_and_survives_no_failure(self)
         helper = method(source, "int16_t writeProfilePacketParams(")

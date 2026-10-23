@@ -3,12 +3,7 @@
 #include "StationG3BootRecovery.h"
 #include <helpers/UsbLogging.h>
 
-// The normal Station G3 roles retain the established RadioLib Arduino HAL.
-// The KISS modem can opt into buffered SPI for its on-board dual-profile RX
-// scanner without changing the regular Station firmware.
-#if defined(MC_SX1262_BUFFERED_RADIO_HAL) && MC_SX1262_BUFFERED_RADIO_HAL
-  #include <helpers/radiolib/ESP32BufferedRadioHal.h>
-#endif
+#include <helpers/radiolib/SX126xBufferedRadioHal.h>
 
 StationG3Board board;
 
@@ -20,14 +15,11 @@ const char meshcore_capability_station_g3_auto_slots[] __attribute__((used)) =
 
 #if defined(P_LORA_SCLK)
   static SPIClass spi;
-  #if defined(MC_SX1262_BUFFERED_RADIO_HAL) && MC_SX1262_BUFFERED_RADIO_HAL
-    static ESP32BufferedRadioHal radio_hal(spi);
-    RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
-  #else
-    RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
-  #endif
+  static SX126xBufferedRadioHal radio_hal(spi);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #else
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+  static SX126xBufferedRadioHal radio_hal(SPI, MC_SX1262_SPI_HZ, true);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #endif
 
 WRAPPER_CLASS radio_driver(radio, board);
