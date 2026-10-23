@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HARDWARE = r'''
 #pragma once
 #include <RadioProfiles.h>
+#include <helpers/RadioSwitchTuning.h>
 namespace mesh {
 class RTCClock {public:virtual ~RTCClock()=default;virtual uint32_t getCurrentTime()=0;};
 enum class RadioParamApplyResult:uint8_t {APPLIED,BUSY,FAILED};
@@ -37,6 +38,14 @@ class Radio {public:
  virtual bool isInRecvMode()const{return true;}
  virtual RadioProfiles* profiles()=0;
  virtual const RadioProfiles* profiles()const=0;
+ // This scheduler fixture has no accelerated physical-radio transport. Match
+ // the production Radio defaults without accepting or persisting tuning.
+ virtual RadioSwitchCapabilities switchTuningCapabilities()const{return {};}
+ virtual RadioSwitchTuning switchTuning()const{return {};}
+ virtual uint32_t switchSpiHz()const{return 0;}
+ virtual bool configureBootSwitchTuning(const RadioSwitchTuning&){return false;}
+ virtual RadioParamApplyResult trySetSwitchTuning(const RadioSwitchTuning&,
+   bool(*)(void*,const RadioSwitchTuning&)=nullptr,void* =nullptr){return RadioParamApplyResult::FAILED;}
  virtual bool validateProfile(const RadioProfileParams&)const=0;
  virtual uint16_t profilePreamble(uint8_t)const=0;
  virtual RadioParamApplyResult trySetPrimaryParams(const RadioProfileParams&,bool,const uint32_t*)=0;
