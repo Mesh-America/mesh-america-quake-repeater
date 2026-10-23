@@ -818,6 +818,7 @@ jobs:
           python3 -B test/test_nrf_radio_yield_budget.py -v
           python3 -B test/test_nrf_radio_priority_lease.py -v
           python3 -B test/test_nrf_radio_priority_integration.py -v
+          python3 -B test/test_nrf_radio_combined_experiment.py -v
           python3 -B test/test_nrf_radio_usb_irq_guard.py -v
           python3 -B test/test_nrf_radio_irq_observer.py -v
           python3 -B test/test_nrf52_hil_irq_binding.py -v

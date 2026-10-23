@@ -1,5 +1,7 @@
 #pragma once
 
+#include "NrfRadioProfileExperimentConfig.h"
+
 #ifndef MC_NRF_RADIO_PROFILE_PRIORITY
 #define MC_NRF_RADIO_PROFILE_PRIORITY 0
 #endif

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hal/Arduino/ArduinoHal.h>
+#include "NrfRadioProfileExperimentConfig.h"
 
 #ifndef MC_NRF_RADIO_PROFILE_PRIORITY
 #define MC_NRF_RADIO_PROFILE_PRIORITY 0
@@ -62,6 +63,12 @@ public:
   // An unused budget can reach a later non-BUSY wait; this is not BUSY-only
   // detection. No GPIO reads, status checks, timeouts or interrupts change.
   void yield() override {
+#if MC_NRF_RADIO_PROFILE_PRIORITY
+    // In the explicit combined test, suppress a cooperative task switch
+    // before the USB guard can yield to the already queued USB worker.
+    const auto decision = mesh::radiopriority::beforeYield();
+    if (decision == mesh::radiopriority::Suppress) return;
+#endif
 #if MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD
     if (mesh::radiousb::beforeYield()) {
       // Normal Arduino yield flushes TinyUSB CDC. While its IRQ is deferred,
@@ -71,8 +78,8 @@ public:
     }
 #endif
 #if MC_NRF_RADIO_PROFILE_PRIORITY
-    const auto decision = mesh::radiopriority::beforeYield();
-    if (decision == mesh::radiopriority::Suppress) return;
+    // Expiry can restore priority while the independent USB deadline still
+    // owns its IRQ. Always consult that guard before a normal CDC flush.
     if (decision == mesh::radiopriority::Expired) {
       ArduinoHal::yield();
       return;

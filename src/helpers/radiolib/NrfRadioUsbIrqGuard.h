@@ -1,5 +1,7 @@
 #pragma once
 
+#include "NrfRadioProfileExperimentConfig.h"
+
 #ifndef MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD
 #define MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD 0
 #endif
@@ -9,9 +11,6 @@
 #if MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD
 #if !defined(NRF52_PLATFORM) || !defined(MESH_HIL_PROFILE_TIMING) || !MESH_HIL_PROFILE_TIMING
 #error "Radio USB IRQ experiment requires nRF52 HIL profile timing"
-#endif
-#if defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY
-#error "Measure the USB IRQ and task-priority experiments separately"
 #endif
 #include <Arduino.h>
 #include <atomic>

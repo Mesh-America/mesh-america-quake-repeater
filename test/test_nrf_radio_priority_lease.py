@@ -37,6 +37,7 @@ inline void vTaskPrioritySet(TaskHandle_t task,unsigned priority) {
 '''
 
 MOCK=MOCK_HAL.replace('#include <cassert>','#include <Arduino.h>\n#include <cassert>')
+MOCK=MOCK.replace('  virtual void spiBeginTransaction() {}\n','')
 MOCK=MOCK.replace('virtual ~ArduinoHal() = default;',r'''
   unsigned yields=0,transactions=0,lastTransactionPriority=0;
   virtual ~ArduinoHal() = default;

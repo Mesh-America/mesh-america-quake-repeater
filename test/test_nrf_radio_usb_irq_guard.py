@@ -112,6 +112,7 @@ inline unsigned nrf_rtc_cc_get(RtcMock* p,unsigned ch) { return p->CC[ch]; }
 '''
 
 MOCK = MOCK_HAL.replace('#include <cassert>', '#include <Arduino.h>\n#include <cassert>')
+MOCK = MOCK.replace('  virtual void spiBeginTransaction() {}\n', '')
 MOCK = MOCK.replace('    ++bursts;', '''
     if(failTransfer) { expire();assert(irqEnabled[USBD_IRQn]); }
     ++bursts;''')

@@ -645,13 +645,25 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   mesh::profiletiming::begin(_active_profile, profile, mesh::profiletiming::readClock());
 #endif
   beginProfileRetune(isInRecvMode() && !_rx_ps_armed && !_rx_ps_enabled);
+#if MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD
+  // The combined HIL experiment must admit the IRQ guard while the loop
+  // still has its ordinary priority; its deadline remains independent.
+  mesh::radiousb::Guard profile_usb_irq(dual_profile && _active_profile != profile
+      && ownsWarmProfileRetune());
+#endif
 #if MC_NRF_RADIO_PROFILE_PRIORITY
   mesh::radiopriority::Lease profile_priority(dual_profile && _active_profile != profile
       && ownsWarmProfileRetune());
 #endif
-#if MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD
-  mesh::radiousb::Guard profile_usb_irq(dual_profile && _active_profile != profile
-      && ownsWarmProfileRetune());
+#if MC_NRF_RADIO_PROFILE_COMBINED
+  // Explicit exits release in this order below. Preserve it for any future
+  // early exit as well, before reverse member/local destruction can let a
+  // queued USB worker run while its IRQ is still deferred.
+  struct OrderedProfileRelease {
+    mesh::radiousb::Guard& usb;
+    mesh::radiopriority::Lease& priority;
+    ~OrderedProfileRelease() { usb.release(); priority.release(); }
+  } ordered_profile_release{profile_usb_irq, profile_priority};
 #endif
   const uint8_t resume = beginReconfigure();
   if (resume > 1) {
