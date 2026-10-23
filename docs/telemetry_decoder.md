@@ -72,13 +72,13 @@ can be changed; the firmware does not overwrite an unmigrated legacy file.
 
 ## Find telemetry packets
 
-[Open the seven-day telemetry view in CascadiaMesh Analyzer](https://analyzer.cascadiamesh.org/#/packets?timeWindow=10080&filter=type%20%3D%3D%20RAW_CUSTOM%20%26%26%20size%20%3E%20120%20%26%26%20age%20%3C%207d%20%26%26%20%28payload.raw%20starts_with%20%2254544231%22%20%7C%7C%20payload.raw%20starts_with%20%2254564231%22%20%7C%7C%20payload.raw%20starts_with%20%2249564231%22%20%7C%7C%20payload.raw%20starts_with%20%224E314231%22%20%7C%7C%20payload.raw%20starts_with%20%224E324231%22%29).
-The link selects RAW_CUSTOM packets larger than 120 bytes whose data starts with
+[Open the seven-day telemetry view in CascadiaMesh Analyzer](https://analyzer.cascadiamesh.org/#/packets?timeWindow=10080&filter=type%20%3D%3D%20RAW_CUSTOM%20%26%26%20age%20%3C%207d%20%26%26%20%28payload.raw%20starts_with%20%2254544231%22%20%7C%7C%20payload.raw%20starts_with%20%2254564231%22%20%7C%7C%20payload.raw%20starts_with%20%2249564231%22%20%7C%7C%20payload.raw%20starts_with%20%224E314231%22%20%7C%7C%20payload.raw%20starts_with%20%224E324231%22%29).
+The link selects RAW_CUSTOM packets whose data starts with
 any of the five telemetry prefixes below. To use the filter box directly, paste
 this as one line:
 
 ```text
-type == RAW_CUSTOM && size > 120 && age < 7d && (payload.raw starts_with "54544231" || payload.raw starts_with "54564231" || payload.raw starts_with "49564231" || payload.raw starts_with "4E314231" || payload.raw starts_with "4E324231")
+type == RAW_CUSTOM && age < 7d && (payload.raw starts_with "54544231" || payload.raw starts_with "54564231" || payload.raw starts_with "49564231" || payload.raw starts_with "4E314231" || payload.raw starts_with "4E324231")
 ```
 
 | Data | Payload tag | Hex prefix |
@@ -89,9 +89,7 @@ type == RAW_CUSTOM && size > 120 && age < 7d && (payload.raw starts_with "545442
 | Main-radio noise floor | `N1B1` | `4E314231` |
 | Radio2 noise floor | `N2B1` | `4E324231` |
 
-`&&` requires every condition; `||` accepts any listed prefix. `size` includes
-headers and routing bytes. Use `payload.rawLength > 120` to filter on data length
-instead, or remove `size > 120 &&` to include shorter snapshots.
+`&&` requires every condition; `||` accepts any listed prefix.
 `payload.raw` starts at the application data, after the routing bytes.
 
 The URL uses `timeWindow=10080` (seven days in minutes). The explicit
