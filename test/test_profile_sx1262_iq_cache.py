@@ -21,7 +21,8 @@ class ProfileIqCacheTest(unittest.TestCase):
                          recipe.read_text(), re.MULTILINE):
                 opt_ins.append(recipe.relative_to(ROOT).as_posix())
         self.assertCountEqual(opt_ins, ["variants/sensecap_indicator-espnow/platformio.ini",
-                                       "variants/lilygo_tdeck/platformio.ini"])
+                                       "variants/lilygo_tdeck/platformio.ini",
+                                       "variants/rak3401/platformio.ini"])
 
     def compile_run(self, source):
         with tempfile.TemporaryDirectory() as folder:
