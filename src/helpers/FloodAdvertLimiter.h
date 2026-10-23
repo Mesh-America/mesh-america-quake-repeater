@@ -24,6 +24,7 @@ public:
   static constexpr uint32_t BAD_INTERVAL_MS = 12UL * 60UL * 60UL * 1000UL;
   static constexpr uint32_t RECOVERY_MS = 7UL * 24UL * 60UL * 60UL * 1000UL;
   static constexpr uint8_t HASH_SLOTS = 11; // maximum normal allowance + evidence of excess
+  static_assert(HASH_SLOTS <= 15, "Advert hash count must fit its four-bit field");
   static constexpr uint8_t PREFIX_BYTES = 6; // first 12 public-key hex characters
 
   enum class Decision : uint8_t { Allow, Duplicate, Quota, BadList, Capacity };
@@ -37,8 +38,10 @@ public:
     uint32_t last_heard;
     uint16_t forwarded;
     uint8_t min_hops;
-    uint8_t count;
-    uint8_t flags;
+    // RAM-only state: count is 0..11 and the four flags are independent.
+    // Sharing one byte also removes tail padding without shortening history.
+    uint8_t count : 4;
+    uint8_t flags : 4;
   };
 
   enum LimitReason : uint8_t { WindowQuota = 1, ReceiveHistory = 2, BadListRule = 4 };
@@ -77,6 +80,8 @@ protected:
 
 private:
   enum : uint8_t { ACTIVE = 1, PREVIOUS_OVER = 2, BAD = 4, HAS_FORWARDED = 8 };
+  static_assert((ACTIVE | PREVIOUS_OVER | BAD | HAS_FORWARDED) <= 15,
+                "Advert flags must fit their four-bit field");
   Entry* _entries;
   size_t _capacity;
   uint32_t _last_sweep = 0;

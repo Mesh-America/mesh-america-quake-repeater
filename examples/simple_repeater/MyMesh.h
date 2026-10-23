@@ -15,15 +15,7 @@
 #include <RTClib.h>
 #include <CayenneLPP.h>
 #include <target.h>
-
-#ifndef MESH_ENABLE_TELEMETRY_HISTORY
-  // LoRa-E5-class STM32 repeater images have less than 3 KB of spare flash.
-  #if defined(STM32_PLATFORM)
-    #define MESH_ENABLE_TELEMETRY_HISTORY 0
-  #else
-    #define MESH_ENABLE_TELEMETRY_HISTORY 1
-  #endif
-#endif
+#include <helpers/TelemetryHistoryConfig.h>
 
 #ifndef MESH_ENABLE_TELEMETRY_GPS_HISTORY
   // Builds without a GPS provider only collect missing GPS positions. Omit
@@ -299,18 +291,23 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
 {
   struct ScheduledRadioSetting {
+    // RAM only: group aligned fields to keep each schedule within 32 bytes.
+    uint64_t hard_end_uptime_millis;
+    float freq;
+    float bw;
+    uint32_t start_time;
+    uint32_t end_time;
     uint16_t preamble = 0;
+    uint8_t sf;
+    uint8_t cr;
     bool active;
     bool temporary;
     bool started;
-    float freq;
-    float bw;
-    uint8_t sf;
-    uint8_t cr;
-    uint32_t start_time;
-    uint32_t end_time;
-    uint64_t hard_end_uptime_millis;
   };
+  static_assert(sizeof(ScheduledRadioSetting) <= 32,
+                "Scheduled radio rows must retain their compact RAM layout");
+  static_assert(alignof(ScheduledRadioSetting) >= alignof(uint64_t),
+                "Scheduled radio uptime deadlines must remain naturally aligned");
 
   FILESYSTEM* _fs;
 #ifndef PORTABLE_MQTT_OBSERVER

@@ -19,6 +19,11 @@ def method(text, signature):
     return text[start:end]
 
 
+SCHEDULED_SETTING = method(
+    (ROOT / "examples/simple_repeater/MyMesh.h").read_text(encoding="utf-8"),
+    "struct ScheduledRadioSetting {") + ";"
+
+
 HARNESS = r'''
 #include <cassert>
 #include <cstdio>
@@ -106,14 +111,7 @@ struct Radio { uint32_t last_rx = 0; uint32_t getLastRecvMillis() { return last_
 // separate Morse loop-policy suite executes the real ownership predicate.
 namespace mesh { bool morseTimingActive(const Radio*) { return false; } }
 struct Barrier { bool held = false; bool waiting() const { return held; } void clear() { held = false; } };
-struct ScheduledRadioSetting {
-  bool active = false, temporary = false, started = false;
-  float freq = 0, bw = 0;
-  uint8_t sf = 0, cr = 0;
-  uint16_t preamble = 0;
-  uint32_t start_time = 0, end_time = 0;
-  uint64_t hard_end_uptime_millis = 0;
-};
+@SCHEDULED_SETTING@
 class MyMesh {
 public:
   RadioPrefs _prefs;
@@ -128,7 +126,7 @@ public:
   bool radio_reply_secondary = false;
   mesh::RxInactivityWatchdog rx_inactivity_watchdog;
   mesh::RepeaterRadioTiming radio_timing;
-  ScheduledRadioSetting scheduled_radio_settings[MAX_SCHEDULED_RADIO_SETTINGS];
+  ScheduledRadioSetting scheduled_radio_settings[MAX_SCHEDULED_RADIO_SETTINGS]{};
   uint64_t uptime_millis = 1;
   uint32_t last_millis = 1;
   uint32_t next_local_advert = 0, next_flood_advert = 0;
@@ -456,6 +454,7 @@ int main() {
   puts("Production scheduler, storage-backoff, watchdog and advert scenarios passed");
 }
 '''
+HARNESS = HARNESS.replace("@SCHEDULED_SETTING@", SCHEDULED_SETTING)
 
 CLI_HARNESS = r'''
 #include <cassert>
@@ -530,6 +529,41 @@ class RepeaterRadioTimingIntegrationTest(unittest.TestCase):
             subprocess.run([os.environ.get("CXX", "g++"), "-std=c++17", "-I", str(ROOT / "src"),
                             str(cpp), "-o", str(exe)], check=True)
             subprocess.run([str(exe)], check=True)
+
+    def test_actual_schedule_rows_are_32_bytes_with_aligned_full_width_fields(self):
+        self.compile_and_run(r'''
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+@SETTING@
+static_assert(sizeof(ScheduledRadioSetting) == 32, "schedule padding increased");
+static_assert(alignof(ScheduledRadioSetting) >= alignof(uint64_t), "unaligned deadline");
+static_assert(offsetof(ScheduledRadioSetting, hard_end_uptime_millis) == 0, "deadline moved");
+static_assert(offsetof(ScheduledRadioSetting, freq) % alignof(float) == 0, "unaligned frequency");
+static_assert(offsetof(ScheduledRadioSetting, bw) % alignof(float) == 0, "unaligned bandwidth");
+static_assert(offsetof(ScheduledRadioSetting, start_time) % alignof(uint32_t) == 0, "unaligned start");
+static_assert(offsetof(ScheduledRadioSetting, end_time) % alignof(uint32_t) == 0, "unaligned end");
+static_assert(offsetof(ScheduledRadioSetting, preamble) % alignof(uint16_t) == 0, "unaligned preamble");
+static_assert(std::is_standard_layout<ScheduledRadioSetting>::value, "schedule layout changed");
+static_assert(std::is_trivially_copyable<ScheduledRadioSetting>::value, "schedule copies changed");
+int main() {
+  ScheduledRadioSetting rows[6]{};
+  static_assert(sizeof(rows) == 192, "all six schedules must retain their capacity");
+  assert(rows[0].preamble == 0 && !rows[0].active && !rows[0].temporary && !rows[0].started);
+  rows[0].hard_end_uptime_millis = 0xFEDCBA9876543210ULL;
+  rows[0].freq = 911.150f; rows[0].bw = 250;
+  rows[0].start_time = 0xFFFFFFFEUL; rows[0].end_time = 0xFFFFFFFFUL;
+  rows[0].preamble = 65535; rows[0].sf = 12; rows[0].cr = 8;
+  rows[0].active = rows[0].temporary = rows[0].started = true;
+  rows[5] = rows[0];
+  assert(rows[5].hard_end_uptime_millis == 0xFEDCBA9876543210ULL);
+  assert(rows[5].freq == 911.150f && rows[5].bw == 250);
+  assert(rows[5].start_time == 0xFFFFFFFEUL && rows[5].end_time == 0xFFFFFFFFUL);
+  assert(rows[5].preamble == 65535 && rows[5].sf == 12 && rows[5].cr == 8);
+  assert(rows[5].active && rows[5].temporary && rows[5].started);
+}
+'''.replace("@SETTING@", SCHEDULED_SETTING))
 
     def test_production_scheduler_and_services(self):
         source = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text(encoding="utf-8")

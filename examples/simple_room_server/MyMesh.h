@@ -46,14 +46,7 @@
 
 namespace mesh { class RoomJsonWriter; }
 
-#ifndef MESH_ENABLE_TELEMETRY_HISTORY
-  // LoRa-E5-class STM32 room images do not have enough flash for history.
-  #if defined(STM32_PLATFORM)
-    #define MESH_ENABLE_TELEMETRY_HISTORY 0
-  #else
-    #define MESH_ENABLE_TELEMETRY_HISTORY 1
-  #endif
-#endif
+#include <helpers/TelemetryHistoryConfig.h>
 
 #ifndef MESH_ENABLE_TELEMETRY_GPS_HISTORY
   #if ENV_INCLUDE_GPS == 1

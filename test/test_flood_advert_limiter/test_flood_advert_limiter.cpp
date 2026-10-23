@@ -45,7 +45,45 @@ TEST_F(FloodAdvertLimit, EveryHopAllowanceAndSaturation) {
     EXPECT_EQ(Decision::Quota, receive(expected[hops], hops, 0));
   }
   EXPECT_EQ(2, Limiter::allowance(63));
-  EXPECT_EQ(144U, sizeof(Limiter::Entry));
+  EXPECT_EQ(140U, sizeof(Limiter::Entry));
+}
+
+TEST(FloodAdvertPacking, EveryFlagCombinationAndCountRetainsAllHistoryFields) {
+  Limiter::Entry entry{};
+  memset(entry.key, 0xa5, sizeof(entry.key));
+  memset(entry.hashes, 0x5a, sizeof(entry.hashes));
+  entry.window_start = UINT32_MAX;
+  entry.last_violation = UINT32_MAX - 1;
+  entry.last_forwarded = UINT32_MAX - 2;
+  entry.last_heard = UINT32_MAX - 3;
+  entry.forwarded = uint16_t((1U << Limiter::HASH_SLOTS) - 1U);
+  entry.min_hops = 255;
+  for (uint8_t count = 0; count <= Limiter::HASH_SLOTS; ++count) {
+    for (uint8_t flags = 0; flags < 16; ++flags) {
+      entry.flags = flags;
+      entry.count = count;
+      EXPECT_EQ(flags, entry.flags);
+      EXPECT_EQ(count, entry.count);
+      entry.flags ^= 15;
+      EXPECT_EQ(uint8_t(flags ^ 15), entry.flags);
+      EXPECT_EQ(count, entry.count);
+      entry.flags &= ~8;
+      entry.flags |= 8;
+      EXPECT_EQ(uint8_t((flags ^ 15) | 8), entry.flags);
+      EXPECT_EQ(count, entry.count);
+    }
+  }
+  EXPECT_EQ(UINT32_MAX, entry.window_start);
+  EXPECT_EQ(UINT32_MAX - 1, entry.last_violation);
+  EXPECT_EQ(UINT32_MAX - 2, entry.last_forwarded);
+  EXPECT_EQ(UINT32_MAX - 3, entry.last_heard);
+  EXPECT_EQ(2047, entry.forwarded);
+  EXPECT_EQ(255, entry.min_hops);
+  for (uint8_t byte : entry.key) EXPECT_EQ(0xa5, byte);
+  for (const auto& hash : entry.hashes) for (uint8_t byte : hash) EXPECT_EQ(0x5a, byte);
+  EXPECT_EQ(4U, alignof(Limiter::Entry));
+  EXPECT_EQ(140U * 128U, sizeof(Limiter::Entry[128]));
+  EXPECT_EQ(140U * 96U, sizeof(Limiter::Entry[96]));
 }
 
 TEST_F(FloodAdvertLimit, PrefixIsSixBytesAndCollisionsShareQuota) {

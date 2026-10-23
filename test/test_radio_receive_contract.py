@@ -24,6 +24,7 @@ HARNESS = r'''
 #include <RadioProfiles.h>
 #include <helpers/radiolib/RadioInterruptEvents.h>
 #include <helpers/radiolib/NoiseFloorEstimator.h>
+#include <helpers/TelemetryHistoryConfig.h>
 #define STATE_IDLE 0
 #define STATE_RX 1
 #define STATE_TX_WAIT 3

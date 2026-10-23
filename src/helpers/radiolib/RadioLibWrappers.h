@@ -1,6 +1,7 @@
 #pragma once
 
 #include "NoiseFloorEstimator.h"
+#include "../TelemetryHistoryConfig.h"
 #include "../CarrierTools.h"
 
 #include <Mesh.h>
@@ -56,9 +57,11 @@ protected:
   uint32_t _cad_scan_timeout_override_ms;
   bool _noise_floor_valid;
   bool _noise_floor_secondary_valid = false;
+#if MESH_ENABLE_TELEMETRY_HISTORY
   uint32_t _nf_published_at[2] = {};
   uint32_t _nf_published_generation[2] = {};
   uint8_t _nf_published_valid = 0;
+#endif
   bool _nf_refresh_requested;
   NoiseFloorEstimator _floor_estimator;
   NoiseFloorEstimator _secondary_floor_estimator;
@@ -555,6 +558,7 @@ public:
     }
     return getNoiseFloorDbm();
   }
+#if MESH_ENABLE_TELEMETRY_HISTORY
   bool getNoiseFloorReading(uint8_t profile, float& dbm,
                            uint32_t& published_at_ms) const override {
     if (profile > 1 || (profile == 1 && !_profiles.enabled())
@@ -566,6 +570,7 @@ public:
     return true;
   }
   void requestNoiseFloorMeasurement() override { requestNoiseFloorRefresh(); }
+#endif
   float getNoiseFloorCalibrationSecondsRemaining() const override {
     const float primary = profileNoiseFloorSecondsRemaining(0);
     if (!_profiles.enabled()) return primary;

@@ -372,7 +372,9 @@ class SolarXiaoRoomTests(unittest.TestCase):
         settings = setup[start:setup.index("#ifdef DISPLAY_CLASS", start)]
         start = loop.index("mesh::power::serviceRegulatorSettings();")
         periodic = loop[start:loop.index("board.loop();", start) + len("board.loop();")]
-        history = conditional_block((ROOM / "MyMesh.h").read_text(), "#ifndef MESH_ENABLE_TELEMETRY_HISTORY")
+        self.assertIn("#include <helpers/TelemetryHistoryConfig.h>", (ROOM / "MyMesh.h").read_text())
+        history = conditional_block((ROOT / "src/helpers/TelemetryHistoryConfig.h").read_text(),
+                                    "#ifndef MESH_ENABLE_TELEMETRY_HISTORY")
         self.assertLess(setup.index("board.begin()"), setup.index("mesh::solar::beginSettings"))
         self.assertLess(setup.index("mesh::solar::beginSettings"), setup.index("sensors.begin()"))
         self.assertLess(setup.index("mesh::solar::beginSettings"), setup.index("radio_init()"))

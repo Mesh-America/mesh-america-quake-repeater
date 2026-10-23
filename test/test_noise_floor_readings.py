@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -183,6 +184,39 @@ int main(int argc, char** argv) {
 }
 '''
 
+DISABLED_FIXTURE = r'''
+#include <type_traits>
+template<class T,class=void> struct HasPublicationState:std::false_type {};
+template<class T> struct HasPublicationState<T,
+    std::void_t<decltype(T::_nf_published_at)>>:std::true_type {};
+static_assert(!HasPublicationState<RadioLibWrapper>::value,
+              "disabled history must not reserve publication timestamp RAM");
+static_assert(!std::is_polymorphic<PublicRadio>::value && sizeof(PublicRadio)==1,
+              "disabled defaults must not add radio vtable slots");
+static_assert(std::is_same<decltype(&RadioLibWrapper::getNoiseFloorReading),
+    bool(PublicRadio::*)(uint8_t,float&,uint32_t&)const>::value,
+    "disabled history must inherit the unsupported reading API");
+static_assert(std::is_same<decltype(&RadioLibWrapper::requestNoiseFloorMeasurement),
+    void(PublicRadio::*)()>::value,
+    "disabled history must inherit the no-op request API");
+int main() {
+  RadioLibWrapper w;
+  w._noise_floor_valid=false;
+  for (unsigned i=0;i<NoiseFloorEstimator::SAMPLE_COUNT;++i) {
+    now_ms+=NoiseFloorEstimator::SAMPLE_INTERVAL_MS;
+    assert(w._floor_estimator.add(-120,now_ms));
+  }
+  w.loop();
+  assert(w._noise_floor_valid && w._noise_floor==-120); // ordinary calibration remains
+  float dbm=123;uint32_t stamp=456;
+  assert(!w.getNoiseFloorReading(0,dbm,stamp) && dbm==123 && stamp==456);
+  w._nf_refresh_requested=false;
+  w.requestNoiseFloorMeasurement();
+  assert(!w._nf_refresh_requested && !w.arms && !w.stops);
+  puts("PASS: disabled");
+}
+'''
+
 
 class NoiseFloorReadingTests(unittest.TestCase):
     @classmethod
@@ -196,7 +230,19 @@ class NoiseFloorReadingTests(unittest.TestCase):
         harness = transition_harness(source).split("struct LegacyRadio {", 1)[0]
         api = "\n".join(method(header, signature).replace(" override", "") for signature in (
             "bool getNoiseFloorReading(", "void requestNoiseFloorMeasurement("))
+        api = "#if MESH_ENABLE_TELEMETRY_HISTORY\n" + api + "\n#endif\n"
         harness = harness.replace("  bool tryResetAGC();", api + "\n  bool tryResetAGC();")
+        # Use the production field gate too: disabled variants must compile the
+        # actual radio loop without either the storage or wrapper overrides.
+        start = header.index("#if MESH_ENABLE_TELEMETRY_HISTORY\n  uint32_t _nf_published_at")
+        state = header[start:header.index("#endif", start) + len("#endif")]
+        harness = re.sub(r"  uint32_t _nf_published_at\[2\][^;]+;\n"
+                         r"  uint8_t _nf_published_valid[^;]+;", state, harness)
+        defaults = "\n".join(method(dispatcher, signature) for signature in (
+            "MESH_TELEMETRY_HISTORY_VIRTUAL bool getNoiseFloorReading(",
+            "MESH_TELEMETRY_HISTORY_VIRTUAL void requestNoiseFloorMeasurement("))
+        harness = harness.replace("struct RadioLibWrapper {",
+            "struct PublicRadio {\n" + defaults + "\n};\nstruct RadioLibWrapper:PublicRadio {")
         harness = harness.replace("#include <cassert>", "#include <cassert>\n#include <cstring>")
         harness = harness.replace("bool serviceCarrierWave() { return false; }",
             "bool _morse_owned = false, _morse_rx_owned = false, _beacon_owned = false;\n"
@@ -206,22 +252,29 @@ class NoiseFloorReadingTests(unittest.TestCase):
             "#define MESH_ENABLE_TX_BEACONS 1\n#define MESH_ENABLE_CARRIER_TOOLS 1\n"
             + loop + "\n#undef MESH_ENABLE_TX_BEACONS\n#undef MESH_ENABLE_CARRIER_TOOLS\n")
         fixture = FIXTURE.replace("@DEFAULT_GETTER@", method(dispatcher,
-            "virtual bool getNoiseFloorReading(")).replace("@DEFAULT_REQUEST@", method(dispatcher,
-            "virtual void requestNoiseFloorMeasurement("))
+            "MESH_TELEMETRY_HISTORY_VIRTUAL bool getNoiseFloorReading("))
+        fixture = fixture.replace("@DEFAULT_REQUEST@", method(dispatcher,
+            "MESH_TELEMETRY_HISTORY_VIRTUAL void requestNoiseFloorMeasurement("))
         cls.binaries = {}
         flags = [] if not sys.platform.startswith("linux") else [
             "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie"]
-        for family in ("sx1262", "other"):
+        variants = (("sx1262", ["-DUSE_SX1262=1"]), ("other", []),
+                    ("stm32_opt_in", ["-DSTM32_PLATFORM=1", "-DMESH_ENABLE_TELEMETRY_HISTORY=1"]),
+                    ("stm32_default", ["-DSTM32_PLATFORM=1"]),
+                    ("explicit_off", ["-DMESH_ENABLE_TELEMETRY_HISTORY=0"]))
+        cls.disabled_binaries = {}
+        for family, defines in variants:
+            disabled = family in ("stm32_default", "explicit_off")
             cpp, binary = work / (family + ".cpp"), work / family
-            cpp.write_text((harness + fixture).replace("\u2014", "-"), encoding="ascii")
+            cpp.write_text((harness + (DISABLED_FIXTURE if disabled else fixture))
+                           .replace("\u2014", "-"), encoding="ascii")
             built = subprocess.run([os.environ.get("CXX", "g++"), "-std=c++17", "-O1", "-g",
-                "-Wall", "-Wextra", "-Werror", *flags,
-                *(["-DUSE_SX1262=1"] if family == "sx1262" else []),
+                "-Wall", "-Wextra", "-Werror", *flags, *defines,
                 "-I", str(ROOT / "src"), str(cpp), "-o", str(binary)],
                 capture_output=True, text=True, timeout=60)
             if built.returncode:
                 raise AssertionError(built.stdout + built.stderr)
-            cls.binaries[family] = binary
+            (cls.disabled_binaries if disabled else cls.binaries)[family] = binary
 
     def run_case(self, scenario):
         for family, binary in self.binaries.items():
@@ -248,6 +301,13 @@ class NoiseFloorReadingTests(unittest.TestCase):
 
     def test_requests_join_collection_without_interrupting_radio_owners(self):
         self.run_case("request")
+
+    def test_disabled_history_omits_tracking_and_keeps_ordinary_calibration(self):
+        for family, binary in self.disabled_binaries.items():
+            with self.subTest(family=family):
+                result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("PASS: disabled", result.stdout)
 
 
 if __name__ == "__main__":
