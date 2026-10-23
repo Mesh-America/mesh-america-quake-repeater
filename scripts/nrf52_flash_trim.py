@@ -190,10 +190,10 @@ def packed_help_policy(platform, mcu, src_filter, flags=(), cppdefines=()):
         return False
     if any(source_selected(src_filter, source) for source in ROLE_SOURCES):
         return False
-    values = flag_defines(flags, cppdefines)
-    # Full Companion can arrive later through PLATFORMIO_BUILD_FLAGS. Register
-    # the exact source early; its C++ gate leaves non-Full RAK builds empty.
-    return values.get("RAK_4631") is not None
+    # Board and Full profile defines can both arrive after pre-scripts. Only
+    # the exact help source changes language; its C++ gate leaves every other
+    # board/profile empty, without changing MyMesh or framework compilation.
+    return True
 
 
 def compile_packed_help(build_env, node):
@@ -210,6 +210,7 @@ def compile_packed_help(build_env, node):
              for name in ("CCFLAGS", "CXXFLAGS")}
     flags["CXXFLAGS"].append("-std=gnu++17")
     private_env.Replace(**flags)
+    print("nRF52 Companion help: isolated C++17 source")
     return private_env.Object(node)
 
 
