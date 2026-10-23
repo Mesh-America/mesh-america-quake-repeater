@@ -11,6 +11,7 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Radio and RF
 
+- [Saved SPI option 9: native, build and V3/V4 persistence checks, 2026-10-23](saved_spi9_2026-10-23.md)
 - [Heltec V3/V4 8 MHz versus 8.889 MHz radio switching measurements, 2026-10-23](esp32_spi_clock_retune_2026-10-23.md)
 - [Five-board eight-peer WiFi UDP bridge hardware qualification, 2026-10-22](udp_bridge_hardware_2026-10-22.md)
 - [Eight-peer WiFi UDP bridge: V3/V4/R8 Full build and host validation, 2026-10-22](udp_bridge_2026-10-22.md)

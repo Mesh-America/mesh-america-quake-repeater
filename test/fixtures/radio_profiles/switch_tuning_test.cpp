@@ -232,6 +232,48 @@ static void roundedClockRequiresCapabilityAndBootAdmission() {
   puts("Fast tuning: rounded SPI 9 uses exact divider Hz, persists unchanged and rejects unsupported clocks");
 }
 
+static void clockOnlyLegacyHalKeepsFeaturesUnavailable() {
+  TuningFixture f;
+  f.radio.caps.flags = f.radio.tuning.flags = 0;
+  f.radio.caps.spi_clocks = 2 | 4 | 8 | mesh::RadioSwitchCapabilities::Spi9;
+  f.radio.default_spi_hz = 2000000;
+  assert(!strcmp(f.cmd("get radio.fast.caps"), "> features:; spi=0,2,4,8,9"));
+  assert(!strcmp(f.cmd("get radio.fast"),
+      "> spi=0 (2000000Hz) warm=na fs=na packet=na iq=na modem=na batch=na buffer=na"));
+  f.cmd("set radio.fast.spi 9");
+  assert(!f.radio.tuning.flags && f.radio.tuning.spi_mhz == 9);
+  assert(f.radio.switchSpiHz() == 8888888);
+  const auto saved = f.fs.files;
+  TuningRadio reboot;
+  reboot.caps = f.radio.caps;
+  reboot.tuning.flags = 0;
+  reboot.default_spi_hz = 2000000;
+  mesh::RadioProfileCLI::configureBootTuning(&f.fs, reboot);
+  assert(!reboot.tuning.flags && reboot.tuning.spi_mhz == 9);
+  assert(reboot.switchSpiHz() == 8888888 && reboot.boot_configurations == 1);
+  mesh::RadioProfileCLI restored;
+  restored.begin(&f.fs, &reboot, &f.clock);
+  assert(reboot.tuning == f.radio.tuning && f.fs.files == saved);
+
+  const auto original = f.radio.tuning;
+  const auto attempts = f.radio.attempts;
+  const auto persists = f.radio.persists;
+  for (const char* feature : {"warm", "fs", "packet", "iq", "modem", "batch", "buffer"}) {
+    char command[48];
+    snprintf(command, sizeof(command), "set radio.fast.%s on", feature);
+    f.cmd(command, false);
+    assert(f.radio.tuning == original && f.fs.files == saved);
+    assert(f.radio.attempts == attempts && f.radio.persists == persists);
+  }
+  f.cmd("set radio.fast off");
+  assert(!f.radio.tuning.flags && f.radio.tuning.spi_mhz == 2);
+  assert(f.radio.switchSpiHz() == 2000000);
+  f.cmd("set radio.fast on");
+  assert(!f.radio.tuning.flags && !f.radio.tuning.spi_mhz);
+  assert(f.radio.switchSpiHz() == 2000000);
+  puts("Fast tuning: clock-only legacy HAL saves SPI 9 without exposing cached feature controls");
+}
+
 static void localOnlyAndBusyTransactions() {
   TuningFixture f;
   f.cmd("set radio.fast.fs off");
@@ -447,6 +489,7 @@ int main() {
   controlsAndPersistence();
   strictInputsAndUnsupportedFeatures();
   roundedClockRequiresCapabilityAndBootAdmission();
+  clockOnlyLegacyHalKeepsFeaturesUnavailable();
   localOnlyAndBusyTransactions();
   storageFailureKeepsCommittedPolicy();
   bootRecoveryAndDeferredAdmission();

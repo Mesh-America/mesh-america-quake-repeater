@@ -84,9 +84,9 @@ struct Mesh {
  RadioLibWrapper& radio;
  bool getDualRadioIdleDelay(uint32_t& out){return radio.getProfileIdleDelay(out);}
 };
-struct Board {unsigned calls=0;uint32_t deadline=0;void sleepUntilMicroseconds(uint32_t at){++calls;deadline=at;}};
+struct ProfileIdleBoard {unsigned calls=0;uint32_t deadline=0;void sleepUntilMicroseconds(uint32_t at){++calls;deadline=at;}};
 int main(){
- RadioLibWrapper w;ready(w);Mesh m{w};Board b;
+ RadioLibWrapper w;ready(w);Mesh m{w};ProfileIdleBoard b;
  auto start=w._esp32_profile_visit_started_us;auto visit=w._esp32_profile_idle_visit_us;
  elapsed_us=start+visit-14000;assert(idle(w,10));
  assert(change("set powersaving.test guard_ms 9"));assert(idle(w,5));
