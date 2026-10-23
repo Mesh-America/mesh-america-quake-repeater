@@ -30,42 +30,59 @@ size_t writeHelpChunks(Output& output, const char* text, size_t length) {
 #if __cplusplus >= 201703L
 namespace help_packing {
 
-// Help is ASCII. Bytes 0x80..0x8f encode these common fragments; the original
-// text exists only during constant evaluation, never alongside the packed data.
-constexpr size_t TokenCount = 16;
-constexpr char Dictionary[] =
-    "  get/set \0" "  get \0" "  set \0" "get/set \0"
-    "bluetooth.\0" "pwrmgt.\0" "radio.\0" "default\0"
-    "preamble\0" "on|off\0" " (saved; \0" "  \0"
-    "get \0" "set \0" "\r\n\0" " / \0";
+// ASCII literals retain bit 7 clear. Two-byte references encode a 3..18 byte
+// match at distance 1..2048. Only the final packed bytes survive evaluation;
+// the hash chains and original text occupy no runtime storage.
+constexpr size_t WindowSize = 2048;
+constexpr size_t MaximumMatch = 18;
+constexpr uint8_t hash(const char* text) {
+  return static_cast<uint8_t>((static_cast<uint8_t>(text[0]) * 31u +
+      static_cast<uint8_t>(text[1])) * 31u + static_cast<uint8_t>(text[2]));
+}
 
-struct TokenOffsets { uint8_t value[TokenCount + 1] = {}; };
-constexpr TokenOffsets tokenOffsets() {
-  TokenOffsets result{};
-  size_t offset = 0;
-  for (size_t token = 0; token < TokenCount; ++token) {
-    result.value[token] = static_cast<uint8_t>(offset);
-    while (Dictionary[offset]) ++offset;
-    ++offset;
+template<size_t N, typename Emit>
+constexpr size_t encode(const char (&text)[N], Emit emit) {
+  static_assert(N <= 65535, "Compile-time help offsets use 16 bits");
+  uint16_t heads[256] = {}, previous[N] = {};
+  size_t position = 0, packed = 0;
+  while (position + 1 < N) {
+    const size_t remaining = N - position - 1;
+    const size_t maximum = remaining < MaximumMatch ? remaining : MaximumMatch;
+    size_t best = 0, distance = 0;
+    if (remaining >= 3) {
+      uint16_t link = heads[hash(text + position)];
+      while (link) {
+        const size_t candidate = link - 1;
+        const size_t back = position - candidate;
+        if (back > WindowSize) break;
+        size_t match = 0;
+        while (match < maximum && text[candidate + match] == text[position + match]) ++match;
+        if (match > best) {
+          best = match;
+          distance = back;
+          if (best == maximum) break;
+        }
+        link = previous[candidate];
+      }
+    }
+    const size_t step = best >= 3 ? best : 1;
+    if (best >= 3) {
+      emit(static_cast<uint8_t>(0x80 | ((best - 3) << 3) | ((distance - 1) >> 8)));
+      emit(static_cast<uint8_t>(distance - 1));
+      packed += 2;
+    } else {
+      emit(static_cast<uint8_t>(text[position]));
+      ++packed;
+    }
+    // Index skipped match bytes too, preserving greedy longest-match choices.
+    for (size_t end = position + step; position < end; ++position) {
+      if (position + 3 >= N) continue;
+      const uint8_t bucket = hash(text + position);
+      previous[position] = heads[bucket];
+      heads[bucket] = static_cast<uint16_t>(position + 1);
+    }
   }
-  result.value[TokenCount] = static_cast<uint8_t>(offset);
-  return result;
-}
-static_assert(sizeof(Dictionary) < 256, "Help dictionary offsets need one byte");
-constexpr TokenOffsets Offsets = tokenOffsets();
-constexpr size_t tokenLength(size_t token) {
-  return Offsets.value[token + 1] - Offsets.value[token] - 1;
-}
-constexpr size_t matchToken(const char* text, size_t remaining) {
-  for (size_t token = 0; token < TokenCount; ++token) {
-    const char* fragment = Dictionary + Offsets.value[token];
-    const size_t length = tokenLength(token);
-    if (length > remaining || *text != *fragment) continue;
-    size_t i = 1;
-    while (i < length && text[i] == fragment[i]) ++i;
-    if (i == length) return token;
-  }
-  return TokenCount;
+  return packed;
 }
 
 } // namespace help_packing
@@ -81,12 +98,7 @@ constexpr bool validHelpText(const char (&text)[N]) {
 
 template<size_t N>
 constexpr size_t packedHelpSize(const char (&text)[N]) {
-  size_t packed = 0;
-  for (size_t i = 0; i + 1 < N; ++packed) {
-    const size_t token = help_packing::matchToken(text + i, N - i - 1);
-    i += token < help_packing::TokenCount ? help_packing::tokenLength(token) : 1;
-  }
-  return packed;
+  return help_packing::encode(text, [](uint8_t) constexpr {});
 }
 
 template<size_t N> struct PackedHelp {
@@ -98,41 +110,36 @@ template<size_t PackedSize, size_t N>
 constexpr PackedHelp<PackedSize> packHelp(const char (&text)[N]) {
   PackedHelp<PackedSize> result{};
   size_t packed = 0;
-  for (size_t i = 0; i + 1 < N;) {
-    const size_t token = help_packing::matchToken(text + i, N - i - 1);
-    if (token < help_packing::TokenCount) {
-      result.bytes[packed++] = static_cast<uint8_t>(0x80 + token);
-      i += help_packing::tokenLength(token);
-    } else {
-      result.bytes[packed++] = static_cast<uint8_t>(text[i++]);
-    }
-  }
+  help_packing::encode(text, [&](uint8_t byte) constexpr { result.bytes[packed++] = byte; });
   return result;
 }
 
 template<typename Output>
 size_t writePackedHelp(Output& output, const uint8_t* packed, size_t length) {
   if (!packed) return 0;
-  size_t position = 0, written = 0;
-  const char* expansion = nullptr;
-  while (position < length || expansion) {
+  uint8_t history[help_packing::WindowSize];
+  size_t position = 0, produced = 0, written = 0;
+  size_t distance = 0, remaining = 0;
+  while (position < length || remaining) {
     char chunk[64];
     size_t used = 0;
-    while (used < sizeof(chunk) && (position < length || expansion)) {
-      if (expansion) {
-        const char next = *expansion++;
-        if (next) chunk[used++] = next;
-        else expansion = nullptr;
+    while (used < sizeof(chunk) && (position < length || remaining)) {
+      uint8_t next;
+      if (remaining) {
+        next = history[(produced - distance) & (help_packing::WindowSize - 1)];
+        --remaining;
       } else {
-        const uint8_t next = packed[position++];
-        if (next >= 0x80) {
-          const size_t token = next - 0x80;
-          if (token >= help_packing::TokenCount) return written;
-          expansion = help_packing::Dictionary + help_packing::Offsets.value[token];
-        } else {
-          chunk[used++] = static_cast<char>(next);
+        next = packed[position++];
+        if (next & 0x80) {
+          if (position == length) return written;
+          distance = ((static_cast<size_t>(next & 7) << 8) | packed[position++]) + 1;
+          remaining = ((next >> 3) & 15) + 3;
+          if (distance > produced) return written;
+          continue;
         }
       }
+      history[produced++ & (help_packing::WindowSize - 1)] = next;
+      chunk[used++] = static_cast<char>(next);
     }
     const size_t accepted = writeHelpChunks(output, chunk, used);
     written += accepted;

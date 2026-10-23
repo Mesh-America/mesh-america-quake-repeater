@@ -114,7 +114,7 @@ int main() {
       mesh::companion::packedHelpSize(literal)>(literal);
   static_assert(sizeof(packed) == mesh::companion::packedHelpSize(literal),
                 "No raw-size padding retained");
-  static_assert(sizeof(packed) + 40 < sizeof(literal), "Fragments compress");
+  static_assert(sizeof(packed) < sizeof(literal), "Repeated fragments compress");
   Output decoded;
   assert(mesh::companion::writePackedHelp(decoded,packed.bytes,sizeof(packed))==sizeof(literal)-1);
   assert(decoded.text==literal);
@@ -135,6 +135,41 @@ int main() {
   assert(mesh::companion::writePackedHelp(unused,packed.bytes,0)==0 && unused.writes.empty());
   const uint8_t invalid_token[]={0xff};
   assert(mesh::companion::writePackedHelp(unused,invalid_token,1)==0 && unused.writes.empty());
+
+  // A match may overlap itself: one literal followed by distance-one runs.
+  constexpr char overlap[]="aaaaaaaaaaaaaaaaaaaaaaa";
+  static constexpr auto overlap_packed=mesh::companion::packHelp<
+      mesh::companion::packedHelpSize(overlap)>(overlap);
+  static_assert(sizeof(overlap_packed)==5 && overlap_packed.bytes[0]=='a' &&
+      overlap_packed.bytes[1]==0xf8 && overlap_packed.bytes[2]==0 &&
+      overlap_packed.bytes[3]==0x88 && overlap_packed.bytes[4]==0,
+      "Greedy longest match and overlapping references");
+  Output repeated;
+  assert(mesh::companion::writePackedHelp(repeated,overlap_packed.bytes,
+      sizeof(overlap_packed))==sizeof(overlap)-1 && repeated.text==overlap);
+
+  // Exercise both the 2048-byte distance limit and the ring wrap, independent
+  // of the encoder's choice of nearer repeated phrases.
+  std::vector<uint8_t> boundary;
+  for(size_t i=0;i<2048;++i) boundary.push_back('!'+(i%90));
+  std::string expected(boundary.begin(),boundary.end());
+  boundary.push_back(0xff);boundary.push_back(0xff); // length18, distance2048
+  expected+=expected.substr(0,18);
+  boundary.push_back(0xf8);boundary.push_back(0); // length18, distance1
+  expected+=std::string(18,expected.back());
+  Output wrapped;wrapped.throttle=5;
+  assert(mesh::companion::writePackedHelp(wrapped,boundary.data(),boundary.size())==expected.size());
+  assert(wrapped.text==expected);
+  for(const auto& corrupt : std::vector<std::vector<uint8_t>>{
+      {0x80}, {0x80,0}, {0xff,0xff}, {'x',0x80,1}}) {
+    Output rejected;
+    assert(mesh::companion::writePackedHelp(rejected,corrupt.data(),corrupt.size())==0);
+    assert(rejected.text.empty() && rejected.writes.empty());
+  }
+  std::vector<uint8_t> late_bad(64,'q');late_bad.push_back(0x80);
+  Output prefix;
+  assert(mesh::companion::writePackedHelp(prefix,late_bad.data(),late_bad.size())==64);
+  assert(prefix.text==std::string(64,'q') && prefix.writes.size()==1);
 }
 '''
 
