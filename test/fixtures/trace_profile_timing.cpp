@@ -11,6 +11,7 @@
 #include <helpers/TracePathHelpers.h>
 
 #define ERR_EVENT_FULL 1
+#define MESH_ENABLE_FOREIGN_RADIO 0
 #define ACTION_RELEASE 0
 #define ACTION_RETRANSMIT_DELAYED(pri, delay) ((((uint32_t)1 + (pri))<<24) | (delay))
 #include "constants.inc"
@@ -56,6 +57,8 @@ struct Manager {
   bool queueOutbound(mesh::Packet* packet, uint8_t, uint32_t) {
     queued.push_back(packet); return true;
   }
+  int getOutboundTotal() const { return int(queued.size()); }
+  mesh::Packet* getOutboundByIdx(int index) const { return queued[index]; }
   void free(mesh::Packet* packet) {
     for (unsigned i = 0; i != used.size(); ++i) if (&packets[i] == packet) {
       assert(used[i]); used[i] = false; ++releases; return;
@@ -74,6 +77,8 @@ public:
   bool radio_available = true, receive_context_active = false;
   uint8_t receive_context_profile = 0;
   uint32_t receive_context_generation = 0;
+  uint32_t profile_cad_busy[2] = {};
+  Packet* outbound = nullptr;
   uint16_t _err_flags = 0;
   Packet* obtainNewPacket();
   void releasePacket(Packet* packet) { _mgr->free(packet); }
@@ -86,6 +91,8 @@ public:
   uint8_t getTransmitProfileMask(const Packet*) const;
   uint32_t getTransmitAirtime(const Packet*) const;
   uint32_t getTransmitAirtime(const Packet*, int) const;
+  void retireUnusedCADWait(uint8_t);
+  bool queueTransmitCandidate(Packet*, uint8_t, uint32_t);
   bool queueOutboundPacket(Packet*, uint8_t, uint32_t);
   bool sendPacket(Packet*, uint8_t, uint32_t);
 };

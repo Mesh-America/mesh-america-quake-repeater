@@ -24,6 +24,8 @@ class TraceProfileTimingTests(unittest.TestCase):
         methods = "namespace mesh {\n"
         for signature in (
             "Packet* Dispatcher::obtainNewPacket(",
+            "void Dispatcher::retireUnusedCADWait(",
+            "bool Dispatcher::queueTransmitCandidate(",
             "bool Dispatcher::queueOutboundPacket(",
             "uint8_t Dispatcher::getTransmitProfileMask(",
             "uint32_t Dispatcher::getTransmitAirtime(const Packet* packet) const",
