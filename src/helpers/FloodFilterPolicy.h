@@ -68,7 +68,7 @@ bool sameRuleConfiguration(const Entry& left, const Entry& right) {
       && left.min_hops == right.min_hops
       && left.max_hops == right.max_hops
       && left.suspend_on_temp_radio == right.suspend_on_temp_radio
-      && memcmp(left.scope_name, right.scope_name, sizeof(left.scope_name)) == 0
+      && memcmp(FloodRuleTargets::scopeName(left), FloodRuleTargets::scopeName(right), sizeof(FloodRuleTargets::scopeName(left))) == 0
       && left.match_blacklisted_path == right.match_blacklisted_path
       && left.scope_uses_slow_timing == right.scope_uses_slow_timing
       && left.incoming_scope_kind == right.incoming_scope_kind
@@ -82,8 +82,8 @@ bool sameRuleConfiguration(const Entry& left, const Entry& right) {
       && left.path_hash_size == right.path_hash_size
       && left.path_hops == right.path_hops
       && memcmp(left.path, right.path, sizeof(left.path)) == 0
-      && memcmp(left.target_region_name, right.target_region_name,
-                sizeof(left.target_region_name)) == 0
+      && memcmp(FloodRuleTargets::regionName(left), FloodRuleTargets::regionName(right),
+                sizeof(FloodRuleTargets::regionName(left))) == 0
       && left.drop_on_match == right.drop_on_match
       && left.rate_limit_enabled == right.rate_limit_enabled
       && left.rate_per_minute == right.rate_per_minute

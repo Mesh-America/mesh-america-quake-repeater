@@ -93,10 +93,17 @@ static const char RULE_TEMP_FILE[] = "/flood_filter.tmp";
 static const char RULE_BACKUP_FILE[] = "/flood_filter.bak";
 '''
 SCENARIOS = r'''
+template<class Entry>
+auto setScope(Entry& row, const char* name, int) -> decltype(row.target_name, void()) {
+  row.target_is_region = false;
+  std::strcpy(row.target_name, name);
+}
+template<class Entry>
+void setScope(Entry& row, const char* name, long) { std::strcpy(row.scope_name,name); }
 template<class Entry> void canonicalRule(Entry& row) {
   row.active=true;row.payload_type=PAYLOAD_TYPE_ADVERT;
   row.min_hops=2;row.max_hops=63;row.suspend_on_temp_radio=true;
-  std::strcpy(row.scope_name,"#Town");row.match_blacklisted_path=true;
+  setScope(row,"#Town",0);row.match_blacklisted_path=true;
   row.scope_uses_slow_timing=true;row.incoming_scope_kind=FloodFilterPolicy::RULE_IN_ALLOWED;
   row.path_hash_size=3;row.rate_limit_enabled=true;row.rate_per_minute=1234;
   row.priority=7;row.stop_on_match=true;row.retry_on_match=true;
@@ -215,6 +222,33 @@ int main() {
     row={};row.active=true;row.payload_type=PAYLOAD_TYPE_ADVERT;row.max_hops=63;row.drop_on_match=true;
     assert(writer.saveFloodPacketFilters());MyMesh drop(fs,63);assert(drop.loadFloodPacketFilters());
     assert(drop.storage[0].active && drop.storage[0].drop_on_match && !drop.storage[0].retry_on_match);
+  }
+  {
+    MemoryFS fs;MyMesh writer(fs,63);auto& row=writer.storage[62];
+    row.active=true;row.payload_type=PAYLOAD_TYPE_ADVERT;row.max_hops=63;
+    row.target_is_region=true;
+    std::strcpy(row.target_name,"1234567890123456789012345678901");
+    assert(writer.saveFloodPacketFilters());
+    const auto image=fs.get(FLOOD_PACKET_FILTER_FILE);
+    MyMesh reader(fs,63);assert(reader.loadFloodPacketFilters());
+    assert(reader.storage[62].active && reader.storage[62].target_is_region);
+    assert(!std::strcmp(reader.storage[62].regionName(), row.target_name));
+    assert(reader.storage[62].scopeName()[0]==0);
+    assert(reader.saveFloodPacketFilters() && fs.get(FLOOD_PACKET_FILTER_FILE)==image);
+    // The stored region field starts at byte 153 of a 187-byte FPF7 row.
+    // A direct scope and region target in one old-format row is invalid;
+    // compaction must never silently choose one.
+    const size_t stride=(image.size()-5-9)/63;
+    assert(stride==187);
+    for(bool terminate : {true,false}) {
+      auto malformed=image;
+      const size_t scope=5+62*stride+5;
+      malformed[scope]='#';malformed[scope+1]='X';
+      if(!terminate)std::fill_n(malformed.begin()+scope,32,'X');
+      MemoryFS bad;bad.put(FLOOD_PACKET_FILTER_FILE,malformed);
+      MyMesh boot(bad,63);assert(boot.loadFloodPacketFilters());
+      assert(boot.seeded==1 && !boot.storage[62].active);
+    }
   }
   const auto large=fixture(63,62),small=fixture(4,2);
   // Older writers stored every slot, including inactive trailing entries.

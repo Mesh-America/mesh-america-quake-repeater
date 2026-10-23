@@ -96,6 +96,8 @@ void Dispatcher::begin() {
   n_recv_flood = n_recv_direct = 0;
   last_meshcore_recv_millis = 0;
   _err_flags = 0;
+  cad_busy_start = 0;
+  profile_cad_busy[0] = profile_cad_busy[1] = 0;
   outbound_radio_retry_at = 0;
   outbound_radio_prepare_deadline = 0;
   outbound_radio_retry_pending = false;
@@ -329,6 +331,7 @@ bool Dispatcher::queueDirectOtaRadioFrame(const uint8_t* message, uint16_t lengt
   const uint16_t encoded = ota::ota_direct_wire_encode(
       foreign_radio_bytes, sizeof(foreign_radio_bytes), message, length);
   if (!encoded) return false;
+  retireUnusedCADWait(profile);
   foreign_radio_length = encoded;
   foreign_radio_profile = profile;
   foreign_radio_protocol = RadioProfileProtocol::MeshCore;
@@ -353,6 +356,7 @@ bool Dispatcher::queueForeignRadioFrame(const uint8_t* bytes, size_t length,
       || !profiles || profile != 1 || !profiles->enabled() || !profiles->canTransmit(profile)
       || profiles->params(profile).protocol != protocol
       || generation != profiles->generation[profile]) return false;
+  retireUnusedCADWait(profile);
   memcpy(foreign_radio_bytes, bytes, length);
   foreign_radio_length = (uint16_t)length;
   foreign_radio_profile = profile;
@@ -1382,6 +1386,30 @@ void Dispatcher::releasePacket(Packet* packet) {
   _mgr->free(packet);
 }
 
+void Dispatcher::retireUnusedCADWait(uint8_t profile) {
+  if (profile_cad_busy[profile] && !(outbound && outbound->radio_profile == profile)
+#if MESH_ENABLE_FOREIGN_RADIO
+      && !(hasForeignRadioFrame() && foreign_radio_profile == profile)
+#endif
+      ) {
+    // Cancellation/echo suppression can retire the last packet for a profile
+    // without observing a free channel. Its old age must not force a later,
+    // unrelated packet to transmit immediately with a false timeout. Check
+    // only on enqueue with an aged wait, never during the idle/sleep loop.
+    bool waiting = false;
+    for (int i = 0, count = _mgr->getOutboundTotal(); i < count; ++i) {
+      const auto* queued = _mgr->getOutboundByIdx(i);
+      if (queued && queued->radio_profile == profile) { waiting = true; break; }
+    }
+    if (!waiting) profile_cad_busy[profile] = 0;
+  }
+}
+
+bool Dispatcher::queueTransmitCandidate(Packet* packet, uint8_t priority, uint32_t scheduled_for) {
+  retireUnusedCADWait(packet->radio_profile);
+  return _mgr->queueOutbound(packet, priority, scheduled_for);
+}
+
 bool Dispatcher::queueOutboundPacket(Packet* packet, uint8_t priority, uint32_t delay_millis) {
   if (packet->violatesRoutePolicy()) {
     return false;
@@ -1399,13 +1427,13 @@ bool Dispatcher::queueOutboundPacket(Packet* packet, uint8_t priority, uint32_t 
   if (profiles == nullptr) {
     if (packet->tx_radio != RADIO_TX_AUTO
         && !(explicitRadioTxMask(packet->tx_radio, false) & 1)) return false;
-    return _mgr->queueOutbound(packet, priority, futureMillis(delay_millis));
+    return queueTransmitCandidate(packet, priority, futureMillis(delay_millis));
   }
   if (packet->radio_bound) {
     if (!isPacketRadioCurrent(packet)) return false;
     if (profiles && packet->radio_profile != packet->radio_origin
         && !allowRadioProfileCross(packet)) return false;
-    return _mgr->queueOutbound(packet, priority, futureMillis(delay_millis));
+    return queueTransmitCandidate(packet, priority, futureMillis(delay_millis));
   }
   if (!packet->radio_local && packet->radio_generation
       && packet->radio_generation != profiles->generation[packet->radio_profile]) return false;
@@ -1436,7 +1464,7 @@ bool Dispatcher::queueOutboundPacket(Packet* packet, uint8_t priority, uint32_t 
   }
   packet->radio_generation = profiles->generation[packet->radio_profile];
   packet->radio_bound = true;
-  if (!_mgr->queueOutbound(packet, priority, futureMillis(delay_millis))) return false;
+  if (!queueTransmitCandidate(packet, priority, futureMillis(delay_millis))) return false;
   if (packet->radio_profile != origin) onRadioProfileCopyQueued(packet, nullptr, priority);
   const uint8_t other = packet->radio_profile ^ 1;
   if (mask & (1U << other)) {
@@ -1445,7 +1473,7 @@ bool Dispatcher::queueOutboundPacket(Packet* packet, uint8_t priority, uint32_t 
       *copy = *packet;
       copy->radio_profile = other;
       copy->radio_generation = profiles->generation[other];
-      if (_mgr->queueOutbound(copy, priority, futureMillis(delay_millis))) {
+      if (queueTransmitCandidate(copy, priority, futureMillis(delay_millis))) {
         onRadioProfileCopyQueued(copy, packet, priority);
         onTracePacketQueuedForSend(copy);
       } else {

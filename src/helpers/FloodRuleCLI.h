@@ -117,8 +117,8 @@ bool formatCompact(char* out, size_t capacity, unsigned slot, const Entry& entry
     default: break;
   }
   if (entry.drop_on_match) text.append(" d");
-  else if (entry.scope_name[0]) text.append(" s=%s", entry.scope_name);
-  else if (entry.target_region_name[0]) text.append(" r=%s", entry.target_region_name);
+  else if (FloodRuleTargets::scopeName(entry)[0]) text.append(" s=%s", FloodRuleTargets::scopeName(entry));
+  else if (FloodRuleTargets::regionName(entry)[0]) text.append(" r=%s", FloodRuleTargets::regionName(entry));
   if (entry.rate_limit_enabled) text.append(" q=%u", (unsigned)entry.rate_per_minute);
   if (entry.priority) text.append(" pri=%u", (unsigned)entry.priority);
   if (entry.stop_on_match) text.append(" s");

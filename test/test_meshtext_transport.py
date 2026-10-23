@@ -139,6 +139,12 @@ int main() {
   { Fixture f;f.radio.receiving=true;assert(f.d.queue(bytes));f.tick();f.tick(201);
     assert(f.radio.sends==0 && f.d.hasOutbound());f.radio.receiving=false;f.tick(201);assert(f.radio.sends==1);
   }
+  { Fixture f;f.radio.receiving=true;assert(f.d.queue(bytes));f.tick();
+    // The empty MeshCore queue must not retire a foreign frame's live CAD
+    // wait. Its existing bounded escape still records sustained contention.
+    f.tick(201);assert(!f.radio.sends && f.d.hasOutbound());
+    f.tick(3800);assert(f.radio.sends==1 && (f.d.getErrFlags() & ERR_EVENT_CAD_TIMEOUT));
+  }
   { Fixture f;auto* p=newPacket(f.d);f.radio.p.cross=RadioCrossMode::On;
     assert(!f.radio.p.canCross() && f.d.getTransmitProfileMask(p)==1);
     assert(f.d.sendPacket(p,0));assert(f.manager.getOutboundTotal()==1);f.tick();

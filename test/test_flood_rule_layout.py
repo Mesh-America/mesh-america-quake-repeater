@@ -24,8 +24,8 @@ static constexpr uint8_t NAME_LEN = 32, PATH_PREFIX_BYTES_MAX = 9;
 '''
 
 SCENARIOS = r'''
-static_assert(sizeof(RepeaterEntry) == 332 && sizeof(RoomEntry) == 332,
-              "extended rows retain the reviewed 332-byte RAM bound");
+static_assert(sizeof(RepeaterEntry) == 300 && sizeof(RoomEntry) == 332,
+              "compact repeater rows save 32 bytes; room layout stays unchanged");
 static_assert(sizeof(LegacyEntry) == 40, "retain legacy STM32 rule layout");
 static_assert(alignof(RepeaterEntry) >= alignof(uint32_t));
 static_assert(alignof(RoomEntry) >= alignof(uint32_t));
@@ -37,6 +37,16 @@ static_assert(alignof(RoomEntry) >= alignof(uint32_t));
 CHECK_ALIGNED(RepeaterEntry);
 CHECK_ALIGNED(RoomEntry);
 
+template<class Entry>
+auto setTargetByte(Entry& e, bool region, size_t offset, char value, int)
+    -> decltype(e.target_name, void()) {
+  e.target_is_region = region;
+  e.target_name[offset] = value;
+}
+template<class Entry>
+void setTargetByte(Entry& e, bool region, size_t offset, char value, long) {
+  (region ? e.target_region_name : e.scope_name)[offset] = value;
+}
 template<class Entry> void setFlags(Entry& e, unsigned flags) {
   e.active = flags & 1;
   e.suspend_on_temp_radio = flags & 2;
@@ -108,7 +118,7 @@ template<class Entry> void exerciseConfigurationEquality() {
       case 2: changed.min_hops = 1; break;
       case 3: changed.max_hops = 1; break;
       case 4: changed.suspend_on_temp_radio = true; break;
-      case 5: changed.scope_name[sizeof(changed.scope_name)-1] = 1; break;
+      case 5: setTargetByte(changed, false, 31, 1, 0); break;
       case 6: changed.match_blacklisted_path = true; break;
       case 7: changed.scope_uses_slow_timing = true; break;
       case 8: changed.incoming_scope_kind = 1; break;
@@ -120,7 +130,7 @@ template<class Entry> void exerciseConfigurationEquality() {
       case 14: changed.path_hash_size = 1; break;
       case 15: changed.path_hops = 1; break;
       case 16: changed.path[sizeof(changed.path)-1] = 1; break;
-      case 17: changed.target_region_name[sizeof(changed.target_region_name)-1] = 1; break;
+      case 17: setTargetByte(changed, true, 31, 1, 0); break;
       case 18: changed.drop_on_match = true; break;
       case 19: changed.rate_limit_enabled = false; break;
       case 20: changed.rate_per_minute = 6; break;
@@ -128,7 +138,7 @@ template<class Entry> void exerciseConfigurationEquality() {
       case 22: changed.stop_on_match = true; break;
       case 23: changed.retry_on_match = true; break;
       case 24: changed.transport_modes = 2; break;
-      case 25: changed.scope_name[0] = '#'; break;
+      case 25: setTargetByte(changed, false, 0, '#', 0); break;
     }
     assert(!FloodFilterPolicy::sameRuleConfiguration(original, changed));
     assert(!FloodFilterPolicy::sameRuleConfiguration(changed, original));
@@ -171,6 +181,25 @@ template<class Rules, class Entry> void exerciseProductionSlotSelection() {
   assert(rules.select(candidate, 3) == 3); // Explicit index remains authoritative.
 }
 int main() {
+  // Every old flag combination can coexist with either target kind. Neither
+  // the tag nor name views may corrupt independent flags or leak a stale name.
+  for (unsigned flags = 0; flags < 512; ++flags) {
+    for (unsigned region = 0; region < 2; ++region) {
+      RepeaterEntry e{};
+      setFlags(e, flags);
+      e.target_is_region = region;
+      std::strcpy(e.target_name, "1234567890123456789012345678901");
+      assert(flagsOf(e) == flags);
+      const auto& selected = region ? e.regionName() : e.scopeName();
+      const auto& inactive = region ? e.scopeName() : e.regionName();
+      assert(!std::strcmp(selected, e.target_name));
+      for (char byte : inactive) assert(byte == 0);
+      RepeaterEntry copied = e;
+      assert(copied.target_is_region == region);
+      assert(!std::memcmp(copied.target_name, e.target_name, 32));
+      assert(flagsOf(copied) == flags);
+    }
+  }
   exerciseFlags<RepeaterEntry>();
   exerciseFlags<RoomEntry>();
   exerciseConfigurationEquality<RepeaterEntry>();

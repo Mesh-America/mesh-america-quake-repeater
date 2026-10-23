@@ -1317,6 +1317,190 @@ TEST(Dispatcher, GrowingQueueShortensCADBusyCeiling) {
   EXPECT_TRUE(dispatcher.getErrFlags() & ERR_EVENT_CAD_TIMEOUT);
 }
 
+TEST(Dispatcher, CancelledBusyQueueDoesNotAgeLaterChannelWait) {
+  RxReservePacketManager manager(8, 1);
+  TestClock clock;
+  clock.now = 100;
+  TestRadio radio;
+  radio.receiving = true;
+  TestDispatcher dispatcher(radio, clock, manager);
+  dispatcher.begin();
+
+  auto queuePacket = [&]() {
+    mesh::Packet* packet = dispatcher.obtainNewPacket();
+    EXPECT_NE(packet, nullptr);
+    packet->header = ROUTE_TYPE_DIRECT | (PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT);
+    packet->payload[0] = 0x40;
+    packet->payload_len = 1;
+    EXPECT_TRUE(dispatcher.sendPacket(packet, 0));
+  };
+  queuePacket();
+  clock.now = 101;
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.send_starts);
+
+  // Echo suppression, cancellation and stale-work expiry can retire the last
+  // queued packet without a successful send or a free-channel observation.
+  manager.free(manager.removeOutboundByIdx(0));
+  clock.now = 302;
+  dispatcher.loop();
+  EXPECT_EQ(0, manager.getOutboundTotal());
+
+  clock.now = 10000;
+  queuePacket();
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.send_starts);
+  EXPECT_EQ(0, dispatcher.getErrFlags() & ERR_EVENT_CAD_TIMEOUT);
+
+  // A genuinely continuous busy channel still reaches the original ceiling.
+  clock.now = 14001;
+  dispatcher.loop();
+  EXPECT_EQ(1, radio.send_starts);
+  EXPECT_TRUE(dispatcher.getErrFlags() & ERR_EVENT_CAD_TIMEOUT);
+}
+
+TEST(Dispatcher, BeginStartsFreshCADBusyObservation) {
+  RxReservePacketManager manager(8, 1);
+  TestClock clock;
+  clock.now = 100;
+  TestRadio radio;
+  radio.receiving = true;
+  TestDispatcher dispatcher(radio, clock, manager);
+  dispatcher.begin();
+
+  mesh::Packet* packet = dispatcher.obtainNewPacket();
+  ASSERT_NE(packet, nullptr);
+  packet->header = ROUTE_TYPE_DIRECT | (PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT);
+  packet->payload[0] = 0x40;
+  packet->payload_len = 1;
+  ASSERT_TRUE(dispatcher.sendPacket(packet, 0));
+  clock.now = 101;
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.send_starts);
+
+  clock.now = 10000;
+  dispatcher.begin();
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.send_starts);
+  EXPECT_EQ(0, dispatcher.getErrFlags() & ERR_EVENT_CAD_TIMEOUT);
+  clock.now = 14001;
+  dispatcher.loop();
+  EXPECT_EQ(1, radio.send_starts);
+  EXPECT_TRUE(dispatcher.getErrFlags() & ERR_EVENT_CAD_TIMEOUT);
+}
+
+TEST(Dispatcher, ImmediateReplacementStartsFreshCADBusyObservation) {
+  RxReservePacketManager manager(8, 1);
+  TestClock clock;
+  clock.now = 100;
+  TestRadio radio;
+  radio.receiving = true;
+  TestDispatcher dispatcher(radio, clock, manager);
+  dispatcher.begin();
+
+  auto queuePacket = [&]() {
+    mesh::Packet* packet = dispatcher.obtainNewPacket();
+    EXPECT_NE(packet, nullptr);
+    packet->header = ROUTE_TYPE_DIRECT | (PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT);
+    packet->payload[0] = 0x40;
+    packet->payload_len = 1;
+    EXPECT_TRUE(dispatcher.sendPacket(packet, 0));
+  };
+  queuePacket();
+  clock.now = 101;
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.send_starts);
+
+  // There need not be an intervening Dispatcher loop with an empty queue.
+  // A cancellation callback can enqueue the replacement immediately.
+  clock.now = 10000;
+  manager.free(manager.removeOutboundByIdx(0));
+  queuePacket();
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.send_starts);
+  EXPECT_EQ(0, dispatcher.getErrFlags() & ERR_EVENT_CAD_TIMEOUT);
+}
+
+TEST(Dispatcher, OtherProfilesQueuedWorkDoesNotPreserveRetiredCADWait) {
+  class DualProfileRadio : public TestRadio {
+  public:
+    mesh::RadioProfiles config;
+    DualProfileRadio() {
+      config.secondary.params = config.primary;
+      config.secondary.mode = mesh::RadioProfileMode::RxTx;
+    }
+    mesh::RadioProfiles* profiles() override { return &config; }
+    const mesh::RadioProfiles* profiles() const override { return &config; }
+    mesh::RadioParamApplyResult prepareTransmitProfile(uint8_t) override {
+      return mesh::RadioParamApplyResult::APPLIED;
+    }
+  } radio;
+  RxReservePacketManager manager(8, 1);
+  TestClock clock;
+  clock.now = 100;
+  radio.receiving = true;
+  TestDispatcher dispatcher(radio, clock, manager);
+  dispatcher.begin();
+
+  auto queuePacket = [&](uint8_t policy, uint32_t delay = 0) {
+    mesh::Packet* packet = dispatcher.obtainNewPacket();
+    EXPECT_NE(packet, nullptr);
+    packet->header = ROUTE_TYPE_DIRECT | (PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT);
+    packet->payload[0] = 0x40;
+    packet->payload_len = 1;
+    packet->tx_radio = policy;
+    EXPECT_TRUE(dispatcher.sendPacket(packet, 0, delay));
+  };
+  queuePacket(mesh::RADIO_TX_SECONDARY);
+  clock.now = 101;
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.send_starts);
+  manager.free(manager.removeOutboundByIdx(0));
+
+  // Future work on primary keeps the whole queue nonempty, but cannot own
+  // the secondary profile's previous, cancelled channel wait.
+  queuePacket(mesh::RADIO_TX_PRIMARY, 100000);
+  clock.now = 10000;
+  queuePacket(mesh::RADIO_TX_SECONDARY);
+  dispatcher.loop();
+  EXPECT_EQ(0, radio.send_starts);
+  EXPECT_EQ(0, dispatcher.getErrFlags() & ERR_EVENT_CAD_TIMEOUT);
+}
+
+TEST(Dispatcher, NewQueuedWorkPreservesRetainedRetryCADWait) {
+  RxReservePacketManager manager(8, 1);
+  TestClock clock;
+  clock.now = 100;
+  TestRadio radio;
+  radio.start_success = false;
+  TestDispatcher dispatcher(radio, clock, manager);
+  dispatcher.begin();
+  auto queuePacket = [&]() {
+    mesh::Packet* packet = dispatcher.obtainNewPacket();
+    EXPECT_NE(packet, nullptr);
+    packet->header = ROUTE_TYPE_DIRECT | (PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT);
+    packet->payload[0] = 0x40;
+    packet->payload_len = 1;
+    EXPECT_TRUE(dispatcher.sendPacket(packet, 0));
+  };
+  queuePacket();
+  clock.now = 101;
+  dispatcher.loop();
+  EXPECT_EQ(1, radio.send_starts);
+  EXPECT_EQ(0, manager.getOutboundTotal());
+
+  radio.receiving = true;
+  clock.now = 302;
+  dispatcher.loop();
+  EXPECT_EQ(1, radio.send_starts);
+  clock.now = 5000;
+  queuePacket();
+  radio.start_success = true;
+  dispatcher.loop();
+  EXPECT_EQ(2, radio.send_starts);
+  EXPECT_TRUE(dispatcher.getErrFlags() & ERR_EVENT_CAD_TIMEOUT);
+}
+
 TEST(Dispatcher, SilentRadioEscalatesFromSoftToHardRecovery) {
   RxReservePacketManager manager(8, 4);
   TestClock clock;

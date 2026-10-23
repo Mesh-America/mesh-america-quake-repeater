@@ -197,7 +197,7 @@ def requirements(platform, defines, target):
     if combined_rak_ethernet and (platform != "NRF52_PLATFORM"
                                  or not {"RAK_4631", "ETHERNET_ENABLED", "OTA_RAK_AUTO_STORE"}.issubset(defines)):
         raise ValueError("combined RAK Ethernet budget requires RAK4631 adaptive nRF52 storage")
-    if (combined_rak_ethernet or platform == "ESP32_PLATFORM") and display == "SSD1306Display":
+    if platform in {"ESP32_PLATFORM", "NRF52_PLATFORM"} and display == "SSD1306Display":
         # The fixed 128x64 driver allocates one 1024-byte framebuffer and
         # reuses it after power cycling. Its linked source assertion binds
         # framebuffer + complete driver object + allocator overhead to 2 KiB.
@@ -308,7 +308,7 @@ def requirements(platform, defines, target):
     if repeater:
         engine = integer(defines, "MESH_ENABLE_FLOOD_RULE_ENGINE", int(platform != "STM32_PLATFORM"))
         slots = integer(defines, "FLOOD_PACKET_FILTER_SLOTS", 63 if engine else 16)
-        parts["flood_filter_table"] = slots * (336 if engine else 40) + 16
+        parts["flood_filter_table"] = slots * (304 if engine else 40) + 16
     if "room_server" in target.lower() and integer(
             defines, "MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE", 0):
         # FloodRuleEngine keeps all 31 persisted rules in one startup heap

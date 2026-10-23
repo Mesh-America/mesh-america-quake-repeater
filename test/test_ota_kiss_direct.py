@@ -290,6 +290,30 @@ int main() {
         self.compile_run(code, ["-DENABLE_OTA", "-DMESH_ENABLE_MESHTEXT_CHAT=0",
                                "-DMESH_ENABLE_ETHERNET_TUNNEL=0"], dispatcher=True)
 
+    def test_channel_wait_retirement_preserves_direct_ota_owner(self):
+        code = dispatcher_harness() + r'''
+int main() {
+  { Fixture f;directProfile(f);f.radio.receiving=true;
+    auto* old=newPacket(f.d,RADIO_TX_SECONDARY);assert(f.d.sendPacket(old,0));
+    f.tick();assert(!f.radio.sends && f.manager.getOutboundTotal()==1);
+    f.manager.free(f.manager.removeOutboundByIdx(0));
+    f.clock.now=10000;assert(enqueue(f));f.tick();
+    // New raw/direct ownership cannot inherit a cancelled MeshCore wait.
+    assert(!f.radio.sends && !(f.d.getErrFlags() & ERR_EVENT_CAD_TIMEOUT));
+  }
+  { Fixture f;directProfile(f);f.radio.receiving=true;assert(enqueue(f));
+    f.tick();assert(!f.radio.sends && !f.manager.getOutboundTotal());
+    f.clock.now=10000;auto* next=newPacket(f.d,RADIO_TX_SECONDARY);
+    assert(f.d.sendPacket(next,0));f.tick();
+    // Conversely, a still-owned direct frame keeps its original ceiling even
+    // when another queued packet arrives for the same profile.
+    assert(f.radio.sends==1 && (f.d.getErrFlags() & ERR_EVENT_CAD_TIMEOUT));
+  }
+}
+'''
+        self.compile_run(code, ["-DENABLE_OTA", "-DMESH_ENABLE_MESHTEXT_CHAT=0",
+                               "-DMESH_ENABLE_ETHERNET_TUNNEL=0"], dispatcher=True)
+
     def test_real_dispatcher_failures_cad_duty_quiet_and_packet_fairness(self):
         code = dispatcher_harness() + r'''
 int main() {

@@ -3,7 +3,7 @@
 #include "OLEDControllerSettings.h"
 #endif
 
-#if defined(ESP32_PLATFORM) || (defined(NRF52_PLATFORM) && defined(RAK4631_COMBINED_ETHERNET))
+#if defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM)
 // Adafruit_SSD1306::begin allocates WIDTH * ((HEIGHT + 7) / 8) once and
 // reuses that framebuffer on later begin calls. The driver itself is embedded
 // in the linked global display, not allocated on the heap. Even including

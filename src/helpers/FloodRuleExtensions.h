@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <Packet.h>
+#include "FloodRuleTargets.h"
 #include "TxtDataHelpers.h"
 #include "FloodTextPattern.h"
 #include "FloodGroupPlainText.h"
@@ -80,7 +81,7 @@ inline bool validRuleFields(const Entry& entry) {
   const bool content_valid = !contentRequested(entry.extra)
       || ((entry.channel_key_len == 16 || entry.channel_key_len == 32)
           && (entry.payload_type == 0xFF || entry.payload_type == PAYLOAD_TYPE_GRP_TXT));
-  const bool flood_actions = entry.scope_name[0] || entry.target_region_name[0]
+  const bool flood_actions = FloodRuleTargets::scopeName(entry)[0] || FloodRuleTargets::regionName(entry)[0]
       || entry.retry_on_match || entry.scope_uses_slow_timing;
   return path_valid && content_valid && (!flood_actions
       || entry.extra.route == LegacyRoute || entry.extra.route == FloodRoute);

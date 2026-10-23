@@ -438,7 +438,7 @@ int main() {
             "ENABLE_OTA": 1, "OTA_HEAP_CONTEXT": 1,
         }, "GEPRC_Linkflow_900_repeater")
         self.assertEqual(policy["components"]["client_table"], 32 * 320 + 16)
-        self.assertEqual(policy["components"]["flood_filter_table"], 63 * 336 + 16)
+        self.assertEqual(policy["components"]["flood_filter_table"], 63 * 304 + 16)
         self.assertEqual(policy["components"]["ota_context"], 16384 + 16)
         self.assertGreaterEqual(policy["required_contiguous_bytes"], 16384 + 16)
         reduced = ram.requirements("STM32_PLATFORM", {
@@ -681,9 +681,9 @@ int main() {
         self.assertNotIn("ota_encoder_workspace", components)
         self.assertNotIn("ota_self_source_scratch", components)
         self.assertEqual(components["display_pixels_and_driver"], 2048)
-        self.assertEqual(combined["required_heap_bytes"] - legacy["required_heap_bytes"], 3072 - 2048)
+        self.assertEqual(combined["required_heap_bytes"] - legacy["required_heap_bytes"], 3072)
         self.assertEqual(components["loop_and_callback_stacks"], 8192 + 3072)
-        self.assertEqual(components["flood_filter_table"], 63 * 336 + 16)
+        self.assertEqual(components["flood_filter_table"], 63 * 304 + 16)
         # An alternate port selects the same bridge instead of allocating two.
         alternate = ram.requirements("NRF52_PLATFORM", {
             **defines, "RAK4631_COMBINED_ETHERNET": 1,
@@ -794,7 +794,7 @@ int main() {
         alias = ram.requirements("ESP32_PLATFORM", {"MESH_CLIENT_REPEATER_ONLY": 1},
                                  "custom_companion_alias")
         self.assertEqual(alias["components"]["client_table"], 32 * 284 + 16)
-        self.assertEqual(alias["components"]["flood_filter_table"], 63 * 336 + 16)
+        self.assertEqual(alias["components"]["flood_filter_table"], 63 * 304 + 16)
         self.assertEqual(alias["components"]["neighbor_history"], 2048 * 9 + 16)
         self.assertEqual(alias["components"]["radio_packet_pool"], 10240)
 
@@ -838,7 +838,46 @@ int main() {
                         self.assertEqual(legacy["required_contiguous_bytes"],
                                          selected["required_contiguous_bytes"])
 
-    def test_combined_rak_oled_bound_does_not_change_other_display_budgets(self):
+    def test_rak_repeater_compact_rule_and_oled_budgets_keep_every_other_reserve(self):
+        flags = {
+            "ENABLE_OTA": 1, "OTA_RAK_AUTO_STORE": 1, "OTA_QSPI_STORE": 1,
+            "OTA_RAK15002_SD_STORE": 1, "OTA_FLASH_STORE": 1,
+            "MESHCORE_OTA_DEVICE_DEFLATE": 1, "MESH_CLIENT_REPEATER_ONLY": 1,
+            "DISPLAY_CLASS": "SSD1306Display",
+        }
+        selected = ram.requirements("NRF52_PLATFORM", flags, "RAK_4631_repeater")
+        self.assertEqual(selected["components"], {
+            "loop_and_callback_stacks": 11264,
+            "core_usb_filesystems_sensors": 12288,
+            "sd_fat_volume_and_files": 2048,
+            "radio_packet_pool": 10240,
+            "client_table": 9104,
+            "flood_filter_table": 63 * 304 + 16,
+            "ota_generic_source_buffers": 3616,
+            "ota_encoder_workspace": 1040,
+            "ota_self_source_scratch": 4128,
+            "display_pixels_and_driver": 2048,
+            "screen_objects_and_history": 2048,
+            "allocation_and_transient_margin": 4096,
+        })
+        self.assertEqual(selected["required_heap_bytes"], 81088)
+        self.assertEqual(selected["required_contiguous_bytes"], 19168)
+        # The fresh Full baseline's 81,668 bytes passed only after the real
+        # 32-byte per-row reduction and same-driver OLED accounting proof.
+        # Neither a one-byte deficit nor the old failed capacity can bypass
+        # the existing real-ELF gate.
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "firmware.elf"
+            for available, expected in ((81087, False), (81088, True), (81668, True)):
+                with self.subTest(available=available):
+                    elf32(path, {"__HeapBase": (0x20010000, 0),
+                                 "__HeapLimit": (0x20010000 + available, 0)})
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        passed = ram.check_firmware(path, "NRF52_PLATFORM", "nrf52840",
+                                                    flags, "RAK_4631_repeater") == 0
+                    self.assertEqual(passed, expected)
+
+    def test_nrf52_oled_bound_matches_same_source_guard_without_changing_other_displays(self):
         defines = {
             "RAK_4631": 1, "ETHERNET_ENABLED": 1, "OTA_RAK_AUTO_STORE": 1,
             "RAK4631_COMBINED_ETHERNET": 1,
@@ -853,7 +892,7 @@ int main() {
         ordinary = ram.requirements("NRF52_PLATFORM", {
             "DISPLAY_CLASS": "SSD1306Display",
         }, "RAK_4631_repeater")
-        self.assertEqual(ordinary["components"]["display_pixels_and_driver"], 4096)
+        self.assertEqual(ordinary["components"]["display_pixels_and_driver"], 2048)
 
     def test_esp32_fixed_oled_and_uart_bounds_preserve_full_runtime_reserves(self):
         defines = {
@@ -866,13 +905,13 @@ int main() {
         }
         full = ram.requirements("ESP32_PLATFORM", defines, "Heltec_v3_repeater_observer_mqtt")
         parts = full["components"]
-        self.assertEqual(full["required_heap_bytes"], 203920)
+        self.assertEqual(full["required_heap_bytes"], 201904)
         self.assertEqual(parts["display_pixels_and_driver"], 2048)
         self.assertEqual(parts["uart_bridge_and_driver"], 3072 + 4096)
         self.assertEqual(parts["wireless_stacks"], 49152)
         self.assertEqual(parts["mqtt_startup_allowance"], 24576)
         self.assertEqual(parts["allocation_and_transient_margin"], 16384)
-        self.assertEqual(full["required_contiguous_bytes"], 21184)
+        self.assertEqual(full["required_contiguous_bytes"], 19168)
         for driver, expected in (("SH1106Display", 2048), ("SH1107Display", 4096),
                                  ("ST7735Display", 25602)):
             with self.subTest(driver=driver):
@@ -883,7 +922,7 @@ int main() {
                 self.assertEqual(other["components"], {
                     **parts, "display_pixels_and_driver": expected,
                 })
-                self.assertEqual(other["required_contiguous_bytes"], max(21184, expected))
+                self.assertEqual(other["required_contiguous_bytes"], max(19168, expected))
 
     def test_sh1106_full_mqtt_release_profile_is_linked_in_ci(self):
         workflow = (ROOT / ".github/workflows/run-unit-tests.yml").read_text()
@@ -933,7 +972,8 @@ int main() {
                             "-DWITH_RS232_BRIDGE=1", "-DWITH_UDP_BRIDGE=1", f"-DOBJECT_BYTES={size}",
                             f"-DFRAME_BYTES={frame}", *["-D" + flag for flag in platform],
                         ], input=stand_in + prefix, text=True, capture_output=True)
-                        enforced = "ESP32=1" in platform or (
+                        enforced = "ESP32=1" in platform or ("NRF52_PLATFORM=1" in platform
+                            and path.endswith("SSD1306Display.cpp")) or (
                             "RAK4631_COMBINED_ETHERNET=1" in platform
                             and not path.endswith(("SH1106Display.cpp", "UDPBridge.cpp")))
                         self.assertEqual(result.returncode == 0, bounded or not enforced,

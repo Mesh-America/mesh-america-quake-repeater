@@ -37,7 +37,7 @@ MQTT reserve the same 49,152-byte WiFi allowance even without `WIFI_SSID` or
 `WIFI_OTA_SEEDER`: saved runtime credentials can activate WiFi. Multiple WiFi
 features count that allowance once; PSRAM-backed TLS does not remove it.
 ESP32 images with
-RS-232 reserve another 6,656 bytes even when UART defaults off: 2,560 bytes for
+RS-232 reserve another 7,168 bytes even when UART defaults off: 3,072 bytes for
 the source-bounded bridge object and allocation metadata, plus an unchanged
 4 KiB for the UART driver and buffers. This
 keeps runtime UART enablement in the budget beside MQTT and ESP-NOW.
@@ -68,10 +68,11 @@ The old 75,396-byte linked capacity therefore failed correctly; the check is
 not bypassed or relaxed to accept it. Full Companion's independent 72 KiB
 floor remains in place.
 
-ESP32 SSD1306 uses a source-bounded 2 KiB
-allowance for its fixed 1,024-byte framebuffer, driver and metadata; other
-OLED and ordinary non-ESP32 allowances remain unchanged. nRF52 Full with that
-color framebuffer must have at least 72 KiB available before startup allocations.
+ESP32 and nRF52 SSD1306 use a source-bounded 2 KiB allowance for the same
+fixed 1,024-byte framebuffer, embedded driver and allocation metadata. The
+OLED auto-detection backend reuses that one buffer across SSD1306/SH1106
+selection and retries. Other display allowances remain unchanged. nRF52 Full
+with that color framebuffer must have at least 72 KiB available before startup allocations.
 Headless and OLED devices use their own smaller totals. The JSON lists each
 component and checks the largest available region against the largest planned
 single allocation.
@@ -162,7 +163,7 @@ physical boot/soak or maximum TLS/WSS/outbox-load qualification. It also does
 not qualify an independently built compact portable-slot recipe.
 
 The experimental RAK4631 combined Ethernet/UART2/adaptive-storage config adds
-an explicit 2,560-byte allowance for the UART bridge and its TX semaphore.
+an explicit 3,072-byte allowance for the UART bridge and its TX semaphore.
 Its Ethernet worker reserves 1,024 stack words (4,096 bytes) plus 256 bytes for
 task metadata and allocator overhead. Its bounded TCP transmit queue allocates
 512 bytes only while Ethernet is enabled; another 64 bytes cover allocator
@@ -197,8 +198,9 @@ for allocation overhead still leaves 836 bytes within the allowance.
 A compile-time assertion
 covers framebuffer, complete driver object and allocator overhead within that
 bound. This corrects a padded allocation estimate; it does not free actual RAM.
-Other images retain their existing display budgets. These are local
-test configs, not a qualification of a published or physically tested image.
+The same source assertion and bound now cover ordinary nRF52 SSD1306 images
+as well; other display drivers keep their existing budgets. These are linked
+capacity checks, not qualification of a published or physically tested image.
 
 ## Shared RAM reductions
 
@@ -211,6 +213,7 @@ stored settings, OTA block sizes and source-image limits.
 | Repeater ACL session state | Pure repeater builds on all platforms | 36 bytes per client on 32-bit targets; 1,152 bytes for 32 clients |
 | Compact recent-repeater records | Repeaters with recent history enabled | 12 to 9 bytes per record; 1,536 bytes for 512 records |
 | Compact flood-rule flags and aligned counters | Generalized repeater and room rule engines | 200 to 192 bytes per rule; 504 bytes for 63 repeater rules or 248 bytes for 31 room rules |
+| One tagged flood-rule target name | Generalized repeater engine on all platforms | 332 to 300 bytes per extended rule; 2,016 constructor-time heap bytes for all 63 slots |
 | Streaming Merkle proof generation | All OTA roles and platforms | Removes full-leaf-table proof scratch; compressed output needs only one logical block |
 | Source buffers allocated on demand | All OTA roles and platforms | Leaves allocate only the selected image's digest count; unused leaves/output return to the heap |
 
@@ -225,6 +228,14 @@ loop; network command handlers marshal their work to that loop. These byte
 operations do not provide synchronization for hypothetical concurrent users.
 Flood flags remain internal; FPF files serialize each field explicitly and
 never expose compiler bitfield layout. Multibyte counters remain aligned.
+Repeater rules store either the direct scope name or target region name in
+one 32-byte array because the CLI and stored-policy validator already reject
+both actions together. A spare flag bit identifies the name. FPF6 retains its
+single scope field. FPF7/8 retain both fixed-width name fields; the inactive field
+is emitted as 32 zero bytes. Load reads and validates both fields before
+selecting the shared name, retaining maximum name lengths and refusing a
+malformed two-target policy. Room-engine rows and on-disk formats are unchanged.
+
 Rule deduplication compares configured fields explicitly, so neither live
 rate-window counters nor struct padding can make different rules share a slot.
 

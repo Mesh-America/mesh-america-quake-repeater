@@ -723,6 +723,8 @@ public:
   unsigned long futureMillis(int millis_from_now) const;
 
 private:
+  void retireUnusedCADWait(uint8_t profile);
+  bool queueTransmitCandidate(Packet* packet, uint8_t priority, uint32_t scheduled_for);
   // Keep the frequently accessed core fields at compact ARM load offsets.
   AGCResetScheduler agc_reset;
   uint32_t receive_context_generation = 0;

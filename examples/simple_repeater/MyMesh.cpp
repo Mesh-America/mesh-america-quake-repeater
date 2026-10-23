@@ -6487,6 +6487,8 @@ bool MyMesh::loadFloodPacketFilters() {
   for (int i = 0; success && i < count; i++) {
     auto& entry = i < flood_packet_filter_slots ? loaded[i] : overflow_entry;
     if (i >= flood_packet_filter_slots) memset(&entry, 0, sizeof(entry));
+    char stored_scope_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] = {};
+    char stored_region_name[FLOOD_PACKET_FILTER_SCOPE_NAME_LEN] = {};
     uint8_t active = 0;
     uint8_t suspend_on_temp_radio = 0;
     uint8_t match_blacklisted_path = 0;
@@ -6503,11 +6505,11 @@ bool MyMesh::loadFloodPacketFilters() {
     success = success && file.read(&suspend_on_temp_radio,
                                     sizeof(suspend_on_temp_radio))
         == sizeof(suspend_on_temp_radio);
-    success = success && file.read((uint8_t*)entry.scope_name,
-                                    sizeof(entry.scope_name))
-        == sizeof(entry.scope_name);
+    success = success && file.read((uint8_t*)stored_scope_name,
+                                    sizeof(stored_scope_name))
+        == sizeof(stored_scope_name);
     success = success
-        && memchr(entry.scope_name, 0, sizeof(entry.scope_name)) != NULL;
+        && memchr(stored_scope_name, 0, sizeof(stored_scope_name)) != NULL;
     success = success && file.read(&match_blacklisted_path,
                                     sizeof(match_blacklisted_path))
         == sizeof(match_blacklisted_path);
@@ -6559,9 +6561,9 @@ bool MyMesh::loadFloodPacketFilters() {
                        sizeof(entry.rate_per_minute))
               == sizeof(entry.rate_per_minute);
       success = success
-          && file.read((uint8_t*)entry.target_region_name,
-                       sizeof(entry.target_region_name))
-              == sizeof(entry.target_region_name);
+          && file.read((uint8_t*)stored_region_name,
+                       sizeof(stored_region_name))
+              == sizeof(stored_region_name);
       success = success
           && file.read(&entry.priority, sizeof(entry.priority))
               == sizeof(entry.priority);
@@ -6575,7 +6577,7 @@ bool MyMesh::loadFloodPacketFilters() {
       entry.incoming_scope_kind = scope_requires_region_match
           ? FloodFilterPolicy::RULE_IN_ALLOWED
           : FloodFilterPolicy::RULE_IN_ANY;
-      drop_on_match = entry.scope_name[0] == 0 ? 1 : 0;
+      drop_on_match = stored_scope_name[0] == 0 ? 1 : 0;
     }
     if (success && version_7) {
       success = FloodFilterPolicy::decodeStoredRuleChannel(
@@ -6604,8 +6606,8 @@ bool MyMesh::loadFloodPacketFilters() {
       success = false;
     }
     success = success && FloodFilterPolicy::transportActionsSupported(
-        entry.transport_modes, entry.scope_name[0] != 0
-            || entry.target_region_name[0] != 0,
+        entry.transport_modes, stored_scope_name[0] != 0
+            || stored_region_name[0] != 0,
         entry.retry_on_match, entry.scope_uses_slow_timing);
     if (!success) break;
     if (!entry.active) {
@@ -6613,12 +6615,12 @@ bool MyMesh::loadFloodPacketFilters() {
       continue;
     }
 
-    bool direct_target = entry.scope_name[0] != 0;
+    bool direct_target = stored_scope_name[0] != 0;
     bool target_name_terminated = memchr(
-        entry.target_region_name, 0,
-        sizeof(entry.target_region_name)) != NULL;
+        stored_region_name, 0,
+        sizeof(stored_region_name)) != NULL;
     bool region_target = target_name_terminated
-        && entry.target_region_name[0] != 0;
+        && stored_region_name[0] != 0;
     bool input_name_terminated = memchr(
         entry.incoming_scope_name, 0,
         sizeof(entry.incoming_scope_name)) != NULL;
@@ -6674,6 +6676,12 @@ bool MyMesh::loadFloodPacketFilters() {
           || entry.payload_type == PAYLOAD_TYPE_GRP_DATA;
     }
 
+    // Keep malformed two-target records invalid; never silently select one.
+    if (target_name_terminated && !(direct_target && region_target)) {
+      entry.target_is_region = region_target;
+      memcpy(entry.target_name, region_target ? stored_region_name : stored_scope_name,
+             sizeof(entry.target_name));
+    }
     bool path_valid = FloodRuleExtensions::validRuleFields(entry);
     bool action_valid = entry.drop_on_match || direct_target
         || region_target || entry.rate_limit_enabled
@@ -6683,11 +6691,11 @@ bool MyMesh::loadFloodPacketFilters() {
           && entry.min_hops <= entry.max_hops
           && entry.max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS
           && (!direct_target
-              || isValidStoredFloodFilterScopeName(entry.scope_name))
+              || isValidStoredFloodFilterScopeName(stored_scope_name))
           && target_name_terminated
           && (!region_target
               || isValidStoredFloodRuleRegionName(
-                  entry.target_region_name))
+                  stored_region_name))
           && !(direct_target && region_target)
           && !(entry.drop_on_match && (direct_target || region_target))
           && !(entry.drop_on_match && entry.rate_limit_enabled)
@@ -6700,6 +6708,11 @@ bool MyMesh::loadFloodPacketFilters() {
           && incoming_valid && channel_valid && path_valid
           && action_valid)) {
       success = false;
+    }
+    if (success) {
+      entry.target_is_region = region_target;
+      memcpy(entry.target_name, region_target ? stored_region_name : stored_scope_name,
+             sizeof(entry.target_name));
     }
     if (success && i >= flood_packet_filter_slots) active_overflow = true;
   }
@@ -6928,7 +6941,7 @@ bool MyMesh::isFloodChannelDataRule(
       && valid_hops
       && entry.max_hops == FLOOD_PACKET_FILTER_MAX_HOPS
       && !entry.suspend_on_temp_radio
-      && entry.scope_name[0] == 0
+      && entry.scopeName()[0] == 0
       && !entry.match_blacklisted_path
       && !entry.scope_uses_slow_timing
       && entry.incoming_scope_kind == FloodFilterPolicy::RULE_IN_ANY
@@ -6937,7 +6950,7 @@ bool MyMesh::isFloodChannelDataRule(
       && entry.channel_name[0] == 0
       && entry.path_hash_size == 0
       && entry.path_hops == 0
-      && entry.target_region_name[0] == 0
+      && entry.regionName()[0] == 0
       && entry.drop_on_match
       && !entry.rate_limit_enabled
       && entry.priority == 0
@@ -7218,7 +7231,7 @@ bool MyMesh::migrateLegacyFloodChannelBlocks() {
           && entry.min_hops == min_hops
           && entry.max_hops == FLOOD_PACKET_FILTER_MAX_HOPS
           && !entry.suspend_on_temp_radio
-          && entry.scope_name[0] == 0
+          && entry.scopeName()[0] == 0
           && !entry.match_blacklisted_path
           && !entry.scope_uses_slow_timing
           && entry.incoming_scope_kind == FloodFilterPolicy::RULE_IN_ANY
@@ -7226,7 +7239,7 @@ bool MyMesh::migrateLegacyFloodChannelBlocks() {
           && entry.channel_key_len == row.key_len
           && memcmp(entry.channel_secret, row.secret, row.key_len) == 0
           && entry.path_hash_size == 0 && entry.path_hops == 0
-          && entry.target_region_name[0] == 0
+          && entry.regionName()[0] == 0
           && entry.drop_on_match && !entry.rate_limit_enabled
           && !entry.stop_on_match;
       if (duplicate) break;
@@ -7323,7 +7336,7 @@ bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
         && writeExact(&entry.min_hops, sizeof(entry.min_hops))
         && writeExact(&entry.max_hops, sizeof(entry.max_hops))
         && writeExact(&suspend_on_temp_radio, sizeof(suspend_on_temp_radio))
-        && writeExact(entry.scope_name, sizeof(entry.scope_name))
+        && writeExact(entry.scopeName(), sizeof(entry.scopeName()))
         && writeExact(&match_blacklisted_path,
                       sizeof(match_blacklisted_path))
         && writeExact(&scope_requires_region_match,
@@ -7343,8 +7356,8 @@ bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
         && writeExact(&drop_on_match, sizeof(drop_on_match))
         && writeExact(&rate_limit_enabled, sizeof(rate_limit_enabled))
         && writeExact(&entry.rate_per_minute, sizeof(entry.rate_per_minute))
-        && writeExact(entry.target_region_name,
-                      sizeof(entry.target_region_name))
+        && writeExact(entry.regionName(),
+                      sizeof(entry.regionName()))
         && writeExact(&entry.priority, sizeof(entry.priority))
         && writeExact(&stop_on_match, sizeof(stop_on_match));
     if (success && version_8) {
@@ -7460,11 +7473,11 @@ bool MyMesh::loadFloodPacketFilters() {
     success = success && file.read(&suspend_on_temp_radio,
                                     sizeof(suspend_on_temp_radio))
         == sizeof(suspend_on_temp_radio);
-    success = success && file.read((uint8_t*)loaded[i].scope_name,
-                                    sizeof(loaded[i].scope_name))
-        == sizeof(loaded[i].scope_name);
+    success = success && file.read((uint8_t*)loaded[i].scopeName(),
+                                    sizeof(loaded[i].scopeName()))
+        == sizeof(loaded[i].scopeName());
     success = success
-        && memchr(loaded[i].scope_name, 0, sizeof(loaded[i].scope_name)) != NULL;
+        && memchr(loaded[i].scopeName(), 0, sizeof(loaded[i].scopeName())) != NULL;
     success = success && file.read(&match_blacklisted_path,
                                     sizeof(match_blacklisted_path))
         == sizeof(match_blacklisted_path);
@@ -7483,7 +7496,7 @@ bool MyMesh::loadFloodPacketFilters() {
         || match_blacklisted_path > 1 || scope_requires_region_match > 1
         || scope_uses_slow_timing > 1
         || (!loaded[i].active
-            && (loaded[i].suspend_on_temp_radio || loaded[i].scope_name[0] != 0
+            && (loaded[i].suspend_on_temp_radio || loaded[i].scopeName()[0] != 0
                 || loaded[i].match_blacklisted_path
                 || loaded[i].scope_requires_region_match
                 || loaded[i].scope_uses_slow_timing)))) {
@@ -7494,17 +7507,17 @@ bool MyMesh::loadFloodPacketFilters() {
                 || loaded[i].payload_type == FLOOD_PACKET_FILTER_ANY_TYPE)
             && loaded[i].min_hops <= loaded[i].max_hops
             && loaded[i].max_hops <= FLOOD_PACKET_FILTER_MAX_HOPS
-            && (loaded[i].scope_name[0] == 0
-                || isValidStoredFloodFilterScopeName(loaded[i].scope_name))
+            && (loaded[i].scopeName()[0] == 0
+                || isValidStoredFloodFilterScopeName(loaded[i].scopeName()))
             && (!loaded[i].scope_requires_region_match
-                || loaded[i].scope_name[0] != 0)
+                || loaded[i].scopeName()[0] != 0)
             && (!loaded[i].scope_uses_slow_timing
-                || loaded[i].scope_name[0] != 0))) {
+                || loaded[i].scopeName()[0] != 0))) {
       success = false;
     }
-    if (success && loaded[i].scope_name[0] != 0) {
-      StrHelper::strzcpy(loaded[i].scope_name, loaded[i].scope_name,
-                         sizeof(loaded[i].scope_name));
+    if (success && loaded[i].scopeName()[0] != 0) {
+      StrHelper::strzcpy(loaded[i].scopeName(), loaded[i].scopeName(),
+                         sizeof(loaded[i].scopeName()));
     }
   }
   file.close();
@@ -7544,8 +7557,8 @@ bool MyMesh::saveFloodPacketFilters(bool empty_scope_phase,
     success = success && file.write(&entry.min_hops, sizeof(entry.min_hops)) == sizeof(entry.min_hops);
     success = success && file.write(&entry.max_hops, sizeof(entry.max_hops)) == sizeof(entry.max_hops);
     success = success && file.write(&suspend_on_temp_radio, sizeof(suspend_on_temp_radio)) == sizeof(suspend_on_temp_radio);
-    success = success && file.write((const uint8_t*)entry.scope_name,
-                                    sizeof(entry.scope_name)) == sizeof(entry.scope_name);
+    success = success && file.write((const uint8_t*)entry.scopeName(),
+                                    sizeof(entry.scopeName())) == sizeof(entry.scopeName());
     success = success && file.write(&match_blacklisted_path,
                                     sizeof(match_blacklisted_path))
         == sizeof(match_blacklisted_path);
@@ -7704,14 +7717,14 @@ uint64_t MyMesh::applyFloodPacketFilterStop(uint64_t match_mask) {
     specificities[i] = FloodFilterPolicy::channelMatcherSpecificity(
         entry.channel_key_len);
     bool region_usable = true;
-    if (entry.target_region_name[0] != 0) {
+    if (entry.regionName()[0] != 0) {
       TransportKey scope;
       const char* canonical_name = NULL;
       region_usable = resolveFloodPacketFilterTargetRegion(
-          entry.target_region_name, scope, canonical_name);
+          entry.regionName(), scope, canonical_name);
     }
     stop_flags[i] = FloodFilterPolicy::stopActionApplies(
-        entry.stop_on_match, entry.target_region_name[0] != 0,
+        entry.stop_on_match, entry.regionName()[0] != 0,
         region_usable) ? 1 : 0;
   }
   return FloodFilterPolicy::truncateRulesAtStop(
@@ -7792,18 +7805,18 @@ bool MyMesh::applyFloodPacketFilterScope(mesh::Packet* packet,
     if (i < 0) break;
     visited |= (uint64_t)1U << i;
     const auto& entry = flood_packet_filters[i];
-    if (entry.scope_name[0] == 0
-        && entry.target_region_name[0] == 0) {
+    if (entry.scopeName()[0] == 0
+        && entry.regionName()[0] == 0) {
       continue;
     }
 
     TransportKey scope;
-    const char* target_name = entry.scope_name;
-    if (entry.scope_name[0] != 0) {
-      deriveFloodFilterScopeKey(entry.scope_name, scope);
+    const char* target_name = entry.scopeName();
+    if (entry.scopeName()[0] != 0) {
+      deriveFloodFilterScopeKey(entry.scopeName(), scope);
     } else {
       if (!resolveFloodPacketFilterTargetRegion(
-              entry.target_region_name, scope, target_name)) {
+              entry.regionName(), scope, target_name)) {
         continue;
       }
     }
@@ -7927,10 +7940,10 @@ bool MyMesh::applyFloodPacketFilterScope(mesh::Packet* packet,
   for (int i = 0; i < flood_packet_filter_slots; i++) {
     const auto& entry = flood_packet_filters[i];
     if ((match_mask & ((uint64_t)1U << i)) == 0
-        || entry.scope_name[0] == 0) continue;
+        || entry.scopeName()[0] == 0) continue;
 
     TransportKey scope;
-    deriveFloodFilterScopeKey(entry.scope_name, scope);
+    deriveFloodFilterScopeKey(entry.scopeName(), scope);
     bool scope_changed = FloodFilterPolicy::setTransportScope(
         packet, scope.calcTransportCode(packet));
     scope_set = true;
@@ -7939,7 +7952,7 @@ bool MyMesh::applyFloodPacketFilterScope(mesh::Packet* packet,
     if (scope_changed && log_change) {
       MESH_DEBUG_PRINTLN("flood.filter set scope slot=%d type=%d hops=%d scope=%s tx=%s",
                          i + 1, packet->getPayloadType(),
-                         packet->getPathHashCount(), entry.scope_name,
+                         packet->getPathHashCount(), entry.scopeName(),
                          entry.scope_uses_slow_timing ? "slow" : "fast");
     }
     return scope_changed;
@@ -7955,7 +7968,7 @@ bool MyMesh::shouldBlockFloodPacketForward(const mesh::Packet* packet,
   for (int i = 0; i < flood_packet_filter_slots; i++) {
     const auto& entry = flood_packet_filters[i];
     if ((match_mask & ((uint64_t)1U << i)) != 0
-        && entry.scope_name[0] == 0) {
+        && entry.scopeName()[0] == 0) {
       MESH_DEBUG_PRINTLN("allowPacketForward: flood.filter matched slot=%d type=%d hops=%d range=%d-%d",
                          i + 1, type, hops, entry.min_hops,
                          entry.max_hops);
@@ -8043,13 +8056,13 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
   action[0] = 0;
   if (entry.drop_on_match) {
     strcpy(action, "drop");
-  } else if (entry.scope_name[0] != 0) {
-    snprintf(action, sizeof(action), "scope=%s", entry.scope_name);
-  } else if (entry.target_region_name[0] != 0) {
+  } else if (entry.scopeName()[0] != 0) {
+    snprintf(action, sizeof(action), "scope=%s", entry.scopeName());
+  } else if (entry.regionName()[0] != 0) {
     snprintf(action, sizeof(action), "region=%s%s",
-             entry.target_region_name,
+             entry.regionName(),
              floodRuleRegionNamePresent(
-                 region_map, entry.target_region_name) ? "" : "?");
+                 region_map, entry.regionName()) ? "" : "?");
   }
   rate[0] = 0;
   if (entry.rate_limit_enabled) {
@@ -8133,11 +8146,11 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
     formatFloodFilterHopSpec(hops, sizeof(hops), entry.min_hops, entry.max_hops);
     if (entry.drop_on_match) {
       strcpy(target, "!drop");
-    } else if (entry.scope_name[0] != 0) {
-      snprintf(target, sizeof(target), ">%s", entry.scope_name);
-    } else if (entry.target_region_name[0] != 0) {
+    } else if (entry.scopeName()[0] != 0) {
+      snprintf(target, sizeof(target), ">%s", entry.scopeName());
+    } else if (entry.regionName()[0] != 0) {
       snprintf(target, sizeof(target), ">r:%s",
-               entry.target_region_name);
+               entry.regionName());
     } else {
       target[0] = 0;
     }
@@ -8681,8 +8694,10 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   candidate.path_hash_size = path_hash_size;
   candidate.path_hops = path_hops;
   memcpy(candidate.path, path, sizeof(candidate.path));
-  StrHelper::strzcpy(candidate.target_region_name, target_region_name,
-                     sizeof(candidate.target_region_name));
+  candidate.target_is_region = target_region_name[0] != 0;
+  StrHelper::strzcpy(candidate.target_name,
+                     candidate.target_is_region ? target_region_name : scope_name,
+                     sizeof(candidate.target_name));
   candidate.drop_on_match = drop_on_match;
   candidate.rate_limit_enabled = rate_limit_enabled;
   candidate.rate_per_minute = rate_per_minute;
@@ -8691,8 +8706,6 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   candidate.retry_on_match = retry_on_match;
   candidate.transport_modes = transport_modes;
   candidate.extra = extra;
-  StrHelper::strzcpy(candidate.scope_name, scope_name,
-                     sizeof(candidate.scope_name));
   if (!FloodRuleExtensions::validRuleFields(candidate)) {
     strcpy(reply, "Err - content needs a keyed group-text channel; scope/retry needs flood route");
     return;
@@ -8758,8 +8771,8 @@ void MyMesh::formatFloodPacketFilterDetail(int index, char* reply, size_t reply_
   char hops[12];
   formatFloodFilterHopSpec(hops, sizeof(hops), entry.min_hops, entry.max_hops);
   const char* suspension = entry.suspend_on_temp_radio ? " suspend=tempradio" : "";
-  const char* scope_prefix = entry.scope_name[0] ? " scope=" : "";
-  const char* scope_name = entry.scope_name[0] ? entry.scope_name : "";
+  const char* scope_prefix = entry.scopeName()[0] ? " scope=" : "";
+  const char* scope_name = entry.scopeName()[0] ? entry.scopeName() : "";
   const char* path_match = entry.match_blacklisted_path ? " path=blacklist" : "";
   const char* region_requirement =
       entry.scope_requires_region_match ? " require=region" : "";
@@ -8805,8 +8818,8 @@ void MyMesh::formatFloodPacketFilters(const char* args, char* reply, bool compac
     snprintf(item, sizeof(item), " %d=%s@%s%s%s%s%s%s%s",
              i + 1, floodFilterPayloadTypeName(entry.payload_type), hops,
              entry.match_blacklisted_path ? "?blacklist" : "",
-             entry.scope_name[0] ? ">" : "",
-             entry.scope_name,
+             entry.scopeName()[0] ? ">" : "",
+             entry.scopeName(),
              entry.scope_requires_region_match ? "!region" : "",
              entry.scope_uses_slow_timing ? "~slow" : "",
              entry.suspend_on_temp_radio ? "~tempradio" : "");
@@ -8967,7 +8980,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
           && entry.suspend_on_temp_radio == suspend_on_temp_radio
           && entry.match_blacklisted_path == match_blacklisted_path
           && entry.scope_requires_region_match == scope_requires_region_match
-          && strcmp(entry.scope_name, scope_name) == 0) {
+          && strcmp(entry.scopeName(), scope_name) == 0) {
         slot = i;
         break;
       }
@@ -8996,7 +9009,7 @@ void MyMesh::setFloodPacketFilter(const char* args, char* reply,
   entry.match_blacklisted_path = match_blacklisted_path;
   entry.scope_requires_region_match = scope_requires_region_match;
   entry.scope_uses_slow_timing = scope_uses_slow_timing;
-  StrHelper::strzcpy(entry.scope_name, scope_name, sizeof(entry.scope_name));
+  StrHelper::strzcpy(entry.scopeName(), scope_name, sizeof(entry.scopeName()));
   if (!saveFloodPacketFilters()) {
     entry = previous;
     strcpy(reply, "Err - unable to save flood filter");
