@@ -3,7 +3,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+class Stream;
+
 namespace mesh { namespace companion {
+
+// The implementation is isolated in the RAK Full C++17 packing source.
+size_t writePackedCompanionHelp(Stream& output);
 
 // Native USB accepts bounded producer writes. Honor partial progress, and stop
 // if the sink cannot accept another byte rather than spinning on a closed host.
@@ -22,6 +27,7 @@ size_t writeHelpChunks(Output& output, const char* text, size_t length) {
   return written;
 }
 
+#if __cplusplus >= 201703L
 namespace help_packing {
 
 // Help is ASCII. Bytes 0x80..0x8f encode these common fragments; the original
@@ -134,5 +140,7 @@ size_t writePackedHelp(Output& output, const uint8_t* packed, size_t length) {
   }
   return written;
 }
+
+#endif // C++17 constant packing and streaming decoder
 
 } } // namespace mesh::companion

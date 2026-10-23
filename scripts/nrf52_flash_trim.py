@@ -183,11 +183,43 @@ def trim_tft_library(build_env, node):
     return node
 
 
+def packed_help_policy(platform, mcu, src_filter, flags=(), cppdefines=()):
+    if platform != "nordicnrf52" or str(mcu).lower() != "nrf52840":
+        return False
+    if not source_selected(src_filter, COMPANION_SOURCES[0]):
+        return False
+    if any(source_selected(src_filter, source) for source in ROLE_SOURCES):
+        return False
+    values = flag_defines(flags, cppdefines)
+    # Match the C++ #if defined gate, including an explicit =0 definition.
+    return all(values.get(name) is not None for name in
+               ("RAK_4631", "COMPANION_RADIO_FULL"))
+
+
+def compile_packed_help(build_env, node):
+    source = Path(node.srcnode().get_abspath()).resolve()
+    expected = Path(build_env.subst("$PROJECT_DIR/examples/companion_radio/CompanionHelpPacked.cpp")).resolve()
+    if source != expected:
+        return node
+    private_env = build_env.Clone()
+    # The framework appends gnu++11 after pre-scripts. Override only this
+    # source's final environment, leaving MyMesh, libraries and all other
+    # targets on their original language standard and feature context.
+    flags = {name: [value for value in private_env.get(name, ())
+                    if not str(value).startswith("-std=")]
+             for name in ("CCFLAGS", "CXXFLAGS")}
+    flags["CXXFLAGS"].append("-std=gnu++17")
+    private_env.Replace(**flags)
+    return private_env.Object(node)
+
+
 def install(build_env):
     platform = build_env.PioPlatform()
     mcu = build_env.BoardConfig().get("build.mcu", "")
     flags = build_env.get("BUILD_FLAGS", ())
     cppdefines = build_env.get("CPPDEFINES", ())
+    if packed_help_policy(platform.name, mcu, build_env.get("SRC_FILTER", ()), flags, cppdefines):
+        build_env.AddBuildMiddleware(compile_packed_help, "*CompanionHelpPacked.cpp")
     definitions = trim_policy(platform.name, mcu, build_env["PIOENV"],
                               build_env.get("SRC_FILTER", ()), flags, cppdefines)
     infrastructure = bool(definitions)

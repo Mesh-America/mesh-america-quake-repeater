@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from cpp_source import body
 
 ROOT = Path(__file__).resolve().parents[1]
 FEATURES = ['COMPANION_FEATURE_READER=1', 'COMPANION_FEATURE_TEMP_RADIO=1',
@@ -43,7 +44,8 @@ HARNESS = r'''
 #include <string>
 #include <vector>
 #include <utility>
-struct Output {
+class Stream {
+public:
   std::string text, trace;
   std::vector<size_t> writes;
   size_t throttle = 256, credit = size_t(-1);
@@ -67,8 +69,11 @@ struct Output {
     text.append(reinterpret_cast<const char*>(value),n);credit-=n;
     record('W',reinterpret_cast<const char*>(value),n);return n;
   }
-} output;
+};
+using Output=Stream;
+Output output;
 Output& terminalOutput() {return output;}
+@PACKED_IMPLEMENTATION@
 void actualHelp(bool _terminal_mode) {
 @ACTUAL_HELP@
 }
@@ -143,7 +148,9 @@ class CompanionHelpWriterTests(unittest.TestCase):
         start = source.index('    auto& output = terminalOutput();',
                              source.index('} else if (strcmp(command, "help") == 0)'))
         end = source.index('  } else if (handleCommand(command, 0, local_reply))', start)
-        harness = HARNESS.replace('@ACTUAL_HELP@', source[start:end])
+        implementation = body((ROOT / 'examples/companion_radio/CompanionHelpPacked.cpp').read_text(), 'size_t writePackedCompanionHelp(Stream& output)')
+        implementation = '#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL)\nnamespace mesh { namespace companion {\n' + implementation + '\n} }\n#endif\n'
+        harness = HARNESS.replace('@ACTUAL_HELP@', source[start:end]).replace('@PACKED_IMPLEMENTATION@', implementation)
         for name, defines in PROFILES.items():
             with self.subTest(profile=name), tempfile.TemporaryDirectory(prefix='companion-help-') as folder:
                 work = Path(folder);(work / 'test.cpp').write_text(harness)
@@ -163,6 +170,31 @@ class CompanionHelpWriterTests(unittest.TestCase):
                     image = (work / 'test').read_bytes()
                     self.assertNotIn(b'Commands:\r\n  stats-core / stats-radio / stats-radio-diag',image)
 
+
+    def test_cpp11_caller_links_actual_cpp17_packing_translation_unit(self):
+        source=(ROOT/'examples/companion_radio/MyMesh.cpp').read_text()
+        start=source.index('    auto& output = terminalOutput();',source.index('} else if (strcmp(command, "help") == 0)'))
+        end=source.index('  } else if (handleCommand(command, 0, local_reply))',start)
+        consumer=HARNESS.replace('@ACTUAL_HELP@',source[start:end]).replace('@PACKED_IMPLEMENTATION@','')
+        consumer=consumer[:consumer.index('  constexpr char literal[] =')]+"}\n"
+        stream=HARNESS[HARNESS.index('class Stream {'):HARNESS.index('using Output=Stream;')]
+        headers='#include <cstdint>\n#include <algorithm>\n#include <cassert>\n#include <cstdio>\n#include <cstring>\n#include <string>\n#include <vector>\n#include <utility>\n'
+        with tempfile.TemporaryDirectory(prefix='companion-help-language-') as folder:
+            work=Path(folder)
+            (work/'MyMesh.h').write_text(headers+stream)
+            (work/'CompanionHelpPacked.cpp').write_bytes((ROOT/'examples/companion_radio/CompanionHelpPacked.cpp').read_bytes())
+            (work/'consumer.cpp').write_text(consumer)
+            compiler=os.environ.get('CXX','g++')
+            options=['-Os','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-sanitize-recover=all','-fno-pie','-no-pie',*['-D'+v for v in PROFILES['rak_full']],'-I'+str(work),'-I'+str(ROOT/'examples/companion_radio')]
+            for name,standard in [('CompanionHelpPacked','c++17'),('consumer','c++11')]:
+                result=subprocess.run([compiler,'-std='+standard,*options,'-c',str(work/(name+'.cpp')),'-o',str(work/(name+'.o'))],capture_output=True,text=True)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            result=subprocess.run([compiler,*options,str(work/'consumer.o'),str(work/'CompanionHelpPacked.o'),'-o',str(work/'test')],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            result=subprocess.run([str(work/'test')],capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
+            self.assertEqual(hashlib.sha256(result.stdout).hexdigest(),GOLDEN['rak_full']['text'])
+            self.assertNotIn(b'Commands:\r\n  stats-core / stats-radio / stats-radio-diag',(work/'test').read_bytes())
 
 if __name__ == '__main__':
     unittest.main()
