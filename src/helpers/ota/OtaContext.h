@@ -15,6 +15,9 @@
 #include "OtaSelf.h"          // ota_self_firmware() - prefer self-describing EndF identity at begin()
 #include "OtaSelfServePolicy.h"
 #include "OtaBlInfo.h"        // bootloader OTA-apply capability marker (nRF52); cached after first read
+#if defined(OTA_BOOTLOADER_MIGRATION)
+#include "BootloaderMigration.h"
+#endif
 
 // Storage policy for the mOTA context. A "dynamic" context is created on demand
 // and handed back once idle, so its multi-kilobyte workspace only occupies RAM
@@ -240,6 +243,18 @@ struct OtaContext {
   // Apply the COMPLETE fetched .mota (platform dispatch) and arm the slot; sets apply_pending on success
   // so the deferred-reboot path (mesh loop) takes over. Caller ensures the fetch is COMPLETE. Shared by
   // manual `ota applydelta` and the auto-install path.
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  bool embeddedBootloaderIdle() const {
+    const auto state = manager.fetchState();
+    return (state == OtaManager::IDLE || state == OtaManager::COMPLETE || state == OtaManager::FAILED) &&
+        !apply_pending && !bootloader_apply_pending &&
+        !manager.pendingServeJobs() && !manager.pendingManifestJobs()
+#if defined(OTA_SD_STORE)
+        && !sdCacheFetching()
+#endif
+        ;
+  }
+#endif
   bool apply_fetched(char* msg) {
     return apply_fetched_impl(nullptr, false, msg);
   }
@@ -264,6 +279,11 @@ struct OtaContext {
   }
 
   bool apply_fetched_impl(const uint8_t* rescue_base_hash, bool trusted_auto, char* msg) {
+#if defined(OTA_BOOTLOADER_MIGRATION)
+    if (bootloader_migration_pending()) {
+      strcpy(msg, "embedded bootloader update is already armed"); return false;
+    }
+#endif
     // The armed update owns its store and handoff until deferred reboot.
     // Re-entering an applier can reset that handoff before a later read fails.
     if (apply_pending || bootloader_apply_pending) {
@@ -398,6 +418,11 @@ struct OtaContext {
 
   bool apply_fetched_bootloader(const uint8_t operator_mid[4],
                                 const uint8_t operator_hash8[8], char* msg) {
+#if defined(OTA_BOOTLOADER_MIGRATION)
+    if (bootloader_migration_pending()) {
+      strcpy(msg, "embedded bootloader update is already armed"); return false;
+    }
+#endif
     if (apply_pending || bootloader_apply_pending) {
       strcpy(msg, "another update is already armed");
       return false;

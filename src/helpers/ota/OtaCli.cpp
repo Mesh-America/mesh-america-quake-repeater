@@ -1030,6 +1030,26 @@ static __attribute__((noinline)) bool handle_control_command(
 #endif
 
   } else if (is_cmd(a, "bootloader|blupdate", &rest)) {
+#if defined(OTA_BOOTLOADER_MIGRATION)
+    const char* embedded = nullptr;
+    if (is_cmd(rest, "embedded", &embedded)) {
+      if (*embedded == 0 || strcmp(embedded, "status") == 0) {
+        bootloader_migration_status(reply, 160);
+      } else if (strcmp(embedded, "audit") == 0) {
+        bootloader_migration_audit(reply, 160);
+      } else {
+        const char* confirmation = nullptr;
+        if (!is_cmd(embedded, "install", &confirmation)) {
+          strcpy(reply, "ERR usage: ota bootloader embedded [status|audit|install HASH16]");
+        } else if (!c.embeddedBootloaderIdle()) {
+          strcpy(reply, "ERR another OTA operation is active");
+        } else {
+          bootloader_migration_request(confirmation, reply, 160);
+        }
+      }
+      return true;
+    }
+#endif
 #if defined(NRF52_PLATFORM) && !defined(OTA_SEEDER_ONLY) && \
     (defined(OTA_QSPI_BOOTLOADER_UPDATE) || defined(OTA_INTERNAL_BOOTLOADER_UPDATE) || \
      defined(OTA_SD_BOOTLOADER_UPDATE))

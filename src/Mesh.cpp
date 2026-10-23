@@ -10,6 +10,9 @@
 #include "helpers/ota/OtaContext.h"   // OTA mesh-integration is centralized here so every role gets it
 #include "helpers/ota/OtaSpeedConfig.h"
 #include "helpers/ota/OtaProtocol.h"  // decode_adv -> the `ota neighbors` discovery table
+#if defined(OTA_BOOTLOADER_MIGRATION)
+#include "helpers/ota/BootloaderMigration.h"
+#endif
 #if MESH_ENABLE_OTA_KISS_DIRECT
 #include "helpers/ota/OtaDirectWire.h"
 #endif
@@ -419,6 +422,9 @@ void Mesh::loop() {
 }
 
 bool Mesh::hasPendingOtaApply() const {
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  if (ota::bootloader_migration_pending()) return true;
+#endif
 #if defined(ENABLE_OTA) && !defined(OTA_SEEDER_ONLY)
   // A released dynamic context cannot hold a pending apply: the context is only
   // handed back once apply_pending is clear.
@@ -474,6 +480,17 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
     }
   }
 #if defined(ENABLE_OTA)
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  if (ota::bootloader_migration_pending()) {
+    // This bridge owns no OTA workspace. Service it even after a dynamic
+    // context has been released, and never allocate one just to poll it.
+    const ota::OtaContext* context = ota::ota_context_if_active();
+    const bool ota_idle = !context || context->embeddedBootloaderIdle();
+    const bool outbound_idle = !hasPendingRadioWork();
+    const bool ready = outbound_idle && ota_idle && prepareForOtaReboot();
+    ota::bootloader_migration_tick(ready, ota_idle);
+  }
+#endif
 #if OTA_DYNAMIC_CONTEXT
   // Nothing below can run without storage, and a released context holds no
   // pending apply or egress. Bail before any ota_ctx() dereference.

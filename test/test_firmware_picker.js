@@ -46,8 +46,8 @@ for (const hardware of ["WioTrackerL1-1W", "WioTrackerL1Eink"]) {
   assert.strictEqual(picker.bootloaderForHardware(bootloaderCatalog, hardware, "nrf52").id, "wio_tracker_l1");
 }
 assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "GAT562_Mesh_Watch13", "nrf52").reason.includes("vibration motor"));
-assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "wio_wm1110", "nrf52").reason.includes("identity and installation route still need qualification"));
-const nextBootloaderTag = "v0.11.0-OTAFIX2.4.12";
+assert(picker.unavailableBootloaderForHardware(bootloaderCatalog, "wio_wm1110", "nrf52").reason.includes("not proven native-USB UF2"));
+const nextBootloaderTag = "v0.11.0-OTAFIX2.4.13";
 const nextBootloaderRelease = {
   tag_name: nextBootloaderTag, draft: false, prerelease: false,
   html_url: "https://github.com/" + bootloaderManifest.repository + "/releases/tag/" + nextBootloaderTag,
@@ -60,7 +60,7 @@ const nextBootloaderRelease = {
   }),
 };
 const nextBootloaderCatalog = picker.buildBootloaderCatalog(bootloaderManifest, nextBootloaderRelease);
-assert.strictEqual(nextBootloaderCatalog.version, "2.4.12");
+assert.strictEqual(nextBootloaderCatalog.version, "2.4.13");
 assert(picker.bootloaderForHardware(nextBootloaderCatalog, "t1000e", "nrf52").files.uf2.url.includes(nextBootloaderTag));
 const ambiguousBootloader = structuredClone(nextBootloaderRelease);
 ambiguousBootloader.assets.push(ambiguousBootloader.assets.find(a => a.name.startsWith("update-heltec_t096_")));

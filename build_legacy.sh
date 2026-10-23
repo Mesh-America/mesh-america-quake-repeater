@@ -149,6 +149,8 @@ Options:
                  Default for Option 3; Companion USB updates remain supported.
                  Cable-only infrastructure platforms are reported and omitted.
   --allow-no-ota: Include cable-only development targets instead.
+  --with-bootloader <2.4.12>: Build a separate nRF52 Repeater/Room variant
+                carrying the exact-board OTAFIX bootloader for authenticated activation.
   --background: Run the selected build as a persistent detached job. Its log
                 and status live outside OUTPUT_DIR so --clean cannot erase them.
 
@@ -1051,6 +1053,13 @@ parse_cli_options() {
       --require-ota)
         REQUIRE_OTA_UPDATES=1
         shift
+        ;;
+      --with-bootloader)
+        if [ "$#" -lt 2 ] || [ "$2" != "2.4.12" ]; then
+          echo "--with-bootloader requires the pinned release 2.4.12"; return 1
+        fi
+        export MESHCORE_NRF52_EMBED_BOOTLOADER="$2"
+        shift 2
         ;;
       --allow-no-ota)
         REQUIRE_OTA_UPDATES=0
@@ -3480,6 +3489,9 @@ record_application_expectation() {
 declare_full_logging_application_contract() {
   local env_name=$1
   BUILD_APPLICATION_EXPECTATIONS=()
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ]; then
+    record_application_expectation "bootloader.embedded" "BL embedded 2.4.12"
+  fi
   if requires_full_usb_packet_logging "$env_name" \
       || is_xiao_qspi_canonical_repeater_build "$env_name" \
       || is_nrf52_paired_runtime_logging_build "$env_name"; then
@@ -4671,7 +4683,8 @@ write_build_capability_manifest() {
   local env_platform=$2
   local pio_env_name=$3
   local firmware_filename=$4
-  local artifact_target=${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}
+  local artifact_target
+  artifact_target=$(embedded_bootloader_artifact_target "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}") || return 1
   if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ] \
       && is_nrf52_sensor_ota_pair_target "$env_name"; then
     artifact_target+="-${NRF52_OTA_SENSOR_PROFILE}-ota"
@@ -4812,7 +4825,7 @@ output_artifact_exists() {
 compute_build_recipe_digest() {
   local env_name=$1 env_platform=$2 pio_env_name=$3 embedded_version=$4
   local original_flags=$5 full_source_commit=$6 artifact_target checkout_dir
-  artifact_target=${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}
+  artifact_target=$(embedded_bootloader_artifact_target "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}") || return 1
   if [ -n "${NRF52_OTA_SENSOR_PROFILE:-}" ] \
       && is_nrf52_sensor_ota_pair_target "$env_name"; then
     artifact_target+="-${NRF52_OTA_SENSOR_PROFILE}-ota"
@@ -4883,7 +4896,7 @@ build_artifacts_exist() {
     nrf52_sensor_profile_manifest_matches \
       "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" "$env_name" \
       "$NRF52_OTA_SENSOR_PROFILE" \
-      "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}-${NRF52_OTA_SENSOR_PROFILE}-ota" || return 1
+      "$(embedded_bootloader_artifact_target "${FIRMWARE_OUTPUT_ENV_NAME:-$env_name}")-${NRF52_OTA_SENSOR_PROFILE}-ota" || return 1
   fi
   # Old manifests can be marked verified while lacking a newly required
   # capability. Never let --resume bypass the current packaged-logging gate.
@@ -4976,14 +4989,30 @@ collect_build_artifacts() {
   python3 scripts/package_pocket_gui_license.py collect "$build_output_dir" \
     --stem "${OUTPUT_DIR}/${firmware_filename}" || return $?
 
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ]; then
+    python3 scripts/qualify_nrf52_embedded_bootloader.py "$build_output_dir" \
+      "${OUTPUT_DIR}/${firmware_filename}.capabilities.json" || return $?
+  fi
+
   python3 scripts/firmware_memory_manifest.py package "$build_output_dir" \
     --stem "${OUTPUT_DIR}/${firmware_filename}" || return $?
+}
+
+embedded_bootloader_artifact_target() {
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ]; then
+    [ "$MESHCORE_NRF52_EMBED_BOOTLOADER" = "2.4.12" ] || return 1
+    echo "${1}-with-bootloader-${MESHCORE_NRF52_EMBED_BOOTLOADER}"
+  else
+    echo "$1"
+  fi
 }
 
 get_firmware_filename() {
   local env_name=$1
   local firmware_version_string=$2
   local filename_infix=$FIRMWARE_FILENAME_INFIX
+  local artifact_env_name
+  artifact_env_name=$(embedded_bootloader_artifact_target "$env_name") || return 1
 
   # Make LoRa-OTA artifacts obvious without changing the PlatformIO environment
   # name or the stable MOTA target identity. FULL artifacts retain their
@@ -5001,9 +5030,9 @@ get_firmware_filename() {
   fi
 
   if [ -n "$filename_infix" ]; then
-    echo "${env_name}-${filename_infix}-${firmware_version_string}"
+    echo "${artifact_env_name}-${filename_infix}-${firmware_version_string}"
   else
-    echo "${env_name}-${firmware_version_string}"
+    echo "${artifact_env_name}-${firmware_version_string}"
   fi
 }
 
@@ -5145,6 +5174,14 @@ build_firmware_one_profile() {
   if ! is_supported_platform "$env_platform"; then
     echo "Unsupported or unknown platform for env: $env_name"
     return 1
+  fi
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ]; then
+    if [ "$MESHCORE_NRF52_EMBED_BOOTLOADER" != "2.4.12" ] \
+        || [ "$env_platform" != "NRF52_PLATFORM" ] \
+        || ! { is_repeater_role_target "$env_name" || is_room_server_role_target "$env_name"; }; then
+      echo "Embedded bootloader variants require an nRF52 Repeater or Room and release 2.4.12." >&2
+      return 1
+    fi
   fi
   pio_env_name=$(get_pio_build_env "$env_name")
   if { [ "$COMPLETE_OTA_FIRST_PASS" = "1" ] \
@@ -5377,6 +5414,12 @@ build_firmware_one_profile() {
   if ! pio_env_option_contains "$pio_env_name" extra_scripts \
       "scripts/check_firmware_ram.py"; then
     append_platformio_extra_script "post:scripts/check_firmware_ram.py"
+  fi
+
+  if [ -n "${MESHCORE_NRF52_EMBED_BOOTLOADER:-}" ] \
+      && ! pio_env_option_contains "$pio_env_name" extra_scripts \
+          "scripts/nrf52_embedded_bootloader_pio.py"; then
+    append_platformio_extra_script "pre:scripts/nrf52_embedded_bootloader_pio.py"
   fi
 
   recipe_build_flags=$PLATFORMIO_BUILD_FLAGS

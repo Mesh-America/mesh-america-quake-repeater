@@ -33,6 +33,13 @@ requested = (
 # replace its own bootloader. Keep its ordinary application OTA path and
 # linker when explicitly building a legacy-compatible destination image.
 legacy_flash = os.environ.get("MESHCORE_NRF52_LEGACY_FLASH_OTA")
+if os.environ.get("MESHCORE_NRF52_LEGACY_BOOTLOADER"):
+    if os.environ.get("MESHCORE_NRF52_EMBED_BOOTLOADER") != "2.4.12":
+        raise RuntimeError("legacy bootloader input requires the embedded 2.4.12 variant")
+    if legacy_flash not in (None, "1"):
+        raise RuntimeError("legacy bootloader delivery cannot use retained-RAM staging")
+    legacy_flash = "1"
+    requested = True  # the resource hook separately verifies the exact RAK legacy profile
 if legacy_flash not in (None, "0", "1"):
     raise RuntimeError("MESHCORE_NRF52_LEGACY_FLASH_OTA must be 0 or 1")
 if legacy_flash == "1":

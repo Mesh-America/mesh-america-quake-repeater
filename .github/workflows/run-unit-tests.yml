@@ -262,6 +262,13 @@ jobs:
       - name: Verify bootloader version regressions without hardware or downloads
         run: python3 -B test/test_nrf52_bootloader_version.py -v
 
+      - name: Verify embedded bootloader variant and guarded activation
+        run: |
+          python3 -B test/test_nrf52_embedded_variant.py -v
+          python3 -B test/test_nrf52_embedded_bootloader.py -v
+          python3 -B tools/mota/test_bootloader_migration.py -v
+          python3 -B tools/mota/test_bootloader_migration_runtime.py -v
+
       - name: Install signed-package verification dependency
         run: python3 -m pip install cryptography
 
