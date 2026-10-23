@@ -105,9 +105,11 @@ int main() {
 
 class RakSdContextHandoffTests(unittest.TestCase):
     def test_card_maintenance_preserves_non_sd_install_sessions(self):
-        source = (ROOT / 'src/helpers/CommonCLI.cpp').read_text()
-        methods = '\n'.join(extract_braced(source, signature) for signature in (
-            'static void formatSdCardElapsed(', 'bool CommonCLI::handleSdCardSetCmd('))
+        source = (ROOT / 'src/helpers/SdCardCLI.cpp').read_text()
+        methods = 'namespace mesh { namespace cli {\n' + '\n'.join(
+            extract_braced(source, signature) for signature in (
+                'static bool sdCardBusAvailable(', 'static void formatSdCardElapsed(',
+                'bool handleSdCardSet(')) + '\n} }\n'
         fixture = (ROOT / 'test/fixtures/rak15002_sd_seeder/maintenance.cpp').read_text()
         for profile in (
                 ['OTA_RAK15002_SD_STORE', 'OTA_RAK_AUTO_STORE'],
@@ -137,7 +139,7 @@ class RakSdContextHandoffTests(unittest.TestCase):
                 build(self, harness, ['OTA_RAK15002_SD_STORE',
                                      *(['OTA_SEEDER_ONLY'] if seeder else [])])
 
-    def test_companion_physical_ethernet_and_sd_commands_keep_failed_admission_off(self):
+    def test_companion_physical_ethernet_commands_keep_failed_admission_off(self):
         source = (ROOT / 'examples/companion_radio/main.cpp').read_text()
         method = extract_braced(source, 'bool handleRak4631PeripheralCommand(')
         fixture = r'''
@@ -190,25 +192,15 @@ int main() {
   ethernet_interface.state = "online";
   assert(handleRak4631PeripheralCommand("get eth", reply, sizeof reply));
   assert(strstr(reply, "eth=online"));
-  assert(handleRak4631PeripheralCommand("get sdcard free", reply, sizeof reply));
-  assert(strstr(reply, "Ethernet off") && !mesh::ota::acquires);
   assert(handleRak4631PeripheralCommand("set eth off", reply, sizeof reply));
   assert(strstr(reply, "eth=stopping") && ethernet_interface.active);
-  assert(handleRak4631PeripheralCommand("get sdcard", reply, sizeof reply));
-  assert(strstr(reply, "Ethernet off") && !mesh::ota::acquires);
   ethernet_interface.active = false; ethernet_interface.state = "off";
   assert(handleRak4631PeripheralCommand("get eth", reply, sizeof reply));
   assert(strstr(reply, "eth=off"));
   assert(!ethernet_interface.active);
-  mesh::ota::admission = false;
-  assert(handleRak4631PeripheralCommand("get sdcard", reply, sizeof reply));
-  assert(strstr(reply, "queue busy") && !mesh::ota::context.card.queries);
-  mesh::ota::admission = true;
-  assert(handleRak4631PeripheralCommand("get sdcard free", reply, sizeof reply));
-  assert(strstr(reply, "used=42 free=4096 bytes") && mesh::ota::context.card.queries == 1);
-  mesh::ota::context.card.okay = false;
-  assert(handleRak4631PeripheralCommand("get sdcard", reply, sizeof reply));
-  assert(strstr(reply, "no SD card"));
+  // SD command admission moved into the shared production handler, executed
+  // under all SD profiles by test_sdcard_cli_parity.py.
+  assert(!handleRak4631PeripheralCommand("get sdcard free", reply, sizeof reply));
 }
 '''.replace('@METHOD@', method)
         build(self, fixture)

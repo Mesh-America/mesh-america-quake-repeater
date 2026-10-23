@@ -68,6 +68,7 @@ public:
   // and be reset automatically.
   void feedWatchdog(bool enabled = true);
   void serviceWatchdog() override;
+  bool getSystemWatchdogRunning(bool& running) const override;
   virtual uint8_t getStartupReason() const override { return startup_reason; }
   virtual float getMCUTemperature() override;
   void reboot() override;
@@ -110,6 +111,7 @@ public:
   void attachDynamicPrefs(KeyValueStore* prefs) { (void)prefs; }  // no-op
 
 #ifdef NRF52_POWER_MANAGEMENT
+  bool supportsPowerManagement() const override { return true; }
   uint16_t getBootVoltage() override { return boot_voltage_mv; }
   virtual uint32_t getResetReason() const override { return reset_reason; }
   uint8_t getShutdownReason() const override { return shutdown_reason; }

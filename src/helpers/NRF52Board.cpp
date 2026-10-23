@@ -370,6 +370,13 @@ void NRF52Board::serviceWatchdog() {
 #endif
 }
 
+bool NRF52Board::getSystemWatchdogRunning(bool& running) const {
+  // Read even if this build's feed policy is disabled: a bootloader can leave
+  // a watchdog running. The query must describe the hardware, not a preference.
+  running = NRF_WDT->RUNSTATUS != 0;
+  return true;
+}
+
 #ifdef NRF52_POWER_MANAGEMENT
 // Power Management global variables
 uint32_t g_nrf52_reset_reason = 0;     // Reset/Startup reason

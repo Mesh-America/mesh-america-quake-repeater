@@ -69,6 +69,9 @@ namespace mesh { class BeaconManager; }
 #include <helpers/TerminalDisplayFilter.h>
 #include <helpers/UsbLogging.h>
 #include <target.h>
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+#include <helpers/SdCardCLI.h>
+#endif
 #if defined(OTA_SHARED_COMPANION_QUEUE)
 #include <helpers/BorrowableFrameBuffer.h>
 #include <helpers/ota/OtaContext.h>
@@ -777,6 +780,9 @@ private:
 
   DataStore* _store;
   mesh::RadioProfileCLI _radio_profiles;
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+  mesh::cli::SdCardCLIState _sdcard_cli;
+#endif
   mesh::MorseReplyHandoff _morse_reply;
   bool _morse_reply_admission = false;
 #if MESH_ENABLE_MESHTEXT_CHAT

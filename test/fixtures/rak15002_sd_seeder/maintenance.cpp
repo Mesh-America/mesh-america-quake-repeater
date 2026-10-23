@@ -1,3 +1,4 @@
+#include <helpers/SdCardCLI.h>
 // Compile the real card-maintenance CLI around its side-effect boundaries.
 // No filesystem, flash, bootloader, or radio hardware is accessed here.
 #include <helpers/CLICommandUtils.h>
@@ -14,9 +15,12 @@ static const char* skipSpacesConst(const char* in) {
   return in;
 }
 static constexpr uint32_t SDCARD_ACTION_COOLDOWN_MILLIS = 300000;
-struct Board {};
+namespace mesh { class MainBoard {}; }
+using Board = mesh::MainBoard;
 
 namespace mesh { namespace ota {
+[[maybe_unused]] static bool ethernet_owned = false;
+[[maybe_unused]] static bool rak4631_ethernet_owns_spi() { return ethernet_owned; }
 struct OtaManager {
   enum State { IDLE, FETCHING, COMPLETE, PAUSED, FAILED };
   State state = IDLE;
@@ -66,9 +70,10 @@ static OtaContext& ota_ctx() { return context; }
 struct CommonCLI {
   Board board;
   Board* _board = &board;
-  bool _sdcard_format_recorded = false, _sdcard_erase_recorded = false;
-  uint32_t _sdcard_format_at = 0, _sdcard_erase_at = 0;
-  bool handleSdCardSetCmd(const char*, char*);
+  mesh::cli::SdCardCLIState state;
+  bool handleSdCardSetCmd(const char* config, char* reply) {
+    return mesh::cli::handleSdCardSet(state, board, config, reply, 160);
+  }
 };
 @METHODS@
 
@@ -88,8 +93,8 @@ int main() {
           CommonCLI cli;
           // --force only bypasses the action cooldown, never store ownership.
           if (strstr(command, "--force")) {
-            cli._sdcard_format_recorded = cli._sdcard_erase_recorded = true;
-            cli._sdcard_format_at = cli._sdcard_erase_at = clock_ms;
+            cli.state.format_recorded = cli.state.erase_recorded = true;
+            cli.state.format_at = cli.state.erase_at = clock_ms;
           }
           struct Reply { char text[160]; char guard[8] = "guarded"; } reply{};
           assert(cli.handleSdCardSetCmd(command, reply.text));

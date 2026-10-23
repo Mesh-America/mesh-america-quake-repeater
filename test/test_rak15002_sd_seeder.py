@@ -200,10 +200,11 @@ int main() { EnvironmentSensorManager sensors; assert(sensors.detectWisBlockStor
                 build(self, harness, defines)
 
     def test_sd_cli_cold_context_oom_validation_and_card_actions(self):
-        source = (ROOT / "src/helpers/CommonCLI.cpp").read_text()
-        methods = "\n".join(extract_braced(source, signature) for signature in (
-            "static void formatSdCardElapsed(", "bool CommonCLI::handleSdCardSetCmd(",
-            "bool CommonCLI::handleSdCardGetCmd("))
+        source = (ROOT / "src/helpers/SdCardCLI.cpp").read_text()
+        methods = "namespace mesh { namespace cli {\n" + "\n".join(
+            extract_braced(source, signature) for signature in (
+                "static bool sdCardBusAvailable(", "static void formatSdCardElapsed(",
+                "bool handleSdCardSet(", "bool handleSdCardGet(")) + "\n} }\n"
         fixture = (FIXTURES / "cli.cpp").read_text()
         build(self, fixture.replace("@METHODS@", methods), ["NRF52_PLATFORM", "OTA_SD_STORE"])
 

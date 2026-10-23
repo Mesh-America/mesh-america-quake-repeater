@@ -1,3 +1,4 @@
+#include <helpers/SdCardCLI.h>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -8,8 +9,11 @@ static uint32_t clock_ms = 500000;
 static uint32_t millis() { return clock_ms; }
 static const char* skipSpacesConst(const char* in) { while (*in == ' ' || *in == '\t') ++in; return in; }
 static constexpr uint32_t SDCARD_ACTION_COOLDOWN_MILLIS = 300000;
-struct Board {};
+namespace mesh { class MainBoard {}; }
+using Board = mesh::MainBoard;
 namespace mesh { namespace ota {
+[[maybe_unused]] static bool ethernet_owned = false;
+[[maybe_unused]] static bool rak4631_ethernet_owns_spi() { return ethernet_owned; }
 struct OtaStoreSdNrf52 {
   int formats = 0, erases = 0, spaces = 0, lists = 0;
   uint16_t page = 0;
@@ -53,10 +57,13 @@ static void formatStorageBytes(char* reply, size_t cap, uint64_t value) { snprin
 struct CommonCLI {
   Board board;
   Board* _board = &board;
-  bool _sdcard_format_recorded = false, _sdcard_erase_recorded = false;
-  uint32_t _sdcard_format_at = 0, _sdcard_erase_at = 0;
-  bool handleSdCardSetCmd(const char*, char*);
-  bool handleSdCardGetCmd(const char*, char*);
+  mesh::cli::SdCardCLIState state;
+  bool handleSdCardSetCmd(const char* config, char* reply) {
+    return mesh::cli::handleSdCardSet(state, board, config, reply, 160);
+  }
+  bool handleSdCardGetCmd(const char* config, char* reply) {
+    return mesh::cli::handleSdCardGet(state, board, config, reply, 160);
+  }
 };
 @METHODS@
 

@@ -96,6 +96,12 @@ over the normal binary USB, BLE, or TCP connection:
 | Command | Availability |
 |---|---|
 | `stats-core`, `stats-radio`, `stats-radio-diag`, `stats-packets` | Local terminal and binary command `0x42` |
+| [`clear stats`, `get rxps.wd`, `get cad`](companion_radio_diagnostics.md) | Companion terminal and command `0x42`; clearing statistics also clears sticky packet error flags |
+| [`get/set radio.rxps.rfrx_disabled`](companion_radio_diagnostics.md) | Supported radio with an RXEN pin; applies for this boot and preserves radio ownership |
+| [`power`, `get pwrmgt.support`, `get pwrmgt.source`, `get pwrmgt.bootmv`](companion_power_diagnostics.md) | Board power capabilities determine available readings |
+| [`get system.watchdog`](companion_power_diagnostics.md) | Actual nRF52 hardware status; Companion does not provide a saved on/off setter |
+| [`get bootloader.ver`](cli_commands.md#view-the-bootloader-version-nrf52-only) | nRF52 Companion terminal and command `0x42`; unidentifiable metadata returns `unknown` |
+| [`get/set sdcard`](test-results/companion_cli_parity_2026-10-23.md#shared-sd-commands) | nRF52 builds with SD OTA storage; maintenance retains OTA and Ethernet ownership guards |
 | `erase` | Local terminal and binary command `0x42`; reboot after erasing stored settings |
 | `set freq <MHz>` | Local terminal, binary command `0x42`, and authorized LoRa CLI; reboot to apply |
 | [`get public.key`](cli_commands.md#view-this-nodes-public-key) | Companion text terminal and binary command `0x42`; read-only, no private-key export feature required |

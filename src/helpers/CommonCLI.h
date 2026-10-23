@@ -18,6 +18,9 @@
 #include <helpers/WirelessControl.h>
 #include <helpers/FleetCommand.h>
 #include <helpers/BatteryForwarding.h>
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+#include <helpers/SdCardCLI.h>
+#endif
 #if defined(WITH_UDP_BRIDGE)
 #include <helpers/UDPBridgePrefs.h>
 #endif
@@ -905,10 +908,7 @@ class CommonCLI {
   ClientACL* _acl;
   char tmp[COMMON_CLI_TMP_LEN];
 #if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
-  bool _sdcard_format_recorded = false;
-  bool _sdcard_erase_recorded = false;
-  uint32_t _sdcard_format_at = 0;
-  uint32_t _sdcard_erase_at = 0;
+  mesh::cli::SdCardCLIState _sdcard_cli;
 #endif
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs _mqtt_prefs;

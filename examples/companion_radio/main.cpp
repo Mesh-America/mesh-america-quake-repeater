@@ -664,21 +664,6 @@ bool handleRak4631PeripheralCommand(const char* command, char* reply, size_t cap
     }
     return true;
   }
-  if (strcmp(command, "get sdcard") == 0 || strcmp(command, "get sdcard free") == 0) {
-    if (ethernet_interface.hardwareActive()) {
-      snprintf(reply, capacity, "Error: turn Ethernet off before accessing SD");
-    } else if (mesh::ota::ota_acquire_context(reply, capacity)) {
-      uint64_t used = 0, free = 0;
-      auto& card = mesh::ota::ota_ctx().sdStagingStore();
-      if (card.getSpace(board, used, free)) {
-        snprintf(reply, capacity, "> SD used=%llu free=%llu bytes; ota cache for archive status",
-                 (unsigned long long)used, (unsigned long long)free);
-      } else {
-        snprintf(reply, capacity, "Error: %s", card.last_error());
-      }
-    }
-    return true;
-  }
   return false;
 }
 #endif

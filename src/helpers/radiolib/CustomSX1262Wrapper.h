@@ -202,12 +202,21 @@ public:
     if (isCarrierWaveActive()) return false;
     if (!supportsRxPowerSavingRfRxDisable()) return false;
 
-    if (_rx_ps_armed) stopReceiveDutyCycle();
-    ((CustomSX1262 *)_radio)->setRxPowerSavingRfRxDisabled(disabled);
+    // Do not stop duty-cycle RX or change its policy before admission. A BUSY
+    // sleep window, TX, or unread RX completion still owns the current mode.
+    const uint8_t resume_rx = beginReconfigure();
+    if (resume_rx > 1) return false;
 
-    // Re-arm the configured receive mode immediately without disturbing an
-    // unread RX interrupt or an in-flight transmission.
-    return setRxPowerSaving(_rx_ps_enabled, _rx_ps_rx_us, _rx_ps_sleep_us);
+    const bool previous = isRxPowerSavingRfRxDisabled();
+    ((CustomSX1262 *)_radio)->setRxPowerSavingRfRxDisabled(disabled);
+    endReconfigure(resume_rx);
+    if (resume_rx && !isInRecvMode()) {
+      // startRecv already retained its bounded retry/backoff. That retry must
+      // use the old RXEN policy; never report a failed RX restoration as OK.
+      ((CustomSX1262 *)_radio)->setRxPowerSavingRfRxDisabled(previous);
+      return false;
+    }
+    return true;
   }
 
   bool isRxPowerSavingRfRxDisabled() const override {

@@ -2781,6 +2781,11 @@ before relying on automatic forwarding limits.
 - The nRF52 hardware cannot stop a watchdog after it has started. Disabling is persisted immediately, then the current firmware stops feeding it so the board performs one watchdog restart within 60 seconds. It remains off after that restart.
 - This setting is nRF52-only. The SoftDevice flash deadlock does not apply to ESP32, whose existing watchdog behavior is unchanged.
 
+Companion supports the getter and reports the actual hardware running state.
+Its application always feeds the watchdog and has no saved on/off policy;
+`set system.watchdog ...` therefore reports that control is unavailable. The
+persistent on/off behavior above applies to infrastructure firmware.
+
 ---
 
 #### Estimate and correct infrastructure-node time after startup
@@ -6605,9 +6610,15 @@ off at boot and is deliberately controlled only for the current boot:
 get eth
 set eth on
 set eth off
-get sdcard [free]
+get sdcard free
 ota cache [on|off]
 ```
+
+SD-capable nRF52 Companion builds also share the infrastructure SD commands:
+`get sdcard ls [page]`, `get sdcard dir [page]`, maintenance history, and
+`set sdcard format|erase [--force]`. Bare `get sdcard` reports maintenance
+history; use `get sdcard free` for capacity. See the
+[SD command details and ownership guards](test-results/companion_cli_parity_2026-10-23.md#shared-sd-commands).
 
 Before `set eth on`, remove the SD card and finish/cancel any active OTA
 capture, transfer, serving, or host-folder work. The command rejects an

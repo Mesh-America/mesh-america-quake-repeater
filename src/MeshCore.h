@@ -195,6 +195,12 @@ public:
   // internally bounded operations can use this while retaining their own
   // timeout. Boards without an explicit watchdog need no implementation.
   virtual void serviceWatchdog() { /* no op */ }
+  // Query the actual hardware state without starting, feeding or stopping a
+  // watchdog. False means this board has no shared runtime status reader.
+  virtual bool getSystemWatchdogRunning(bool& running) const {
+    (void)running;
+    return false;
+  }
   virtual void enterDeepSleep(uint32_t secs) { (void)secs; }
   // Called by example setup() functions to signal that boot is complete.
   // Boards may override to stop a boot-indicator LED sequence or similar.
@@ -298,6 +304,7 @@ public:
 #endif
 
   // Power management interface (boards with power management override these)
+  virtual bool supportsPowerManagement() const { return false; }
   virtual bool isPwrMgtInitialised() const { return false; }
   virtual bool isExternalPowered() { return false; }
   virtual bool isUsbDataConnected() { return false; }

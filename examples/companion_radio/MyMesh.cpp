@@ -22,6 +22,8 @@
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
 #include <helpers/CompanionStartupFrequency.h>
+#include <helpers/CompanionRadioDiagnostics.h>
+#include <helpers/CompanionPowerDiagnostics.h>
 #include <helpers/CompanionTxRoutingCLI.h>
 #include <helpers/CompanionTrafficRouting.h>
 #include <helpers/CompanionChannelAlias.h>
@@ -3613,9 +3615,8 @@ bool MyMesh::handleCadCommand(const char* command, char* reply,
     } else {
       snprintf(maximum, sizeof(maximum), "%u", (unsigned)_prefs.cad_max_duration_ms);
     }
-    snprintf(reply, reply_size,
-             "radio.cad %s, scan=%s ms, retry=%s ms, max=%s ms",
-             _prefs.cad_enabled ? "on" : "off", scan, retry, maximum);
+    mesh::companion::formatCadDiagnostics(reply, reply_size,
+        _prefs.cad_enabled != 0, scan, retry, maximum, board.n_cad_busy);
     return true;
   }
 
@@ -3894,11 +3895,15 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   }
 #endif
   if (mesh::powerdiag::handleCommand(command, reply, reply_size, millis())) return true;
+  if (mesh::companion::handlePowerDiagnosticsCommand(board, command, reply, reply_size)) return true;
 #if defined(ESP32_PLATFORM)
   if (mesh::esp32::cpuclock::handleCommand(board, _prefs.cpu_freq_mhz,
           _prefs.powersaving_enabled != 0, command, reply, reply_size,
           [this]() { return savePrefs(); })) return true;
   if (mesh::esp32::handlePowerTestCommand(command, reply, reply_size, true)) return true;
+#endif
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+  if (mesh::cli::handleSdCardCommand(_sdcard_cli, board, command, reply, reply_size)) return true;
 #endif
 #if defined(OTA_RAK15002_SD_STORE) && defined(ETHERNET_USE_RAK13800)
   if (handleRak4631PeripheralCommand(command, reply, reply_size)) return true;
@@ -3948,6 +3953,12 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
   if (handleCompanionBluetoothCommand(command, reply, reply_size)) return true;
   if (handleCompanionWirelessCommand(command, reply, reply_size)) return true;
   if (handleRxPowerSavingGetCommand(command, reply, reply_size)) return true;
+  if (mesh::companion::handleRadioDiagnosticsCommand(
+          radio_driver, _radio_available, command, reply, reply_size, [this]() {
+            radio_driver.resetStats();
+            this->resetStats();
+            static_cast<SimpleMeshTables*>(getTables())->resetStats();
+          })) return true;
 
   if (strcmp(command, "get powersaving") == 0 || strcmp(command, "powersaving") == 0) {
     snprintf(reply, reply_size, "> %s", _prefs.powersaving_enabled ? "on" : "off");
@@ -10448,9 +10459,18 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
 #endif
 #if defined(OTA_RAK15002_SD_STORE) && defined(ETHERNET_USE_RAK13800)
     output.print(
-        "  get eth / set eth on|off (physical RAK13800; default off, this boot)\r\n"
-        "  get sdcard [free] / ota cache [on|off] (RAK15002; mutually exclusive with Ethernet)\r\n");
+        "  get eth / set eth on|off (physical RAK13800; default off, this boot)\r\n");
 #endif
+#if defined(NRF52_PLATFORM) && defined(OTA_SD_STORE)
+    output.print(
+        "  get sdcard [free|ls|dir [page]|format|erase|*]\r\n"
+        "  set sdcard format|erase [--force]\r\n"
+        "  ota cache [on|off] (SD archive)\r\n");
+#endif
+    output.print(
+        "  power / get pwrmgt.support / get pwrmgt.source / get pwrmgt.bootmv\r\n"
+        "  get system.watchdog (hardware status)\r\n"
+        "  get bootloader.ver\r\n");
     output.print(
         "  get pwrmgt.bootreason\r\n"
 #if COMPANION_FEATURE_MEMORY_DIAGNOSTICS
@@ -10548,6 +10568,10 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
         "  get/set radio.cad <on|off>\r\n"
         "  set radio.cad timings <scan_ms|auto> <retry_ms|auto> <max_ms|auto>\r\n"
         "  get/set radio.rxgain <on|off>\r\n");
+    output.print(
+        "  get rxps.wd\r\n"
+        "  get/set radio.rxps.rfrx_disabled <on|off> (this boot)\r\n"
+        "  clear stats\r\n");
     output.print(
         "  get/set radio.fem.rxgain <on|off>\r\n"
         "  get/set radio.fem.txgain <on|off>\r\n"
