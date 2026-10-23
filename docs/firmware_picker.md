@@ -159,11 +159,12 @@ Once the exact board and role are selected, the picker skips logging,
 connection, and profile choices that all select the same firmware. Logging
 settings move into **Restore your settings after flashing** beneath the files.
 Choices that select different images remain visible.
-For qualified nRF52 sensor pairs, Full is the normal recommendation. Open
-**Advanced: sensor compatibility → Show Reduced sensor images** to select a Reduced image for
-an existing update route or its smaller optional-driver set. Shared links
-that explicitly select Reduced retain that selection. Both downloads remain
-available; this changes the recommendation, not their OTA identities.
+For qualified nRF52 sensor pairs, Full is the normal recommendation and both
+Full and Reduced profiles are shown by default. **Show Reduced sensor images**
+under **Advanced: sensor compatibility** starts checked, including after clearing
+the picker. Uncheck it to show only the recommended Full profiles. Shared links
+retain their selected profile; showing Reduced does not switch a Full selection
+or change either image's OTA identity.
 The optional chip-family filter (ESP32, nRF52, RP2040, or STM32) can narrow the
 hardware list first. You can skip it: picking hardware fills it in automatically.
 Chip family and hardware are the only dropdowns. All remaining choices use
