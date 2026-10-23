@@ -30,7 +30,7 @@
 #include "esp32/WiFiRadioPolicy.h"
 #endif
 #if defined(ESP32_PLATFORM) && defined(ENABLE_OTA) && \
-    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID))
+    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
 #include "esp32/WiFiOtaSeeder.h"
 #endif
 #ifdef WITH_MQTT_BRIDGE
@@ -52,7 +52,7 @@ static uint32_t _atoi(const char* sp) {
 
 #ifdef ESP_PLATFORM
 static bool observerBluetoothWiFiCoexistenceRequired() {
-#if defined(BLE_PIN_CODE) && defined(WIFI_SSID)
+#if defined(BLE_PIN_CODE) && (defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
   return true;
 #else
   return false;
@@ -1129,7 +1129,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #endif
     }
 #if defined(ESP32_PLATFORM) && defined(ENABLE_OTA) && \
-    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID))
+    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
     mesh::ota::WiFiOtaSeeder::appendStatus(reply, 160);
 #endif
   } else if (memcmp(config, "wifi.powersave", 14) == 0) {

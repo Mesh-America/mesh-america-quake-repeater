@@ -440,7 +440,8 @@ class Nrf52VariantContractsTest(unittest.TestCase):
 
         self.assertIn("bool isBridgeRunning() const override", header)
         self.assertIn("if (isRs232BridgeRunning()) reply_data[8] |= 0x01", implementation)
-        self.assertIn("if (isBridgeRunning()) reply_data[8] |= 0x03", implementation)
+        self.assertIn("if (isEspNowBridgeRunning()) reply_data[8] |= 0x03", implementation)
+        self.assertNotIn("if (isBridgeRunning()) reply_data[8] |= 0x03", implementation)
         boot_failure = implementation[
             implementation.index("if (!bridge || !beginRS232Bridge())"):
             implementation.index("#else", implementation.index(

@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+#if defined(ESP32_PLATFORM) && (defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
 
 #include <Arduino.h>
 #include <IPAddress.h>

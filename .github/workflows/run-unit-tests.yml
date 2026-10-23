@@ -1115,6 +1115,7 @@ jobs:
           python3 -B test/test_ssd1306_power.py -v
           python3 -B test/test_oled_display_probe.py -v
           python3 -B test/test_oled_controller_settings.py -v
+          python3 -B test/test_upstream_auto_display_merge.py -v
           python3 -B test/test_companion_inbox.py
           python3 -B test/test_heltec_r8_external_power.py
           python3 -B test/test_bluetooth_mac_contract.py

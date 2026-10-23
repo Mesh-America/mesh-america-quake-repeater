@@ -50,12 +50,17 @@ class NativeDisplaysTest(unittest.TestCase):
                         source += driver[a:b]
                         source += method(driver, cls, "drawChar")
                     else:
-                        source += f"bool {cls}::begin() {{ return true; }}\n"
+                        awake = "_isOn=true; " if cls == "ST7789LCDDisplay" else ""
+                        source += f"bool {cls}::begin() {{ {awake}return true; }}\n"
                     for name in ("turnOn", "turnOff", "clear", "endFrame"):
                         source += f"void {cls}::{name}() {{}}\n"
                     source += f"void {cls}::startFrame(ColorVal) {{}}\n"
                     if cls == "ST7789LCDDisplay":
                         source += f"void {cls}::setFlipped(bool) {{}}\n"
+                        if "LILYGO_TDECK" in defines:
+                            source += f"{cls}::~{cls}() {{}}\n"
+                            source += method(driver, cls, "isBufferedRendering")
+                            source += f"void {cls}::finishCanvasPrimitive(int,int,int,int) {{ assert(false); }}\n"
                     names = ["setTextSize", "setColor", "setCursor", "print", "fillRect", "drawRect", "drawXbm", "getTextWidth"]
                     if cls == "ST7789LCDDisplay":
                         names += ["setRotationDegrees"]
@@ -66,6 +71,9 @@ class NativeDisplaysTest(unittest.TestCase):
                     source += r'''
 int main() {
   Driver d; d.begin(); d.setColor(1); d.setTextSize(1);
+#ifdef LILYGO_TDECK
+  assert(!d.isBufferedRendering());
+#endif
   auto& c=*Canvas::active;
   assert(d.width()==EXPECTED_WIDTH && d.height()==EXPECTED_HEIGHT);
   assert(!d.useSmallMessageFont());

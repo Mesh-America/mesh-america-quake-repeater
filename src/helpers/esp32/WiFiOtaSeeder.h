@@ -1,7 +1,7 @@
 #pragma once
 
 #if defined(ESP32_PLATFORM) && defined(ENABLE_OTA) && \
-    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID))
+    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
 
 #include <stddef.h>
 #include <stdint.h>
