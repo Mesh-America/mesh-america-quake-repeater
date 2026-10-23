@@ -22,6 +22,7 @@ CONTEXT = r'''
 #include <MeshCore.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 namespace mesh { namespace ota {
 inline bool ethernet_owned = false;
 inline bool rak4631_ethernet_owns_spi() { return ethernet_owned; }
@@ -44,16 +45,17 @@ struct FetchStore {
 struct OtaStoreSdNrf52 {
   unsigned formats = 0, erases = 0, spaces = 0, lists = 0;
   uint16_t page = 0;
+  char error[120] = "card unavailable";
   bool format_ok = true, erase_ok = true, read_ok = true;
-  bool formatCard(MainBoard&) { ++formats; return format_ok; }
-  bool eraseCard(MainBoard&) { ++erases; return erase_ok; }
+  bool formatCard(MainBoard&) { ++formats; strcpy(error, "card unavailable"); return format_ok; }
+  bool eraseCard(MainBoard&) { ++erases; strcpy(error, "card unavailable"); return erase_ok; }
   bool getSpace(MainBoard&, uint64_t& used, uint64_t& free) {
     ++spaces; used = 12; free = 34; return read_ok;
   }
   bool listFiles(MainBoard&, uint16_t p, char* reply, size_t cap) {
     ++lists; page = p; snprintf(reply, cap, "> files page=%u", unsigned(p)); return read_ok;
   }
-  const char* last_error() const { return "card unavailable"; }
+  const char* last_error() const { return error; }
 };
 struct OtaContext {
   OtaManager manager;
@@ -65,7 +67,7 @@ struct OtaContext {
   unsigned prepares = 0, finishes = 0;
   OtaStoreSdNrf52& sdStagingStore() { return card; }
   void prepareSdCardReset() { ++prepares; }
-  void finishSdCardReset(uint32_t) { ++finishes; }
+  void finishSdCardReset(uint32_t) { ++finishes; strcpy(card.error, "cleanup replaced error"); }
 };
 inline OtaContext context;
 inline bool acquired = false, out_of_memory = false;
@@ -133,6 +135,7 @@ int main() {
   context.card.format_ok = false;
   assert(command("set sdcard format"));
   assert(strstr(reply.text, "format failed") && context.prepares == 1 && context.finishes == 1);
+  assert(strcmp(reply.text, "Error: SD card format failed: card unavailable") == 0);
   assert(!state.format_recorded);
   context.card.format_ok = true;
   assert(command("set sdcard format")); assert(state.format_recorded && state.format_at == clock_ms);
@@ -141,9 +144,11 @@ int main() {
   assert(command("set sdcard format --force")); assert(context.card.formats == formats + 1);
   context.card.erase_ok = false;
   assert(command("set sdcard erase")); assert(strstr(reply.text, "erase failed"));
+  assert(strcmp(reply.text, "Error: SD card erase failed: card unavailable") == 0);
   assert(!state.erase_recorded && context.prepares == context.finishes);
   context.card.erase_ok = true; context.card.format_ok = false;
   assert(command("set sdcard erase")); assert(strstr(reply.text, "erased but format failed"));
+  assert(strcmp(reply.text, "Error: SD card erased but format failed: card unavailable") == 0);
   assert(state.erase_recorded && context.prepares == context.finishes);
   context.card.format_ok = true;
   assert(command("set sdcard erase --force")); assert(strstr(reply.text, "erase and format complete"));

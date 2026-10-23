@@ -57,6 +57,19 @@ static void formatSdCardElapsed(char* out, size_t out_len, bool recorded,
   }
 }
 
+// Keep the three failure exits shared even with LTO: each must preserve the
+// card error before reset cleanup can replace it, then sample the finish time.
+static __attribute__((noinline)) bool finishSdCardFailure(
+    mesh::ota::OtaContext& context, mesh::ota::OtaStoreSdNrf52& card,
+    char* reply, size_t capacity, const char* format) {
+  char error[80];
+  strncpy(error, card.last_error(), sizeof(error) - 1);
+  error[sizeof(error) - 1] = 0;
+  context.finishSdCardReset(millis());
+  snprintf(reply, capacity, format, error);
+  return true;
+}
+
 bool handleSdCardSet(SdCardCLIState& state, MainBoard& board,
                      const char* config, char* reply, size_t capacity) {
   if (!config || !reply || capacity == 0
@@ -139,13 +152,8 @@ bool handleSdCardSet(SdCardCLIState& state, MainBoard& board,
 
   if (is_format) {
     if (!card.formatCard(board)) {
-      char error[80];
-      strncpy(error, card.last_error(), sizeof(error) - 1);
-      error[sizeof(error) - 1] = 0;
-      context.finishSdCardReset(millis());
-      snprintf(reply, capacity, "Error: SD card format failed: %s",
-               error);
-      return true;
+      return finishSdCardFailure(context, card, reply, capacity,
+                                 "Error: SD card format failed: %s");
     }
     context.finishSdCardReset(millis());
     state.format_recorded = true;
@@ -155,25 +163,15 @@ bool handleSdCardSet(SdCardCLIState& state, MainBoard& board,
   }
 
   if (!card.eraseCard(board)) {
-    char error[80];
-    strncpy(error, card.last_error(), sizeof(error) - 1);
-    error[sizeof(error) - 1] = 0;
-    context.finishSdCardReset(millis());
-    snprintf(reply, capacity, "Error: SD card erase failed: %s",
-             error);
-    return true;
+    return finishSdCardFailure(context, card, reply, capacity,
+                               "Error: SD card erase failed: %s");
   }
   state.erase_recorded = true;
   state.erase_at = millis();
 
   if (!card.formatCard(board)) {
-    char error[80];
-    strncpy(error, card.last_error(), sizeof(error) - 1);
-    error[sizeof(error) - 1] = 0;
-    context.finishSdCardReset(millis());
-    snprintf(reply, capacity, "Error: SD card erased but format failed: %s",
-             error);
-    return true;
+    return finishSdCardFailure(context, card, reply, capacity,
+                               "Error: SD card erased but format failed: %s");
   }
   state.format_recorded = true;
   state.format_at = millis();
