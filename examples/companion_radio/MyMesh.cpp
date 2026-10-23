@@ -3861,10 +3861,6 @@ bool MyMesh::handleTxRoutingCommand(const char* command, char* reply, size_t rep
   return true;
 }
 
-#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL)
-// Keep occasional management work out of the space-optimized hot call graph.
-__attribute__((cold))
-#endif
 bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
                                        size_t reply_size) {
   if (!command || !reply || reply_size == 0) return false;
@@ -9959,9 +9955,6 @@ bool MyMesh::streamTerminalBusy() const {
 }
 #endif
 
-#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL)
-__attribute__((cold))
-#endif
 void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
                                    mesh::ReaderTryWrite reader_try_write) {
   while (*command == ' ' || *command == '\t') command++;

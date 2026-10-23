@@ -80,18 +80,19 @@ bool handleSdCardSet(SdCardCLIState& state, MainBoard& board,
 
   const char* action_args = skipSpacesConst(config + 6);
   bool is_format;
-  bool force = false;
-  if (strcmp(action_args, "format") == 0) {
+  const char* suffix;
+  if (strncmp(action_args, "format", 6) == 0) {
     is_format = true;
-  } else if (strcmp(action_args, "format --force") == 0) {
-    is_format = true;
-    force = true;
-  } else if (strcmp(action_args, "erase") == 0) {
+    suffix = action_args + 6;
+  } else if (strncmp(action_args, "erase", 5) == 0) {
     is_format = false;
-  } else if (strcmp(action_args, "erase --force") == 0) {
-    is_format = false;
-    force = true;
+    suffix = action_args + 5;
   } else {
+    mesh::cli::formatError(reply, capacity, "use set sdcard format|erase [--force]");
+    return true;
+  }
+  const bool force = strcmp(suffix, " --force") == 0;
+  if (*suffix && !force) {
     mesh::cli::formatError(reply, capacity, "use set sdcard format|erase [--force]");
     return true;
   }
@@ -198,16 +199,13 @@ bool handleSdCardGet(SdCardCLIState& state, MainBoard& board,
     formatSdCardElapsed(erase_age, sizeof(erase_age),
                         state.erase_recorded, state.erase_at, now);
     snprintf(reply, capacity, "> format: %s, erase: %s", format_age, erase_age);
-  } else if (strcmp(query, "format") == 0) {
+  } else if (strcmp(query, "format") == 0 || strcmp(query, "erase") == 0) {
+    const bool format = *query == 'f';
     char age[32];
-    formatSdCardElapsed(age, sizeof(age), state.format_recorded,
-                        state.format_at, now);
-    snprintf(reply, capacity, "> format: %s", age);
-  } else if (strcmp(query, "erase") == 0) {
-    char age[32];
-    formatSdCardElapsed(age, sizeof(age), state.erase_recorded,
-                        state.erase_at, now);
-    snprintf(reply, capacity, "> erase: %s", age);
+    formatSdCardElapsed(age, sizeof(age),
+                        format ? state.format_recorded : state.erase_recorded,
+                        format ? state.format_at : state.erase_at, now);
+    snprintf(reply, capacity, "> %s: %s", query, age);
   } else if (strcmp(query, "free") == 0) {
     if (!sdCardBusAvailable(reply, capacity)) return true;
     if (!mesh::ota::ota_acquire_context(reply, capacity)) return true;

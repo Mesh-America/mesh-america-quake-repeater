@@ -133,6 +133,13 @@ int main() {
   assert(strstr(reply.text, "apply is pending") && !context.prepares && !context.card.formats);
   context.apply_pending = false;
   context.card.format_ok = false;
+  for (const char* value : {"set sdcard formats", "set sdcard eraseX",
+      "set sdcard format--force", "set sdcard erase  --force",
+      "set sdcard format\t--force", "set sdcard erase --force "}) {
+    assert(command(value));
+    assert(strcmp(reply.text, "Error: use set sdcard format|erase [--force]") == 0);
+    assert(context.card.formats == 0 && context.card.erases == 0 && context.prepares == 0);
+  }
   assert(command("set sdcard format"));
   assert(strstr(reply.text, "format failed") && context.prepares == 1 && context.finishes == 1);
   assert(strcmp(reply.text, "Error: SD card format failed: card unavailable") == 0);
