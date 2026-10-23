@@ -21,7 +21,8 @@
 #include <helpers/ui/StartupScreen.h>
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
-#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL)
+#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL) \
+    || (defined(STM32_PLATFORM) && defined(STM32WLxx) && COMPANION_FEATURE_TEXT_TERMINAL)
 #include "CompanionHelpWriter.h"
 #endif
 #include <helpers/CompanionStartupFrequency.h>
