@@ -8,7 +8,7 @@ Status: **PARTIAL. Buffered SPI improved switching, but the 500 us maximum
 objective remains unmet. XIAO's witnessed RF test missed one packet.**
 MeshTower and Tag passed their finite 200-packet RF tests. Final-source XIAO
 and Tag Companion command and Bluetooth tests passed while both receive
-profiles remained active. XIAO was restored to the final Repeater image; the
+profiles remained active. XIAO was restored to the final Repeater image.
 The RAK Full build correction and its capacity checks passed.
 
 This campaign covers five baseline/DUT boards, additional fixed witnesses,
@@ -210,6 +210,11 @@ profiles, mixed-language linkage, overlap, ring wrap, malformed references and
 short/zero writes. Extracting and decoding the actual linked ELF reproduces
 the retained original help exactly; the uncompressed copy is absent. This
 size-only follow-up was not flashed for another hardware campaign.
+
+After merging remote `fd47fe0b1`, source `86ef1e89` passed the same canonical
+build and linked-help proof with the same application size and RAM capacity.
+The incoming display and dynamic-WiFi regression suites also passed. The
+hardware receipts above remain bound to their explicitly recorded images.
 
 ## Remaining work
 

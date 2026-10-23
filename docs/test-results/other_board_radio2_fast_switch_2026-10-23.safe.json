@@ -619,6 +619,31 @@
       "memory_report_sha256": "602186647d1f257dc8cd08f4dc5c37772d1a10b03ffe85e607153b7a31302fb2",
       "help_proof_sha256": "af07b666ef0d7906468cd01507d2f72ce8681b5c75b77d6b56525e23fa76ff97",
       "hardware_flashed": false
+    },
+    {
+      "target": "RAK_4631_companion_radio_full",
+      "source": "86ef1e890cda179cde298db3a448de51d8d74944",
+      "passed": true,
+      "elf_sha256": "70d576d25caf9ff6b3191e50829d5fd396fd192c58f5bf36d14a5589c7724711",
+      "application_bytes": 712684,
+      "application_limit_bytes": 712704,
+      "application_margin_bytes": 20,
+      "available_internal_bytes": 81220,
+      "required_heap_bytes": 72528,
+      "full_companion": true,
+      "features_or_contact_channel_limits_removed": false,
+      "storage_layout_changed": false,
+      "decoded_help_bytes": 4222,
+      "packed_help_bytes": 2159,
+      "exact_legacy_help_preserved": true,
+      "raw_help_absent_from_elf": true,
+      "decoder_history_bytes": 2048,
+      "decoder_chunk_bytes": 64,
+      "decoder_heap_allocation": false,
+      "memory_report_sha256": "0097de9bd287aafe87feb61abdd60c74caf5fb79ceb60bad5ecb107186504b67",
+      "help_proof_sha256": "9ae10a6652cdf61dfe03b40318fa4af976c23570fd7b23c43c9f0a0b0f54c618",
+      "hardware_flashed": false,
+      "merged_remote_head": "fd47fe0b1"
     }
   ]
 }
