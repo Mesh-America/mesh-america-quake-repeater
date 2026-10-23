@@ -1,4 +1,5 @@
 #include <cassert>
+#include <helpers/CLICommandUtils.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>

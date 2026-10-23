@@ -1,5 +1,6 @@
 // Compile the real card-maintenance CLI around its side-effect boundaries.
 // No filesystem, flash, bootloader, or radio hardware is accessed here.
+#include <helpers/CLICommandUtils.h>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>

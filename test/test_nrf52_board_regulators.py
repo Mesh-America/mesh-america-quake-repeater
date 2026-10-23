@@ -178,6 +178,7 @@ public:
   explicit NRF52Board(const char* name) : ota_name(name) {}
   virtual void begin() {}
   virtual uint16_t getBattMilliVolts() = 0;
+  virtual bool supportsBatteryCalibration() const { return false; }
   virtual const char* getManufacturerName() const = 0;
   virtual void shutdownPeripherals() {}
 };

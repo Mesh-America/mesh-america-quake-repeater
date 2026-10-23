@@ -9,6 +9,7 @@ from test_replay_reset_integration import extract_braced
 ROOT = Path(__file__).resolve().parents[1]
 
 HARNESS = r'''
+#include <helpers/CLICommandUtils.h>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>

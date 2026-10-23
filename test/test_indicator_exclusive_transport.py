@@ -143,7 +143,7 @@ local = mesh[local_start:local_end]
 assert 'strcmp(command, "get companion.transport") == 0' in local
 assert 'strncmp(command, "set companion.transport", 23) == 0' in local
 assert '"OK - companion transport %s saved; reboot required"' in local
-assert '"Error: failed to save companion transport"' in local
+assert 'mesh::cli::formatError(reply, reply_size, "failed to save companion transport")' in local
 help_start = mesh.index('  } else if (strcmp(command, "help") == 0) {')
 help_end = mesh.index('  } else if (handleCommand(command, 0, local_reply))', help_start)
 help_body = mesh[help_start:help_end]

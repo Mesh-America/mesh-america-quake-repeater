@@ -29,7 +29,9 @@
 #define PAYLOAD_TYPE_RESPONSE 1
 #define ONE_KEY_DM_ID_SIZE 8
 #include "production_constants.inc"
+#include "battery_calibration_cli_stub.h"
 
+struct BatteryBoard {} board;
 namespace mesh {
 struct Identity { uint8_t pub_key[PUB_KEY_SIZE] = {}; };
 struct GroupChannel { uint8_t secret[16] = {}; };

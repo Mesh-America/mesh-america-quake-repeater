@@ -131,11 +131,19 @@ void commands() {
       "delete beacon 1 extra", "set beacon 1 unknown 1 Hello",
       "set beacon 1 meshcore nan,62.5,7,5,14 Hello", "set beacon 1 meshcore inf,62.5,7,5,14 Hello",
       "set beacon 1 meshcore 906.5,nan,7,5,14 Hello", "set beacon 1 meshcore 906.5,62.5,256,5,14 Hello",
+      "set beacon 1 meshcore 9.065e2,62.5,7,5,14 Hello", "set beacon 1 meshcore 0x1.c54p9,62.5,7,5,14 Hello",
+      "set beacon 1 meshcore 906.5,6.25e1,7,5,14 Hello", "set beacon 1 meshcore 906.5,62.5junk,7,5,14 Hello",
+      "set beacon 1 meshcore -906.5,62.5,7,5,14 Hello", "set beacon 1 meshcore 2501,62.5,7,5,14 Hello",
+      "set beacon 1 meshcore 906.5,-62.5,7,5,14 Hello", "set beacon 1 meshcore 906.5,501,7,5,14 Hello",
       "set beacon 1 meshcore 906.5,62.5,7,5,128 Hello", "set beacon 1 meshcore 906.5,62.5,7,5,23 Hello",
       "set beacon 1 meshcore 906.5,62.5,7,5,14,7 Hello", "set beacon 1 meshcore 906.5,62.5,7,5,14,65536 Hello",
       "set beacon 1 meshcore 906.5,62.5,7,5,14,32,1 Hello", "set beacon 1 meshcore 906.5,62.5,7,5,14",
       "set beacon 1 meshtext bad LongFast 14 Hello", "set beacon 1 meshtext US bad 14 Hello",
       "set beacon 1 meshtext US LongFast 128 Hello"}) f.cmd(command, false);
+  for (const char* tuple : {"906.500,62.5", "+906.5,+62.500", "00906.500,062.5"}) {
+    f.cmd(std::string("set beacon 1 meshcore ") + tuple + ",7,5,14 Hello");
+    assert(std::strstr(f.cmd("get beacon 1"), "906.5"));
+  }
   f.cmd("set beacon 1 meshcore 906.5,62.5,7,5,14 " + std::string(80, 'A'));
   assert(std::strstr(f.cmd("get beacon 1"), std::string(80, 'A').c_str()));
   f.cmd("set beacon 1 meshcore 906.5,62.5,7,5,14 " + std::string(81, 'A'), false);

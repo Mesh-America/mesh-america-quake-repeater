@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include "CLICommandUtils.h"
 
 namespace mesh { namespace power {
 
@@ -68,7 +69,7 @@ bool handleBatteryCalibrationCommand(Board& board, const char* command,
   while (*value == ' ' || *value == '\t') ++value;
   const float previous = board.getAdcMultiplier();
   if (!isfinite(previous) || previous <= 0.0f) {
-    snprintf(reply, capacity, "Error: battery ADC unsupported");
+    mesh::cli::formatError(reply, capacity, "unsupported");
     return true;
   }
   const char* reset_end = value;
@@ -78,39 +79,39 @@ bool handleBatteryCalibrationCommand(Board& board, const char* command,
     if (*reset_end == 0) {
       *reply = 0;
       if (set_multiplier(0.0f, reply, capacity))
-        snprintf(reply, capacity, "OK - ADC defaults restored (saved)");
+        snprintf(reply, capacity, "OK - defaults (saved)");
       else if (*reply == 0)
-        snprintf(reply, capacity, "Error: calibration save failed");
+        mesh::cli::formatError(reply, capacity, "save failed");
       return true;
     }
   }
   uint16_t reference = 0;
   if (!parseBatteryReferenceMillivolts(value, reference)) {
-    snprintf(reply, capacity, "Error: use battery calibrate <volts>|reset");
+    mesh::cli::formatError(reply, capacity, "use battery calibrate <volts>|reset");
     return true;
   }
   const uint16_t reported = board.getBattMilliVolts();
   if (reported == 0 || reported == UINT16_MAX) {
-    snprintf(reply, capacity, "Error: battery voltage unavailable");
+    mesh::cli::formatError(reply, capacity, "no battery reading");
     return true;
   }
   const float correction = static_cast<float>(reference) / reported;
   if (!validRelativeBatteryMultiplier(correction)) {
-    snprintf(reply, capacity, "Error: reference must be 50%%-150%% of reading");
+    snprintf(reply, capacity, "Error: use 50%%-150%% of reading");
     return true;
   }
   const float multiplier = previous * correction;
   if (!isfinite(multiplier) || multiplier <= 0.0f) {
-    snprintf(reply, capacity, "Error: invalid calibration correction");
+    mesh::cli::formatError(reply, capacity, "invalid multiplier");
     return true;
   }
   *reply = 0;
   if (set_multiplier(multiplier, reply, capacity)) {
-    snprintf(reply, capacity, "OK - %u.%03u V; multiplier %.6f (saved)",
+    snprintf(reply, capacity, "OK - %u.%03u V; ADC %.6f (saved)",
              static_cast<unsigned>(reference / 1000),
              static_cast<unsigned>(reference % 1000), board.getAdcMultiplier());
   } else if (*reply == 0) {
-    snprintf(reply, capacity, "Error: calibration save failed");
+    mesh::cli::formatError(reply, capacity, "save failed");
   }
   return true;
 }

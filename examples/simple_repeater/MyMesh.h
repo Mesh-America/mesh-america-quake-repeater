@@ -831,6 +831,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   FloodRetryBridgeState* floodRetryBridgeStateFor(const mesh::Packet* packet, bool create) const;
   void clearFloodRetryBridgeStateByKey(const uint8_t* retry_key, uint8_t radio_profile);
   void refreshFloodRetryReachability(const mesh::Packet* packet);
+  bool hasFloodRetryHeard(const mesh::Packet* packet) const;
   void formatFloodRetryPath(char* dest, size_t dest_len, const mesh::Packet* packet) const;
   bool handleClientPathCommand(ClientInfo* sender, char* command, char* reply);
   bool formatFloodRetryHeard(char* dest, size_t dest_len, const mesh::Packet* packet) const;
@@ -1036,7 +1037,10 @@ protected:
 
   bool allowPacketForward(const mesh::Packet* packet) override;
   bool allowPacketTransmit(const mesh::Packet* packet) const override;
+#if MESH_DEBUG || MESH_ENABLE_PACKET_FILE_LOGGING \
+    || (MESH_PACKET_LOGGING && !MESH_PACKET_LOGGING_COMPACT)
   const char* getLogDateTime() override;
+#endif
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
 
   void logRx(mesh::Packet* pkt, int len, float score) override;

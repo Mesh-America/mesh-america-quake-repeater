@@ -20,6 +20,7 @@ HARNESS = r'''
 #include <helpers/radiolib/RXPowerSaving.h>
 #include <helpers/esp32/PowerTestControls.h>
 #include "companion_fleet_dispatch.h"
+#include "battery_calibration_cli_stub.h"
 #include <sys/stat.h>
 #include <limits>
 #define constrain(value,low,high) ((value)<(low)?(low):((value)>(high)?(high):(value)))
@@ -58,6 +59,7 @@ struct Radio : mesh::Radio {
   bool isInRecvMode() const override { return true; }
 };
 struct Sensors { double node_lat=0,node_lon=0; } sensors;
+struct BatteryBoard {} board;
 // Morse dispatch is independently executable in its own shared-handler suite;
 // this legacy fixture keeps that optional branch inactive for tuple rollback.
 namespace mesh {

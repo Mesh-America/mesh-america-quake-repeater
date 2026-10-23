@@ -3028,19 +3028,17 @@ bool CommonCLI::saveCommonPrefs() {
 bool CommonCLI::applyAndSaveAdcMultiplier(float multiplier, char* reply,
                                          size_t capacity) {
   if (!isfinite(multiplier) || multiplier < 0.0f || multiplier > 10.0f) {
-    snprintf(reply, capacity, "Error: multiplier must be 0-10");
+    mesh::cli::formatError(reply, capacity, "multiplier 0-10");
     return false;
   }
   if (_board->getAdcMultiplier() <= 0.0f) {
-    snprintf(reply, capacity, "Error: unsupported");
+    mesh::cli::formatError(reply, capacity, "unsupported");
     return false;
   }
 #if defined(NRF52_POWER_MANAGEMENT)
   if (mesh::power::voltagePolicySupported()) {
-    char command[48];
-    snprintf(command, sizeof(command), "set adc.multiplier %.3f", multiplier);
-    const bool saved = mesh::power::handleVoltagePolicyCommand(command, reply, capacity)
-        && strncmp(reply, "OK", 2) == 0;
+    const bool saved = mesh::power::setConfiguredAdcMultiplier(multiplier,
+                                                             reply, capacity);
     if (saved) loopBatteryForwarding(true);
     return saved;
   }
@@ -3048,7 +3046,7 @@ bool CommonCLI::applyAndSaveAdcMultiplier(float multiplier, char* reply,
   const float previous = _board->getAdcMultiplier();
   const float previous_pref = _prefs->adc_multiplier;
   if (!_board->setAdcMultiplier(multiplier)) {
-    snprintf(reply, capacity, "Error: multiplier rejected by board");
+    mesh::cli::formatError(reply, capacity, "invalid multiplier");
     return false;
   }
   _prefs->adc_multiplier = multiplier;
@@ -3061,7 +3059,7 @@ bool CommonCLI::applyAndSaveAdcMultiplier(float multiplier, char* reply,
     return false;
   }
   loopBatteryForwarding(true);
-  if (multiplier == 0.0f) snprintf(reply, capacity, "OK - using default board multiplier");
+  if (multiplier == 0.0f) snprintf(reply, capacity, "OK - defaults (saved)");
   else snprintf(reply, capacity, "OK - multiplier set to %.3f", multiplier);
   return true;
 }
@@ -3111,7 +3109,7 @@ bool CommonCLI::handleRs232DiagnosticCommand(uint32_t sender_timestamp,
   constexpr size_t capacity = 157;  // Leave room for an infrastructure reply prefix.
   if (strncmp(command, "get rs232.transport", 19) == 0) {
     if (strcmp(command, "get rs232.transport") != 0) {
-      snprintf(reply, capacity, "Error: use get rs232.transport");
+      mesh::cli::formatError(reply, capacity, "use get rs232.transport");
     } else {
       _callbacks->formatRs232Transport(reply, capacity);
     }
@@ -3125,14 +3123,14 @@ bool CommonCLI::handleRs232DiagnosticCommand(uint32_t sender_timestamp,
                || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0) {
       _callbacks->formatRs232Stats(page + 1, reply, capacity);
     } else {
-      snprintf(reply, capacity, "Error: use get rs232.stats [rx|tx|drops|test]");
+      mesh::cli::formatError(reply, capacity, "use get rs232.stats [rx|tx|drops|test]");
     }
     return true;
   }
   if (strncmp(command, "rs232", 5) != 0
       || (command[5] != 0 && command[5] != ' ')) return false;
   if (sender_timestamp != 0) {
-    snprintf(reply, capacity, "Error: RS232 test/reset requires a local connection");
+    mesh::cli::formatError(reply, capacity, "RS232 test/reset requires a local connection");
     return true;
   }
   if (strcmp(command, "rs232 resetstats") == 0) {
@@ -3145,12 +3143,12 @@ bool CommonCLI::handleRs232DiagnosticCommand(uint32_t sender_timestamp,
     nonce = millis();  // Correlation only; this is not a security token.
   } else {
     if (strncmp(command, "rs232 test ", 11) != 0) {
-      snprintf(reply, capacity, "Error: use rs232 test [8 hex digits] or rs232 resetstats");
+      mesh::cli::formatError(reply, capacity, "use rs232 test [8 hex digits] or rs232 resetstats");
       return true;
     }
     const char* value = command + 11;
     if (strlen(value) != 8) {
-      snprintf(reply, capacity, "Error: use rs232 test [8 hex digits] or rs232 resetstats");
+      mesh::cli::formatError(reply, capacity, "use rs232 test [8 hex digits] or rs232 resetstats");
       return true;
     }
     for (size_t i = 0; i < 8; ++i) {
@@ -3160,7 +3158,7 @@ bool CommonCLI::handleRs232DiagnosticCommand(uint32_t sender_timestamp,
       else if (c >= 'a' && c <= 'f') digit = static_cast<uint8_t>(c - 'a' + 10);
       else if (c >= 'A' && c <= 'F') digit = static_cast<uint8_t>(c - 'A' + 10);
       else {
-        snprintf(reply, capacity, "Error: use rs232 test [8 hex digits] or rs232 resetstats");
+        mesh::cli::formatError(reply, capacity, "use rs232 test [8 hex digits] or rs232 resetstats");
         return true;
       }
       nonce = (nonce << 4) | digit;
@@ -3170,7 +3168,7 @@ bool CommonCLI::handleRs232DiagnosticCommand(uint32_t sender_timestamp,
     snprintf(reply, capacity, "OK - test queued id=%08lX; confirm on peer",
              static_cast<unsigned long>(nonce));
   } else {
-    snprintf(reply, capacity, "Error: RS232 test not queued; check status/stats");
+    mesh::cli::formatError(reply, capacity, "RS232 test not queued; check status/stats");
   }
   return true;
 }
@@ -3182,7 +3180,7 @@ bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
   constexpr size_t capacity = 157;  // Leave room for an infrastructure reply prefix.
   if (strncmp(command, "get espnow.status", 17) == 0) {
     if (strcmp(command, "get espnow.status") != 0) {
-      snprintf(reply, capacity, "Error: use get espnow.status");
+      mesh::cli::formatError(reply, capacity, "use get espnow.status");
     } else {
       _callbacks->formatEspNowStatus(reply, capacity);
     }
@@ -3196,14 +3194,14 @@ bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
                || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0) {
       _callbacks->formatEspNowStats(page + 1, reply, capacity);
     } else {
-      snprintf(reply, capacity, "Error: use get espnow.stats [rx|tx|drops|test]");
+      mesh::cli::formatError(reply, capacity, "use get espnow.stats [rx|tx|drops|test]");
     }
     return true;
   }
   if (strncmp(command, "espnow", 6) != 0
       || (command[6] != 0 && command[6] != ' ')) return false;
   if (sender_timestamp != 0) {
-    snprintf(reply, capacity, "Error: ESP-NOW test/reset requires a local connection");
+    mesh::cli::formatError(reply, capacity, "ESP-NOW test/reset requires a local connection");
     return true;
   }
   if (strcmp(command, "espnow resetstats") == 0) {
@@ -3216,14 +3214,14 @@ bool CommonCLI::handleEspNowDiagnosticCommand(uint32_t sender_timestamp,
     nonce = millis();  // Correlation only; this is not a security token.
   } else if (strncmp(command, "espnow test ", 12) != 0
              || !mesh::bridge::diag::parseNonce(command + 12, nonce)) {
-    snprintf(reply, capacity, "Error: use espnow test [8 hex digits] or espnow resetstats");
+    mesh::cli::formatError(reply, capacity, "use espnow test [8 hex digits] or espnow resetstats");
     return true;
   }
   if (_callbacks->sendEspNowTest(nonce)) {
     snprintf(reply, capacity, "OK - test queued id=%08lX; confirm on peer",
              static_cast<unsigned long>(nonce));
   } else {
-    snprintf(reply, capacity, "Error: ESP-NOW test not queued; check status/stats");
+    mesh::cli::formatError(reply, capacity, "ESP-NOW test not queued; check status/stats");
   }
   return true;
 }
@@ -3248,11 +3246,11 @@ bool CommonCLI::handleUDPBridgeCommand(uint32_t sender_timestamp,
       else if (strcmp(page, " rx") == 0 || strcmp(page, " tx") == 0
           || strcmp(page, " drops") == 0 || strcmp(page, " test") == 0)
         _callbacks->formatUDPBridgeStats(page + 1, reply, capacity);
-      else snprintf(reply, capacity, "Error: use get udp.stats [rx|tx|drops|test]");
+      else mesh::cli::formatError(reply, capacity, "use get udp.stats [rx|tx|drops|test]");
       return true;
     }
     const Prefs* current = _callbacks->getUDPBridgePrefs();
-    if (!current) { snprintf(reply, capacity, "Error: UDP bridge unavailable"); return true; }
+    if (!current) { mesh::cli::formatError(reply, capacity, "UDP bridge unavailable"); return true; }
     Prefs candidate = *current;
     if (strcmp(key, "enabled") == 0 && get) {
       snprintf(reply, capacity, "%s", current->enabled ? "on" : "off"); return true;
@@ -3265,22 +3263,22 @@ bool CommonCLI::handleUDPBridgeCommand(uint32_t sender_timestamp,
       const uint8_t index = static_cast<uint8_t>(key[5] - '1');
       if (get && key[6] == 0) { formatPeer(current->peers[index], reply, capacity); return true; }
       if (!set || key[6] != ' ' || !parsePeer(key + 7, candidate.peers[index])) {
-        snprintf(reply, capacity, "Error: use set udp.peer.1..8 <IPv4:port|off>"); return true;
+        mesh::cli::formatError(reply, capacity, "use set udp.peer.1..8 <IPv4:port|off>"); return true;
       }
     } else if (set && strncmp(key, "enabled ", 8) == 0) {
       if (strcmp(key + 8, "on") == 0) candidate.enabled = 1;
       else if (strcmp(key + 8, "off") == 0) candidate.enabled = 0;
-      else { snprintf(reply, capacity, "Error: use set udp.enabled on|off"); return true; }
+      else { mesh::cli::formatError(reply, capacity, "use set udp.enabled on|off"); return true; }
     } else if (set && strncmp(key, "port ", 5) == 0) {
       if (!parsePort(key + 5, candidate.port)) {
-        snprintf(reply, capacity, "Error: UDP port must be 1..65535"); return true;
+        mesh::cli::formatError(reply, capacity, "UDP port must be 1..65535"); return true;
       }
     } else {
-      snprintf(reply, capacity, "Error: use udp.enabled, udp.port, udp.peer.1..8, udp.status or udp.stats");
+      mesh::cli::formatError(reply, capacity, "use udp.enabled, udp.port, udp.peer.1..8, udp.status or udp.stats");
       return true;
     }
     if (!validPrefs(candidate)) {
-      snprintf(reply, capacity, "Error: invalid or duplicate UDP peer"); return true;
+      mesh::cli::formatError(reply, capacity, "invalid or duplicate UDP peer"); return true;
     }
     snprintf(reply, capacity, "%s", _callbacks->setUDPBridgePrefs(candidate)
         ? "OK - UDP settings saved; use get udp.status" : "Error: UDP settings not saved");
@@ -3288,7 +3286,7 @@ bool CommonCLI::handleUDPBridgeCommand(uint32_t sender_timestamp,
   }
   if (strncmp(command, "udp", 3) != 0 || (command[3] != 0 && command[3] != ' ')) return false;
   if (sender_timestamp != 0) {
-    snprintf(reply, capacity, "Error: UDP test/reset requires a local connection"); return true;
+    mesh::cli::formatError(reply, capacity, "UDP test/reset requires a local connection"); return true;
   }
   if (strcmp(command, "udp resetstats") == 0) {
     snprintf(reply, capacity, "%s", _callbacks->resetUDPBridgeStats()
@@ -3296,15 +3294,15 @@ bool CommonCLI::handleUDPBridgeCommand(uint32_t sender_timestamp,
   }
   if (strncmp(command, "udp test ", 9) != 0 || command[9] < '1' || command[9] > '8'
       || (command[10] != 0 && command[10] != ' ')) {
-    snprintf(reply, capacity, "Error: use udp test <1..8> [8 hex digits] or udp resetstats"); return true;
+    mesh::cli::formatError(reply, capacity, "use udp test <1..8> [8 hex digits] or udp resetstats"); return true;
   }
   uint32_t nonce = millis();
   if (command[10] != 0 && !parseNonce(command + 11, nonce)) {
-    snprintf(reply, capacity, "Error: use udp test <1..8> [8 hex digits] or udp resetstats"); return true;
+    mesh::cli::formatError(reply, capacity, "use udp test <1..8> [8 hex digits] or udp resetstats"); return true;
   }
   if (_callbacks->sendUDPBridgeTest(static_cast<uint8_t>(command[9] - '1'), nonce))
     snprintf(reply, capacity, "OK - test queued id=%08lX; confirm on peer", static_cast<unsigned long>(nonce));
-  else snprintf(reply, capacity, "Error: UDP test not queued; check status/stats");
+  else mesh::cli::formatError(reply, capacity, "UDP test not queued; check status/stats");
   return true;
 }
 #endif
@@ -3626,7 +3624,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       if (_callbacks->scheduleNormalRadio()) {
         strcpy(reply, "OK - normal radio restore scheduled");
       } else {
-        strcpy(reply, "Error: unsupported");
+        mesh::cli::formatError(reply, 160, "unsupported");
       }
     } else if (memcmp(command, "tempradio ", 10) == 0) {
       uint16_t preamble = 0;
@@ -3666,12 +3664,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       // change admin password
 #ifdef ESP_PLATFORM
       if (!mesh::esp32::managementPassword::validPassword(&command[9])) {
-        strcpy(reply, "Error: password must be 1-15 bytes, no line breaks; use 8-15 ASCII for setup WiFi");
+        mesh::cli::formatError(reply, 160, "password must be 1-15 bytes, no line breaks; use 8-15 ASCII for setup WiFi");
         return;
       }
       mesh::esp32::managementPassword::ChangeGuard change;
       if (!change.acquired()) {
-        strcpy(reply, "Error: OTA upload or password change busy; retry");
+        mesh::cli::formatError(reply, 160, "OTA upload or password change busy; retry");
         return;
       }
 #endif
@@ -3680,12 +3678,12 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       StrHelper::strncpy(_prefs->password, &command[9], sizeof(_prefs->password));
       if (!trySavePrefs()) {
         memcpy(_prefs->password, previous, sizeof(previous));
-        strcpy(reply, "Error: save unconfirmed; reboot may differ");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
 #ifdef ESP_PLATFORM
       if (!change.publish(_prefs->password)) {
-        strcpy(reply, "Error: password saved; management unavailable, reboot required");
+        mesh::cli::formatError(reply, 160, "password saved; management unavailable, reboot required");
         return;
       }
 #endif
@@ -4072,7 +4070,7 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
     is_format = false;
     force = true;
   } else {
-    strcpy(reply, "Error: use set sdcard format|erase [--force]");
+    mesh::cli::formatError(reply, 160, "use set sdcard format|erase [--force]");
     return true;
   }
 
@@ -4094,7 +4092,7 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
   if (!mesh::ota::ota_acquire_context(reply, 160)) return true;
   mesh::ota::OtaContext& context = mesh::ota::ota_ctx();
   if (context.apply_pending) {
-    strcpy(reply, "Error: OTA apply is pending");
+    mesh::cli::formatError(reply, 160, "OTA apply is pending");
     return true;
   }
 #if defined(OTA_TOWER_AUTO_STORE)
@@ -4102,7 +4100,7 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
   if (context.fetch_store.usesInternal() &&
       (context.manager.fetchState() != mesh::ota::OtaManager::IDLE ||
        context.fetch_store.staged_size() != 0)) {
-    strcpy(reply, "Error: internal OTA slot is occupied; use ota cancel first");
+    mesh::cli::formatError(reply, 160, "internal OTA slot is occupied; use ota cancel first");
     return true;
   }
 #elif defined(OTA_RAK15002_SD_STORE) && !defined(OTA_SEEDER_ONLY)
@@ -4112,7 +4110,7 @@ bool CommonCLI::handleSdCardSetCmd(const char* config, char* reply) {
   if (!context.fetch_store.usesSd() &&
       (context.manager.fetchState() != mesh::ota::OtaManager::IDLE ||
        context.fetch_store.staged_size() != 0)) {
-    strcpy(reply, "Error: non-SD OTA slot is occupied; use ota cancel first");
+    mesh::cli::formatError(reply, 160, "non-SD OTA slot is occupied; use ota cancel first");
     return true;
   }
 #endif
@@ -4218,7 +4216,7 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
     const bool is_ls = strncmp(query, "ls", 2) == 0;
     const size_t word_len = is_ls ? 2 : 3;
     if (query[word_len] != 0 && query[word_len] != ' ') {
-      strcpy(reply, "Error: use get sdcard ls|dir [page]");
+      mesh::cli::formatError(reply, 160, "use get sdcard ls|dir [page]");
       return true;
     }
     const char* page_arg = skipSpacesConst(query + word_len);
@@ -4227,7 +4225,7 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
       char* end = nullptr;
       unsigned long parsed = strtoul(page_arg, &end, 10);
       if (parsed == 0 || parsed > 65535 || !end || *skipSpacesConst(end) != 0) {
-        strcpy(reply, "Error: use get sdcard ls|dir [page]");
+        mesh::cli::formatError(reply, 160, "use get sdcard ls|dir [page]");
         return true;
       }
       page = parsed;
@@ -4238,7 +4236,7 @@ bool CommonCLI::handleSdCardGetCmd(const char* config, char* reply) {
       snprintf(reply, 160, "Error: SD card list failed: %s", store.last_error());
     }
   } else {
-    strcpy(reply, "Error: use get sdcard [format|erase|free|ls|dir [page]|*]");
+    mesh::cli::formatError(reply, 160, "use get sdcard [format|erase|free|ls|dir [page]|*]");
   }
   return true;
 }
@@ -4253,27 +4251,27 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #else
   if (strncmp(config, "peripherals.mode", 16) == 0
       && (config[16] == 0 || config[16] == ' ' || config[16] == '\t')) {
-    strcpy(reply, "Error: unsupported");
+    mesh::cli::formatError(reply, 160, "unsupported");
     return;
   }
 #endif
   if (strncmp(config, "repeat.trace", 12) == 0
       && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
     if (strcmp(_callbacks->getRole(), "repeater") != 0) {
-      strcpy(reply, "Error: repeat.trace is only supported by repeaters");
+      mesh::cli::formatError(reply, 160, "repeat.trace is only supported by repeaters");
       return;
     }
     const char* value = config + 12;
     while (*value == ' ' || *value == '\t') ++value;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      strcpy(reply, "Error: usage set repeat.trace on|off");
+      mesh::cli::formatError(reply, 160, "usage set repeat.trace on|off");
       return;
     }
     const uint8_t previous = _prefs->trace_when_repeat_off;
     _prefs->trace_when_repeat_off = strcmp(value, "on") == 0 ? 1 : 0;
     if (!trySavePrefs()) {
       _prefs->trace_when_repeat_off = previous;
-      strcpy(reply, "Error: save unconfirmed; reboot may differ");
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
       return;
     }
     _callbacks->onRetryConfigChanged();
@@ -4284,7 +4282,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   const bool adc_multiplier_command = strncmp(config, "adc.multiplier", 14) == 0
       && (config[14] == 0 || config[14] == ' ' || config[14] == '\t');
   if (adc_multiplier_command && _board->getAdcMultiplier() <= 0.0f) {
-    strcpy(reply, "Error: unsupported");
+    mesh::cli::formatError(reply, 160, "unsupported");
     return;
   }
   if (!adc_multiplier_command || mesh::power::voltagePolicySupported()) {
@@ -4314,15 +4312,15 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     while (*value == ' ' || *value == '\t') ++value;
     uint16_t hours = 0;
     if (!mesh::gps::parseSyncIntervalHours(value, hours)) {
-      strcpy(reply, "Error: GPS sync interval must be 1..336 hours");
+      mesh::cli::formatError(reply, 160, "GPS sync interval must be 1..336 hours");
     } else if (_sensors->getLocationProvider() == nullptr) {
-      strcpy(reply, "Error: GPS unavailable");
+      mesh::cli::formatError(reply, 160, "GPS unavailable");
     } else {
       const uint16_t previous = _prefs->gps_sync_interval_hours;
       _prefs->gps_sync_interval_hours = hours;
       if (!trySavePrefs()) {
         _prefs->gps_sync_interval_hours = previous;
-        strcpy(reply, "Error: save unconfirmed; reboot may differ");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
       } else {
         _sensors->applyGpsTimeSyncInterval(hours);
         snprintf(reply, 160, "OK - GPS sync interval %u hours (saved)", (unsigned)hours);
@@ -4332,7 +4330,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   }
   if (strncmp(config, "gps ", 4) == 0) {
     if (strcmp(config + 4, "on") != 0 && strcmp(config + 4, "off") != 0) {
-      strcpy(reply, "Error: use set gps on|off");
+      mesh::cli::formatError(reply, 160, "use set gps on|off");
     } else {
       char gps_command[8];
       snprintf(gps_command, sizeof(gps_command), "%s", config);
@@ -4348,14 +4346,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     while (*value == ' ' || *value == '\t') value++;
     uint8_t channel = 0;
     if (!mesh::wifi::parseEspNowChannel(value, channel)) {
-      strcpy(reply, "Error: ESP-NOW channel must be 1-13");
+      mesh::cli::formatError(reply, 160, "ESP-NOW channel must be 1-13");
     } else {
       // Snapshot the boot channel before writing NVS. The saved setting must
       // never become the active value in this boot merely because this is the
       // first policy helper reached by a CLI-only image.
       const uint8_t active = mesh::wifi::activeEspNowChannel();
       if (!mesh::wifi::saveConfiguredEspNowChannel(channel)) {
-        strcpy(reply, "Error: failed to save ESP-NOW channel");
+        mesh::cli::formatError(reply, 160, "failed to save ESP-NOW channel");
       } else if (channel == active) {
         snprintf(reply, 160,
                  "OK - ESP-NOW channel %u saved and active",
@@ -4380,14 +4378,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       _prefs->usb_logging_enabled = enabled ? 1 : 0;
       if (!trySavePrefs()) {
         _prefs->usb_logging_enabled = previous;
-        strcpy(reply, "Error: save unconfirmed; reboot may differ");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       // Commit before changing the stream's live protocol ownership.
       mesh::setUsbLoggingEnabled(enabled);
       snprintf(reply, 160, "OK - USB logging %s (saved)", enabled ? "on" : "off");
     } else {
-      strcpy(reply, "Error: usage set usb.logging on|off");
+      mesh::cli::formatError(reply, 160, "usage set usb.logging on|off");
     }
     return;
   }
@@ -4402,13 +4400,13 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       _prefs->usb_debug_enabled = enabled ? 1 : 0;
       if (!trySavePrefs()) {
         _prefs->usb_debug_enabled = previous;
-        strcpy(reply, "Error: save unconfirmed; reboot may differ");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       mesh::setUsbDebugEnabled(enabled);
       snprintf(reply, 160, "OK - USB debug %s (saved)", enabled ? "on" : "off");
     } else {
-      strcpy(reply, "Error: usage set usb.debug on|off");
+      mesh::cli::formatError(reply, 160, "usage set usb.debug on|off");
     }
     return;
   }
@@ -4421,11 +4419,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     bool usb_enabled;
     bool wifi_enabled;
     if (!mesh::cli::parseLoggingOutput(value, usb_enabled, wifi_enabled)) {
-      strcpy(reply, "Error: usage set logging.output off|usb|wifi|both");
+      mesh::cli::formatError(reply, 160, "usage set logging.output off|usb|wifi|both");
       return;
     }
     if (wifi_enabled && _callbacks->isMqttBridgeStopping()) {
-      strcpy(reply, "Error: MQTT is stopping; retry when mqtt.stopping is off");
+      mesh::cli::formatError(reply, 160, "MQTT is stopping; retry when mqtt.stopping is off");
       return;
     }
     const uint8_t previous_usb = _prefs->usb_logging_enabled;
@@ -4435,14 +4433,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (!trySavePrefs()) {
       _prefs->usb_logging_enabled = previous_usb;
       _prefs->bridge_enabled = previous_bridge;
-      strcpy(reply, "Error: save unconfirmed; reboot may differ");
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
       return;
     }
     mesh::setUsbLoggingEnabled(usb_enabled);
     const bool applied = wifi_enabled ? _callbacks->setMqttBridgeState(true)
                                       : _callbacks->requestMqttBridgeStop();
     if (!applied) {
-      strcpy(reply, "Error: logging output saved, but MQTT runtime change failed");
+      mesh::cli::formatError(reply, 160, "logging output saved, but MQTT runtime change failed");
       return;
     }
     snprintf(reply, 160, "OK - logging.output %s (saved)", value);
@@ -4471,11 +4469,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (strcmp(value, "on") == 0) enabled = true;
     else if (strcmp(value, "off") == 0) enabled = false;
     else {
-      strcpy(reply, "Error: usage set webui on|off");
+      mesh::cli::formatError(reply, 160, "usage set webui on|off");
       return;
     }
     if (!_callbacks->setWebUIEnabled(enabled, reply)) {
-      strcpy(reply, "Error: webui not supported on this build");
+      mesh::cli::formatError(reply, 160, "webui not supported on this build");
     }
     return;
   }
@@ -4485,7 +4483,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (mesh::cli::classifyStandaloneWiFiSet(config, &cli_value) ==
       mesh::cli::StandaloneWiFiKey::CLI) {
     if (!_callbacks->setWiFiCLI(cli_value, reply)) {
-      strcpy(reply, "Error: WiFi CLI unavailable on this build");
+      mesh::cli::formatError(reply, 160, "WiFi CLI unavailable on this build");
     }
     return;
   }
@@ -4497,11 +4495,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strncmp(config, "mqtt.enabled ", 13) == 0) {
     const char* value = config + 13;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      strcpy(reply, "Error: use set mqtt.enabled on|off");
+      mesh::cli::formatError(reply, 160, "use set mqtt.enabled on|off");
     } else {
       const bool enable = strcmp(value, "on") == 0;
       if (enable && _callbacks->isMqttBridgeStopping()) {
-        strcpy(reply, "Error: MQTT is stopping; retry when mqtt.stopping is off");
+        mesh::cli::formatError(reply, 160, "MQTT is stopping; retry when mqtt.stopping is off");
         return;
       }
       const uint8_t previous = _prefs->bridge_enabled;
@@ -4510,7 +4508,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       // intent first so a failed write leaves the running service unchanged.
       if (!trySavePrefs()) {
         _prefs->bridge_enabled = previous;
-        strcpy(reply, "Error: save unconfirmed; reboot may differ");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       const bool applied = enable ? _callbacks->setMqttBridgeState(true)
@@ -4525,14 +4523,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strncmp(config, "rs232.heartbeat ", 16) == 0) {
     bool enable = false;
     if (!parseOnOffStrict(config + 16, enable)) {
-      strcpy(reply, "Error: use set rs232.heartbeat on|off");
+      mesh::cli::formatError(reply, 160, "use set rs232.heartbeat on|off");
       return;
     }
     const uint8_t previous = _prefs->rs232_heartbeat;
     _prefs->rs232_heartbeat = enable ? 1 : 0;
     if (!trySavePrefs()) {
       _prefs->rs232_heartbeat = previous;
-      strcpy(reply, "Error: save unconfirmed; reboot may differ");
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
     } else {
       strcpy(reply, enable ? "OK - RS232 heartbeat enabled" : "OK - heartbeat and standby disabled");
     }
@@ -4542,14 +4540,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     bool enable = false;
     const bool force = strcmp(config + 16, "force") == 0;
     if (!force && !parseOnOffStrict(config + 16, enable)) {
-      strcpy(reply, "Error: use set rs232.autosleep on|off|force");
+      mesh::cli::formatError(reply, 160, "use set rs232.autosleep on|off|force");
       return;
     }
     const uint8_t previous = _prefs->rs232_autosleep;
     _prefs->rs232_autosleep = force ? 2 : enable ? 1 : 0;
     if (!trySavePrefs()) {
       _prefs->rs232_autosleep = previous;
-      strcpy(reply, "Error: save unconfirmed; reboot may differ");
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
     } else {
       strcpy(reply, force ? "OK - forced standby; stock/unknown peers can miss packets"
           : enable ? "OK - standby after peer heartbeat confirmed; stock stays active"
@@ -4562,14 +4560,14 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (!mesh::cli::parseUnsignedIntegerStrict(config + 11, seconds)
         || seconds < mesh::bridge::rs232power::MIN_IDLE_SECONDS
         || seconds > mesh::bridge::rs232power::MAX_IDLE_SECONDS) {
-      strcpy(reply, "Error: use set rs232.idle 60..3600 seconds");
+      mesh::cli::formatError(reply, 160, "use set rs232.idle 60..3600 seconds");
       return;
     }
     const uint16_t previous = _prefs->rs232_idle_seconds;
     _prefs->rs232_idle_seconds = static_cast<uint16_t>(seconds);
     if (!trySavePrefs()) {
       _prefs->rs232_idle_seconds = previous;
-      strcpy(reply, "Error: save unconfirmed; reboot may differ");
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
     } else {
       sprintf(reply, "OK - RS232 idle %us", static_cast<unsigned>(seconds));
     }
@@ -4578,13 +4576,13 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strncmp(config, "rs232.enabled ", 14) == 0) {
     bool enable = false;
     if (!parseOnOffStrict(config + 14, enable)) {
-      strcpy(reply, "Error: use set rs232.enabled on|off");
+      mesh::cli::formatError(reply, 160, "use set rs232.enabled on|off");
       return;
     }
     if (enable && _sensors->gpsSerialTransportMayConflict(_prefs->bridge_uart)
         && (!_sensors->gpsUsesSerialUart(_prefs->bridge_uart)
             || !_sensors->gpsSerialTransportCanYield(_prefs->bridge_uart))) {
-      strcpy(reply, "Error: UART may be driven by GPS; use UART 2 or a no-GPS build");
+      mesh::cli::formatError(reply, 160, "UART may be driven by GPS; use UART 2 or a no-GPS build");
       return;
     }
 #ifdef WITH_MQTT_BRIDGE
@@ -4622,7 +4620,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (memcmp(config, "espnow.enabled ", 15) == 0) {
     const char* value = config + 15;
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      strcpy(reply, "Error: use set espnow.enabled on|off");
+      mesh::cli::formatError(reply, 160, "use set espnow.enabled on|off");
     } else {
       const bool enable = strcmp(value, "on") == 0;
 #if defined(WITH_MQTT_BRIDGE) || defined(WITH_RS232_BRIDGE) \
@@ -4668,7 +4666,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   }
   if (wifi_key != mesh::cli::StandaloneWiFiKey::None) {
     if (!wifi_supported) {
-      strcpy(reply, "Error: standalone WiFi settings unavailable on this build");
+      mesh::cli::formatError(reply, 160, "standalone WiFi settings unavailable on this build");
     }
     return;
   }
@@ -4706,10 +4704,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "OK - disabled; restarting within 60s");
     } else {
-      strcpy(reply, "Error: use set system.watchdog on|off");
+      mesh::cli::formatError(reply, 160, "use set system.watchdog on|off");
     }
 #else
-    strcpy(reply, "Error: unsupported on this platform");
+    mesh::cli::formatError(reply, 160, "unsupported on this platform");
 #endif
   } else if (memcmp(config, "af ", 3) == 0) {
     float factor = 0.0f;
@@ -4727,7 +4725,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "cad ", 4) == 0) {
     const char* value = &config[4];
     if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
-      strcpy(reply, "Error: use set cad on|off");
+      mesh::cli::formatError(reply, 160, "use set cad on|off");
     } else {
       _prefs->cad_enabled = strcmp(value, "on") == 0;
       savePrefs();
@@ -4736,7 +4734,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "agc.reset.interval ", 19) == 0) {
     uint32_t seconds;
     if (!mesh::cli::parseUnsignedIntegerStrict(&config[19], seconds) || seconds > 1020) {
-      strcpy(reply, "Error: AGC interval must be 0-1020 seconds");
+      mesh::cli::formatError(reply, 160, "AGC interval must be 0-1020 seconds");
     } else {
       _prefs->agc_reset_interval = seconds / 4;
       savePrefs();
@@ -4766,13 +4764,13 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     uint32_t hours = 0;
     if (!parseUint32Strict(&config[22], hours)
         || (hours != 0 && (hours < 3 || hours > 168))) {
-      strcpy(reply, "Error: interval must be 0 (off) or 3-168 hours");
+      mesh::cli::formatError(reply, 160, "interval must be 0 (off) or 3-168 hours");
     } else {
       const uint8_t previous = _prefs->flood_advert_interval;
       _prefs->flood_advert_interval = (uint8_t)(hours);
       if (!trySavePrefs()) {
         _prefs->flood_advert_interval = previous;
-        strcpy(reply, "Error: save unconfirmed; reboot may differ");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       _callbacks->updateFloodAdvertTimer();
@@ -4788,7 +4786,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       _prefs->advert_interval = (uint8_t)(mins / 2);
       if (!trySavePrefs()) {
         _prefs->advert_interval = previous;
-        strcpy(reply, "Error: save unconfirmed; reboot may differ");
+        mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
         return;
       }
       _callbacks->updateAdvertTimer();
@@ -4800,7 +4798,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     StrHelper::strncpy(_prefs->guest_password, &config[15], sizeof(_prefs->guest_password));
     if (!trySavePrefs()) {
       memcpy(_prefs->guest_password, previous, sizeof(previous));
-      strcpy(reply, "Error: save unconfirmed; reboot may differ");
+      mesh::cli::formatError(reply, 160, "save unconfirmed; reboot may differ");
       return;
     }
     strcpy(reply, "OK");
@@ -4812,7 +4810,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       mesh::LocalIdentity new_id;
       new_id.readFrom(prv_key, PRV_KEY_SIZE);
       if (!_callbacks->saveIdentity(new_id)) {
-        strcpy(reply, "Error: identity not saved; current key unchanged");
+        mesh::cli::formatError(reply, 160, "identity not saved; current key unchanged");
         return;
       }
       strcpy(reply, "OK, reboot to apply! New pubkey: ");
@@ -4844,16 +4842,16 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "OK");
     } else {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     }
   } else if (memcmp(config, "radio.fem.rxgain ", 17) == 0) {
     const auto* radio = _callbacks->getProfileRadio();
     if (radio && (radio->isMorseTxActive() || radio->isMorseRxActive())) {
-      strcpy(reply, "Error: stop Morse before changing LoRa FEM gain");
+      mesh::cli::formatError(reply, 160, "stop Morse before changing LoRa FEM gain");
       return;
     }
     if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else if (memcmp(&config[17], "on", 2) == 0) {
       bool changed = !_board->isLoRaFemLnaEnabled();
       if (_board->setLoRaFemLnaEnabled(true)) {
@@ -4862,7 +4860,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         savePrefs();
         strcpy(reply, "OK - LoRa FEM RX gain on");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+        mesh::cli::formatError(reply, 160, "failed to apply LoRa FEM RX gain");
       }
     } else if (memcmp(&config[17], "off", 3) == 0) {
       bool changed = _board->isLoRaFemLnaEnabled();
@@ -4872,26 +4870,26 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         savePrefs();
         strcpy(reply, "OK - LoRa FEM RX gain off");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+        mesh::cli::formatError(reply, 160, "failed to apply LoRa FEM RX gain");
       }
     } else {
-      strcpy(reply, "Error: state must be on or off");
+      mesh::cli::formatError(reply, 160, "state must be on or off");
     }
   } else if (memcmp(config, "radio.fem.txgain ", 17) == 0) {
     const auto* radio = _callbacks->getProfileRadio();
     if (radio && (radio->isMorseTxActive() || radio->isMorseRxActive())) {
-      strcpy(reply, "Error: stop Morse before changing LoRa FEM gain");
+      mesh::cli::formatError(reply, 160, "stop Morse before changing LoRa FEM gain");
       return;
     }
     if (!_board->canControlLoRaFemPaGain()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else if (memcmp(&config[17], "on", 2) == 0) {
       if (_board->setLoRaFemPaGainEnabled(true)) {
         _prefs->radio_fem_txgain = 1;
         savePrefs();
         strcpy(reply, "OK - LoRa FEM TX gain on");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM TX gain");
+        mesh::cli::formatError(reply, 160, "failed to apply LoRa FEM TX gain");
       }
     } else if (memcmp(&config[17], "off", 3) == 0) {
       if (_board->setLoRaFemPaGainEnabled(false)) {
@@ -4899,10 +4897,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         savePrefs();
         strcpy(reply, "OK - LoRa FEM TX gain off");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM TX gain");
+        mesh::cli::formatError(reply, 160, "failed to apply LoRa FEM TX gain");
       }
     } else {
-      strcpy(reply, "Error: state must be on or off");
+      mesh::cli::formatError(reply, 160, "state must be on or off");
     }
   } else if (strncmp(config, "radio.rxps.rfrx_disabled ", 25) == 0) {
     const char* value = &config[25];
@@ -4912,12 +4910,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else if (strcmp(value, "off") == 0) {
       disabled = false;
     } else {
-      strcpy(reply, "Error: state must be on or off");
+      mesh::cli::formatError(reply, 160, "state must be on or off");
       return;
     }
 
     if (!_callbacks->setRxPowerSavingRfRxDisabled(disabled)) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "OK - radio.rxps.rfrx_disabled %s", disabled ? "on" : "off");
     }
@@ -5051,7 +5049,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
         && _radio_profiles.acceptsPrimary(freq, bw, sf, cr, preamble)) {
       const int8_t previous_power = _prefs->tx_power_dbm;
       if (!savePrimaryRadioParams(freq, bw, sf, cr, preamble)) {
-        strcpy(reply, "Error: radio settings could not be saved"); return;
+        mesh::cli::formatError(reply, 160, "radio settings could not be saved"); return;
       }
       if (_prefs->tx_power_dbm != previous_power) {
         sprintf(reply, "OK - reboot to apply; TX power limited to %d dBm",
@@ -5482,12 +5480,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     const int8_t minimum = mesh::minLoRaTxPowerForFrequency(_prefs->freq);
     const int8_t maximum = mesh::maxLoRaTxPowerForFrequency(_prefs->freq);
     if (!mesh::cli::parseIntegerStrict(&config[3], power)) {
-      strcpy(reply, "Error: invalid TX power");
+      mesh::cli::formatError(reply, 160, "invalid TX power");
     } else if (!mesh::isLoRaTxPowerValid(power, _prefs->freq)) {
       sprintf(reply, "Error: TX power range is %d to %d dBm",
               (int)minimum, (int)maximum);
     } else if (!_callbacks->setTxPower(static_cast<int8_t>(power))) {
-      strcpy(reply, "Error: radio busy or TX power rejected");
+      mesh::cli::formatError(reply, 160, "radio busy or TX power rejected");
     } else {
       _prefs->tx_power_dbm = static_cast<int8_t>(power);
       savePrefs();
@@ -5515,7 +5513,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "bridge.enabled ", 15) == 0) {
     bool enable = false;
     if (!parseOnOffStrict(&config[15], enable)) {
-      strcpy(reply, "Error: usage set bridge.enabled on|off");
+      mesh::cli::formatError(reply, 160, "usage set bridge.enabled on|off");
     } else {
 #if defined(WITH_ESPNOW_BRIDGE) \
     && (defined(WITH_MQTT_BRIDGE) \
@@ -5536,7 +5534,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
           && _sensors->gpsSerialTransportMayConflict(_prefs->bridge_uart)
           && (!_sensors->gpsUsesSerialUart(_prefs->bridge_uart)
               || !_sensors->gpsSerialTransportCanYield(_prefs->bridge_uart))) {
-        strcpy(reply, "Error: UART may be driven by GPS; use UART 2 or a no-GPS build");
+        mesh::cli::formatError(reply, 160, "UART may be driven by GPS; use UART 2 or a no-GPS build");
         return;
       }
       const uint8_t previous_enabled = _prefs->bridge_enabled;
@@ -5588,12 +5586,12 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "OK");
     } else {
-      strcpy(reply, "Error: delay must be between 0-10000 ms");
+      mesh::cli::formatError(reply, 160, "delay must be between 0-10000 ms");
     }
   } else if (memcmp(config, "bridge.source ", 14) == 0) {
     const char* source = &config[14];
     if (strcmp(source, "rx") != 0 && strcmp(source, "tx") != 0) {
-      strcpy(reply, "Error: usage set bridge.source rx|tx");
+      mesh::cli::formatError(reply, 160, "usage set bridge.source rx|tx");
       return;
     }
     _prefs->bridge_pkt_src = strcmp(source, "rx") == 0;
@@ -5672,7 +5670,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
           && _sensors->gpsSerialTransportMayConflict((uint8_t)uart)
           && (!_sensors->gpsUsesSerialUart((uint8_t)uart)
               || !_sensors->gpsSerialTransportCanYield((uint8_t)uart))) {
-        strcpy(reply, "Error: UART may be driven by GPS; keep UART 2 or use a no-GPS build");
+        mesh::cli::formatError(reply, 160, "UART may be driven by GPS; keep UART 2 or use a no-GPS build");
         return;
       }
       const uint8_t previous_uart = _prefs->bridge_uart;
@@ -5753,10 +5751,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "bridge.format ", 14) == 0) {
     uint8_t format = mesh::bridge::ESPNOW_FORMAT_WRAPPED;
     if (!mesh::bridge::parseEspNowFormat(&config[14], format)) {
-      strcpy(reply, "Error: format must be wrapped or raw");
+      mesh::cli::formatError(reply, 160, "format must be wrapped or raw");
     } else if (!mesh::bridge::isValidEspNowBridgeChannel(
                    _prefs->bridge_channel, format)) {
-      strcpy(reply, "Error: set bridge.channel to 1-13 before changing format");
+      mesh::cli::formatError(reply, 160, "set bridge.channel to 1-13 before changing format");
     } else {
       _prefs->bridge_format = format;
       const bool applied =
@@ -5767,7 +5765,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
 #endif
       savePrefs();
       if (!applied) {
-        strcpy(reply, "Error: setting saved; bridge failed to restart");
+        mesh::cli::formatError(reply, 160, "setting saved; bridge failed to restart");
       } else {
         strcpy(reply, format == mesh::bridge::ESPNOW_FORMAT_RAW
             ? "OK - raw MeshCore frames; bridge.secret is ignored"
@@ -5778,7 +5776,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "adc.multiplier ", 15) == 0) {
     float multiplier = 0.0f;
     if (!mesh::cli::parseDecimalStrict(&config[15], multiplier)) {
-      strcpy(reply, "Error: invalid multiplier");
+      mesh::cli::formatError(reply, 160, "invalid multiplier");
     } else {
       applyAndSaveAdcMultiplier(multiplier, reply, 160);
     };
@@ -5789,7 +5787,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "reboot.interval disabled");
     } else if (hours < 1 || 255 < hours) {
-      strcpy(reply, "Error: interval range is 1-255 hours");
+      mesh::cli::formatError(reply, 160, "interval range is 1-255 hours");
     } else {
       _prefs->reboot_interval = hours;
       savePrefs();
@@ -5815,7 +5813,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       }
     }
 #else
-    strcpy(reply, "Error: extra.sf requires an LR2021 radio");
+    mesh::cli::formatError(reply, 160, "extra.sf requires an LR2021 radio");
 #endif
 #if defined(STATION_G3_ESP32)
   } else if (_board->handleCommand(command, sender_timestamp, reply)) {
@@ -5835,16 +5833,16 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
           [this]() { return trySavePrefs(); })) return;
 #else
   if (strcmp(config, "peripherals.mode") == 0) {
-    strcpy(reply, "Error: unsupported");
+    mesh::cli::formatError(reply, 160, "unsupported");
     return;
   }
 #endif
   if (strncmp(config, "repeat.trace", 12) == 0
       && (config[12] == 0 || config[12] == ' ' || config[12] == '\t')) {
     if (strcmp(_callbacks->getRole(), "repeater") != 0) {
-      strcpy(reply, "Error: repeat.trace is only supported by repeaters");
+      mesh::cli::formatError(reply, 160, "repeat.trace is only supported by repeaters");
     } else if (strcmp(config, "repeat.trace") != 0) {
-      strcpy(reply, "Error: usage get repeat.trace");
+      mesh::cli::formatError(reply, 160, "usage get repeat.trace");
     } else {
       snprintf(reply, 160, "> %s", _prefs->trace_when_repeat_off == 1 ? "on" : "off");
     }
@@ -5854,7 +5852,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   const bool adc_multiplier_command = strncmp(config, "adc.multiplier", 14) == 0
       && (config[14] == 0 || config[14] == ' ' || config[14] == '\t');
   if (adc_multiplier_command && _board->getAdcMultiplier() <= 0.0f) {
-    strcpy(reply, "Error: unsupported");
+    mesh::cli::formatError(reply, 160, "unsupported");
     return;
   }
   if (!adc_multiplier_command || mesh::power::voltagePolicySupported()) {
@@ -5865,7 +5863,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (sender_timestamp == 0) {
       snprintf(reply, 160, "> %s", _prefs->password);
     } else {
-      strcpy(reply, "Error: get password requires a local connection");
+      mesh::cli::formatError(reply, 160, "get password requires a local connection");
     }
     return;
   }
@@ -5874,7 +5872,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (sender_timestamp != 0) {
       strcpy(reply, "> ******** (local connection only)");
     } else if (!_callbacks->getWiFiPassword(reply)) {
-      strcpy(reply, "Error: WiFi password unavailable on this build");
+      mesh::cli::formatError(reply, 160, "WiFi password unavailable on this build");
     }
     return;
   }
@@ -5887,7 +5885,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (strcmp(config, "gps.sync.interval") == 0) {
     auto* provider = _sensors->getLocationProvider();
     if (provider == nullptr) {
-      strcpy(reply, "Error: GPS unavailable");
+      mesh::cli::formatError(reply, 160, "GPS unavailable");
     } else {
       const uint16_t hours = provider->getTimeSyncIntervalHours();
       if (hours == 0) strcpy(reply, "> default (board GPS sync policy)");
@@ -5945,7 +5943,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #if defined(ESP_PLATFORM) && defined(ADMIN_PASSWORD) && !defined(WEBCONFIG_DISABLED)
   if (strcmp(config, "webui") == 0) {
     if (!_callbacks->getWebUIStatus(reply)) {
-      strcpy(reply, "Error: webui not supported on this build");
+      mesh::cli::formatError(reply, 160, "webui not supported on this build");
     }
     return;
   }
@@ -5954,7 +5952,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   if (mesh::cli::classifyStandaloneWiFiGet(config) ==
       mesh::cli::StandaloneWiFiKey::CLI) {
     if (!_callbacks->getWiFiCLI(reply)) {
-      strcpy(reply, "Error: WiFi CLI unavailable on this build");
+      mesh::cli::formatError(reply, 160, "WiFi CLI unavailable on this build");
     }
     return;
   }
@@ -5991,7 +5989,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   }
   if (wifi_key != mesh::cli::StandaloneWiFiKey::None) {
     if (!wifi_supported) {
-      strcpy(reply, "Error: WiFi information unavailable on this build");
+      mesh::cli::formatError(reply, 160, "WiFi information unavailable on this build");
     }
     return;
   }
@@ -6016,7 +6014,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
 #if defined(NRF52_PLATFORM)
     sprintf(reply, "> %s", _prefs->system_watchdog_enabled ? "on" : "off");
 #else
-    strcpy(reply, "Error: unsupported on this platform");
+    mesh::cli::formatError(reply, 160, "unsupported on this platform");
 #endif
   } else if (configKeyEquals(config, "af")) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->airtime_factor));
@@ -6059,13 +6057,13 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->rx_boosted_gain ? "on" : "off");
   } else if (configKeyEquals(config, "radio.fem.rxgain")) {
     if (!_board->canControlLoRaFemLna()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "> %s", _board->isLoRaFemLnaEnabled() ? "on" : "off");
     }
   } else if (configKeyEquals(config, "radio.fem.txgain")) {
     if (!_board->canControlLoRaFemPaGain()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "> %s", _board->isLoRaFemPaGainEnabled() ? "on" : "off");
     }
@@ -6075,7 +6073,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     _callbacks->formatScheduledRadioParams(false, skipSpacesConst(&config[7]), reply);
   } else if (strcmp(config, "radio.rxps.rfrx_disabled") == 0) {
     if (!_callbacks->supportsRxPowerSavingRfRxDisable()) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "> %s", _callbacks->isRxPowerSavingRfRxDisabled() ? "on" : "off");
     }
@@ -6315,12 +6313,12 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
           strcpy(reply, "> unknown");
       }
   #else
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
   #endif
   } else if (configKeyEquals(config, "adc.multiplier")) {
     float adc_mult = _board->getAdcMultiplier();
     if (adc_mult == 0.0f) {
-      strcpy(reply, "Error: unsupported");
+      mesh::cli::formatError(reply, 160, "unsupported");
     } else {
       sprintf(reply, "> %.3f", adc_mult);
     }
@@ -6363,7 +6361,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "No extra SF configured");
     }
 #else
-    strcpy(reply, "Error: extra.sf requires an LR2021 radio");
+    mesh::cli::formatError(reply, 160, "extra.sf requires an LR2021 radio");
 #endif
 #if defined(STATION_G3_ESP32)
   } else if (_board->handleCommand(command, sender_timestamp, reply)) {

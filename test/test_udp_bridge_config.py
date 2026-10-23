@@ -28,7 +28,7 @@ class UDPBridgeConfigTests(unittest.TestCase):
                 flags = ["-DWITH_UDP_BRIDGE=1", "-DESP32_PLATFORM", "-DESP32", "-I", str(mocks)]
                 sources = [str(ROOT / "src/helpers/UDPBridgeSettings.cpp")]
             main = work / "main.cpp"
-            main.write_text(source, encoding="ascii")
+            main.write_text('#include <helpers/CLICommandUtils.h>\n' + source, encoding="ascii")
             binary = work / "check"
             result = subprocess.run([compiler, "-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                 "-Wno-misleading-indentation", "-Wno-sign-compare", "-fsanitize=address,undefined",

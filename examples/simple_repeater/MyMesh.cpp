@@ -1173,6 +1173,8 @@ bool MyMesh::allowPacketTransmit(const mesh::Packet* packet) const {
   return mesh::Mesh::allowPacketTransmit(packet);
 }
 
+#if MESH_DEBUG || MESH_ENABLE_PACKET_FILE_LOGGING \
+    || (MESH_PACKET_LOGGING && !MESH_PACKET_LOGGING_COMPACT)
 const char *MyMesh::getLogDateTime() {
   static char tmp[32];
   uint32_t now = getRTCClock()->getCurrentTime();
@@ -1181,6 +1183,7 @@ const char *MyMesh::getLogDateTime() {
           dt.year());
   return tmp;
 }
+#endif
 
 #if MESH_ENABLE_FLOOD_RULE_ENGINE
 bool MyMesh::allowTransportPacket(const mesh::Packet* packet, uint8_t context) {
@@ -1208,12 +1211,10 @@ bool MyMesh::allowTransportPacket(const mesh::Packet* packet, uint8_t context) {
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #if MESH_PACKET_LOGGING
   if (mesh::isUsbLoggingEnabled()) {
-    mesh::SerialLogLine<> line;
 #if MESH_PACKET_LOGGING_COMPACT
-    line.printf("R");
-    line.hex(raw, len);
-    line.flush(mesh::usbLoggingPort(), false);
+    mesh::serialLogCompactPacket(mesh::usbLoggingPort(), 'R', raw, len);
 #else
+    mesh::SerialLogLine<> line;
     line.printf("%s RAW: ", getLogDateTime());
     line.hex(raw, len);
     line.flush(mesh::usbLoggingPort());
@@ -1709,11 +1710,11 @@ static uint8_t getRetryLogCodingRate(const mesh::Packet* packet, uint8_t default
 
 void MyMesh::onDirectRetryEvent(const char* event, const mesh::Packet* packet, uint32_t delay_millis, uint8_t retry_attempt,
                                 const uint8_t* target_hash, uint8_t target_hash_len, int16_t payload_type) {
-#if defined(PORTABLE_MQTT_OBSERVER)
+#if defined(PORTABLE_MQTT_OBSERVER) \
+    || (!MESH_DEBUG && !MESH_ENABLE_PACKET_FILE_LOGGING)
   (void)event; (void)packet; (void)delay_millis; (void)retry_attempt;
   (void)target_hash; (void)target_hash_len; (void)payload_type;
-  return;
-#endif
+#else
   char type_label[8];
   char target_label[(MAX_HASH_SIZE * 2) + 1];
   const char* route_label = packet != NULL ? (packet->isRouteDirect() ? "D" : "F") : "D";
@@ -1756,6 +1757,7 @@ void MyMesh::onDirectRetryEvent(const char* event, const mesh::Packet* packet, u
       f.close();
     }
   }
+#endif
 #endif
 }
 
@@ -2238,6 +2240,16 @@ void MyMesh::formatFloodRetryPath(char* dest, size_t dest_len, const mesh::Packe
   }
 }
 
+bool MyMesh::hasFloodRetryHeard(const mesh::Packet* packet) const {
+  if (packet == NULL || packet->getPathHashCount() == 0) return false;
+  const uint8_t hash_size = packet->getPathHashSize();
+  if (hash_size == 0 || hash_size > MAX_ROUTE_HASH_BYTES) return false;
+  if (!_prefs.flood_retry_bridge_enabled) return true;
+  FloodRetryBridgeState* state = floodRetryBridgeStateFor(packet, false);
+  return state != NULL && (floodRetryBridgeHeardMask(packet, state->source_mask,
+      state->progress_marker) & state->target_mask) != 0;
+}
+
 bool MyMesh::formatFloodRetryHeard(char* dest, size_t dest_len, const mesh::Packet* packet) const {
   if (dest == NULL || dest_len == 0 || packet == NULL || packet->getPathHashCount() == 0) {
     return false;
@@ -2343,6 +2355,7 @@ void MyMesh::onFloodRetryEvent(const char* event, const mesh::Packet* packet, ui
     return;
   }
 
+#if MESH_DEBUG || MESH_ENABLE_PACKET_FILE_LOGGING
   const char* time_label = "time_ms";
   if (strcmp(event, "queued") == 0 || strcmp(event, "dropped_queue_full") == 0) {
     time_label = "wait_ms";
@@ -2401,7 +2414,11 @@ void MyMesh::onFloodRetryEvent(const char* event, const mesh::Packet* packet, ui
     }
   }
 #endif
-
+#else
+  // Routing must not depend on formatting a discarded diagnostic string.
+  if (strcmp(event, "good") == 0 && hasFloodRetryHeard(packet))
+    refreshFloodRetryReachability(packet);
+#endif
 }
 
 void MyMesh::onFloodRetrySlotReleased(const uint8_t* retry_key, uint8_t radio_profile) {

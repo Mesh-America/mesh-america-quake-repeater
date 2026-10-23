@@ -24,6 +24,7 @@ PREAMBLE = r'''
 #include <helpers/CompanionLostReply.h>
 #include <helpers/CompanionTimezonePrefs.h>
 #include "companion_fleet_dispatch.h"
+#include "battery_calibration_cli_stub.h"
 #define ESP32 1
 #define WIFI_SSID "test"
 #define WITH_MQTT_BRIDGE 1
@@ -409,6 +410,7 @@ int main() {
             binary = Path(temp) / "test"
             result = subprocess.run([
                 "c++", "-std=c++17", "-include", "initializer_list", "-x", "c++", "-",
+                "-include", str(ROOT / "src/helpers/CLICommandUtils.h"),
                 *SANITIZER_FLAGS, "-o", str(binary),
             ], input=code, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)

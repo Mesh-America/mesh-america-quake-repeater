@@ -34,7 +34,7 @@ def build(testcase, source, defines=(), files=None, expect_success=True):
         testcase.skipTest("a host C++17 compiler is required")
     with tempfile.TemporaryDirectory(prefix="rak15002-") as folder:
         work = Path(folder)
-        (work / "main.cpp").write_text(source, encoding="utf-8")
+        (work / "main.cpp").write_text('#include <helpers/CLICommandUtils.h>\n' + source, encoding="utf-8")
         for name, content in (files or {}).items():
             (work / name).write_text(content, encoding="utf-8")
         sanitizer = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",

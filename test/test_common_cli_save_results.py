@@ -14,7 +14,7 @@ def compile_run(source, macros=()):
     with tempfile.TemporaryDirectory(prefix='common-cli-save-') as directory:
         work = Path(directory)
         cpp, exe = work / 'test.cpp', work / 'test'
-        cpp.write_text(source, encoding='utf-8')
+        cpp.write_text('#include <helpers/CLICommandUtils.h>\n' + source, encoding='utf-8')
         subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
                         '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                         '-fno-pie', '-no-pie', *['-D' + m + '=1' for m in macros],

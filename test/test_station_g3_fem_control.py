@@ -19,6 +19,7 @@ FIXTURE = r'''
 #include <cstring>
 #include <initializer_list>
 #include <helpers/PrefsSaveReplyGuard.h>
+#include <helpers/CLICommandUtils.h>
 #include "LoRaFEMControl.h"
 #include "StationG3RadioSlot.h"
 struct ESP32Board {

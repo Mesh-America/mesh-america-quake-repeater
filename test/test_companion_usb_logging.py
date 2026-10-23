@@ -14,6 +14,7 @@ from test_radio_receive_contract import method
 ROOT = Path(__file__).resolve().parents[1]
 
 PREFERENCE_HARNESS = r'''
+#include <helpers/CLICommandUtils.h>
 struct ConfigText : Stream {
  std::string text;size_t offset=0;
  int available() override{return int(text.size()-offset);}

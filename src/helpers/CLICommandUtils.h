@@ -10,6 +10,11 @@ namespace cli {
 
 // Share fixed error prefixes without duplicating their bytes in each message.
 // Formatting keeps the same termination and truncation as other CLI replies.
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, noclone))
+#elif defined(__GNUC__)
+__attribute__((noinline))
+#endif
 inline void formatError(char* reply, size_t capacity, const char* message) {
   snprintf(reply, capacity, "Error: %s", message);
 }

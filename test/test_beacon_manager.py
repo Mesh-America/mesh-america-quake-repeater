@@ -49,6 +49,42 @@ class BeaconManagerTest(unittest.TestCase):
     def test_commands_and_bounds(self):
         self.run_scenario("commands")
 
+    def test_plain_decimal_parser_matches_radio_grammar(self):
+        production = (ROOT / "src/helpers/BeaconManager.cpp").read_text(encoding="ascii")
+        parser = body(production, "bool floatValue(")
+        source = Path(self.work.name) / "decimal.cpp"
+        binary = Path(self.work.name) / "decimal"
+        source.write_text(r'''
+#include <helpers/CLICommandUtils.h>
+#include <cassert>
+#include <math.h>
+#include <cstring>
+#include <initializer_list>
+namespace mesh {
+''' + parser + r'''
+}
+int main() {
+  float value = 0;
+  struct Valid { const char* text; float value; };
+  for (const Valid& input : {Valid{"906.875", 906.875f}, {"+62.5", 62.5f},
+       {"-.5", -0.5f}, {".5", 0.5f}, {"906.", 906.0f}, {"0", 0.0f}}) {
+    assert(mesh::floatValue(input.text, value) && value == input.value);
+  }
+  for (const char* invalid : {"", ".", "+", "nan", "inf", "-inf", "0x1.c54p9",
+       "9.06875e2", "906.875MHz", " 906.875", "906.875 ", "906.875\t", "4294967296"})
+    assert(!mesh::floatValue(invalid, value));
+  assert(!mesh::floatValue(nullptr, value));
+}
+''', encoding="ascii")
+        compiled = subprocess.run([
+            self.build_command[0], "-std=c++17", "-Wall", "-Wextra", "-Werror",
+            "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
+            "-I", str(ROOT / "src"), str(source), "-o", str(binary),
+        ], capture_output=True, text=True, timeout=60)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_all_intervals_and_wrap(self):
         self.run_scenario("schedule")
 

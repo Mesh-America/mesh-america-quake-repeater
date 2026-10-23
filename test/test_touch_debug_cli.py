@@ -132,6 +132,7 @@ int main() {
             with self.subTest(touch=touch), tempfile.TemporaryDirectory() as temp:
                 binary = Path(temp) / "touch_debug_cli"
                 compiled = subprocess.run(["c++", "-std=c++11", "-O1",
+                    "-include", str(ROOT / "src/helpers/CLICommandUtils.h"),
                     "-fsanitize=address,undefined", "-fno-pie", "-no-pie",
                     *(["-DHAS_TOUCH=1"] if touch else []),
                     "-x", "c++", "-", "-o", str(binary)],

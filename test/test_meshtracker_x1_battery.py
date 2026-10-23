@@ -31,6 +31,7 @@ def sampling_source(mutation=None):
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <helpers/BatteryCalibration.h>
 #define LOW 0
 #define HIGH 1
 #define AR_DEFAULT 10
@@ -60,7 +61,13 @@ int analogRead(int pin) {
   assert(!events.empty() && events.back().name=="settle");
   events.push_back({"sample",raw});return raw;
 }
-class Board { public: @METHOD@ };
+class Board {
+  uint16_t calibrateBatteryMillivolts(uint16_t value) const {
+    return mesh::power::scaleBatteryMillivolts(value, 1.0f);
+  }
+public:
+  @METHOD@
+};
 int main() {
   Board board;
 #ifdef BATTERY_PIN
@@ -100,7 +107,8 @@ class MeshTrackerX1BatteryTests(unittest.TestCase):
             sanitizer = [] if os.name == "nt" else ["-fsanitize=address,undefined",
                 "-fno-sanitize-recover=all", "-fno-pie", "-no-pie"]
             build = subprocess.run([compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror",
-                *sanitizer, *["-D"+flag for flag in defines], str(cpp), "-o", str(binary)],
+                *sanitizer, "-I", str(ROOT / "src"),
+                *["-D"+flag for flag in defines], str(cpp), "-o", str(binary)],
                 text=True, capture_output=True, timeout=30)
             self.assertEqual(build.returncode, 0, build.stdout+build.stderr)
             run = subprocess.run([str(binary)], text=True, capture_output=True, timeout=10)

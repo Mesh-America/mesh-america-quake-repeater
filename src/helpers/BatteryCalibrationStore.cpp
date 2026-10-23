@@ -15,10 +15,16 @@
 #include <stdio.h>
 #include <string.h>
 
+#if BATTERY_CALIBRATION_VOLTAGE_POLICY_ONLY && !defined(NRF52_POWER_MANAGEMENT)
+#error "Policy-only battery calibration requires NRF52_POWER_MANAGEMENT"
+#endif
+
 namespace mesh { namespace power {
 namespace {
+#if !BATTERY_CALIBRATION_VOLTAGE_POLICY_ONLY
 FILESYSTEM* calibration_fs = nullptr;
 const char* const calibration_path = "/battery_cal";
+#endif
 
 bool usesVoltagePolicy() {
 #if defined(NRF52_POWER_MANAGEMENT)
@@ -28,6 +34,7 @@ bool usesVoltagePolicy() {
 #endif
 }
 
+#if !BATTERY_CALIBRATION_VOLTAGE_POLICY_ONLY
 void encode(float multiplier, uint8_t (&data)[12]) {
   memcpy(data, "ADC1", 4);
   static_assert(sizeof(multiplier) == sizeof(uint32_t), "ADC record needs 32-bit float");
@@ -49,9 +56,14 @@ bool readMultiplier(float& multiplier) {
 
 bool saveMultiplier(float multiplier) {
   if (!calibration_fs) return false;
-  uint8_t data[12], verified[12];
+  uint8_t data[12];
   encode(multiplier, data);
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+#if defined(NRF52_PLATFORM)
+  return storage::writeCheckedSettingsFile(calibration_fs, calibration_path,
+      data, sizeof(data)) == AtomicFileWriter::Outcome::Committed;
+#else
+  uint8_t verified[12];
+#if defined(STM32_PLATFORM)
   AtomicFileWriter file(calibration_fs, calibration_path);
 #else
   ContactFileTransaction file(calibration_fs, calibration_path);
@@ -60,10 +72,20 @@ bool saveMultiplier(float multiplier) {
   return storage::readFixedSettingsFile(calibration_fs, calibration_path,
                                          verified, sizeof(verified))
       && memcmp(data, verified, sizeof(data)) == 0;
+#endif
 }
+#endif
 } // namespace
 
 bool beginBatteryCalibrationStore(MainBoard& board, FILESYSTEM* fs) {
+#if BATTERY_CALIBRATION_VOLTAGE_POLICY_ONLY
+  // A tagged board must finish its boot policy initialization first. Even a
+  // missing/corrupt policy file initializes safe defaults; never silently
+  // select a second calibration store if the board lifecycle is incomplete.
+  (void)board;
+  (void)fs;
+  return usesVoltagePolicy();
+#else
   calibration_fs = fs;
   if (usesVoltagePolicy() || board.getAdcMultiplier() <= 0.0f) return true;
 #if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
@@ -73,29 +95,31 @@ bool beginBatteryCalibrationStore(MainBoard& board, FILESYSTEM* fs) {
   if (!fs->exists(calibration_path)) return true;
   float multiplier;
   return readMultiplier(multiplier) && board.setAdcMultiplier(multiplier);
+#endif
 }
 
 bool setStoredAdcMultiplier(MainBoard& board, float multiplier,
                             char* reply, size_t capacity) {
   if (!isfinite(multiplier) || multiplier < 0.0f || multiplier > 10.0f) {
-    snprintf(reply, capacity, "Error: multiplier must be 0-10");
+    mesh::cli::formatError(reply, capacity, "multiplier 0-10");
     return false;
   }
   if (board.getAdcMultiplier() <= 0.0f) {
-    snprintf(reply, capacity, "Error: ADC calibration unsupported");
+    mesh::cli::formatError(reply, capacity, "unsupported");
     return false;
   }
 #if defined(NRF52_POWER_MANAGEMENT)
   if (usesVoltagePolicy()) {
-    char command[48];
-    snprintf(command, sizeof(command), "set adc.multiplier %.3f", multiplier);
-    return handleVoltagePolicyCommand(command, reply, capacity)
-        && strncmp(reply, "OK", 2) == 0;
+    return setConfiguredAdcMultiplier(multiplier, reply, capacity);
   }
 #endif
+#if BATTERY_CALIBRATION_VOLTAGE_POLICY_ONLY
+  mesh::cli::formatError(reply, capacity, "voltage policy unsupported");
+  return false;
+#else
   const float previous = board.getAdcMultiplier();
   if (!board.setAdcMultiplier(multiplier)) {
-    snprintf(reply, capacity, "Error: multiplier rejected by board");
+    mesh::cli::formatError(reply, capacity, "invalid multiplier");
     return false;
   }
   if (!saveMultiplier(multiplier)) {
@@ -105,9 +129,10 @@ bool setStoredAdcMultiplier(MainBoard& board, float multiplier,
         : "Error: save unconfirmed; runtime restore failed; reboot may differ");
     return false;
   }
-  if (multiplier == 0.0f) snprintf(reply, capacity, "OK - using default board multiplier");
-  else snprintf(reply, capacity, "OK - multiplier set to %.3f (saved)", multiplier);
+  if (multiplier == 0.0f) snprintf(reply, capacity, "OK - defaults (saved)");
+  else snprintf(reply, capacity, "OK - ADC %.3f (saved)", multiplier);
   return true;
+#endif
 }
 
 bool handleStoredAdcMultiplierCommand(MainBoard& board, const char* command,
@@ -120,25 +145,29 @@ bool handleStoredAdcMultiplierCommand(MainBoard& board, const char* command,
   if (strncmp(key, "adc.multiplier", 14) != 0
       || (key[14] && key[14] != ' ' && key[14] != '\t')) return false;
   if (board.getAdcMultiplier() <= 0.0f) {
-    snprintf(reply, capacity, "Error: ADC calibration unsupported");
+    mesh::cli::formatError(reply, capacity, "unsupported");
     return true;
   }
+#if BATTERY_CALIBRATION_VOLTAGE_POLICY_ONLY
+  return handleVoltagePolicyCommand(command, reply, capacity);
+#else
 #if defined(NRF52_POWER_MANAGEMENT)
   if (usesVoltagePolicy()) return handleVoltagePolicyCommand(command, reply, capacity);
 #endif
   const char* value = key + 14;
   while (*value == ' ' || *value == '\t') ++value;
   if (get) {
-    if (*value) snprintf(reply, capacity, "Error: usage get adc.multiplier");
-    else if (board.getAdcMultiplier() <= 0.0f) snprintf(reply, capacity, "Error: ADC calibration unsupported");
+    if (*value) mesh::cli::formatError(reply, capacity, "usage get adc.multiplier");
+    else if (board.getAdcMultiplier() <= 0.0f) mesh::cli::formatError(reply, capacity, "unsupported");
     else snprintf(reply, capacity, "> %.3f", board.getAdcMultiplier());
   } else {
     float multiplier;
     if (!cli::parseDecimalStrict(value, multiplier))
-      snprintf(reply, capacity, "Error: invalid multiplier");
+      mesh::cli::formatError(reply, capacity, "invalid multiplier");
     else setStoredAdcMultiplier(board, multiplier, reply, capacity);
   }
   return true;
+#endif
 }
 
 bool handleStoredBatteryCalibrationCommand(MainBoard& board, const char* command,

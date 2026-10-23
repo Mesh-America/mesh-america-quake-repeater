@@ -21,6 +21,7 @@ class ManagementPasswordCommandsTest(unittest.TestCase):
         companion = companion[start:end] + '  return false;\n}\n'
         source = r'''
 #include <helpers/esp32/ManagementPassword.h>
+#include <helpers/CLICommandUtils.h>
 #include <cassert>
 #include <cstdio>
 #include <cstring>

@@ -123,6 +123,155 @@ int main() {
 
 
 class BatteryCalibrationStoreTests(unittest.TestCase):
+    def test_policy_only_recipe_loads_policy_before_application_store(self):
+        recipe = (ROOT / "variants/rak4631/platformio.ini").read_text(encoding="ascii")
+        board = (ROOT / "variants/rak4631/RAK4631Board.cpp").read_text(encoding="ascii")
+        nrf52 = (ROOT / "src/helpers/NRF52Board.cpp").read_text()
+        self.assertIn("-D NRF52_POWER_MANAGEMENT", recipe)
+        self.assertIn("-D BATTERY_CALIBRATION_VOLTAGE_POLICY_ONLY=1", recipe)
+        begin = board[board.index("void RAK4631Board::begin() {"):]
+        self.assertIn("checkBootVoltage(&power_config);", begin)
+        self.assertIn("mesh::power::loadVoltagePolicyAtBoot(config->voltage_bootlock);", nrf52)
+
+    def test_nrf52_typed_policy_setter_retains_record_cli_and_failure_behavior(self):
+        with tempfile.TemporaryDirectory(prefix="battery-calibration-policy-") as temp:
+            work = Path(temp)
+            (work / "helpers").mkdir()
+            mock = ROOT / "test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h"
+            (work / "helpers/IdentityStore.h").write_text(mock.read_text(encoding="ascii"), encoding="ascii")
+            (work / "InternalFileSystem.h").write_text(r'''
+#pragma once
+#include <helpers/IdentityStore.h>
+struct lfs_config {};
+class Adafruit_LittleFS : public MemoryFS {
+public:
+  bool mount_ok = true;
+  bool begin(struct lfs_config* = nullptr) { return mount_ok; }
+  void end() {}
+};
+Adafruit_LittleFS InternalFS;
+''', encoding="ascii")
+            policy = (ROOT / "src/helpers/NRF52VoltagePolicy.cpp").read_text(encoding="ascii")
+            for header in ("NRF52VoltagePolicy.h", "IdentityStore.h", "AtomicFileWriter.h",
+                           "PersistentStoreFormat.h", "CLICommandUtils.h"):
+                policy = policy.replace(f'#include "{header}"', f'#include <helpers/{header}>')
+            (work / "policy_under_test.cpp").write_text(policy, encoding="ascii")
+            store = (ROOT / "src/helpers/BatteryCalibrationStore.cpp").read_text(encoding="ascii")
+            for header in ("BatteryCalibrationStore.h", "BatteryCalibration.h", "CheckedSettingsFile.h",
+                           "CLICommandUtils.h", "PersistentStoreFormat.h", "AtomicFileWriter.h",
+                           "NRF52VoltagePolicy.h"):
+                store = store.replace(f'#include "{header}"', f'#include <helpers/{header}>')
+            (work / "store_under_test.cpp").write_text(store, encoding="ascii")
+            (work / "test.cpp").write_text(r'''
+#include <cassert>
+#include <cmath>
+#include <cstring>
+#include <initializer_list>
+#define ATOMIC_FILE_WRITER_IMPLEMENTATION
+#include "policy_under_test.cpp"
+#undef ATOMIC_FILE_WRITER_IMPLEMENTATION
+#include "store_under_test.cpp"
+struct PolicyBoard : mesh::MainBoard {
+  bool supportsBatteryCalibration() const override { return true; }
+  float getAdcMultiplier() const override { return mesh::power::configuredAdcPermille() / 1000.0f; }
+  uint16_t getBattMilliVolts() override {
+    return mesh::power::calibratedMillivolts(4000, mesh::power::configuredAdcPermille());
+  }
+  const char* getManufacturerName() const override { return "fixture"; }
+  uint8_t getStartupReason() const override { return 0; }
+  void reboot() override {}
+  void sleep(uint32_t) override {}
+};
+int main() {
+  using namespace mesh::power;
+  PolicyBoard board;
+  char reply[160];
+  InternalFS.files["/battery_cal"] = {0xde, 0xad};
+  const auto unused_record = InternalFS.files.at("/battery_cal");
+  // Neither a supplied filesystem nor no filesystem may silently select a
+  // second store before the tagged board has loaded its authoritative policy.
+  assert(!beginBatteryCalibrationStore(board, &InternalFS));
+  assert(!beginBatteryCalibrationStore(board, nullptr));
+  assert(!setStoredAdcMultiplier(board, 1.1f, reply, sizeof(reply)));
+  assert(strstr(reply, "unsupported"));
+  InternalFS.mount_ok = false;
+  loadVoltagePolicyAtBoot(3300);
+  assert(voltagePolicySupported() && configuredAdcPermille() == 1000);
+  assert(beginBatteryCalibrationStore(board, nullptr));
+  InternalFS.fail_write = true;
+  assert(!setStoredAdcMultiplier(board, 1.1f, reply, sizeof(reply)));
+  assert(configuredAdcPermille() == 1000);
+  InternalFS.fail_write = false;
+  InternalFS.mount_ok = true;
+  InternalFS.rename_replaces = true;
+  loadVoltagePolicyAtBoot(3300);
+  assert(beginBatteryCalibrationStore(board, &InternalFS));
+  assert(handleStoredBatteryCalibrationCommand(board, "battery calibrate 4.18", reply, sizeof(reply)));
+  assert(strstr(reply, "4.180 V") && strstr(reply, "(saved)"));
+  assert(configuredAdcPermille() == 1045);
+  const auto good = InternalFS.files.at("/pwrmgt_v1");
+  assert(good.size() == 20 && !memcmp(good.data(), "NVP2", 4));
+  assert(mesh::storage::readLE16(good.data() + 12) == 1045);
+  assert(mesh::storage::readLE32(good.data() + 16)
+      == mesh::storage::updateCRC32(0xffffffffUL, good.data(), 16));
+  loadVoltagePolicyAtBoot(3300);
+  assert(configuredAdcPermille() == 1045);
+  InternalFS.files["/pwrmgt_v1"][16] ^= 1;
+  loadVoltagePolicyAtBoot(3300);
+  assert(configuredAdcPermille() == 1000);
+  assert(beginBatteryCalibrationStore(board, nullptr));
+  assert(InternalFS.files.at("/battery_cal") == unused_record);
+  InternalFS.files["/pwrmgt_v1"] = good;
+  loadVoltagePolicyAtBoot(3300);
+  assert(configuredAdcPermille() == 1045);
+  assert(handleVoltagePolicyCommand("set adc.multiplier 1.1", reply, sizeof(reply)));
+  assert(!strcmp(reply, "OK - ADC multiplier 1.100 saved"));
+  assert(configuredAdcPermille() == 1100);
+  assert(setConfiguredAdcMultiplier(0, reply, sizeof(reply)));
+  assert(configuredAdcPermille() == 1000);
+  assert(setConfiguredAdcMultiplier(0.5f, reply, sizeof(reply)));
+  assert(configuredAdcPermille() == 500);
+  assert(setConfiguredAdcMultiplier(1.5f, reply, sizeof(reply)));
+  assert(configuredAdcPermille() == 1500);
+  const auto before_invalid = InternalFS.files.at("/pwrmgt_v1");
+  for (float invalid : {NAN, INFINITY, -INFINITY, -1.0f, 0.49f, 1.51f, 65536.0f}) {
+    assert(!setConfiguredAdcMultiplier(invalid, reply, sizeof(reply)));
+    assert(!strncmp(reply, "Error:", 6));
+    assert(configuredAdcPermille() == 1500);
+    assert(InternalFS.files.at("/pwrmgt_v1") == before_invalid);
+  }
+  InternalFS.fail_write = true;
+  assert(!setConfiguredAdcMultiplier(1.1f, reply, sizeof(reply)));
+  assert(strstr(reply, "could not be saved"));
+  assert(configuredAdcPermille() == 1500);
+  assert(InternalFS.files.at("/pwrmgt_v1") == before_invalid);
+  InternalFS.fail_write = false;
+  InternalFS.fail_rename = 1;
+  assert(!setConfiguredAdcMultiplier(1.1f, reply, sizeof(reply)));
+  assert(configuredAdcPermille() == 1500);
+  assert(InternalFS.files.at("/pwrmgt_v1") == before_invalid);
+  char bounded[4] = {'X', 'X', 'X', 'Z'};
+  assert(!setConfiguredAdcMultiplier(NAN, bounded, 3));
+  assert(bounded[2] == 0 && bounded[3] == 'Z');
+  assert(!setConfiguredAdcMultiplier(1, nullptr, sizeof(reply)));
+  assert(!setConfiguredAdcMultiplier(1, reply, 0));
+  assert(InternalFS.files.at("/battery_cal") == unused_record);
+}
+''', encoding="ascii")
+            binary = work / "policy"
+            built = subprocess.run([
+                os.environ.get("CXX", "g++"), "-std=c++17", "-O1", "-Wall", "-Wextra", "-Werror",
+                "-Wno-sign-compare", "-Wno-unused-parameter", "-fsanitize=address,undefined",
+                "-fno-sanitize-recover=all", "-fno-pie", "-no-pie",
+                "-DNRF52_PLATFORM", "-DNRF52_POWER_MANAGEMENT",
+                "-DBATTERY_CALIBRATION_VOLTAGE_POLICY_ONLY=1",
+                "-I" + str(work), "-I" + str(ROOT / "src"),
+                str(work / "test.cpp"), "-o", str(binary),
+            ], capture_output=True, text=True, timeout=60)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_roundtrip_corruption_write_failure_reset_and_backup_recovery(self):
         with tempfile.TemporaryDirectory(prefix="battery-calibration-store-") as temp:
             work = Path(temp)

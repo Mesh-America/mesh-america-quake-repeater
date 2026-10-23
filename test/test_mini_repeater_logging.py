@@ -30,6 +30,10 @@ inline uint32_t micros() { return millis() * 1000U; }
 #include <helpers/ManagementFeatureConfig.h>
 #include <helpers/PacketFileLoggingConfig.h>
 #include <helpers/SerialPacketLog.h>
+#include "@PRODUCTION_UTILS@"
+#define MAX_ROUTE_HASH_BYTES @ROUTE_HASH_LIMIT@
+static const uint8_t FLOOD_RETRY_BRIDGE_OTHER_BUCKET = @BRIDGE_BUCKET_COUNT@;
+@BUCKET_MASK_METHOD@
 #include <algorithm>
 #include <cassert>
 #include <cstdarg>
@@ -64,6 +68,15 @@ namespace mesh {
 bool logging_enabled = true;
 bool isUsbLoggingEnabled() { return logging_enabled; }
 Stream& usbLoggingPort() { return log_port; }
+void Utils::toHex(char* destination, const uint8_t* source, size_t size) {
+  const char* digits = "0123456789ABCDEF";
+  while (size--) {
+    const uint8_t value = *source++;
+    *destination++ = digits[value >> 4];
+    *destination++ = digits[value & 15];
+  }
+  *destination = 0;
+}
 
 @PACKET_METHODS@
 
@@ -143,7 +156,18 @@ struct Callbacks {
 };
 inline uint8_t getRetryLogCodingRate(const mesh::Packet*, uint8_t fallback) { return fallback; }
 inline uint16_t rxPowerSavingPreambleForParams(uint8_t, float) { return 16; }
+unsigned direct_format_calls = 0;
+void formatDirectRetryTarget(char* output, size_t size, const uint8_t*, uint8_t) {
+  ++direct_format_calls;
+  std::snprintf(output, size, "01");
+}
 struct MyMesh : Callbacks {
+  struct { bool flood_retry_bridge_enabled = false; } _prefs;
+  struct FloodRetryBridgeState {
+    uint8_t source_mask = 0, target_mask = 0, progress_marker = 0;
+  };
+  mutable FloodRetryBridgeState retry_state;
+  bool has_retry_state = false;
   bool _logging = false;
   FakeFS fs;
   FakeFS* _fs = &fs;
@@ -162,10 +186,15 @@ struct MyMesh : Callbacks {
   void formatFloodRetryPath(char* output, size_t size, const mesh::Packet*) {
     std::snprintf(output, size, "01");
   }
-  bool formatFloodRetryHeard(char* output, size_t size, const mesh::Packet*) {
-    std::snprintf(output, size, "02");
-    return true;
+  bool formatFloodRetryHeard(char* output, size_t size, const mesh::Packet* packet) const;
+  FloodRetryBridgeState* floodRetryBridgeStateFor(const mesh::Packet*, bool) const {
+    return has_retry_state ? &retry_state : nullptr;
   }
+  uint8_t floodRetryBucketMaskForPathHop(const uint8_t* prefix, uint8_t,
+                                       uint8_t, uint8_t) const { return *prefix; }
+  uint8_t floodRetryBridgeHeardMask(const mesh::Packet* packet,
+                                  uint8_t source_mask, uint8_t progress_marker) const;
+  bool hasFloodRetryHeard(const mesh::Packet* packet) const;
   void refreshFloodRetryReachability(const mesh::Packet*) { ++refreshed; }
   @INLINE_CALLBACKS@
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len);
@@ -174,6 +203,10 @@ struct MyMesh : Callbacks {
   void logTxFail(mesh::Packet* pkt, int len);
   void onFloodRetryEvent(const char* event, const mesh::Packet* packet,
                         uint32_t delay_millis, uint8_t retry_attempt);
+  void onDirectRetryEvent(const char* event, const mesh::Packet* packet,
+                         uint32_t delay_millis, uint8_t retry_attempt,
+                         const uint8_t* target_hash, uint8_t target_hash_len,
+                         int16_t payload_type);
 };
 @RX_METHOD@
 @FILE_METHODS@
@@ -207,6 +240,13 @@ static mesh::Packet makePacket(bool maximum = false) {
 }
 
 int main() {
+  MyMesh direct_diagnostics;
+  direct_diagnostics.setLoggingOn(true);
+  direct_diagnostics.onDirectRetryEvent("good", nullptr, 12, 1, nullptr, 0, 3);
+  assert(direct_format_calls == unsigned(EXPECT_FILE_LOGGING));
+  assert(direct_diagnostics.fs.opens == unsigned(EXPECT_FILE_LOGGING));
+  if (EXPECT_FILE_LOGGING)
+    assert(direct_diagnostics.fs.output.find(": direct retry good") != std::string::npos);
   MyMesh repeater;
   // Actual inline callbacks and persistent packet emitters remain independent
   // of live USB logging. The file-off control cannot be re-enabled at runtime.
@@ -239,6 +279,61 @@ int main() {
   repeater.logTxFail(&stored, 42);
   repeater.onFloodRetryEvent("good", &stored, 12, 1);
   assert(repeater.refreshed == 2 && repeater.fs.opens == old_opens);
+
+  // The unlogged path must make the same routing decision as the textual
+  // formatter: a real target echo, excluding source and progress-marker hops.
+  MyMesh routing;
+  mesh::Packet heard = makePacket();
+  heard.header = (PAYLOAD_TYPE_GRP_DATA << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
+  heard.setPathHashSizeAndCount(1, 3);
+  heard.path[0] = 1; heard.path[1] = 2; heard.path[2] = 4;
+  assert(routing.hasFloodRetryHeard(&heard));
+  assert(!routing.hasFloodRetryHeard(nullptr));
+  const uint8_t valid_path = heard.path_len;
+  heard.path_len = 0;
+  assert(!routing.hasFloodRetryHeard(&heard));
+  heard.path_len = 0xC1; // Reserved four-byte route-hash mode.
+  assert(!routing.hasFloodRetryHeard(&heard));
+  heard.path_len = valid_path;
+  routing._prefs.flood_retry_bridge_enabled = true;
+  assert(!routing.hasFloodRetryHeard(&heard)); // No pending bridge retry.
+  routing.has_retry_state = true;
+  routing.retry_state = {1, 4, 2};
+  assert(routing.hasFloodRetryHeard(&heard));
+  routing.onFloodRetryEvent("good", &heard, 12, 1);
+  assert(routing.refreshed == 1);
+  routing.retry_state.target_mask = 2; // Progress marker is not an echo.
+  assert(!routing.hasFloodRetryHeard(&heard));
+  routing.onFloodRetryEvent("good", &heard, 12, 1);
+  assert(routing.refreshed == 1);
+  routing.retry_state.target_mask = 1; // The source is not a target echo.
+  assert(!routing.hasFloodRetryHeard(&heard));
+  routing.retry_state = {0, 2, 0};
+  assert(routing.hasFloodRetryHeard(&heard));
+  routing.onFloodRetryEvent("queued", &heard, 12, 1);
+  routing.onFloodRetryEvent("failure", &heard, 12, 1);
+  assert(routing.refreshed == 1);
+  routing.onFloodRetryEvent("good", &heard, 12, 1);
+  assert(routing.refreshed == 2);
+  // Compare the production eligibility check with the production formatter's
+  // success result using its actual 96-byte caller buffer, including every
+  // source/target/progress combination for representative route-hash sizes.
+  for (unsigned hash_size = 1; hash_size <= MAX_ROUTE_HASH_BYTES; ++hash_size) {
+    heard.setPathHashSizeAndCount(hash_size, 3);
+    memset(heard.path, 0, sizeof(heard.path));
+    heard.path[0] = 1;
+    heard.path[hash_size] = 2;
+    heard.path[hash_size * 2] = uint8_t(1U << FLOOD_RETRY_BRIDGE_OTHER_BUCKET);
+    for (unsigned source = 0; source < 8; ++source)
+      for (unsigned target : {0U, 1U, 2U, 3U, 64U, 127U})
+        for (unsigned progress = 0; progress <= 3; ++progress) {
+          routing.retry_state = {uint8_t(source), uint8_t(target), uint8_t(progress)};
+          char formatted[96];
+          assert(routing.hasFloodRetryHeard(&heard)
+              == routing.formatFloodRetryHeard(formatted, sizeof(formatted), &heard));
+        }
+  }
+
   const uint8_t raw[] = {0x00, 0xAB, 0xFF};
   reset();
   repeater.logRxRaw(2.5f, -92, raw, sizeof(raw));
@@ -339,7 +434,18 @@ class MiniRepeaterLoggingTest(unittest.TestCase):
             "uint8_t Packet::writeTo(", "bool Packet::readFrom("))
         dispatcher = (ROOT / "src/Dispatcher.cpp").read_text()
         repeater = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text()
-        program = HARNESS.replace("@PACKET_METHODS@", packet_methods).replace(
+        route_hash_limit = re.search(r"^#define MAX_ROUTE_HASH_BYTES\s+(\d+)\s*$",
+            (ROOT / "src/helpers/SimpleMeshTables.h").read_text(), re.MULTILINE)
+        self.assertIsNotNone(route_hash_limit)
+        bridge_bucket_count = re.search(r"^\s*#define FLOOD_RETRY_BRIDGE_BUCKETS\s+(\d+)\s*$",
+            (ROOT / "src/helpers/CommonCLI.h").read_text(), re.MULTILINE)
+        self.assertIsNotNone(bridge_bucket_count)
+        program = HARNESS.replace("@ROUTE_HASH_LIMIT@", route_hash_limit.group(1))
+        program = program.replace("@PRODUCTION_UTILS@", str(ROOT / "src/Utils.h"))
+        program = program.replace("@BRIDGE_BUCKET_COUNT@", bridge_bucket_count.group(1))
+        program = program.replace("@BUCKET_MASK_METHOD@",
+            body(repeater, "static uint8_t floodRetryBucketMask("))
+        program = program.replace("@PACKET_METHODS@", packet_methods).replace(
             "@TX_METHOD@", body(dispatcher, "bool Dispatcher::startOutboundTransmit()"))
         program = program.replace("@RX_METHOD@", body(repeater, "void MyMesh::logRxRaw("))
         header = (ROOT / "examples/simple_repeater/MyMesh.h").read_text()
@@ -347,7 +453,9 @@ class MiniRepeaterLoggingTest(unittest.TestCase):
             "void setLoggingOn(", "void eraseLogFile()")))
         program = program.replace("@FILE_METHODS@", "\n".join(body(repeater, signature) for signature in (
             "void MyMesh::logRx(", "void MyMesh::logTx(", "void MyMesh::logTxFail(",
-            "void MyMesh::onFloodRetryEvent(")))
+            "void MyMesh::onFloodRetryEvent(", "bool MyMesh::hasFloodRetryHeard(",
+            "uint8_t MyMesh::floodRetryBridgeHeardMask(", "bool MyMesh::formatFloodRetryHeard(",
+            "void MyMesh::onDirectRetryEvent(")))
         sanitizers = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                        "-fno-pie", "-no-pie"] if sys.platform.startswith("linux") else [])
         with tempfile.TemporaryDirectory(prefix="mini-experiment-logging-") as directory:
@@ -373,6 +481,57 @@ class MiniRepeaterLoggingTest(unittest.TestCase):
                     tested = subprocess.run([str(executable)], capture_output=True, text=True, timeout=15)
                     self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
                     self.assertIn("PASS: production compact repeater RX/TX", tested.stdout)
+
+    def test_timestamp_override_is_retained_for_every_actual_consumer(self):
+        compiler = os.environ.get("CXX") or shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler, "a host C++17 compiler is required")
+        header = (ROOT / "examples/simple_repeater/MyMesh.h").read_text()
+        source = (ROOT / "examples/simple_repeater/MyMesh.cpp").read_text()
+
+        def guarded(text, signature):
+            start = text.index(signature)
+            guard = text.rfind("#if ", 0, start)
+            end = text.index("#endif", start) + len("#endif")
+            self.assertGreaterEqual(guard, 0)
+            return text[guard:end]
+
+        declaration = guarded(header, "const char* getLogDateTime() override;")
+        definition = guarded(source, "const char *MyMesh::getLogDateTime()")
+        blocks, checks = ["#include <cassert>\n#include <cstdint>\n#include <cstdio>\n#include <cstring>"], []
+        for index, (debug, files, packets, compact) in enumerate(itertools.product((0, 1), repeat=4)):
+            flags = dict(MESH_DEBUG=debug, MESH_ENABLE_PACKET_FILE_LOGGING=files,
+                         MESH_PACKET_LOGGING=packets, MESH_PACKET_LOGGING_COMPACT=compact)
+            for name, value in flags.items():
+                blocks.append(f"#undef {name}\n#define {name} {value}")
+            blocks.append(f"namespace timestamp_variant_{index} {{")
+            blocks.append(r'''
+struct Clock { uint32_t getCurrentTime() const { return 123; } };
+struct DateTime {
+  explicit DateTime(uint32_t) {}
+  unsigned hour() const { return 3; } unsigned minute() const { return 4; }
+  unsigned second() const { return 5; } unsigned day() const { return 2; }
+  unsigned month() const { return 1; } unsigned year() const { return 2026; }
+};
+struct Base { virtual const char* getLogDateTime() { return "unused"; } };
+struct MyMesh : Base {
+  Clock clock;
+  Clock* getRTCClock() { return &clock; }
+''')
+            blocks.extend((declaration, "};", definition))
+            expected = ("03:04:05 - 2/1/2026 U" if debug or files or (packets and not compact)
+                        else "unused")
+            blocks.append(f'void check() {{ MyMesh mesh; assert(!strcmp(mesh.getLogDateTime(), "{expected}")); }}\n}}')
+            checks.append(f"timestamp_variant_{index}::check();")
+        blocks.append("int main() {" + " ".join(checks) + "}")
+        with tempfile.TemporaryDirectory(prefix="mini-timestamp-consumers-") as directory:
+            path, executable = Path(directory) / "test.cpp", Path(directory) / "test"
+            path.write_text("\n".join(blocks), encoding="ascii")
+            built = subprocess.run([compiler, "-std=c++17", "-O1", "-Wall", "-Wextra",
+                                    "-Werror", str(path), "-o", str(executable)],
+                                   capture_output=True, text=True, timeout=60)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            tested = subprocess.run([str(executable)], capture_output=True, text=True, timeout=15)
+            self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
 
     def test_baseline_storage_logging_host_cli_and_authentication_contracts_remain(self):
         config = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=(";",))

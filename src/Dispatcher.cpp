@@ -233,10 +233,7 @@ bool Dispatcher::startOutboundTransmit() {
 #if MESH_PACKET_LOGGING
   if (isUsbLoggingEnabled()) {
 #if MESH_PACKET_LOGGING_COMPACT
-    SerialLogLine<> line;
-    line.printf("T");
-    line.hex(raw, len);
-    line.flush(usbLoggingPort(), false);
+    serialLogCompactPacket(usbLoggingPort(), 'T', raw, len);
 #else
     logPacketLine("TX", outbound, len, false, 0.0f, 0);
 #endif

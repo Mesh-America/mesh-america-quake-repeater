@@ -295,6 +295,7 @@ public:
   virtual void applyLedPolicy() {}
   virtual void onBeforeTransmit() {}
   virtual void onAfterTransmit() {}
+  virtual bool supportsBatteryCalibration() const { return false; }
   virtual bool getBatteryChargeTarget(uint16_t&) { return false; }
   virtual bool supportsBatteryChargeTarget(uint16_t) { return false; }
   virtual bool setBatteryChargeTarget(uint16_t) { return false; }

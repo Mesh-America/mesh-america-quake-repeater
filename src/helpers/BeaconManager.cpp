@@ -7,9 +7,9 @@
 #include <helpers/MeshtextChat.h>
 #include <helpers/PersistentStoreFormat.h>
 #include <helpers/UTF8Helpers.h>
+#include <helpers/CLICommandUtils.h>
 #include <Arduino.h>
 #include <ctype.h>
-#include <errno.h>
 #include <math.h>
 #include <new>
 #include <stdio.h>
@@ -115,11 +115,10 @@ bool powerValue(const char* text, int8_t& value) {
   return true;
 }
 bool floatValue(const char* text, float& value) {
-  if (!*text || *text == ' ' || *text == '\t') return false;
-  errno = 0;
-  char* end = nullptr;
-  value = strtof(text, &end);
-  return end && !*end && errno != ERANGE && isfinite(value);
+  // Match the plain decimal radio CLI grammar without retaining newlib's
+  // general-purpose strtof/strtod parser for two bounded numeric fields.
+  return text && *text && !strchr(text, ' ') && !strchr(text, '\t')
+      && cli::parseDecimalStrict(text, value) && isfinite(value);
 }
 bool meshcoreTuple(char* text, BeaconSlot& slot) {
   char* fields[6];

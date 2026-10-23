@@ -117,3 +117,6 @@ These small Mini margins qualify the stated recipes, not arbitrary optional
 features or longer build metadata. The earlier Mini Sensor overflow remains
 recorded above; that target was not rebuilt in this final integration campaign.
 No physical ADC, voltmeter, charging or installed-device test was performed.
+
+The later [unit-test workflow follow-up](unit_test_workflow_fix_2026-10-22.md)
+records release-wrapper failures that these direct recipe builds did not cover.

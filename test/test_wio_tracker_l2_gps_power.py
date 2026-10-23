@@ -120,6 +120,7 @@ public:
  virtual void begin() {}
  virtual void applyLedPolicy() {}
  virtual uint16_t getBattMilliVolts() { return 0; }
+ virtual bool supportsBatteryCalibration() const { return false; }
  virtual const char* getManufacturerName() const { return "host"; }
  virtual void onBeforeTransmit() {}
  virtual void onAfterTransmit() {}

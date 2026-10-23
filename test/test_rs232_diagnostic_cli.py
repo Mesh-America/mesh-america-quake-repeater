@@ -17,7 +17,7 @@ class Rs232DiagnosticCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="rs232-cli-") as directory:
             source_path = Path(directory) / "main.cpp"
             binary = Path(directory) / "check"
-            source_path.write_text(source, encoding="ascii")
+            source_path.write_text('#include <helpers/CLICommandUtils.h>\n' + source, encoding="ascii")
             subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                             "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                             "-I", str(ROOT / "src"), *flags, str(source_path),

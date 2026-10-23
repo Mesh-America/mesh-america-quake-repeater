@@ -314,6 +314,11 @@ namespace mesh { namespace power {
 static bool policyAvailable = false;
 static unsigned policyCalls = 0;
 static bool voltagePolicySupported() { return policyAvailable; }
+static bool setConfiguredAdcMultiplier(float, char* reply, size_t capacity) {
+  ++policyCalls;
+  snprintf(reply, capacity, "%s", policyAvailable ? "OK - saved" : "Error: voltage policy unsupported");
+  return policyAvailable;
+}
 static bool handleVoltagePolicyCommand(const char*, char* reply, size_t capacity) {
   ++policyCalls;
   snprintf(reply, capacity, "%s", policyAvailable ? "> policy" : "Error: voltage policy unsupported");
@@ -362,8 +367,6 @@ static bool handleVoltagePolicyCommand(const char*, char* reply, size_t capacity
         source = (ROOT / "src/helpers/CommonCLI.cpp").read_text(encoding="ascii")
         setter = extract_braced(source, "void CommonCLI::handleSetCmd(")
         branch = extract_braced(setter, 'if (memcmp(config, "adc.multiplier ", 15) == 0)')
-        utils = (ROOT / "src/helpers/CLICommandUtils.h").read_text(encoding="ascii")
-        parser = extract_braced(utils, "inline bool parseDecimalStrict(")
         prefix = self.runtime_prefix(r'''
   struct Prefs { float adc_multiplier = 0.0f; } prefs;
   Prefs* _prefs = &prefs;
@@ -373,7 +376,7 @@ static bool handleVoltagePolicyCommand(const char*, char* reply, size_t capacity
   bool applyAndSaveAdcMultiplier(float multiplier, char* reply, size_t capacity);
   void dispatchAdc(char* command, char* reply);
 ''')
-        prefix += "\n#include <math.h>\nnamespace mesh { namespace cli {\n" + parser + "\n}}\n"
+        prefix += "\n#include <math.h>\n#include <helpers/CLICommandUtils.h>\n"
         prefix += extract_braced(source, "bool CommonCLI::applyAndSaveAdcMultiplier(") + "\n"
         prefix += "void CommonCLI::dispatchAdc(char* command, char* reply) {\n"
         prefix += "const char* config = &command[4];\n" + branch + "\n}\n"
@@ -411,7 +414,7 @@ static bool handleVoltagePolicyCommand(const char*, char* reply, size_t capacity
   cli.prefsSaveOk = true;
   char reset[] = "set adc.multiplier 0";
   cli.dispatchAdc(reset, reply);
-  assert(strcmp(reply, "OK - using default board multiplier") == 0);
+  assert(strcmp(reply, "OK - defaults (saved)") == 0);
   assert(cli.prefsSaves == 3 && board.reads == 3 && cli._battery_forward_state.percentage == 41);
   assert(!cli.batteryAllowsForward(false));
 ''', prefix=prefix, flags=("-DESP32_PLATFORM",))

@@ -288,6 +288,8 @@ int main() {
 #include <cassert>
 #include <cstring>
 #include <string>
+#include "battery_calibration_cli_stub.h"
+struct BatteryBoard {} board;
 struct Radio { bool active = false; };
 namespace mesh {
 bool morseTimingActive(const Radio* radio) { return radio && radio->active; }
@@ -348,6 +350,7 @@ int main() {
                                   str(ROOT / "src/helpers/ota/OtaTinf.c"), "-o", str(obj)])
                 self.run_checked([cxx, "-std=c++17", "-Os", "-Wall", "-Wextra", "-Werror",
                                   *flags, "-I" + str(ROOT / "src"), "-I" + str(FIXTURE),
+                                  "-I" + str(ROOT / "test/fixtures"),
                                   str(generated), str(ROOT / "src/helpers/CompanionReader.cpp"),
                                   str(obj), "-o", str(binary)])
                 self.run_checked([str(binary)])
