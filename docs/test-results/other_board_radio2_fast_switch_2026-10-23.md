@@ -222,7 +222,42 @@ hardware receipts above remain bound to their explicitly recorded images.
 - Investigate the unexplained pretrial radio-driver recovery attempts.
 - Audit controller ownership before extending buffered SPI to RAK4631 or T096.
 
-No production-default promotion, all-board release qualification or CPU-sleep
-qualification is implied by the completed subsets. The machine-readable
+At this checkpoint, production-default promotion, all-board release
+qualification and CPU-sleep qualification remained open. The machine-readable
 [sanitized results](other_board_radio2_fast_switch_2026-10-23.safe.json) retain
 separate delivery, speed, compatibility and build states.
+
+## Saved controls follow-up
+
+Code `4c0f2acf` adds saved `radio.fast` controls across the shared CLI roles.
+Supported features default on, including boards awaiting physical testing.
+Individual controls cover SPI speed, buffered transfers, batched modulation,
+warm receive ownership, FS, packet, IQ and modem reuse. Plain SX1262 board
+transports now default to 8 MHz byte transfers. Compiled buffered transports
+can select byte transfers without moving their SPI controller. Indicator keeps
+its existing transport and compile-time exclusions.
+
+The wired RAK3401 passed 19 control cases and two software-reboot persistence
+cases on the final Full repeater. Twenty-one read-only SWD samples confirmed
+the SPIM2 frequency register at 2, 4 and 8 MHz. Both profiles continued
+switching, core errors stayed zero, and no new radio-watchdog attempts were
+observed. Its original settings and gateway service were restored. The
+application update preserved its bootloader. These checks cover configuration,
+startup persistence and switching liveness; packet delivery, BLE, CPU sleep and
+the earlier XIAO loss remain separate qualifications.
+
+Sequential builds passed for V4 Full Companion, RAK4631 Full Companion,
+RAK3401 Full and Reduced OTA repeaters, and the standard T1000 BLE Companion.
+The RAK4631 application including EndF is 711,400 of 712,704 bytes, leaving
+1,304 bytes. Runtime RAM available is 81,140 bytes against 72,528 required.
+
+To retain Full features, the offline Reader now uses a word dictionary before
+DEFLATE. All 879 verses retain their exact wording; its pinned source and 4 KiB
+scratch capacity are unchanged. Data and all dictionary/index tables total
+33,399 bytes, saving 5,086 bytes. Corpus, malformed-token, C++11 compatibility,
+sanitizer and ARM stack checks passed. The merged Meshtext retry-limit and
+beacon tests also passed.
+
+The [saved-control results](radio_switch_saved_controls_2026-10-23.safe.json)
+record the build sizes and physical test scope. Command details are in
+[Saved switching controls](../radio_profiles.md#saved-switching-controls).
