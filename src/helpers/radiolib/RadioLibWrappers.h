@@ -328,9 +328,11 @@ protected:
   virtual bool radioDeepInit() { return false; }
   virtual bool supportsRadioDeepInit() const { return false; }
   virtual bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) = 0;
+#if MESH_RADIO_SWITCH_TUNING
   virtual uint8_t getDriverSwitchFeatures() const { return 0; }
   virtual uint8_t driverSwitchCapabilities() const { return 0; }
   virtual void setDriverSwitchFeatures(uint8_t) {}
+#endif
   virtual int16_t applyCachedTxPower(int8_t dbm) {
     return _radio->setOutputPower(dbm);
   }
@@ -486,6 +488,7 @@ public:
 #endif
   mesh::RadioProfiles* profiles() override { return &_profiles; }
   const mesh::RadioProfiles* profiles() const override { return &_profiles; }
+#if MESH_RADIO_SWITCH_TUNING
   mesh::RadioSwitchCapabilities switchTuningCapabilities() const override;
   mesh::RadioSwitchTuning switchTuning() const override;
   uint32_t switchSpiHz() const override;
@@ -493,6 +496,7 @@ public:
   mesh::RadioParamApplyResult trySetSwitchTuning(const mesh::RadioSwitchTuning& tuning,
       bool (*persist)(void*, const mesh::RadioSwitchTuning&) = nullptr,
       void* context = nullptr) override;
+#endif
   bool validateProfile(const mesh::RadioProfileParams& params) const override;
   uint8_t receiveProfile() const override { return _active_profile; }
   uint32_t receiveProfileGeneration() const override { return _profile_generation; }

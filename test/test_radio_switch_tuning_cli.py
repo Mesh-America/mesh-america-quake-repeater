@@ -37,6 +37,65 @@ class RadioSwitchTuningCLITest(unittest.TestCase):
                 if role == 'simple_secure_chat':
                     self.assertLess(radio_init.start(), setup.index('fast_rng.begin('))
 
+    def test_capability_gate_only_defaults_off_for_integrated_stm32wl(self):
+        compiler = shutil.which('g++') or shutil.which('clang++')
+        self.assertIsNotNone(compiler)
+        for defines, expected in (((), 1), (('NRF52_PLATFORM',), 1), (('ESP32_PLATFORM',), 1),
+                                  (('RP2040_PLATFORM',), 1), (('STM32_PLATFORM',), 1),
+                                  (('STM32WLxx',), 1), (('STM32_PLATFORM', 'STM32WLxx'), 0),
+                                  (('STM32_PLATFORM', 'STM32WLxx', 'MESH_RADIO_SWITCH_TUNING=1'), 1)):
+            with self.subTest(defines=defines):
+                source = '#include <helpers/RadioSwitchTuning.h>\n'
+                source += f'static_assert(MESH_RADIO_SWITCH_TUNING == {expected}, "capability gate");\n'
+                built = subprocess.run([compiler, '-std=c++11', '-fsyntax-only', '-x', 'c++',
+                    '-I', str(ROOT / 'src'), *['-D' + value for value in defines], '-'],
+                    input=source, capture_output=True, text=True)
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+
+    def test_integrated_stm32wl_omits_unsupported_controls_and_boot_storage_reads(self):
+        compiler = shutil.which('g++') or shutil.which('clang++')
+        self.assertIsNotNone(compiler)
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            helpers = work / 'helpers'
+            helpers.mkdir()
+            # Instrument the existing filesystem mock, rather than accepting
+            # an untouched file as proof that no startup read occurred.
+            mock = (ROOT / 'test/fixtures/radio_profiles/mocks/helpers/IdentityStore.h').read_text()
+            mock = mock.replace('  std::map<std::string, std::vector<uint8_t>> files;',
+                '  std::map<std::string, std::vector<uint8_t>> files;\n'
+                '  std::vector<std::string> opened_paths;')
+            mock = mock.replace('  File open(const char* path, const char* mode = "r", bool = false) {',
+                '  File open(const char* path, const char* mode = "r", bool = false) {\n'
+                '    opened_paths.push_back(path);')
+            mock = mock.replace('  File open(const char* path, const char* mode = "r", bool = false) {',
+                '  File open(const char* path, int mode) { return open(path, mode ? "w" : "r"); }\n'
+                '  File open(const char* path, const char* mode = "r", bool = false) {')
+            (helpers / 'IdentityStore.h').write_text(mock, encoding='ascii')
+            flags = [compiler, '-std=c++17', '-O2', '-Wall', '-Wextra', '-DSTM32_PLATFORM',
+                     '-DSTM32WLxx', '-DLFS_ERR_NOENT=-2', '-I', str(work),
+                     '-I', str(ROOT / 'test/fixtures/radio_profiles/mocks'),
+                     '-I', str(ROOT / 'test/mocks'), '-I', str(ROOT / 'src')]
+            source = ROOT / 'src/helpers/RadioProfileCLI.cpp'
+            executable = work / 'unsupported'
+            built = subprocess.run(flags + [str(source), str(ROOT / 'test/fixtures/radio_profiles/'
+                'switch_tuning_unsupported_test.cpp'), '-o', str(executable)],
+                capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            subprocess.run([str(executable)], check=True)
+            # Inspect real production objects. The inactive branch must omit
+            # both saved-file names and all parser/persistence entry points.
+            for enabled in (False, True):
+                obj = work / f'cli-{int(enabled)}.o'
+                override = ['-DMESH_RADIO_SWITCH_TUNING=1'] if enabled else []
+                subprocess.run(flags + override + ['-c', str(source), '-o', str(obj)],
+                               check=True, capture_output=True, text=True)
+                raw = obj.read_bytes()
+                for marker in (b'/radio_fast', b'handleFastSettings', b'loadFastSettings',
+                               b'saveFastSettings', b'validFastImage'):
+                    self.assertEqual(marker in raw, enabled, marker)
+                self.assertIn(b'/radio_profiles', raw)
+
     def test_saved_controls_and_failure_transactions(self):
         compiler = shutil.which('g++') or shutil.which('clang++')
         self.assertIsNotNone(compiler)

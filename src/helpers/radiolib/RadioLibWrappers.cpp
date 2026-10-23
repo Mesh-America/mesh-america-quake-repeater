@@ -6,7 +6,7 @@
 #include "ProfileSwitchTiming.h"
 #include "NrfRadioPriorityLease.h"
 #include "NrfRadioUsbIrqGuard.h"
-#if defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM) || defined(RP2040_PLATFORM)
+#if MESH_RADIO_SWITCH_TUNING && (defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM) || defined(RP2040_PLATFORM))
 #include "TunableRadioHal.h"
 #define MESH_TUNABLE_RADIO_HAL 1
 #endif
@@ -447,6 +447,7 @@ void RadioLibWrapper::endReconfigure(bool resume_rx) {
   if (resume_rx) startRecv();
 }
 
+#if MESH_RADIO_SWITCH_TUNING
 mesh::RadioSwitchCapabilities RadioLibWrapper::switchTuningCapabilities() const {
   mesh::RadioSwitchCapabilities caps;
 #if MESH_TUNABLE_RADIO_HAL
@@ -509,6 +510,7 @@ bool RadioLibWrapper::configureBootSwitchTuning(const mesh::RadioSwitchTuning& v
   setDriverSwitchFeatures(value.flags);
   return true;
 }
+#endif
 
 bool RadioLibWrapper::restoreAfterDeepInit() {
 #if MESH_ENABLE_TX_BEACONS

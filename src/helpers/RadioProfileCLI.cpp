@@ -36,9 +36,11 @@ const char* const TempPath = "/radio_profiles.tmp";
 // Never considered a boot-time committed image. Losing power before the
 // acknowledgement leaves the previous saved radio untouched.
 const char* const ReplyPath = "/radio_profiles.reply";
+#if MESH_RADIO_SWITCH_TUNING
 const char* const FastPath = "/radio_fast";
 const char* const FastBackup = "/radio_fast.bak";
 const char* const FastTemp = "/radio_fast.tmp";
+#endif
 uint32_t checksum(const uint8_t* p, size_t n) {
   return storage::updateCRC32(0xffffffffU, p, n);
 }
@@ -223,6 +225,7 @@ bool RadioProfileCLI::commitImage(const char* path, const char* active,
   return true;
 }
 
+#if MESH_RADIO_SWITCH_TUNING
 bool RadioProfileCLI::validFastImage(const uint8_t* bytes, RadioSwitchTuning& value) const {
   if (bytes[2] != 1) return false;
   for (size_t n = 5; n < ImageSize - 4; ++n) if (bytes[n]) return false;
@@ -367,10 +370,13 @@ __attribute__((noinline)) bool RadioProfileCLI::handleFastSettings(const char* k
       ? "radio busy; retry" : "radio tuning could not be applied/saved");
   return true;
 }
+#endif
 
 void RadioProfileCLI::begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool infrastructure_replies) {
   fs_ = fs; radio_ = radio; rtc_ = rtc; last_ms_ = millis();
+#if MESH_RADIO_SWITCH_TUNING
   loadFastSettings();
+#endif
   hold_ = false;
   cross_ = RadioCrossMode::Off;
   recoverable_corrupt_store_ = false;
@@ -734,12 +740,14 @@ bool RadioProfileCLI::applyReplyMutation() {
 
 void RadioProfileCLI::loop() {
   const uint32_t now = millis();
+#if MESH_RADIO_SWITCH_TUNING
   if (fast_pending_ && radio_ && (int32_t)(now - fast_retry_ms_) >= 0) {
     // A saved setting may fail RX verification as well as be temporarily busy.
     // Avoid repeatedly applying and rolling it back at the main-loop rate.
     fast_pending_ = radio_->trySetSwitchTuning(fast_saved_) != RadioParamApplyResult::APPLIED;
     fast_retry_ms_ = now + 1000;
   }
+#endif
   if (!radio_ || !radio_->profiles()) return;
   const uint32_t elapsed = now - last_ms_;
   last_ms_ = now;
@@ -949,7 +957,9 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
   memcpy(key, text, n); key[n] = 0;
   const char* args = text + n;
   while (*args == ' ' || *args == '\t') ++args;
+#if MESH_RADIO_SWITCH_TUNING
   if (handleFastSettings(key, args, verb, remote_origin, reply, capacity)) return true;
+#endif
   enum { Base, Temporary, Scheduled, ScheduledTemporary, Crossing, Replies,
          Status, Scan, Timing, TimingAlias, KeyCount };
   static const char keys[] = "radio2\0tempradio2\0radioat2\0tempradioat2\0radio2.cross\0"

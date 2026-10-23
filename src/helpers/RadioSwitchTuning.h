@@ -1,6 +1,17 @@
 #pragma once
 #include <stdint.h>
 
+// The integrated STM32WL driver has neither the cached retune paths nor a
+// tunable SPI HAL. Do not retain saved controls it cannot apply on small WL
+// images. Other radios retain every supported acceleration by default.
+#ifndef MESH_RADIO_SWITCH_TUNING
+#if defined(STM32_PLATFORM) && defined(STM32WLxx)
+#define MESH_RADIO_SWITCH_TUNING 0
+#else
+#define MESH_RADIO_SWITCH_TUNING 1
+#endif
+#endif
+
 namespace mesh {
 
 // Saved policy for one physical radio, shared by both RF profiles. SPI MHz 0
