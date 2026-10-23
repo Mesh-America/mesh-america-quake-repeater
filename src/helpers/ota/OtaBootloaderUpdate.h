@@ -143,12 +143,15 @@ inline bool ota_bootloader_live_bank_preserves_scratch(uint32_t app_base,
 }
 #endif
 
-// Only the two official XIAO nRF52840 OTAFIX identities are eligible. Runtime matching against the
-// installed, CRC-valid manifest distinguishes the base and Sense modules even for carrier-board aliases.
+// XIAO's deployed wire IDs remain stable. SenseCAP Solar P1 shares the base
+// VID/PID-derived board ID, so its distinct device name is part of its identity.
 static const uint32_t OTA_XIAO_BOARD_ID_BASE  = 0x28860044UL;
 static const uint32_t OTA_XIAO_BOARD_ID_SENSE = 0x28860045UL;
 static const uint8_t OTA_XIAO_BOOT_DEVICE_NAME[OTA_BOOT_DEVICE_NAME_SIZE] = {
   'X','I','A','O','_','D','F','U', 0,0,0,0,0,0,0,0
+};
+static const uint8_t OTA_SENSECAP_BOOT_DEVICE_NAME[OTA_BOOT_DEVICE_NAME_SIZE] = {
+  'S','C','A','P','_','D','F','U', 0,0,0,0,0,0,0,0
 };
 
 struct OtaBootloaderIdentity {
@@ -204,6 +207,11 @@ inline bool ota_xiao_bootloader_board_id(uint32_t board_id) {
   return board_id == OTA_XIAO_BOARD_ID_BASE || board_id == OTA_XIAO_BOARD_ID_SENSE;
 }
 
+inline bool ota_xiao_bootloader_identity(uint32_t board_id, const uint8_t name[16]) {
+  return ota_xiao_bootloader_board_id(board_id) && name &&
+         memcmp(name, OTA_XIAO_BOOT_DEVICE_NAME, OTA_BOOT_DEVICE_NAME_SIZE) == 0;
+}
+
 inline bool ota_bootloader_board_id_valid(uint32_t board_id) {
   return board_id != 0u && board_id != UINT32_MAX;
 }
@@ -213,8 +221,13 @@ inline bool ota_bootloader_board_id_valid(uint32_t board_id) {
 // identities retain their exact legacy name and signed hardware IDs.
 inline bool ota_bootloader_device_name_valid(uint32_t board_id, const uint8_t name[16]) {
   if (!name) return false;
-  if (ota_xiao_bootloader_board_id(board_id))
-    return memcmp(name, OTA_XIAO_BOOT_DEVICE_NAME, OTA_BOOT_DEVICE_NAME_SIZE) == 0;
+  if (ota_xiao_bootloader_board_id(board_id)) {
+    // Both qualified names share the complete suffix and zero padding.
+    if (memcmp(name + 4, OTA_XIAO_BOOT_DEVICE_NAME + 4, OTA_BOOT_DEVICE_NAME_SIZE - 4) != 0)
+      return false;
+    return memcmp(name, "XIAO", 4) == 0 ||
+           (board_id == OTA_XIAO_BOARD_ID_BASE && memcmp(name, "SCAP", 4) == 0);
+  }
   size_t end = 0;
   while (end < OTA_BOOT_DEVICE_NAME_SIZE && name[end] != 0) {
     if (name[end] < 0x21u || name[end] > 0x7Eu) return false;
@@ -245,7 +258,8 @@ inline bool ota_bootloader_hw_id(uint32_t board_id, const uint8_t device_name[16
                                  uint8_t out[32]) {
   if (!out || !ota_bootloader_board_id_valid(board_id) ||
       !ota_bootloader_device_name_valid(board_id, device_name)) return false;
-  if (ota_xiao_bootloader_board_id(board_id)) return ota_xiao_bootloader_hw_id(board_id, out);
+  if (ota_xiao_bootloader_identity(board_id, device_name))
+    return ota_xiao_bootloader_hw_id(board_id, out);
   static const char hex[] = "0123456789ABCDEF";
   memset(out, 0, 32);
   memcpy(out, "NRF_BL_", 7);
@@ -261,7 +275,7 @@ inline bool ota_bootloader_hw_id(uint32_t board_id, const uint8_t device_name[16
 inline bool ota_bootloader_hw_id(const OtaBootloaderIdentity& identity, uint8_t out[32]);
 
 inline uint32_t ota_bootloader_target_id(uint32_t board_id, const uint8_t device_name[16]) {
-  if (ota_xiao_bootloader_board_id(board_id)) return board_id;
+  if (ota_xiao_bootloader_identity(board_id, device_name)) return board_id;
   uint8_t hw_id[32], digest[4];
   if (!ota_bootloader_hw_id(board_id, device_name, hw_id)) return 0;
   mh4(digest, hw_id, sizeof(hw_id));

@@ -34,8 +34,9 @@ MESHCORE_NRF52_EMBED_BOOTLOADER=2.4.12 pio run -e TARGET
 
 The generator matches the board and storage to the 2.4.12 catalog and verifies
 the release asset before embedding only its 40 KiB bootloader region. Host
-validation covers 22 profiles. SenseCAP Solar P1 is excluded because its shared
-XIAO board ID and different device name need separate identity support.
+validation covers all 23 published profiles, including SenseCAP Solar P1.
+P1 uses its exact `SCAP_DFU` identity and S140 v7 layout; XIAO's `XIAO_DFU`
+identity remains separate despite the shared USB board ID.
 Unsupported profiles are refused. The usual application,
 capacity and memory checks still apply: the resource adds 40 KiB plus update
 code, so some profiles will not fit. The build does not remove features or
@@ -59,6 +60,12 @@ It accepts the qualified MeshEnvy `0.9.2-ev1` RAK4631 image, whose full-region
 SHA-256 is `64bfe69d56eefc2d0fe51770902aff70ea0cc06cad261d3d219e4a3c0efac8dc`.
 A matching version string alone is insufficient; another board's image or an
 unknown stock bootloader is not accepted by that exception.
+
+A P1 already running a XIAO bootloader needs a deliberate identity migration;
+the embedded installer does not change one board identity into another. Use
+the documented temporary recovery bridge for the installed identity, followed
+by the normal P1 bootloader. The all-in-one P1 variant embeds the normal 2.4.12
+P1 image, not a recovery image.
 
 ## Install and activate
 

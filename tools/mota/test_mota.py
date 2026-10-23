@@ -1693,7 +1693,8 @@ def test_bootloader_build_inventory_is_unique_and_disjoint_from_app_targets():
         for value in re.findall(r"\{ 0x([0-9a-fA-F]{8}),", target_header)
     }
     audited = ml.audit_bootloader_target_inventory(app_targets)
-    assert len(audited) == len(expected) + 4  # internal, two XIAOs, two adaptive RAKs
+    assert len(audited) == len(expected) + 5  # internal, two XIAOs, Solar P1, two adaptive RAKs
+    assert audited[0xD677B472] == (0x28860044, "SCAP_DFU")
     assert audited[0xD04AB3AB] == (0x239A0029, "3401_AUTO_DFU")
     assert audited[0xFEEAFD1B] == (0x239A0029, "4631_AUTO_DFU")
 
@@ -1714,10 +1715,7 @@ def test_bootloader_build_inventory_is_unique_and_disjoint_from_app_targets():
 
 
 def test_qualified_bootloader_platform_and_storage_profiles_are_exact():
-    qualified = (
-        (ml.XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
-        (ml.XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU"),
-    ) + ml.INTERNAL_BOOTLOADER_IDENTITIES
+    qualified = ml.QSPI_BOOTLOADER_IDENTITIES + ml.INTERNAL_BOOTLOADER_IDENTITIES
     for board_id, device_name in qualified:
         family, fwid, app_base, layout_abi = \
             ml.bootloader_qualified_platform_profile(board_id, device_name)
@@ -1731,8 +1729,7 @@ def test_qualified_bootloader_platform_and_storage_profiles_are_exact():
             assert (fwid, app_base) == (ml.BOOTLOADER_S140_V6_FWID,
                                        ml.NRF52_APP_BASE_S140_V6)
         for storage in storages:
-            if board_id in (ml.XIAO_BOOT_BOARD_ID_BASE,
-                             ml.XIAO_BOOT_BOARD_ID_SENSE):
+            if (board_id, device_name) in ml.XIAO_BOOTLOADER_IDENTITIES:
                 image = _xiao_bootloader_image(board_id)
             else:
                 image = bytearray(_generic_bootloader_image(
@@ -1767,7 +1764,7 @@ def test_qualified_bootloader_platform_and_storage_profiles_are_exact():
                 pass
 
     # Capability storage is part of the profile too. Tower alone admits both
-    # internal and SD; QSPI is XIAO-only and non-Tower internals cannot claim SD.
+    # internal and SD; QSPI is qualified per exact name, and other internals cannot claim SD.
     for invalid in (
         _generic_bootloader_image(storage=ml.BOOT_STORAGE_SD_UPDATE),
         _generic_bootloader_image(board_id=0x239A0071,

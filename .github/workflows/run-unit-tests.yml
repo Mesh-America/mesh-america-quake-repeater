@@ -262,15 +262,20 @@ jobs:
       - name: Verify bootloader version regressions without hardware or downloads
         run: python3 -B test/test_nrf52_bootloader_version.py -v
 
+      - name: Install host identity test dependencies
+        run: |
+          python3 -m pip install cryptography
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+
       - name: Verify embedded bootloader variant and guarded activation
         run: |
           python3 -B test/test_nrf52_embedded_variant.py -v
           python3 -B test/test_nrf52_embedded_bootloader.py -v
+          python3 -B test/test_sensecap_bootloader_identity.py -v
+          python3 -B test/test_sensecap_bootloader_runtime.py -v
           python3 -B tools/mota/test_bootloader_migration.py -v
           python3 -B tools/mota/test_bootloader_migration_runtime.py -v
-
-      - name: Install signed-package verification dependency
-        run: python3 -m pip install cryptography
 
       - name: Verify old-firmware compatibility in both OTA launchers
         run: python3 -B -m unittest discover -s tools/lora_ota -p test_lora_ota_bootloader_version.py -v

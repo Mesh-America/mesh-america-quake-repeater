@@ -90,6 +90,13 @@ NRF52_LAYOUT_FLAG_AUTO_STORE = 0x20
 
 XIAO_BOOT_BOARD_ID_BASE = 0x28860044
 XIAO_BOOT_BOARD_ID_SENSE = 0x28860045
+# Solar P1 shares XIAO's USB-derived board ID, but retains its own name and wire identity.
+XIAO_BOOTLOADER_IDENTITIES = (
+    (XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
+    (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU"),
+)
+SENSECAP_BOOTLOADER_IDENTITY = (XIAO_BOOT_BOARD_ID_BASE, "SCAP_DFU")
+QSPI_BOOTLOADER_IDENTITIES = XIAO_BOOTLOADER_IDENTITIES + (SENSECAP_BOOTLOADER_IDENTITY,)
 XIAO_BOOT_IMAGE_START = 0x000F4000
 XIAO_BOOT_IMAGE_SIZE = 0x0000A000
 XIAO_BOOT_MANIFEST_MAGIC = b"BLMFCRC1"
@@ -155,12 +162,10 @@ SD_BOOTLOADER_IDENTITIES = (
 # Exact runtime continuity profiles for signed, remotely installable
 # bootloaders. A CRC-valid BLM2 envelope is not sufficient for package
 # creation: signing the wrong SoftDevice/application layout only produces a
-# package every qualified device will refuse. XIAO/Sense, Minew MX25LE01, and
-# T1000-E run S140 v7; the remaining inventory (including both Tower storage
+# package every qualified device will refuse. XIAO/Sense, Solar P1, Minew
+# MX25LE01, and T1000-E run S140 v7; the remaining inventory (including both Tower storage
 # profiles) runs S140 v6.
-BOOTLOADER_S140_V7_IDENTITIES = (
-    (XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
-    (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU"),
+BOOTLOADER_S140_V7_IDENTITIES = QSPI_BOOTLOADER_IDENTITIES + (
     (0x239A0029, "MX25_DFU"),
     (0x28860057, "T1KE_DFU"),
 )
@@ -666,7 +671,12 @@ def _bootloader_device_name(board_id: int, name_raw: bytes) -> Optional[str]:
     if len(name_raw) != 16 or board_id in (0, 0xFFFFFFFF):
         return None
     if board_id in (XIAO_BOOT_BOARD_ID_BASE, XIAO_BOOT_BOARD_ID_SENSE):
-        return "XIAO_DFU" if name_raw == XIAO_BOOT_DEVICE_NAME else None
+        if name_raw == XIAO_BOOT_DEVICE_NAME:
+            return "XIAO_DFU"
+        if (board_id == SENSECAP_BOOTLOADER_IDENTITY[0] and
+                name_raw == SENSECAP_BOOTLOADER_IDENTITY[1].encode("ascii").ljust(16, b"\0")):
+            return SENSECAP_BOOTLOADER_IDENTITY[1]
+        return None
     try:
         end = name_raw.index(0)
     except ValueError:
@@ -680,13 +690,13 @@ def bootloader_hw_id(board_id: int, device_name: str) -> bytes:
     name_raw = device_name.encode("ascii", "strict")
     if len(name_raw) > 15 or _bootloader_device_name(board_id, name_raw.ljust(16, b"\0")) is None:
         raise ValueError("invalid embedded bootloader board/name identity")
-    if board_id in (XIAO_BOOT_BOARD_ID_BASE, XIAO_BOOT_BOARD_ID_SENSE):
+    if (board_id, device_name) in XIAO_BOOTLOADER_IDENTITIES:
         return hw_id_bytes(xiao_bootloader_hw_id(board_id))
     return hw_id_bytes(f"NRF_BL_{board_id:08X}_{device_name}")
 
 
 def bootloader_target_id(board_id: int, device_name: str) -> int:
-    if board_id in (XIAO_BOOT_BOARD_ID_BASE, XIAO_BOOT_BOARD_ID_SENSE):
+    if (board_id, device_name) in XIAO_BOOTLOADER_IDENTITIES:
         return board_id
     return int.from_bytes(sha256(bootloader_hw_id(board_id, device_name))[:4], "little")
 
@@ -699,10 +709,8 @@ def audit_bootloader_target_inventory(application_target_ids=()) -> dict:
     to enter a newly built signed package, and release tests pass the generated
     application target table here to keep the two wire namespaces disjoint.
     """
-    identities = (
-        (XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
-        (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU"),
-    ) + INTERNAL_BOOTLOADER_IDENTITIES + RAK_AUTO_BOOTLOADER_IDENTITIES
+    identities = (QSPI_BOOTLOADER_IDENTITIES + INTERNAL_BOOTLOADER_IDENTITIES +
+                  RAK_AUTO_BOOTLOADER_IDENTITIES)
     app_ids = set(application_target_ids)
     targets = {}
     for identity in identities:
@@ -721,9 +729,7 @@ def audit_bootloader_target_inventory(application_target_ids=()) -> dict:
 def bootloader_identity_is_buildable(board_id: int, device_name: str) -> bool:
     return ((board_id, device_name) in INTERNAL_BOOTLOADER_IDENTITIES or
             (board_id, device_name) in RAK_AUTO_BOOTLOADER_IDENTITIES or
-            (board_id, device_name) in (
-                (XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
-                (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU")))
+            (board_id, device_name) in QSPI_BOOTLOADER_IDENTITIES)
 
 
 def bootloader_qualified_platform_profile(board_id: int, device_name: str):
@@ -743,8 +749,7 @@ def bootloader_qualified_storage_profiles(board_id: int, device_name: str):
     identity = (board_id, device_name)
     if identity in RAK_AUTO_BOOTLOADER_IDENTITIES:
         return (BOOT_STORAGE_RAK_AUTO_UPDATE,)
-    if identity in ((XIAO_BOOT_BOARD_ID_BASE, "XIAO_DFU"),
-                    (XIAO_BOOT_BOARD_ID_SENSE, "XIAO_DFU")):
+    if identity in QSPI_BOOTLOADER_IDENTITIES:
         return (BOOT_STORAGE_QSPI_UPDATE,)
     if identity in SD_BOOTLOADER_IDENTITIES:
         # One embedded Tower identity supports two distinct application
@@ -823,8 +828,8 @@ def parse_bootloader_identity(image: bytes) -> Optional[BootloaderIdentity]:
 def parse_xiao_bootloader_identity(image: bytes) -> Optional[XiaoBootloaderIdentity]:
     """Compatibility wrapper restricted to the two deployed XIAO identities."""
     identity = parse_bootloader_identity(image)
-    return identity if identity and identity.board_id in (
-        XIAO_BOOT_BOARD_ID_BASE, XIAO_BOOT_BOARD_ID_SENSE) else None
+    return identity if identity and (identity.board_id, identity.device_name) in \
+        XIAO_BOOTLOADER_IDENTITIES else None
 
 
 def bootloader_caps_storage(image: bytes) -> Optional[int]:
@@ -931,7 +936,7 @@ def validate_bootloader_image(image: bytes, target_id: Optional[int] = None,
 
 def validate_xiao_bootloader_image(image: bytes, board_id: Optional[int] = None) -> XiaoBootloaderIdentity:
     identity = validate_bootloader_image(image)
-    if identity.board_id not in (XIAO_BOOT_BOARD_ID_BASE, XIAO_BOOT_BOARD_ID_SENSE):
+    if (identity.board_id, identity.device_name) not in XIAO_BOOTLOADER_IDENTITIES:
         raise ValueError("bootloader is not a deployed XIAO identity")
     if board_id is not None and identity.board_id != board_id:
         raise ValueError("bootloader embedded board ID does not match package target")
