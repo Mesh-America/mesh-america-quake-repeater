@@ -21,6 +21,7 @@
 #include <helpers/ui/StartupScreen.h>
 #include "NotificationSettingsFile.h"
 #include "MyMesh.h"
+#include <helpers/CompanionStartupFrequency.h>
 #include <helpers/CompanionTxRoutingCLI.h>
 #include <helpers/CompanionTrafficRouting.h>
 #include <helpers/CompanionChannelAlias.h>
@@ -3027,6 +3028,12 @@ void MyMesh::begin(bool has_display, bool radio_available,
   // load persisted prefs
   const bool prefs_ready =
       _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
+#if MESH_HIL_COMPANION_STARTUP_FREQ_MHZ
+  // A role transition can expose old Companion preferences independently of
+  // the Repeater's saved radio. Keep this private image on its bench channel
+  // before saved parameters or automatic traffic can consume that frequency.
+  mesh::companion::applyHilStartupFrequency(_prefs.freq);
+#endif
   FILESYSTEM* battery_calibration_fs = _store->getPrimaryFS();
 #if defined(NRF52_PLATFORM)
   if (_store->isVolatilePrimaryFS()) battery_calibration_fs = nullptr;
@@ -4160,6 +4167,19 @@ bool MyMesh::handleLocalControlCommand(const char* command, char* reply,
 
   if (strcmp(command, "get role") == 0) {
     snprintf(reply, reply_size, "> companion");
+    return true;
+  }
+  if (strcmp(command, "get bootloader.ver") == 0) {
+#if defined(NRF52_PLATFORM)
+    char version[128];  // Preserve the bootloader's preview/fork/build suffix.
+    if (board.getBootloaderVersion(version, sizeof(version))) {
+      snprintf(reply, reply_size, "> %s", version);
+    } else {
+      snprintf(reply, reply_size, "> unknown");
+    }
+#else
+    mesh::cli::formatError(reply, reply_size, "unsupported");
+#endif
     return true;
   }
   if (strcmp(command, "get lat") == 0 || strcmp(command, "get lon") == 0) {

@@ -23,3 +23,7 @@
 #endif
 #include <helpers/radiolib/Nrf52BufferedRadioHal.h>
 #endif
+
+// Also validate the initial radio setting before target.cpp can initialize
+// the chip, including when this private safety flag is set on another role.
+#include <helpers/CompanionStartupFrequency.h>
