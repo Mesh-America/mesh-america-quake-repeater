@@ -186,7 +186,9 @@ static bool isGpioConfig(const char* config) {
 #endif
 
 void CommonCLI::loop() {
+#if MESH_ENABLE_BATTERY_FORWARDING
   loopBatteryForwarding();
+#endif
 #if MESH_ENABLE_MORSE_RX
   if (_morse_reply.pending()) {
     const ClientInfo* actor = _acl->getClient(_morse_reply.actor(), PUB_KEY_SIZE);
@@ -801,7 +803,9 @@ static void formatSnrDbX4Short(char* dest, size_t dest_len, int16_t snr_x4) {
 }
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
+#if MESH_ENABLE_BATTERY_FORWARDING
   loadBatteryForwarding(fs);
+#endif
   mesh::hilStartupTrace("prefs_profiles_begin");
   _radio_profiles.begin(fs, _callbacks->getProfileRadio(), _rtc, true);
 #if MESH_ENABLE_CARRIER_TOOLS || MESH_ENABLE_MORSE_RX
@@ -3260,7 +3264,9 @@ bool CommonCLI::handleUDPBridgeCommand(uint32_t sender_timestamp,
 void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* reply) {
     PrefsSaveReplyGuard save_reply(_prefs_save_failures, reply);
     mesh::cli::normalizeCommandVerb(command);
+#if MESH_ENABLE_BATTERY_FORWARDING
     if (handleBatteryForwardingCommand(command, reply)) return;
+#endif
 #if defined(WITH_UDP_BRIDGE)
     if (handleUDPBridgeCommand(sender_timestamp, command, reply)) return;
 #endif
@@ -4224,7 +4230,9 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
   }
 #if defined(NRF52_POWER_MANAGEMENT)
   if (mesh::power::handleVoltagePolicyCommand(command, reply, 160)) {
+#if MESH_ENABLE_BATTERY_FORWARDING
     if (strncmp(reply, "OK", 2) == 0) loopBatteryForwarding(true);
+#endif
     return;
   }
 #endif
@@ -5716,7 +5724,9 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else if (_board->setAdcMultiplier(multiplier)) {
       _prefs->adc_multiplier = multiplier;
       savePrefs();
+#if MESH_ENABLE_BATTERY_FORWARDING
       loopBatteryForwarding(true);
+#endif
       if (_prefs->adc_multiplier == 0.0f) {
         strcpy(reply, "OK - using default board multiplier");
       } else {

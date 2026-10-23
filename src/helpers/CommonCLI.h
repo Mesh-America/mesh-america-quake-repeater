@@ -872,6 +872,7 @@ class CommonCLI {
   NodePrefs* _prefs;
   CommonCLICallbacks* _callbacks;
   mesh::MainBoard* _board;
+#if MESH_ENABLE_BATTERY_FORWARDING
   FILESYSTEM* _battery_forward_fs = nullptr;
   mesh::batteryforward::Settings _battery_forward_settings;
   mutable mesh::batteryforward::State _battery_forward_state;
@@ -879,6 +880,11 @@ class CommonCLI {
   bool saveBatteryForwarding(const mesh::batteryforward::Settings& settings);
   void loopBatteryForwarding(bool force = false) const;
   bool handleBatteryForwardingCommand(const char* command, char* reply);
+#else
+  void loadBatteryForwarding(FILESYSTEM*) {}
+  void loopBatteryForwarding(bool = false) const {}
+  bool handleBatteryForwardingCommand(const char*, char*) { return false; }
+#endif
   uint16_t batteryEmptyMv() const;
   uint16_t batteryFullMv() const;
 #if defined(WITH_ESPNOW_BRIDGE) \
@@ -1019,8 +1025,13 @@ public:
       FILESYSTEM* _fs,
       PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Both);
   void loop();
+#if MESH_ENABLE_BATTERY_FORWARDING
   bool batteryAllowsForward(bool flood) const;
   bool batteryAllowsTransmit(const mesh::Packet* packet) const;
+#else
+  bool batteryAllowsForward(bool) const { return true; }
+  bool batteryAllowsTransmit(const mesh::Packet*) const { return true; }
+#endif
   uint8_t batteryPercent(uint16_t mv) const;
   bool hasActiveUserGpioTimer() const;
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);

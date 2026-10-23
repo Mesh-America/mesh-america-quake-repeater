@@ -2610,6 +2610,10 @@ Repeater, Room Server, and Sensor firmware can automatically pause forwarding
 below a configured battery percentage. Both controls default to `off`, including
 when upgrading. They are independent of battery alerts.
 
+`wio-e5-mini_repeater` omits these controls and the adjustable battery voltage
+range below to fit its application partition. Battery alerts and basic battery
+readings remain available.
+
 **Usage:**
 
 - `get repeat.battery`

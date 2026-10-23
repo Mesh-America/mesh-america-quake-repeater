@@ -1,5 +1,6 @@
 #pragma once
 
+#include "BatteryForwardingConfig.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -7,6 +8,15 @@
 
 namespace mesh { namespace batteryforward {
 
+// Percentage reporting also serves the existing low-battery alerts when the
+// optional forwarding controls are omitted from a constrained image.
+inline uint8_t percent(uint16_t mv, uint16_t empty, uint16_t full) {
+  if (full <= empty || mv >= full) return 100;
+  if (mv <= empty) return 0;
+  return uint8_t(uint32_t(mv - empty) * 100U / (full - empty));
+}
+
+#if MESH_ENABLE_BATTERY_FORWARDING
 static constexpr uint8_t Repeat = 1;
 static constexpr uint8_t Flood = 2;
 static constexpr uint32_t SampleIntervalMs = 30000;
@@ -64,12 +74,6 @@ inline bool decode(const uint8_t* in, size_t size, Settings& s) {
   if (!validSettings(candidate)) return false;
   s = candidate;
   return true;
-}
-
-inline uint8_t percent(uint16_t mv, uint16_t empty, uint16_t full) {
-  if (full <= empty || mv >= full) return 100;
-  if (mv <= empty) return 0;
-  return uint8_t(uint32_t(mv - empty) * 100U / (full - empty));
 }
 
 struct State {
@@ -184,5 +188,7 @@ bool handleCommand(Settings& s, const State& state, uint16_t empty, uint16_t ful
   else { s = candidate; snprintf(reply, capacity, "OK - saved"); }
   return true;
 }
+
+#endif  // MESH_ENABLE_BATTERY_FORWARDING
 
 }} // namespace mesh::batteryforward

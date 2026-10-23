@@ -1,9 +1,12 @@
 #include "CommonCLI.h"
+#if MESH_ENABLE_BATTERY_FORWARDING
 #include "CheckedSettingsFile.h"
+#endif
 #include <MeshCore.h>
 #if defined(NRF52_PLATFORM) && defined(NRF52_POWER_MANAGEMENT)
 #include "NRF52VoltagePolicy.h"
 #endif
+#if MESH_ENABLE_BATTERY_FORWARDING
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
 #include "AtomicFileWriter.h"
 #else
@@ -56,6 +59,7 @@ bool CommonCLI::saveBatteryForwarding(const mesh::batteryforward::Settings& sett
       verified, sizeof(verified)) && memcmp(bytes, verified, sizeof(bytes)) == 0;
 #endif
 }
+#endif  // MESH_ENABLE_BATTERY_FORWARDING
 
 uint16_t CommonCLI::batteryEmptyMv() const {
 #if defined(NRF52_PLATFORM) && defined(NRF52_POWER_MANAGEMENT)
@@ -66,7 +70,10 @@ uint16_t CommonCLI::batteryEmptyMv() const {
 #else
   const uint16_t compiled = 3000;
 #endif
-  return _battery_forward_settings.emptyMv ? _battery_forward_settings.emptyMv : compiled;
+#if MESH_ENABLE_BATTERY_FORWARDING
+  if (_battery_forward_settings.emptyMv) return _battery_forward_settings.emptyMv;
+#endif
+  return compiled;
 #endif
 }
 
@@ -79,7 +86,10 @@ uint16_t CommonCLI::batteryFullMv() const {
 #else
   const uint16_t compiled = 4200;
 #endif
-  return _battery_forward_settings.fullMv ? _battery_forward_settings.fullMv : compiled;
+#if MESH_ENABLE_BATTERY_FORWARDING
+  if (_battery_forward_settings.fullMv) return _battery_forward_settings.fullMv;
+#endif
+  return compiled;
 #endif
 }
 
@@ -87,6 +97,7 @@ uint8_t CommonCLI::batteryPercent(uint16_t mv) const {
   return mesh::batteryforward::percent(mv, batteryEmptyMv(), batteryFullMv());
 }
 
+#if MESH_ENABLE_BATTERY_FORWARDING
 bool CommonCLI::batteryAllowsTransmit(const mesh::Packet* packet) const {
   // Explicit relay ownership survives path stripping and retry clones. Own
   // replies and OTA session traffic are not inferred from radio routing flags.
@@ -130,3 +141,4 @@ bool CommonCLI::handleBatteryForwardingCommand(const char* command, char* reply)
   if (saved) loopBatteryForwarding(true);
   return handled;
 }
+#endif  // MESH_ENABLE_BATTERY_FORWARDING

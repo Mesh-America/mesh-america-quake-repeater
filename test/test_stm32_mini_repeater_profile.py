@@ -2,9 +2,11 @@
 """Guard the constrained Mini Repeater recipe without bypassing size/storage gates."""
 
 import configparser
+import os
 import re
 import runpy
 import shlex
+import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -25,6 +27,7 @@ OPTIONAL_CUTS = (
     "MESH_ENABLE_CARRIER_TOOLS",
     "MESH_ENABLE_MANAGEMENT_REPORTING",
     "MESH_ENABLE_PACKET_FILE_LOGGING",
+    "MESH_ENABLE_BATTERY_FORWARDING",
 )
 
 
@@ -65,7 +68,7 @@ class MiniRepeaterProfileTest(unittest.TestCase):
         self.assertNotIn("MAX_CLIENTS", self.flags)
         self.assertNotIn("--no-check", self.repeater.get("extra_scripts", ""))
 
-    def test_three_opt_outs_apply_only_to_exact_mini_repeater(self):
+    def test_four_opt_outs_apply_only_to_exact_mini_repeater(self):
         for macro in OPTIONAL_CUTS:
             self.assertRegex(self.flags, r"-D\s+" + macro + r"=0\b")
         for path in [ROOT / "platformio.ini", *sorted((ROOT / "variants").rglob("platformio.ini"))]:
@@ -149,6 +152,7 @@ printf '%s\n' "${BUILD_REDUCTIONS[@]}"
             "radio.carrier_tools omitted to preserve the Mini Repeater app boundary",
             "management.reporting and data.tx omitted to preserve the Mini Repeater app boundary",
             "logging.file omitted; live USB/MQTT packet logging retained",
+            "battery.forwarding omitted; battery alerts and readings retained",
         ]
         for target in (TARGET, "wio-e5-mini_companion_radio_usb", "wio-e5-mini_sensor",
                        "wio-e5_repeater", "RAK_3x72_repeater", TARGET + "_custom"):
@@ -160,6 +164,27 @@ printf '%s\n' "${BUILD_REDUCTIONS[@]}"
                     self.assertEqual(result.stderr, "")
                     self.assertEqual(result.stdout.splitlines(),
                                      ["caller.record", *(omissions if target == TARGET else ())])
+
+    def test_battery_forwarding_defaults_on_and_rejects_invalid_feature_values(self):
+        compiler = os.environ.get("CXX") or shutil.which("g++") or shutil.which("clang++")
+        self.assertIsNotNone(compiler, "host C++ compiler required for the battery feature gate")
+        source = "#include <helpers/BatteryForwardingConfig.h>\nMESH_ENABLE_BATTERY_FORWARDING\n"
+        for flags, expected in (([], "1"), (["-DMESH_ENABLE_BATTERY_FORWARDING=0"], "0"),
+                                (["-DMESH_ENABLE_BATTERY_FORWARDING=1"], "1")):
+            with self.subTest(flags=flags):
+                result = subprocess.run([compiler, "-E", "-P", "-x", "c++", "-",
+                                         "-I", str(ROOT / "src"), *flags],
+                                        input=source, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+        for value in ("-1", "2", "255"):
+            with self.subTest(value=value):
+                result = subprocess.run([compiler, "-E", "-P", "-x", "c++", "-",
+                                         "-I", str(ROOT / "src"),
+                                         "-DMESH_ENABLE_BATTERY_FORWARDING=" + value],
+                                        input=source, capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("MESH_ENABLE_BATTERY_FORWARDING", result.stderr)
 
     def test_ci_links_exact_cable_only_profile_with_release_logging_and_gates(self):
         workflow = (ROOT / ".github/workflows/run-unit-tests.yml").read_text()

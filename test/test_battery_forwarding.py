@@ -1,6 +1,7 @@
 """Run the production battery forwarding policy, CLI and record under sanitizers."""
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -127,6 +128,85 @@ struct CommonCLI {
   EXTRA_MEMBERS
 };
 '''.replace("EXTRA_MEMBERS", extra_members) + methods
+
+    def disabled_runtime_prefix(self):
+        """Compile the real disabled declarations and entire battery implementation.
+
+        No board or filesystem implementation is provided: a retained sampler,
+        persistence path, or policy member makes this fixture fail to compile.
+        """
+        header = (ROOT / "src/helpers/CommonCLI.h").read_text(encoding="ascii")
+        start = header.index("#if MESH_ENABLE_BATTERY_FORWARDING\n  FILESYSTEM* _battery_forward_fs")
+        end = header.index("#if defined(WITH_ESPNOW_BRIDGE)", start)
+        private_api = header[start:end]
+        start = header.index("#if MESH_ENABLE_BATTERY_FORWARDING\n  bool batteryAllowsForward")
+        end = header.index("  bool hasActiveUserGpioTimer()", start)
+        public_api = header[start:end]
+        implementation = (ROOT / "src/helpers/CommonCLI_Battery.cpp").read_text(encoding="ascii")
+        implementation = re.sub(r"^#include[^\n]*\n", "", implementation, flags=re.MULTILINE)
+        return r'''
+#include <helpers/BatteryForwarding.h>
+#include <cassert>
+#include <cstring>
+#include <initializer_list>
+namespace mesh { struct Packet; }
+struct FILESYSTEM;
+class CommonCLI {
+public:
+''' + private_api + public_api + r'''
+};
+static_assert(sizeof(CommonCLI) == 1, "disabled forwarding must not retain state");
+''' + implementation
+
+    def test_disabled_actual_common_cli_has_no_storage_adc_or_forwarding_commands(self):
+        prefix = self.disabled_runtime_prefix()
+        for extra_flags, empty, full in (((), 3000, 4200),
+                                        (("-DBATT_MIN_MILLIVOLTS=6000", "-DBATT_MAX_MILLIVOLTS=8400"),
+                                         6000, 8400)):
+            with self.subTest(endpoints=(empty, full)):
+                self.exercise(r'''
+  static_assert(MESH_ENABLE_BATTERY_FORWARDING == 0, "explicit opt-out");
+  CommonCLI cli;
+  cli.loadBatteryForwarding(reinterpret_cast<FILESYSTEM*>(1));
+  cli.loopBatteryForwarding();
+  cli.loopBatteryForwarding(true);
+  assert(cli.batteryAllowsForward(false) && cli.batteryAllowsForward(true));
+  assert(cli.batteryAllowsTransmit(nullptr));
+  assert(cli.batteryAllowsTransmit(reinterpret_cast<const mesh::Packet*>(1)));
+  char reply[] = "untouched";
+  for (const char* command : {"get repeat.battery", "set repeat.battery on",
+                              "get flood.battery", "set flood.battery 20",
+                              "get battery.forward", "set battery.empty 3200",
+                              "get battery.full"}) {
+    assert(!cli.handleBatteryForwardingCommand(command, reply));
+    assert(strcmp(reply, "untouched") == 0);
+  }
+  assert(cli.batteryEmptyMv() == EMPTY && cli.batteryFullMv() == FULL);
+  assert(cli.batteryPercent(EMPTY - 1) == 0);
+  assert(cli.batteryPercent(EMPTY) == 0);
+  assert(cli.batteryPercent((EMPTY + FULL) / 2) == 50);
+  assert(cli.batteryPercent(FULL) == 100);
+  assert(cli.batteryPercent(FULL + 1) == 100);
+'''.replace("EMPTY", str(empty)).replace("FULL", str(full)), prefix=prefix,
+                              flags=("-DSTM32_PLATFORM", "-DMESH_ENABLE_BATTERY_FORWARDING=0",
+                                     *extra_flags))
+
+    def test_stm32_explicit_opt_in_keeps_real_commands_and_admission(self):
+        self.exercise(r'''
+  static_assert(MESH_ENABLE_BATTERY_FORWARDING == 1, "explicit opt-in");
+  Board board;
+  board.mv = 3108;
+  CommonCLI cli(board);
+  char reply[160] = {};
+  assert(cli.handleBatteryForwardingCommand("set repeat.battery 15", reply));
+  assert(strcmp(reply, "OK - saved") == 0 && board.reads == 1 && cli.saveCalls == 1);
+  assert(!cli.batteryAllowsForward(false) && !cli.batteryAllowsForward(true));
+  assert(cli.handleBatteryForwardingCommand("get battery.forward", reply));
+  assert(strcmp(reply, "> battery=9% mv=3108 repeat=blocked flood=blocked") == 0);
+  assert(cli.handleBatteryForwardingCommand("set repeat.battery off", reply));
+  assert(cli.batteryAllowsForward(false) && cli.batteryAllowsForward(true));
+''', prefix=self.runtime_prefix(),
+                      flags=("-DSTM32_PLATFORM", "-DMESH_ENABLE_BATTERY_FORWARDING=1"))
 
     def test_actual_set_command_voltage_policy_branch_refreshes_profile_endpoints_and_calibration(self):
         source = (ROOT / "src/helpers/CommonCLI.cpp").read_text(encoding="ascii")
