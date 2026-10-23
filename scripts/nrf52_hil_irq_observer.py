@@ -80,10 +80,12 @@ def replace_port(build_env, node):
     return _private_copy(build_env, node, patched_port, "port.c")
 
 
-def observer_enabled(flags=(), cppdefines=()):
+def observer_enabled(flags=(), cppdefines=(), parser_path=None):
     # Reuse the repository's effective -D/-U parser, including split -D values.
+    if parser_path is None:
+        parser_path = Path(__file__).with_name("nrf52_flash_trim.py")
     spec = importlib.util.spec_from_file_location(
-        "mesh_nrf52_flash_trim_irq_flags", Path(__file__).with_name("nrf52_flash_trim.py"))
+        "mesh_nrf52_flash_trim_irq_flags", parser_path)
     parser = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(parser)
     values = parser.flag_defines(flags, cppdefines)
@@ -97,7 +99,9 @@ def observer_enabled(flags=(), cppdefines=()):
 
 
 def install(build_env):
-    if not observer_enabled(build_env.get("BUILD_FLAGS", ()), build_env.get("CPPDEFINES", ())):
+    # SCons executes extra scripts without defining __file__.
+    parser_path = Path(build_env.subst("$PROJECT_DIR")) / "scripts/nrf52_flash_trim.py"
+    if not observer_enabled(build_env.get("BUILD_FLAGS", ()), build_env.get("CPPDEFINES", ()), parser_path):
         return
     if (build_env.PioPlatform().name != "nordicnrf52"
             or build_env.BoardConfig().get("build.mcu", "").lower() != "nrf52840"):

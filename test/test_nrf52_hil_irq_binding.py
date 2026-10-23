@@ -82,6 +82,8 @@ class BuildEnv(dict):
         self.middleware.append((callback, pattern))
 
     def subst(self, value):
+        if value == "$PROJECT_DIR":
+            return str(ROOT)
         assert value == "$BUILD_DIR"
         return str(self.build_dir)
 
@@ -90,6 +92,17 @@ class BuildEnv(dict):
 
 
 class Nrf52HilIrqBindingTest(unittest.TestCase):
+    def test_actual_scons_entry_without_file_uses_project_root(self):
+        source = (ROOT / "scripts/nrf52_hil_irq_observer.py").read_text(encoding="ascii")
+        with tempfile.TemporaryDirectory() as directory:
+            for flag, expected in (("0", 0), ("1", 2)):
+                env = BuildEnv(Path(directory), "-DMESH_HIL_IRQ_TIMING=" + flag)
+                scope = {}
+                scope["Import"] = lambda name: scope.update({name: env})
+                exec(compile(source, "nrf52_hil_irq_observer.py", "exec"), scope)
+                self.assertNotIn("__file__", scope)
+                self.assertEqual(len(env.middleware), expected)
+
     def test_startup_changes_only_six_vectors_and_preserves_all_real_aliases(self):
         patched = PATCH.patched_startup(STARTUP.replace("\n", "\r\n"))
         self.assertEqual(PATCH.patched_startup(patched), patched)
