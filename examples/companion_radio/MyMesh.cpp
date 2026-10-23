@@ -10404,7 +10404,8 @@ void MyMesh::handleTerminalCommand(char* command, bool reader_prompt,
                   FIRMWARE_VERSION, (unsigned)FIRMWARE_VER_CODE, FIRMWARE_BUILD_DATE);
   } else if (strcmp(command, "help") == 0) {
     auto& output = terminalOutput();
-#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL)
+#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL) \
+    || (defined(STM32_PLATFORM) && defined(STM32WLxx) && COMPANION_FEATURE_TEXT_TERMINAL)
     mesh::companion::writePackedCompanionHelp(output);
 #else
 #define MESH_COMPANION_HELP_BEGIN output.print(

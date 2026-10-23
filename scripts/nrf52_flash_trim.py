@@ -208,7 +208,7 @@ def compile_packed_help(build_env, node):
                     if not str(value).startswith("-std=")]
              for name in ("CCFLAGS", "CXXFLAGS")}
     flags["CXXFLAGS"].append("-std=gnu++17")
-    print("nRF52 Companion help: isolated C++17 source")
+    print("Companion help: isolated C++17 source")
     # Builder overrides stay attached to this object even when PlatformIO
     # collects it through the parent construction environment afterward.
     return build_env.Object(node, **flags)

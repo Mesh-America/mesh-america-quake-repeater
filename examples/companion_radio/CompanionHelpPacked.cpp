@@ -1,9 +1,11 @@
-#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL)
-// This is the only Companion translation unit compiled as C++17. Include the
+#if defined(RAK_4631) && defined(COMPANION_RADIO_FULL) \
+    || (defined(STM32_PLATFORM) && defined(STM32WLxx))
+// This is the only selected Companion source compiled as C++17. Include the
 // same feature/board context as MyMesh before expanding the single help source.
 #include "MyMesh.h"
 #include "CompanionHelpWriter.h"
 
+#if !defined(STM32_PLATFORM) || COMPANION_FEATURE_TEXT_TERMINAL
 namespace mesh { namespace companion {
 size_t writePackedCompanionHelp(Stream& output) {
     // Constant evaluation retains only the exact-sized packed help image.
@@ -29,4 +31,5 @@ size_t writePackedCompanionHelp(Stream& output) {
                                     sizeof(packed_help.bytes));
 }
 } } // namespace mesh::companion
+#endif
 #endif

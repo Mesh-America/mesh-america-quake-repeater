@@ -7,7 +7,7 @@ class Stream;
 
 namespace mesh { namespace companion {
 
-// The implementation is isolated in the RAK Full C++17 packing source.
+// The implementation is isolated in one selected C++17 packing source.
 size_t writePackedCompanionHelp(Stream& output);
 
 // Native USB accepts bounded producer writes. Honor partial progress, and stop
@@ -33,7 +33,13 @@ namespace help_packing {
 // ASCII literals retain bit 7 clear. Two-byte references encode a 3..18 byte
 // match at distance 1..2048. Only the final packed bytes survive evaluation;
 // the hash chains and original text occupy no runtime storage.
+#if defined(STM32_PLATFORM) && defined(STM32WLxx)
+// Small STM32WL Companions retain their 1 KiB minimum stack allowance. A
+// smaller history preserves every help byte without adding a 2 KiB frame.
+constexpr size_t WindowSize = 256;
+#else
 constexpr size_t WindowSize = 2048;
+#endif
 constexpr size_t MaximumMatch = 18;
 constexpr uint8_t hash(const char* text) {
   return static_cast<uint8_t>((static_cast<uint8_t>(text[0]) * 31u +
@@ -134,7 +140,7 @@ size_t writePackedHelp(Output& output, const uint8_t* packed, size_t length) {
           if (position == length) return written;
           distance = ((static_cast<size_t>(next & 7) << 8) | packed[position++]) + 1;
           remaining = ((next >> 3) & 15) + 3;
-          if (distance > produced) return written;
+          if (distance > produced || distance > help_packing::WindowSize) return written;
           continue;
         }
       }
