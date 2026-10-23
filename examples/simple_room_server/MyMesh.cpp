@@ -1658,6 +1658,7 @@ uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
 
 bool MyMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash,
                               uint8_t next_hop_hash_len) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
   if (_cli.morseReply().ownsReply(packet)) return false;
   (void)packet;
   (void)next_hop_hash;
@@ -1691,6 +1692,7 @@ uint32_t MyMesh::getDirectRetryAttemptDelay(const mesh::Packet* packet, uint8_t 
 }
 
 bool MyMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
   if (_cli.morseReply().ownsReply(packet)) return false;
   if (_prefs.disable_fwd || _prefs.flood_retry_attempts == 0) return false;
   if (packet != NULL
@@ -1712,6 +1714,7 @@ uint8_t MyMesh::getFloodRetryMaxPathLength(const mesh::Packet* packet) const {
 }
 
 uint8_t MyMesh::getFloodRetryMaxAttempts(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return 0;
   if (_prefs.disable_fwd) return 0;
 
   uint8_t attempts = constrain(_prefs.flood_retry_attempts, 0, 15);
@@ -1731,6 +1734,7 @@ void MyMesh::onRetryConfigChanged() {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
+  if (!packet || !_cli.batteryAllowsForward(packet->isRouteFlood())) return false;
   if (_prefs.disable_fwd) return false;
   if (packet->isRouteFlood()) {
     if (mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max,
@@ -1765,6 +1769,11 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 #endif
   _clock_sync.observeAcceptedFlood(packet);
   return true;
+}
+
+bool MyMesh::allowPacketTransmit(const mesh::Packet* packet) const {
+  return _cli.batteryAllowsTransmit(packet)
+      && mesh::Mesh::allowPacketTransmit(packet);
 }
 
 mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {

@@ -20,7 +20,7 @@ struct Packet {
  uint8_t payload[64] = {}, payload_len = 32, type = 5, header = (5 << 2);
  uint8_t radio_profile=0,radio_origin=0,tx_radio=RADIO_TX_AUTO;
  uint32_t radio_generation=0,radio_origin_generation=0;
- bool radio_bound=false,radio_local=true,radio_reply=false,radio_reply_force=false;
+ bool radio_bound=false,radio_local=true,radio_reply=false,radio_reply_force=false,forwarded=false;
  uint8_t getPayloadType() const { return (header >> 2) & 0x0f; }
  bool violatesRoutePolicy() const {
    const uint8_t route = header & 0x03;

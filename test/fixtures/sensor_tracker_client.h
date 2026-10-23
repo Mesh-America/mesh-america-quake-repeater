@@ -169,6 +169,8 @@ public:
   FakeTrigger* alert_tasks[4] = {&alert1, &alert2};
   int num_alert_tasks = 2;
   struct CLI {
+    bool batteryAllowsForward(bool) const { return true; }
+    bool batteryAllowsTransmit(const mesh::Packet*) const { return true; }
     struct NoMorseReply { void complete(const void*) {} void fail(const void*) {} } morse;
     NoMorseReply& morseReply() { return morse; }
     bool active = false;

@@ -22,6 +22,7 @@ protected:
     packet->radio_local = false;
     packet->tx_radio = mesh::RADIO_TX_AUTO;
     packet->radio_reply = packet->radio_reply_force = false;
+    packet->forwarded = true;
     return true;
   }
 

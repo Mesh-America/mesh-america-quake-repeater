@@ -496,21 +496,6 @@ static bool verifyFloodSettingsWrite(FILESYSTEM* fs, const char* filename,
   return hash == expected_hash;
 }
 
-static uint8_t batteryPercentFromMilliVolts(uint16_t batt_mv) {
-#if defined(NRF52_POWER_MANAGEMENT)
-  return mesh::power::configuredBatteryPercent(batt_mv);
-#else
-  const int min_mv = BATT_MIN_MILLIVOLTS;
-  const int max_mv = BATT_MAX_MILLIVOLTS;
-  if (max_mv <= min_mv) return 100;
-
-  int pct = (((int)batt_mv - min_mv) * 100) / (max_mv - min_mv);
-  if (pct < 0) return 0;
-  if (pct > 100) return 100;
-  return (uint8_t)pct;
-#endif
-}
-
 static bool parseBatteryAlertPercent(const char* value, uint8_t min_value, uint8_t max_value, uint8_t& result) {
   if (value == NULL || *value == 0) {
     return false;
@@ -1095,6 +1080,7 @@ bool MyMesh::floodChannelDataHopApplies(const mesh::Packet* packet) const {
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (!packet) return false;
+  if (!_cli.batteryAllowsForward(packet->isRouteFlood())) return false;
   if (_prefs.disable_fwd && !(_prefs.trace_when_repeat_off == 1 && packet
       && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE)) return false;
 #if !defined(PORTABLE_MQTT_OBSERVER) && MESH_ENABLE_FLOOD_RULE_ENGINE
@@ -1177,6 +1163,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 }
 
 bool MyMesh::allowPacketTransmit(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
   // Forwarded traces have already appended this node's SNR. A locally
   // originated trace starts with an empty SNR path and is not a relay.
   // Recheck at egress so a queued relay/retry cannot outlive this opt-in.
@@ -1587,6 +1574,7 @@ uint32_t MyMesh::getDirectRetryAttemptStepMillis() const {
 }
 
 bool MyMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash, uint8_t next_hop_hash_len) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
   if (_cli.morseReply().ownsReply(packet)) return false;
   if (_prefs.disable_fwd && _prefs.trace_when_repeat_off != 1 && packet
       && packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_TRACE
@@ -2132,6 +2120,7 @@ MyMesh::FloodRetryBridgeState* MyMesh::floodRetryBridgeStateFor(const mesh::Pack
 }
 
 bool MyMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
   if (_cli.morseReply().ownsReply(packet)) return false;
   if (_prefs.disable_fwd || constrain(_prefs.flood_retry_attempts, 0, 15) == 0) {
     return false;
@@ -2447,6 +2436,7 @@ uint8_t MyMesh::getFloodRetryMaxPathLength(const mesh::Packet* packet) const {
 }
 
 uint8_t MyMesh::getFloodRetryMaxAttempts(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return 0;
   if (_prefs.disable_fwd) {
     return 0;
   }
@@ -4412,7 +4402,7 @@ void MyMesh::checkBatteryAlert() {
   }
 
   uint16_t batt_mv = board.getBattMilliVolts();
-  uint8_t batt_pct = batteryPercentFromMilliVolts(batt_mv);
+  uint8_t batt_pct = _cli.batteryPercent(batt_mv);
   if (batt_mv <= LOW_BATTERY_MIN_VALID_MV || batt_pct >= _prefs.battery_alert_low_percent) {
     return;
   }

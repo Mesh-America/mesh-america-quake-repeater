@@ -17,6 +17,7 @@
 #include <helpers/MorseReplyHandoff.h>
 #include <helpers/WirelessControl.h>
 #include <helpers/FleetCommand.h>
+#include <helpers/BatteryForwarding.h>
 #if defined(WITH_UDP_BRIDGE)
 #include <helpers/UDPBridgePrefs.h>
 #endif
@@ -871,6 +872,15 @@ class CommonCLI {
   NodePrefs* _prefs;
   CommonCLICallbacks* _callbacks;
   mesh::MainBoard* _board;
+  FILESYSTEM* _battery_forward_fs = nullptr;
+  mesh::batteryforward::Settings _battery_forward_settings;
+  mutable mesh::batteryforward::State _battery_forward_state;
+  void loadBatteryForwarding(FILESYSTEM* fs);
+  bool saveBatteryForwarding(const mesh::batteryforward::Settings& settings);
+  void loopBatteryForwarding(bool force = false) const;
+  bool handleBatteryForwardingCommand(const char* command, char* reply);
+  uint16_t batteryEmptyMv() const;
+  uint16_t batteryFullMv() const;
 #if defined(WITH_ESPNOW_BRIDGE) \
     || (defined(WITH_MQTT_BRIDGE) && defined(LIGHTWEIGHT_WIFI_OTA))
   // Browser OTA restores only transports it actually paused, not saved
@@ -1009,6 +1019,9 @@ public:
       FILESYSTEM* _fs,
       PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Both);
   void loop();
+  bool batteryAllowsForward(bool flood) const;
+  bool batteryAllowsTransmit(const mesh::Packet* packet) const;
+  uint8_t batteryPercent(uint16_t mv) const;
   bool hasActiveUserGpioTimer() const;
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   mesh::MainBoard* getBoard() { return _board; }

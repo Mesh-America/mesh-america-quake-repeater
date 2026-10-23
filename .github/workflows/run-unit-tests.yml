@@ -474,6 +474,7 @@ jobs:
           python3 -B test/test_radio_regulator_modes.py -v
           python3 -B test/test_regulator_recovery.py -v
           python3 -B test/test_regulator_settings.py -v
+          python3 -B test/test_battery_forwarding.py -v
           python3 -B test/test_power_saving_diagnostics.py -v
           python3 -B test/test_power_saving_diagnostics_buckets.py -v
           python3 -B test/test_power_saving_role_diagnostics.py -v

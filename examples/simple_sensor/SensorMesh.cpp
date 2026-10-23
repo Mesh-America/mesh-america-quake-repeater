@@ -442,11 +442,17 @@ bool SensorMesh::getCADEnabled() const {
 }
 
 bool SensorMesh::allowPacketForward(const mesh::Packet* packet) {
+  if (!packet || !_cli.batteryAllowsForward(packet->isRouteFlood())) return false;
   if (isTrackerModeEnabled()) return false;
   if (_prefs.disable_fwd) return false;
   if (packet->isRouteFlood() && packet->getPathHashCount() >= _prefs.flood_max) return false;
   _clock_sync.observeAcceptedFlood(packet);
   return true;
+}
+
+bool SensorMesh::allowPacketTransmit(const mesh::Packet* packet) const {
+  return _cli.batteryAllowsTransmit(packet)
+      && mesh::Mesh::allowPacketTransmit(packet);
 }
 
 int SensorMesh::calcRxDelay(float score, uint32_t air_time) const {
@@ -467,6 +473,7 @@ uint32_t SensorMesh::getDirectRetransmitDelay(const mesh::Packet* packet) {
 
 bool SensorMesh::allowDirectRetry(const mesh::Packet* packet, const uint8_t* next_hop_hash,
                                   uint8_t next_hop_hash_len) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
   if (_cli.morseReply().ownsReply(packet)) return false;
 #if MESH_ENABLE_SENSOR_TRACKER
   if (tracker_pending && packet != NULL) {
@@ -507,6 +514,7 @@ uint32_t SensorMesh::getDirectRetryAttemptDelay(const mesh::Packet* packet, uint
 }
 
 bool SensorMesh::allowFloodRetry(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return false;
   if (_cli.morseReply().ownsReply(packet)) return false;
   if (packet != NULL && packet->flood_retry_policy == mesh::FLOOD_RETRY_POLICY_DENY) return false;
   if (_prefs.disable_fwd || _prefs.flood_retry_attempts == 0) return false;
@@ -525,6 +533,7 @@ uint8_t SensorMesh::getFloodRetryMaxPathLength(const mesh::Packet* packet) const
 }
 
 uint8_t SensorMesh::getFloodRetryMaxAttempts(const mesh::Packet* packet) const {
+  if (!_cli.batteryAllowsTransmit(packet)) return 0;
   if (_prefs.disable_fwd) return 0;
 
   uint8_t attempts = constrain(_prefs.flood_retry_attempts, 0, 15);

@@ -991,6 +991,7 @@ bool Dispatcher::tryParsePacket(Packet* pkt, const uint8_t* raw, int len) {
   pkt->radio_local = false;
   pkt->tx_radio = RADIO_TX_AUTO;
   pkt->radio_reply = pkt->radio_reply_force = false;
+  pkt->forwarded = false;
 #if defined(WITH_UDP_BRIDGE)
   pkt->udp_bridge_ingress = false;
 #endif
@@ -1193,6 +1194,7 @@ void Dispatcher::processRecvPacket(Packet* pkt) {
   } else if (action == ACTION_MANUAL_HOLD) {
     // sub-class is wanting to manually hold Packet instance, and call releasePacket() at appropriate time
   } else {   // ACTION_RETRANSMIT*
+    pkt->forwarded = true;
     uint8_t priority = (action >> 24) - 1;
     uint32_t _delay = action & 0xFFFFFF;
 
@@ -1371,6 +1373,7 @@ Packet* Dispatcher::obtainNewPacket() {
     pkt->tx_radio = RADIO_TX_AUTO;
     pkt->radio_reply = receive_context_active;
     pkt->radio_reply_force = false;
+    pkt->forwarded = false;
 #if defined(WITH_UDP_BRIDGE)
     pkt->udp_bridge_ingress = false;
 #endif

@@ -222,7 +222,7 @@ class RegularFileReadTest(unittest.TestCase):
                               "static File openFloodSettingsWrite(")
         verification = section("examples/simple_repeater/MyMesh.cpp",
                                "static uint32_t updateFloodSettingsHash(",
-                               "static uint8_t batteryPercentFromMilliVolts(")
+                               "static bool parseBatteryAlertPercent(")
         program = program.replace("@FLOOD_VERIFY@", read_helper + verification)
         for platform in ("ESP32_PLATFORM", "NRF52_PLATFORM", "RP2040_PLATFORM", "STM32_PLATFORM"):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:

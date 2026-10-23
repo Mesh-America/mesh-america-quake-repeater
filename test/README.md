@@ -37,6 +37,7 @@ python3 test/test_companion_pairing_display.py # real OLED pairing wake, USB coe
 python3 test/test_companion_identity_startup.py # real saved/missing/unreadable identity branch and truthful startup phases
 python3 test/test_startup_screen.py            # early display ordering and cooperative entropy progress
 python3 -B test/test_common_prefs_legacy_rxgain.py -v # compact stock gain, appended tails and truncation
+python3 -B test/test_battery_forwarding.py -v # battery relay thresholds, hysteresis, calibration and checked settings records
 python3 test/test_companion_settings_persistence_contract.py  # Atomic settings and appended Bluetooth fields
 python3 test/test_webconfig_ui.py              # Web controls, reboot handling and generated-page consistency
 python3 test/test_webconfig_ui_runtime.py      # Real Chromium, including independent stealth toggle

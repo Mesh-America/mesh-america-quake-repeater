@@ -49,6 +49,8 @@ struct SimpleMeshTables {
 struct MyMesh : mesh::Mesh {
   struct CLI {
     mesh::MorseReplyHandoff handoff;
+    bool batteryAllowsForward(bool) const { return true; }
+    bool batteryAllowsTransmit(const mesh::Packet*) const { return true; }
     mesh::MorseReplyHandoff& morseReply() { return handoff; }
     const mesh::MorseReplyHandoff& morseReply() const { return handoff; }
   } _cli;

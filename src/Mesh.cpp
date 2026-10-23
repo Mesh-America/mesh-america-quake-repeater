@@ -1113,6 +1113,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
           && self_id.isHashMatch(&pkt->payload[i + offset], hash_size)
           && allowPacketForward(pkt) && !_tables->wasSeen(pkt)) {
         _tables->markSeen(pkt);
+        pkt->forwarded = true;
         // append SNR (Not hash!)
         pkt->path[pkt->path_len++] = (int8_t) (pkt->getSNR()*4);
 
@@ -1158,6 +1159,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       removePathPrefix(pkt, pkt->getPathHashCount());
     } else if (self_id.isHashMatch(pkt->path, pkt->getPathHashSize()) || maybeShortCircuitDirect(pkt)) {
       if (allowPacketForward(pkt)) {
+        pkt->forwarded = true;
         const uint32_t d = getDirectRetransmitDelay(pkt);
         if (pkt->getPayloadType() == PAYLOAD_TYPE_MULTIPART) {
           return forwardMultipartDirect(pkt, d);
@@ -1506,6 +1508,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
           && (n + 1) * pkt->getPathHashSize() <= MAX_PATH_SIZE
           && (primary_ota || _mgr->getFreeCount() > OTA_FWD_MIN_FREE)
           && allowPacketForward(pkt) && allowOtaForwardRetry(pkt)) {
+        pkt->forwarded = true;
         rememberOtaForward(pkt);  // record incoming hop count, before appending ourselves
         self_id.copyHashTo(&pkt->path[n * pkt->getPathHashSize()], pkt->getPathHashSize());
         pkt->setPathHashCount(n + 1);
@@ -1562,6 +1565,7 @@ DispatcherAction Mesh::routeRecvPacket(Packet* packet) {
       }
     }
     if (!allowPacketForward(packet)) return ACTION_RELEASE;
+    packet->forwarded = true;
     if (limiter) limiter->commit(packet->payload, hash, now);
     // append this node's hash to 'path'
     self_id.copyHashTo(&packet->path[n * packet->getPathHashSize()], packet->getPathHashSize());
@@ -1606,6 +1610,7 @@ void Mesh::routeDirectRecvAcks(Packet* packet, uint32_t delay_millis) {
       auto a1 = createMultiAck(packet->payload, packet->payload_len, extra);
       if (a1) {
         a1->radio_reply = false;  // relayed ACK, not a local response
+        a1->forwarded = true;
         a1->path_len = Packet::copyPath(a1->path, packet->path, packet->path_len);
         a1->header &= ~PH_ROUTE_MASK;
         a1->header |= ROUTE_TYPE_DIRECT;
@@ -1619,6 +1624,7 @@ void Mesh::routeDirectRecvAcks(Packet* packet, uint32_t delay_millis) {
     auto a2 = createAck(packet->payload, packet->payload_len);
     if (a2) {
       a2->radio_reply = false;  // relayed ACK, not a local response
+      a2->forwarded = true;
       a2->path_len = Packet::copyPath(a2->path, packet->path, packet->path_len);
       a2->header &= ~PH_ROUTE_MASK;
       a2->header |= ROUTE_TYPE_DIRECT;

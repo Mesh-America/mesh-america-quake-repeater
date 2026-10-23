@@ -2601,6 +2601,103 @@ send text.flood checking ridge link
 
 ---
 
+#### Pause forwarding when the battery is low
+
+**Search terms:** low battery repeating, battery flood cutoff, save battery,
+automatic repeat off.
+
+Repeater, Room Server, and Sensor firmware can automatically pause forwarding
+below a configured battery percentage. Both controls default to `off`, including
+when upgrading. They are independent of battery alerts.
+
+**Usage:**
+
+- `get repeat.battery`
+- `set repeat.battery <off|on|1-100>`
+- `get flood.battery`
+- `set flood.battery <off|on|1-100>`
+- `get battery.forward`
+
+`set repeat.battery on` enables the saved repeat threshold, initially **10%**.
+`set flood.battery on` enables the saved flood threshold, initially **20%**.
+A number both enables the control and sets its threshold. `off` disables it
+while retaining that threshold for the next `on`. Changes are saved and take
+effect without a reboot.
+
+Below the repeat threshold, the node stops LoRa retransmissions of received
+traffic. Below the flood threshold, it stops LoRa retransmissions of received
+flood traffic but may still
+relay routed traffic if repeating is otherwise allowed. Neither control stops
+the node's own transmissions or replies to administration requests. The saved
+manual repeat flag, flood limits, and forwarding rules remain unchanged; a
+battery recovery does not override a manual restriction.
+
+Received packets entering from a bridge are subject to the same LoRa transmit
+limits. Exporting radio reception to WiFi, ESP-NOW, or RS232 is unchanged.
+
+Forwarding resumes automatically after the measured percentage reaches two
+percentage points above the applicable threshold, capped at 100%. With the
+initial thresholds, flood forwarding pauses below 20% and resumes at 22%; all
+relay forwarding pauses below 10% and resumes at 12%. This recovery margin
+avoids repeatedly switching forwarding on and off near a threshold.
+
+Battery voltage is sampled every 30 seconds while either control is enabled,
+and immediately when its configuration changes. `get battery.forward` reports
+the voltage, estimated percentage, whether the reading is valid, and which
+battery controls are currently suppressing forwarding. A missing or invalid
+reading does not suppress forwarding: accepted readings are 2000-20000 mV.
+Voltage alone does not establish that a battery is physically connected.
+
+To enable both default thresholds:
+
+```text
+set repeat.battery on
+set flood.battery on
+get battery.forward
+```
+
+To choose different thresholds and later disable the feature:
+
+```text
+set repeat.battery 15
+set flood.battery 25
+set repeat.battery off
+set flood.battery off
+```
+
+#### Set the battery percentage voltage range
+
+The forwarding thresholds use a voltage-derived percentage. On infrastructure
+builds without the nRF52 voltage policy, the saved range is adjustable with:
+
+```text
+get battery.empty
+get battery.full
+set battery.empty 3000
+set battery.full 4200
+```
+
+Values are millivolts, from 2000 to 20000, with full at least 100 mV above empty.
+The default range comes from the board's compiled battery endpoints, normally
+3000 mV for 0% and 4200 mV for 100%; boards with a two-cell pack retain their
+compiled pack range. The percentage is interpolated between those endpoints
+and limited to 0-100%. These settings describe the battery
+range; they do not calibrate the voltage measurement or alter a charger.
+
+Supported nRF52 power-management builds use their existing saved
+`battery.profile`, `battery.empty`, and `battery.full` values instead. Their
+endpoint range remains 2000-4200 mV, with at least 100 mV between endpoints.
+See [nRF52 battery protection](#configure-nrf52-battery-protection) for profiles
+and their separate boot-lock and cutoff effects. `set adc.multiplier` adjusts
+voltage calibration on boards that support it; see
+[battery reading calibration](#fine-tune-the-battery-reading).
+
+Percentage remains an estimate: a voltage reading under transmit load may
+differ from an idle reading. Check the reported voltage against a voltmeter
+before relying on automatic forwarding limits.
+
+---
+
 #### Enable or disable the RX inactivity watchdog (Repeater Only)
 **Usage:**
 - `get rx.watchdog`

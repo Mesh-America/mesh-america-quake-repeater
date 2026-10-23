@@ -25,6 +25,7 @@ struct CommonCLI {
   struct Profiles { unsigned loops = 0; void loop() { ++loops; } } _radio_profiles;
   unsigned management_loops = 0;
   CommonCLI(ACL& acl, Callbacks& callbacks) : _acl(&acl), _callbacks(&callbacks) {}
+  void loopBatteryForwarding(bool = false) {}
   void loopManagement() { ++management_loops; }
   void loop();
 };

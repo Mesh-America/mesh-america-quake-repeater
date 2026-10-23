@@ -173,6 +173,7 @@ struct CommonCLI {
   UserGpio _user_gpio;
   struct Profiles { unsigned loops=0; void loop() { ++loops; } } _radio_profiles;
   unsigned management=0;
+  void loopBatteryForwarding(bool = false) {}
   void loopManagement() { ++management; }
   void loop();
 };
