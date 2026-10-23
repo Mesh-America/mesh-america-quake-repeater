@@ -33,3 +33,20 @@ helper frames total 384 bytes; a 512-byte caller/output reserve keeps that
 local estimate at 896 bytes within the existing 1,024-byte minimum stack
 allowance. This is compiler frame accounting, excluding physical interrupt
 high-water. The complete firmware's linked size is a separate build check.
+
+Complete builds at `5b20bf37` passed sequentially with the Cascade profile and
+unchanged flash boundaries. All four USB Companions also passed the canonical
+OTA packaging and runtime RAM checks:
+
+| Target | Linked flash used / limit | Flash remaining |
+| --- | --- | --- |
+| RAK 3x72 USB Companion | 228,920 / 229,376 bytes | 456 bytes |
+| Wio E5 Mini USB Companion | 228,736 / 229,376 bytes | 640 bytes |
+| Wio E5 USB Companion | 228,716 / 229,376 bytes | 660 bytes |
+| Tiny Relay USB Companion | 228,784 / 229,376 bytes | 592 bytes |
+
+The Wio E5 Mini repeater also passed its cable-only build and runtime RAM
+checks at 245,356 / 245,760 flash bytes, leaving 404 bytes. These integrated
+STM32WL targets expose no supported saved radio-switch tuning features; the
+unavailable machinery is omitted without changing their radio commands or
+stored profiles. These are build checks, not physical device qualification.

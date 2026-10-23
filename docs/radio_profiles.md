@@ -1216,6 +1216,8 @@ supported feature names and accepted SPI values (`spi=na` without clock
 control). Settings affect the one
 physical radio and both profiles. They are shared by the same CLI roles as
 `radio2`, including Full Companion, and survive reboot and firmware updates.
+Integrated STM32WL builds omit these controls because their radio interface
+does not support the tuning features.
 
 | Control | Values | Effect when enabled |
 | --- | --- | --- |
