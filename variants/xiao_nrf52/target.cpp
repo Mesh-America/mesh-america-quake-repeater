@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "target.h"
+#include "XiaoRadioSpiConfig.h"
 #include <helpers/ArduinoHelpers.h>
 #ifdef USE_CC310_HW_CRYPTO
   #include <helpers/NRF52Crypto.h>
@@ -14,7 +15,14 @@ static bool target_radio_available = false;
 
 XiaoNrf52Board board;
 
+#if MC_XIAO_NRF52_HIL_FAST_SPI
+// The explicit SDK mapping keeps global SPI, including std_init/recovery and
+// base shutdown, on SPIM2. Dedicated NRF_QSPI storage never starts SPI1.
+static Nrf52BufferedRadioHal radioHal(SPI, 8000000);
+RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+#else
 RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+#endif
 
 WRAPPER_CLASS radio_driver(radio, board);
 

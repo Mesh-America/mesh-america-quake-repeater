@@ -124,7 +124,12 @@ void check() {{
         self.assertEqual(len(sources),32)
         for source in sources:
             text=source.read_text()
-            self.assertNotIn("BufferedRadioHal",text,str(source))
+            if source.parent.name == "xiao_nrf52":
+                # Its separate constructor test executes the default-off
+                # candidate gate and actual legacy/opt-in branches.
+                self.assertIn("#if MC_XIAO_NRF52_HIL_FAST_SPI",text)
+            else:
+                self.assertNotIn("BufferedRadioHal",text,str(source))
             constructions=re.findall(r"^RADIO_CLASS radio = new Module\(P_LORA_NSS[^;]+;",text,re.MULTILINE)
             fallback=source.parent.name in {"heltec_t096","heltec_t1","heltec_t114"}
             self.assertEqual(len(constructions),2 if fallback else 1,str(source))
