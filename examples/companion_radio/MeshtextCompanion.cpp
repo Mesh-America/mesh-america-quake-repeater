@@ -460,7 +460,8 @@ uint8_t MyMesh::meshtextRetryLimit(const mesh::mt::PendingFrame& frame) const {
   // exist when mt.hops is zero, so don't force all configured duplicates.
   if (!(frame.bytes[12] & 7)) return 0;
   const uint8_t count = _prefs.flood_retry_attempts > 15 ? 15 : _prefs.flood_retry_attempts;
-  return frame.nodeinfo ? (_prefs.flood_retry_advert_enabled && count ? 1 : 0) : count;
+  return frame.nodeinfo ? (_prefs.flood_retry_advert_enabled && count ? 1 : 0)
+      : mesh::mt::messageRetryLimit(count);
 }
 
 uint32_t MyMesh::meshtextRetryDelay(const mesh::mt::PendingFrame& frame) {

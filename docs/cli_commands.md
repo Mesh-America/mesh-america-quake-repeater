@@ -23,9 +23,10 @@ Chat remains plain text. A separate GPS-free NodeInfo is sent after the first
 successful chat transmission per used channel/identity per boot; the explicit
 command can also request one. Automatic metadata waits for a 250 ms gap after
 the latest successful MT transmission; explicit requests bypass that gap.
-MT heard-repeat retries use the Companion's
-`flood.retry.count`, with the metadata cap and `flood.retry.advert` gate for
-NodeInfo.
+MT messages default to 15 total attempts (the first send plus up to 14 retries)
+unless a matching repeat is heard. The Companion's `flood.retry.count` can lower
+that budget; `0` or `mt.hops 0` sends once. NodeInfo keeps its metadata cap and
+`flood.retry.advert` gate. Scheduled beacons remain fire and forget.
 
 See [carrier-wave RF checks](carrier_wave.md) for `cw on [seconds]`,
 `cw2 on [seconds]`, and stopping a carrier with `off`.
@@ -5156,7 +5157,8 @@ section apply to infrastructure roles. Companion does not expose repeater
 bridge or prefix retry filters.
 
 On builds with [Meshtext channel chat](radio_profiles.md#heard-repeat-retries),
-`flood.retry.count` also limits retries of the node's own MT channel text.
+`flood.retry.count` also limits retries of the node's own MT channel text,
+with a cap of 15 total attempts (the original plus 14 retries).
 Retries reuse the original encoded packet and stop after hearing a matching
 forwarded copy with a lower remaining hop limit. This is not a recipient ACK
 or a delivery guarantee. NodeInfo permits at most one additional transmission,
@@ -5166,6 +5168,7 @@ received MT traffic or apply MeshCore prefix/bridge rules to MT packets.
 `set mt.hops 0` disables heard-repeat retries, without suppressing the original
 chat or its first-use NodeInfo. `get mt.retry` reports retry/heard/exhausted
 counters, pending work and the configured count without changing settings.
+Scheduled beacons always send once per occurrence.
 
 **Search terms:** flood tx retries, flood retry attempts, flood retransmissions, broadcast retries.
 

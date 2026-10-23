@@ -99,7 +99,7 @@ public:
   mesh::RadioProfileCLI _radio_profiles;
   struct {
     float freq=909.5; char node_name[32]="Test";
-    uint8_t flood_retry_attempts=15,flood_retry_max_path=1;
+    uint8_t flood_retry_attempts=@DEFAULT_FLOOD_RETRIES@,flood_retry_max_path=1;
     uint8_t flood_retry_group_max_path=0xff,flood_retry_advert_enabled=1;
   } _prefs;
   mesh::LocalIdentity self_id;
@@ -1016,6 +1016,40 @@ static void automaticNodeinfoQuiet() {
   failure.completeForeign(); failure.advance(250); assert(failure.foreign.size()==3);
   puts("PASS auto-nodeinfo-quiet");
 }
+static void defaultTries() {
+  for (bool echo_on_last : {false, true}) {
+    Preferences::reset(); MyMesh node; active(node); announce(node);
+    assert(node._prefs.flood_retry_attempts==15);
+    char reply[256];
+    assert(node.handleMeshtextCommand("get mt.retry",reply,sizeof(reply)));
+    assert(strstr(reply,"count=15"));
+    const auto before=node.foreign.size();
+    assert(node.sendMeshtextText(node.stored[0],"fifteen tries",13));
+    const auto original=node.foreign.back();
+    const auto next_id=node._mt_packet_id;
+    node.completeForeign();
+    for (unsigned attempt=1;attempt<15;++attempt) {
+      auto* frame=pendingChat(node); assert(frame);
+      advanceTo(node,frame->due);
+      assert(node.foreign_pending && node.foreign.back()==original);
+      assert(node._mt_packet_id==next_id);
+      node.completeForeign();
+    }
+    assert(node.foreign.size()==before+15 && node._mt_retried==14);
+    auto* frame=pendingChat(node); assert(frame); // Final echo window remains.
+    if (echo_on_last) {
+      const auto echo=repeated(original);
+      assert(receiveFrame(node,echo.data(),echo.size()));
+      assert(node._mt_heard==1 && node._mt_exhausted==0);
+    } else {
+      advanceTo(node,frame->due);
+      assert(node._mt_exhausted==1 && node._mt_heard==0);
+    }
+    node.advance(3600000);
+    assert(!pendingChat(node) && !node.foreign_pending && node.foreign.size()==before+15);
+  }
+  puts("PASS default-tries");
+}
 static void heardRetries() {
   Preferences::reset(); MyMesh node; active(node); announce(node);
   node._prefs.flood_retry_attempts=2;
@@ -1040,16 +1074,16 @@ static void heardRetries() {
   capped._prefs.flood_retry_attempts=15;
   assert(capped.sendMeshtextText(capped.stored[0],"bounded",7));
   const auto cap_original=capped.foreign.back(); capped.completeForeign();
-  for(unsigned i=0;i<15;++i) {
+  for(unsigned i=0;i<14;++i) {
     auto* current=pendingChat(capped); assert(current);
     advanceTo(capped,current->due);
     assert(capped.foreign_pending && capped.foreign.back()==cap_original);
     capped.completeForeign();
   }
-  assert(capped._mt_retried==15 && capped.foreign.size()==17);
+  assert(capped._mt_retried==14 && capped.foreign.size()==16);
   auto* current=pendingChat(capped); assert(current); advanceTo(capped,current->due);
   assert(capped._mt_exhausted==1 && !pendingChat(capped));
-  capped.advance(3600000); assert(capped.foreign.size()==17);
+  capped.advance(3600000); assert(capped.foreign.size()==16);
 
   Preferences::reset(); MyMesh disabled; active(disabled); announce(disabled);
   disabled._prefs.flood_retry_attempts=0;
@@ -1620,6 +1654,7 @@ int main(int argc,char** argv) {
   else if(!strcmp(argv[1],"auto-nodeinfo"))automaticNodeinfo();
   else if(!strcmp(argv[1],"auto-nodeinfo-quiet"))automaticNodeinfoQuiet();
   else if(!strcmp(argv[1],"heard-retries"))heardRetries();
+  else if(!strcmp(argv[1],"default-tries"))defaultTries();
   else if(!strcmp(argv[1],"strict-echo"))strictEcho();
   else if(!strcmp(argv[1],"delivery-lifecycle"))deliveryLifecycle();
   else if(!strcmp(argv[1],"delivery-contention"))deliveryContention();
