@@ -4,6 +4,10 @@
 
 # RS-232 bridge diagnostics, 22 October 2026
 
+Follow-up: the [RAK RAM repair and hardware checks](rak_release_fixes_2026-10-22.md)
+close the Full/Reduced build failure below at `adb11e7b4`. Physical RS232 cable
+and line-driver testing remain outside that follow-up's scope.
+
 Status: **host tests and ESP32 Full build PASS**. The RAK4631 Reduced
 sensor/LoRa OTA build passes, but its Full sensor build fails the RAM gate.
 The same Full failure occurs on the previous source, before these diagnostics.

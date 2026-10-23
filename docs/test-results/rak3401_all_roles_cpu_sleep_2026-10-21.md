@@ -4,6 +4,11 @@
 
 # RAK3401 all firmware CPU sleep checks, 21 October 2026
 
+Follow-up: the [targeted RAK release checks](rak_release_fixes_2026-10-22.md)
+record a new Full Room Server PASS at `adb11e7b4`: three physical LoRa round
+trips, 79.31% sampled CPU sleep and zero post-check errors. The original failed
+capture below remains unchanged; its RF cause was not established.
+
 All 15 applicable images were installed and measured sequentially on the same
 RAK3401. **All 13 profiles that support power saving passed the CPU sleep
 capture with PS on.** Twelve also passed every runtime check. Full Room Server
