@@ -12126,7 +12126,11 @@ bool MyMesh::handleReplayResetCommand(ClientInfo* sender, const char* command,
       || (clock_sync_last_result >= CLOCK_SYNC_RESULT_WITHIN_DRIFT
           && clock_sync_last_result <= CLOCK_SYNC_RESULT_CORRECTED_BACKWARD);
   if (!clock_observed || !clockSyncEpochIsValid(now)) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+    strcpy(reply, "Err - verify/sync clock before replay reset");
+#else
     strcpy(reply, "Err - set/sync and verify the repeater clock before replay recovery");
+#endif
     return true;
   }
 
@@ -12138,7 +12142,11 @@ bool MyMesh::handleReplayResetCommand(ClientInfo* sender, const char* command,
       const auto issued = replay_reset_nonce.issue(
           sender->id.pub_key, request.key, random_token, now_ms, now);
       if (issued == mesh::ReplayResetNonce::IssueResult::Busy) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+        strcpy(reply, "Err - replay confirmation pending (up to 300s)");
+#else
         strcpy(reply, "Err - another replay confirmation is pending (up to 300 seconds)");
+#endif
       } else if (issued == mesh::ReplayResetNonce::IssueResult::AwaitingConfirmation) {
         snprintf(reply, 156, "Err - token is confirmation-only; use earlier reply or wait %lus for expiry",
                  (unsigned long)replay_reset_nonce.remainingSeconds(now_ms, now));
@@ -12160,7 +12168,11 @@ bool MyMesh::handleReplayResetCommand(ClientInfo* sender, const char* command,
     // or growing nonce history is necessary.
     if (!replay_reset_nonce.consume(sender->id.pub_key, request.key,
                                     request.token, now_ms, now)) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+      strcpy(reply, "Err - token expired/used or clock changed; reset again");
+#else
       strcpy(reply, "Err - expired/used replay token or clock changed; request a new reset");
+#endif
       return true;
     }
   } else if (kind == mesh::ReplayResetKind::ExactKeyConfirm) {

@@ -3749,7 +3749,11 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       }
 #else
     } else if (memcmp(command, "ota", 3) == 0 && (command[3] == 0 || command[3] == ' ')) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+      strcpy(reply, "LoRa OTA absent; tempradio cannot enable it. Install OTA repeater firmware");
+#else
       strcpy(reply, "LoRa OTA is not included in this build; tempradio cannot enable it. Use an OTA-enabled repeater firmware");
+#endif
 #endif
     } else if (strcmp(command, "power") == 0) {
       const char* usb_state = _board->hasUsbPowerDetect()
@@ -5349,7 +5353,11 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       _prefs->flood_retry_bridge_enabled = 1;
       savePrefs();
       if (!formatFloodRetryBucketCollisionWarning(reply, _prefs, "OK - bucket 7=prefixes; ")) {
+#if defined(STM32_PLATFORM) && defined(WIO_E5_MINI_NO_EXTERNAL_SENSORS)
+        strcpy(reply, "OK - bucket 7 (other)=flood.retry.prefixes; multi-try bridge on");
+#else
         strcpy(reply, "OK - flood.retry.prefixes acts as bucket 7 (other); multi-try bridge routing enabled");
+#endif
       }
     } else if (strcmp(&config[19], "off") == 0) {
       _prefs->flood_retry_bridge_enabled = 0;
