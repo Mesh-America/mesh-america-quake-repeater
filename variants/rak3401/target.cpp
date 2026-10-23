@@ -2,6 +2,7 @@
 #include "target.h"
 #include "OnboardRadioSleep.h"
 #include <helpers/ArduinoHelpers.h>
+#include <helpers/radiolib/Nrf52BufferedRadioHal.h>
 #include <nrf_gpio.h>
 #ifdef USE_CC310_HW_CRYPTO
   #include <helpers/NRF52Crypto.h>
@@ -124,7 +125,11 @@ RAK3401Board board;
 // The RAK13302 is wired to the second WisBlock SPI controller. Keep the same
 // controller instance for startup and watchdog recovery; resetting the radio
 // must not replace or tear down the SPI object used by its Module.
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI1);
+// Batch each RadioLib command into one SPIM transfer rather than starting a
+// transfer per byte. Retain the existing 2 MHz clock and RadioLib's BUSY,
+// chip-select, command status, and IRQ handling.
+static Nrf52BufferedRadioHal radioHal(SPI1, 2000000);
+RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);
 

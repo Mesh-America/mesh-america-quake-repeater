@@ -471,7 +471,9 @@ class Rak3401OnboardRadioTests(unittest.TestCase):
         self.assertIn("P_LORA_RESET, P_LORA_BUSY, SPI)", target)
         # External-radio construction and retry must retain their SPI1 owner.
         external_target = (VARIANT / "target.cpp").read_text()
-        self.assertIn("P_LORA_RESET, P_LORA_BUSY, SPI1)", external_target)
+        self.assertIn("Nrf52BufferedRadioHal radioHal(SPI1, 2000000)", external_target)
+        self.assertIn("new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, "
+                      "P_LORA_RESET, P_LORA_BUSY)", external_target)
         external_init = extract_braced(external_target, "bool radio_init()")
         self.assertIn("radio.std_init(&SPI1)", external_init)
         self.assertNotIn("sleepOnboardRadio", external_init)
