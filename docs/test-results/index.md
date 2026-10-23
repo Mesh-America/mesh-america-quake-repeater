@@ -11,6 +11,7 @@ Completed validation reports, experiments, and test guides are collected here. O
 
 ## Radio and RF
 
+- [Heltec V3/V4 8 MHz versus 8.889 MHz radio switching measurements, 2026-10-23](esp32_spi_clock_retune_2026-10-23.md)
 - [Five-board eight-peer WiFi UDP bridge hardware qualification, 2026-10-22](udp_bridge_hardware_2026-10-22.md)
 - [Eight-peer WiFi UDP bridge: V3/V4/R8 Full build and host validation, 2026-10-22](udp_bridge_2026-10-22.md)
 - [RS-232 bridge diagnostics: host/build checks and existing RAK Full RAM failure, 2026-10-22](rs232_bridge_diagnostics_2026-10-22.md)
