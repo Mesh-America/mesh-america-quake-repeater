@@ -8,6 +8,7 @@
 
 #if MESH_HIL_PROFILE_TIMING
 #include <stdint.h>
+#include "NrfRadioIrqObserver.h"
 
 namespace mesh {
 namespace profiletiming {
@@ -89,11 +90,24 @@ inline uint32_t readClock() {
 #endif
 }
 
+inline uint32_t readEndpointClock() {
+#if MESH_HIL_IRQ_TIMING
+  return mesh::irqobserver::endpoint();
+#else
+  return readClock();
+#endif
+}
+
 inline void begin(uint8_t from, uint8_t to, uint32_t now_ticks) {
   auto& work = mesh_hil_profile_timing_work;
   work.active = from < 2 && to < 2 && from != to;
   if (!work.active) return;
   work.direction = from;
+#if MESH_HIL_IRQ_TIMING
+  // Establish a coherent IRQ counter/time baseline before radio work. This
+  // excludes the observer's snapshot setup from its own timing window.
+  now_ticks = mesh::irqobserver::begin();
+#endif
   work.start_ticks = work.previous_ticks = now_ticks;
   work.mask = 0;
   for (uint32_t i = 0; i < StageCount; ++i) work.duration_us[i] = 0;
@@ -148,6 +162,9 @@ inline void finish(Result result, uint32_t now_ticks) {
   auto& direction = capture.direction[work.direction];
   const bool worst = result == Success && (direction.stage[Whole].count == 0
       || work.duration_us[Whole] > direction.stage[Whole].max_us);
+#if MESH_HIL_IRQ_TIMING
+  mesh::irqobserver::finish(work.direction, result, worst);
+#endif
   direction.last_result = result;
   direction.last_mask = work.mask;
   if (result == Success) ++direction.successes;

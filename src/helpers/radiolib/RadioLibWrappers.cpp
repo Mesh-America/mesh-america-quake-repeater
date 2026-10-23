@@ -657,7 +657,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   if (resume > 1) {
     endProfileRetune(resume == 2);  // Only a BUSY guard deferred before changing hardware.
 #if MESH_HIL_PROFILE_TIMING
-    const uint32_t finished_ticks = mesh::profiletiming::readClock();
+    const uint32_t finished_ticks = mesh::profiletiming::readEndpointClock();
 #if MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD
     profile_usb_irq.release();
 #endif
@@ -713,7 +713,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
 #if MESH_HIL_PROFILE_TIMING
     // Finish before rollback: restoration is a different operation and must
     // not overwrite the failed hop's partial stage evidence.
-    const uint32_t finished_ticks = mesh::profiletiming::readClock();
+    const uint32_t finished_ticks = mesh::profiletiming::readEndpointClock();
 #if MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD
     profile_usb_irq.release();
 #endif
@@ -769,7 +769,7 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   }
 #if MESH_HIL_PROFILE_TIMING
   mesh::profiletiming::mark(mesh::profiletiming::Tail, mesh::profiletiming::readClock());
-  const uint32_t finished_ticks = mesh::profiletiming::readClock();
+  const uint32_t finished_ticks = mesh::profiletiming::readEndpointClock();
 #if MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD
   profile_usb_irq.release();
 #endif
