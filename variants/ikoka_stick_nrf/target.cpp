@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include "target.h"
-#include <helpers/radiolib/SX126xBufferedRadioHal.h>
 #include <helpers/ArduinoHelpers.h>
 
 IkokaStickNRFBoard board;
@@ -10,8 +9,7 @@ IkokaStickNRFBoard board;
   MomentaryButton user_btn(PIN_USER_BTN, 1000, true);
 #endif
 
-static SX126xBufferedRadioHal radioHal(SPI);
-RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
 
 WRAPPER_CLASS radio_driver(radio, board);
 
