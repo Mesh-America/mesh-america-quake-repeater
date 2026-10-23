@@ -1,6 +1,6 @@
 #include "WiFiSetupPortal.h"
 
-#if defined(ESP32_PLATFORM) && defined(WIFI_SSID)
+#if defined(ESP32_PLATFORM) && (defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
 
 #include <WiFi.h>
 #include <helpers/esp32/StaticHtml.h>

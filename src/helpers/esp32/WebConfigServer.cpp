@@ -21,7 +21,7 @@ static_assert(sizeof(WEBCONFIG_AP_PREFIX) <= 28,
 #include <esp_heap_caps.h>
 
 #if defined(ESP32_PLATFORM) && defined(ENABLE_OTA) && \
-    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID))
+    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
   #include <helpers/esp32/WiFiOtaSeeder.h>
 #endif
 
@@ -177,7 +177,7 @@ static bool bluetoothWiFiCoexistenceRequired() {
   // This server is never constructed on the exclusive profile's BLE boot.
   // Any running WebConfig instance therefore has no active Bluetooth stack.
   return false;
-#elif defined(BLE_PIN_CODE) && defined(WIFI_SSID)
+#elif defined(BLE_PIN_CODE) && (defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
   return mesh::wifi::activeCompanionMode()
       != mesh::wifi::CompanionMode::WiFiOnly;
 #else
@@ -307,7 +307,7 @@ static bool fixedTimeEquals(const char* a, const char* b, size_t max_len) {
 
 static void appendOtaSeederStatus(char* reply, size_t reply_len) {
 #if defined(ESP32_PLATFORM) && defined(ENABLE_OTA) && \
-    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID))
+    (defined(WIFI_OTA_SEEDER) || defined(WIFI_SSID) || defined(ENABLE_WIFI_INTERFACE))
   mesh::ota::WiFiOtaSeeder::appendStatus(reply, reply_len);
 #else
   (void)reply;
