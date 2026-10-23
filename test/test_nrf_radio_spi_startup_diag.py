@@ -151,11 +151,14 @@ class NrfRadioSpiStartupDiagTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="nrf-spi-startup-") as directory:
             folder=Path(directory);(folder/"hal/Arduino").mkdir(parents=True)
             mock=MOCK_HAL.replace('#include <cassert>','#include <Arduino.h>\n#include <cassert>')
+            # This fixture supplies checked register proxies in Arduino.h;
+            # replace the constructor fixture's simpler SPIM mock entirely.
+            start=mock.index('struct MockSpim {')
+            mock=mock[:start]+mock[mock.index('struct SPISettings {',start):]
             mock=mock.replace("constexpr unsigned MSBFIRST", "void before_test_spi_transfer();\nconstexpr unsigned MSBFIRST")
             mock=mock.replace("    ++bursts;", "    before_test_spi_transfer();\n    ++bursts;")
             mock=mock.replace('rx[i] = tx[i] ^ 0xa5;', 'if(rx) rx[i] = tx[i] ^ 0xa5;')
-            mock=mock.replace('virtual ~ArduinoHal() = default;',r'''
-  virtual ~ArduinoHal() = default;
+            mock=mock.replace('virtual void spiBeginTransaction() {}',r'''
   virtual void spiBeginTransaction() { ++transaction_starts;spim3.ENABLE=7; }
 ''')
             (folder/"hal/Arduino/ArduinoHal.h").write_text(mock,encoding="ascii")

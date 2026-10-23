@@ -21,6 +21,8 @@
 #endif
 #endif
 
+#include "NrfRadioSpiReadProbe.h"
+
 #if MESH_HIL_SPI_STARTUP_DIAG
 #if !defined(NRF52_PLATFORM)
 #error "SPI startup diagnostic requires nRF52"
@@ -62,6 +64,17 @@ class NrfRadioSpiStartupDiagHal : public Nrf52BufferedRadioHal {
 public:
   explicit NrfRadioSpiStartupDiagHal(SPIClass& bus, uint32_t hz)
       : Nrf52BufferedRadioHal(bus, hz) {}
+
+#if defined(MESH_HIL_SPI_READ_PROBE) && MESH_HIL_SPI_READ_PROBE
+  // Only the separately gated post-initialization read probe can switch
+  // these settings. Apply between completed frames through the normal HAL.
+  bool setDiagnosticSpiFrequency(uint32_t hz) {
+    if (hz != 8000000 && hz != 16000000) return false;
+    spiSettings = SPISettings(hz, MSBFIRST, SPI_MODE0);
+    return true;
+  }
+  uint32_t diagnosticSpiFrequencyRegister() const { return NRF_SPIM3->FREQUENCY; }
+#endif
 
   void spiBeginTransaction() override {
 #if defined(SPI_32MHZ_INTERFACE) && SPI_32MHZ_INTERFACE == 1

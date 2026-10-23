@@ -25,6 +25,8 @@
 #error "RAK3401 radio SPI clock must be 2, 4 or 8 MHz"
 #endif
 
+#include <helpers/radiolib/NrfRadioSpiReadProbe.h>
+
 namespace {
 
 // This is the optional private radio bus, NOT the external RAK13302's SPI1.
@@ -169,6 +171,18 @@ AutoDiscoverRTCClock rtc_clock(fallback_clock);
 
 static bool target_radio_available = false;
 
+#if MESH_HIL_SPI_READ_PROBE
+static bool finishSpiReadProbe() {
+  if (mesh::spireadprobe::mesh_hil_spi_read_probe.runs) return true;
+  mesh::spireadprobe::run(radioHal, *radio.getMod(), mesh::spistartup::mesh_hil_spi_startup);
+  if (mesh::spireadprobe::trailingBaselineHealthy()) return true;
+  // Preserve the probe evidence, but never hand normal firmware an unknown
+  // radio state. The restored 8 MHz setting and existing reset/init path
+  // rebuild it once. The caller re-enables the frontend after success.
+  return board.recoverRadio() && radio.std_init(&SPI1);
+}
+#endif
+
 bool radio_init() {
   rtc_clock.begin(Wire);
   // A successful physical reset proves that the external SX1262 can release
@@ -182,7 +196,11 @@ bool radio_init() {
     return false;
   }
 
-  if (radio.std_init(&SPI1)) {
+  if (radio.std_init(&SPI1)
+#if MESH_HIL_SPI_READ_PROBE
+      && finishSpiReadProbe()
+#endif
+      ) {
     target_radio_available = true;
     board.enableRadioFrontend();
     return true;
@@ -194,7 +212,11 @@ bool radio_init() {
     target_radio_available = false;
     return false;
   }
-  if (!radio.std_init(&SPI1)) {
+  if (!radio.std_init(&SPI1)
+#if MESH_HIL_SPI_READ_PROBE
+      || !finishSpiReadProbe()
+#endif
+      ) {
     target_radio_available = false;
     return false;
   }
