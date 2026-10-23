@@ -191,9 +191,9 @@ def packed_help_policy(platform, mcu, src_filter, flags=(), cppdefines=()):
     if any(source_selected(src_filter, source) for source in ROLE_SOURCES):
         return False
     values = flag_defines(flags, cppdefines)
-    # Match the C++ #if defined gate, including an explicit =0 definition.
-    return all(values.get(name) is not None for name in
-               ("RAK_4631", "COMPANION_RADIO_FULL"))
+    # Full Companion can arrive later through PLATFORMIO_BUILD_FLAGS. Register
+    # the exact source early; its C++ gate leaves non-Full RAK builds empty.
+    return values.get("RAK_4631") is not None
 
 
 def compile_packed_help(build_env, node):

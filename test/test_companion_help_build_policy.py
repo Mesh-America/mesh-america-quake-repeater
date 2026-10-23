@@ -6,10 +6,12 @@ import unittest
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('help_language_policy',ROOT/'scripts/nrf52_flash_trim.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class HelpBuildPolicy(unittest.TestCase):
- def test_only_actual_rak_full_companion_profile_selects_cpp17_helper(self):
+ def test_rak_companion_source_registers_before_late_full_profile_flags(self):
   yes=dict(platform='nordicnrf52',mcu='nrf52840',src_filter='+<*> +<../examples/companion_radio>',flags='-DRAK_4631 -DCOMPANION_RADIO_FULL')
   self.assertTrue(m.packed_help_policy(**yes))
-  for key,value in [('platform','espressif32'),('mcu','nrf52832'),('src_filter','+<*>'),('src_filter','+<../examples/companion_radio> +<../examples/simple_repeater>'),('flags','-DRAK_4631'),('flags','-DCOMPANION_RADIO_FULL'),('flags','-DRAK_4631 -DCOMPANION_RADIO_FULL -UCOMPANION_RADIO_FULL')]:
+  for flags in ('-DRAK_4631', '-DRAK_4631 -DCOMPANION_RADIO_FULL -UCOMPANION_RADIO_FULL'):
+   self.assertTrue(m.packed_help_policy(**dict(yes,flags=flags)))
+  for key,value in [('platform','espressif32'),('mcu','nrf52832'),('src_filter','+<*>'),('src_filter','+<../examples/companion_radio> +<../examples/simple_repeater>'),('flags','-DCOMPANION_RADIO_FULL'),('flags','-DRAK_4631 -URAK_4631')]:
    with self.subTest(key=key,value=value):
     no=dict(yes);no[key]=value;self.assertFalse(m.packed_help_policy(**no))
   self.assertTrue(m.packed_help_policy('nordicnrf52','nrf52840','+<../examples/companion_radio>',cppdefines=[('RAK_4631',1),('COMPANION_RADIO_FULL',1)]))
