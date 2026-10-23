@@ -64,6 +64,8 @@ or Meshtext NodeInfo. Meshtext beacons request no ACK and have no forwarding
 budget. MeshCore Public uses one locally transmitted flood; other MeshCore
 nodes may relay that flood according to their own policies.
 
+Beacons are **fire and forget**, independent of `flood.retry.count` and MT
+message retries. They do not wait for an echo or resend when none is heard.
 The transmitter briefly borrows the physical radio, sends once, and restores
 its normal receive settings, power, and RX power saving. It does not occupy,
 replace, or persist changes to `radio2`, including a temporary second profile.

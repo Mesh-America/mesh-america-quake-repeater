@@ -82,6 +82,11 @@ class CompanionMeshtextTest(unittest.TestCase):
         fixture = (ROOT / "test/fixtures/radio_profiles/cli_test.cpp").read_text(encoding="utf-8")
         fixture = fixture[:fixture.index("static void permanentScheduleOrder()")]
         text = (ROOT / "test/fixtures/companion_meshtext.cpp").read_text(encoding="utf-8")
+        prefs = (ROOT / "examples/companion_radio/NodePrefs.h").read_text(encoding="utf-8")
+        default_retries = re.search(r"uint8_t\s+flood_retry_attempts\s*=\s*(\d+)\s*;", prefs)
+        if default_retries is None:
+            raise AssertionError("Companion retry default missing from production preferences")
+        text = text.replace("@DEFAULT_FLOOD_RETRIES@", default_retries.group(1))
         radio_source = (ROOT / "src/helpers/radiolib/RadioLibWrappers.cpp").read_text(encoding="utf-8")
         airtime = body(radio_source, "uint32_t RadioLibWrapper::getProfileAirtime(")
         airtime = "uint32_t actualProfileAirtime(uint8_t profile, int len, uint8_t cr=0) " + airtime[airtime.index("{"):]
@@ -249,6 +254,9 @@ class CompanionMeshtextTest(unittest.TestCase):
 
     def test_heard_repeat_retries_identical_packets_bounded_by_existing_settings(self):
         self.run_case("heard-retries")
+
+    def test_default_fifteen_total_attempts_and_last_attempt_echo(self):
+        self.run_case("default-tries")
 
     def test_only_exact_forwarded_echo_on_the_current_profile_stops_retries(self):
         self.run_case("strict-echo")

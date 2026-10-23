@@ -813,9 +813,11 @@ networks or guaranteed message delivery.
 
 #### Heard-repeat retries
 
-MT channel chat uses the Companion's saved `flood.retry.count` budget: `0`
-disables retries, and `1`–`15` allows that many extra transmissions after the
-initial send. Locally originated MT traffic is hop zero for the
+MT channel messages default to **15 total attempts** without a heard repeat:
+the initial send and up to 14 retries. They use the Companion's saved
+`flood.retry.count`, capped at 14 extra transmissions for MT text. Lower saved
+counts retain their extra-retry meaning; `0` disables retries. MeshCore's retry
+count meaning is unchanged. Locally originated MT traffic is hop zero for the
 `flood.retry.path` gate, so a gate of `0` still permits it; the group-data gate
 does not apply to channel text. `mt.hops 0` disables heard-repeat retries
 because peers cannot forward a packet with no remaining hop budget; the
@@ -826,9 +828,8 @@ airtime-based flood spacing and the normal CAD and airtime limits rather than
 transmitting continuously.
 
 `get mt.retry` is read-only diagnostics: it reports retry transmissions,
-matching heard repeats, exhausted retry sequences, pending work and the
-configured retry count. Use `set flood.retry.count`, not this getter, to change
-the budget.
+matching heard repeats, exhausted retry sequences, pending work and the shared
+configured retry `count`. Use `set flood.retry.count` to change the budget.
 
 A matching over-air copy with a lower remaining hop limit cancels the retry
 sequence. Merely receiving another message, an unchanged-hop copy or a packet

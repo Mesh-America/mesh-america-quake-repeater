@@ -212,6 +212,13 @@ static void basic() {
   assert(f.radio.p.generation[0] == saved.generation[0] && f.radio.p.generation[1] == saved.generation[1]);
   assert(!f.d.getNumSentFlood() && !f.d.getNumSentDirect() && !f.d.mc_sent);
   assert(f.d.getTotalAirTime() == 21);
+  // A silent channel never turns this beacon into a chat retry. Its raw
+  // owner is retired after TX, even while message retries are enabled.
+  for (unsigned minute = 0; minute < 15; ++minute) {
+    f.tick(60000);
+    assert(!f.d.hasOutbound() && !f.d.hasBeaconRadioFrame());
+    assert(f.radio.beacon_sends == 1 && f.radio.normal_sends == 0);
+  }
 }
 static void preparation() {
   { Fixture f; f.radio.prepare = RadioParamApplyResult::BUSY;
@@ -629,7 +636,7 @@ class BeaconDispatcherTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS", result.stdout)
 
-    def test_one_tx_uses_private_tuple_preserves_radio2_and_accounts_airtime(self):
+    def test_one_tx_without_echo_preserves_radio2_and_accounts_airtime(self):
         self.run_case("basic")
 
     def test_prepare_busy_is_bounded_and_owned_failures_restore_exclusively(self):

@@ -43,4 +43,11 @@ struct PendingFrame {
 static constexpr unsigned DeliverySlots = 4;
 static constexpr unsigned ChatDeliverySlots = DeliverySlots - 1;
 
+// Text messages get at most 15 transmissions, including the original send.
+// Lower saved flood retry counts still mean additional transmissions.
+static constexpr uint8_t MaxMessageAttempts = 15;
+constexpr uint8_t messageRetryLimit(uint8_t count) {
+  return count < MaxMessageAttempts ? count : MaxMessageAttempts - 1;
+}
+
 } } // namespace mesh::mt
