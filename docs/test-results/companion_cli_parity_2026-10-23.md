@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/companion_cli_parity_2026-10-23/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Companion hardware command parity, 2026-10-23
 
 The audit baseline was `04c4fdb240318d0151947b8c11ce09a3e2aec65c`.
