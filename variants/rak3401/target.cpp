@@ -126,9 +126,9 @@ RAK3401Board board;
 // controller instance for startup and watchdog recovery; resetting the radio
 // must not replace or tear down the SPI object used by its Module.
 // Batch each RadioLib command into one SPIM transfer rather than starting a
-// transfer per byte. Retain the existing 2 MHz clock and RadioLib's BUSY,
+// transfer per byte. Use the SPI1-supported 8 MHz clock and retain RadioLib's BUSY,
 // chip-select, command status, and IRQ handling.
-static Nrf52BufferedRadioHal radioHal(SPI1, 2000000);
+static Nrf52BufferedRadioHal radioHal(SPI1, 8000000);
 RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);

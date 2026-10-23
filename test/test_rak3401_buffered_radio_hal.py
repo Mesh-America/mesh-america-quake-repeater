@@ -60,7 +60,7 @@ struct Module {
   Module(ArduinoHal* adapter, unsigned cs, unsigned irq, unsigned rst, unsigned busy)
       : hal(adapter) {
     assert(cs==1 && irq==2 && rst==3 && busy==4);
-    assert(hal->spi == &SPI1 && hal->spiSettings.hz == 2000000);
+    assert(hal->spi == &SPI1 && hal->spiSettings.hz == 8000000);
   }
 };
 struct Radio {
@@ -97,7 +97,7 @@ int main() {
 
 
 class Rak3401BufferedRadioHalTests(unittest.TestCase):
-    def test_actual_target_uses_one_transfer_per_command_on_same_2mhz_spi1(self):
+    def test_actual_target_uses_one_transfer_per_command_on_same_spi1_at_8mhz(self):
         target = (ROOT / "variants/rak3401/target.cpp").read_text(encoding="ascii")
         construction = "\n".join(re.findall(
             r"^(?:static Nrf52BufferedRadioHal radioHal\([^;]+;|"
