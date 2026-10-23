@@ -18,6 +18,12 @@ MOCK_HAL = r'''
 #include <cstdint>
 #include <cstring>
 constexpr unsigned MSBFIRST = 1, SPI_MODE0 = 0;
+struct MockSpim {
+  uint32_t ENABLE = 0;
+  struct { uint32_t RXDELAY = 2; } IFTIMING;
+};
+inline MockSpim mockSpim3;
+inline MockSpim* NRF_SPIM3 = &mockSpim3;
 struct SPISettings {
   unsigned hz, order, mode;
   SPISettings(unsigned h, unsigned o, unsigned m) : hz(h), order(o), mode(m) {}
@@ -42,6 +48,7 @@ struct ArduinoHal {
   explicit ArduinoHal(SPIClass& bus, SPISettings settings)
       : spi(&bus), spiSettings(settings) {}
   virtual ~ArduinoHal() = default;
+  virtual void spiBeginTransaction() {}
   virtual void spiTransfer(uint8_t* out, size_t length, uint8_t* in) {
     for (size_t i = 0; i < length; ++i) in[i] = spi->transfer(out[i]);
   }
