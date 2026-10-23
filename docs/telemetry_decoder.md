@@ -72,13 +72,13 @@ can be changed; the firmware does not overwrite an unmigrated legacy file.
 
 ## Find telemetry packets
 
-[Open the seven-day telemetry view in CascadiaMesh Analyzer](https://analyzer.cascadiamesh.org/#/packets?timeWindow=10080&filter=type%20%3D%3D%20RAW_CUSTOM%20%26%26%20age%20%3C%207d%20%26%26%20%28payload.raw%20starts_with%20%2254544231%22%20%7C%7C%20payload.raw%20starts_with%20%2254564231%22%20%7C%7C%20payload.raw%20starts_with%20%2249564231%22%20%7C%7C%20payload.raw%20starts_with%20%224E314231%22%20%7C%7C%20payload.raw%20starts_with%20%224E324231%22%29).
+[Open the two-day telemetry view in CascadiaMesh Analyzer](https://analyzer.cascadiamesh.org/#/packets?timeWindow=2880&filter=type%20%3D%3D%20RAW_CUSTOM%20%26%26%20age%20%3C%202d%20%26%26%20%28payload.raw%20starts_with%20%2254544231%22%20%7C%7C%20payload.raw%20starts_with%20%2254564231%22%20%7C%7C%20payload.raw%20starts_with%20%2249564231%22%20%7C%7C%20payload.raw%20starts_with%20%224E314231%22%20%7C%7C%20payload.raw%20starts_with%20%224E324231%22%29).
 The link selects RAW_CUSTOM packets whose data starts with
 any of the five telemetry prefixes below. To use the filter box directly, paste
 this as one line:
 
 ```text
-type == RAW_CUSTOM && age < 7d && (payload.raw starts_with "54544231" || payload.raw starts_with "54564231" || payload.raw starts_with "49564231" || payload.raw starts_with "4E314231" || payload.raw starts_with "4E324231")
+type == RAW_CUSTOM && age < 2d && (payload.raw starts_with "54544231" || payload.raw starts_with "54564231" || payload.raw starts_with "49564231" || payload.raw starts_with "4E314231" || payload.raw starts_with "4E324231")
 ```
 
 | Data | Payload tag | Hex prefix |
@@ -92,12 +92,12 @@ type == RAW_CUSTOM && age < 7d && (payload.raw starts_with "54544231" || payload
 `&&` requires every condition; `||` accepts any listed prefix.
 `payload.raw` starts at the application data, after the routing bytes.
 
-The URL uses `timeWindow=10080` (seven days in minutes). The explicit
-`age < 7d` condition preserves that cutoff when refreshing, since the analyzer's
+The URL uses `timeWindow=2880` (two days in minutes). The explicit
+`age < 2d` condition preserves that cutoff when refreshing, since the analyzer's
 time dropdown only offers fixed windows up to 24 hours. Packet retention and
 loading limits still apply: the current server returns at most 10,000 packets,
-and mobile clients load at most 1,000, so a busy network may show less than a
-full week.
+and mobile clients load at most 1,000, so a busy network may show less than
+two days.
 
 ## Decode a packet
 
