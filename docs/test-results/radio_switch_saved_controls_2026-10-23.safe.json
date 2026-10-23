@@ -41,7 +41,7 @@
       8
     ],
     "core_errors_after": 0,
-    "new_radio_watchdog_attempts": 0,
+    "new_rxps_watchdog_attempts": 0,
     "settings_restored": true,
     "gateway_service_restored": true,
     "application_only_update": true,
