@@ -3,6 +3,17 @@
 #include "RadioLibWrappers.h"
 #include "RadioInterruptEvents.h"
 #include "RadioProfileChip.h"
+#include "ProfileSwitchTiming.h"
+#if MESH_HIL_PROFILE_TIMING
+namespace mesh { namespace profiletiming {
+extern "C" {
+volatile Capture mesh_hil_profile_timing = {
+    Magic, Version, sizeof(Capture), 0, ClockHz, StageCount,
+    HistogramCount, HistogramWidthUs, 0, 0, {}};
+Work mesh_hil_profile_timing_work = {};
+}
+} }
+#endif
 #if MESH_ENABLE_TX_BEACONS
 #include "RadioPowerLimits.h"
 #endif
@@ -225,6 +236,9 @@ void RadioLibWrapper::begin() {
 #endif
 #if MESH_ENABLE_TX_BEACONS
   if (_beacon_owned) return;
+#endif
+#if MESH_HIL_PROFILE_TIMING
+  mesh::profiletiming::initializeClock();
 #endif
   (void)profileTimestamp(_profiles.enabled());
 #ifdef USE_CC310_HW_CRYPTO
@@ -598,10 +612,20 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   if (!validateProfile(p)) return mesh::RadioParamApplyResult::FAILED;
   const bool dual_profile = _profiles.enabled();
   const uint32_t started = profileTimestamp(dual_profile);
+#if MESH_HIL_PROFILE_TIMING
+  mesh::profiletiming::begin(_active_profile, profile, mesh::profiletiming::readClock());
+#endif
   beginProfileRetune(isInRecvMode() && !_rx_ps_armed && !_rx_ps_enabled);
   const uint8_t resume = beginReconfigure();
+#if MESH_HIL_PROFILE_TIMING
+  mesh::profiletiming::mark(mesh::profiletiming::BeginReconfigure, mesh::profiletiming::readClock());
+#endif
   if (resume > 1) {
     endProfileRetune(resume == 2);  // Only a BUSY guard deferred before changing hardware.
+#if MESH_HIL_PROFILE_TIMING
+    mesh::profiletiming::finish(resume == 2 ? mesh::profiletiming::Busy
+        : mesh::profiletiming::Failure, mesh::profiletiming::readClock());
+#endif
     return resume == 2 ? mesh::RadioParamApplyResult::BUSY : mesh::RadioParamApplyResult::FAILED;
   }
   const float old_freq = _cur_freq, old_bw = _cur_bw;
@@ -632,13 +656,24 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
 #endif
     _profile_refresh_required = false;
     _profile_repair_required = false;
+#if MESH_HIL_PROFILE_TIMING
+    mesh::profiletiming::mark(mesh::profiletiming::ProtocolAndCache, mesh::profiletiming::readClock());
+#endif
     endReconfigure(resume);
+#if MESH_HIL_PROFILE_TIMING
+    mesh::profiletiming::mark(mesh::profiletiming::RxResume, mesh::profiletiming::readClock());
+#endif
     applied = !resume || isInRecvMode();
   }
   endProfileRetune(applied);
   if (applied) {
     ++_profiles.switches;
   } else {
+#if MESH_HIL_PROFILE_TIMING
+    // Finish before rollback: restoration is a different operation and must
+    // not overwrite the failed hop's partial stage evidence.
+    mesh::profiletiming::finish(mesh::profiletiming::Failure, mesh::profiletiming::readClock());
+#endif
     ++_profiles.switch_failures;
     // RX restart is part of the transaction, not merely a best-effort tail.
     // Revoke any fast-RX capability and restore both the physical tuple and
@@ -684,6 +719,10 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   if (applied && resume && old_profile != profile) {
     _profiles.sampleSwitch(old_profile, profile, elapsed, millis());
   }
+#if MESH_HIL_PROFILE_TIMING
+  mesh::profiletiming::mark(mesh::profiletiming::Tail, mesh::profiletiming::readClock());
+  mesh::profiletiming::finish(mesh::profiletiming::Success, mesh::profiletiming::readClock());
+#endif
   return applied ? mesh::RadioParamApplyResult::APPLIED : mesh::RadioParamApplyResult::FAILED;
 }
 

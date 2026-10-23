@@ -3,6 +3,7 @@
 
 #include "CustomSX1262.h"
 #include "RadioLibWrappers.h"
+#include "ProfileSwitchTiming.h"
 #include "SX126xReset.h"
 #include "SX126xMorseRamp.h"
 #include "SX126xMorseReceiver.h"
@@ -120,14 +121,30 @@ protected:
 
   bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     if (static_cast<CustomSX1262*>(_radio)->profileSwitchFailed()) return false;
+#if MESH_HIL_PROFILE_TIMING
+    bool success = ((CustomSX1262 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE;
+    mesh::profiletiming::mark(mesh::profiletiming::Frequency, mesh::profiletiming::readClock());
+    if (success) {
+      success = ((CustomSX1262 *)_radio)->setLoRaModulationParams(bw, sf, cr) == RADIOLIB_ERR_NONE;
+      mesh::profiletiming::mark(mesh::profiletiming::Modulation, mesh::profiletiming::readClock());
+    }
+    if (success) {
+      success = updatePreamble(sf, bw);
+      mesh::profiletiming::mark(mesh::profiletiming::Preamble, mesh::profiletiming::readClock());
+    }
+#else
     bool success = ((CustomSX1262 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE
         && ((CustomSX1262 *)_radio)->setLoRaModulationParams(bw, sf, cr) == RADIOLIB_ERR_NONE
         && updatePreamble(sf, bw);
+#endif
     if (!success) return false;
 
     PacketMillis pm = calcMaxPacketMillis(sf, bw, cr, preambleLengthForParams(sf, bw));
     ((CustomSX1262 *)_radio)->setPreambleMillis(pm.preambleMillis);
     ((CustomSX1262 *)_radio)->setMaxPayloadMillis(pm.payloadMillis);
+#if MESH_HIL_PROFILE_TIMING
+    mesh::profiletiming::mark(mesh::profiletiming::GuardMath, mesh::profiletiming::readClock());
+#endif
     return true;
   }
 
