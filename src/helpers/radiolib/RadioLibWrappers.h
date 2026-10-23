@@ -387,6 +387,9 @@ protected:
   virtual void setProfileStandbyWarm(bool) {}
   virtual void beginProfileRetune(bool) {}
   virtual void endProfileRetune(bool) {}
+#if defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY
+  virtual bool ownsWarmProfileRetune() const { return false; }
+#endif
   // 0 = reconfigure from idle, 1 = resume RX afterwards, 2 = currently busy.
   uint8_t beginReconfigure();
   void endReconfigure(bool resume_rx);

@@ -4,6 +4,7 @@
 #include "RadioInterruptEvents.h"
 #include "RadioProfileChip.h"
 #include "ProfileSwitchTiming.h"
+#include "NrfRadioPriorityLease.h"
 #if MESH_HIL_PROFILE_TIMING
 namespace mesh { namespace profiletiming {
 extern "C" {
@@ -643,12 +644,20 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   mesh::profiletiming::begin(_active_profile, profile, mesh::profiletiming::readClock());
 #endif
   beginProfileRetune(isInRecvMode() && !_rx_ps_armed && !_rx_ps_enabled);
+#if MC_NRF_RADIO_PROFILE_PRIORITY
+  mesh::radiopriority::Lease profile_priority(dual_profile && _active_profile != profile
+      && ownsWarmProfileRetune());
+#endif
   const uint8_t resume = beginReconfigure();
   if (resume > 1) {
     endProfileRetune(resume == 2);  // Only a BUSY guard deferred before changing hardware.
 #if MESH_HIL_PROFILE_TIMING
+    const uint32_t finished_ticks = mesh::profiletiming::readClock();
+#if MC_NRF_RADIO_PROFILE_PRIORITY
+    profile_priority.release();
+#endif
     mesh::profiletiming::finish(resume == 2 ? mesh::profiletiming::Busy
-        : mesh::profiletiming::Failure, mesh::profiletiming::readClock());
+        : mesh::profiletiming::Failure, finished_ticks);
 #endif
     return resume == 2 ? mesh::RadioParamApplyResult::BUSY : mesh::RadioParamApplyResult::FAILED;
   }
@@ -696,7 +705,11 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
 #if MESH_HIL_PROFILE_TIMING
     // Finish before rollback: restoration is a different operation and must
     // not overwrite the failed hop's partial stage evidence.
-    mesh::profiletiming::finish(mesh::profiletiming::Failure, mesh::profiletiming::readClock());
+    const uint32_t finished_ticks = mesh::profiletiming::readClock();
+#if MC_NRF_RADIO_PROFILE_PRIORITY
+    profile_priority.release();
+#endif
+    mesh::profiletiming::finish(mesh::profiletiming::Failure, finished_ticks);
 #endif
     ++_profiles.switch_failures;
     // RX restart is part of the transaction, not merely a best-effort tail.
@@ -745,7 +758,11 @@ mesh::RadioParamApplyResult RadioLibWrapper::tuneProfile(uint8_t profile) {
   }
 #if MESH_HIL_PROFILE_TIMING
   mesh::profiletiming::mark(mesh::profiletiming::Tail, mesh::profiletiming::readClock());
-  mesh::profiletiming::finish(mesh::profiletiming::Success, mesh::profiletiming::readClock());
+  const uint32_t finished_ticks = mesh::profiletiming::readClock();
+#if MC_NRF_RADIO_PROFILE_PRIORITY
+  profile_priority.release();
+#endif
+  mesh::profiletiming::finish(mesh::profiletiming::Success, finished_ticks);
 #endif
   return applied ? mesh::RadioParamApplyResult::APPLIED : mesh::RadioParamApplyResult::FAILED;
 }

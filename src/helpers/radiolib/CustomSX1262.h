@@ -120,6 +120,12 @@ class CustomSX1262 : public SX1262 {
     void beginProfileSwitch(bool continuousRx) { _profileSwitch.begin(continuousRx, standbyXOSC); }
     void endProfileSwitch(bool success) { _profileSwitch.end(success); }
     bool profileSwitchFailed() const { return _profileSwitch.failed(); }
+#if defined(MC_NRF_RADIO_PROFILE_PRIORITY) && MC_NRF_RADIO_PROFILE_PRIORITY
+    bool hilOwnsWarmProfileRetune() const {
+      return _profileSwitch.open && _profileSwitch.active
+          && _profileSwitch.rxValid && !_coldStandby;
+    }
+#endif
     uint32_t getOptimizedProfileSwitches() const { return _profileFastResumes; }
 #ifdef MC_SX1262_HIL
     // Same-image lab baseline: force only 0x8B, preserving fast RX ownership.
