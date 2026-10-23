@@ -24,6 +24,57 @@ static void checkOffsetWidth(uint32_t offset) {
   assert(text == nullptr);
 }
 
+static void checkTokenBounds() {
+  struct Guarded { uint32_t pre; char scratch[kBlockSize]; uint32_t post; } buf;
+  const uint8_t words[] = {'a', 'b', 'c'};
+  const uint16_t offsets[] = {0, 3};
+  auto check = [&](const std::vector<uint8_t>& encoded, const uint8_t* dictionary,
+                   uint16_t size, const uint16_t* starts, uint16_t count,
+                   LookupResult expected, const char* expected_text = nullptr) {
+    assert(encoded.size() <= kBlockSize);
+    const uint16_t length = encoded.size();
+    std::vector<uint8_t> data = {1, uint8_t(length), uint8_t(length >> 8),
+        uint8_t(~length), uint8_t(~length >> 8)};
+    data.insert(data.end(), encoded.begin(), encoded.end());
+    const BlockIndexT<uint16_t> block = {0, uint16_t(data.size()), length, 0};
+    const TokenCorpusT<uint16_t> corpus = {"test", "test", data.data(),
+        uint32_t(data.size()), &block, 1, kVerseCount, dictionary, size, starts, count};
+    buf.pre = 0x11223344;buf.post = 0xaabbccdd;
+    const char* text = reinterpret_cast<const char*>(uintptr_t(1));
+    assert(lookup(corpus, {1, 1}, buf.scratch, sizeof(buf.scratch), text) == expected);
+    assert(buf.pre == 0x11223344 && buf.post == 0xaabbccdd);
+    if (expected_text) assert(text && strcmp(text, expected_text) == 0);
+    else assert(text == nullptr);
+  };
+  check({128, 0}, words, 3, offsets, 1, LookupResult::Found, "abc");
+  check({255, 0}, words, 3, offsets, 1, LookupResult::Corrupt);
+  check({128, 0}, nullptr, 3, offsets, 1, LookupResult::Corrupt);
+  check({128, 0}, words, 0, offsets, 1, LookupResult::Corrupt);
+  check({128, 0}, words, 3, nullptr, 1, LookupResult::Corrupt);
+  check({128, 0}, words, 3, offsets, 0, LookupResult::Corrupt);
+  check({128, 0}, words, 3, offsets, 129, LookupResult::Corrupt);
+  for (const auto& bad : {std::vector<uint16_t>{1, 3}, {0, 4}, {0, 0},
+                          {0, 4, 3}, {0, 0, 3}})
+    check({128, 0}, words, 3, bad.data(), uint16_t(bad.size() - 1), LookupResult::Corrupt);
+  const uint16_t decreasing[] = {0, 3, 2, 3};
+  check({129, 0}, words, 3, decreasing, 3, LookupResult::Corrupt);
+  for (uint8_t invalid : {uint8_t(0), uint8_t(31), uint8_t(127), uint8_t(128)}) {
+    const uint8_t invalid_words[] = {'a', invalid, 'c'};
+    check({128, 0}, invalid_words, 3, offsets, 1, LookupResult::Corrupt);
+  }
+  check({'x', 31, 0}, words, 3, offsets, 1, LookupResult::Corrupt);
+  check({'x', 127, 0}, words, 3, offsets, 1, LookupResult::Corrupt);
+  std::vector<uint8_t> exact(kBlockSize - 4, 0);exact[0] = 128;
+  check(exact, words, 3, offsets, 1, LookupResult::Found, "abc");
+  exact.push_back(0);
+  check(exact, words, 3, offsets, 1, LookupResult::Corrupt);
+  std::vector<uint8_t> literal(kBlockSize, 'q');literal.back() = 0;
+  check(literal, words, 3, offsets, 1, LookupResult::Found,
+        std::string(kBlockSize - 1, 'q').c_str());
+  literal[0] = 128;
+  check(literal, words, 3, offsets, 1, LookupResult::Corrupt);
+}
+
 static void drain(Stream& output) {
   unsigned calls = 0;
   while (mesh::readerCommandActive()) {
@@ -90,6 +141,7 @@ int main(int argc, char**) {
   static_assert(sizeof(BlockIndexT<uint32_t>) == 12, "wide index alignment");
   checkOffsetWidth<uint16_t>(UINT16_MAX);
   checkOffsetWidth<uint32_t>(uint32_t(UINT16_MAX) + 1);
+  checkTokenBounds();
   Reference ref = {};
   for (const char* cmd : {"get reader 3:16", " GET\treader 3:16 \t", "get reader 03:16"}) {
     assert(parse(cmd, ref) == ParseResult::Valid && ref.chapter == 3 && ref.verse == 16);

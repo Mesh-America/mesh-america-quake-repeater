@@ -3,6 +3,7 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -37,6 +38,7 @@ class CompanionReaderTest(unittest.TestCase):
     def test_block_sizes_roundtrip_all_verses(self):
         for size in (1024, 2048, 4096):
             packed, blocks = packer.pack(self.document, size)
+            words = packer.token_dictionary(packer.source_verses(self.document, size))
             actual = []
             for offset, length, plain_length, first in blocks:
                 self.assertEqual(first, len(actual))
@@ -44,7 +46,12 @@ class CompanionReaderTest(unittest.TestCase):
                 self.assertEqual(len(plain), plain_length)
                 self.assertLessEqual(len(plain), size)
                 self.assertEqual(plain[-1], 0)
-                actual.extend(part.decode("ascii") for part in plain[:-1].split(b"\0"))
+                for encoded in plain[:-1].split(b"\0"):
+                    decoded = b"".join(words[value - 128] if value >= 128 else bytes([value])
+                                       for value in encoded)
+                    if any(value >= 128 for value in encoded):
+                        self.assertLessEqual(len(plain) + len(decoded) + 1, size)
+                    actual.append(decoded.decode("ascii"))
             self.assertEqual(actual, list(self.expected_verses.values()))
 
     def test_arm_reader_decode_frames_fit_existing_loop_stack(self):
@@ -145,11 +152,37 @@ class CompanionReaderTest(unittest.TestCase):
 
     def test_ascii_data_size(self):
         packed, blocks = packer.pack(self.document)
-        self.assertEqual(sum(block[2] for block in blocks), 96568)
-        self.assertEqual(len(blocks), 24)
-        self.assertEqual(len(packed), 38293)
+        self.assertEqual(sum(len(v) + 1 for v in packer.source_verses(self.document)), 96568)
+        self.assertEqual(sum(block[2] for block in blocks), 53806)
+        self.assertEqual(len(blocks), 14)
+        self.assertEqual(len(packed), 32324)
         self.assertEqual(packer.block_index_layout(blocks), ("uint16_t", 8))
-        self.assertEqual(len(packed) + 8 * len(blocks), 38485)
+        words = packer.token_dictionary(packer.source_verses(self.document))
+        self.assertEqual(len(words), 128)
+        self.assertEqual(packer.dictionary_storage(words), 963)
+        self.assertEqual(len(packed) + 8 * len(blocks) + packer.dictionary_storage(words), 33399)
+
+    def test_literal_fallback_and_empty_dictionary_preserve_original_text_limit(self):
+        document = copy.deepcopy(self.document)
+        document["verses"] = dict.fromkeys(packer.references(), None)
+        document["verses"]["1:1"] = "q" * (packer.BLOCK_SIZE - 1)
+        blocks, starts, words = packer.token_blocks(document)
+        self.assertEqual(words, [])
+        self.assertEqual(blocks[0], b"q" * (packer.BLOCK_SIZE - 1) + b"\0")
+        self.assertEqual(starts[:2], [0, 1])
+        with patch.object(packer, "pack", return_value=(b"x", [(0, 1, 4096, 0)])):
+            header = packer.render(document)
+        self.assertIn("using ReaderCorpus = CorpusT<uint16_t>;", header)
+        self.assertNotIn("readerWords[]", header)
+        # A known dictionary cannot force a very long mostly literal verse
+        # to reserve a second copy. Its exact ASCII fallback stays decodable.
+        document = copy.deepcopy(self.document)
+        long_verse = "z the " + "q" * (packer.BLOCK_SIZE - 7)
+        document["verses"]["1:1"] = long_verse
+        blocks, _, words = packer.token_blocks(document)
+        self.assertIn(b" the", words)
+        self.assertEqual(blocks[0], long_verse.encode("ascii") + b"\0")
+        self.assertEqual(len(blocks[0]), packer.BLOCK_SIZE)
 
     def test_index_offsets_widen_before_any_block_start_can_truncate(self):
         self.assertEqual(packer.block_index_layout([(65535, 7, 2, 0)]), ("uint16_t", 8))
@@ -161,7 +194,7 @@ class CompanionReaderTest(unittest.TestCase):
         with patch.object(packer, "pack", return_value=(b"", [(65536, 7, 2, 0)])):
             header = packer.render(self.document)
         self.assertIn("using ReaderBlockIndex = BlockIndexT<uint32_t>;", header)
-        self.assertIn("using ReaderCorpus = CorpusT<uint32_t>;", header)
+        self.assertIn("using ReaderCorpus = TokenCorpusT<uint32_t>;", header)
         self.assertIn("sizeof(ReaderBlockIndex) == 12", header)
         self.assertIn("{65536, 7, 2, 0}", header)
 
@@ -265,11 +298,38 @@ int main() {
         self.assertEqual(source.count("mesh::handleReaderCommand("), 2)
         self.assertLess(terminal.index("mesh::handleReaderCommand("),
                         terminal.index("char local_reply[160]"))
-        self.assertIn("get reader <chapter>[:<verse>[-<last>]] [page] (World English Bible, offline)", terminal)
-        self.assertEqual(terminal.count("#if COMPANION_FEATURE_READER"), 2)
+        help_text = (ROOT / "examples/companion_radio/CompanionHelp.inc").read_text()
+        self.assertIn("get reader <chapter>[:<verse>[-<last>]] [page] (World English Bible, offline)", help_text)
+        self.assertIn('#include "CompanionHelp.inc"', terminal)
+        self.assertIn("mesh::companion::writePackedCompanionHelp(output)", terminal)
+        packed_help = (ROOT / "examples/companion_radio/CompanionHelpPacked.cpp").read_text()
+        self.assertIn('#include "CompanionHelp.inc"', packed_help)
+        self.assertEqual(terminal.count("#if COMPANION_FEATURE_READER"), 1)
+        self.assertEqual(help_text.count("#if COMPANION_FEATURE_READER"), 1)
         rescue = extract_braced(source, "void MyMesh::checkCLIRescueCmd()")
         self.assertLess(rescue.index("mesh::handleReaderCommand(cli_command, output)"),
                         rescue.index("handleCommand(cli_command, 0, reply_buf)"))
+
+    def test_token_corruption_boundaries_under_native_sanitizers(self):
+        cc, cxx = shutil.which("gcc"), shutil.which("g++")
+        if not cc or not cxx:
+            self.skipTest("host GCC and G++ required")
+        source = (FIXTURE / "test_reader_lookup.cpp").read_text()
+        checks = extract_braced(source, "static void checkTokenBounds()")
+        harness = ("#include <helpers/bible/ReaderLookup.h>\n#include <cassert>\n"
+                   "#include <string>\n#include <vector>\nusing namespace mesh::bible;\n"
+                   + checks + "\nint main() { checkTokenBounds(); }\n")
+        sanitizers = [] if os.name == "nt" else [
+            "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-pie", "-no-pie"]
+        with tempfile.TemporaryDirectory(prefix="mesh-reader-token-bounds-") as directory:
+            directory = Path(directory)
+            cpp, obj, binary = directory / "checks.cpp", directory / "tinf.o", directory / "checks"
+            cpp.write_text(harness)
+            self.run_checked([cc, "-std=c11", "-Os", "-DOTA_TRANSPORT_DEFLATE_TEST=1", *sanitizers, "-c",
+                              str(ROOT / "src/helpers/ota/OtaTinf.c"), "-o", str(obj)])
+            self.run_checked([cxx, "-std=c++17", "-Os", "-Wall", "-Wextra", "-Werror",
+                              *sanitizers, "-I" + str(ROOT / "src"), str(cpp), str(obj), "-o", str(binary)])
+            self.run_checked([str(binary)])
 
     def test_production_bounded_reader_dispatch_preserves_tags_and_local_access(self):
         cc, cxx = shutil.which("gcc"), shutil.which("g++")

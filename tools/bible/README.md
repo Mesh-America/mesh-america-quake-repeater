@@ -97,9 +97,29 @@ headings; punctuation and words are preserved as UTF-8 in this source file.
 The packer converts curly quotes/apostrophes to straight ones, en/em dashes to
 hyphens, and nonbreaking spaces to ordinary spaces before compression. No
 letters or words are changed. Any other non-ASCII character is rejected for
-review, never silently dropped or transliterated. This conversion happens on
-the computer, with no firmware conversion buffer or extra decoding step.
+review, never silently dropped or transliterated. This typography conversion
+happens on the computer; the firmware never changes wording or punctuation.
 No NLT or ERV text is included.
+
+The generated copy uses 128 exact, case-sensitive word tokens before DEFLATE.
+Each token retains its original letters and optional preceding space in a
+flash dictionary. Lookup inflates one token block, then expands only the
+selected verse after that block in the same 4 KiB scratch. The packer checks
+that every block plus its largest expanded selection fits; a very long literal
+verse can stay in place to retain the original 4095-byte text limit. Legacy
+plain corpora keep their original format and lookup behavior. Dictionary
+indices, word bounds, printable ASCII and output headroom are checked before
+returning a verse. No heap, filesystem cache or additional decode buffer is
+used.
+
+The pinned 879 verses remain 96,568 ASCII bytes including separators. The
+generated 14-block copy uses 32,324 DEFLATE bytes, 112 block-index bytes, 705
+dictionary bytes and 258 dictionary-offset bytes: 33,399 bytes in total,
+5,086 fewer than the preceding 38,485-byte plain-block copy. This is static
+asset accounting; the complete firmware size also includes the lookup code.
+Tests compare all 879 decoded verses and their terminal output against the
+independently normalized pinned source, including pagination, corruption and
+the existing ARM stack limits.
 
 The text is [public domain](https://ebible.org/engwebp/copyright.htm).
 World English Bible is a trademark of eBible.org; the source must not be

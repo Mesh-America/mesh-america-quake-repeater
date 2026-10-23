@@ -30,6 +30,23 @@ template <typename Offset> struct CorpusT {
   uint16_t block_count;
   uint16_t verse_count;
 };
+// Keep the original plain corpus aggregate and its seven-field initializer.
+// Token metadata is static flash data; no decoded block or heap is retained.
+template <typename Offset> struct TokenCorpusT : CorpusT<Offset> {
+  const uint8_t* words;
+  uint16_t words_size;
+  const uint16_t* word_offsets;
+  uint16_t word_count;
+
+  constexpr TokenCorpusT(const char* translation, const char* attribution,
+      const uint8_t* data, uint32_t data_size, const BlockIndexT<Offset>* blocks,
+      uint16_t block_count, uint16_t verse_count, const uint8_t* words,
+      uint16_t words_size, const uint16_t* word_offsets, uint16_t word_count)
+      : CorpusT<Offset>{translation, attribution, data, data_size, blocks,
+                        block_count, verse_count},
+        words(words), words_size(words_size), word_offsets(word_offsets),
+        word_count(word_count) {}
+};
 // Keep the original general-purpose types available. Generated corpora select
 // a narrower offset only when every block start fits, without a runtime branch.
 using BlockIndex = BlockIndexT<uint32_t>;
@@ -90,8 +107,10 @@ inline ParseResult parse(const char* command, Reference& ref) {
 // stay in memory-mapped flash on both target families; there is no heap/cache.
 template <typename Offset>
 inline LookupResult lookup(const CorpusT<Offset>& corpus, Reference ref,
-                           char* scratch, size_t capacity, const char*& text) {
+                           char* scratch, size_t capacity, const char*& text,
+                           size_t* decoded_size = nullptr) {
   text = nullptr;
+  if (decoded_size) *decoded_size = 0;
   uint16_t index;
   if (!verseNumber(ref, index)) return LookupResult::Invalid;
   if (!scratch || capacity < kBlockSize || !corpus.data || !corpus.blocks ||
@@ -111,6 +130,7 @@ inline LookupResult lookup(const CorpusT<Offset>& corpus, Reference ref,
                             block.packed) != TINF_OK || produced != block.plain) {
     return LookupResult::Corrupt;
   }
+  if (decoded_size) *decoded_size = produced;
   const char* current = scratch;
   const char* end = scratch + produced;
   for (unsigned v = block.first_verse; v <= index; ++v) {
@@ -123,6 +143,59 @@ inline LookupResult lookup(const CorpusT<Offset>& corpus, Reference ref,
     }
     current = terminator + 1;
   }
+  return LookupResult::Found;
+}
+
+// Expand only the selected verse after its token block in the same 4 KiB
+// scratch. The packer reserves this headroom for every tokenized verse.
+template <typename Offset>
+inline LookupResult lookup(const TokenCorpusT<Offset>& corpus, Reference ref,
+                           char* scratch, size_t capacity, const char*& text) {
+  size_t produced;
+  const LookupResult result = lookup(static_cast<const CorpusT<Offset>&>(corpus),
+                                    ref, scratch, capacity, text, &produced);
+  if (result != LookupResult::Found) return result;
+  const uint8_t* encoded = reinterpret_cast<const uint8_t*>(text);
+  text = nullptr;
+  if (!corpus.words || !corpus.word_offsets || corpus.word_count == 0
+      || corpus.word_count > 128 || corpus.words_size == 0
+      || corpus.word_offsets[0] != 0
+      || corpus.word_offsets[corpus.word_count] != corpus.words_size)
+    return LookupResult::Corrupt;
+  bool tokenized = false;
+  for (const uint8_t* p = encoded; *p; ++p) {
+    if (*p < 32 || *p == 127) return LookupResult::Corrupt;
+    if (*p >= 128) tokenized = true;
+  }
+  // Literal fallback retains the original maximum-length verse allowance.
+  if (!tokenized) {
+    text = reinterpret_cast<const char*>(encoded);
+    return LookupResult::Found;
+  }
+  char* output = scratch + produced;
+  size_t available = kBlockSize - produced;
+  char* dest = output;
+  for (; *encoded; ++encoded) {
+    const uint8_t* word = encoded;
+    size_t length = 1;
+    if (*encoded >= 128) {
+      const unsigned index = *encoded - 128;
+      if (index >= corpus.word_count) return LookupResult::Corrupt;
+      const uint16_t start = corpus.word_offsets[index];
+      const uint16_t end = corpus.word_offsets[index + 1];
+      if (start >= end || end > corpus.words_size) return LookupResult::Corrupt;
+      word = corpus.words + start;
+      length = end - start;
+    }
+    if (length >= available) return LookupResult::Corrupt; // Retain the NUL.
+    for (size_t i = 0; i < length; ++i) {
+      if (word[i] < 32 || word[i] >= 127) return LookupResult::Corrupt;
+      *dest++ = static_cast<char>(word[i]);
+    }
+    available -= length;
+  }
+  *dest = 0;
+  text = output;
   return LookupResult::Found;
 }
 
