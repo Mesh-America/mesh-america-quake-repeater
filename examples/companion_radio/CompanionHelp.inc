@@ -225,10 +225,12 @@ MESH_COMPANION_HELP_BEGIN
 MESH_COMPANION_HELP_END
 #endif
 // Keep native USB producer writes within 256 bytes.
+#if !defined(MESH_RADIO_SWITCH_TUNING) || MESH_RADIO_SWITCH_TUNING
 MESH_COMPANION_HELP_BEGIN
     "  get radio.fast / get radio.fast.caps (supported saved controls)\r\n"
     "  set radio.fast <on|off> / set radio.fast.spi <0|2|4|8|16>\r\n"
 MESH_COMPANION_HELP_END
+#endif
 MESH_COMPANION_HELP_BEGIN
     "  get radio.rxps.config\r\n"
     "  get/set radio.rxps <off|on|level 1-10 [preamble 16|32]|rx_us sleep_us>\r\n"

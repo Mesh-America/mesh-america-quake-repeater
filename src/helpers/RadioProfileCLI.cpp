@@ -203,9 +203,24 @@ bool RadioProfileCLI::prepareSavedImage(const char* path, const RadioProfileConf
 }
 
 bool RadioProfileCLI::commitSavedImage(const char* path) {
+#if MESH_RADIO_SWITCH_TUNING
   return commitImage(path, ImagePath, BackupPath, hold_);
+#else
+  if (!fs_ || hold_) return false;
+  if (fs_->exists(ImagePath)) {
+    if (fs_->exists(BackupPath) && !fs_->remove(BackupPath)) return false;
+    if (!fs_->rename(ImagePath, BackupPath)) return false;
+  }
+  if (!fs_->rename(path, ImagePath)) {
+    if (fs_->exists(BackupPath) && !fs_->rename(BackupPath, ImagePath)) hold_ = true;
+    return false;
+  }
+  if (fs_->exists(BackupPath)) fs_->remove(BackupPath);
+  return true;
+#endif
 }
 
+#if MESH_RADIO_SWITCH_TUNING
 bool RadioProfileCLI::commitImage(const char* path, const char* active,
                                   const char* backup, bool& hold, bool preserve_backup) {
   if (!fs_ || hold) return false;
@@ -225,7 +240,6 @@ bool RadioProfileCLI::commitImage(const char* path, const char* active,
   return true;
 }
 
-#if MESH_RADIO_SWITCH_TUNING
 bool RadioProfileCLI::validFastImage(const uint8_t* bytes, RadioSwitchTuning& value) const {
   if (bytes[2] != 1) return false;
   for (size_t n = 5; n < ImageSize - 4; ++n) if (bytes[n]) return false;

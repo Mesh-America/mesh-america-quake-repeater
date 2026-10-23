@@ -88,9 +88,9 @@ class RadioProfileCLI {
   bool prepareSavedImage(const char* path, const RadioProfileConfig& config,
                          uint16_t preamble, RadioCrossMode cross, int8_t manual_secondary = -1);
   bool commitSavedImage(const char* path);
+#if MESH_RADIO_SWITCH_TUNING
   bool commitImage(const char* staged, const char* active, const char* backup,
                    bool& hold, bool preserve_backup = false);
-#if MESH_RADIO_SWITCH_TUNING
   bool validFastImage(const uint8_t* bytes, RadioSwitchTuning& value) const;
   void loadFastSettings(bool boot = false);
   bool saveFastSettings(const RadioSwitchTuning& value);

@@ -99,6 +99,7 @@ public:
   virtual void begin() { }
   virtual RadioProfiles* profiles() { return nullptr; }
   virtual const RadioProfiles* profiles() const { return nullptr; }
+#if MESH_RADIO_SWITCH_TUNING
   virtual RadioSwitchCapabilities switchTuningCapabilities() const { return {}; }
   virtual RadioSwitchTuning switchTuning() const { return {}; }
   virtual uint32_t switchSpiHz() const { return 0; }
@@ -109,6 +110,7 @@ public:
       bool (*)(void*, const RadioSwitchTuning&) = nullptr, void* = nullptr) {
     return RadioParamApplyResult::FAILED;
   }
+#endif
   virtual bool validateProfile(const RadioProfileParams&) const { return false; }
   virtual bool supportsMeshtext() const { return false; }
   virtual bool supportsEthernetTunnel() const { return false; }

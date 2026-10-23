@@ -3,6 +3,18 @@
 #define main existing_cli_main
 #include "cli_test.cpp"
 #undef main
+#include <type_traits>
+
+#define CHECK_TUNING_MEMBER_ABSENT(name) \
+  template<typename T, typename = void> struct Has_##name : std::false_type {}; \
+  template<typename T> struct Has_##name<T, decltype((void)&T::name)> : std::true_type {}; \
+  static_assert(!Has_##name<mesh::Radio>::value, "Unsupported radio API must be absent: " #name)
+CHECK_TUNING_MEMBER_ABSENT(switchTuningCapabilities);
+CHECK_TUNING_MEMBER_ABSENT(switchTuning);
+CHECK_TUNING_MEMBER_ABSENT(switchSpiHz);
+CHECK_TUNING_MEMBER_ABSENT(configureBootSwitchTuning);
+CHECK_TUNING_MEMBER_ABSENT(trySetSwitchTuning);
+#undef CHECK_TUNING_MEMBER_ABSENT
 
 int main() {
   static_assert(MESH_RADIO_SWITCH_TUNING == 0, "Integrated STM32WL tuning must be absent");
@@ -27,10 +39,6 @@ int main() {
   assert(fs.opened_paths.empty());
   assert(fs.files["/radio_fast"] == record);
   assert(fs.files.size() == 1);
-  const auto capabilities = radio.switchTuningCapabilities();
-  assert(capabilities.flags == 0 && capabilities.spi_clocks == 0);
-  assert(!radio.configureBootSwitchTuning({}));
-  assert(radio.trySetSwitchTuning({}) == mesh::RadioParamApplyResult::FAILED);
   // Existing radio2 configuration commands remain available.
   assert(cli.handle("get radio2", reply, sizeof(reply)));
   assert(!strncmp(reply, "> off", 5));
