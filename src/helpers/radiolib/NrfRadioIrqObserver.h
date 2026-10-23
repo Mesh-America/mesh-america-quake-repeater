@@ -15,7 +15,8 @@
 #include <stdint.h>
 
 namespace mesh { namespace irqobserver {
-enum Source : uint32_t { Rtc1, Gpiote, Uart0, Uart1, PowerClock, Usb, Scheduler, SourceCount };
+// Append sources to retain the original per-source indices in captures.
+enum Source : uint32_t { Rtc1, Gpiote, Uart0, Uart1, PowerClock, Usb, Scheduler, Twim0Spim0, SourceCount };
 enum TaskKind : uint32_t { LoopTask, TimerTask, UsbTask, OtherTask, TaskKindCount };
 struct Counter { uint32_t sequence, calls, cycles; };
 struct Sample {
@@ -186,7 +187,7 @@ inline void finish(uint32_t direction_index, uint32_t result, bool worst) {
   barrier();
   ++capture.sequence;
 }
-static_assert(sizeof(Capture) == 392 && sizeof(Counter) == 12,
+static_assert(sizeof(Capture) == 424 && sizeof(Counter) == 12 && SourceCount == 8,
               "Unexpected IRQ observer ABI");
 } } // namespace mesh::irqobserver
 #endif

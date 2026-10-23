@@ -103,7 +103,7 @@ class Nrf52HilIrqBindingTest(unittest.TestCase):
                 self.assertNotIn("__file__", scope)
                 self.assertEqual(len(env.middleware), expected)
 
-    def test_startup_changes_only_six_vectors_and_preserves_all_real_aliases(self):
+    def test_startup_changes_only_selected_vectors_and_preserves_all_real_aliases(self):
         patched = PATCH.patched_startup(STARTUP.replace("\n", "\r\n"))
         self.assertEqual(PATCH.patched_startup(patched), patched)
         expected = STARTUP
@@ -185,13 +185,13 @@ class Nrf52HilIrqBindingTest(unittest.TestCase):
             source = '#include <cassert>\n#include <cstdint>\n'
             source += 'extern "C" const uint32_t test_vectors[];\n'
             source += 'extern "C" void SVC_Handler() {}\nextern "C" void PendSV_Handler() {}\n'
-            source += "static unsigned real_calls[6], wrapped_calls[6];\n"
+            source += f"static unsigned real_calls[{len(PATCH.IRQ_HANDLERS)}], wrapped_calls[{len(PATCH.IRQ_HANDLERS)}];\n"
             for index, symbol in enumerate(PATCH.IRQ_HANDLERS):
                 source += f'extern "C" void {symbol}() {{ ++real_calls[{index}]; }}\n'
                 source += f'extern "C" void __real_{symbol}();\n'
                 source += (f'extern "C" void __wrap_{symbol}() {{ ++wrapped_calls[{index}]; '
                            f'__real_{symbol}(); }}\n')
-            source += "int main() { for (unsigned i = 0; i < 6; ++i) { "
+            source += f"int main() {{ for (unsigned i = 0; i < {len(PATCH.IRQ_HANDLERS)}; ++i) {{ "
             source += "reinterpret_cast<void(*)()>(uintptr_t(test_vectors[i+2]))(); "
             source += "assert(real_calls[i] == 1); assert(wrapped_calls[i] == EXPECT_WRAPPED); } }\n"
             (directory / "handlers.cpp").write_text(source)

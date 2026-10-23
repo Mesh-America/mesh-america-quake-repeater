@@ -6,7 +6,7 @@ extern "C" {
 volatile Counter mesh_hil_irq_counters[SourceCount] = {};
 volatile uint32_t mesh_hil_irq_selected[TaskKindCount + 2] = {};
 volatile Capture mesh_hil_radio_irqs = {
-    0x4d434952, 1, sizeof(Capture), 0, SourceCount, 0, 0, 0, 0, 0, {}};
+    0x4d434952, 2, sizeof(Capture), 0, SourceCount, 0, 0, 0, 0, 0, {}};
 }
 std::atomic<uint32_t> revision{0};
 Work work;
@@ -29,6 +29,7 @@ MESH_OBSERVE_IRQ(UARTE0_UART0_IRQHandler, Uart0)
 MESH_OBSERVE_IRQ(UARTE1_IRQHandler, Uart1)
 MESH_OBSERVE_IRQ(POWER_CLOCK_IRQHandler, PowerClock)
 MESH_OBSERVE_IRQ(USBD_IRQHandler, Usb)
+MESH_OBSERVE_IRQ(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0_IRQHandler, Twim0Spim0)
 #undef MESH_OBSERVE_IRQ
 
 extern "C" void __real_vTaskSwitchContext(void);

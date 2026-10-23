@@ -27,7 +27,7 @@ FIXTURE=r'''
 #include <helpers/radiolib/ProfileSwitchTiming.h>
 @TIMING_GLOBALS@
 DwtMock dwt;
-unsigned real_calls[7]{},durations[7]={640,128,192,256,320,384,448};
+unsigned real_calls[8]{},durations[8]={640,128,192,256,320,384,448,512};
 bool nested=false;
 const char* selected_task_name="loop";
 const char* pcTaskGetName(void* task) { assert(task==nullptr);return selected_task_name; }
@@ -38,6 +38,7 @@ extern "C" void __wrap_UARTE1_IRQHandler();
 extern "C" void __wrap_POWER_CLOCK_IRQHandler();
 extern "C" void __wrap_USBD_IRQHandler();
 extern "C" void __wrap_vTaskSwitchContext();
+extern "C" void __wrap_SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0_IRQHandler();
 extern "C" void __real_RTC1_IRQHandler() {
   ++real_calls[0];dwt.CYCCNT+=durations[0];
   if(nested) __wrap_GPIOTE_IRQHandler();
@@ -49,15 +50,19 @@ REAL_HANDLER(UARTE1_IRQHandler,3)
 REAL_HANDLER(POWER_CLOCK_IRQHandler,4)
 REAL_HANDLER(USBD_IRQHandler,5)
 REAL_HANDLER(vTaskSwitchContext,6)
+REAL_HANDLER(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0_IRQHandler,7)
 int main() {
   namespace obs=mesh::irqobserver;
   namespace timing=mesh::profiletiming;
   auto& capture=obs::mesh_hil_radio_irqs;
-  assert(capture.magic==0x4d434952 && capture.version==1 && capture.size_bytes==392 && capture.source_count==7);
+  assert(capture.magic==0x4d434952 && capture.version==2 && capture.size_bytes==424 && capture.source_count==8);
+  static_assert(obs::Scheduler==6 && obs::Twim0Spim0==7,"Original indices must remain stable");
+  static_assert(sizeof(obs::mesh_hil_irq_counters)==96,"IRQ counter bank size changed");
   // Actual wrappers forward every source exactly once, with no active hop.
   __wrap_UARTE0_UART0_IRQHandler();__wrap_UARTE1_IRQHandler();
   __wrap_POWER_CLOCK_IRQHandler();__wrap_USBD_IRQHandler();__wrap_vTaskSwitchContext();
-  for(unsigned i=2;i<7;++i) assert(real_calls[i]==1);
+  __wrap_SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0_IRQHandler();
+  for(unsigned i=2;i<8;++i) assert(real_calls[i]==1);
   // Nested source time is explicitly inclusive in its parent; deltas remain
   // per source and are attached to the same worst successful physical hop.
   dwt.CYCCNT=100;durations[0]=640;durations[1]=128;nested=true;
@@ -94,9 +99,12 @@ int main() {
   obs::mesh_hil_irq_counters[obs::Uart1].cycles=UINT32_MAX-10;
   dwt.CYCCNT=UINT32_MAX-31;durations[3]=64;
   timing::begin(1,0,timing::readClock());__wrap_UARTE1_IRQHandler();
+  __wrap_SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0_IRQHandler();
   timing::finish(timing::Success,timing::readEndpointClock());
-  assert(capture.direction[1].last_ticks==64 && capture.direction[1].last.calls[obs::Uart1]==1);
+  assert(capture.direction[1].last_ticks==576 && capture.direction[1].last.calls[obs::Uart1]==1);
   assert(capture.direction[1].last.cycles[obs::Uart1]==64);
+  assert(capture.direction[1].last.calls[obs::Twim0Spim0]==1 && capture.direction[1].last.cycles[obs::Twim0Spim0]==512);
+  assert(capture.direction[1].worst.calls[obs::Twim0Spim0]==1 && capture.direction[1].worst.cycles[obs::Twim0Spim0]==512);
   // A permanently odd writer sequence cannot hang the application or publish
   // stale counter data as valid attribution. Timing itself remains available.
   obs::mesh_hil_irq_counters[obs::Gpiote].sequence=1;
@@ -106,7 +114,7 @@ int main() {
   dwt.CYCCNT+=128;
   timing::finish(timing::Success,timing::readEndpointClock());
   assert(capture.snapshot_failures==failures+1 && !capture.direction[1].last_valid);
-  for(unsigned i=0;i<7;++i) {
+  for(unsigned i=0;i<8;++i) {
     assert(capture.direction[1].last.calls[i]==0 && capture.direction[1].last.cycles[i]==0);
   }
   assert(capture.sequence%2==0 && capture.snapshots==10 && capture.retries>=8);

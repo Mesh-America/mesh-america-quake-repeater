@@ -2,7 +2,7 @@
 
 The framework's same-object weak vector aliases and its LTO-visible scheduler
 call bypass GNU --wrap. Only for MESH_HIL_IRQ_TIMING=1, name the wrappers at
-those seven call sites explicitly. Keep each real handler, SVC/PendSV vector,
+those eight call sites explicitly. Keep each real handler, SVC/PendSV vector,
 and the naked port's register/exception-return sequence unchanged. The linker
 wrap options still resolve the observer's __real_* calls to the real handlers.
 No installed framework source is modified.
@@ -15,6 +15,7 @@ from pathlib import Path
 IRQ_HANDLERS = (
     "POWER_CLOCK_IRQHandler", "UARTE0_UART0_IRQHandler", "GPIOTE_IRQHandler",
     "RTC1_IRQHandler", "USBD_IRQHandler", "UARTE1_IRQHandler",
+    "SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0_IRQHandler",
 )
 WRAPPED_SYMBOLS = IRQ_HANDLERS + ("vTaskSwitchContext",)
 PORT_CALL = '    "   bl vTaskSwitchContext               \\n"\n'
