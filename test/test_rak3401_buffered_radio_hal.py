@@ -53,6 +53,7 @@ HARNESS = r'''
 #include <array>
 #include <initializer_list>
 #include <helpers/radiolib/Nrf52BufferedRadioHal.h>
+@CLOCK_POLICY@
 SPIClass SPI, SPI1;
 constexpr unsigned P_LORA_NSS=1, P_LORA_DIO_1=2, P_LORA_RESET=3, P_LORA_BUSY=4;
 struct Module {
@@ -60,7 +61,7 @@ struct Module {
   Module(ArduinoHal* adapter, unsigned cs, unsigned irq, unsigned rst, unsigned busy)
       : hal(adapter) {
     assert(cs==1 && irq==2 && rst==3 && busy==4);
-    assert(hal->spi == &SPI1 && hal->spiSettings.hz == 8000000);
+    assert(hal->spi == &SPI1 && hal->spiSettings.hz == MC_RAK3401_SPI_HZ);
   }
 };
 struct Radio {
@@ -99,6 +100,8 @@ int main() {
 class Rak3401BufferedRadioHalTests(unittest.TestCase):
     def test_actual_target_uses_one_transfer_per_command_on_same_spi1_at_8mhz(self):
         target = (ROOT / "variants/rak3401/target.cpp").read_text(encoding="ascii")
+        clock_policy = target[target.index("#ifndef MC_RAK3401_SPI_HZ"):
+                              target.index("\nnamespace {")]
         construction = "\n".join(re.findall(
             r"^(?:static Nrf52BufferedRadioHal radioHal\([^;]+;|"
             r"RADIO_CLASS radio = new Module\([^;]+;)$", target, re.MULTILINE))
@@ -117,7 +120,8 @@ class Rak3401BufferedRadioHalTests(unittest.TestCase):
             (base / "helpers/radiolib").mkdir(parents=True)
             (base / "hal/Arduino/ArduinoHal.h").write_text(MOCK_HAL, encoding="ascii")
             cpp, executable = base / "test.cpp", base / "test"
-            cpp.write_text(HARNESS.replace("@CONSTRUCTION@", construction), encoding="ascii")
+            cpp.write_text(HARNESS.replace("@CONSTRUCTION@", construction)
+                           .replace("@CLOCK_POLICY@", clock_policy), encoding="ascii")
             for name, implementation, succeeds in (("buffered", helper, True),
                                                    ("per-byte", legacy, False)):
                 with self.subTest(implementation=name):
@@ -134,6 +138,47 @@ class Rak3401BufferedRadioHalTests(unittest.TestCase):
                     else:
                         self.assertNotEqual(ran.returncode, 0,
                                             "per-byte negative control did not fail")
+
+    def test_clock_dial_requires_correct_controller_and_global_dma_workaround(self):
+        target = (ROOT / "variants/rak3401/target.cpp").read_text(encoding="ascii")
+        policy = target[target.index("#ifndef MC_RAK3401_SPI_HZ"):
+                        target.index("\nnamespace {")]
+        construction = "\n".join(re.findall(
+            r"^(?:static Nrf52BufferedRadioHal radioHal\([^;]+;|"
+            r"RADIO_CLASS radio = new Module\([^;]+;)$", target, re.MULTILINE))
+        fixture = HARNESS.replace("@CLOCK_POLICY@", policy).replace("@CONSTRUCTION@", construction)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "hal/Arduino").mkdir(parents=True)
+            (folder / "hal/Arduino/ArduinoHal.h").write_text(MOCK_HAL, encoding="ascii")
+            cpp, binary = folder / "test.cpp", folder / "test.exe"
+            cpp.write_text(fixture, encoding="ascii")
+            cases = [([], True)] + [
+                ([f"MC_RAK3401_SPI_HZ={clock}"], True)
+                for clock in (2000000, 4000000, 8000000)] + [
+                (["MC_RAK3401_SPI_HZ=16000000", "SPI_32MHZ_INTERFACE=1",
+                  "NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED=1"], True),
+                (["MC_RAK3401_SPI_HZ=16000000"], False),
+                (["MC_RAK3401_SPI_HZ=16000000", "SPI_32MHZ_INTERFACE=1"], False),
+                (["MC_RAK3401_SPI_HZ=16000000", "SPI_32MHZ_INTERFACE=0",
+                  "NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED=1"], False),
+                (["MC_RAK3401_SPI_HZ=16000000", "SPI_32MHZ_INTERFACE=1",
+                  "NRFX_SPIM3_NRF52840_ANOMALY_198_WORKAROUND_ENABLED=0"], False),
+                (["MC_RAK3401_SPI_HZ=12000000"], False),
+                (["MC_RAK3401_SPI_HZ=32000000"], False)]
+            for flags, valid in cases:
+                with self.subTest(flags=flags):
+                    built = subprocess.run([os.environ.get("CXX", "g++"), "-std=c++17",
+                        "-Wall", "-Wextra", "-Werror", *["-D" + flag for flag in flags],
+                        "-I", str(folder), "-I", str(ROOT / "src"), str(cpp),
+                        "-o", str(binary)], capture_output=True, text=True)
+                    if valid:
+                        self.assertEqual(built.returncode, 0, built.stderr)
+                        ran = subprocess.run([str(binary)], capture_output=True, text=True)
+                        self.assertEqual(ran.returncode, 0, ran.stderr)
+                    else:
+                        self.assertNotEqual(built.returncode, 0)
+                        self.assertIn("RAK3401", built.stderr)
 
 
 if __name__ == "__main__":
