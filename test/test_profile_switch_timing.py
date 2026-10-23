@@ -48,7 +48,7 @@ void dwt_enable() { clockEnabled=true; ++enableCalls; }
 int main() {
   using namespace mesh::profiletiming;
   auto& capture=mesh_hil_profile_timing;
-  assert(capture.magic==Magic && capture.size_bytes==1736);
+  assert(capture.magic==Magic && capture.version==2 && capture.size_bytes==1808);
   assert(capture.clock_hz==64000000 && capture.sequence==0);
   initializeClock();
   assert(enableCalls==1 && capture.clock_state==2);
@@ -68,6 +68,7 @@ int main() {
   const auto& forward=capture.direction[0];
   assert(forward.successes==1 && forward.busy==0 && forward.failures==0);
   assert(forward.last_mask==511 && forward.last_us[Whole]==600);
+  assert(forward.worst_us[Whole]==600 && forward.worst_us[Frequency]==50);
   assert(forward.stage[Whole].sum_low_us==600 && forward.stage[Whole].sum_high_us==0);
   assert(forward.stage[Whole].min_us==600 && forward.stage[Whole].max_us==600);
   assert(forward.stage[Whole].histogram[9]==1);
@@ -94,10 +95,13 @@ int main() {
   begin(0,1,0); mark(Frequency,20*64); finish(Success,20*64);
   assert(sum.sum_low_us==9 && sum.sum_high_us==4);
   assert(sum.min_us==20 && sum.max_us==50 && sum.count==2);
+  assert(forward.worst_us[Whole]==600 && forward.worst_us[Frequency]==50);
   begin(1,0,0); mark(Frequency,960*64); finish(Success,960*64);
   assert(capture.direction[1].stage[Frequency].histogram[15]==1);
   begin(1,0,0); mark(Frequency,10000*64); finish(Success,10000*64);
   assert(capture.direction[1].stage[Frequency].histogram[15]==2);
+  assert(capture.direction[1].worst_us[Whole]==10000);
+  assert(capture.direction[1].worst_us[Frequency]==10000);
 }
 '''.replace("@GLOBALS@", self.production_globals()))
 

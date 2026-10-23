@@ -18,7 +18,7 @@ enum Stage : uint32_t {
 };
 enum Result : uint32_t { Success = 0, Busy = 1, Failure = 2 };
 static constexpr uint32_t Magic = 0x4d435054; // MCPT
-static constexpr uint32_t Version = 1;
+static constexpr uint32_t Version = 2;
 static constexpr uint32_t HistogramCount = 16;
 static constexpr uint32_t HistogramWidthUs = 64;
 #if defined(NRF52_PLATFORM)
@@ -37,6 +37,7 @@ struct StageStats {
 struct DirectionStats {
   uint32_t successes, busy, failures, last_result, last_mask;
   uint32_t last_us[StageCount];
+  uint32_t worst_us[StageCount]; // stages from the same worst successful hop
   StageStats stage[StageCount];
 };
 struct Capture {
@@ -58,7 +59,13 @@ extern volatile Capture mesh_hil_profile_timing;
 extern Work mesh_hil_profile_timing_work;
 }
 
-inline void barrier() { __asm__ __volatile__("" ::: "memory"); }
+inline void barrier() {
+#if defined(__arm__) || defined(__thumb__)
+  __asm__ __volatile__("dmb" ::: "memory");
+#else
+  __asm__ __volatile__("" ::: "memory");
+#endif
+}
 
 // Call once during wrapper initialization, outside the measured switch.
 // The nRF core enables trace and CYCCNT only; it does not enable debug/halt.
@@ -113,6 +120,8 @@ inline void finish(Result result, uint32_t now_ticks) {
   ++capture.sequence;
   barrier();
   auto& direction = capture.direction[work.direction];
+  const bool worst = result == Success && (direction.stage[Whole].count == 0
+      || work.duration_us[Whole] > direction.stage[Whole].max_us);
   direction.last_result = result;
   direction.last_mask = work.mask;
   if (result == Success) ++direction.successes;
@@ -121,6 +130,7 @@ inline void finish(Result result, uint32_t now_ticks) {
   for (uint32_t i = 0; i < StageCount; ++i) {
     const uint32_t duration = work.duration_us[i];
     direction.last_us[i] = duration;
+    if (worst) direction.worst_us[i] = duration;
     if (result != Success || !(work.mask & (uint32_t(1) << i))) continue;
     auto& stats = direction.stage[i];
     const uint32_t previous_low = stats.sum_low_us;
@@ -137,7 +147,7 @@ inline void finish(Result result, uint32_t now_ticks) {
   ++capture.sequence;
 }
 
-static_assert(sizeof(Capture) == 40 + 2 * (20 + StageCount * (4 + 88)),
+static_assert(sizeof(Capture) == 40 + 2 * (20 + StageCount * (8 + 88)),
               "Unexpected profile timing ABI");
 
 } // namespace profiletiming
