@@ -228,7 +228,7 @@ MESH_COMPANION_HELP_END
 #if !defined(MESH_RADIO_SWITCH_TUNING) || MESH_RADIO_SWITCH_TUNING
 MESH_COMPANION_HELP_BEGIN
     "  get radio.fast / get radio.fast.caps (supported saved controls)\r\n"
-    "  set radio.fast <on|off> / set radio.fast.spi <0|2|4|8|16>\r\n"
+    "  set radio.fast <on|off> / set radio.fast.spi <0|2|4|8|9|16>\r\n"
 MESH_COMPANION_HELP_END
 #endif
 MESH_COMPANION_HELP_BEGIN

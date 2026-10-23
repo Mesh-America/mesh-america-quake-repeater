@@ -41,7 +41,7 @@ GOLDEN = {'rak_full': {'text': '9a68ce5a10905a201c3bddeb19f4819ce03c6dcaff248cff
 GOLDEN['stm32_wl_usb'] = {'text': '9e587ac9f287c8f8fe64fe5c899fe635b6de5d6cf436c4c43a27ffd4add42474'}
 
 FAST_HELP = (b'  get radio.fast / get radio.fast.caps (supported saved controls)\r\n'
-             b'  set radio.fast <on|off> / set radio.fast.spi <0|2|4|8|16>\r\n')
+             b'  set radio.fast <on|off> / set radio.fast.spi <0|2|4|8|9|16>\r\n')
 
 HARNESS = r'''
 #include "CompanionHelpWriter.h"

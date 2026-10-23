@@ -13,6 +13,13 @@ class TunableRadioHal : public ArduinoHal {
   const bool _canBuffer;
   uint8_t _spiMHz = 0;
   bool _bufferEnabled;
+  // The pinned C6 core calculates SPI dividers from 40 MHz and cannot select
+  // the 80/9 divider. Do not advertise a clock its HAL would round away.
+#if defined(ESP32_PLATFORM) && !defined(CONFIG_IDF_TARGET_ESP32C6)
+  static constexpr uint32_t DefaultMaxSpiHz = 8888888;
+#else
+  static constexpr uint32_t DefaultMaxSpiHz = 8000000;
+#endif
 
   static TunableRadioHal*& registry() {
     static TunableRadioHal* head = nullptr;
@@ -25,10 +32,14 @@ class TunableRadioHal : public ArduinoHal {
  public:
   explicit TunableRadioHal(SPIClass& bus, uint32_t hz = 8000000,
       bool initializeBus = false, bool canBuffer = false,
-      uint32_t maxHz = 8000000)
+      uint32_t maxHz = DefaultMaxSpiHz)
       : ArduinoHal(bus, SPISettings(hz, MSBFIRST, SPI_MODE0)),
         _next(registry()), _defaultHz(hz),
-        _spiClocks(2 | 4 | 8 | (maxHz >= 16000000 ? 16 : 0)),
+        _spiClocks(2 | 4 | 8 | (maxHz >= 16000000 ? 16 : 0)
+#if defined(ESP32_PLATFORM) && !defined(CONFIG_IDF_TARGET_ESP32C6)
+            | (maxHz >= 8888888 ? mesh::RadioSwitchCapabilities::Spi9 : 0)
+#endif
+            ),
         _canBuffer(canBuffer), _bufferEnabled(canBuffer) {
     initInterface = initializeBus;
     registry() = this;
@@ -76,6 +87,7 @@ class TunableRadioHal : public ArduinoHal {
 
   uint32_t defaultHz() const { return _defaultHz; }
   uint32_t effectiveHz() const {
+    if (_spiMHz == 9) return 8888888;
     return _spiMHz ? static_cast<uint32_t>(_spiMHz) * 1000000UL : _defaultHz;
   }
 };

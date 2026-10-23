@@ -95,13 +95,20 @@ int main() {
   assert(unused.bursts==0 && fallbackBus.bursts==0);
 
   using Tuning=mesh::RadioSwitchTuning;
+  using Capabilities=mesh::RadioSwitchCapabilities;
+#if defined(ESP32_PLATFORM) && !defined(CONFIG_IDF_TARGET_ESP32C6)
+  constexpr uint8_t spi9=Capabilities::Spi9;
+#else
+  constexpr uint8_t spi9=0;
+#endif
+  static_assert(sizeof(Tuning)==2 && sizeof(Capabilities)==2,"compact saved SPI policy");
   assert(TunableRadioHal::find(&hal)==&external);
   assert(external.defaultHz()==MC_SX1262_SPI_HZ);
   assert(external.effectiveHz()==MC_SX1262_SPI_HZ);
   assert(external.getTuning().spi_mhz==0);
   assert(external.getTuning().flags==Tuning::Buffer);
   assert(external.capabilities().flags==Tuning::Buffer);
-  assert(external.capabilities().spi_clocks==(2|4|8));
+  assert(external.capabilities().spi_clocks==(2|4|8|spi9));
   // Disable bulk transfers without changing the controller, bus lifetime or
   // packet response. Driver-owned feature bits are handled by the wrapper.
   Tuning tuning;
@@ -122,6 +129,18 @@ int main() {
     assert(external.effectiveHz()==unsigned(clock)*1000000);
     assert(external.spiSettings.hz==external.effectiveHz());
   }
+  const Tuning before9=external.getTuning();
+  tuning.spi_mhz=9;
+#if defined(ESP32_PLATFORM) && !defined(CONFIG_IDF_TARGET_ESP32C6)
+  assert(external.setTuning(tuning));
+  assert(external.getTuning().spi_mhz==9);
+  assert(external.effectiveHz()==8888888 && external.spiSettings.hz==8888888);
+#else
+  assert(!external.setTuning(tuning));
+  assert(external.getTuning()==before9 && external.effectiveHz()==8000000);
+#endif
+  assert(hal.spi==&explicitBus && explicitBus.begins==1 && explicitBus.ends==1);
+  (void)before9;
   const Tuning previous=external.getTuning();
   for (uint8_t clock : {uint8_t(1),uint8_t(3),uint8_t(16),uint8_t(255)}) {
     tuning.spi_mhz=clock;
@@ -142,10 +161,58 @@ int main() {
     TunableRadioHal byteHal(unused);
     assert(TunableRadioHal::find(&byteHal)==&byteHal);
     assert(byteHal.capabilities().flags==0 && byteHal.defaultHz()==8000000);
+    assert(byteHal.capabilities().spi_clocks==(2|4|8|spi9));
     assert(!byteHal.setTuning(tuning));
     tuning.flags=0;tuning.spi_mhz=2;
     assert(byteHal.setTuning(tuning) && byteHal.spiSettings.hz==2000000);
+    const auto before=byteHal.getTuning();
+    tuning.spi_mhz=9;
+#if defined(ESP32_PLATFORM) && !defined(CONFIG_IDF_TARGET_ESP32C6)
+    assert(byteHal.setTuning(tuning) && byteHal.spiSettings.hz==8888888);
+#else
+    assert(!byteHal.setTuning(tuning) && byteHal.getTuning()==before);
+    assert(byteHal.spiSettings.hz==2000000);
+#endif
+    (void)before;
   }
+  // Explicit maximums describe hardware capability rather than the current
+  // default. Only ESP32 can generate the fractional-divider 9 alias, including
+  // its byte HAL; granting 16 MHz on another MCU must not grant 9 implicitly.
+  for (uint32_t maximum : {8000000U,8888887U,8888888U,16000000U}) {
+    SPIClass shared;
+    TunableRadioHal bounded(shared,4000000,false,false,maximum);
+    const auto before=bounded.getTuning();
+    tuning.flags=0;tuning.spi_mhz=9;
+    const bool supports9=spi9 && maximum>=8888888;
+    assert(bool(bounded.capabilities().spi_clocks & Capabilities::Spi9)==supports9);
+    assert(bounded.setTuning(tuning)==supports9);
+    if (supports9) {
+      assert(bounded.getTuning().spi_mhz==9 && bounded.effectiveHz()==8888888);
+      assert(bounded.spiSettings.hz==8888888);
+    } else {
+      assert(bounded.getTuning()==before && bounded.effectiveHz()==4000000);
+      assert(bounded.spiSettings.hz==4000000);
+    }
+    assert(bool(bounded.capabilities().spi_clocks & 16)==(maximum>=16000000));
+    tuning.spi_mhz=16;
+    assert(bounded.setTuning(tuning)==(maximum>=16000000));
+    assert(bounded.spi==&shared && !shared.begins && !shared.ends);
+    assert(!shared.bursts && !shared.bytes);
+  }
+#if defined(ESP32_PLATFORM)
+  {
+    SPIClass lrBus;
+    ESP32BufferedRadioHal lr1110(lrBus,16000000);
+    assert(lr1110.defaultHz()==16000000 && lr1110.effectiveHz()==16000000);
+    assert(lr1110.capabilities().spi_clocks==(2|4|8|16|spi9));
+    tuning.flags=Tuning::Buffer;tuning.spi_mhz=9;
+    assert(lr1110.setTuning(tuning)==bool(spi9));
+    assert(lr1110.spiSettings.hz==(spi9 ? 8888888U : 16000000U));
+    tuning.spi_mhz=0;
+    assert(lr1110.setTuning(tuning) && lr1110.spiSettings.hz==16000000);
+    assert(!lrBus.begins && !lrBus.ends);
+  }
+#endif
   ArduinoHal foreign(unused,SPISettings(2000000,MSBFIRST,SPI_MODE0));
   assert(TunableRadioHal::find(&foreign)==nullptr);
   assert(TunableRadioHal::find(nullptr)==nullptr);
@@ -170,9 +237,12 @@ class SX126xBufferedRadioHalTests(unittest.TestCase):
                 (ROOT/"src/helpers/RadioSwitchTuning.h").read_text(),encoding="ascii")
             cpp,executable=base/"test.cpp",base/"test"
             cpp.write_text(FIXTURE,encoding="ascii")
-            for arch,header in (("NRF52_PLATFORM","Nrf52BufferedRadioHal.h"),
-                                ("ESP32_PLATFORM","ESP32BufferedRadioHal.h"),
-                                ("RP2040_PLATFORM","SX126xBufferedRadioHal.h")):
+            for arch,defines,header in (
+                    ("nrf52",("NRF52_PLATFORM",),"Nrf52BufferedRadioHal.h"),
+                    ("esp32",("ESP32_PLATFORM",),"ESP32BufferedRadioHal.h"),
+                    ("esp32c6",("ESP32_PLATFORM","CONFIG_IDF_TARGET_ESP32C6"),
+                     "ESP32BufferedRadioHal.h"),
+                    ("rp2040",("RP2040_PLATFORM",),"SX126xBufferedRadioHal.h")):
                 # Without the real override, byte-for-byte correctness alone
                 # still passes; the per-command transfer requirement must fail.
                 legacy=re.sub(r"  void spiTransfer\([^}]+\}\n","",headers[header])
@@ -185,7 +255,8 @@ class SX126xBufferedRadioHalTests(unittest.TestCase):
                                 (base/"helpers/radiolib"/file).write_text(
                                     implementation if file==header else content,encoding="ascii")
                             built=subprocess.run([compiler,"-std=c++17","-Wall","-Wextra",
-                                "-Werror",f"-D{arch}",f"-DMC_SX1262_SPI_HZ={clock}",
+                                "-Werror",*["-D"+value for value in defines],
+                                f"-DMC_SX1262_SPI_HZ={clock}",
                                 "-I",str(base),"-I",str(ROOT/"src"),"-I",str(RADIO),str(cpp),"-o",str(executable)],
                                 capture_output=True,text=True,timeout=60)
                             self.assertEqual(built.returncode,0,built.stdout+built.stderr)

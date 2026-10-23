@@ -16,6 +16,7 @@ namespace mesh {
 
 // Saved policy for one physical radio, shared by both RF profiles. SPI MHz 0
 // retains the board's default clock (which need not be an integer MHz).
+// Selection 9 is the integer label for the supported 8.888888 MHz divider.
 struct RadioSwitchTuning {
   enum Feature : uint8_t {
     Warm = 1, Fs = 2, Packet = 4, Iq = 8, Modem = 16,
@@ -30,8 +31,9 @@ struct RadioSwitchTuning {
 };
 
 struct RadioSwitchCapabilities {
+  enum SpiClock : uint8_t { Spi9 = 1 };
   uint8_t flags = 0;
-  // Bit N permits 2^N MHz; bit 0 (1 MHz) is deliberately unused.
+  // Bits 1..4 permit 2^N MHz. Bit 0 permits selection 9 (8888888 Hz).
   uint8_t spi_clocks = 0;
 };
 
@@ -39,6 +41,7 @@ inline bool validRadioSwitchTuning(const RadioSwitchTuning& value,
                                   const RadioSwitchCapabilities& caps) {
   if (value.flags & ~caps.flags) return false;
   if (!value.spi_mhz) return true;
+  if (value.spi_mhz == 9) return caps.spi_clocks & RadioSwitchCapabilities::Spi9;
   for (uint8_t n = 1; n <= 4; ++n)
     if (value.spi_mhz == (1U << n)) return caps.spi_clocks & (1U << n);
   return false;

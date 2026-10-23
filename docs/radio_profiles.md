@@ -1199,9 +1199,11 @@ profile. Packets/retries bound to an expired or changed session are discarded.
 
 ## Saved switching controls
 
-Supported SX1262 and LR1110 radios expose separate saved controls for their
-switching optimizations. Available acceleration features start enabled,
-including on supported boards that have not had a hardware timing test. The
+Supported radio HALs expose saved SPI clock controls and, where available,
+separate controls for switching optimizations. SPI clock choices can be
+available even when no other acceleration feature is supported. Available
+acceleration features start enabled, including on supported boards that have
+not had a hardware timing test. The
 board's SPI default remains its selected default clock. Availability depends on
 the radio, board bus, and compiled feature support; inspect the device first:
 
@@ -1228,7 +1230,7 @@ does not support the tuning features.
 | `radio.fast.modem` | `on`, `off` | Reuse confirmed unchanged modem state/queries |
 | `radio.fast.batch` | `on`, `off` | Apply SF, bandwidth and coding rate together |
 | `radio.fast.buffer` | `on`, `off` | Transfer SPI command bytes in a buffer where supported |
-| `radio.fast.spi` | `0`, `2`, `4`, `8`, `16` where supported | Select the radio SPI clock in MHz; `0` restores the board default |
+| `radio.fast.spi` | `0`, `2`, `4`, `8`, `9`, `16` where supported | Select the radio SPI clock; `0` restores the board default |
 
 For example, compare buffered transfers or a lower clock independently:
 
@@ -1240,8 +1242,16 @@ set radio.fast.spi 0
 set radio.fast.buffer on
 ```
 
+The integer `9` selects 8.889 MHz (8,888,888 Hz); the rounded `9 MHz` label does
+not request 9,000,000 Hz. ESP32 buses expose this choice when their tunable
+radio HAL and clock limit support it. Check `get radio.fast.caps` on the device
+and read the actual Hz with `get radio.fast.spi`. The current ESP32-C6 core
+cannot select this clock, so ESP32-C6 does not offer `9`. Current nRF52,
+RP2040, and STM32 radio buses also do not offer this choice.
+
 `0` preserves board-specific defaults, including clocks that are not whole MHz.
-An unsupported feature or clock is rejected. A feature saved as `on` only runs
+Adding the `9` choice does not change those defaults. An unsupported feature or
+clock is rejected. A feature saved as `on` only runs
 when its normal ownership and safety checks allow it; disabling `warm` also
 prevents its dependent RX shortcuts from being used. Buffered transfer support
 is separate from clock support. Some nRF52 buses support an 8 MHz byte path

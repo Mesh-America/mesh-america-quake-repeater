@@ -335,8 +335,11 @@ __attribute__((noinline)) bool RadioProfileCLI::handleFastSettings(const char* k
         name += strlen(name) + 1;
       }
       appendReply(reply, capacity, "; spi=%s", caps.spi_clocks ? "0" : "na");
-      for (unsigned n = 1; n <= 4; ++n)
+      for (unsigned n = 1; n <= 4; ++n) {
         if (caps.spi_clocks & (1U << n)) appendReply(reply, capacity, ",%u", 1U << n);
+        if (n == 3 && (caps.spi_clocks & RadioSwitchCapabilities::Spi9))
+          appendReply(reply, capacity, ",9");
+      }
     } else if (master) {
       if (caps.spi_clocks) {
         snprintf(reply, capacity, "> spi=%u (%luHz)", current.spi_mhz,
@@ -368,10 +371,10 @@ __attribute__((noinline)) bool RadioProfileCLI::handleFastSettings(const char* k
   }
   RadioSwitchTuning next = current;
   if (spi) {
-    // Keep parsing strict without five separate whole-string comparisons.
-    if (!args[1] && strchr("0248", args[0])) next.spi_mhz = args[0] - '0';
+    // Single-digit selections remain strict; 9 labels the 8888888 Hz clock.
+    if (!args[1] && strchr("02489", args[0])) next.spi_mhz = args[0] - '0';
     else if (!strcmp(args, "16")) next.spi_mhz = 16;
-    else { cli::formatError(reply, capacity, "SPI MHz: 0,2,4,8,16 where supported"); return true; }
+    else { cli::formatError(reply, capacity, "SPI MHz: 0,2,4,8,9,16 where supported"); return true; }
   } else {
     const bool on = !strcmp(args, "on");
     if (!on && strcmp(args, "off")) { cli::formatError(reply, capacity, "use on or off"); return true; }

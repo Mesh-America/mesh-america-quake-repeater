@@ -1,10 +1,12 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 
 WaveshareS3LR1121Board board;
 
 static SPIClass spi;
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
+static TunableRadioHal radio_hal(spi, 2000000);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 WRAPPER_CLASS radio_driver(radio, board);
 
 ESP32RTCClock fallback_clock;

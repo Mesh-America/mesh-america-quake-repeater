@@ -1656,9 +1656,10 @@ capacity. Remote use follows the existing administrator-command permissions.
 
 #### Tune and save radio switching acceleration
 
-Use local USB or BLE to change these settings on supported SX1262 and LR1110
-radios. Supported acceleration features default to on, including on boards
-awaiting hardware qualification. `get radio.fast.caps` lists the options the
+Use local USB or BLE to change these settings on supported radio HALs.
+SPI clock choices can be available even when the radio exposes no other
+acceleration features. Supported acceleration features default to on,
+including on boards awaiting hardware qualification. `get radio.fast.caps` lists the options the
 current radio and SPI bus actually support.
 
 | Command | Purpose |
@@ -1668,9 +1669,16 @@ current radio and SPI bus actually support.
 | `get radio.fast.<feature>` | Read an individual feature |
 | `set radio.fast.<feature> on\|off` | Save one feature selection: `warm`, `fs`, `packet`, `iq`, `modem`, `batch`, or `buffer` |
 | `get radio.fast.spi` | Read the selected MHz and actual clock in Hz |
-| `set radio.fast.spi 0\|2\|4\|8\|16` | Save a supported SPI MHz choice; `0` restores the board default |
+| `set radio.fast.spi 0\|2\|4\|8\|9\|16` | Save a supported SPI clock choice; `0` restores the board default |
 | `set radio.fast off` | Disable supported acceleration features and use 2 MHz where available |
 | `set radio.fast on` | Enable supported features and restore the board default SPI clock |
+
+The integer `9` is a rounded label for 8.889 MHz (8,888,888 Hz), rather than
+9,000,000 Hz. It is available on ESP32 buses with a tunable radio HAL and a
+clock limit high enough to support it; check `get radio.fast.caps`. The current
+ESP32-C6 core cannot select this clock, so ESP32-C6 does not offer `9`. Current
+nRF52, RP2040, and STM32 radio buses also do not offer this choice. The getter
+shows the actual clock in Hz. Existing board defaults are unchanged.
 
 The change applies safely without reboot and survives firmware updates. A busy
 radio or failed apply/save leaves the previous policy in use. Remote LoRa

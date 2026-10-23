@@ -4,6 +4,9 @@
 #include "cli_test.cpp"
 #undef main
 
+static_assert(sizeof(mesh::RadioSwitchTuning) == 2, "SPI 9 must not enlarge saved policy");
+static_assert(sizeof(mesh::RadioSwitchCapabilities) == 2, "SPI 9 must reuse a capability bit");
+
 struct TuningRadio : Radio {
   mesh::RadioSwitchCapabilities caps;
   mesh::RadioSwitchTuning tuning;
@@ -12,12 +15,13 @@ struct TuningRadio : Radio {
   unsigned boot_configurations = 0, attempts = 0, changes = 0, persists = 0;
   TuningRadio() {
     caps.flags = 127;
-    caps.spi_clocks = 0x1e;
+    caps.spi_clocks = 0x1e | mesh::RadioSwitchCapabilities::Spi9;
     tuning.flags = caps.flags;
   }
   mesh::RadioSwitchCapabilities switchTuningCapabilities() const override { return caps; }
   mesh::RadioSwitchTuning switchTuning() const override { return tuning; }
   uint32_t switchSpiHz() const override {
+    if (tuning.spi_mhz == 9) return 8888888;
     return tuning.spi_mhz ? uint32_t(tuning.spi_mhz) * 1000000UL : default_spi_hz;
   }
   bool configureBootSwitchTuning(const mesh::RadioSwitchTuning& value) override {
@@ -105,7 +109,7 @@ static void controlsAndPersistence() {
     f.cmd(command);
     assert(f.radio.tuning.flags & (1U << i));
   }
-  for (unsigned mhz : {2, 4, 8, 16, 0}) {
+  for (unsigned mhz : {2, 4, 8, 9, 16, 0}) {
     char command[48];
     snprintf(command, sizeof(command), "set radio.fast.spi %u", mhz);
     f.cmd(command);
@@ -114,11 +118,15 @@ static void controlsAndPersistence() {
     mesh::RadioProfileCLI restored;
     restored.begin(&f.fs, &reboot, &f.clock);
     assert(reboot.tuning == f.radio.tuning);
-    assert(reboot.switchSpiHz() == (mhz ? mhz * 1000000UL : 8888888));
+    assert(reboot.switchSpiHz() == (mhz == 9 || !mhz ? 8888888 : mhz * 1000000UL));
+    const auto& image = f.fs.files["/radio_fast"];
+    assert(image.size() == 24 && image[0] == 'R' && image[1] == '2' && image[2] == 1);
+    assert(image[3] == f.radio.tuning.flags && image[4] == mhz);
+    for (size_t i = 5; i < 20; ++i) assert(image[i] == 0);
   }
   assert(strstr(f.cmd("get radio.fast"), "8888888"));
   assert(!strcmp(f.cmd("get radio.fast.caps"),
-      "> features: warm fs packet iq modem batch buffer; spi=0,2,4,8,16"));
+      "> features: warm fs packet iq modem batch buffer; spi=0,2,4,8,9,16"));
   f.cmd("set radio.fast off");
   assert(!f.radio.tuning.flags && f.radio.tuning.spi_mhz == 2);
   f.cmd("set radio.fast on");
@@ -143,6 +151,9 @@ static void strictInputsAndUnsupportedFeatures() {
       "set radio.fast.fs", "set radio.fast.fs ON", "set radio.fast.fs on extra",
       "set radio.fast.spi", "set radio.fast.spi -2", "set radio.fast.spi +8",
       "set radio.fast.spi 8mhz", "set radio.fast.spi 3", "set radio.fast.spi 32",
+      "set radio.fast.spi 8.889", "set radio.fast.spi 8.888888", "set radio.fast.spi 9.0",
+      "set radio.fast.spi +9", "set radio.fast.spi -9", "set radio.fast.spi 09",
+      "set radio.fast.spi 9mhz", "set radio.fast.spi 9 0",
       "set radio.fast.spi 256", "set radio.fast.spi 8 16", "set radio.fast.caps on"}) {
     f.cmd(command, false);
     assert(f.radio.tuning == original && f.fs.files.empty());
@@ -161,7 +172,7 @@ static void strictInputsAndUnsupportedFeatures() {
   assert(f.radio.tuning == limited && f.fs.files.empty());
   assert(strstr(f.cmd("get radio.fast.buffer"), "unsupported"));
   assert(!strstr(f.cmd("get radio.fast.caps"), "buffer"));
-  assert(strstr(f.reply, "; spi=0,2,4,8") && !strstr(f.reply, ",16"));
+  assert(strstr(f.reply, "; spi=0,2,4,8,9") && !strstr(f.reply, ",16"));
   f.cmd("set radio.fast off");
   f.cmd("set radio.fast on");
   assert(f.radio.tuning.flags == f.radio.caps.flags);
@@ -175,6 +186,50 @@ static void strictInputsAndUnsupportedFeatures() {
   f.cmd("set radio.fast on");
   assert(f.radio.tuning == no_clock_control);
   puts("Fast tuning: strict parsing and unsupported controls passed");
+}
+
+static void roundedClockRequiresCapabilityAndBootAdmission() {
+  TuningFixture f;
+  // The integer token is deliberately an alias for the real divider rate,
+  // independent of the board default rather than a request for 9000000 Hz.
+  f.radio.default_spi_hz = 8000000;
+  f.cmd("set radio.fast.spi 9");
+  assert(f.radio.tuning.spi_mhz == 9 && f.radio.switchSpiHz() == 8888888);
+  assert(strstr(f.cmd("get radio.fast.spi"), "> 9 (8888888Hz"));
+  assert(strstr(f.cmd("get radio.fast"), "> spi=9 (8888888Hz)"));
+  const auto saved = f.fs.files;
+  TuningRadio reboot;
+  reboot.default_spi_hz = 4000000;
+  mesh::RadioProfileCLI::configureBootTuning(&f.fs, reboot);
+  assert(reboot.tuning.spi_mhz == 9 && reboot.switchSpiHz() == 8888888);
+  assert(reboot.boot_configurations == 1 && !reboot.attempts && !reboot.persists);
+  assert(f.fs.files == saved);
+
+  // nRF/RP controller caps may support 16 MHz while lacking this fractional
+  // divider. Rejection must precede both driver admission and storage writes.
+  f.cmd("set radio.fast.spi 8");
+  f.radio.caps.spi_clocks &= ~mesh::RadioSwitchCapabilities::Spi9;
+  const auto original = f.radio.tuning;
+  const auto committed = f.fs.files;
+  const auto attempts = f.radio.attempts;
+  const auto persists = f.radio.persists;
+  f.cmd("set radio.fast.spi 9", false);
+  assert(f.radio.tuning == original && f.fs.files == committed);
+  assert(f.radio.attempts == attempts && f.radio.persists == persists);
+  assert(!strstr(f.cmd("get radio.fast.caps"), ",9"));
+
+  // A saved 9 from a capable image remains protected when booted on a build
+  // which cannot generate it; it must neither fall back to 9 MHz nor rewrite.
+  f.fs.files = saved;
+  TuningRadio unsupported;
+  unsupported.caps.spi_clocks &= ~mesh::RadioSwitchCapabilities::Spi9;
+  unsupported.default_spi_hz = 8000000;
+  const auto defaults = unsupported.tuning;
+  mesh::RadioProfileCLI::configureBootTuning(&f.fs, unsupported);
+  assert(unsupported.tuning == defaults && unsupported.switchSpiHz() == 8000000);
+  assert(!unsupported.boot_configurations && !unsupported.attempts && !unsupported.persists);
+  assert(f.fs.files == saved);
+  puts("Fast tuning: rounded SPI 9 uses exact divider Hz, persists unchanged and rejects unsupported clocks");
 }
 
 static void localOnlyAndBusyTransactions() {
@@ -391,6 +446,7 @@ static void savedSlowClockPrecedesRadioInitialization() {
 int main() {
   controlsAndPersistence();
   strictInputsAndUnsupportedFeatures();
+  roundedClockRequiresCapabilityAndBootAdmission();
   localOnlyAndBusyTransactions();
   storageFailureKeepsCommittedPolicy();
   bootRecoveryAndDeferredAdmission();

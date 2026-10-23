@@ -19,7 +19,7 @@ class ESP32BufferedRadioHal : public TunableRadioHal {
  public:
   explicit ESP32BufferedRadioHal(SPIClass& bus, uint32_t hz = MC_SX1262_SPI_HZ)
       : TunableRadioHal(bus, hz, false, true,
-                        hz >= 16000000 ? 16000000 : 8000000) {}
+                        hz >= 16000000 ? 16000000 : 8888888) {}
 #if defined(MESH_HIL_ESP_SPI_AB) && MESH_HIL_ESP_SPI_AB
   void spiBeginTransaction() override {
     ArduinoHal::spiBeginTransaction();
