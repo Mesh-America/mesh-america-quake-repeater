@@ -16,7 +16,7 @@ class BatchedModulationTests(unittest.TestCase):
             cpp, exe = Path(folder) / "test.cpp", Path(folder) / "test.exe"
             cpp.write_text(source)
             built = subprocess.run([os.environ.get("CXX", "g++"), "-std=c++17",
-                                    "-Wall", "-Wextra", str(cpp), "-o", str(exe)],
+                                    "-Wall", "-Wextra", "-I", str(ROOT / "src"), str(cpp), "-o", str(exe)],
                                    capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stderr)
             ran = subprocess.run([str(exe)], capture_output=True, text=True)
@@ -27,6 +27,7 @@ class BatchedModulationTests(unittest.TestCase):
                             "int16_t setLoRaModulationParams(")
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
@@ -51,6 +52,7 @@ using std::isfinite;
 #define RADIOLIB_SX126X_LORA_BW_500_0 0x06
 struct Radio {
   SX1262ProfileSwitchState _profileSwitch{true};
+  uint8_t _profileSwitchFeatures=63;
   uint8_t spreadingFactor=9, bandwidth=4, codingRate=3, ldrOptimize=0;
   float bandwidthKhz=125;
   bool ldroAuto=true;
@@ -181,6 +183,7 @@ int main() {
         state = (ROOT / "src/helpers/radiolib/SX1262ProfileSwitchState.h").read_text().replace("#pragma once", "")
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstdint>
 @STATE@
 struct SX1262 {
@@ -193,6 +196,7 @@ struct SX1262 {
 };
 struct Radio: SX1262 {
   SX1262ProfileSwitchState _profileSwitch{true};
+  uint8_t _profileSwitchFeatures=63;
   @METHODS@
 };
 int main() {
@@ -218,13 +222,18 @@ int main() {
 
     def test_wrapper_batches_once_and_preserves_failure_short_circuit(self):
         source = (ROOT / "src/helpers/radiolib/CustomSX1262Wrapper.h").read_text()
-        production = method(source, "bool applyParams(").replace(" override", "")
+        production = "\n".join(method(source, signature).replace(" override", "")
+                               for signature in ("bool applyProfileModulation(", "bool applyParams("))
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstdint>
 #define RADIOLIB_ERR_NONE 0
 struct CustomSX1262 {
-  unsigned freq=0,mod=0,limits=0;int failure=0;
+  unsigned freq=0,mod=0,limits=0,ordinary=0;int failure=0;
+  int setSpreadingFactor(uint8_t sf) { assert(sf==8);++ordinary;return failure==2?-1:0; }
+  int setBandwidth(float bw) { assert(bw==500);++ordinary;return 0; }
+  int setCodingRate(uint8_t cr) { assert(cr==5);++ordinary;return 0; }
   bool profileSwitchFailed() const { return failure==4; }
   int setFrequency(float f) { assert(f==910.5f);++freq;return failure==1?-1:0; }
   int setLoRaModulationParams(float bw,uint8_t sf,uint8_t cr) {
@@ -236,6 +245,8 @@ struct CustomSX1262 {
 struct PacketMillis { uint32_t preambleMillis,payloadMillis; };
 struct Wrapper {
   CustomSX1262 chip;CustomSX1262* _radio=&chip;unsigned preamble=0,calcs=0;
+  uint8_t features=mesh::RadioSwitchTuning::Batch;
+  uint8_t getDriverSwitchFeatures() const { return features; }
   bool updatePreamble(uint8_t sf,float bw) {
     assert(sf==8 && bw==500);++preamble;return chip.failure!=3;
   }
@@ -256,6 +267,10 @@ int main() {
     assert(w.chip.mod==(failure==1?0u:1u));
     assert(w.preamble==((failure==1 || failure==2)?0u:1u));
     assert(w.calcs==(failure?0u:1u) && w.chip.limits==(failure?0u:2u));
+    Wrapper slow;slow.features=0;slow.chip.failure=failure;
+    assert(slow.applyParams(910.5f,500,8,5)==(failure==0));
+    assert(slow.chip.mod==0 && slow.chip.ordinary==(failure==1?0u:failure==2?1u:3u));
+    assert(slow.preamble==((failure==1 || failure==2)?0u:1u));
   }
 }
 '''

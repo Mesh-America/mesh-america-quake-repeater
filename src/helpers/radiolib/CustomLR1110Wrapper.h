@@ -35,6 +35,15 @@ public:
   void setDeepInitCallback(DeepInitCallback callback) { _deep_init = callback; }
 
 protected:
+  uint8_t getDriverSwitchFeatures() const override {
+    return static_cast<const CustomLR1110*>(_radio)->getProfileSwitchFeatures();
+  }
+  uint8_t driverSwitchCapabilities() const override {
+    return static_cast<const CustomLR1110*>(_radio)->profileSwitchCapabilities();
+  }
+  void setDriverSwitchFeatures(uint8_t features) override {
+    static_cast<CustomLR1110*>(_radio)->setProfileSwitchFeatures(features);
+  }
 #if MESH_ENABLE_MESHTEXT_WIRE
   bool applyProtocol(mesh::RadioProfileProtocol protocol) override {
     if (protocol != mesh::RadioProfileProtocol::MeshCore
@@ -97,19 +106,20 @@ public:
   }
 
 protected:
+  bool applyProfileModulation(float bw, uint8_t sf, uint8_t cr) {
+    auto* radio = static_cast<CustomLR1110*>(_radio);
+    if (getDriverSwitchFeatures() & mesh::RadioSwitchTuning::Batch)
+      return radio->setLoRaModulationParams(bw, sf, cr) == RADIOLIB_ERR_NONE;
+    return radio->setSpreadingFactor(sf) == RADIOLIB_ERR_NONE
+        && radio->setBandwidth(bw) == RADIOLIB_ERR_NONE
+        && radio->setCodingRate(cr) == RADIOLIB_ERR_NONE;
+  }
+
   bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     if (static_cast<CustomLR1110*>(_radio)->profileSwitchFailed()) return false;
-#if MC_LR1110_FAST_PROFILE_SWITCH
     bool success = ((CustomLR1110 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE
-        && ((CustomLR1110 *)_radio)->setLoRaModulationParams(bw, sf, cr) == RADIOLIB_ERR_NONE
+        && applyProfileModulation(bw, sf, cr)
         && updatePreamble(sf, bw);
-#else
-    bool success = ((CustomLR1110 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE
-        && ((CustomLR1110 *)_radio)->setSpreadingFactor(sf) == RADIOLIB_ERR_NONE
-        && ((CustomLR1110 *)_radio)->setBandwidth(bw) == RADIOLIB_ERR_NONE
-        && ((CustomLR1110 *)_radio)->setCodingRate(cr) == RADIOLIB_ERR_NONE
-        && updatePreamble(sf, bw);
-#endif
     if (!success) return false;
 
     PacketMillis pm = calcMaxPacketMillis(sf, bw, cr, preambleLengthForParams(sf, bw));

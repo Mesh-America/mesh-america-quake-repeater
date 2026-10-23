@@ -24,6 +24,7 @@ def build_source(family='CustomSX1262',remove_reset=False,include_duty=False):
  source=source.replace('#include <cassert>', '''#include <cassert>
 #include <cstdio>
 #include <RadioProfiles.h>
+#include <helpers/RadioSwitchTuning.h>
 #include <helpers/radiolib/NoiseFloorEstimator.h>
 #include <helpers/radiolib/SX1262ProfileSwitchState.h>
 #include <helpers/radiolib/LR1110ProfileSwitchState.h>
@@ -59,11 +60,14 @@ namespace mesh { enum class RadioParamApplyResult { APPLIED, BUSY, FAILED }; }
 int64_t esp_timer_get_time(){return int64_t(now_ms)*1000;}
 uint32_t profileTimestamp(bool){return now_ms*1000;}
 uint32_t profileElapsedUs(uint32_t a,uint32_t b,bool){return b-a;}''')
+ source=source.replace('struct Board {', 'struct Board { bool prepareRadioProfileCpuClock(bool, bool& changed) {changed=false;return true;}')
  source=source.replace('struct Module {', '''struct Module {
  enum {MODE_RX=1};void setRfSwitchState(int){}''')
  source=source.replace('struct Chip : LR2021 {', '''using SX1262=LR2021;using SX1268=LR2021;using LLCC68=LR2021;using STM32WLx=LR2021;using LR1110=LR2021;using LR1121=LR2021;
 struct Chip : LR2021 {
  SX1262ProfileSwitchState _profileSwitch{true};bool _coldStandby=true;
+ uint8_t _profileSwitchFeatures=63;
+ uint8_t getProfileSwitchFeatures() const { return _profileSwitchFeatures; }
  uint32_t _profileFastResumes=0;
  bool _profilePacketDirty=false;Module* mod=&module;
  int16_t snapshotIrqAfterRxExit(uint32_t* pending){*pending=irq;return snapshot_failure;}

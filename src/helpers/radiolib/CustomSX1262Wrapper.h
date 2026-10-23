@@ -17,6 +17,15 @@ class CustomSX1262Wrapper : public RadioLibWrapper {
   bool _saved_standby_xosc = false;
 
 protected:
+  uint8_t getDriverSwitchFeatures() const override {
+    return static_cast<const CustomSX1262*>(_radio)->getProfileSwitchFeatures();
+  }
+  uint8_t driverSwitchCapabilities() const override {
+    return static_cast<const CustomSX1262*>(_radio)->profileSwitchCapabilities();
+  }
+  void setDriverSwitchFeatures(uint8_t features) override {
+    static_cast<CustomSX1262*>(_radio)->setProfileSwitchFeatures(features);
+  }
   int8_t readReceiveMode() override { return sx126xReceiveMode((SX126x*)_radio); }
   void beginProfileRetune(bool continuousRx) override {
     static_cast<CustomSX1262*>(_radio)->beginProfileSwitch(continuousRx);
@@ -125,13 +134,22 @@ protected:
 #endif
   }
 
+  bool applyProfileModulation(float bw, uint8_t sf, uint8_t cr) {
+    auto* radio = static_cast<CustomSX1262*>(_radio);
+    if (getDriverSwitchFeatures() & mesh::RadioSwitchTuning::Batch)
+      return radio->setLoRaModulationParams(bw, sf, cr) == RADIOLIB_ERR_NONE;
+    return radio->setSpreadingFactor(sf) == RADIOLIB_ERR_NONE
+        && radio->setBandwidth(bw) == RADIOLIB_ERR_NONE
+        && radio->setCodingRate(cr) == RADIOLIB_ERR_NONE;
+  }
+
   bool applyParams(float freq, float bw, uint8_t sf, uint8_t cr) override {
     if (static_cast<CustomSX1262*>(_radio)->profileSwitchFailed()) return false;
 #if MESH_HIL_PROFILE_TIMING
     bool success = ((CustomSX1262 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE;
     mesh::profiletiming::mark(mesh::profiletiming::Frequency, mesh::profiletiming::readClock());
     if (success) {
-      success = ((CustomSX1262 *)_radio)->setLoRaModulationParams(bw, sf, cr) == RADIOLIB_ERR_NONE;
+      success = applyProfileModulation(bw, sf, cr);
       mesh::profiletiming::mark(mesh::profiletiming::Modulation, mesh::profiletiming::readClock());
     }
     if (success) {
@@ -140,7 +158,7 @@ protected:
     }
 #else
     bool success = ((CustomSX1262 *)_radio)->setFrequency(freq) == RADIOLIB_ERR_NONE
-        && ((CustomSX1262 *)_radio)->setLoRaModulationParams(bw, sf, cr) == RADIOLIB_ERR_NONE
+        && applyProfileModulation(bw, sf, cr)
         && updatePreamble(sf, bw);
 #endif
     if (!success) return false;

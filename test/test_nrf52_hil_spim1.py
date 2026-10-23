@@ -185,7 +185,7 @@ int main() {
  assert(SPI1._spim.drv_inst_idx==unsigned(MC_NRF52_HIL_SPIM1_RADIO));
  assert(c_indices()==(MC_NRF52_HIL_SPIM1_RADIO?0x3210u:0x2100u));
  assert(radio.module->hal->spi==&SPI && !radio.module->hal->initInterface);
- assert(radio.module->hal->spiSettings.hz==(MC_NRF52_HIL_SPIM1_RADIO?8000000:2000000));
+ assert(radio.module->hal->spiSettings.hz==8000000);
  assert(radio_init() && SPI.begins==1 && SPI1.begins==0);
  uint8_t tx[]={0x86,1,2,3},rx[4]={};radio.module->hal->spiTransfer(tx,4,rx);
  assert(SPI.bursts==unsigned(MC_NRF52_HIL_SPIM1_RADIO));

@@ -36,6 +36,9 @@ const char* const TempPath = "/radio_profiles.tmp";
 // Never considered a boot-time committed image. Losing power before the
 // acknowledgement leaves the previous saved radio untouched.
 const char* const ReplyPath = "/radio_profiles.reply";
+const char* const FastPath = "/radio_fast";
+const char* const FastBackup = "/radio_fast.bak";
+const char* const FastTemp = "/radio_fast.tmp";
 uint32_t checksum(const uint8_t* p, size_t n) {
   return storage::updateCRC32(0xffffffffU, p, n);
 }
@@ -198,21 +201,176 @@ bool RadioProfileCLI::prepareSavedImage(const char* path, const RadioProfileConf
 }
 
 bool RadioProfileCLI::commitSavedImage(const char* path) {
-  if (!fs_ || hold_) return false;
-  if (fs_->exists(ImagePath)) {
-    if (fs_->exists(BackupPath) && !fs_->remove(BackupPath)) return false;
-    if (!fs_->rename(ImagePath, BackupPath)) return false;
+  return commitImage(path, ImagePath, BackupPath, hold_);
+}
+
+bool RadioProfileCLI::commitImage(const char* path, const char* active,
+                                  const char* backup, bool& hold, bool preserve_backup) {
+  if (!fs_ || hold) return false;
+  if (fs_->exists(active)) {
+    if (preserve_backup) {
+      if (!fs_->remove(active)) return false;
+    } else {
+      if (fs_->exists(backup) && !fs_->remove(backup)) return false;
+      if (!fs_->rename(active, backup)) return false;
+    }
   }
-  if (!fs_->rename(path, ImagePath)) {
-    if (fs_->exists(BackupPath) && !fs_->rename(BackupPath, ImagePath)) hold_ = true;
+  if (!fs_->rename(path, active)) {
+    if (fs_->exists(backup) && !fs_->rename(backup, active)) hold = true;
     return false;
   }
-  if (fs_->exists(BackupPath)) fs_->remove(BackupPath);
+  if (fs_->exists(backup)) fs_->remove(backup);
+  return true;
+}
+
+bool RadioProfileCLI::validFastImage(const uint8_t* bytes, RadioSwitchTuning& value) const {
+  if (bytes[2] != 1) return false;
+  for (size_t n = 5; n < ImageSize - 4; ++n) if (bytes[n]) return false;
+  value.flags = bytes[3]; value.spi_mhz = bytes[4];
+  return radio_ && validRadioSwitchTuning(value, radio_->switchTuningCapabilities());
+}
+
+void RadioProfileCLI::configureBootTuning(FILESYSTEM* fs, Radio& radio) {
+  RadioProfileCLI loader;
+  loader.fs_ = fs; loader.radio_ = &radio;
+  loader.loadFastSettings(true);
+}
+
+__attribute__((noinline)) void RadioProfileCLI::loadFastSettings(bool boot) {
+  fast_pending_ = fast_hold_ = false;
+  if (!fs_ || !radio_) return;
+  uint8_t bytes[ImageSize];
+  const auto primary = readImage(FastPath, bytes, sizeof(bytes));
+  bool loaded = primary == ImageReadResult::Valid && validFastImage(bytes, fast_saved_);
+  if (!loaded) {
+    const auto backup = readImage(FastBackup, bytes, sizeof(bytes));
+    loaded = backup == ImageReadResult::Valid && validFastImage(bytes, fast_saved_);
+    fast_hold_ = primary == ImageReadResult::Unreadable || backup == ImageReadResult::Unreadable;
+    if (loaded && !fast_hold_) {
+      // Publish the known-good backup before accepting further writes. Never
+      // move a corrupt/unsupported primary over this only valid record.
+      fast_hold_ = (fs_->exists(FastPath) && !fs_->remove(FastPath))
+          || !fs_->rename(FastBackup, FastPath);
+    }
+  }
+  if (loaded) {
+    fast_pending_ = boot ? !radio_->configureBootSwitchTuning(fast_saved_)
+        : radio_->trySetSwitchTuning(fast_saved_) != RadioParamApplyResult::APPLIED;
+    fast_retry_ms_ = millis() + 1000;
+  }
+}
+
+bool RadioProfileCLI::saveFastSettings(const RadioSwitchTuning& value) {
+  if (!fs_ || fast_hold_) return false;
+  // A read error must not be interpreted as a missing/corrupt saved policy.
+  uint8_t previous[ImageSize];
+  RadioSwitchTuning decoded;
+  const auto read = readImage(FastPath, previous, sizeof(previous));
+  if (read == ImageReadResult::Unreadable) return false;
+  const bool preserve = read != ImageReadResult::Valid || !validFastImage(previous, decoded);
+  uint8_t image[ImageSize] = {'R', '2', 1, value.flags, value.spi_mhz};
+  const uint32_t crc = checksum(image, ImageSize - 4);
+  memcpy(image + ImageSize - 4, &crc, 4);
+  if (!writeImage(FastTemp, image, sizeof(image))
+      || !commitImage(FastTemp, FastPath, FastBackup, fast_hold_, preserve)) return false;
+  fast_saved_ = value;
+  fast_pending_ = false;
+  return true;
+}
+
+bool RadioProfileCLI::commitFastSettings(void* context, const RadioSwitchTuning& value) {
+  return static_cast<RadioProfileCLI*>(context)->saveFastSettings(value);
+}
+
+__attribute__((noinline)) bool RadioProfileCLI::handleFastSettings(const char* key, const char* args, int verb,
+                                        bool remote, char* reply, size_t capacity) {
+  if (strcmp(key, "radio.fast") && strncmp(key, "radio.fast.", 11)) return false;
+  if (!radio_) { cli::formatError(reply, capacity, "radio tuning unsupported"); return true; }
+  const auto caps = radio_->switchTuningCapabilities();
+  const auto current = radio_->switchTuning();
+  const char* suffix = key + (key[10] ? 11 : 10);
+  static const char names[] = "warm\0fs\0packet\0iq\0modem\0batch\0buffer";
+  const char* name = names;
+  unsigned feature = 0;
+  while (feature < 7 && strcmp(suffix, name)) { name += strlen(name) + 1; ++feature; }
+  const bool master = !*suffix, spi = !strcmp(suffix, "spi");
+  const bool capabilities = !strcmp(suffix, "caps");
+  if (!master && !spi && !capabilities && feature == 7) {
+    cli::formatError(reply, capacity, "unknown radio.fast control"); return true;
+  }
+  const uint8_t bit = feature < 7 ? 1U << feature : 0;
+  if ((spi && !caps.spi_clocks) || (bit && !(caps.flags & bit))
+      || (master && !caps.flags && !caps.spi_clocks)) {
+    cli::formatError(reply, capacity, "radio tuning unsupported"); return true;
+  }
+  if (verb == 0 && !*args) {
+    if (capabilities) {
+      snprintf(reply, capacity, "> features:");
+      name = names;
+      for (unsigned n = 0; n < 7; ++n) {
+        if (caps.flags & (1U << n)) appendReply(reply, capacity, " %s", name);
+        name += strlen(name) + 1;
+      }
+      appendReply(reply, capacity, "; spi=%s", caps.spi_clocks ? "0" : "na");
+      for (unsigned n = 1; n <= 4; ++n)
+        if (caps.spi_clocks & (1U << n)) appendReply(reply, capacity, ",%u", 1U << n);
+    } else if (master) {
+      if (caps.spi_clocks) {
+        snprintf(reply, capacity, "> spi=%u (%luHz)", current.spi_mhz,
+            (unsigned long)radio_->switchSpiHz());
+      } else snprintf(reply, capacity, "> spi=na");
+      if (fast_pending_) appendReply(reply, capacity, " pending saved policy");
+      name = names;
+      for (unsigned n = 0; n < 7; ++n) {
+        appendReply(reply, capacity, " %s=%s", name,
+            !(caps.flags & (1U << n)) ? "na" : current.flags & (1U << n) ? "on" : "off");
+        name += strlen(name) + 1;
+      }
+    } else if (spi) snprintf(reply, capacity, "> %u (%luHz; 0=board default)",
+        current.spi_mhz, (unsigned long)radio_->switchSpiHz());
+    else snprintf(reply, capacity, "> %s", current.flags & bit ? "on" : "off");
+    return true;
+  }
+  if (capabilities) {
+    cli::formatError(reply, capacity, "radio.fast.caps is read-only"); return true;
+  }
+  if (verb != 1 || !*args) {
+    cli::formatError(reply, capacity, "use get/set radio.fast[.control] value"); return true;
+  }
+  if (remote || remote_command_) {
+    cli::formatError(reply, capacity, "radio.fast changes require local USB or BLE"); return true;
+  }
+  if (hasReplyMutation() || fast_hold_) {
+    cli::formatError(reply, capacity, "radio settings held; retry after recovery"); return true;
+  }
+  RadioSwitchTuning next = current;
+  if (spi) {
+    // Keep parsing strict without five separate whole-string comparisons.
+    if (!args[1] && strchr("0248", args[0])) next.spi_mhz = args[0] - '0';
+    else if (!strcmp(args, "16")) next.spi_mhz = 16;
+    else { cli::formatError(reply, capacity, "SPI MHz: 0,2,4,8,16 where supported"); return true; }
+  } else {
+    const bool on = !strcmp(args, "on");
+    if (!on && strcmp(args, "off")) { cli::formatError(reply, capacity, "use on or off"); return true; }
+    if (master) {
+      next.flags = on ? caps.flags : 0;
+      next.spi_mhz = !on && (caps.spi_clocks & 2) ? 2 : 0;
+    } else if (on) next.flags |= bit;
+    else next.flags &= ~bit;
+  }
+  if (!validRadioSwitchTuning(next, caps)) {
+    cli::formatError(reply, capacity, "radio tuning unsupported"); return true;
+  }
+  const auto result = radio_->trySetSwitchTuning(next, commitFastSettings, this);
+  if (result == RadioParamApplyResult::APPLIED) snprintf(reply, capacity, "OK - %s=%s (saved)", key, args);
+  else cli::formatError(reply, capacity, result == RadioParamApplyResult::BUSY
+      ? "radio busy; retry" : "radio tuning could not be applied/saved");
   return true;
 }
 
 void RadioProfileCLI::begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool infrastructure_replies) {
   fs_ = fs; radio_ = radio; rtc_ = rtc; last_ms_ = millis();
+  loadFastSettings();
   hold_ = false;
   cross_ = RadioCrossMode::Off;
   recoverable_corrupt_store_ = false;
@@ -575,8 +733,15 @@ bool RadioProfileCLI::applyReplyMutation() {
 }
 
 void RadioProfileCLI::loop() {
+  const uint32_t now = millis();
+  if (fast_pending_ && radio_ && (int32_t)(now - fast_retry_ms_) >= 0) {
+    // A saved setting may fail RX verification as well as be temporarily busy.
+    // Avoid repeatedly applying and rolling it back at the main-loop rate.
+    fast_pending_ = radio_->trySetSwitchTuning(fast_saved_) != RadioParamApplyResult::APPLIED;
+    fast_retry_ms_ = now + 1000;
+  }
   if (!radio_ || !radio_->profiles()) return;
-  const uint32_t now = millis(), elapsed = now - last_ms_;
+  const uint32_t elapsed = now - last_ms_;
   last_ms_ = now;
   remote_commit_retry_ms_ = elapsed >= remote_commit_retry_ms_ ? 0 : remote_commit_retry_ms_ - elapsed;
   if (remote_delivered_ && !remote_commit_retry_ms_ && !applyReplyMutation()) {
@@ -784,6 +949,7 @@ bool RadioProfileCLI::handle(const char* command, char* reply, size_t capacity, 
   memcpy(key, text, n); key[n] = 0;
   const char* args = text + n;
   while (*args == ' ' || *args == '\t') ++args;
+  if (handleFastSettings(key, args, verb, remote_origin, reply, capacity)) return true;
   enum { Base, Temporary, Scheduled, ScheduledTemporary, Crossing, Replies,
          Status, Scan, Timing, TimingAlias, KeyCount };
   static const char keys[] = "radio2\0tempradio2\0radioat2\0tempradioat2\0radio2.cross\0"

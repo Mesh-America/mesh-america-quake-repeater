@@ -42,7 +42,9 @@ struct SPIClass {
   }
   uint8_t transfer(uint8_t value) { ++bytes; return value ^ 0xa5; }
 };
-struct ArduinoHal {
+struct RadioLibHal { virtual ~RadioLibHal()=default; };
+struct ArduinoHal : RadioLibHal {
+  bool initInterface = false;
   SPIClass* spi;
   SPISettings spiSettings;
   explicit ArduinoHal(SPIClass& bus, SPISettings settings)

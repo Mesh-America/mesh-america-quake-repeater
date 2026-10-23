@@ -52,7 +52,7 @@ class ProfileIqCacheTest(unittest.TestCase):
             sanitizers = [] if os.name == "nt" else [
                 "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"]
             built = subprocess.run([os.environ.get("CXX", "g++"), "-std=c++17",
-                "-Wall", "-Wextra", *sanitizers, str(cpp), "-o", str(binary)],
+                "-Wall", "-Wextra", *sanitizers, "-I", str(ROOT / "src"), str(cpp), "-o", str(binary)],
                 capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True)
@@ -61,7 +61,8 @@ class ProfileIqCacheTest(unittest.TestCase):
     def test_owned_iq_ack_wire_payload_setters_lifecycle_and_errors(self):
         source = (ROOT / "src/helpers/radiolib/CustomSX1262.h").read_text()
         state = (ROOT / "src/helpers/radiolib/SX1262ProfileSwitchState.h").read_text().replace("#pragma once", "")
-        signatures = ("void setProfileSwitchOptimization(", "void beginProfileSwitch(",
+        signatures = ("uint8_t defaultProfileSwitchFeatures(", "uint8_t profileSwitchCapabilities(", "uint8_t getProfileSwitchFeatures(",
+                      "void setProfileSwitchFeatures(", "void setProfileSwitchOptimization(", "void beginProfileSwitch(",
                       "void endProfileSwitch(", "int16_t reset(bool", "int16_t sleep(bool",
                       "int16_t stageMode(", "int16_t setPreambleLength(", "int16_t setCRC(",
                       "int16_t implicitHeader(", "int16_t explicitHeader()", "int16_t invertIQ(",
@@ -71,11 +72,15 @@ class ProfileIqCacheTest(unittest.TestCase):
         methods = "\n".join(method(source, signature).replace(" override", "") for signature in signatures)
         fixture = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstdint>
 #include <cstddef>
 #include <string>
 #include <vector>
 @DEFINES@
+#define MC_SX1262_FAST_PROFILE_SWITCH 1
+#define MC_SX1262_FAST_FS 1
+#define MC_SX1262_FAST_MODEM_CACHE 0
 #define MC_SX1262_FAST_PACKET_CACHE 0
 #define RADIOLIB_ERR_NONE 0
 #define RADIOLIB_SX126X_STANDBY_RC 0
@@ -153,10 +158,12 @@ struct SX1262 {
 struct Radio : SX1262 {
   uint32_t _activityAt=0;bool _headerSeen=false;
   SX1262ProfileSwitchState _profileSwitch{true};
+  uint8_t _profileSwitchFeatures=defaultProfileSwitchFeatures();
   bool _coldStandby=true,_tcxoWakePending=false,_rx_ps_rf_rx_disabled=false;
   uint32_t _profileFastResumes=0;
 #ifdef MC_SX1262_HIL
   bool hilSkipUnchangedPacket=false,hilSkipUnchangedIq=true;
+  bool hilUseFsOnRetune=false,hilSkipConfirmedModemQuery=false;
   uint32_t hilPacketSkips=0,hilIqWorkaroundSkips=0;
 #endif
   @METHODS@
@@ -197,6 +204,11 @@ int main() {
 #endif
     assert(r.startReceive()==0 && r.trace=="CIiPWR");
   }
+  // A runtime IQ opt-out keeps owned RX but forces its checked workaround.
+  { Radio r;prime(r);r.setProfileSwitchFeatures(
+        r.getProfileSwitchFeatures() & ~mesh::RadioSwitchTuning::Iq);
+    r.trace.clear();prime(r);arm(r);
+    assert(r.startReceive()==0 && r.trace=="CIiPWR"); }
   // Owned preamble staging is the intended fast case, unlike an ordinary
   // preamble command. Every ordinary packet/direct-register path revokes IQ.
   { Radio r;prime(r);arm(r);assert(r.setPreambleLength(64)==0 && r.trace.empty());

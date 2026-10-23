@@ -73,6 +73,7 @@ class XiaoNrf52BufferedSpiTests(unittest.TestCase):
 #include <cstdint>
 #include <hal/Arduino/ArduinoHal.h>
 #include "XiaoRadioSpiConfig.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 #define SPI_INTERFACES_COUNT 2
 #define PIN_SPI_MISO 9
 #define PIN_SPI_MOSI 10
@@ -118,7 +119,7 @@ int main() {
   assert(radio.module->hal->spi==&SPI);
   assert(SPI.device->number==(MC_XIAO_NRF52_HIL_FAST_SPI?2:3));
   assert(SPI1.device->number==(MC_XIAO_NRF52_HIL_FAST_SPI?3:2));
-  assert(radio.module->hal->spiSettings.hz==(MC_XIAO_NRF52_HIL_FAST_SPI?8000000:2000000));
+  assert(radio.module->hal->spiSettings.hz==8000000);
   assert(!radio.module->hal->initInterface && SPI.begins==0 && SPI1.begins==0);
   radio.module->hal->init();radio.module->hal->term();
   assert(SPI.begins==0 && SPI.ends==0); // The board still owns bus lifetime.
@@ -187,7 +188,7 @@ int main() {
                 self.assertIn(diagnostic, result.stderr)
 
     def test_default_candidate_has_no_code_or_sdk_dependency_and_recipes_do_not_enable_it(self):
-        result = subprocess.run([os.environ.get("CXX", "g++"), "-E", "-P", "-x", "c++", str(CONFIG)],
+        result = subprocess.run([os.environ.get("CXX", "g++"), "-E", "-P", "-x", "c++", "-I", str(ROOT / "src"), str(CONFIG)],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(result.stdout.strip())

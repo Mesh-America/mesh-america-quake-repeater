@@ -6,6 +6,7 @@
 #include "MeshCore.h"
 #include "RXPowerSaving.h"
 #include "SX1262ProfileSwitchState.h"
+#include <helpers/RadioSwitchTuning.h>
 #include "SX126xMorseRssi.h"
 #include "ESP32RadioTrace.h"
 #if defined(STATION_G3_ESP32)
@@ -67,6 +68,7 @@ class CustomSX1262 : public SX1262 {
   bool _rx_ps_rf_rx_disabled = false;
   uint32_t _rxDutyCycleTransitionUs = 1000;
   SX1262ProfileSwitchState _profileSwitch{MC_SX1262_FAST_PROFILE_SWITCH != 0};
+  uint8_t _profileSwitchFeatures = defaultProfileSwitchFeatures();
   uint32_t _profileFastResumes = 0;
   bool _coldStandby = true;
   bool _tcxoWakePending = false;
@@ -113,9 +115,52 @@ class CustomSX1262 : public SX1262 {
       return status == RADIOLIB_ERR_NONE ? raw * -0.5f : NAN;
     }
 
-    void setProfileSwitchOptimization(bool enabled) {
-      _profileSwitch.enabled = enabled;
+    uint8_t defaultProfileSwitchFeatures() const {
+      return mesh::RadioSwitchTuning::Batch
+          | (MC_SX1262_FAST_PROFILE_SWITCH ? mesh::RadioSwitchTuning::Warm : 0)
+          | (MC_SX1262_FAST_FS ? mesh::RadioSwitchTuning::Fs : 0)
+          | (MC_SX1262_FAST_PACKET_CACHE ? mesh::RadioSwitchTuning::Packet : 0)
+          | (MC_SX1262_FAST_IQ_CACHE ? mesh::RadioSwitchTuning::Iq : 0)
+          | (MC_SX1262_FAST_MODEM_CACHE ? mesh::RadioSwitchTuning::Modem : 0);
+    }
+    uint8_t profileSwitchCapabilities() const {
+      uint8_t features = defaultProfileSwitchFeatures();
+#ifdef MC_SX1262_HIL
+      // Lab images retain their explicit per-shortcut experiments even when a
+      // production macro defaults off. Ordinary builds never gain these caps.
+      if (MC_SX1262_FAST_PROFILE_SWITCH)
+        features |= mesh::RadioSwitchTuning::Fs | mesh::RadioSwitchTuning::Packet
+            | mesh::RadioSwitchTuning::Iq | mesh::RadioSwitchTuning::Modem;
+#endif
+      return features;
+    }
+    uint8_t getProfileSwitchFeatures() const {
+      uint8_t features = _profileSwitchFeatures;
+#ifdef MC_SX1262_HIL
+      // Legacy lab commands directly select these booleans. Reflect them in
+      // the same getter used by the production feature gates and new CLI.
+      features &= ~(mesh::RadioSwitchTuning::Fs | mesh::RadioSwitchTuning::Packet
+          | mesh::RadioSwitchTuning::Iq | mesh::RadioSwitchTuning::Modem);
+      if (hilUseFsOnRetune) features |= mesh::RadioSwitchTuning::Fs;
+      if (hilSkipUnchangedPacket) features |= mesh::RadioSwitchTuning::Packet;
+      if (hilSkipUnchangedIq) features |= mesh::RadioSwitchTuning::Iq;
+      if (hilSkipConfirmedModemQuery) features |= mesh::RadioSwitchTuning::Modem;
+#endif
+      return features & profileSwitchCapabilities();
+    }
+    void setProfileSwitchFeatures(uint8_t features) {
+      _profileSwitchFeatures = features & profileSwitchCapabilities();
+#ifdef MC_SX1262_HIL
+      hilUseFsOnRetune = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Fs) != 0;
+      hilSkipUnchangedPacket = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Packet) != 0;
+      hilSkipUnchangedIq = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Iq) != 0;
+      hilSkipConfirmedModemQuery = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Modem) != 0;
+#endif
+      _profileSwitch.enabled = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Warm) != 0;
       _profileSwitch.invalidate();
+    }
+    void setProfileSwitchOptimization(bool enabled) {
+      setProfileSwitchFeatures(enabled ? profileSwitchCapabilities() : 0);
     }
     void beginProfileSwitch(bool continuousRx) { _profileSwitch.begin(continuousRx, standbyXOSC); }
     void endProfileSwitch(bool success) { _profileSwitch.end(success); }
@@ -160,9 +205,9 @@ class CustomSX1262 : public SX1262 {
       const bool alreadyAwake = !_coldStandby && _profileSwitch.active && _profileSwitch.rxValid;
       if (!alreadyAwake) _profileSwitch.invalidate();
       int16_t rc;
-      bool useFs = MC_SX1262_FAST_FS != 0;
+      bool useFs = (getProfileSwitchFeatures() & mesh::RadioSwitchTuning::Fs) != 0;
 #ifdef MC_SX1262_HIL
-      useFs = hilUseFsOnRetune;
+      useFs = useFs && hilUseFsOnRetune;
 #endif
       if (alreadyAwake && useFs) {
         getMod()->setRfSwitchState(Module::MODE_IDLE);
@@ -327,9 +372,9 @@ class CustomSX1262 : public SX1262 {
       }
       bool queryModem = true;
 #if MC_SX1262_FAST_MODEM_CACHE || defined(MC_SX1262_HIL)
-      bool reuseModem = MC_SX1262_FAST_MODEM_CACHE != 0;
+      bool reuseModem = (getProfileSwitchFeatures() & mesh::RadioSwitchTuning::Modem) != 0;
 #ifdef MC_SX1262_HIL
-      reuseModem = hilSkipConfirmedModemQuery;
+      reuseModem = reuseModem && hilSkipConfirmedModemQuery;
 #endif
       // rxValid is established only after full RX setup confirms LoRa, or by
       // resuming that same owned context. A successful owned standby, warm
@@ -353,7 +398,8 @@ class CustomSX1262 : public SX1262 {
       const uint8_t effectiveLdro = ldroAuto
           ? ((float(uint32_t(1) << sf) / bw) >= 16.0f ? 1 : 0)
           : ldrOptimize;
-      const bool unchanged = _profileSwitch.matchesModulation(
+      const bool unchanged = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Batch)
+          && _profileSwitch.matchesModulation(
           sf, codes[index], cr - 4, effectiveLdro);
       const auto oldSf = spreadingFactor;
       const auto oldBw = bandwidth;
@@ -744,17 +790,17 @@ class CustomSX1262 : public SX1262 {
         // Existing continuous RX already established buffer bases and the
         // MeshCore IRQ map (including preamble detection). No TX/CAD/sleep/
         // reset/staging may intervene without revoking that context.
-        bool skipPacket = MC_SX1262_FAST_PACKET_CACHE != 0;
+        bool skipPacket = (getProfileSwitchFeatures() & mesh::RadioSwitchTuning::Packet) != 0;
 #ifdef MC_SX1262_HIL
-        skipPacket = hilSkipUnchangedPacket;
+        skipPacket = skipPacket && hilSkipUnchangedPacket;
 #endif
         skipPacket = skipPacket && _profileSwitch.matchesPacket(
             preambleLengthLoRa, crcTypeLoRa, implicitLen,
             headerType, invertIQEnabled);
 #if MC_SX1262_FAST_IQ_CACHE || defined(MC_SX1262_HIL)
-        bool reuseIq = MC_SX1262_FAST_IQ_CACHE != 0;
+        bool reuseIq = (getProfileSwitchFeatures() & mesh::RadioSwitchTuning::Iq) != 0;
 #ifdef MC_SX1262_HIL
-        reuseIq = hilSkipUnchangedIq;
+        reuseIq = reuseIq && hilSkipUnchangedIq;
 #endif
         // Capture this capability BEFORE revoking rxValid for the command
         // sequence. Packet/IQ setters, protocol changes, sleep, reset, TX/CAD,

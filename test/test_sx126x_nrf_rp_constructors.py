@@ -1,4 +1,4 @@
-"""Compile actual conservative nRF52 and buffered RP2040 radio constructors."""
+"""Compile actual tunable nRF52 and buffered RP2040 radio constructors."""
 from pathlib import Path
 import os
 import re
@@ -118,7 +118,7 @@ void check() {{
                 fixture+="\nint main() {"+"".join(f"{name}::check();" for name,_ in cases)+"}\n"
                 self.compile_run(arch,fixture)
 
-    def test_all_new_nrf52_spim3_defaults_keep_prior_2mhz_byte_path(self):
+    def test_all_nrf52_spim3_defaults_use_tunable_8mhz_byte_path(self):
         cases=[]
         sources=target_sources({"nrf52_base","rak4631_hw"})
         self.assertEqual(len(sources),32)
@@ -134,12 +134,15 @@ void check() {{
                 self.assertIn("#if MC_NRF52_HIL_SPIM1_RADIO",text)
             else:
                 self.assertNotIn("BufferedRadioHal",text,str(source))
-            constructions=re.findall(r"^RADIO_CLASS radio = new Module\(P_LORA_NSS[^;]+;",text,re.MULTILINE)
+            constructions=re.findall(r"^static TunableRadioHal radio_hal\(([^;]+)\);\n"
+                                    r"(RADIO_CLASS radio = new Module\(&radio_hal,[^;]+;)",
+                                    text,re.MULTILINE)
             fallback=source.parent.name in {"heltec_t096","heltec_t1","heltec_t114"}
             self.assertEqual(len(constructions),2 if fallback else 1,str(source))
-            for ordinal,construction in enumerate(constructions):
+            for ordinal,(arguments,module) in enumerate(constructions):
                 owns=fallback and ordinal==1
-                self.assertEqual(construction.endswith(", SPI);"),not owns,str(source))
+                self.assertEqual(arguments, "SPI, 8000000, true" if owns else "SPI",str(source))
+                construction=f"static TunableRadioHal radio_hal({arguments});\n{module}"
                 name=f"case_{len(cases)}"
                 cases.append((name,f'''
 namespace {name} {{
@@ -147,8 +150,9 @@ SPIClass SPI;
 struct BindDefaultBus {{ BindDefaultBus() {{testDefaultBus=&SPI;}} }} bindDefaultBus;
 {construction}
 void check() {{
-  assert(radio.mod->owned && radio.mod->hal->spi==&SPI);
-  assert(radio.mod->hal->spiSettings.hz==2000000);
+  assert(!radio.mod->owned && radio.mod->hal==&radio_hal && radio.mod->hal->spi==&SPI);
+  assert(radio.mod->hal->spiSettings.hz==8000000);
+  assert(radio_hal.capabilities().flags==0 && radio_hal.capabilities().spi_clocks==(2|4|8));
   assert(radio.mod->hal->initInterface=={str(owns).lower()});
   radio.mod->hal->init();radio.mod->hal->term();
   assert(SPI.begins=={int(owns)} && SPI.ends=={int(owns)});
@@ -163,15 +167,17 @@ void check() {{
         fixture+="\nint main() {"+"".join(f"{name}::check();" for name,_ in cases)+"}\n"
         self.compile_run("NRF52_PLATFORM",fixture)
 
-    def test_muzi_uno_and_lr1121_duo_keep_prior_constructor(self):
+    def test_muzi_uno_and_lr1121_duo_keep_bus_and_gain_tunable_byte_clock(self):
         text=(ROOT/"variants/muzi_base/target.cpp").read_text()
-        constructor=re.search(r"^RADIO_CLASS radio = new Module\(P_LORA_NSS[^;]+;",text,re.MULTILINE)
+        constructor=re.search(r"^static TunableRadioHal radio_hal\([^;]+;\n"
+                              r"RADIO_CLASS radio = new Module\(&radio_hal,[^;]+;",text,re.MULTILINE)
         self.assertIsNotNone(constructor)
         self.assertNotIn("BufferedRadioHal",text)
         fixture=PREFIX+"\nSPIClass SPI;\n"+constructor.group(0)+r'''
 int main() {
   assert(radio.mod->hal->spi==&SPI);
-  assert(radio.mod->owned && radio.mod->hal->spiSettings.hz==2000000);
+  assert(!radio.mod->owned && radio.mod->hal->spiSettings.hz==8000000);
+  assert(TunableRadioHal::find(radio.mod->hal)==&radio_hal);
 }
 '''
         for definitions in ((),("USE_SX1262",)):
@@ -180,7 +186,8 @@ int main() {
 
     def test_lr1110_m4_keeps_manual_spi_start_and_prior_2mhz_byte_path(self):
         text=(ROOT/"variants/thinknode_m4/target.cpp").read_text()
-        construction=re.search(r"^RADIO_CLASS radio = new Module\(P_LORA_NSS[^;]+;",text,re.MULTILINE)
+        construction=re.search(r"^static TunableRadioHal radio_hal\([^;]+;\n"
+                               r"RADIO_CLASS radio = new Module\(&radio_hal,[^;]+;",text,re.MULTILINE)
         self.assertIsNotNone(construction)
         self.assertNotIn("BufferedRadioHal",text)
         self.assertIn("SPI.setPins(P_LORA_MISO, P_LORA_SCLK, P_LORA_MOSI);",text)
@@ -188,7 +195,7 @@ int main() {
         self.assertIn("int status = radio.begin(",text)
         fixture=PREFIX+"\nSPIClass SPI;\n"+construction.group(0)+r'''
 int main() {
-  assert(radio.mod->owned && radio.mod->hal->spi==&SPI);
+  assert(!radio.mod->owned && radio.mod->hal==&radio_hal && radio.mod->hal->spi==&SPI);
   assert(radio.mod->hal->spiSettings.hz==2000000 && !radio.mod->hal->initInterface);
   radio.mod->hal->init();radio.mod->hal->term();
   assert(SPI.begins==0 && SPI.ends==0);

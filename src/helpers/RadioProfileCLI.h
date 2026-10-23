@@ -56,6 +56,9 @@ class RadioProfileCLI {
   // readable backup. Read/I/O failures and an intact backup remain read-only.
   bool recoverable_corrupt_store_ = false;
   bool publish_pending_ = false;
+  RadioSwitchTuning fast_saved_;
+  uint32_t fast_retry_ms_ = 0;
+  bool fast_pending_ = false, fast_hold_ = false;
   enum class ImageReadResult : uint8_t { Missing, Valid, Invalid, Unreadable };
   enum class RemoteMutation : uint8_t {
     None, Saved, Temporary, Off, TempOff, DeleteTemp
@@ -83,6 +86,14 @@ class RadioProfileCLI {
   bool prepareSavedImage(const char* path, const RadioProfileConfig& config,
                          uint16_t preamble, RadioCrossMode cross, int8_t manual_secondary = -1);
   bool commitSavedImage(const char* path);
+  bool commitImage(const char* staged, const char* active, const char* backup,
+                   bool& hold, bool preserve_backup = false);
+  bool validFastImage(const uint8_t* bytes, RadioSwitchTuning& value) const;
+  void loadFastSettings(bool boot = false);
+  bool saveFastSettings(const RadioSwitchTuning& value);
+  static bool commitFastSettings(void* context, const RadioSwitchTuning& value);
+  bool handleFastSettings(const char* key, const char* args, int verb,
+                          bool remote, char* reply, size_t capacity);
   bool discardCorruptSavedImagesForWrite();
   bool applyReplyMutation();
   ImageReadResult readImage(const char* path, uint8_t* bytes, size_t size);
@@ -96,6 +107,8 @@ class RadioProfileCLI {
                     const Schedule* schedule = nullptr) const;
   void appendSecondaryWarnings(char* reply, size_t capacity, const RadioProfiles& preview) const;
  public:
+  // Call after the settings filesystem mounts and before radio_init().
+  static void configureBootTuning(FILESYSTEM* fs, Radio& radio);
   void begin(FILESYSTEM* fs, Radio* radio, RTCClock* rtc, bool infrastructure_replies = false);
   void loop();
   bool handle(const char* command, char* reply, size_t capacity = 160, bool remote_origin = false);

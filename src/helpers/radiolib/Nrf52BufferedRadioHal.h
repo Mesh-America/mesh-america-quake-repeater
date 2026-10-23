@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hal/Arduino/ArduinoHal.h>
+#include "TunableRadioHal.h"
 #include "NrfRadioProfileExperimentConfig.h"
 
 #ifndef MC_NRF_RADIO_PROFILE_PRIORITY
@@ -26,13 +26,14 @@
 // nRF52840 SPIClass::transfer(uint8_t) starts one SPIM transaction per byte.
 // RadioLib sends whole command buffers; keep its CS, BUSY, and status handling
 // but transfer each buffer in one SPIM transaction. LR1110 supports 16 MHz SPI.
-class Nrf52BufferedRadioHal : public ArduinoHal {
+class Nrf52BufferedRadioHal : public TunableRadioHal {
 #if MC_NRF_RADIO_BUSY_SPIN_POLLS > 0
   uint8_t _busy_spin_polls_remaining = 0;
 #endif
 public:
   explicit Nrf52BufferedRadioHal(SPIClass& bus, uint32_t hz = 16000000)
-      : ArduinoHal(bus, SPISettings(hz, MSBFIRST, SPI_MODE0)) {}
+      : TunableRadioHal(bus, hz, false, true,
+                        hz >= 16000000 ? 16000000 : 8000000) {}
 
 #if MC_NRF_RADIO_PROFILE_PRIORITY || MC_NRF_RADIO_PROFILE_USB_IRQ_GUARD
   void spiBeginTransaction() override {
@@ -50,7 +51,8 @@ public:
 
   void spiTransfer(uint8_t* out, size_t len, uint8_t* in) override {
     if (!len) return;
-    spi->transfer(out, in, len);
+    if (!bufferedTransfersEnabled()) ArduinoHal::spiTransfer(out, len, in);
+    else spi->transfer(out, in, len);
 #if MC_NRF_RADIO_BUSY_SPIN_POLLS > 0
     _busy_spin_polls_remaining = MC_NRF_RADIO_BUSY_SPIN_POLLS;
 #endif

@@ -15,17 +15,23 @@ class ModemCacheTests(unittest.TestCase):
     def test_confirmed_modem_requires_owned_warm_rx_and_survives_no_failure(self):
         source = (ROOT / "src/helpers/radiolib/CustomSX1262.h").read_text()
         state = (ROOT / "src/helpers/radiolib/SX1262ProfileSwitchState.h").read_text().replace("#pragma once", "")
-        signatures = ("void invalidateMorseModemCache(", "void setProfileSwitchOptimization(",
+        signatures = ("uint8_t defaultProfileSwitchFeatures(", "uint8_t profileSwitchCapabilities(", "uint8_t getProfileSwitchFeatures(",
+                      "void setProfileSwitchFeatures(", "void invalidateMorseModemCache(", "void setProfileSwitchOptimization(",
                       "int16_t begin(const ConfigLoRa_t&", "int16_t beginFSK(const ConfigFSK_t&",
                       "int16_t beginLRFHSS(const ConfigLRFHSS_t&", "int16_t setModem(",
                       "int16_t setLoRaModulationParams(")
         production = "\n".join(method(source, signature).replace(" override", "") for signature in signatures)
         fixture = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
 @DEFINES@
+#define MC_SX1262_FAST_PROFILE_SWITCH 1
+#define MC_SX1262_FAST_FS 1
+#define MC_SX1262_FAST_PACKET_CACHE 1
+#define MC_SX1262_FAST_IQ_CACHE 1
 @STATE@
 using std::isfinite;
 #define RADIOLIB_ERR_NONE 0
@@ -67,6 +73,7 @@ struct SX1262 {
 };
 struct Radio : SX1262 {
   SX1262ProfileSwitchState _profileSwitch{true};
+  uint8_t _profileSwitchFeatures=defaultProfileSwitchFeatures();
   bool _coldStandby = false, _tcxoWakePending = true;
   uint8_t spreadingFactor = 9, bandwidth = 4, codingRate = 3, ldrOptimize = 0;
   float bandwidthKhz = 125;
@@ -76,6 +83,7 @@ struct Radio : SX1262 {
   int16_t writeResult = 0;
 #ifdef MC_SX1262_HIL
   bool hilSkipConfirmedModemQuery = false;
+  bool hilUseFsOnRetune=false,hilSkipUnchangedPacket=false,hilSkipUnchangedIq=false;
   uint32_t hilModemQuerySkips = 0;
 #endif
   using SX1262::beginFSK;
@@ -91,19 +99,11 @@ struct Radio : SX1262 {
   @PRODUCTION@
 };
 bool skipsModem(const Radio& r) {
-#ifdef MC_SX1262_HIL
-  return r.hilSkipConfirmedModemQuery;
-#else
-  (void)r;
-  return MC_SX1262_FAST_MODEM_CACHE != 0;
-#endif
+  return (r.getProfileSwitchFeatures() & mesh::RadioSwitchTuning::Modem) != 0;
 }
 void selectCache(Radio& r, bool enabled) {
-#ifdef MC_SX1262_HIL
-  r.hilSkipConfirmedModemQuery = enabled;
-#else
-  (void)r; (void)enabled;
-#endif
+  const auto flags=r.getProfileSwitchFeatures() & ~mesh::RadioSwitchTuning::Modem;
+  r.setProfileSwitchFeatures(flags | (enabled ? mesh::RadioSwitchTuning::Modem : 0));
 }
 void prime(Radio& r) {
   // Models the full RX path's successful live LoRa confirmation. The ordinary
@@ -126,7 +126,7 @@ int main() {
     assert(r.setLoRaModulationParams(500, 8, 5) == 0 && r.writes == 2);
     assert(r.queries == (skipsModem(r) ? 1U : 3U));
 #ifdef MC_SX1262_HIL
-    assert(r.hilModemQuerySkips == (requested ? 2U : 0U));
+    assert(r.hilModemQuerySkips == (skipsModem(r) ? 2U : 0U));
 #endif
     // Every ownership gate independently restores the live query.
     for (int gate = 0; gate < 9; ++gate) {

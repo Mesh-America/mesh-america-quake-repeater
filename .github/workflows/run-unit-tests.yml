@@ -233,6 +233,9 @@ jobs:
           python3 -B test/test_management_feature_gate.py -v
           python3 -B test/test_carrier_wave.py -v
           python3 -B test/test_radio_profile_cli.py -v
+          python3 -B test/test_radio_switch_tuning_cli.py -v
+          python3 -B test/test_radio_switch_tuning_transaction.py -v
+          python3 -B test/test_radio_switch_driver_controls.py -v
           python3 -B test/test_ed25519_compact_scalar.py -v
           python3 -B test/test_ed25519_compact_field.py -v
           python3 -B test/test_ed25519_compact.py -v

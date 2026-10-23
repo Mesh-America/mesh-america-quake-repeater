@@ -1,11 +1,13 @@
 #include <Arduino.h>
 #include <nrf_gpio.h>
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 #include "variant.h"
 
 MuziBaseBoard board;
 
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+static TunableRadioHal radio_hal(SPI);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);
 

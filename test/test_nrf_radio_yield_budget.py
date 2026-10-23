@@ -23,7 +23,7 @@ int main() {
   ArduinoHal& radio=concrete;
   constexpr unsigned budget=MC_NRF_RADIO_BUSY_SPIN_POLLS;
 #if MC_NRF_RADIO_BUSY_SPIN_POLLS == 0
-  static_assert(sizeof(Nrf52BufferedRadioHal)==sizeof(ArduinoHal),"default RAM growth");
+  static_assert(sizeof(Nrf52BufferedRadioHal)==sizeof(TunableRadioHal),"default RAM growth");
 #endif
   // The first pre-transfer wait delegates immediately, even in opt-in builds.
   for(unsigned i=0;i<1000;++i) radio.yield();

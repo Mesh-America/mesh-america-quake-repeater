@@ -88,7 +88,7 @@ struct Radio {
                 clock = 8888888 if target == "lilygo_tdeck" else 8000000
                 buffered = local or target not in LEGACY_FALLBACKS
                 expected = (4000000 if local else 2000000) if target == "heltec_rc32" else (
-                    clock if buffered else 2000000)
+                    clock)
                 selected = "spi" if local else "::SPI"
                 name = f"target_{index}_{int(local)}"
                 options = f"#define P_LORA_SCLK 5\n" if local else ""

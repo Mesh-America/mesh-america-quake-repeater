@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 #include <helpers/radiolib/ESP32BufferedRadioHal.h>
 
 XiaoS3WIOBoard board;
@@ -9,7 +10,8 @@ XiaoS3WIOBoard board;
   static ESP32BufferedRadioHal radio_hal(spi);
   RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #else
-  RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
+  static TunableRadioHal radio_hal(SPI, MC_SX1262_SPI_HZ, true);
+  RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #endif
 
 WRAPPER_CLASS radio_driver(radio, board);

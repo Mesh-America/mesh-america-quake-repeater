@@ -19,6 +19,7 @@ class ProtocolBatchingTests(unittest.TestCase):
             "int16_t setProfileProtocol(", "int16_t startReceive()"))
         harness = r'''
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstdint>
 #include <cstddef>
 #include <string>
@@ -86,6 +87,8 @@ struct SX1262 {
 struct Radio: SX1262 {
   uint32_t _activityAt=0;bool _headerSeen=false;
   SX1262ProfileSwitchState _profileSwitch{true};
+  uint8_t _profileSwitchFeatures=63;
+  uint8_t getProfileSwitchFeatures() const { return _profileSwitchFeatures; }
   bool _coldStandby=false;uint32_t _profileFastResumes=0;
   @METHODS@
 };

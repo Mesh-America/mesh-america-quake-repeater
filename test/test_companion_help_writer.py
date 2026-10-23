@@ -35,6 +35,9 @@ PROFILES = {
 # suffix. Non-RAK call hashes bind print/println order as well as all text bytes.
 GOLDEN = {'rak_full': {'text': '9a68ce5a10905a201c3bddeb19f4819ce03c6dcaff248cff9c140803b70b14a7', 'calls': '56ed09dee7d53881b2c9fcf3f4ec9b6223e1562ce63e110a065e46706702b53b'}, 'nrf_full': {'text': 'b114ac12ae2ea01b7c47609b72f7eafb616c1dbeb7fb796a95b1377465fd9105', 'calls': '4973a7f21887d07b129cce4ae4cc8145f3f35e664bae09be658957210440d52e'}, 'nrf_minimal': {'text': '15fa8f290cd8c75cfde2fd2ac1cb5b5151a6755c68448fb2793dde3f27669033', 'calls': '6063fd1a699f9c0b588252bd8ce5922e0ff31cec6bbd24522789284ab2a37644'}, 'esp_full': {'text': '1e3b6781c81b5603f7092108e5e309543c60cef8ff4d7cb41a891f67396f716f', 'calls': 'b6335df2bd05b9cab44a7933469b76c5b2611c4b81057436a959feaf3bfbaf60'}}
 
+FAST_HELP = (b'  get radio.fast / get radio.fast.caps (supported saved controls)\r\n'
+             b'  set radio.fast <on|off> / set radio.fast.spi <0|2|4|8|16>\r\n')
+
 HARNESS = r'''
 #include "CompanionHelpWriter.h"
 #include <algorithm>
@@ -198,9 +201,14 @@ class CompanionHelpWriterTests(unittest.TestCase):
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
                 result = subprocess.run([str(work/'test')],capture_output=True)
                 self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
-                self.assertEqual(hashlib.sha256(result.stdout).hexdigest(),GOLDEN[name]['text'])
+                self.assertEqual(result.stdout.count(FAST_HELP), 1)
+                previous_help = result.stdout.replace(FAST_HELP, b'')
+                self.assertEqual(hashlib.sha256(previous_help).hexdigest(),GOLDEN[name]['text'])
                 if name != 'rak_full':
-                    self.assertEqual(hashlib.sha256(result.stderr).hexdigest(),GOLDEN[name]['calls'])
+                    fast_call = b'P' + len(FAST_HELP).to_bytes(4, 'little') + FAST_HELP
+                    self.assertEqual(result.stderr.count(fast_call), 1)
+                    previous_calls = result.stderr.replace(fast_call, b'')
+                    self.assertEqual(hashlib.sha256(previous_calls).hexdigest(),GOLDEN[name]['calls'])
                 else:
                     image = (work / 'test').read_bytes()
                     self.assertNotIn(b'Commands:\r\n  stats-core / stats-radio / stats-radio-diag',image)
@@ -228,7 +236,8 @@ class CompanionHelpWriterTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             result=subprocess.run([str(work/'test')],capture_output=True)
             self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
-            self.assertEqual(hashlib.sha256(result.stdout).hexdigest(),GOLDEN['rak_full']['text'])
+            self.assertEqual(result.stdout.count(FAST_HELP), 1)
+            self.assertEqual(hashlib.sha256(result.stdout.replace(FAST_HELP, b'')).hexdigest(),GOLDEN['rak_full']['text'])
             self.assertNotIn(b'Commands:\r\n  stats-core / stats-radio / stats-radio-diag',(work/'test').read_bytes())
 
 if __name__ == '__main__':

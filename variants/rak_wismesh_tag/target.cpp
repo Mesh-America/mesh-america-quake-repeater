@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "target.h"
+#include <helpers/radiolib/TunableRadioHal.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/nrf52/Nrf52HilSpim1Owner.h>
 #if MC_NRF52_HIL_SPIM1_RADIO
@@ -21,7 +22,8 @@ RAKWismeshTagBoard board;
 static Nrf52BufferedRadioHal radioHal(SPI, 8000000);
 RADIO_CLASS radio = new Module(&radioHal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #else
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+static TunableRadioHal radio_hal(SPI);
+RADIO_CLASS radio = new Module(&radio_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 #endif
 
 WRAPPER_CLASS radio_driver(radio, board);

@@ -5,6 +5,7 @@
 #include <Packet.h>
 #include <Utils.h>
 #include <RadioProfiles.h>
+#include <helpers/RadioSwitchTuning.h>
 #include <helpers/MeshtextConfig.h>
 #include <helpers/MorseTx.h>
 #include <helpers/MorseRx.h>
@@ -98,6 +99,16 @@ public:
   virtual void begin() { }
   virtual RadioProfiles* profiles() { return nullptr; }
   virtual const RadioProfiles* profiles() const { return nullptr; }
+  virtual RadioSwitchCapabilities switchTuningCapabilities() const { return {}; }
+  virtual RadioSwitchTuning switchTuning() const { return {}; }
+  virtual uint32_t switchSpiHz() const { return 0; }
+  virtual bool configureBootSwitchTuning(const RadioSwitchTuning&) { return false; }
+  // Commit only after admission and verified RX restoration. The callback
+  // must not access the radio; a failed save restores the previous policy.
+  virtual RadioParamApplyResult trySetSwitchTuning(const RadioSwitchTuning&,
+      bool (*)(void*, const RadioSwitchTuning&) = nullptr, void* = nullptr) {
+    return RadioParamApplyResult::FAILED;
+  }
   virtual bool validateProfile(const RadioProfileParams&) const { return false; }
   virtual bool supportsMeshtext() const { return false; }
   virtual bool supportsEthernetTunnel() const { return false; }

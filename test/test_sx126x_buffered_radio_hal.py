@@ -41,7 +41,8 @@ struct SPIClass {
 #endif
   uint8_t transfer(uint8_t value) { ++bytes; return value^0xa5; }
 };
-struct ArduinoHal {
+struct RadioLibHal { virtual ~RadioLibHal()=default; };
+struct ArduinoHal : RadioLibHal {
   SPIClass* spi; SPISettings spiSettings; bool initInterface=false;
   explicit ArduinoHal(SPIClass& bus,SPISettings settings)
       : spi(&bus),spiSettings(settings) {}
@@ -92,6 +93,63 @@ int main() {
   hal.spiTransfer(nullptr,0,nullptr);
   assert(explicitBus.bursts==before && explicitBus.bytes==0);
   assert(unused.bursts==0 && fallbackBus.bursts==0);
+
+  using Tuning=mesh::RadioSwitchTuning;
+  assert(TunableRadioHal::find(&hal)==&external);
+  assert(external.defaultHz()==MC_SX1262_SPI_HZ);
+  assert(external.effectiveHz()==MC_SX1262_SPI_HZ);
+  assert(external.getTuning().spi_mhz==0);
+  assert(external.getTuning().flags==Tuning::Buffer);
+  assert(external.capabilities().flags==Tuning::Buffer);
+  assert(external.capabilities().spi_clocks==(2|4|8));
+  // Disable bulk transfers without changing the controller, bus lifetime or
+  // packet response. Driver-owned feature bits are handled by the wrapper.
+  Tuning tuning;
+  tuning.flags=Tuning::Warm;
+  tuning.spi_mhz=2;
+  assert(external.setTuning(tuning));
+  assert(external.getTuning().flags==0 && external.effectiveHz()==2000000);
+  assert(external.spiSettings.hz==2000000 && hal.spi==&explicitBus);
+  const unsigned bytes=explicitBus.bytes;
+  rx.fill(0x77);
+  hal.spiTransfer(tx.data(),7,rx.data());
+  assert(explicitBus.bursts==before && explicitBus.bytes==bytes+7);
+  for (unsigned i=0;i<7;++i) assert(rx[i]==uint8_t(tx[i]^0xa5));
+  for (unsigned i=7;i<rx.size();++i) assert(rx[i]==0x77);
+  for (uint8_t clock : {uint8_t(4),uint8_t(8)}) {
+    tuning.spi_mhz=clock;
+    assert(external.setTuning(tuning));
+    assert(external.effectiveHz()==unsigned(clock)*1000000);
+    assert(external.spiSettings.hz==external.effectiveHz());
+  }
+  const Tuning previous=external.getTuning();
+  for (uint8_t clock : {uint8_t(1),uint8_t(3),uint8_t(16),uint8_t(255)}) {
+    tuning.spi_mhz=clock;
+    assert(!external.setTuning(tuning) && external.getTuning()==previous);
+  }
+  tuning.spi_mhz=0;
+  tuning.flags=Tuning::Buffer;
+  assert(external.setTuning(tuning));
+  assert(external.effectiveHz()==MC_SX1262_SPI_HZ);
+  assert(external.spiSettings.hz==MC_SX1262_SPI_HZ);
+  hal.spiTransfer(tx.data(),7,rx.data());
+  assert(explicitBus.bursts==before+1 && explicitBus.bytes==bytes+7);
+  assert(explicitBus.begins==1 && explicitBus.ends==1);
+
+  // The plain nRF SPIM3 byte route exposes clock selection but never admits
+  // the buffered path that needs a separately qualified controller mapping.
+  {
+    TunableRadioHal byteHal(unused);
+    assert(TunableRadioHal::find(&byteHal)==&byteHal);
+    assert(byteHal.capabilities().flags==0 && byteHal.defaultHz()==8000000);
+    assert(!byteHal.setTuning(tuning));
+    tuning.flags=0;tuning.spi_mhz=2;
+    assert(byteHal.setTuning(tuning) && byteHal.spiSettings.hz==2000000);
+  }
+  ArduinoHal foreign(unused,SPISettings(2000000,MSBFIRST,SPI_MODE0));
+  assert(TunableRadioHal::find(&foreign)==nullptr);
+  assert(TunableRadioHal::find(nullptr)==nullptr);
+  assert(TunableRadioHal::find(&external)==&external);
 }
 '''
 
@@ -101,12 +159,15 @@ class SX126xBufferedRadioHalTests(unittest.TestCase):
         compiler=shutil.which(os.environ.get("CXX","g++"))
         self.assertIsNotNone(compiler)
         headers={name:(RADIO/name).read_text(encoding="ascii") for name in (
-            "SX126xBufferedRadioHal.h","Nrf52BufferedRadioHal.h","ESP32BufferedRadioHal.h")}
+            "SX126xBufferedRadioHal.h","Nrf52BufferedRadioHal.h","ESP32BufferedRadioHal.h",
+            "TunableRadioHal.h")}
         with tempfile.TemporaryDirectory(prefix="sx126x-buffered-radio-") as folder:
             base=Path(folder)
             (base/"hal/Arduino").mkdir(parents=True)
             (base/"helpers/radiolib").mkdir(parents=True)
             (base/"hal/Arduino/ArduinoHal.h").write_text(MOCK,encoding="ascii")
+            (base/"helpers/RadioSwitchTuning.h").write_text(
+                (ROOT/"src/helpers/RadioSwitchTuning.h").read_text(),encoding="ascii")
             cpp,executable=base/"test.cpp",base/"test"
             cpp.write_text(FIXTURE,encoding="ascii")
             for arch,header in (("NRF52_PLATFORM","Nrf52BufferedRadioHal.h"),
@@ -125,7 +186,7 @@ class SX126xBufferedRadioHalTests(unittest.TestCase):
                                     implementation if file==header else content,encoding="ascii")
                             built=subprocess.run([compiler,"-std=c++17","-Wall","-Wextra",
                                 "-Werror",f"-D{arch}",f"-DMC_SX1262_SPI_HZ={clock}",
-                                "-I",str(base),str(cpp),"-o",str(executable)],
+                                "-I",str(base),"-I",str(ROOT/"src"),"-I",str(RADIO),str(cpp),"-o",str(executable)],
                                 capture_output=True,text=True,timeout=60)
                             self.assertEqual(built.returncode,0,built.stdout+built.stderr)
                             ran=subprocess.run([str(executable)],capture_output=True,

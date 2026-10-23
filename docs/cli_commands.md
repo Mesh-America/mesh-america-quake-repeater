@@ -1653,6 +1653,31 @@ capacity. Remote use follows the existing administrator-command permissions.
 
 ### Radio
 
+#### Tune and save radio switching acceleration
+
+Use local USB or BLE to change these settings on supported SX1262 and LR1110
+radios. Supported acceleration features default to on, including on boards
+awaiting hardware qualification. `get radio.fast.caps` lists the options the
+current radio and SPI bus actually support.
+
+| Command | Purpose |
+| --- | --- |
+| `get radio.fast` | Read feature selections, actual SPI clock and any pending saved policy |
+| `get radio.fast.caps` | List supported feature names and SPI MHz values |
+| `get radio.fast.<feature>` | Read an individual feature |
+| `set radio.fast.<feature> on\|off` | Save one feature selection: `warm`, `fs`, `packet`, `iq`, `modem`, `batch`, or `buffer` |
+| `get radio.fast.spi` | Read the selected MHz and actual clock in Hz |
+| `set radio.fast.spi 0\|2\|4\|8\|16` | Save a supported SPI MHz choice; `0` restores the board default |
+| `set radio.fast off` | Disable supported acceleration features and use 2 MHz where available |
+| `set radio.fast on` | Enable supported features and restore the board default SPI clock |
+
+The change applies safely without reboot and survives firmware updates. A busy
+radio or failed apply/save leaves the previous policy in use. Remote LoRa
+mutations and unsupported choices are rejected. Both radio profiles share the
+settings. Changing them restarts the switching timing test; inspect
+`get radio2.timing` after it completes. See [saved switching controls](radio_profiles.md#saved-switching-controls)
+for what each feature does, hardware limits, and default/fallback behavior.
+
 #### Select MCU and LoRa regulator modes
 
 ```text

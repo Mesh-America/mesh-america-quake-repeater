@@ -6,6 +6,7 @@
 #include "RXPowerSaving.h"
 #include "LR1110RxRecovery.h"
 #include "LR1110ProfileSwitchState.h"
+#include <helpers/RadioSwitchTuning.h>
 #include "LR11x0MorseRfSwitch.h"
 #include "../MorseRx.h"
 
@@ -29,6 +30,7 @@ class CustomLR1110 : public LR1110 {
   bool _headerSeen = false;
   bool _rx_boosted = false;
   LR1110ProfileSwitchState _profileSwitch{MC_LR1110_FAST_PROFILE_SWITCH != 0};
+  uint8_t _profileSwitchFeatures = profileSwitchCapabilities();
   bool _profileStandbyWarm = false;
   bool _profilePacketDirty = false;
   uint32_t _profileFastResumes = 0;
@@ -74,10 +76,22 @@ class CustomLR1110 : public LR1110 {
       return _regulator.finishInitialization(status);
     }
 
-    void setProfileSwitchOptimization(bool enabled) {
-      _profileSwitch.enabled = enabled;
+    uint8_t profileSwitchCapabilities() const {
+      return MC_LR1110_FAST_PROFILE_SWITCH
+          ? mesh::RadioSwitchTuning::Warm | mesh::RadioSwitchTuning::Fs
+              | mesh::RadioSwitchTuning::Packet | mesh::RadioSwitchTuning::Modem
+              | mesh::RadioSwitchTuning::Batch
+          : 0;
+    }
+    uint8_t getProfileSwitchFeatures() const { return _profileSwitchFeatures; }
+    void setProfileSwitchFeatures(uint8_t features) {
+      _profileSwitchFeatures = features & profileSwitchCapabilities();
+      _profileSwitch.enabled = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Warm) != 0;
       _profileSwitch.invalidate();
       _profilePacketDirty = false;
+    }
+    void setProfileSwitchOptimization(bool enabled) {
+      setProfileSwitchFeatures(enabled ? profileSwitchCapabilities() : 0);
     }
     void setProfileStandbyWarm(bool enabled) {
       _profileStandbyWarm = enabled;
@@ -119,8 +133,8 @@ class CustomLR1110 : public LR1110 {
       const bool warm = _profileSwitch.active && _profileSwitch.rxValid;
       if (!warm) _profileSwitch.invalidate();
       // RadioLib 7.7.1 defines STANDBY_XOSC as 0, the same as STANDBY_RC.
-      // The LR1110 command's XOSC selector is 1 (Semtech UM §2.1.1).
-      bool useFs = warm;
+      // The LR1110 command's XOSC selector is 1 (Semtech UM section 2.1.1).
+      bool useFs = warm && (_profileSwitchFeatures & mesh::RadioSwitchTuning::Fs);
 #ifdef MC_LR1110_HIL
       useFs = useFs && hilUseFsOnRetune;
 #endif
@@ -227,7 +241,8 @@ class CustomLR1110 : public LR1110 {
       else if (fabsf(bw - 250.0f) < 0.01f) bwCode = RADIOLIB_LR11X0_LORA_BW_250_0;
       else if (fabsf(bw - 500.0f) < 0.01f) bwCode = RADIOLIB_LR11X0_LORA_BW_500_0;
       else return RADIOLIB_ERR_INVALID_BANDWIDTH;
-      if (!_profileSwitch.canResumeFast()) {
+      if (!(_profileSwitchFeatures & mesh::RadioSwitchTuning::Modem)
+          || !_profileSwitch.canResumeFast()) {
         uint8_t type = RADIOLIB_LR11X0_PACKET_TYPE_NONE;
         const int16_t rc = getPacketType(&type);
         if (rc != RADIOLIB_ERR_NONE) return rc;
@@ -237,7 +252,8 @@ class CustomLR1110 : public LR1110 {
           ? (float(uint32_t(1) << sf) / bw >= 16.0f
                 ? RADIOLIB_LR11X0_LORA_LDRO_ENABLED : RADIOLIB_LR11X0_LORA_LDRO_DISABLED)
           : ldrOptimize;
-      const bool unchanged = _profileSwitch.matchesModulation(sf, bwCode, cr - 4, effectiveLdro);
+      const bool unchanged = (_profileSwitchFeatures & mesh::RadioSwitchTuning::Batch)
+          && _profileSwitch.matchesModulation(sf, bwCode, cr - 4, effectiveLdro);
       const auto oldSf = spreadingFactor, oldBw = bandwidth, oldCr = codingRate, oldLdro = ldrOptimize;
       const auto oldBwKhz = bandwidthKhz;
       spreadingFactor = sf;
@@ -467,7 +483,8 @@ class CustomLR1110 : public LR1110 {
         fastClearCycles += DWT->CYCCNT - segment;
         segment = DWT->CYCCNT;
 #endif
-        if (rc == RADIOLIB_ERR_NONE && _profilePacketDirty) {
+        if (rc == RADIOLIB_ERR_NONE && (_profilePacketDirty
+            || !(_profileSwitchFeatures & mesh::RadioSwitchTuning::Packet))) {
           rc = setPacketParamsLoRa(preambleLengthLoRa, headerType,
               RADIOLIB_LR11X0_MAX_PACKET_LENGTH, crcTypeLoRa, invertIQEnabled);
         }

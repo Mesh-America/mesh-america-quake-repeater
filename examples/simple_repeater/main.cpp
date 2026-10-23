@@ -221,6 +221,7 @@ void setup() {
   if (!mesh::power::beginRegulatorSettings(board, radio_driver, regulator_prefs_fs)) {
     MESH_DEBUG_PRINTLN("Regulator selection could not be applied");
   }
+  mesh::RadioProfileCLI::configureBootTuning(regulator_prefs_fs, radio_driver);
   mesh::hilStartupTrace("fs_ready");
 #ifdef DISPLAY_CLASS
   mesh::hilStartupTrace("display_begin");

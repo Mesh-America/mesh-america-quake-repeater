@@ -6,6 +6,10 @@
 #include "ProfileSwitchTiming.h"
 #include "NrfRadioPriorityLease.h"
 #include "NrfRadioUsbIrqGuard.h"
+#if defined(ESP32_PLATFORM) || defined(NRF52_PLATFORM) || defined(RP2040_PLATFORM)
+#include "TunableRadioHal.h"
+#define MESH_TUNABLE_RADIO_HAL 1
+#endif
 #if MESH_HIL_PROFILE_TIMING
 namespace mesh { namespace profiletiming {
 extern "C" {
@@ -441,6 +445,69 @@ uint8_t RadioLibWrapper::beginReconfigure() {
 
 void RadioLibWrapper::endReconfigure(bool resume_rx) {
   if (resume_rx) startRecv();
+}
+
+mesh::RadioSwitchCapabilities RadioLibWrapper::switchTuningCapabilities() const {
+  mesh::RadioSwitchCapabilities caps;
+#if MESH_TUNABLE_RADIO_HAL
+  auto* hal = TunableRadioHal::find(_radio->getMod()->hal);
+  if (hal) caps = hal->capabilities();
+#endif
+  caps.flags |= driverSwitchCapabilities();
+  return caps;
+}
+
+mesh::RadioSwitchTuning RadioLibWrapper::switchTuning() const {
+  mesh::RadioSwitchTuning value;
+#if MESH_TUNABLE_RADIO_HAL
+  auto* hal = TunableRadioHal::find(_radio->getMod()->hal);
+  if (hal) value = hal->getTuning();
+#endif
+  value.flags |= getDriverSwitchFeatures();
+  return value;
+}
+
+uint32_t RadioLibWrapper::switchSpiHz() const {
+#if MESH_TUNABLE_RADIO_HAL
+  auto* hal = TunableRadioHal::find(_radio->getMod()->hal);
+  if (hal) return hal->effectiveHz();
+#endif
+  return 0;
+}
+
+mesh::RadioParamApplyResult RadioLibWrapper::trySetSwitchTuning(
+    const mesh::RadioSwitchTuning& value,
+    bool (*persist)(void*, const mesh::RadioSwitchTuning&), void* context) {
+  using Result = mesh::RadioParamApplyResult;
+  if (!mesh::validRadioSwitchTuning(value, switchTuningCapabilities())) return Result::FAILED;
+  const auto previous = switchTuning();
+  if (value == previous) return !persist || persist(context, value) ? Result::APPLIED : Result::FAILED;
+  const uint8_t resume_rx = beginReconfigure();
+  if (resume_rx > 1) return resume_rx == 2 ? Result::BUSY : Result::FAILED;
+
+  // These setters change policy/SPISettings only, never an SPI peripheral or
+  // pin mapping. Clearing owned caches forces the next retune to prove RX.
+  configureBootSwitchTuning(value);
+  _profiles.resetSwitchTest();
+  endReconfigure(resume_rx);
+  const bool resumed = !resume_rx || isInRecvMode();
+  if (resumed && (!persist || persist(context, value))) return Result::APPLIED;
+
+  // There is no SPI in these setters, including after an RX completion was
+  // queued during a filesystem save. Never rearm or clear that unread FIFO.
+  configureBootSwitchTuning(previous);
+  if (!resumed) endReconfigure(resume_rx);
+  return Result::FAILED;
+}
+
+bool RadioLibWrapper::configureBootSwitchTuning(const mesh::RadioSwitchTuning& value) {
+  if (!mesh::validRadioSwitchTuning(value, switchTuningCapabilities())) return false;
+#if MESH_TUNABLE_RADIO_HAL
+  auto* hal = TunableRadioHal::find(_radio->getMod()->hal);
+  if (hal && !hal->setTuning(value)) return false;
+#endif
+  setDriverSwitchFeatures(value.flags);
+  return true;
 }
 
 bool RadioLibWrapper::restoreAfterDeepInit() {

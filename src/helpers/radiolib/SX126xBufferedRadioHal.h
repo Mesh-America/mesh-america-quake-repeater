@@ -11,15 +11,16 @@
   #include "ESP32BufferedRadioHal.h"
   using SX126xBufferedRadioHalBase = ESP32BufferedRadioHal;
 #elif defined(RP2040_PLATFORM)
-  #include <hal/Arduino/ArduinoHal.h>
+  #include "TunableRadioHal.h"
   // Earle Philhower's HardwareSPI bulk API retains full-duplex blocking
   // completion while filling/draining the controller FIFO in one call.
-  class SX126xBufferedRadioHalBase : public ArduinoHal {
+  class SX126xBufferedRadioHalBase : public TunableRadioHal {
    public:
     explicit SX126xBufferedRadioHalBase(SPIClass& bus, uint32_t hz)
-        : ArduinoHal(bus, SPISettings(hz, MSBFIRST, SPI_MODE0)) {}
+        : TunableRadioHal(bus, hz, false, true) {}
     void spiTransfer(uint8_t* out, size_t len, uint8_t* in) override {
-      if (len) spi->transfer(out, in, len);
+      if (!bufferedTransfersEnabled()) ArduinoHal::spiTransfer(out, len, in);
+      else if (len) spi->transfer(out, in, len);
     }
   };
 #else

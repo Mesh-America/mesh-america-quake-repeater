@@ -37,6 +37,7 @@ class LR1110PacketSetterCacheTests(unittest.TestCase):
         state = (ROOT / "src/helpers/radiolib/LR1110ProfileSwitchState.h").read_text()
         harness = r"""
 #include <cassert>
+#include <helpers/RadioSwitchTuning.h>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -106,6 +107,7 @@ struct LR1110 {
 struct Radio : LR1110 {
   uint32_t _activityAt=0;bool _headerSeen=false;
   LR1110ProfileSwitchState _profileSwitch{true};
+  uint8_t _profileSwitchFeatures=55;
   bool _profilePacketDirty = true;
   uint32_t _profileFastResumes = 0;
   Radio() { ownership = &_profileSwitch; }
@@ -182,7 +184,7 @@ int main(int argc, char** argv) {
         flags = [] if os.name == "nt" else ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                                            "-fno-pie", "-no-pie"]
         built = subprocess.run([compiler, "-std=gnu++11", "-Wall", "-Wextra", *flags,
-                                str(cpp), "-o", str(cls.binary)],
+                                "-I", str(ROOT / "src"), str(cpp), "-o", str(cls.binary)],
                                capture_output=True, text=True, timeout=60)
         if built.returncode:
             raise AssertionError(built.stdout + built.stderr)
