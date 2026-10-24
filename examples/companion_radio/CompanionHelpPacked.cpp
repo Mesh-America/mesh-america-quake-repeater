@@ -1,8 +1,10 @@
+// This is the only selected Companion source compiled as C++17. Include the
+// same feature/board context as MyMesh before testing board aliases: RAK3401
+// defines its RAK_4631 compatibility macro in the variant header.
+#include "MyMesh.h"
+
 #if defined(RAK_4631) && defined(COMPANION_RADIO_FULL) \
     || (defined(STM32_PLATFORM) && defined(STM32WLxx))
-// This is the only selected Companion source compiled as C++17. Include the
-// same feature/board context as MyMesh before expanding the single help source.
-#include "MyMesh.h"
 #include "CompanionHelpWriter.h"
 
 #if !defined(STM32_PLATFORM) || COMPANION_FEATURE_TEXT_TERMINAL
