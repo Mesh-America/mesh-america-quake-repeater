@@ -1,4 +1,29 @@
 #include "MyMesh.h"
+
+#if FLOOD_ADVERT_RTC_FAST_SLOTS
+alignas(4) RTC_FAST_ATTR static mesh::FloodAdvertLimiter::Entry
+    repeater_rtc_advert_fast[FLOOD_ADVERT_RTC_FAST_SLOTS];
+#endif
+#if FLOOD_ADVERT_RTC_SLOW_SLOTS
+alignas(4) RTC_SLOW_ATTR static mesh::FloodAdvertLimiter::Entry
+    repeater_rtc_advert_slow[FLOOD_ADVERT_RTC_SLOW_SLOTS];
+#endif
+#if FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertFastBank() {
+#if FLOOD_ADVERT_RTC_FAST_SLOTS
+  return repeater_rtc_advert_fast;
+#else
+  return nullptr;
+#endif
+}
+mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertSlowBank() {
+#if FLOOD_ADVERT_RTC_SLOW_SLOTS
+  return repeater_rtc_advert_slow;
+#else
+  return nullptr;
+#endif
+}
+#endif
 #include <helpers/DefaultPasswordWarning.h>
 #if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
     && HELTEC_TFT_RUNTIME_ROTATION == 1
@@ -1322,8 +1347,9 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #endif
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
-      && neighbor_discover_next < neighbor_discover_count) {
-    NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+      && neighbor_discover_next < neighbor_discover_count
+      && (size_t)neighbor_discover_next < NEIGHBOR_SCOPE_RESULTS) {
+    auto& entry = neighbor_discover_metadata[neighbor_discover_next];
     if (entry.status == ND_QUEUED) {
       entry.status = ND_PENDING;
       neighbor_discover_queried_count++;
@@ -1379,8 +1405,9 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
-      && neighbor_discover_next < neighbor_discover_count) {
-    NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+      && neighbor_discover_next < neighbor_discover_count
+      && (size_t)neighbor_discover_next < NEIGHBOR_SCOPE_RESULTS) {
+    auto& entry = neighbor_discover_metadata[neighbor_discover_next];
     if (entry.status == ND_QUEUED) {
       entry.status = ND_SEND_FAILED;
       neighbor_discover_request = NULL;
@@ -2874,7 +2901,8 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
     for (int i = 0; i < neighbor_discover_count && n < MAX_CLIENTS; i++) {
       auto& entry = neighbor_discover[i];
       if (acl.getClient(entry.id.pub_key, PUB_KEY_SIZE) != nullptr) continue;
-      if (entry.heard_timestamp > 0 && entry.id.isHashMatch(hash)) {
+      // Every counted snapshot key was admitted with a positive heard time.
+      if (entry.id.isHashMatch(hash)) {
         matching_peer_indexes[n++] = NEIGHBOR_DISCOVER_PEER_BASE + i;
       }
     }
@@ -3845,11 +3873,13 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.rx_ps_preamble = DEFAULT_RXPS_PREAMBLE;
   _prefs.rx_ps_rx_us = RX_POWERSAVING_DEFAULT_RX_US;
   _prefs.rx_ps_sleep_us = RX_POWERSAVING_DEFAULT_SLEEP_US;
+#ifdef WRAPPER_CLASS
   if (WRAPPER_CLASS::SupportsRxPowerSaving) {
     recalcRxPowerSavingFromLevel(_prefs.rx_ps_level, _prefs.sf, _prefs.bw,
                                  _prefs.rx_ps_preamble, &_prefs.rx_ps_rx_us,
                                  &_prefs.rx_ps_sleep_us);
   }
+#endif
 
   // bridge defaults
 #if defined(WITH_RS232_BRIDGE) && defined(RS232_BRIDGE_MERGED) \
@@ -14082,9 +14112,10 @@ bool MyMesh::completeNeighborDiscoverEntry() {
     finishNeighborDiscover();
     return false;
   }
-  NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+  auto& entry = neighbor_discover_metadata[neighbor_discover_next];
   char pubkey_hex[65];
-  mesh::Utils::toHex(pubkey_hex, entry.id.pub_key, PUB_KEY_SIZE);
+  mesh::Utils::toHex(pubkey_hex,
+                    neighbor_discover[neighbor_discover_next].id.pub_key, PUB_KEY_SIZE);
 
   MQTTMessageBuilder::NeighborsMessageEntry measured = {
     pubkey_hex,
@@ -14118,7 +14149,7 @@ bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx,
                                             float snr, int16_t rssi) {
   if (overlay_idx < 0 || overlay_idx >= neighbor_discover_count
       || (size_t)overlay_idx >= NEIGHBOR_SCOPE_RESULTS) return false;
-  NeighborDiscoverEntry& entry = neighbor_discover[overlay_idx];
+  auto& entry = neighbor_discover_metadata[overlay_idx];
   if (entry.status != ND_PENDING || len < 8) return false;
 
   uint32_t tag;
@@ -14139,7 +14170,7 @@ bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx,
   entry.heard_timestamp = getRTCClock()->getCurrentTime();
   entry.snr = (int8_t)(snr * 4);
   entry.rssi = rssi;
-  touchNeighbourHeard(entry.id, entry.heard_timestamp, snr, rssi);
+  touchNeighbourHeard(neighbor_discover[overlay_idx].id, entry.heard_timestamp, snr, rssi);
   return true;
 }
 
@@ -14269,9 +14300,9 @@ void MyMesh::finishNeighborDiscover() {
     uint32_t now_secs = getRTCClock()->getCurrentTime();
 
     for (int i = 0; i < publish_count; i++) {
-      auto& entry = neighbor_discover[i];
+      auto& entry = neighbor_discover_metadata[i];
       char* hex = &pubkey_hex[i * hex_size];
-      mesh::Utils::toHex(hex, entry.id.pub_key, PUB_KEY_SIZE);
+      mesh::Utils::toHex(hex, neighbor_discover[i].id.pub_key, PUB_KEY_SIZE);
       entries[i].pubkey_hex = hex;
       entries[i].snr = entry.snr / 4.0f;
       entries[i].rssi = entry.rssi;
@@ -14341,8 +14372,13 @@ void MyMesh::loopNeighborDiscover() {
     finishNeighborDiscover();
     return;
   }
+  if ((size_t)neighbor_discover_next >= NEIGHBOR_SCOPE_RESULTS) {
+    neighbor_discover_truncated = true;
+    finishNeighborDiscover();
+    return;
+  }
 
-  NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+  auto& entry = neighbor_discover_metadata[neighbor_discover_next];
   if (entry.status == ND_QUEUED) {
     if (!millisHasNowPassed(neighbor_discover_until)) return;
     if (cancelNeighborDiscoverRequest()) {
@@ -14376,7 +14412,8 @@ void MyMesh::loopNeighborDiscover() {
   }
 
   uint32_t tag;
-  mesh::Packet* request = sendAnonRegionsReq(entry.id, tag);
+  mesh::Packet* request = sendAnonRegionsReq(
+      neighbor_discover[neighbor_discover_next].id, tag);
   if (request) {
     entry.tag = tag;
     entry.status = ND_QUEUED;
@@ -14411,35 +14448,46 @@ bool MyMesh::startNeighborDiscover(char* reply) {
     return false;  // reply already set
   }
 
+  // Select in the exact original stable order without putting another full
+  // 254-entry table on the loop stack. The live cache is only mutated on this
+  // mesh task, so it remains stable during this synchronous snapshot step.
+  static_assert(MAX_NEIGHBOURS <= 255, "Snapshot indexes and count must fit one byte");
+  uint8_t order[MAX_NEIGHBOURS];
   neighbor_discover_count = 0;
   for (int i = 0; i < MAX_NEIGHBOURS; i++) {
     if (neighbours[i].heard_timestamp > 0) {
-      NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_count];
-      entry.id = neighbours[i].id;
-      entry.heard_timestamp = neighbours[i].heard_timestamp;
-      entry.snr = neighbours[i].snr;
-      entry.rssi = neighbours[i].rssi;
-      entry.tag = 0;
-      entry.status = ND_UNSENT;
-      neighbor_discover_count++;
+      order[neighbor_discover_count++] = (uint8_t)i;
     }
   }
 
-  // Query the freshest/strongest entries first; pubkey makes ties deterministic.
   for (int i = 1; i < neighbor_discover_count; i++) {
-    NeighborDiscoverEntry entry = neighbor_discover[i];
+    const uint8_t entry_index = order[i];
+    const auto& entry = neighbours[entry_index];
     int j = i;
     while (j > 0) {
-      auto& rhs = neighbor_discover[j - 1];
+      const auto& rhs = neighbours[order[j - 1]];
       bool before = entry.heard_timestamp > rhs.heard_timestamp
         || (entry.heard_timestamp == rhs.heard_timestamp && entry.snr > rhs.snr)
         || (entry.heard_timestamp == rhs.heard_timestamp && entry.snr == rhs.snr
             && memcmp(entry.id.pub_key, rhs.id.pub_key, PUB_KEY_SIZE) < 0);
       if (!before) break;
-      neighbor_discover[j] = neighbor_discover[j - 1];
+      order[j] = order[j - 1];
       j--;
     }
-    neighbor_discover[j] = entry;
+    order[j] = entry_index;
+  }
+
+  memset(neighbor_discover_metadata, 0, sizeof(neighbor_discover_metadata));
+  for (int i = 0; i < neighbor_discover_count; i++) {
+    const auto& source = neighbours[order[i]];
+    neighbor_discover[i].id = source.id;
+    if ((size_t)i < NEIGHBOR_SCOPE_RESULTS) {
+      auto& metadata = neighbor_discover_metadata[i];
+      metadata.heard_timestamp = source.heard_timestamp;
+      metadata.snr = source.snr;
+      metadata.rssi = source.rssi;
+      metadata.status = ND_UNSENT;
+    }
   }
 
   memset(neighbor_discover_scopes, 0, sizeof(neighbor_discover_scopes));
@@ -14695,7 +14743,7 @@ mesh::powerdiag::Mask MyMesh::pendingWorkReason() const {
   if (esp_wifi_get_mode(&sdk_mode) != ESP_ERR_WIFI_NOT_INIT) return mask(Reason::Network);
 #endif
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
-  if (_local_cli_output.busy()) return mask(Reason::Serial);
+  if (_local_cli_output.busy()) return mask(Reason::SerialIO);
 #endif
   if (deferred_cli_command.pending || pending_self_advert || _cli.hasActiveUserGpioTimer()) return mask(Reason::Scheduled);
 #if defined(WITH_BRIDGE)

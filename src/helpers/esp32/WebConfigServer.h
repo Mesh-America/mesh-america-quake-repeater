@@ -175,6 +175,12 @@ public:
     // Teardown finished (server + DNS freed, WiFi mode restored).
     virtual void onWebConfigStopped() {}
     virtual bool supportsRoomService() const { return false; }
+    // The role owns its page resource. Keeping it out of this shared server
+    // lets repeaters/companions omit the Room UI without disabling a feature.
+    virtual const uint8_t* roomPageGzip(size_t& length) const {
+      length = 0;
+      return nullptr;
+    }
     // Input may be parsed in place. Authentication, storage and radio work
     // happen only on tick(), never on async_tcp.
     virtual void processRoomRequest(const uint8_t* token, uint32_t sequence,

@@ -428,7 +428,7 @@ public:
     // sleep loses their first input bytes; UART wake loses the wake character
     // too. HardwareSerial's bool reports an installed driver, not a USB host.
     // Keep an enabled console available even before its first command.
-    keep_awake = keep_awake || hold(static_cast<bool>(Serial), Reason::Serial);
+    keep_awake = keep_awake || hold(static_cast<bool>(Serial), Reason::SerialIO);
 #endif
 #if MESH_USB_LOGGING_AVAILABLE
     // A live logging stream must also remain available before a host opens

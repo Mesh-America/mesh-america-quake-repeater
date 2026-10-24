@@ -87,6 +87,92 @@ int main(){
 
 
 class RxpsHardwareCapabilityTests(unittest.TestCase):
+    def probe_repeater_constructor(self, standard, capability, remove_guard=False):
+        source = (ROOT / 'examples/simple_repeater/MyMesh.cpp').read_text()
+        start = source.index('  _prefs.rx_powersaving_enabled = DEFAULT_RXPS_ENABLED ? 1 : 0;')
+        end = source.index('\n  // bridge defaults', start)
+        initialization = source[start:end]
+        if remove_guard:
+            initialization = initialization.replace('#ifdef WRAPPER_CLASS\n', '', 1)
+            initialization = initialization.replace('#endif\n', '', 1)
+        if capability is None:
+            radio = '#include <helpers/esp32/ESPNOWRadio.h>\n'
+            self.assertIn('extern ESPNOWRadio radio_driver;',
+                          (ROOT / 'variants/generic_espnow/target.h').read_text())
+            self.assertNotIn('WRAPPER_CLASS',
+                             (ROOT / 'variants/generic_espnow/platformio.ini').read_text())
+        else:
+            radio = 'long random(long,long);\n#include <helpers/radiolib/RadioLibWrappers.h>\n'
+            if capability:
+                radio += ('struct SupportedWrapper : RadioLibWrapper {\n'
+                          ' static constexpr bool SupportsRxPowerSaving = true;\n};\n'
+                          '#define WRAPPER_CLASS SupportedWrapper\n')
+            else:
+                radio += '#define WRAPPER_CLASS RadioLibWrapper\n'
+        code = radio + r'''
+#include <helpers/radiolib/RXPowerSaving.h>
+#include <cstdio>
+struct Prefs {
+ uint8_t rx_powersaving_enabled, rx_ps_level, rx_ps_preamble, sf;
+ uint32_t rx_ps_rx_us, rx_ps_sleep_us;
+ float bw;
+};
+struct Repeater {
+ Prefs _prefs = {};
+ Repeater() {
+  _prefs.sf = 7;
+  _prefs.bw = 62.5f;
+@INITIALIZATION@
+ }
+};
+#define CHECK(value) do { if (!(value)) return 1; } while (0)
+int main() {
+ Repeater repeater;
+ const Prefs& prefs = repeater._prefs;
+ CHECK(prefs.rx_powersaving_enabled == 1 && prefs.rx_ps_level == 5);
+ CHECK(prefs.rx_ps_preamble == 16 && prefs.sf == 7 && prefs.bw == 62.5f);
+@CHECK_TIMINGS@
+}
+'''
+        if capability:
+            timing_check = (' CHECK(prefs.rx_ps_rx_us != RX_POWERSAVING_DEFAULT_RX_US\n'
+                            '       || prefs.rx_ps_sleep_us != RX_POWERSAVING_DEFAULT_SLEEP_US);\n'
+                            ' CHECK(isValidRxPowerSavingPeriod(prefs.rx_ps_rx_us));\n'
+                            ' CHECK(isValidRxPowerSavingPeriod(prefs.rx_ps_sleep_us));')
+        else:
+            timing_check = (' CHECK(prefs.rx_ps_rx_us == RX_POWERSAVING_DEFAULT_RX_US);\n'
+                            ' CHECK(prefs.rx_ps_sleep_us == RX_POWERSAVING_DEFAULT_SLEEP_US);')
+        code = code.replace('@INITIALIZATION@', initialization).replace('@CHECK_TIMINGS@', timing_check)
+        with tempfile.TemporaryDirectory(prefix='repeater-rxps-constructor-') as folder:
+            work = Path(folder)
+            (work / 'RadioLib.h').write_text(RADIO_STUB)
+            cpp, binary = work / 'test.cpp', work / 'test'
+            cpp.write_text(code)
+            built = subprocess.run([os.environ.get('CXX', 'g++'), '-std=' + standard,
+                '-pedantic-errors', '-Os', '-DNDEBUG', '-ffunction-sections', '-fdata-sections',
+                '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-pie', '-no-pie',
+                '-DDEFAULT_RXPS_ENABLED=1', '-DDEFAULT_RXPS_LEVEL=5', '-DDEFAULT_RXPS_PREAMBLE=16',
+                '-DLORA_SF=7', '-DLORA_BW=125', '-I' + str(work),
+                '-isystem', str(ROOT / 'src'), '-isystem', str(ROOT / 'test/mocks'),
+                str(cpp), '-Wl,--gc-sections', '-o', str(binary)],
+                capture_output=True, text=True, timeout=30)
+            if remove_guard:
+                self.assertNotEqual(built.returncode, 0)
+                self.assertIn('WRAPPER_CLASS', built.stderr)
+                return
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_repeater_constructor_keeps_wrapperless_and_lora_capabilities(self):
+        for standard in ('c++11', 'c++17'):
+            for capability in (None, False, True):
+                with self.subTest(standard=standard, capability=capability):
+                    self.probe_repeater_constructor(standard, capability)
+
+    def test_missing_constructor_guard_reproduces_espnow_compile_failure(self):
+        self.probe_repeater_constructor('c++11', None, remove_guard=True)
+
     def probe(self, standard, mutate=False):
         common = (ROOT / 'src/helpers/CommonCLI.cpp').read_text()
         setter = body(common, 'if (memcmp(config, "radio.rxps ", 11) == 0)')

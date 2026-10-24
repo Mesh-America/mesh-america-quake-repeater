@@ -378,6 +378,8 @@ jobs:
           python3 -B test/test_cli_error_bounds.py -v
           python3 -B test/test_common_cli_argument_bounds.py -v
           python3 -B test/test_flood_retry_bucket_cli.py -v
+          python3 -B test/test_flood_advert_rtc.py -v
+          python3 -B test/test_flood_advert_iram.py -v
           python3 -B test/test_ota_security.py -v
           python3 -B test/test_companion_offline_delivery.py -v
           python3 -B test/test_room_receive_admission.py -v
@@ -397,12 +399,15 @@ jobs:
           python3 -B test/test_room_access_policy.py -v
           python3 -B test/test_room_history_store.py -v
           python3 -B test/test_room_history_integration.py -v
+          python3 -B test/test_room_rtc_posts.py -v
           python3 -B test/test_room_board_store.py -v
           python3 -B test/test_room_board_protocol.py -v
           python3 -B test/test_room_mail_store.py -v
           python3 -B test/test_room_mail_protocol.py -v
           python3 -B test/test_room_web_mailbox.py -v
           python3 -B test/test_room_web_http.py -v
+          python3 -B test/test_room_web_gzip.py -v
+          python3 -B test/test_esp32_full_size.py -v
           python3 -B test/test_room_web_service.py -v
           python3 -B test/test_contact_clock_bootstrap.py -v
           python3 -B test/test_rtc_discovery.py -v
@@ -481,6 +486,7 @@ jobs:
           python3 -B test/test_udp_bridge.py -v
           python3 -B test/test_udp_bridge_integration.py -v
           python3 -B test/test_indicator_repeater_profile.py -v
+          python3 -B test/test_companion_psram_mesh.py -v
 
       - name: Verify saved repeat-off trace exception and relay guards
         run: |
@@ -545,6 +551,7 @@ jobs:
           python3 -B test/test_power_saving_diagnostics_buckets.py -v
           python3 -B test/test_power_saving_role_diagnostics.py -v
           python3 -B test/test_companion_power_diagnostics.py -v
+          python3 -B test/test_companion_rtc_queue.py -v
           python3 -B test/test_esp32_cpu_clock.py -v
           python3 -B test/test_esp32_cpu_clock_board.py -v
           python3 -B test/test_esp32_power_test_controls.py -v

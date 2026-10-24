@@ -268,11 +268,27 @@ static bool isNetworkTerminalActive();
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
+#if COMPANION_MESH_PSRAM_STORAGE
+static mesh::CompanionPsramMesh<MyMesh> companion_mesh_storage;
+MyMesh& companionMeshInstance() { return companion_mesh_storage.get(); }
+
+static bool initializeCompanionMeshStorage() {
+  const auto result = companion_mesh_storage.begin(
+      radio_driver, fast_rng, rtc_clock, tables, store, &ui_task);
+  using Result = mesh::CompanionPsramMesh<MyMesh>::Result;
+  if (result == Result::Ready) return true;
+  mesh::usbLoggingPort().println(result == Result::MissingPsram
+      ? "ERROR: Full Companion requires working PSRAM; check the board/image"
+      : "ERROR: insufficient PSRAM for Full Companion; startup stopped");
+  return false;
+}
+#else
 MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store
    #ifdef DISPLAY_CLASS
       , &ui_task
    #endif
 );
+#endif
 
 #if defined(WIO_E5_MINI_HEADLESS_COMPANION_UI) && defined(PIN_USER_BTN)
 namespace {
@@ -3583,6 +3599,13 @@ void setup() {
   board.setCompanionCpuClockPolicy(true);
 #endif
   board.begin();
+#if COMPANION_MESH_PSRAM_STORAGE
+  if (!initializeCompanionMeshStorage()) {
+    // No partial mesh, radio, display or network service may start without
+    // the required external storage. Keep USB available to report the error.
+    for (;;) delay(1000);
+  }
+#endif
 
 #if defined(ESP32) && defined(WIFI_SSID)
   // MyMesh::begin can already read the power-save policy for MQTT/WebConfig.

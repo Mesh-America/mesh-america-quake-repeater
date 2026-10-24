@@ -72,8 +72,9 @@ template<class Mesh> std::string collect(Mesh& mesh,size_t scope_bytes,int state
   std::vector<std::string> keys; keys.reserve(254);
   std::vector<MQTTPayloadBuilder::NeighborsMessageEntry> entries;
   for(int i=0;i<254;++i) {
-    auto& row=mesh.neighbor_discover[i];
-    memset(row.id.pub_key,uint8_t(i),sizeof(row.id.pub_key));
+    auto& row=mesh.neighbor_discover_metadata[i];
+    auto& id=mesh.neighbor_discover[i].id;
+    memset(id.pub_key,uint8_t(i),sizeof(id.pub_key));
     row.status=uint8_t(state); row.snr=int8_t(snr*4); row.rssi=int16_t(rssi);
     if(state==Mesh::ND_RESPONDED) {
       row.status=Mesh::ND_PENDING; row.tag=123;
@@ -82,7 +83,7 @@ template<class Mesh> std::string collect(Mesh& mesh,size_t scope_bytes,int state
       assert(mesh.handleNeighborDiscoverResponse(i,response.data(),response.size(),snr,int16_t(rssi)));
     }
     if(!mesh.completeNeighborDiscoverEntry())break;
-    char key[65]; mesh::Utils::toHex(key,row.id.pub_key,32); keys.emplace_back(key);
+    char key[65]; mesh::Utils::toHex(key,id.pub_key,32); keys.emplace_back(key);
     entries.push_back({keys.back().c_str(),row.snr/4.0f,UINT32_MAX,
       mesh.neighbor_discover_scopes[i],state==Mesh::ND_RESPONDED ? "responded"
         : (state==Mesh::ND_SEND_FAILED ? "send_failed" : "timeout"),rssi,false});
@@ -104,11 +105,28 @@ int main() {
   static_assert(sizeof(memory.neighbor_discover)/sizeof(memory.neighbor_discover[0])==254,
                 "keep the complete neighbor snapshot capacity");
 #ifndef TEST_PUBLICATION_NEGATIVE_CONTROL
-  assert(sizeof(MyMesh::NeighborDiscoverEntry)==44);
-  assert(sizeof(LegacyMesh::NeighborDiscoverEntry)==48);
+  assert(sizeof(MyMesh::NeighborDiscoverEntry)==32);
+  assert(sizeof(LegacyMesh::NeighborDiscoverEntry)==32);
+  assert(sizeof(MyMesh::NeighborDiscoverMetadata)==12);
+  assert(sizeof(LegacyMesh::NeighborDiscoverMetadata)==16);
+  assert(sizeof(legacy_memory.neighbor_discover_metadata)==254*16);
+  assert(sizeof(memory.neighbor_discover_metadata)==MyMesh::NEIGHBOR_SCOPE_RESULTS*12);
+#if defined(BOARD_HAS_PSRAM)
   assert(sizeof(memory.neighbor_discover_scopes)==72*96);
   assert(sizeof(legacy_memory.neighbor_discover_scopes)-sizeof(memory.neighbor_discover_scopes)==17472);
-  assert(sizeof(legacy_memory.neighbor_discover)-sizeof(memory.neighbor_discover)==1016);
+#else
+  assert(sizeof(memory.neighbor_discover_scopes)==21*96);
+  assert(sizeof(legacy_memory.neighbor_discover_scopes)-sizeof(memory.neighbor_discover_scopes)==22368);
+#endif
+  const size_t old_storage=sizeof(legacy_memory.neighbor_discover)
+      +sizeof(legacy_memory.neighbor_discover_metadata)+sizeof(legacy_memory.neighbor_discover_scopes);
+  const size_t new_storage=sizeof(memory.neighbor_discover)
+      +sizeof(memory.neighbor_discover_metadata)+sizeof(memory.neighbor_discover_scopes);
+#if defined(BOARD_HAS_PSRAM)
+  assert(old_storage-new_storage==20672);
+#else
+  assert(old_storage-new_storage==26180);
+#endif
 #else
   (void)legacy_memory;
 #endif

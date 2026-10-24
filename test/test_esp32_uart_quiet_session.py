@@ -190,7 +190,7 @@ int main(int argc,char**) {
     // still-assumed-connected interface. A real RX queues MSG_WAITING forever.
     assert(usb_serial_interface.isEnabled());receive(0);
     assert(the_mesh.offline_queue_len==1&&interface_manager.hasPendingIO());
-    assert(the_mesh.serialVeto()==mesh::powerdiag::mask(mesh::powerdiag::Reason::Serial));
+    assert(the_mesh.serialVeto()==mesh::powerdiag::mask(mesh::powerdiag::Reason::SerialIO));
     puts("old UART quiet retained MSG_WAITING serial veto");return 42;
   }
   assert(!usb_serial_interface.isEnabled()&&!interface_manager.isConnected());
@@ -214,7 +214,7 @@ int main(int argc,char**) {
   the_mesh.pending_route=the_mesh.stream_route=&other_interface;
   assert(interface_manager.writeFrameToRoute(&other_interface,&ack,1)==1);
   assert(interface_manager.hasPendingIO());
-  assert(the_mesh.serialVeto()==mesh::powerdiag::mask(mesh::powerdiag::Reason::Serial));
+  assert(the_mesh.serialVeto()==mesh::powerdiag::mask(mesh::powerdiag::Reason::SerialIO));
   assert(!transitionCompanionUartQuietSession(nullptr,UartQuietSessionAction::Resume));
   assert(!usb_serial_interface.isEnabled()&&the_mesh.pending_route==&other_interface);
   other_stream.write_capacity=4096;interface_manager.loop();
@@ -297,7 +297,7 @@ def harness(legacy=False):
         park = "    if (!mesh::esp32::transitionUartQuietSession(\n            mesh::esp32::UartQuietSessionAction::Park)) return;\n"
         assert board.count(park) == 1
         board = board.replace(park, "", 1)
-    guard = re.search(r"  if \(_serial != NULL && _serial->hasPendingIO\(\)\) return mask\(Reason::Serial\);", source)
+    guard = re.search(r"  if \(_serial != NULL && _serial->hasPendingIO\(\)\) return mask\(Reason::SerialIO\);", source)
     assert guard is not None
     result = PRELUDE
     for marker, value in {"@CONSTANTS@": constants, "@BUFFER@": extract_braced(native, "class BufferStream") + ";",

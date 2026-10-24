@@ -147,6 +147,17 @@ namespace mesh { class RoomJsonWriter; }
 
 #define MAX_POST_TEXT_LEN    (160-9)
 
+#ifndef ROOM_POSTS_RTC_SLOW_STORAGE
+#define ROOM_POSTS_RTC_SLOW_STORAGE 0
+#endif
+#if ROOM_POSTS_RTC_SLOW_STORAGE != 0 && ROOM_POSTS_RTC_SLOW_STORAGE != 1
+#error "ROOM_POSTS_RTC_SLOW_STORAGE must be 0 or 1"
+#endif
+#if ROOM_POSTS_RTC_SLOW_STORAGE && (!defined(ESP32_PLATFORM) || !defined(LILYGO_TLORA) \
+    || !defined(MESHCORE_EXPANDED_PARTITION_PROFILE))
+#error "RTC slow Room posts require the qualified Full TLora ESP32 recipe"
+#endif
+
 struct PostInfo {
   mesh::Identity author;
   uint32_t post_timestamp;   // by OUR clock
@@ -230,7 +241,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
   uint16_t _num_posted, _num_post_pushes;
   int next_client_idx;  // for round-robin polling
   int next_post_idx;
+#if ROOM_POSTS_RTC_SLOW_STORAGE
+  PostInfo (&posts)[MAX_UNSYNCED_POSTS];
+#else
   PostInfo posts[MAX_UNSYNCED_POSTS];   // cyclic queue
+#endif
   static_assert(MAX_UNSYNCED_POSTS <= 32, "Room readiness bitmap holds 32 posts");
   uint32_t post_ready_at[MAX_UNSYNCED_POSTS] = {};
   uint32_t post_ready_mask = UINT32_MAX;
@@ -279,15 +294,28 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks,
     ND_SEND_FAILED = 5,
   };
   struct NeighborDiscoverEntry {
+    // Keep every full key in the immutable crypto overlay, even when the
+    // existing JSON/query budget cannot publish that neighbor this pass.
     mesh::Identity id;
+  };
+  struct NeighborDiscoverMetadata {
     uint32_t heard_timestamp;
-    int8_t snr;
-    int16_t rssi;
     uint32_t tag;
-    char scopes[96];
+    int16_t rssi;
+    int8_t snr;
     uint8_t status;
   };
+  static_assert(sizeof(NeighborDiscoverMetadata) == 12,
+                "Discovery metadata must retain its complete compact layout");
   NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
+  // Only the publishable prefix (plus the result that detects truncation)
+  // receives scope queries. Keep every neighbor snapshot, without reserving
+  // 96 response bytes for each entry that will never be queried.
+  static constexpr size_t NEIGHBOR_SCOPE_RESULTS =
+      MAX_NEIGHBOURS < MQTTBridge::NEIGHBORS_SCOPE_RESULT_CAPACITY
+          ? MAX_NEIGHBOURS : MQTTBridge::NEIGHBORS_SCOPE_RESULT_CAPACITY;
+  NeighborDiscoverMetadata neighbor_discover_metadata[NEIGHBOR_SCOPE_RESULTS];
+  char neighbor_discover_scopes[NEIGHBOR_SCOPE_RESULTS][96];
   uint8_t neighbor_discover_count;
   uint8_t neighbor_discover_next;
   uint8_t neighbor_discover_publish_count;
@@ -504,6 +532,13 @@ public:
   bool getFleetLocation(int32_t& latitude_e6, int32_t& longitude_e6) const override;
 #endif
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables);
+#if ROOM_POSTS_RTC_SLOW_STORAGE
+  ~MyMesh();
+  MyMesh(const MyMesh&) = delete;
+  MyMesh& operator=(const MyMesh&) = delete;
+  MyMesh(MyMesh&&) = delete;
+  MyMesh& operator=(MyMesh&&) = delete;
+#endif
 
   void begin(FILESYSTEM* fs);
   bool addSystemPost(const char* postData);
@@ -1041,6 +1076,7 @@ public:
   void getNodeSnapshot(WebConfigServer::NodeSnapshot& snapshot) override;
   void execCommand(char* cmd, char* reply) override { handleCommand(0, cmd, reply); }
   bool supportsRoomService() const override { return true; }
+  const uint8_t* roomPageGzip(size_t& length) const override;
   bool roomRequestAuthenticated() const override { return room_web_request_authenticated; }
   void processRoomRequest(const uint8_t* token, uint32_t sequence, char* request,
                           char* response, size_t capacity) override;

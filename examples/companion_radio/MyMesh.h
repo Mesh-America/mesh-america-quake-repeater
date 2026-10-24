@@ -150,6 +150,8 @@ namespace mesh { class BeaconManager; }
 #endif
 #endif
 
+#include <helpers/CompanionRtcQueue.h>
+
 static_assert(OFFLINE_QUEUE_SIZE > 0, "OFFLINE_QUEUE_SIZE must be positive");
 #if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
 static_assert(OFFLINE_QUEUE_SIZE >= 15, "Shared DM queue needs 15 frame slots");
@@ -977,6 +979,30 @@ private:
   static mesh::ota::OtaContext* acquireOfflineQueueForOta(void* owner);
   static uint16_t drainOfflineQueueForOta(void* owner);
   static void releaseOfflineQueueFromOta(void* owner);
+#elif COMPANION_RTC_FAST_OFFLINE_FRAMES || COMPANION_RTC_SLOW_OFFLINE_FRAMES
+  // Concrete definitions in MyMesh.cpp keep GCC from moving template-local
+  // statics back into ordinary .bss despite the requested RTC attribute.
+#if COMPANION_RTC_FAST_OFFLINE_FRAMES
+  static Frame rtc_fast_offline_frames[COMPANION_RTC_FAST_OFFLINE_FRAMES];
+#endif
+#if COMPANION_RTC_SLOW_OFFLINE_FRAMES
+  static Frame rtc_slow_offline_frames[COMPANION_RTC_SLOW_OFFLINE_FRAMES];
+#endif
+  static Frame* rtcFastQueueBank() {
+#if COMPANION_RTC_FAST_OFFLINE_FRAMES
+    return rtc_fast_offline_frames;
+#else
+    return nullptr;
+#endif
+  }
+  static Frame* rtcSlowQueueBank() {
+#if COMPANION_RTC_SLOW_OFFLINE_FRAMES
+    return rtc_slow_offline_frames;
+#else
+    return nullptr;
+#endif
+  }
+  mesh::CompanionRtcQueue<Frame, OFFLINE_QUEUE_SIZE> offline_queue;
 #elif defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
   enum {
     OFFLINE_QUEUE_PSRAM_FALLBACK_SIZE =
@@ -1117,4 +1143,11 @@ private:
 #endif
 };
 
+#include <helpers/CompanionPsramMesh.h>
+#if COMPANION_MESH_PSRAM_STORAGE
+MyMesh& companionMeshInstance();
+// Keep the shared UI/CLI lvalue interface; the accessor never allocates.
+#define the_mesh companionMeshInstance()
+#else
 extern MyMesh the_mesh;
+#endif

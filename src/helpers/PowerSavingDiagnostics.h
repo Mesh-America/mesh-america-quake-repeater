@@ -13,7 +13,7 @@ namespace powerdiag {
 enum class Reason : uint8_t {
   PolicyOff, Startup, UsbSession, UsbLogging, UsbRecovery, Wireless, Button,
   Morse, DualRadio, Ota, Calibration, RadioWatchdog, Queue, Retry, Scheduled,
-  Serial, Bridge, BridgeCleanup, BridgeWake, Network, Mesh, Tracker, Board,
+  SerialIO, Bridge, BridgeCleanup, BridgeWake, Network, Mesh, Tracker, Board,
   NoWake, Count
 };
 using Mask = uint32_t;

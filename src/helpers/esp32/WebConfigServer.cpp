@@ -33,7 +33,6 @@ static_assert(sizeof(WEBCONFIG_AP_PREFIX) <= 28,
 #endif
 
 #include "WebConfigHtml.h"
-#include "RoomWebHtml.h"
 #include <Utils.h>
 #include <helpers/HttpContentEncoding.h>
 #include "WebTerminalStream.h"
@@ -1947,16 +1946,35 @@ static bool roomRequestIdentity(AsyncWebServerRequest* req, uint8_t (&token)[32]
       && sequence != 0;
 }
 
+static bool webConfigClientAcceptsGzip(AsyncWebServerRequest* req) {
+  return req && mesh::http::acceptsGzip(req->hasHeader("Accept-Encoding")
+      ? req->getHeader("Accept-Encoding")->value().c_str() : nullptr);
+}
+
+static void webConfigRejectEncoding(AsyncWebServerRequest* req) {
+  AsyncWebServerResponse* res = req->beginResponse(
+      406, "text/plain", "WebConfig requires gzip support");
+  res->addHeader("Vary", "Accept-Encoding");
+  res->addHeader("Cache-Control", "no-store");
+  req->send(res);
+}
+
 void WebConfigServer::handleRoomPage(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF || !_cb || !_cb->supportsRoomService()) { req->send(404); return; }
   _last_activity = millis();
   noteNetworkActivity();
+  if (!webConfigClientAcceptsGzip(req)) { webConfigRejectEncoding(req); return; }
+  size_t page_length = 0;
+  const uint8_t* page = _cb->roomPageGzip(page_length);
+  if (!page || !page_length) { req->send(503); return; }
   auto* response = new (std::nothrow) WebConfigPacedProgmemResponse(
-      "text/html; charset=utf-8", reinterpret_cast<const uint8_t*>(ROOM_WEB_HTML), sizeof(ROOM_WEB_HTML) - 1);
+      "text/html; charset=utf-8", page, page_length);
   if (!response) { req->send(503); return; }
   response->addHeader("Cache-Control", "no-store");
   response->addHeader("X-Content-Type-Options", "nosniff");
   response->addHeader("Referrer-Policy", "no-referrer");
+  response->addHeader("Content-Encoding", "gzip");
+  response->addHeader("Vary", "Accept-Encoding");
   req->send(response);
 }
 
@@ -2138,19 +2156,6 @@ bool WebConfigServer::resultReceiptAllowedLocked(AsyncWebServerRequest* req,
 // ---------------------------------------------------------------------------
 // Handlers (async_tcp task - no CLI/prefs writes, no radio access)
 // ---------------------------------------------------------------------------
-
-static bool webConfigClientAcceptsGzip(AsyncWebServerRequest* req) {
-  return req && mesh::http::acceptsGzip(req->hasHeader("Accept-Encoding")
-      ? req->getHeader("Accept-Encoding")->value().c_str() : nullptr);
-}
-
-static void webConfigRejectEncoding(AsyncWebServerRequest* req) {
-  AsyncWebServerResponse* res = req->beginResponse(
-      406, "text/plain", "WebConfig requires gzip support");
-  res->addHeader("Vary", "Accept-Encoding");
-  res->addHeader("Cache-Control", "no-store");
-  req->send(res);
-}
 
 void WebConfigServer::handleRoot(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { req->send(503); return; }

@@ -3859,6 +3859,25 @@ apply_esp32_constrained_companion_size_profile() {
   esac
 }
 
+apply_esp32_iram_advert_storage_profile() {
+  local env_name=$1
+  if [ "$ESP32_FULL_BUILD" != "1" ] || ! supports_esp32_full_build "$env_name"; then
+    return 0
+  fi
+  # These measured classic ESP32 Full roles have genuine unused SRAM0 IRAM,
+  # distinct from byte-accessible D/IRAM heap. Keep all 128 advert records in
+  # its existing SDK NOLOAD section; the backend uses explicit word accesses.
+  case "${env_name,,}" in
+    lilygo_tlora_v2_1_1_6_repeater|lilygo_tlora_v2_1_1_6_repeater_|\
+    lilygo_tlora_v2_1_1_6_repeater_observer_mqtt|lilygo_tlora_v2_1_1_6_repeater_observer_mqtt_|\
+    lilygo_tlora_v2_1_1_6_room_server|lilygo_tlora_v2_1_1_6_room_server_|\
+    lilygo_tlora_v2_1_1_6_room_server_observer_mqtt|lilygo_tlora_v2_1_1_6_room_server_observer_mqtt_|\
+    tbeam_sx1262_repeater_observer_mqtt|tbeam_sx1276_repeater_observer_mqtt)
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_ADVERT_IRAM_WORD_STORAGE=1"
+      ;;
+  esac
+}
+
 apply_esp32_full_size_profile() {
   local env_name=$1
   local max_neighbours=$ESP32_FULL_MAX_NEIGHBOURS
@@ -3887,6 +3906,13 @@ apply_esp32_full_size_profile() {
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_NEIGHBOURS=${max_neighbours}"
 
   case "${env_name,,}" in
+    lilygo_tlora_v2_1_1_6_room_server|lilygo_tlora_v2_1_1_6_room_server_|\
+    lilygo_tlora_v2_1_1_6_room_server_observer_mqtt|lilygo_tlora_v2_1_1_6_room_server_observer_mqtt_)
+      # Preserve all 32 Room posts in genuine byte-accessible RTC SLOW memory.
+      # The bounded proof implementation serves the same maximum 4096 leaves
+      # without retaining the legacy 16 KiB leaf cache alongside Room services.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DROOM_POSTS_RTC_SLOW_STORAGE=1 -DOTA_BOUNDED_SOURCE_PROOFS=1"
+      ;;
     tbeam_sx1262_repeater_observer_mqtt|tbeam_sx1276_repeater_observer_mqtt)
       # MQTT/TLS plus OTA left only 3.3 KiB of static-region headroom with
       # 63 rules. Retain the complete rule engine with a 31-entry table.
@@ -3909,6 +3935,18 @@ apply_esp32_full_size_profile() {
         record_build_reduction \
           "mesh.flood_rules limited to 47 by measured internal DRAM; complete rule engine retained"
       fi
+      ;;
+  esac
+
+  # Preserve all 128 advert-source records and complete Full settings. These
+  # exact S3 recipes use real retained RTC banks for part of the same table.
+  case "${env_name,,}" in
+    heltec_wireless_tracker_repeater|heltec_wireless_tracker_repeater_observer_mqtt|\
+    heltec_tracker_v2_repeater|heltec_tracker_v2_repeater_observer_mqtt)
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_ADVERT_RTC_FAST_SLOTS=50 -DFLOOD_ADVERT_RTC_SLOW_SLOTS=50"
+      ;;
+    heltec_t190_repeater_|heltec_t190_repeater_observer_mqtt)
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_ADVERT_RTC_FAST_SLOTS=16"
       ;;
   esac
 
@@ -4489,6 +4527,9 @@ apply_companion_radio_full_profile() {
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_EXCLUSIVE_WIFI_BLE=1 -DUI_WIFI_SETUP_HOME_PAGE=1 -DWEBCONFIG_AP_PREFIX='\"MC-Set\"'"
       if [ "${env_name,,}" = "sensecapindicator-espnow_companion_radio_full" ]; then
         export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DINDICATOR_TRANSPORT_RENDER_PROFILE=1"
+        # Construct the complete mesh in real PSRAM after board startup;
+        # preserve all 350 contacts, 512 queue frames and 15 held DMs.
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_MESH_PSRAM_STORAGE=1"
       fi
       ;;
   esac
@@ -4544,6 +4585,10 @@ apply_companion_radio_full_profile() {
       # Reuse idle queue storage during explicit OTA; retain all 224 normal slots.
       if [[ "${env_name,,}" != generic_espnow_companion_radio_full ]]; then
         export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOTA_SHARED_COMPANION_QUEUE=1 -DONE_KEY_DM_COMPACT_HELD=1"
+      else
+        # Keep all 224 frames during OTA too; RTC FAST holds 32 existing
+        # slots without borrowing the queue or shrinking held-DM storage.
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_RTC_FAST_OFFLINE_FRAMES=32"
       fi
       record_build_reduction \
         "companion.capacity limited to 100 contacts for runtime RAM; 224 queued frames and all Full transports retained"
@@ -4560,8 +4605,18 @@ apply_companion_radio_full_profile() {
     heltec_wireless_tracker_companion_radio_full)
       append_platformio_build_unflags "-DMAX_CONTACTS=350"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=150"
+      # Retain all 256 frames, independent OTA workspace, held DMs, and the
+      # RGB565 display. Each RTC bank holds 32 existing CPU-only frames.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_RTC_FAST_OFFLINE_FRAMES=32 -DCOMPANION_RTC_SLOW_OFFLINE_FRAMES=32"
       record_build_reduction \
         "companion.capacity limited to 150 contacts for runtime RAM; 256 queued frames and all Full transports retained"
+      ;;
+    mke_s3_companion_radio_full|\
+    thinknode_m2_companion_radio_full|\
+    thinknode_m5_companion_radio_full)
+      # These S3 boards retain the complete 256-frame queue during OTA, with
+      # 32 existing frames in each RTC bank and all 350 contacts unchanged.
+      export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DCOMPANION_RTC_FAST_OFFLINE_FRAMES=32 -DCOMPANION_RTC_SLOW_OFFLINE_FRAMES=32"
       ;;
     sensecapindicator-lora_companion_radio_full|\
     sensecapindicator-lora-n16r2_companion_radio_full)
@@ -5437,6 +5492,7 @@ build_firmware_one_profile() {
   apply_esp32_lora_ota_size_profile "$env_name"
   apply_esp32_constrained_companion_size_profile "$env_name"
   apply_esp32_full_size_profile "$env_name"
+  apply_esp32_iram_advert_storage_profile "$env_name"
   apply_esp32_full_shared_bridge_profile "$pio_env_name"
   apply_esp32_full_async_tcp_profile "$env_name"
   apply_repeater_neighbor_capacity "$env_name"
@@ -5463,6 +5519,16 @@ build_firmware_one_profile() {
     if ! pio_env_option_contains "$pio_env_name" extra_scripts \
         "scripts/esp32_full_partition.py"; then
       append_platformio_extra_script "pre:scripts/esp32_full_partition.py"
+    fi
+    # Some board recipes replace esp32_base.extra_scripts. Keep the final
+    # infrastructure object-size policy in those exact Full environments too.
+    if ! pio_env_option_contains "$pio_env_name" extra_scripts \
+        "scripts/esp32_full_size.py"; then
+      append_platformio_extra_script "pre:scripts/esp32_full_size.py"
+    fi
+    if ! pio_env_option_contains "$pio_env_name" extra_scripts \
+        "scripts/generate_room_web_html.py"; then
+      append_platformio_extra_script "pre:scripts/generate_room_web_html.py"
     fi
     # PlatformIO appends PLATFORMIO_BUILD_FLAGS while resolving every extends
     # layer. Deep ESP32 Full profiles can therefore exceed Windows' process

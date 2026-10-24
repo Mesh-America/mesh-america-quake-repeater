@@ -29,6 +29,7 @@ HARNESS = r'''
 #include <helpers/CLICommandUtils.h>
 #include <helpers/WebConfigBatch.h>
 #include <helpers/WiFiNetworkPowerPolicy.h>
+#include <helpers/HttpContentEncoding.h>
 using String = std::string;
 #define PROGMEM
 @HTML@
@@ -132,7 +133,7 @@ struct AsyncWebServer {
 };
 struct DNS { unsigned stops = 0; void stop() { ++stops; } };
 struct Callbacks {
-  bool supported = true, authenticated = true;
+  bool supported = true, authenticated = true, page_available = true;
   bool roomRequestAuthenticated() const { return authenticated; }
   unsigned calls = 0, stops = 0;
   String last_body;
@@ -141,6 +142,10 @@ struct Callbacks {
   size_t last_capacity = 0;
   std::function<void(char*, char*)> in_callback;
   bool supportsRoomService() const { return supported; }
+  const uint8_t* roomPageGzip(size_t& length) const {
+    length = page_available ? sizeof(ROOM_WEB_HTML_GZ) : 0;
+    return page_available ? ROOM_WEB_HTML_GZ : nullptr;
+  }
   void processRoomRequest(const uint8_t* token, uint32_t sequence, char* body, char* result, size_t capacity) {
     assert(lock_depth == 0); // Mutating callback runs only on the loop, outside the HTTP mutex.
     ++calls; last_body = body; memcpy(last_token, token, 32);
@@ -362,7 +367,19 @@ static void pagesAndAvailability() {
   server.host.invoke("/room", HTTP_GET, page); assert(page.status == 200);
   assert(server.isNetworkForegroundActive(ticks));
   assert(mesh::wifi::networkPower().foregroundActive());
-  assert(page.reply.find("MeshCore Room") != String::npos && page.response_type == "text/html; charset=utf-8");
+  assert(page.reply.size() == sizeof(ROOM_WEB_HTML_GZ) && page.response_type == "text/html; charset=utf-8");
+  assert(memcmp(page.reply.data(), ROOM_WEB_HTML_GZ, sizeof(ROOM_WEB_HTML_GZ)) == 0);
+  assert(page.response_headers["Content-Encoding"] == "gzip" && page.response_headers["Vary"] == "Accept-Encoding");
+  AsyncWebServerRequest no_encoding;
+  no_encoding.headers["Accept-Encoding"].text = "gzip;q=0, identity";
+  server.host.invoke("/room", HTTP_GET, no_encoding);
+  assert(no_encoding.status == 406 && no_encoding.response_headers["Vary"] == "Accept-Encoding");
+  no_encoding.headers["Accept-Encoding"].text = "br, GZip;q=0.5";
+  server.host.invoke("/room", HTTP_GET, no_encoding);
+  assert(no_encoding.status == 200);
+  cb.page_available = false;
+  server.host.invoke("/room", HTTP_GET, no_encoding); assert(no_encoding.status == 503);
+  cb.page_available = true;
   assert(page.response_headers["Cache-Control"] == "no-store");
   assert(page.response_headers["X-Content-Type-Options"] == "nosniff" && page.response_headers["Referrer-Policy"] == "no-referrer");
   assert(cb.calls == 0);
@@ -447,11 +464,12 @@ class RoomWebHttpTests(unittest.TestCase):
             raise AssertionError("a host C++ compiler is required")
         source = (ROOT / "src/helpers/esp32/WebConfigServer.cpp").read_text()
         header = (ROOT / "src/helpers/esp32/WebConfigServer.h").read_text()
-        html = (ROOT / "src/helpers/esp32/RoomWebHtml.h").read_text()
-        html_constant = re.search(r'static const char ROOM_WEB_HTML\[\] PROGMEM = R"roomhtml\([\s\S]*?\)roomhtml";', html)
+        html = (ROOT / "src/helpers/esp32/RoomWebHtmlGzip.h").read_text()
+        html_constant = re.search(r'static const uint8_t ROOM_WEB_HTML_GZ\[\] PROGMEM = \{[\s\S]*?\};', html)
         if html_constant is None:
             raise AssertionError("production room HTML constant not found")
         methods = [extract_braced(source, signature) for signature in (
+            "static bool webConfigClientAcceptsGzip(", "static void webConfigRejectEncoding(",
             "void WebConfigServer::serviceRoom(", "static bool roomRequestIdentity(",
             "void WebConfigServer::handleRoomPage(", "void WebConfigServer::handleRoomPost(",
             "void WebConfigServer::handleRoomResult(", "void WebConfigServer::collectBody(",

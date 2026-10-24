@@ -518,6 +518,13 @@ bool MyMesh::updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, co
   return true;
 }
 
+#if COMPANION_RTC_FAST_OFFLINE_FRAMES
+alignas(4) RTC_FAST_ATTR MyMesh::Frame MyMesh::rtc_fast_offline_frames[COMPANION_RTC_FAST_OFFLINE_FRAMES];
+#endif
+#if COMPANION_RTC_SLOW_OFFLINE_FRAMES
+alignas(4) RTC_SLOW_ATTR MyMesh::Frame MyMesh::rtc_slow_offline_frames[COMPANION_RTC_SLOW_OFFLINE_FRAMES];
+#endif
+
 bool MyMesh::Frame::isChannelMsg() const {
   return len > 0 && (buf[0] == RESP_CODE_CHANNEL_MSG_RECV || buf[0] == RESP_CODE_CHANNEL_MSG_RECV_V3 ||
                      buf[0] == RESP_CODE_CHANNEL_DATA_RECV);
@@ -535,6 +542,8 @@ int MyMesh::getOfflineQueueCapacity() const {
 
 MyMesh::Frame& MyMesh::offlineQueueFrameAt(int logical_index) {
 #if defined(OTA_SHARED_COMPANION_QUEUE)
+  return offline_queue.at((offline_queue_head + logical_index) % getOfflineQueueCapacity());
+#elif COMPANION_RTC_FAST_OFFLINE_FRAMES || COMPANION_RTC_SLOW_OFFLINE_FRAMES
   return offline_queue.at((offline_queue_head + logical_index) % getOfflineQueueCapacity());
 #elif ONE_KEY_DM_SHARED_OFFLINE_QUEUE
   return offline_queue[logical_index];
@@ -2808,7 +2817,11 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
                   _prefs.airtime_factor),
 #endif
       _serial(NULL), _mota_source_control(NULL),
-      telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui), _iter(0) {
+      telemetry(MAX_PACKET_PAYLOAD - 4),
+#if COMPANION_RTC_FAST_OFFLINE_FRAMES || COMPANION_RTC_SLOW_OFFLINE_FRAMES
+      offline_queue(rtcFastQueueBank(), rtcSlowQueueBank()),
+#endif
+      _store(&store), _ui(ui), _iter(0) {
   _iter_started = false;
   _iter_reply_route = NULL;
   _iter_start_pending = false;
@@ -11677,9 +11690,9 @@ mesh::powerdiag::Mask MyMesh::pendingWorkReason() const {
 #else
   const bool contact_write_needs_polling = isContactWriteDue();
 #endif
-  if (_serial != NULL && _serial->hasPendingIO()) return mask(Reason::Serial);
+  if (_serial != NULL && _serial->hasPendingIO()) return mask(Reason::SerialIO);
   if (_iter_started && _serial != NULL
-      && _serial->isReplyRouteAvailable(_iter_reply_route)) return mask(Reason::Serial);
+      && _serial->isReplyRouteAvailable(_iter_reply_route)) return mask(Reason::SerialIO);
   if (hasPendingOtaApply()) return mask(Reason::Ota);
   if (command_radio_apply_pending || _scheduled_reboot_at != 0) return mask(Reason::Scheduled);
   if (hasPendingReqs() || _delayed_replies.hasBinaryTrace()) return mask(Reason::Mesh);

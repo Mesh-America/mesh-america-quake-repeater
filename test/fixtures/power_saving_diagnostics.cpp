@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
     assert(!state().observed && !state().current && !state().seen);
     assert(!state().union_blocked_ms && !state().eligible_ms);
   } else if (!strcmp(test, "reset")) {
-    setEnabled(true, 0); decision(mask(Reason::Serial), 1);
+    setEnabled(true, 0); decision(mask(Reason::SerialIO), 1);
     sleepBegin(1); sleepEnd(20); reset(10);
     assert(enabled() && !state().observed && !state().calls && !state().seen);
     decision(0, 11); assert(snapshot(20).eligible_ms == 9);

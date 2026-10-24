@@ -285,6 +285,11 @@ struct NeighbourInfo {
 #define RADIO_APPLY_RETRY_INTERVAL_MILLIS     1000UL
 #define SCHEDULED_RADIO_CLOCK_CHECKPOINT_SECS 60UL
 
+#if FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertFastBank();
+mesh::FloodAdvertLimiter::Entry* repeaterRtcAdvertSlowBank();
+#endif
+
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #ifdef WITH_WEBCONFIG
     , public WebConfigServer::Callbacks
@@ -311,7 +316,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 
   FILESYSTEM* _fs;
 #ifndef PORTABLE_MQTT_OBSERVER
+#if FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+  mesh::StaticFloodAdvertLimiter<> flood_advert_limiter{
+      repeaterRtcAdvertFastBank(), repeaterRtcAdvertSlowBank()};
+#else
   mesh::StaticFloodAdvertLimiter<> flood_advert_limiter;
+#endif
   mesh::FloodAdvertLimiter* getFloodAdvertLimiter() override { return &flood_advert_limiter; }
 #endif
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
@@ -768,13 +778,19 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
     ND_SEND_FAILED = 5,
   };
   struct NeighborDiscoverEntry {
-    mesh::Identity id;       // immutable snapshot: neighbour table can change mid-pass
-    uint32_t heard_timestamp;
-    uint32_t tag;            // anon-regions request tag we're waiting on
-    int16_t rssi;            // dBm from the last packet heard from this neighbour
-    int8_t snr;              // multiplied by 4
-    uint8_t status;          // NeighborDiscoverStatus
+    // Keep every full key in the immutable crypto overlay, even when the
+    // existing JSON/query budget cannot publish that neighbor this pass.
+    mesh::Identity id;
   };
+  struct NeighborDiscoverMetadata {
+    uint32_t heard_timestamp;
+    uint32_t tag;
+    int16_t rssi;
+    int8_t snr;
+    uint8_t status;
+  };
+  static_assert(sizeof(NeighborDiscoverMetadata) == 12,
+                "Discovery metadata must retain its complete compact layout");
   NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
   // Only the publishable prefix (plus the result that detects truncation)
   // receives scope queries. Keep every neighbor snapshot, without reserving
@@ -782,6 +798,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   static constexpr size_t NEIGHBOR_SCOPE_RESULTS =
       MAX_NEIGHBOURS < MQTTBridge::NEIGHBORS_SCOPE_RESULT_CAPACITY
           ? MAX_NEIGHBOURS : MQTTBridge::NEIGHBORS_SCOPE_RESULT_CAPACITY;
+  NeighborDiscoverMetadata neighbor_discover_metadata[NEIGHBOR_SCOPE_RESULTS];
   char neighbor_discover_scopes[NEIGHBOR_SCOPE_RESULTS][96];
   uint8_t neighbor_discover_count;
   uint8_t neighbor_discover_next;            // newest-first entry currently being queried

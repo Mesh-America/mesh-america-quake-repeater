@@ -129,6 +129,60 @@ int main() {
                     f"-DENV_INCLUDE_BME680_BSEC={sensors}",
                 ])
 
+    def test_tlora_full_room_preserves_maximum_source_and_bounded_ownership(self):
+        self.check_grouped_equivalence([
+            "-DESP32_PLATFORM=1", "-DLILYGO_TLORA=1", "-DOTA_BOUNDED_SOURCE_PROOFS=1",
+        ])
+
+    def test_tlora_room_budget_changes_only_actual_source_workspace(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from check_firmware_ram import requirements
+        flags = dict(ENABLE_OTA=1, OTA_HEAP_CONTEXT=1, WITH_MQTT_BRIDGE=1,
+                     ADMIN_PASSWORD="password", MQTT_TASK_STACK_SIZE=16384,
+                     DISPLAY_CLASS="SSD1306Display", MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE=1,
+                     MESHCORE_OTA_DEVICE_DEFLATE=1)
+        target = "LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt_"
+        before = requirements("ESP32_PLATFORM", flags, target)
+        after = requirements("ESP32_PLATFORM", dict(flags, OTA_BOUNDED_SOURCE_PROOFS=1), target)
+        self.assertEqual(before["required_heap_bytes"], 225072)
+        self.assertEqual(after["required_heap_bytes"], 210224)
+        self.assertEqual(before["required_contiguous_bytes"], 18464)
+        self.assertEqual(after["required_contiguous_bytes"], 16400)
+        self.assertEqual(before["components"]["ota_generic_source_buffers"], 18464)
+        self.assertEqual(after["components"]["ota_generic_source_buffers"], 3616)
+        before_parts = dict(before["components"])
+        after_parts = dict(after["components"])
+        before_parts.pop("ota_generic_source_buffers")
+        after_parts.pop("ota_generic_source_buffers")
+        self.assertEqual(before_parts, after_parts)
+        self.assertEqual(before["mqtt"], after["mqtt"])
+        self.assertEqual(after_parts["allocation_and_transient_margin"], 16384)
+
+    def test_tlora_legacy_source_reference_retains_same_maximum_geometry(self):
+        # Keep the real old all-leaf cache path as the independent comparison:
+        # actual allocation, all Merkle proofs, maximum leaf count and last DATA
+        # tail still execute under the exact same ESP32/TLora geometry.
+        from test_ota_cold_buffers import HOST_MARKERS
+        with tempfile.TemporaryDirectory(prefix="tlora-legacy-proofs-") as folder:
+            binary = Path(folder) / "legacy"
+            files = ("OtaManager.cpp", "OtaProtocol.cpp", "MotaContainer.cpp", "MerkleTree.cpp")
+            built = subprocess.run([
+                os.environ.get("CXX", "g++"), "-std=c++17", "-O1", "-Wall", "-Wextra", "-Werror",
+                "-Wno-unused-parameter", "-Wno-sign-compare", "-fsanitize=address,undefined",
+                "-fno-sanitize-recover=all", "-fno-pie", "-no-pie", "-DESP32_PLATFORM=1",
+                "-DLILYGO_TLORA=1", "-DOTA_BOUNDED_SOURCE_PROOFS=0",
+                "-I", str(ROOT / "src"), "-I", str(ROOT / "test/mocks"),
+                str(ROOT / "test/fixtures/ota_cold_buffers/test.cpp"),
+                *[str(ROOT / "src/helpers/ota" / name) for name in files], str(ROOT / "src/Utils.cpp"),
+                "-Wl,--wrap=malloc", "-Wl,--wrap=free", "-o", str(binary),
+            ], capture_output=True, text=True, timeout=90)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=90)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            for marker in HOST_MARKERS:
+                self.assertIn("PASS: " + marker, ran.stdout)
+
     def check_grouped_equivalence(self, flags):
         # Reuse the existing source/wire/allocator harness, retaining its legacy
         # tests unchanged in their own suite. Only its helpers precede this point.

@@ -2,6 +2,8 @@
 
 #include <MeshCore.h>
 #include <string.h>
+#include "FloodAdvertRtcPolicy.h"
+#include "FloodAdvertIramPolicy.h"
 
 #ifndef FLOOD_ADVERT_SOURCE_SLOTS
   #if defined(STM32_PLATFORM)
@@ -15,6 +17,9 @@
 #endif
 
 namespace mesh {
+#if FLOOD_ADVERT_IRAM_WORD_STORAGE
+volatile uint32_t* floodAdvertIramBank();
+#endif
 
 // Volatile, bounded receive history. Only forwarding roles own this table.
 // All times are uint32_t uptime milliseconds, never advert timestamps or RTC.
@@ -74,7 +79,17 @@ public:
   size_t listLimited(uint32_t now, size_t offset, LimitedEntry* dest, size_t count);
 
 protected:
+#if FLOOD_ADVERT_IRAM_WORD_STORAGE
+  FloodAdvertLimiter(volatile uint32_t* entries, size_t capacity);
+  ~FloodAdvertLimiter();
+#elif FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+  FloodAdvertLimiter(Entry* entries, size_t capacity, Entry* fast, Entry* slow)
+      : _entries(entries, fast, slow), _capacity(capacity) {
+    if (capacity != FLOOD_ADVERT_SOURCE_SLOTS) abort();
+  }
+#else
   FloodAdvertLimiter(Entry* entries, size_t capacity) : _entries(entries), _capacity(capacity) {}
+#endif
   FloodAdvertLimiter(const FloodAdvertLimiter&) = delete;
   FloodAdvertLimiter& operator=(const FloodAdvertLimiter&) = delete;
 
@@ -82,10 +97,85 @@ private:
   enum : uint8_t { ACTIVE = 1, PREVIOUS_OVER = 2, BAD = 4, HAS_FORWARDED = 8 };
   static_assert((ACTIVE | PREVIOUS_OVER | BAD | HAS_FORWARDED) <= 15,
                 "Advert flags must fit their four-bit field");
+#if FLOOD_ADVERT_IRAM_WORD_STORAGE
+  volatile uint32_t* _entries;
+  static const void*& iramOwner();
+  void requireIramOwner(size_t index) const;
+  struct EntryTail {
+    uint16_t forwarded;
+    uint8_t min_hops;
+    uint8_t count : 4;
+    uint8_t flags : 4;
+  };
+  static_assert(sizeof(Entry) == 140 && sizeof(EntryTail) == 4
+                && offsetof(Entry, forwarded) == 136 && offsetof(Entry, min_hops) == 138,
+                "Qualified IRAM codec must preserve the original record ABI");
+  static constexpr size_t EntryWords = sizeof(Entry) / sizeof(uint32_t);
+  void loadEntry(size_t index, Entry& dest) const;
+  void storeEntry(size_t index, const Entry& source);
+  EntryTail readTail(size_t index) const;
+  void writeTail(size_t index, EntryTail tail);
+  uint32_t readStamp(size_t index, size_t offset) const;
+  bool keyMatches(size_t index, const uint8_t* key, size_t length) const;
+  size_t findIndex(const uint8_t* key) const;
+#elif FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+  // CPU-only banks. No transport or DMA engine receives these addresses.
+  class EntryStorage {
+    static constexpr size_t FastCount = FLOOD_ADVERT_RTC_FAST_SLOTS;
+    static constexpr size_t SlowCount = FLOOD_ADVERT_RTC_SLOW_SLOTS;
+    static constexpr size_t MainCount = FLOOD_ADVERT_SOURCE_SLOTS - FastCount - SlowCount;
+    static_assert(FLOOD_ADVERT_SOURCE_SLOTS > FastCount + SlowCount,
+                  "Advert history must retain an ordinary main bank");
+    static_assert(sizeof(Entry) == 140 && std::is_trivial<Entry>::value,
+                  "Qualified advert records must retain every original field");
+    static_assert(sizeof(Entry) * FastCount <= 7168 && sizeof(Entry) * SlowCount <= 7168,
+                  "Advert banks must leave SDK RTC storage headroom");
+    Entry* main_;
+    Entry* fast_;
+    Entry* slow_;
+    static const void*& owner() {
+      // This lease lives in ordinary BSS and resets on every boot/deep wake.
+      static const void* value = nullptr;
+      return value;
+    }
+    void requireOwner() const { if (owner() != this) abort(); }
+  public:
+    EntryStorage(Entry* main, Entry* fast, Entry* slow)
+        : main_(main), fast_(fast), slow_(slow) {
+      if (!main || reinterpret_cast<uintptr_t>(main) % alignof(Entry)
+          || (FastCount && (!fast || reinterpret_cast<uintptr_t>(fast) % 4))
+          || (SlowCount && (!slow || reinterpret_cast<uintptr_t>(slow) % 4))
+          || owner() != nullptr) abort();
+      owner() = this;
+    }
+    ~EntryStorage() { requireOwner(); owner() = nullptr; }
+    EntryStorage(const EntryStorage&) = delete;
+    EntryStorage& operator=(const EntryStorage&) = delete;
+    Entry& operator[](size_t index) {
+      requireOwner();
+      if (index >= FLOOD_ADVERT_SOURCE_SLOTS) abort();
+      if (index < MainCount) return main_[index];
+      index -= MainCount;
+      if (index < FastCount) return fast_[index];
+      return slow_[index - FastCount];
+    }
+    void reset() {
+      requireOwner();
+      // Clear in place, including retained bytes after reboot/deep wake.
+      memset(main_, 0, sizeof(Entry) * MainCount);
+      if (FastCount) memset(fast_, 0, sizeof(Entry) * FastCount);
+      if (SlowCount) memset(slow_, 0, sizeof(Entry) * SlowCount);
+    }
+  };
+  EntryStorage _entries;
+#else
   Entry* _entries;
+#endif
   size_t _capacity;
   uint32_t _last_sweep = 0;
+#if !FLOOD_ADVERT_IRAM_WORD_STORAGE
   Entry* find(const uint8_t* key);
+#endif
   static int hashIndex(const Entry& entry, const uint8_t* hash);
   static void advance(Entry& entry, uint32_t now);
   void refresh(uint32_t now);
@@ -94,9 +184,23 @@ private:
 template<size_t Capacity = FLOOD_ADVERT_SOURCE_SLOTS>
 class StaticFloodAdvertLimiter : public FloodAdvertLimiter {
   static_assert(Capacity > 0, "Advert limiter needs at least one source slot");
+#if FLOOD_ADVERT_IRAM_WORD_STORAGE
+  static_assert(Capacity == FLOOD_ADVERT_SOURCE_SLOTS,
+                "IRAM advert storage retains the exact full source capacity");
+public:
+  StaticFloodAdvertLimiter() : FloodAdvertLimiter(floodAdvertIramBank(), Capacity) { reset(); }
+#elif FLOOD_ADVERT_RTC_FAST_SLOTS || FLOOD_ADVERT_RTC_SLOW_SLOTS
+  static_assert(Capacity == FLOOD_ADVERT_SOURCE_SLOTS,
+                "RTC advert storage requires the exact fixed source capacity");
+  Entry _storage[Capacity - FLOOD_ADVERT_RTC_FAST_SLOTS - FLOOD_ADVERT_RTC_SLOW_SLOTS];
+public:
+  StaticFloodAdvertLimiter(Entry* fast, Entry* slow)
+      : FloodAdvertLimiter(_storage, Capacity, fast, slow) { reset(); }
+#else
   Entry _storage[Capacity];
 public:
   StaticFloodAdvertLimiter() : FloodAdvertLimiter(_storage, Capacity) { reset(); }
+#endif
 };
 
 } // namespace mesh

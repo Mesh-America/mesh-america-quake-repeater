@@ -238,7 +238,7 @@ int main() {
     check(node.ota, Reason::Ota); // An idle scanner does not bypass other role guards.
     check(node.queue, Reason::Queue); check(node.retry, Reason::Retry);
     node.dual = node.profile_idle = false;
-    check(node._local_cli_output.busy_value, Reason::Serial);
+    check(node._local_cli_output.busy_value, Reason::SerialIO);
     check(node.deferred_cli_command.pending, Reason::Scheduled);
     check(node.uart.running, Reason::Bridge);
     node.active_rs232_bridge_uart = 1;

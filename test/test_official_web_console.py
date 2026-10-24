@@ -60,7 +60,7 @@ def firmware_harness(*, lose_sleep_guard=False, lose_crlf=False,
         "bool isUsbDataConnected() override",
         "bool isUsbHostConnected() override")) + "\n" + sleep_held
     if lose_raw_uart_guard:
-        expression = "keep_awake = keep_awake || hold(static_cast<bool>(Serial), Reason::Serial);"
+        expression = "keep_awake = keep_awake || hold(static_cast<bool>(Serial), Reason::SerialIO);"
         assert expression in methods, "Missing raw UART negative-control boundary"
         methods = methods.replace(expression, "keep_awake = keep_awake || false;")
     source = source.replace("@METHODS@", methods)

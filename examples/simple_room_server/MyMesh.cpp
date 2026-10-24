@@ -54,6 +54,7 @@
 #include <memory>
 #include <helpers/RoomWebJson.h>
 #include <helpers/RoomMailWeb.h>
+#include <helpers/esp32/RoomWebHtmlGzip.h>
 #endif
 #include <helpers/OtaChannel.h>
 
@@ -680,6 +681,11 @@ void MyMesh::processRoomWebBoardWrite(const char* operation, JsonObjectConst inp
   if (result != mesh::RoomBoardResult::Success) { error("article save failed or version changed; previous article retained"); return; }
   json.raw("{\"ok\":true,\"version\":"); json.number(board.revision + 1);
   json.raw("}"); json.finish();
+}
+
+const uint8_t* MyMesh::roomPageGzip(size_t& length) const {
+  length = sizeof(ROOM_WEB_HTML_GZ);
+  return ROOM_WEB_HTML_GZ;
 }
 
 void MyMesh::processRoomRequest(const uint8_t* token, uint32_t sequence, char* request,
@@ -1505,8 +1511,9 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
-      && neighbor_discover_next < neighbor_discover_count) {
-    NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+      && neighbor_discover_next < neighbor_discover_count
+      && (size_t)neighbor_discover_next < NEIGHBOR_SCOPE_RESULTS) {
+    auto& entry = neighbor_discover_metadata[neighbor_discover_next];
     if (entry.status == ND_QUEUED) {
       entry.status = ND_PENDING;
       neighbor_discover_queried_count++;
@@ -1546,8 +1553,9 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
-      && neighbor_discover_next < neighbor_discover_count) {
-    NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+      && neighbor_discover_next < neighbor_discover_count
+      && (size_t)neighbor_discover_next < NEIGHBOR_SCOPE_RESULTS) {
+    auto& entry = neighbor_discover_metadata[neighbor_discover_next];
     if (entry.status == ND_QUEUED) {
       entry.status = ND_SEND_FAILED;
       neighbor_discover_request = NULL;
@@ -1988,7 +1996,8 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
       // a second overlay entry would decrypt first and intercept their normal
       // CLI/request traffic for the duration of discovery.
       if (acl.getClient(entry.id.pub_key, PUB_KEY_SIZE) != nullptr) continue;
-      if (entry.heard_timestamp > 0 && entry.id.isHashMatch(hash)) {
+      // Every counted snapshot key was admitted with a positive heard time.
+      if (entry.id.isHashMatch(hash)) {
         matching_peer_indexes[n++] = NEIGHBOR_DISCOVER_PEER_BASE + i;
       }
     }
@@ -2523,12 +2532,44 @@ void MyMesh::sendNodeDiscoverReq() {
 
 #endif // WITH_MQTT_NEIGHBORS
 
+#if ROOM_POSTS_RTC_SLOW_STORAGE
+#include <esp_attr.h>
+#include <sdkconfig.h>
+#include <stdlib.h>
+#if !defined(CONFIG_IDF_TARGET_ESP32)
+#error "Qualified RTC slow Room posts require classic ESP32"
+#endif
+static_assert(MAX_UNSYNCED_POSTS == 32 && sizeof(PostInfo) == 188,
+              "Keep the complete qualified Room post capacity and geometry");
+namespace {
+const void* room_rtc_posts_owner = nullptr;
+
+PostInfo (&acquireRoomRtcPosts(const void* owner))[MAX_UNSYNCED_POSTS] {
+  // This bank belongs to one mesh object. NDEBUG cannot permit aliases.
+  if (!owner || room_rtc_posts_owner) abort();
+  // A concrete non-template local static honors RTC placement and constructs
+  // Identity before MyMesh's reference is initialized, across translation units.
+  alignas(4) static RTC_SLOW_ATTR PostInfo storage[MAX_UNSYNCED_POSTS];
+  room_rtc_posts_owner = owner;
+  return storage;
+}
+
+void releaseRoomRtcPosts(const void* owner) {
+  if (!owner || room_rtc_posts_owner != owner) abort();
+  room_rtc_posts_owner = nullptr;
+}
+} // namespace
+#endif
+
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
     : mesh::Mesh(radio, ms, rng, rtc, *createObserverPacketManager(32), tables),
       region_map(key_store), temp_map(key_store),
       _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
       _clock_sync(radio, ms, rtc, acl, sensors, _prefs.tx_delay_factor, this),
+#if ROOM_POSTS_RTC_SLOW_STORAGE
+      posts(acquireRoomRtcPosts(this)),
+#endif
       telemetry(MAX_PACKET_PAYLOAD - 4)
 #ifdef WITH_MQTT_BRIDGE
       , bridge(nullptr)
@@ -2650,6 +2691,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   memset(default_scope.key, 0, sizeof(default_scope.key));
 }
+
+#if ROOM_POSTS_RTC_SLOW_STORAGE
+MyMesh::~MyMesh() { releaseRoomRtcPosts(this); }
+#endif
 
 void MyMesh::begin(FILESYSTEM *fs) {
   mesh::Mesh::begin();
@@ -4458,7 +4503,7 @@ mesh::powerdiag::Mask MyMesh::pendingWorkReason() const {
   if (esp_wifi_get_mode(&sdk_mode) != ESP_ERR_WIFI_NOT_INIT) return mask(Reason::Network);
 #endif
 #if defined(WITH_WEBCONFIG) || defined(ETHERNET_ENABLED)
-  if (_local_cli_output.busy()) return mask(Reason::Serial);
+  if (_local_cli_output.busy()) return mask(Reason::SerialIO);
 #endif
 #if defined(WITH_BRIDGE)
 #ifdef WITH_MQTT_BRIDGE
@@ -4579,15 +4624,21 @@ void MyMesh::resetNeighborDiscoverJsonBudget() {
 // progress metadata; UINT32_MAX likewise reserves the widest heard-age value.
 // If this result cannot fit, stop before transmitting another scope request.
 bool MyMesh::completeNeighborDiscoverEntry() {
-  NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+  if ((size_t)neighbor_discover_next >= NEIGHBOR_SCOPE_RESULTS) {
+    neighbor_discover_truncated = true;
+    finishNeighborDiscover();
+    return false;
+  }
+  auto& entry = neighbor_discover_metadata[neighbor_discover_next];
   char pubkey_hex[65];
-  mesh::Utils::toHex(pubkey_hex, entry.id.pub_key, PUB_KEY_SIZE);
+  mesh::Utils::toHex(pubkey_hex,
+                    neighbor_discover[neighbor_discover_next].id.pub_key, PUB_KEY_SIZE);
 
   MQTTMessageBuilder::NeighborsMessageEntry measured = {
     pubkey_hex,
     entry.snr / 4.0f,
     UINT32_MAX,
-    entry.scopes,
+    neighbor_discover_scopes[neighbor_discover_next],
     entry.status == ND_RESPONDED ? "responded"
       : (entry.status == ND_SEND_FAILED ? "send_failed" : "timeout")
   };
@@ -4613,8 +4664,9 @@ bool MyMesh::completeNeighborDiscoverEntry() {
 bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx,
                                             const uint8_t* data, size_t len,
                                             float snr, int16_t rssi) {
-  if (overlay_idx < 0 || overlay_idx >= neighbor_discover_count) return false;
-  NeighborDiscoverEntry& entry = neighbor_discover[overlay_idx];
+  if (overlay_idx < 0 || overlay_idx >= neighbor_discover_count
+      || (size_t)overlay_idx >= NEIGHBOR_SCOPE_RESULTS) return false;
+  auto& entry = neighbor_discover_metadata[overlay_idx];
   if (entry.status != ND_PENDING || len < 8) return false;
 
   uint32_t tag;
@@ -4622,11 +4674,12 @@ bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx,
   if (tag != entry.tag) return false;
 
   size_t scope_len = len - 8;
-  if (scope_len >= sizeof(entry.scopes)) {
-    scope_len = sizeof(entry.scopes) - 1;
+  auto& scopes = neighbor_discover_scopes[overlay_idx];
+  if (scope_len >= sizeof(scopes)) {
+    scope_len = sizeof(scopes) - 1;
   }
-  memcpy(entry.scopes, &data[8], scope_len);
-  entry.scopes[scope_len] = 0;
+  memcpy(scopes, &data[8], scope_len);
+  scopes[scope_len] = 0;
   entry.status = ND_RESPONDED;
   // A zero-hop reply is proof we heard this neighbour now, so re-stamp both the
   // snapshot and live table with this packet's measurements. A stamp taken
@@ -4634,7 +4687,7 @@ bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx,
   entry.heard_timestamp = getRTCClock()->getCurrentTime();
   entry.snr = (int8_t)(snr * 4);
   entry.rssi = rssi;
-  touchNeighbourHeard(entry.id, entry.heard_timestamp, snr, rssi);
+  touchNeighbourHeard(neighbor_discover[overlay_idx].id, entry.heard_timestamp, snr, rssi);
   return true;
 }
 
@@ -4762,16 +4815,16 @@ void MyMesh::finishNeighborDiscover() {
     uint32_t now_secs = getRTCClock()->getCurrentTime();
 
     for (int i = 0; i < publish_count; i++) {
-      auto& entry = neighbor_discover[i];
+      auto& entry = neighbor_discover_metadata[i];
       char* hex = &pubkey_hex[i * hex_size];
-      mesh::Utils::toHex(hex, entry.id.pub_key, PUB_KEY_SIZE);
+      mesh::Utils::toHex(hex, neighbor_discover[i].id.pub_key, PUB_KEY_SIZE);
       entries[i].pubkey_hex = hex;
       entries[i].snr = entry.snr / 4.0f;
       entries[i].rssi = entry.rssi;
       bool heard_known = neighborHeardAgeUsable(entry.heard_timestamp, now_secs);
       entries[i].heard_unknown = !heard_known;
       entries[i].heard_secs_ago = heard_known ? (now_secs - entry.heard_timestamp) : 0;
-      entries[i].scopes = entry.scopes;
+      entries[i].scopes = neighbor_discover_scopes[i];
       switch (entry.status) {
         case ND_RESPONDED:   entries[i].status = "responded"; break;
         case ND_SEND_FAILED: entries[i].status = "send_failed"; break;
@@ -4834,8 +4887,13 @@ void MyMesh::loopNeighborDiscover() {
     finishNeighborDiscover();
     return;
   }
+  if ((size_t)neighbor_discover_next >= NEIGHBOR_SCOPE_RESULTS) {
+    neighbor_discover_truncated = true;
+    finishNeighborDiscover();
+    return;
+  }
 
-  NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+  auto& entry = neighbor_discover_metadata[neighbor_discover_next];
   if (entry.status == ND_QUEUED) {
     if (!millisHasNowPassed(neighbor_discover_until)) return;
     if (cancelNeighborDiscoverRequest()) {
@@ -4869,7 +4927,8 @@ void MyMesh::loopNeighborDiscover() {
   }
 
   uint32_t tag;
-  mesh::Packet* request = sendAnonRegionsReq(entry.id, tag);
+  mesh::Packet* request = sendAnonRegionsReq(
+      neighbor_discover[neighbor_discover_next].id, tag);
   if (request) {
     entry.tag = tag;
     entry.status = ND_QUEUED;
@@ -4904,38 +4963,49 @@ bool MyMesh::startNeighborDiscover(char* reply) {
     return false;  // reply already set
   }
 
+  // Select in the exact original stable order without putting another full
+  // 254-entry table on the loop stack. The live cache is only mutated on this
+  // mesh task, so it remains stable during this synchronous snapshot step.
+  static_assert(MAX_NEIGHBOURS <= 255, "Snapshot indexes and count must fit one byte");
+  uint8_t order[MAX_NEIGHBOURS];
   neighbor_discover_count = 0;
   for (int i = 0; i < MAX_NEIGHBOURS; i++) {
     if (neighbours[i].heard_timestamp > 0) {
-      NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_count];
-      entry.id = neighbours[i].id;
-      entry.heard_timestamp = neighbours[i].heard_timestamp;
-      entry.snr = neighbours[i].snr;
-      entry.rssi = neighbours[i].rssi;
-      entry.scopes[0] = 0;
-      entry.tag = 0;
-      entry.status = ND_UNSENT;
-      neighbor_discover_count++;
+      order[neighbor_discover_count++] = (uint8_t)i;
     }
   }
 
-  // Query the freshest/strongest entries first; pubkey makes ties deterministic.
   for (int i = 1; i < neighbor_discover_count; i++) {
-    NeighborDiscoverEntry entry = neighbor_discover[i];
+    const uint8_t entry_index = order[i];
+    const auto& entry = neighbours[entry_index];
     int j = i;
     while (j > 0) {
-      auto& rhs = neighbor_discover[j - 1];
+      const auto& rhs = neighbours[order[j - 1]];
       bool before = entry.heard_timestamp > rhs.heard_timestamp
         || (entry.heard_timestamp == rhs.heard_timestamp && entry.snr > rhs.snr)
         || (entry.heard_timestamp == rhs.heard_timestamp && entry.snr == rhs.snr
             && memcmp(entry.id.pub_key, rhs.id.pub_key, PUB_KEY_SIZE) < 0);
       if (!before) break;
-      neighbor_discover[j] = neighbor_discover[j - 1];
+      order[j] = order[j - 1];
       j--;
     }
-    neighbor_discover[j] = entry;
+    order[j] = entry_index;
   }
 
+  memset(neighbor_discover_metadata, 0, sizeof(neighbor_discover_metadata));
+  for (int i = 0; i < neighbor_discover_count; i++) {
+    const auto& source = neighbours[order[i]];
+    neighbor_discover[i].id = source.id;
+    if ((size_t)i < NEIGHBOR_SCOPE_RESULTS) {
+      auto& metadata = neighbor_discover_metadata[i];
+      metadata.heard_timestamp = source.heard_timestamp;
+      metadata.snr = source.snr;
+      metadata.rssi = source.rssi;
+      metadata.status = ND_UNSENT;
+    }
+  }
+
+  memset(neighbor_discover_scopes, 0, sizeof(neighbor_discover_scopes));
   neighbor_discover_next = 0;
   resetNeighborDiscoverJsonBudget();
   neighbor_discover_active = true;
