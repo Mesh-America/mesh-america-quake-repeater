@@ -454,7 +454,9 @@ static void checkAmbiguousPublicationAndServiceGate() {
   assert(healthy.node.packets.size() == 1);
   assert(healthy.node.packets[0].payload_len == 184);
   assert(!memcmp(healthy.node.packets[0].payload, "TTB1", 4));
-  test_millis += 2000; healthy.node.serviceTelemetryHistoryTx(); test_millis = 0;
+  test_millis += 89999; healthy.node.serviceTelemetryHistoryTx();
+  assert(healthy.node.packets.size() == 1);
+  test_millis += 1; healthy.node.serviceTelemetryHistoryTx(); test_millis = 0;
   assert(healthy.node.packets.size() == 2 && !memcmp(healthy.node.packets[1].payload, "TVB1", 4));
   assert(healthy.node.command("send telemetry.tx now").find("OK - telemetry.tx queued") == 0);
 }

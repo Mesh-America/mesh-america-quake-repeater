@@ -63,6 +63,9 @@ history is entirely zero are treated as disconnected and are not sent. The
 command requires at least one collected base sample and works even when the
 automatic schedule is off.
 
+Packets in manual and scheduled batches are queued 90 seconds apart. Channel
+activity and airtime limits can delay actual transmission further.
+
 It also queues a `N1B1` noise-floor packet once the main radio has completed a
 15-minute history bucket. With radio2 enabled, it queues a separate `N2B1`
 packet for that profile once it has a completed bucket. Each holds the latest
