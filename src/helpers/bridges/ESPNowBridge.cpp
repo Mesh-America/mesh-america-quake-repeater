@@ -304,7 +304,8 @@ void ESPNowBridge::end() {
   uint8_t tx_index = _tx_tail;
   for (uint8_t i = 0; i < _tx_count; ++i) {
     const QueuedTransmit& queued_tx = _tx_queue[tx_index];
-    if (!queued_tx.started && !queued_tx.diagnostic) _seen_packets.clear(&queued_tx.packet);
+    if (!queued_tx.started && !queued_tx.diagnostic)
+      _seen_packets.clearSeenKey(queued_tx.seen_key);
     tx_index = static_cast<uint8_t>((tx_index + 1) % TX_QUEUE_DEPTH);
   }
   portENTER_CRITICAL(&_tx_mux);
@@ -385,12 +386,16 @@ bool ESPNowBridge::queueTransmitFrames(
     }
   }
 
+  // Hash the caller-owned snapshot before entering the callback-shared queue
+  // lock. SHA work never extends an ESP-NOW critical section.
+  SimpleMeshTables::SeenKey seen_key;
+  if (!diagnostic) seen_key = _seen_packets.seenKey(packet);
   bool queued = false;
   portENTER_CRITICAL(&_tx_mux);
   if (_tx_count < TX_QUEUE_DEPTH) {
     QueuedTransmit& queued_tx = _tx_queue[_tx_head];
     queued_tx.frames = frames;
-    if (!diagnostic) queued_tx.packet = packet;
+    queued_tx.seen_key = seen_key;
     queued_tx.next_frame = 0;
     queued_tx.started = false;
     queued_tx.start_retries = 0;
@@ -417,7 +422,7 @@ void ESPNowBridge::pumpTransmitQueue() {
   bool completed = false;
   int completed_status = ESP_NOW_SEND_SUCCESS;
   bool clear_unsent_seen = false;
-  mesh::Packet unsent_packet;
+  SimpleMeshTables::SeenKey unsent_key;
   uint32_t dropped = 0;
   const uint32_t now = millis();
   bool timed_out = false;
@@ -527,7 +532,7 @@ void ESPNowBridge::pumpTransmitQueue() {
         _tx_retry_at = now + TX_RETRY_DELAY_MS;
       } else {
         if (!queued_tx.started && !queued_tx.diagnostic) {
-          unsent_packet = queued_tx.packet;
+          unsent_key = queued_tx.seen_key;
           clear_unsent_seen = true;
         }
         _tx_tail = static_cast<uint8_t>((_tx_tail + 1) % TX_QUEUE_DEPTH);
@@ -539,7 +544,7 @@ void ESPNowBridge::pumpTransmitQueue() {
     portEXIT_CRITICAL(&_tx_mux);
     // Admission marks the packet to suppress duplicate queue entries. Restore
     // the prior behavior when even its first esp_now_send() cannot start.
-    if (clear_unsent_seen) _seen_packets.clear(&unsent_packet);
+    if (clear_unsent_seen) _seen_packets.clearSeenKey(unsent_key);
     BRIDGE_DEBUG_PRINTLN("TX failed to start, error=%d\n", (int)result);
   } else {
     portENTER_CRITICAL(&_tx_mux);

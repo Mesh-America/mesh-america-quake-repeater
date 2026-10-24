@@ -124,6 +124,64 @@ static Packet makeMultipartAckPacket(uint32_t crc, uint8_t remaining = 1, bool d
     return p;
 }
 
+TEST(SimpleMeshTables, SeenKeyRetainsEveryHashByteAndAckCacheDomain) {
+    SimpleMeshTables table;
+    Packet ordinary = makeFloodPacket(0x43);
+    Packet plain_ack = makeAckPacket(0x10203040);
+    Packet multipart_ack = makeMultipartAckPacket(0x10203040);
+    for (Packet* packet : {&ordinary, &plain_ack, &multipart_ack}) {
+        table.markSeen(packet);
+        auto key = table.seenKey(*packet);
+        uint8_t expected[MAX_HASH_SIZE];
+        packet->calculatePacketHash(expected);
+        EXPECT_EQ(0, memcmp(expected, key.hash, sizeof(expected)));
+        EXPECT_EQ(packet != &ordinary, key.dedicated_ack);
+        auto wrong_domain = key;
+        wrong_domain.dedicated_ack = !wrong_domain.dedicated_ack;
+        table.clearSeenKey(wrong_domain);
+        EXPECT_TRUE(table.wasSeen(packet));
+        table.clearSeenKey(key);
+        EXPECT_FALSE(table.wasSeen(packet));
+    }
+}
+
+TEST(SimpleMeshTables, SeenKeyClassifiesShortAndNonAckMultipartAsOrdinary) {
+    SimpleMeshTables table;
+    Packet short_ack = makeAckPacket(0x10203040);
+    short_ack.payload_len = 3;
+    Packet short_multipart = makeMultipartAckPacket(0x10203040);
+    short_multipart.payload_len = 4;
+    Packet other_multipart = makeMultipartAckPacket(0x10203040);
+    other_multipart.payload[0] = PAYLOAD_TYPE_RAW_CUSTOM;
+    for (Packet* packet : {&short_ack, &short_multipart, &other_multipart}) {
+        auto key = table.seenKey(*packet);
+        EXPECT_FALSE(key.dedicated_ack);
+        table.markSeen(packet);
+        EXPECT_TRUE(table.wasSeen(packet));
+        table.clearSeenKey(key);
+        EXPECT_FALSE(table.wasSeen(packet));
+    }
+}
+
+TEST(SimpleMeshTables, SeenKeySurvivesPacketReuseAndTracePathChanges) {
+    SimpleMeshTables table;
+    Packet original = makeFloodPacket(0x51);
+    original.header = ROUTE_TYPE_FLOOD | (PAYLOAD_TYPE_TRACE << PH_TYPE_SHIFT);
+    original.path_len = 3;
+    Packet reused = original;
+    table.markSeen(&original);
+    const auto key = table.seenKey(reused);
+    reused.path_len = 4; // TRACE's hash also includes its current path length.
+    table.markSeen(&reused);
+    EXPECT_TRUE(table.wasSeen(&original));
+    EXPECT_TRUE(table.wasSeen(&reused));
+    table.clearSeenKey(key);
+    EXPECT_FALSE(table.wasSeen(&original));
+    EXPECT_TRUE(table.wasSeen(&reused));
+    table.clear(&reused); // Packet callers retain the same public operation.
+    EXPECT_FALSE(table.wasSeen(&reused));
+}
+
 // -- wasSeen: pure query -------------------------------------------------------
 
 TEST(SimpleMeshTables, WasSeen_ReturnsFalseForUnseen) {

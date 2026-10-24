@@ -91,11 +91,15 @@ struct NodePrefs {
  char bridge_secret[32]="fleet-test";
 };
 struct Seen {
+ struct SeenKey {uint8_t hash[8]={};bool dedicated_ack=false;};
  std::vector<uint8_t> ids;
+ SeenKey seenKey(const mesh::Packet& p)const{SeenKey key;key.hash[0]=p.data[0];return key;}
+ void clearSeenKey(const SeenKey& key){ids.erase(std::remove(ids.begin(),ids.end(),key.hash[0]),ids.end());}
  bool wasSeen(const mesh::Packet* p){return std::find(ids.begin(),ids.end(),p->data[0])!=ids.end();}
  void markSeen(const mesh::Packet* p){if(!wasSeen(p))ids.push_back(p->data[0]);}
  void clear(const mesh::Packet* p){ids.erase(std::remove(ids.begin(),ids.end(),p->data[0]),ids.end());}
 };
+using SimpleMeshTables=Seen;
 class BridgeBase {
 public:
 @INGRESS_HOOK@
@@ -195,6 +199,71 @@ class BridgeRecoveryTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     result = subprocess.run([str(exe)], capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_seen_keys_keep_all_six_frames_and_survive_caller_packet_reuse(self):
+        self.run_fixture(r'''
+int main(){
+ Backend backend;backend.wifi=true;mesh::wireless::control().begin(backend);
+ sdk_initialized=sdk_started=true;sdk_mode=WIFI_STA;
+ NodePrefs prefs;mesh::PacketManager mgr;mesh::RTCClock rtc;
+ ESPNowBridge bridge(&prefs,&mgr,&rtc);bridge.begin();
+ std::array<mesh::Packet,6> originals;
+ std::array<mesh::Packet,6> reusable;
+ for(unsigned i=0;i<6;++i){
+  originals[i]=packet(uint8_t(0x11+i),255);reusable[i]=originals[i];
+  bridge.sendPacket(&reusable[i]);
+  assert(bridge._tx_count==int(i+1));
+  assert(bridge._tx_queue[i].seen_key.hash[0]==originals[i].data[0]);
+  memset(reusable[i].data,0x90+i,sizeof reusable[i].data);
+ }
+ auto overflow=packet(0x27);bridge.sendPacket(&overflow);
+ assert(bridge._tx_count==6&&!bridge._seen_packets.wasSeen(&overflow));
+ bridge.end();
+ assert(bridge._seen_packets.ids.empty()&&send_calls==0); // exact original admissions retired
+ bridge.begin();
+ for(auto& p:originals)bridge.sendPacket(&p);
+ bridge.loop();
+ for(unsigned i=0;i<6;++i){
+  mesh::espnow::ESPNowRawFrames expected;
+  assert(mesh::espnow::encodeEspNowRawFrames(originals[i].data,255,expected));
+  assert(expected.count==2&&sent[2*i]==std::vector<uint8_t>(expected.data[0],expected.data[0]+expected.lengths[0]));
+  complete(bridge);
+  assert(sent[2*i+1]==std::vector<uint8_t>(expected.data[1],expected.data[1]+expected.lengths[1]));
+  complete(bridge);
+ }
+ assert(bridge._tx_count==0&&sent.size()==12);
+ bridge.end();
+ for(auto& p:originals)assert(bridge._seen_packets.wasSeen(&p)); // completed entries stay seen
+}
+''', versions=(40400,50200,50500))
+
+    def test_seen_cleanup_retries_and_timeout_distinguish_never_sent_entries(self):
+        self.run_fixture(r'''
+int main(){
+ Backend backend;backend.wifi=true;mesh::wireless::control().begin(backend);
+ sdk_initialized=sdk_started=true;sdk_mode=WIFI_STA;
+ NodePrefs prefs;mesh::PacketManager mgr;mesh::RTCClock rtc;
+ ESPNowBridge bridge(&prefs,&mgr,&rtc);bridge.begin();
+ auto original=packet(0x15,255),caller=original;
+ bridge.sendPacket(&caller);memset(caller.data,0x95,sizeof caller.data);
+ send_result=ESP_ERR_ESPNOW_NO_MEM;
+ for(unsigned i=0;i<4;++i){bridge.loop();now_ms+=20;}
+ assert(bridge._tx_count==0&&!bridge._seen_packets.wasSeen(&original));
+ // Once a first fragment was accepted, an immediate sibling rejection cannot
+ // clear the logical packet's admission, even if the caller reused its pool entry.
+ send_result=ESP_OK;bridge.sendPacket(&original);bridge.loop();
+ assert(bridge._tx_count==1&&bridge._tx_queue[bridge._tx_tail].started);
+ send_result=ESP_ERR_INVALID_ARG;complete(bridge);
+ assert(bridge._tx_count==0&&bridge._seen_packets.wasSeen(&original));
+ auto active=packet(0x21,255),waiting=packet(0x25,255);
+ send_result=ESP_OK;bridge.sendPacket(&active);bridge.sendPacket(&waiting);bridge.loop();
+ assert(bridge._tx_count==2&&bridge._tx_waiting);
+ now_ms+=1000;bridge.loop(); // lost callback tears down before restarting the session
+ assert(bridge._initialized&&bridge._tx_count==0);
+ assert(bridge._seen_packets.wasSeen(&active)&&!bridge._seen_packets.wasSeen(&waiting));
+ bridge.end();
+}
+''', versions=(40400,50200,50500))
 
     def test_ota_identical_retries_cross_espnow_and_uart_without_permanent_dedup(self):
         self.run_fixture(r'''

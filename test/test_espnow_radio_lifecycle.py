@@ -225,10 +225,10 @@ public:
  int _tx_callback_status=0,_tx_dropped=0,_tx_dropped_reported=0;
  uint32_t _tx_started_at=0,_tx_retry_at=0;bool _sdk_teardown_failed=false;
  mesh::espnow::ESPNowRawReassembler _raw_reassembler;
- struct QueuedTransmit {bool started=false,diagnostic=false;int packet=0;};
+ struct QueuedTransmit {bool started=false,diagnostic=false;int seen_key=0;};
  static constexpr int TX_QUEUE_DEPTH=2;
  QueuedTransmit _tx_queue[TX_QUEUE_DEPTH];
- struct {void clear(const int*){}} _seen_packets;
+ struct {void clearSeenKey(const int&){}} _seen_packets;
  static void recv_cb(){}static void send_cb(){}
  void begin();void end();
 };

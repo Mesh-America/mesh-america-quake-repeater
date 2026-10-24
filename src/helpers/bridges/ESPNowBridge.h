@@ -104,12 +104,15 @@ private:
   // instead of transmitting an orphan fragment.
   struct QueuedTransmit {
     mesh::espnow::ESPNowRawFrames frames;
-    mesh::Packet packet;
+    SimpleMeshTables::SeenKey seen_key;
     uint8_t next_frame;
     bool started;
     uint8_t start_retries;
     bool diagnostic;
   };
+  static_assert(sizeof(QueuedTransmit) <= sizeof(mesh::espnow::ESPNowRawFrames) +
+                    sizeof(SimpleMeshTables::SeenKey) + 8,
+                "ESP-NOW TX must retain encoded frames without a second packet copy");
   QueuedTransmit _tx_queue[TX_QUEUE_DEPTH];
   portMUX_TYPE _tx_mux = portMUX_INITIALIZER_UNLOCKED;
   volatile uint8_t _tx_head;

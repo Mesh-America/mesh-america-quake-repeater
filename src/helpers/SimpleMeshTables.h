@@ -53,6 +53,15 @@ inline bool routeHashPrefixesOverlap(const uint8_t* a, uint8_t a_len,
 
 class SimpleMeshTables : public mesh::MeshTables {
 public:
+  // A queued transport can retire an unsent admission after its Packet pool
+  // entry is gone. Keep the complete hash and its separate ACK-cache domain.
+  struct SeenKey {
+    uint8_t hash[MAX_HASH_SIZE] = {};
+    bool dedicated_ack = false;
+  };
+  static_assert(sizeof(SeenKey) == MAX_HASH_SIZE + 1,
+                "A seen key must not retain packet data or alignment padding");
+
   // Recent rows belong to the mesh loop, including CLI requests marshaled from
   // network tasks. They must not be read or changed concurrently by an ISR or
   // worker. Byte access avoids unaligned uint32_t loads in the compact rows;
@@ -411,24 +420,30 @@ public:
     }
   }
 
-  void clear(const mesh::Packet* packet) override {
-    if (isDedicatedAckPacket(packet)) {
-      uint8_t hash[MAX_HASH_SIZE];
-      packet->calculatePacketHash(hash);
-      clearAckHash(hash);
+  SeenKey seenKey(const mesh::Packet& packet) const {
+    SeenKey key;
+    packet.calculatePacketHash(key.hash);
+    key.dedicated_ack = isDedicatedAckPacket(&packet);
+    return key;
+  }
+
+  void clearSeenKey(const SeenKey& key) {
+    if (key.dedicated_ack) {
+      clearAckHash(key.hash);
       return;
     }
 
-    uint8_t hash[MAX_HASH_SIZE];
-    packet->calculatePacketHash(hash);
-
     uint8_t* sp = _hashes;
     for (int i = 0; i < MAX_PACKET_HASHES; i++, sp += MAX_HASH_SIZE) {
-      if (memcmp(hash, sp, MAX_HASH_SIZE) == 0) {
+      if (memcmp(key.hash, sp, MAX_HASH_SIZE) == 0) {
         memset(sp, 0, MAX_HASH_SIZE);
         break;
       }
     }
+  }
+
+  void clear(const mesh::Packet* packet) override {
+    clearSeenKey(seenKey(*packet));
   }
 
   uint32_t getNumDirectDups() const { return _direct_dups; }

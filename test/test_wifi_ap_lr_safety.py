@@ -21,10 +21,10 @@ public:
  mesh::bridge::diag::Stats _stats;
  std::atomic<bool> _debug_dirty{false};
  mesh::espnow::ESPNowRawReassembler _raw_reassembler;
- struct QueuedTransmit {bool started=false,diagnostic=false;int packet=0;};
+ struct QueuedTransmit {bool started=false,diagnostic=false;int seen_key=0;};
  static constexpr int TX_QUEUE_DEPTH=2;
  QueuedTransmit _tx_queue[TX_QUEUE_DEPTH];
- struct {void clear(const int*){}} _seen_packets;
+ struct {void clearSeenKey(const int&){}} _seen_packets;
  static void recv_cb(){}static void send_cb(){}
  void begin();void end();
  void recordError(mesh::bridge::diag::Stage,int32_t);void emitDebug();
