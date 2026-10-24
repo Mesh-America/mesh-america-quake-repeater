@@ -19,6 +19,9 @@
 #endif
 
 #include "MyMesh.h"
+#if defined(OTA_BOOTLOADER_MIGRATION)
+#include <helpers/ota/BootloaderMigration.h>
+#endif
 #if defined(MESH_SOAK_DIAGNOSTICS)
 #include "../../tools/hil/S3SoakDiagnostics.h"
 #endif
@@ -377,6 +380,9 @@ void setup() {
   mesh::hilStartupTrace("mesh_begin");
   the_mesh.begin(fs);
   mesh::hilStartupTrace("mesh_ready");
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  mesh::ota::bootloader_migration_begin(volatile_primary_fs ? nullptr : fs);
+#endif
 
   mesh::hilStartupTrace("watchdog_begin");
 #if defined(NRF52_PLATFORM)

@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include "OtaBootloaderUpdate.h"
 
 namespace mesh {
@@ -15,6 +16,55 @@ static const uint32_t PARAMS_BASE = 0xFE000u;
 static const uint32_t SETTINGS_BASE = 0xFF000u;
 static const uint32_t ACL_READ_DENIED = 1u << 2;
 static const uint32_t ACL_WRITE_DENIED = 1u << 1;
+
+enum class InstalledVariant { Unknown, Normal, Recovery };
+
+inline bool boot_text_matches(const uint8_t *text, size_t available,
+                              const char *expected, size_t length) {
+  return available >= length && memcmp(text, expected, length) == 0;
+}
+
+// Recovery builds deliberately retain the normal board identity and BLM2
+// flags. Their on-device version text is the only published discriminator.
+// Older recovery images can omit that text entirely, so automatic installation
+// also requires one complete, recognized normal INFO_UF2 version record.
+// The caller must separately verify the image CRC, identity and platform.
+inline InstalledVariant installed_variant(const uint8_t *image, size_t size,
+                                          uint32_t version) {
+  if (!image || size != BOOT_SIZE || !ota_bootloader_version_valid(version))
+    return InstalledVariant::Unknown;
+  static const char header[] = "UF2 Bootloader ";
+  static const char recovery[] = "R_0x";
+  static const char old_recovery[] = "-recovery-allow-all";
+  static const char recovery_header[] = "UF2 Bootloader R_";
+  for (size_t i = 0; i < size; ++i) {
+    const size_t left = size - i;
+    if (boot_text_matches(image + i, left, recovery, sizeof(recovery) - 1) ||
+        boot_text_matches(image + i, left, old_recovery, sizeof(old_recovery) - 1) ||
+        boot_text_matches(image + i, left, recovery_header, sizeof(recovery_header) - 1))
+      return InstalledVariant::Recovery;
+  }
+  char normal[48], packed[16];
+  const unsigned preview = version & 0xFFu;
+  snprintf(normal, sizeof(normal),
+           preview == 0xFFu ? "0.11.0-OTAFIX%u.%u.%u\r\n" :
+                              "0.11.0-OTAFIX%u.%u.%u-preview.%u\r\n",
+           unsigned(version >> 24), unsigned((version >> 16) & 0xFFu),
+           unsigned((version >> 8) & 0xFFu), preview);
+  snprintf(packed, sizeof(packed), "BL_0x%08lX\r\n", (unsigned long)version);
+  unsigned records = 0;
+  for (size_t i = 0; i + sizeof(header) - 1 < size; ++i) {
+    if (!boot_text_matches(image + i, size - i, header, sizeof(header) - 1)) continue;
+    const uint8_t *label = image + i + sizeof(header) - 1;
+    size_t left = size - i - (sizeof(header) - 1);
+    bool matches = boot_text_matches(label, left, packed, strlen(packed));
+    if (*label == 'v') { ++label; --left; }
+    if (!matches && !boot_text_matches(label, left, normal, strlen(normal)))
+      return InstalledVariant::Unknown;
+    if (++records > 1) return InstalledVariant::Unknown;
+  }
+  return records == 1 ? InstalledVariant::Normal : InstalledVariant::Unknown;
+}
 
 struct AclRegion {
   uint32_t address;
@@ -101,13 +151,19 @@ inline bool installed_can_migrate(const OtaBootloaderIdentity &installed,
                                        140, fwid, app_base, 1) == OTA_BOOT_CONTINUITY_OK;
 }
 
-inline bool installed_up_to_date(const OtaBootloaderIdentity &installed,
-                                 uint32_t board_id, const char name[16],
-                                 uint32_t version, uint32_t app_base, uint16_t fwid) {
+inline bool installed_matches_resource(const OtaBootloaderIdentity &installed,
+                                       uint32_t board_id, const char name[16],
+                                       uint32_t app_base, uint16_t fwid) {
   return installed.present && installed.crc_ok &&
          installed.image_start == BOOT_BASE && installed.image_size == BOOT_SIZE &&
          installed.board_id == board_id && memcmp(installed.device_name, name, 16) == 0 &&
-         ota_bootloader_continuity_matches_runtime(installed, 140, fwid, app_base, 1) &&
+         ota_bootloader_continuity_matches_runtime(installed, 140, fwid, app_base, 1);
+}
+
+inline bool installed_up_to_date(const OtaBootloaderIdentity &installed,
+                                 uint32_t board_id, const char name[16],
+                                 uint32_t version, uint32_t app_base, uint16_t fwid) {
+  return installed_matches_resource(installed, board_id, name, app_base, fwid) &&
          installed.boot_version >= version;
 }
 

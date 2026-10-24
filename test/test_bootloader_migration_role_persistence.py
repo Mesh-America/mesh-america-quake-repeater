@@ -132,6 +132,21 @@ int main() {
 
 
 class BootloaderMigrationRolePersistenceTest(unittest.TestCase):
+    def test_both_roles_initialize_the_lock_after_mesh_with_durable_storage_only(self):
+        for role in ("simple_repeater", "simple_room_server"):
+            with self.subTest(role=role):
+                source = (ROOT / "examples" / role / "main.cpp").read_text(encoding="utf-8")
+                setup = body(source, "void setup()")
+                startup = re.search(
+                    r"#if defined\(OTA_BOOTLOADER_MIGRATION\)\n"
+                    r"\s*mesh::ota::bootloader_migration_begin\("
+                    r"volatile_primary_fs \? nullptr : fs\);\n#endif", setup)
+                self.assertIsNotNone(startup)
+                self.assertEqual(setup.count("bootloader_migration_begin("), 1)
+                self.assertLess(setup.index("the_mesh.begin(fs);"), startup.start())
+                self.assertLess(setup.index("internalPrimaryFilesystemReady("), startup.start())
+                self.assertLess(setup.index("volatile_primary_fs = true;"), startup.start())
+
     def test_mesh_services_startup_checks_without_allocating_an_ota_workspace(self):
         source = (ROOT / "src/Mesh.cpp").read_text(encoding="utf-8")
         maintenance = body(source, "void __attribute__((noinline)) Mesh::serviceLoopMaintenance()")

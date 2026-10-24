@@ -2,9 +2,11 @@
 
 #if defined(OTA_BOOTLOADER_MIGRATION)
 #include <stddef.h>
+#include "BootloaderMigrationStore.h"
 
 namespace mesh {
 namespace ota {
+void bootloader_migration_begin(FILESYSTEM *fs);
 bool bootloader_migration_pending();
 bool bootloader_migration_service_due();
 // nullptr selects the pinned embedded image; a supplied hash must match exactly.

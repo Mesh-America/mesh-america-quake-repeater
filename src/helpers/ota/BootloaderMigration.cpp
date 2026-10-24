@@ -32,6 +32,12 @@ uint32_t armed_at = 0;
 uint8_t last_result = 0;
 bool result_is_current = false;
 bool already_installed = false;
+FILESYSTEM *state_fs = nullptr;
+uint8_t firmware_hash[32] = {};
+MigrationAutoLock automatic_lock = MigrationAutoLock::Unavailable;
+bool firmware_identified = false;
+migration::InstalledVariant automatic_variant = migration::InstalledVariant::Unknown;
+bool loader_excluded = false;
 
 // The pinned framework's historical SVC wrapper has no memory clobber or IPA
 // barrier. The MBR reads this pointed-to command after exception entry, which
@@ -79,6 +85,33 @@ bool installed_up_to_date() {
          migration::installed_up_to_date(installed, migration_board_id, migration_device_name,
                                          migration_boot_version, mota_nrf52_app_base(),
                                          migration_softdevice_fwid);
+}
+
+bool installed_allows_automatic() {
+  const uint8_t *boot = reinterpret_cast<const uint8_t *>(migration::BOOT_BASE);
+  OtaBootloaderIdentity installed;
+  const bool valid = ota_bootloader_identity_from_image(boot, migration::BOOT_SIZE, installed);
+  automatic_variant = migration::installed_variant(boot, migration::BOOT_SIZE,
+                                                    valid ? installed.boot_version : 0);
+  if (automatic_variant == migration::InstalledVariant::Recovery) return false;
+  if (valid && automatic_variant == migration::InstalledVariant::Normal &&
+      migration::installed_matches_resource(installed, migration_board_id, migration_device_name,
+                                            mota_nrf52_app_base(), migration_softdevice_fwid))
+    return true;
+  // Only the explicitly pinned legacy bridge may omit modern identity/text.
+  if (!migration_has_legacy) return false;
+  uint8_t digest[32];
+  hash_region(migration::BOOT_BASE, migration::BOOT_SIZE, digest);
+  return memcmp(digest, migration_legacy_sha256, sizeof(digest)) == 0;
+}
+
+bool lock_automatic_for_firmware() {
+  if (!firmware_identified || !bootloader_migration_lock_auto(state_fs, firmware_hash)) {
+    automatic_lock = MigrationAutoLock::Unavailable;
+    return false;
+  }
+  automatic_lock = MigrationAutoLock::Locked;
+  return true;
 }
 
 bool read_reboot_marker(uint32_t &result) {
@@ -215,6 +248,21 @@ void install() {
 }
 } // namespace
 
+void bootloader_migration_begin(FILESYSTEM *fs) {
+  state_fs = fs;
+  firmware_identified = false;
+  automatic_lock = MigrationAutoLock::Unavailable;
+  SelfFwInfo app;
+  if (fs && ota_self_firmware(app) && app.valid) {
+    hash_region(mota_nrf52_app_base(), app.image_len, firmware_hash);
+    firmware_identified = true;
+    automatic_lock = bootloader_migration_auto_lock(fs, firmware_hash);
+  }
+  automatic_attempted = automatic_lock == MigrationAutoLock::Locked ||
+                        automatic_lock == MigrationAutoLock::Unavailable;
+  automatic_blocked = automatic_attempted;
+}
+
 bool bootloader_migration_pending() {
   return pending;
 }
@@ -229,6 +277,10 @@ void bootloader_migration_status(char *reply, size_t capacity) {
   snprintf(reply, capacity, "BL embedded 2.4.12: 40960 B; hash=%s; %s; last=%u; auto=%s", hash,
            pending ? "armed" : already_installed ? "already installed" :
            installed_up_to_date() ? "up to date" : "idle", retained_result(),
+           loader_excluded ? automatic_variant == migration::InstalledVariant::Recovery ?
+               "recovery" : "unrecognized" :
+           automatic_lock == MigrationAutoLock::Locked ? "locked for this firmware" :
+           automatic_lock == MigrationAutoLock::Unavailable ? "storage unavailable" :
            automatic_blocked ? "blocked" : automatic_attempted ? "checked" : "70s after boot");
 }
 
@@ -266,6 +318,12 @@ bool bootloader_migration_request(const char *confirmation, char *reply, size_t 
     return true;
   }
   already_installed = false;
+  if (!lock_automatic_for_firmware()) {
+    last_result = 18;
+    result_is_current = true;
+    snprintf(reply, capacity, "ERR cannot save bootloader automatic-update lock");
+    return false;
+  }
   if (!write_reboot_marker(ATTEMPT_MARKER)) {
     last_result = 17;
     result_is_current = true;
@@ -306,8 +364,9 @@ void bootloader_migration_tick(bool outbound_idle, bool ota_idle) {
     // A failed MBR/preflight reset leaves this marker. Do not create a loop
     // that retries and resets every 70 seconds; the CLI can retry explicitly.
     uint32_t marker = 0;
-    if (!read_reboot_marker(marker) || marker == ATTEMPT_MARKER ||
-        (marker > 0xC0 && marker <= 0xCF)) {
+    if (!read_reboot_marker(marker) ||
+        (automatic_lock != MigrationAutoLock::PreviousImage &&
+         (marker == ATTEMPT_MARKER || (marker > 0xC0 && marker <= 0xCF)))) {
       automatic_attempted = true;
       automatic_blocked = true;
       return;
@@ -319,6 +378,24 @@ void bootloader_migration_tick(bool outbound_idle, bool ota_idle) {
       last_result = 17;
       result_is_current = true;
       automatic_blocked = true;
+      return;
+    }
+    // Save the current image before inspecting the bootloader. A new firmware
+    // may ignore its predecessor's retained marker, so GPREGRET alone cannot
+    // protect a reset during that first check.
+    if (!lock_automatic_for_firmware()) {
+      last_result = 18;
+      result_is_current = true;
+      automatic_blocked = true;
+      return;
+    }
+    if (!installed_allows_automatic()) {
+      loader_excluded = true;
+      automatic_blocked = true;
+      if (!write_reboot_marker(0)) {
+        last_result = 17;
+        result_is_current = true;
+      }
       return;
     }
     char reply[160];

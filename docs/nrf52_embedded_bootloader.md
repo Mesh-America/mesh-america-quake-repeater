@@ -9,7 +9,8 @@ the exact board's [OTAFIX 2.4.12 bootloader](https://github.com/mikecarper/Adafr
 in one application image. After installing that application, it checks the
 bootloader once at 70 seconds after startup and updates it when needed. The
 check waits for idle radio and OTA activity, and skips a valid matching
-bootloader at the same or newer version. Ordinary firmware has no automatic
+bootloader at the same or newer version. Recovery and unrecognized bootloaders
+are excluded from automatic installation. Ordinary firmware has no automatic
 bootloader update.
 
 This follows the internal-flash bridge in
@@ -96,19 +97,27 @@ P1 image, not a recovery image.
    `ota bootloader embedded install HASH16` command remains available with the
    confirmation shown by `status`.
 
-The automatic check runs once per boot. A manual attempt also consumes that
-boot's check, so a cancelled or failed attempt needs another explicit command.
-An update failure or a retained attempt guard suppresses another automatic
-attempt after a warm reboot, preventing a repeated reboot loop; the CLI can
-still retry. The
-guard is saved before the automatic version/hash check and retained through
-the bootloader copy, so an unexpected reset during either step also stops
-automatic retries. The guard also remains after a successful replacement;
-the next boot stays up and reports its installed version. A completed no-op
-clears its temporary guard. This protects
-against repeated update attempts; it cannot repair a bootloader that fails
-before the application starts. Status shows `auto=70s after boot` while waiting,
-`auto=checked` afterward, or `auto=blocked` when the reboot guard prevents it.
+Automatic installation is limited to one attempt per firmware image. A saved
+40-byte record in `/bl_auto` contains the full SHA-256 of the running image,
+including its version trailer. It survives reboots and power cycles. Flashing
+a different firmware image permits a new check; recovery bootloaders remain
+excluded. Older recovery images without a recognizable normal bootloader label
+also skip automatic installation.
+
+The record is committed before inspecting the bootloader, so an interrupted or
+failed check also requires manual retry or different firmware. Missing persistent
+storage, corrupt records, or an unfinished file transaction block automatic updates.
+Manual `ota bootloader update` remains available under its existing identity,
+version and persistence checks. The first lock write changes the filesystem
+audit hash; it does not change the application or SoftDevice.
+
+The retained reboot guard still covers the initial checks and copy. A guard
+from the previous firmware does not prevent a verified different image from
+qualifying again. Status reports `auto=locked for this firmware`, `auto=recovery`,
+`auto=unrecognized`, `auto=storage unavailable`, or `auto=blocked` when relevant.
+These guards prevent repeated update attempts; they cannot repair a bootloader
+that fails before the application starts. Erasing the filesystem also erases
+the saved firmware lock.
 
 The bridge validates the live application, candidate hash, installed identity,
 chip/layout, MBR addresses, watchdog and flash protection before copying. A
