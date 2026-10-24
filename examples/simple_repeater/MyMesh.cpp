@@ -247,6 +247,7 @@ static const uint8_t TELEMETRY_HISTORY_TX_VOLTAGE = 2U;
 static const uint8_t TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE = 4U;
 static const uint8_t TELEMETRY_HISTORY_TX_NOISE = 8U;
 static const uint8_t TELEMETRY_HISTORY_TX_NOISE2 = 16U;
+static const uint8_t TELEMETRY_HISTORY_TX_ALL_TYPES = 31U;
 #endif
 
 #define CLOCK_SYNC_VALID_YEARS 10
@@ -3743,6 +3744,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   telemetry_history_tx_manual = false;
   telemetry_history_tx_external_channel = 0;
   telemetry_history_tx_external_chunk = 0;
+  telemetry_history_tx_types = TELEMETRY_HISTORY_TX_ALL_TYPES;
   telemetry_history_next_tx_uptime = 0;
   telemetry_history_tx_resume_uptime = 0;
   telemetry_history_last_tx_uptime = UINT64_MAX;
@@ -12380,6 +12382,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       "set telemetry.tx schedule";
   static const char telemetry_tx_send_now_command[] = "send telemetry.tx now";
 
+  if (handleTelemetryHistoryTxTypesCommand(command, reply,
+          sender == NULL || sender->isAdmin())) return;
+
   if (strcmp(command, telemetry_tx_send_now_command) == 0) {
     if (sender != NULL && !sender->isAdmin()) {
       strcpy(reply, "Err - not permitted");
@@ -12399,21 +12404,19 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       strcpy(reply, "OK - telemetry.tx already queued");
       return;
     }
-    if (telemetry_history.voltageSampleCount() == 0) {
-      strcpy(reply, "Err - telemetry history is empty");
+    if (telemetry_history_tx_types == 0) {
+      strcpy(reply, "Err - no telemetry packet types enabled");
       return;
     }
-    telemetry_history_tx_pending = TELEMETRY_HISTORY_TX_TEMPERATURE
-        | TELEMETRY_HISTORY_TX_VOLTAGE;
-    if (noise_floor_history.sampleCount(0) != 0)
-      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_NOISE;
-    if (isDualRadioActive() && noise_floor_history.sampleCount(1) != 0)
-      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_NOISE2;
-    const uint8_t external_channels =
-        external_voltage_history.populatedChannelCount();
-    if (external_channels != 0) {
-      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE;
+    const uint8_t pending = availableTelemetryHistoryTxTypes();
+    if (pending == 0) {
+      strcpy(reply, "Err - no enabled telemetry data available");
+      return;
     }
+    telemetry_history_tx_pending = pending;
+    const uint8_t external_channels =
+        pending & TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE
+            ? external_voltage_history.populatedChannelCount() : 0;
     if (!telemetry_history_tx_manual) {
       telemetry_history_tx_resume_uptime = telemetry_history_next_tx_uptime;
     }
@@ -12430,7 +12433,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
         * external_voltage_history.binaryChunkCount();
     snprintf(reply, 160,
              "OK - telemetry.tx queued temp=%u volt=%u i2c=%u/%u noise=%u/%u",
-             sent, sent, (unsigned)external_channels, external_packets,
+             pending & TELEMETRY_HISTORY_TX_TEMPERATURE ? sent : 0U,
+             pending & TELEMETRY_HISTORY_TX_VOLTAGE ? sent : 0U,
+             (unsigned)external_channels, external_packets,
              (telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE) != 0,
              (telemetry_history_tx_pending & TELEMETRY_HISTORY_TX_NOISE2) != 0);
     return;
@@ -12576,7 +12581,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, ClientInfo* sender, char *
       telemetry_history_tx_resume_uptime = previous_resume_tx;
       strcpy(reply, "Err - unable to save telemetry.tx");
     } else if (telemetry_history_tx_enabled) {
-      snprintf(reply, 160, "OK - telemetry.tx schedule=%ud temp=165 volt=165",
+      snprintf(reply, 160, "OK - telemetry.tx schedule=%ud",
                (unsigned)telemetry_history_tx_interval_days);
     } else {
       strcpy(reply, "OK - telemetry.tx off");
@@ -13252,6 +13257,98 @@ uint8_t MyMesh::resizeTelemetryGpsDays(uint8_t requested_days) {
 }
 #endif
 
+uint8_t MyMesh::availableTelemetryHistoryTxTypes() const {
+  uint8_t available = 0;
+  if (telemetry_history.voltageSampleCount() != 0)
+    available |= TELEMETRY_HISTORY_TX_TEMPERATURE | TELEMETRY_HISTORY_TX_VOLTAGE;
+  if (external_voltage_history.populatedChannelCount() != 0)
+    available |= TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE;
+  if (noise_floor_history.sampleCount(0) != 0)
+    available |= TELEMETRY_HISTORY_TX_NOISE;
+  if (isDualRadioActive() && noise_floor_history.sampleCount(1) != 0)
+    available |= TELEMETRY_HISTORY_TX_NOISE2;
+  return available & telemetry_history_tx_types;
+}
+
+void MyMesh::finishTelemetryHistoryTxBatch(uint64_t now) {
+  if (telemetry_history_tx_manual) {
+    telemetry_history_next_tx_uptime = telemetry_history_tx_resume_uptime;
+    telemetry_history_tx_manual = false;
+    telemetry_history_tx_resume_uptime = 0;
+  } else {
+    telemetry_history_next_tx_uptime = telemetry_history_tx_enabled
+        ? now + (uint64_t)telemetry_history_tx_interval_days
+            * 24ULL * 60ULL * 60ULL * 1000ULL
+        : 0;
+  }
+}
+
+bool MyMesh::handleTelemetryHistoryTxTypesCommand(char* command, char* reply,
+                                                  bool permitted) {
+  const bool get = strncmp(command, "get telemetry.tx.", 17) == 0;
+  const bool set = strncmp(command, "set telemetry.tx.", 17) == 0;
+  if (!get && !set) return false;
+  if (!permitted) { strcpy(reply, "Err - not permitted"); return true; }
+
+  static const char* const names[] = {
+      "temp", "volt", "volt.i2c", "noise", "noise2", "types"};
+  char* key = command + 17;
+  char* value = strchr(key, ' ');
+  const size_t length = value ? (size_t)(value - key) : strlen(key);
+  unsigned index = 0;
+  while (index < sizeof(names) / sizeof(names[0])
+      && (strlen(names[index]) != length || memcmp(key, names[index], length))) ++index;
+  if (index == sizeof(names) / sizeof(names[0])) {
+    strcpy(reply, "Err - unknown telemetry packet type");
+    return true;
+  }
+  const uint8_t bit = index == 5 ? TELEMETRY_HISTORY_TX_ALL_TYPES : uint8_t(1U << index);
+  if (get && value) { strcpy(reply, "Err - unexpected arguments"); return true; }
+  if (set) {
+    value = value ? trimSpaces(value) : NULL;
+    if (!value || (strcmp(value, "on") && strcmp(value, "off"))) {
+      strcpy(reply, "Err - use on or off");
+      return true;
+    }
+  }
+  if (!telemetry_history_tx_prefs_healthy) {
+    strcpy(reply, "Err - telemetry.tx prefs unavailable");
+    return true;
+  }
+  if (get) {
+    if (index == 5) {
+      snprintf(reply, 160, "> temp=%s volt=%s volt.i2c=%s noise=%s noise2=%s",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_TEMPERATURE ? "on" : "off",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_VOLTAGE ? "on" : "off",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE ? "on" : "off",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_NOISE ? "on" : "off",
+          telemetry_history_tx_types & TELEMETRY_HISTORY_TX_NOISE2 ? "on" : "off");
+    } else {
+      snprintf(reply, 160, "> %s", telemetry_history_tx_types & bit ? "on" : "off");
+    }
+    return true;
+  }
+  const uint8_t previous = telemetry_history_tx_types;
+  telemetry_history_tx_types = !strcmp(value, "on") ? previous | bit : previous & ~bit;
+  if (telemetry_history_tx_types != previous && !saveTelemetryHistoryTxPrefs()) {
+    telemetry_history_tx_types = previous;
+    strcpy(reply, "Err - unable to save telemetry.tx types");
+    return true;
+  }
+  // Already admitted radio packets belong to the TX queue. Only future batch
+  // work can be cancelled, and newly enabled types join the next batch.
+  const uint8_t pending = telemetry_history_tx_pending;
+  telemetry_history_tx_pending &= telemetry_history_tx_types;
+  if (!(telemetry_history_tx_types & TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE)) {
+    telemetry_history_tx_external_channel = 0;
+    telemetry_history_tx_external_chunk = 0;
+  }
+  if (pending && !telemetry_history_tx_pending)
+    finishTelemetryHistoryTxBatch(uptime_millis + (uint32_t)(millis() - last_millis));
+  snprintf(reply, 160, "OK - telemetry.tx.%s=%s", names[index], value);
+  return true;
+}
+
 static bool recoverTelemetryHistoryTxPrefs(FILESYSTEM* fs) {
   if (fs == NULL) return false;
 #if defined(ESP32_PLATFORM) || defined(RP2040_PLATFORM)
@@ -13268,12 +13365,15 @@ static bool readTelemetryHistoryTxPrefsImage(FILESYSTEM* fs,
   File file = openFloodSettingsRead(fs, TELEMETRY_HISTORY_TX_PREFS_FILE);
   if (!file) return false;
   size = file.size();
-  const bool complete = (size == 6 || size == 7 + MAX_PATH_SIZE)
+  const bool complete = (size == 6 || size == 7 || size == 7 + MAX_PATH_SIZE)
       && file.read(image, size) == size;
   file.close();
   if (!complete) return false;
-  const bool legacy = size == 7 + MAX_PATH_SIZE;
-  if (memcmp(image, legacy ? "THT2" : "THT3", 4) || image[4] > 1) return false;
+  const bool legacy = size == 7 + MAX_PATH_SIZE && !memcmp(image, "THT2", 4);
+  const bool previous = size == 6 && !memcmp(image, "THT3", 4);
+  const bool selective = size == 7 && !memcmp(image, "THT4", 4);
+  if ((!legacy && !previous && !selective) || image[4] > 1
+      || (selective && (image[6] & ~TELEMETRY_HISTORY_TX_ALL_TYPES))) return false;
   const uint8_t days = image[legacy ? 6 : 5];
   if (days < 1 || days > TELEMETRY_HISTORY_TX_MAX_DAYS) return false;
   return !legacy || (image[5] == OUT_PATH_UNKNOWN ? image[4] == 0
@@ -13288,6 +13388,7 @@ void MyMesh::loadTelemetryHistoryTxPrefs() {
   telemetry_history_tx_manual = false;
   telemetry_history_tx_external_channel = 0;
   telemetry_history_tx_external_chunk = 0;
+  telemetry_history_tx_types = TELEMETRY_HISTORY_TX_ALL_TYPES;
   telemetry_history_next_tx_uptime = 0;
   telemetry_history_tx_resume_uptime = 0;
 
@@ -13297,13 +13398,14 @@ void MyMesh::loadTelemetryHistoryTxPrefs() {
   if (!present) { telemetry_history_tx_prefs_healthy = true; return; }
   uint8_t image[7 + MAX_PATH_SIZE]; size_t size = 0;
   if (!readTelemetryHistoryTxPrefsImage(_fs, image, size)) return;
-  const bool legacy = size == sizeof(image);
+  const bool legacy = !memcmp(image, "THT2", 4);
   // Preserve the only durable old route until shared-route adoption succeeds.
   // Otherwise an enabled legacy producer would silently use fresh zero-hop.
   if (legacy && image[5] != OUT_PATH_UNKNOWN
       && !_cli.adoptLegacyDataTxPath(image + 7, image[5])) return;
   telemetry_history_tx_enabled = image[4] != 0;
   telemetry_history_tx_interval_days = image[legacy ? 6 : 5];
+  if (!memcmp(image, "THT4", 4)) telemetry_history_tx_types = image[6];
   telemetry_history_tx_prefs_healthy = true;
 }
 
@@ -13316,8 +13418,9 @@ bool MyMesh::saveTelemetryHistoryTxPrefs() {
       || (previous_present && !readTelemetryHistoryTxPrefsImage(_fs, previous, previous_size))) {
     telemetry_history_tx_prefs_healthy = false; return false;
   }
-  const uint8_t image[] = {'T', 'H', 'T', '3', uint8_t(telemetry_history_tx_enabled),
-                           telemetry_history_tx_interval_days};
+  const uint8_t image[] = {'T', 'H', 'T', '4', uint8_t(telemetry_history_tx_enabled),
+                           telemetry_history_tx_interval_days,
+                           telemetry_history_tx_types};
   bool success;
   {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -13439,6 +13542,14 @@ void MyMesh::serviceTelemetryHistoryTx() {
   if (!telemetry_history_tx_prefs_healthy) return;
   const uint64_t current_uptime_millis =
       uptime_millis + (uint32_t)(millis() - last_millis);
+  if (telemetry_history_tx_pending != 0) {
+    telemetry_history_tx_pending &= telemetry_history_tx_types;
+    if (telemetry_history_tx_pending == 0) {
+      finishTelemetryHistoryTxBatch(current_uptime_millis);
+      return;
+    }
+  }
+  if (telemetry_history_tx_types == 0) return;
   if (telemetry_history_next_tx_uptime != 0
       && current_uptime_millis < telemetry_history_next_tx_uptime) {
     return;
@@ -13450,20 +13561,14 @@ void MyMesh::serviceTelemetryHistoryTx() {
                < mesh::TelemetryHistory::BINARY_MAX_SAMPLES) {
       return;
     }
+    const uint8_t available = availableTelemetryHistoryTxTypes();
+    if (available == 0) return;
     const uint8_t* data_path = NULL;
     uint8_t data_path_len = OUT_PATH_UNKNOWN;
     if (!_cli.getDataTxPath(data_path, data_path_len)) return;
     telemetry_history_tx_manual = false;
     telemetry_history_tx_resume_uptime = 0;
-    telemetry_history_tx_pending = TELEMETRY_HISTORY_TX_TEMPERATURE
-        | TELEMETRY_HISTORY_TX_VOLTAGE;
-    if (noise_floor_history.sampleCount(0) != 0)
-      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_NOISE;
-    if (isDualRadioActive() && noise_floor_history.sampleCount(1) != 0)
-      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_NOISE2;
-    if (external_voltage_history.populatedChannelCount() != 0) {
-      telemetry_history_tx_pending |= TELEMETRY_HISTORY_TX_EXTERNAL_VOLTAGE;
-    }
+    telemetry_history_tx_pending = available;
     telemetry_history_tx_external_channel = 0;
     telemetry_history_tx_external_chunk = 0;
   }
@@ -13526,17 +13631,7 @@ void MyMesh::serviceTelemetryHistoryTx() {
   }
 
   if (telemetry_history_tx_pending == 0) {
-    if (telemetry_history_tx_manual) {
-      telemetry_history_next_tx_uptime = telemetry_history_tx_resume_uptime;
-      telemetry_history_tx_manual = false;
-      telemetry_history_tx_resume_uptime = 0;
-    } else {
-      telemetry_history_next_tx_uptime = telemetry_history_tx_enabled
-          ? current_uptime_millis
-              + (uint64_t)telemetry_history_tx_interval_days
-                  * 24ULL * 60ULL * 60ULL * 1000ULL
-          : 0;
-    }
+    finishTelemetryHistoryTxBatch(current_uptime_millis);
   } else {
     telemetry_history_next_tx_uptime =
         current_uptime_millis + TELEMETRY_HISTORY_TX_PACKET_SPACING_MILLIS;

@@ -593,6 +593,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   bool telemetry_history_tx_manual;
   uint8_t telemetry_history_tx_external_channel;
   uint8_t telemetry_history_tx_external_chunk;
+  uint8_t telemetry_history_tx_types;
   uint64_t telemetry_history_next_tx_uptime;
   uint64_t telemetry_history_tx_resume_uptime;
   uint64_t telemetry_history_last_tx_uptime;
@@ -878,6 +879,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 #endif
   void loadTelemetryHistoryTxPrefs();
   bool saveTelemetryHistoryTxPrefs();
+  uint8_t availableTelemetryHistoryTxTypes() const;
+  void finishTelemetryHistoryTxBatch(uint64_t now);
+  bool handleTelemetryHistoryTxTypesCommand(char* command, char* reply,
+                                            bool permitted);
   void serviceTelemetryHistoryTx();
   bool sendTelemetryHistorySnapshot(mesh::TelemetryHistory::Series series);
   bool sendNoiseFloorHistorySnapshot(uint8_t profile);

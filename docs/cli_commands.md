@@ -756,6 +756,8 @@ estimates rather than received-packet RSSI. Main-radio and radio2 history are
 kept separate; failed measurements retain a Missing position in the timeline.
 
 The feature is omitted from flash-constrained STM32 repeater and room images.
+The `telemetry.tx` commands, including packet-type selections, are repeater-only.
+Room servers provide local history and its CLI reads, without batch transmission.
 
 **Usage:**
 
@@ -769,6 +771,10 @@ The feature is omitted from flash-constrained STM32 repeater and room images.
 - `get telemetry.tx`
 - `set telemetry.tx <off|direct|path>`
 - `set telemetry.tx schedule <off|1-30d>`
+- `get telemetry.tx.types`
+- `set telemetry.tx.types <on|off>`
+- `get telemetry.tx.<type>`
+- `set telemetry.tx.<type> <on|off>`
 - `send telemetry.tx now`
 - `get data.tx`
 - `get data.tx path`
@@ -806,6 +812,7 @@ The feature is omitted from flash-constrained STM32 repeater and room images.
 - `schedule`: Automatic interval in whole days. Automatic transmission is off
   on a fresh install. The retained cadence defaults to `2d`; `off` retains the
   shared route for manual test sends.
+- `type`: `temp`, `volt`, `volt.i2c`, `noise`, or `noise2`, as listed below.
 
 Local serial and remote administrator CLI sessions can read the history on
 both roles. Collection uses the MCU temperature, battery voltage, external I2C
@@ -845,12 +852,40 @@ zero-hop `direct` plus `region=auto`, but it does not enable telemetry or any
 other producer. For compatibility, `set telemetry.tx direct|path` updates the
 shared path and enables the default `2d` schedule; new configuration should use
 `set data.tx path ...` followed by `set telemetry.tx schedule ...`.
-An automatic run waits until 165 half-hour positions are
-available, then sends one maximum-size temperature packet, one maximum-size
-battery-voltage packet, and up to three `IVB1` packets for every populated I2C
-voltage channel, plus the collected noise-floor snapshots. GPS is never included
-in this raw transmission. The history
-remains boot-local, so the first scheduled run after a reboot needs about 82.5
+
+Each packet type has a separate saved on/off setting. All five default to
+`on`; this does not enable the automatic schedule. These settings select both
+manual and scheduled transmissions while history sampling and CLI reads
+continue normally.
+
+| Setting | Selected packets |
+|---|---|
+| `telemetry.tx.temp` | MCU temperature (`TTB1`) |
+| `telemetry.tx.volt` | Battery voltage (`TVB1`) |
+| `telemetry.tx.volt.i2c` | External I2C voltage (`IVB1`), all monitor channels |
+| `telemetry.tx.noise` | Main-radio noise floor (`N1B1`) |
+| `telemetry.tx.noise2` | Radio2 noise floor (`N2B1`) |
+
+For example, omit noise packets while keeping the other selections:
+
+```text
+set telemetry.tx.noise off
+set telemetry.tx.noise2 off
+get telemetry.tx.types
+```
+
+`get telemetry.tx.noise` reads one selection. `set telemetry.tx.types on`
+restores all five selections; `set telemetry.tx.types off` disables them all.
+Turning a type off cancels its batch work that has not yet been queued. Packets
+already queued can still transmit. The remaining batch keeps its 90-second
+pacing. Turning a type on includes it in the next batch.
+
+An automatic run still waits until 165 half-hour positions are available,
+regardless of the selected types. It then sends the selected temperature and
+battery-voltage snapshots, up to three `IVB1` packets for every populated I2C
+voltage channel when selected, and the selected noise-floor snapshots. GPS is
+never included in this raw transmission. The history remains boot-local, so
+the first scheduled run after a reboot needs about 82.5
 hours to fill. On the default two-day interval, each 82.5-hour temperature or
 battery packet overlaps its predecessor by 34.5 hours. Packets are queued 90
 seconds apart. A queue failure is retried after 30 minutes only for the packet
@@ -870,16 +905,20 @@ Queue acceptance and relayed telemetry do not update it, and it does not confirm
 observer receipt. It shows `last=never` until the first completed send after a
 reboot. The age uses uptime, so clock corrections do not affect it.
 
-`send telemetry.tx now` is an administrator-only test action. It queues
-temperature and battery-voltage snapshots plus the available I2C voltage
-chunks over the configured path. It also queues one main-radio `N1B1` packet
-once a noise bucket has completed and one `N2B1` packet when radio2 is enabled
-and has a completed bucket. Missing positions are included; an all-Missing
-history is still sent. It uses all currently available base
-positions up to 165 and all available I2C positions up to 192 per populated
-channel, plus the latest 255 positions per noise profile (63 hours 45 minutes).
+`send telemetry.tx now` is an administrator-only test action. It queues the
+selected temperature and battery-voltage snapshots plus selected, available
+I2C voltage chunks over the configured path. When selected, it also queues
+one main-radio `N1B1` packet once a noise bucket has completed and one `N2B1`
+packet when radio2 is enabled and has a completed bucket. Missing positions
+are included; an all-Missing history is still sent. It uses all currently
+available base positions up to 165 and all available I2C positions up to 192
+per populated channel, plus the latest 255 positions per noise profile
+(63 hours 45 minutes).
 It works while the schedule is off and does not move the next
-scheduled send time.
+scheduled send time. Selected I2C or noise data can be sent without any
+temperature or battery history. With all types off, it returns
+`Err - no telemetry packet types enabled`. If selected types have no data
+available, it returns `Err - no enabled telemetry data available`.
 
 With a non-empty hop path, `TTB1`, `TVB1`, `IVB1`, `N1B1`, and `N2B1` telemetry
 use the existing direct-message echo retries. They follow `direct.retry`,

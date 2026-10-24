@@ -40,21 +40,26 @@ class TelemetryPersistenceTests(unittest.TestCase):
             "bool CommonCLI::handleDataTxCommand(")) + "\n"
         generated += '#define TELEMETRY_HISTORY_TX_PREFS_FILE "/telemetry_tx"\n'
         for name in ("RETRY_MILLIS", "PACKET_SPACING_MILLIS", "DEFAULT_DAYS", "MAX_DAYS",
-                     "TEMPERATURE", "VOLTAGE", "EXTERNAL_VOLTAGE", "NOISE", "NOISE2"):
+                     "TEMPERATURE", "VOLTAGE", "EXTERNAL_VOLTAGE", "NOISE", "NOISE2", "ALL_TYPES"):
             generated += re.search(r"static const uint(?:8|64)_t TELEMETRY_HISTORY_TX_" +
                                    name + r"[^;]*;", source).group() + "\n"
         generated += "\n".join(extract_braced(source, signature) for signature in (
+            "static char* trimSpaces(",
             "static File openFloodSettingsRead(", "static void formatPathReply(",
             "static bool recoverTelemetryHistoryTxPrefs(",
             "static bool readTelemetryHistoryTxPrefsImage(", "void MyMesh::loadTelemetryHistoryTxPrefs(",
             "bool MyMesh::saveTelemetryHistoryTxPrefs(", "bool MyMesh::sendTelemetryHistorySnapshot(",
+            "uint8_t MyMesh::availableTelemetryHistoryTxTypes(",
+            "void MyMesh::finishTelemetryHistoryTxBatch(",
+            "bool MyMesh::handleTelemetryHistoryTxTypesCommand(",
             "void MyMesh::recordTelemetryHistoryTx(",
             "bool MyMesh::sendNoiseFloorHistorySnapshot(",
             "bool MyMesh::sendExternalVoltageHistorySnapshot(", "void MyMesh::serviceTelemetryHistoryTx(",
-            "void MyMesh::formatTelemetryHistoryTxStatus(", "static char* trimSpaces(")) + "\n"
+            "void MyMesh::formatTelemetryHistoryTxStatus(")) + "\n"
         generated += ('void MyMesh::handle(char* command, char* reply, ClientInfo* sender) {\n'
                       '  static const char telemetry_tx_schedule_command[] = "set telemetry.tx schedule";\n'
-                      '  static const char telemetry_tx_send_now_command[] = "send telemetry.tx now";\n')
+                      '  static const char telemetry_tx_send_now_command[] = "send telemetry.tx now";\n'
+                      '  if (handleTelemetryHistoryTxTypesCommand(command, reply, !sender || sender->isAdmin())) return;\n')
         generated += extract_braced(source, "if (strcmp(command, telemetry_tx_send_now_command)") + "\n"
         generated += extract_braced(source, "if (strncmp(command, telemetry_tx_schedule_command,")
         generated += '\n  strcpy(reply, "Err - unrecognized command");\n}\n'

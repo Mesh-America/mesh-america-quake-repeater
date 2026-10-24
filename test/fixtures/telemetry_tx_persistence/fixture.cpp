@@ -98,6 +98,7 @@ public:
   bool telemetry_history_tx_prefs_healthy = false;
   bool telemetry_history_tx_enabled = false;
   uint8_t telemetry_history_tx_interval_days = 2;
+  uint8_t telemetry_history_tx_types = 31;
   uint8_t telemetry_history_tx_pending = 0;
   bool telemetry_history_tx_manual = false;
   uint8_t telemetry_history_tx_external_channel = 0;
@@ -108,12 +109,16 @@ public:
   uint64_t uptime_millis = 0;
   uint32_t last_millis = 0;
   std::vector<mesh::Packet> packets;
+  std::vector<uint64_t> packet_times;
   std::vector<std::string> attempts;
   std::string reject_magic;
   unsigned rejected_sends = 0;
   explicit MyMesh(FILESYSTEM& fs) : _fs(&fs) {}
   void loadTelemetryHistoryTxPrefs();
   bool saveTelemetryHistoryTxPrefs();
+  uint8_t availableTelemetryHistoryTxTypes() const;
+  void finishTelemetryHistoryTxBatch(uint64_t);
+  bool handleTelemetryHistoryTxTypesCommand(char*, char*, bool);
   void serviceTelemetryHistoryTx();
   bool sendTelemetryHistorySnapshot(mesh::TelemetryHistory::Series);
   bool sendExternalVoltageHistorySnapshot(uint8_t, uint8_t);
@@ -135,13 +140,16 @@ public:
       --rejected_sends; delete packet; return false;
     }
     packet->path_len = mesh::Packet::copyPath(packet->path, path, length);
-    packets.push_back(*packet); delete packet; return true;
+    packets.push_back(*packet);
+    packet_times.push_back(uptime_millis + uint32_t(millis() - last_millis));
+    delete packet; return true;
   }
-  std::array<uint64_t, 8> state() const {
+  std::array<uint64_t, 9> state() const {
     return {{telemetry_history_tx_enabled, telemetry_history_tx_interval_days,
              telemetry_history_tx_pending, telemetry_history_tx_manual,
              telemetry_history_tx_external_channel, telemetry_history_tx_external_chunk,
-             telemetry_history_next_tx_uptime, telemetry_history_tx_resume_uptime}};
+             telemetry_history_next_tx_uptime, telemetry_history_tx_resume_uptime,
+             telemetry_history_tx_types}};
   }
   std::string command(const char* text, ClientInfo* sender = nullptr) {
     std::vector<char> input(text, text + strlen(text) + 1);
@@ -154,7 +162,11 @@ public:
 static const char target[] = "/telemetry_tx";
 static const char temp[] = "/telemetry_tx.tmp";
 static const char backup[] = "/telemetry_tx.bak";
-static std::vector<uint8_t> current(bool enabled = true, uint8_t days = 7) {
+static std::vector<uint8_t> current(bool enabled = true, uint8_t days = 7,
+                                    uint8_t types = 31) {
+  return {'T', 'H', 'T', '4', uint8_t(enabled), days, types};
+}
+static std::vector<uint8_t> previous(bool enabled = true, uint8_t days = 7) {
   return {'T', 'H', 'T', '3', uint8_t(enabled), days};
 }
 static std::vector<uint8_t> legacy(bool enabled = true, uint8_t length = 1,
@@ -212,6 +224,12 @@ struct Fixture {
     assert(node.packets.empty() && node.state() == before);
     assert(node.command("send telemetry.tx now") == "Err - telemetry.tx prefs unavailable");
     assert(node.state() == before && fs.writes == writes);
+    for (const char* key : {"temp", "volt", "volt.i2c", "noise", "noise2", "types"}) {
+      const std::string prefix = std::string("telemetry.tx.") + key;
+      assert(node.command(("get " + prefix).c_str()) == "Err - telemetry.tx prefs unavailable");
+      assert(node.command(("set " + prefix + " off").c_str()) == "Err - telemetry.tx prefs unavailable");
+      assert(node.state() == before && fs.writes == writes);
+    }
     char reply[160]; node.formatTelemetryHistoryTxStatus(reply, sizeof(reply));
     assert(strstr(reply, " fault=prefs"));
     ClientInfo unauthorized; unauthorized.admin = false;
@@ -224,6 +242,7 @@ static void checkFreshAndValid() {
   Fixture f; f.boot();
   assert(f.node.telemetry_history_tx_prefs_healthy);
   assert(!f.node.telemetry_history_tx_enabled && f.node.telemetry_history_tx_interval_days == 2);
+  assert(f.node.telemetry_history_tx_types == 31);
   assert(f.fs.files.empty());
   for (const bool enabled : {false, true}) {
     for (const uint8_t days : {uint8_t(1), uint8_t(2), uint8_t(30)}) {
@@ -231,6 +250,7 @@ static void checkFreshAndValid() {
       assert(f.node.telemetry_history_tx_prefs_healthy);
       assert(f.node.telemetry_history_tx_enabled == enabled);
       assert(f.node.telemetry_history_tx_interval_days == days);
+      assert(f.node.telemetry_history_tx_types == 31);
       assert(f.node.saveTelemetryHistoryTxPrefs() && f.fs.files.at(target) == current(enabled, days));
       assert(!f.fs.exists(temp) && !f.fs.exists(backup));
       char reply[160]; f.node.formatTelemetryHistoryTxStatus(reply, sizeof(reply));
@@ -245,7 +265,7 @@ static void checkLoadFailures() {
     Fixture f; f.fs.files[target] = std::vector<uint8_t>(length, 0); f.boot();
     f.expectFault(); assert(f.fs.files.at(target) == std::vector<uint8_t>(length, 0));
   }
-  for (const auto& image : {current(), legacy()}) {
+  for (const auto& image : {current(), previous(), legacy()}) {
     for (size_t limit = 0; limit < image.size(); ++limit) {
       Fixture f; f.fs.files[target] = image; f.fs.read_limit[target] = limit;
       f.boot(); f.expectFault(); assert(f.fs.files.at(target) == image);
@@ -274,9 +294,22 @@ static void checkLoadFailures() {
 }
 
 static void checkLegacyMigration() {
+  for (const bool enabled : {false, true}) {
+    for (const uint8_t days : {uint8_t(1), uint8_t(30)}) {
+      Fixture f; const auto image = previous(enabled, days); f.seed(image);
+      assert(f.node.telemetry_history_tx_prefs_healthy);
+      assert(f.node.telemetry_history_tx_enabled == enabled);
+      assert(f.node.telemetry_history_tx_interval_days == days);
+      assert(f.node.telemetry_history_tx_types == 31);
+      assert(f.fs.files.at(target) == image); // old files are not rewritten on boot
+      assert(f.node.saveTelemetryHistoryTxPrefs());
+      assert(f.fs.files.at(target) == current(enabled, days));
+    }
+  }
   for (const uint8_t length : {uint8_t(0), uint8_t(1), uint8_t(0x42), uint8_t(0x82)}) {
     Fixture f; const auto image = legacy(true, length); f.seed(image);
     assert(f.node.telemetry_history_tx_prefs_healthy && f.node.telemetry_history_tx_enabled);
+    assert(f.node.telemetry_history_tx_types == 31);
     assert(f.route.persisted && f.route.path_len == length);
     const size_t bytes = (length & 63) * ((length >> 6) + 1);
     assert(!memcmp(f.route.path, image.data() + 7, bytes));
@@ -322,7 +355,7 @@ static void checkLegacyMigration() {
 }
 
 static void verifyRollback(Fixture& f, const std::vector<uint8_t>& prior,
-                           const std::array<uint64_t, 8>& state) {
+                           const std::array<uint64_t, 9>& state) {
   assert(f.node.state() == state && f.node.telemetry_history_tx_prefs_healthy);
   assert(f.fs.files.at(target) == prior);
   assert(!f.fs.exists(temp));
@@ -335,8 +368,8 @@ static void verifyRollback(Fixture& f, const std::vector<uint8_t>& prior,
 }
 
 static void checkWriteAndValidationFailures() {
-  for (const auto& prior : {current(), legacy()}) {
-    for (size_t limit = 0; limit < 6; ++limit) {
+  for (const auto& prior : {current(), previous(), legacy()}) {
+    for (size_t limit = 0; limit < current().size(); ++limit) {
       Fixture f; f.seed(prior); const auto before = f.node.state();
       f.fs.write_limit[temp] = limit;
       assert(f.node.command("set telemetry.tx schedule off") == "Err - unable to save telemetry.tx schedule");
@@ -349,7 +382,7 @@ static void checkWriteAndValidationFailures() {
       assert(f.node.command("set telemetry.tx schedule off") == "Err - unable to save telemetry.tx schedule");
       verifyRollback(f, prior, before);
     }
-    for (size_t limit = 0; limit < 6; ++limit) {
+    for (size_t limit = 0; limit < current().size(); ++limit) {
       Fixture f; f.seed(prior); const auto before = f.node.state();
       f.fs.read_limit[temp] = limit;
       assert(f.node.command("set telemetry.tx schedule off") == "Err - unable to save telemetry.tx schedule");
@@ -439,7 +472,7 @@ static void checkAmbiguousPublicationAndServiceGate() {
       assert(f.fs.files.at(target) == current(false));
     } else f.expectFault();
   }
-  for (int limit = 0; limit < 6; ++limit) {
+  for (int limit = 0; limit < int(current().size()); ++limit) {
     Fixture f; f.seed(); f.history();
     f.fs.final_read_limit = limit;
     assert(f.node.command("set telemetry.tx schedule off") == "Err - unable to save telemetry.tx schedule");
@@ -836,6 +869,211 @@ static void checkLastTxSurvivesScheduleAndStatusTruncation() {
   expectLastTx(restarted.node, "never"); // boot-local; do not invent a timestamp
 }
 
+static const char* const type_keys[] = {"temp", "volt", "volt.i2c", "noise", "noise2"};
+
+static void externalHistory(Fixture& f) {
+  const uint8_t channels[] = {7, 9};
+  assert(f.node.external_voltage_history.configure(channels, 2));
+  const mesh::ExternalVoltageHistory::Reading readings[] = {{7, 12.5f, true}, {9, 5.0f, true}};
+  for (unsigned i = 0; i < mesh::ExternalVoltageHistory::RETENTION_SAMPLES; ++i)
+    f.node.external_voltage_history.record(1000800 + i * 1800, readings, 2);
+  assert(f.node.external_voltage_history.binaryChunkCount() == 3);
+}
+
+static std::vector<std::string> selectedMagics(uint8_t types) {
+  std::vector<std::string> expected;
+  if (types & 1) expected.push_back("TTB1");
+  if (types & 2) expected.push_back("TVB1");
+  if (types & 8) expected.push_back("N1B1");
+  if (types & 16) expected.push_back("N2B1");
+  if (types & 4) for (unsigned i = 0; i < 6; ++i) expected.push_back("IVB1");
+  return expected;
+}
+
+static void checkTypePreferencesAndCommands() {
+  for (unsigned value = 0; value <= 255; ++value) {
+    Fixture f; const auto image = current(true, 7, uint8_t(value)); f.seed(image);
+    assert(f.fs.files.at(target) == image); // no eager format rewrite
+    assert(f.node.telemetry_history_tx_prefs_healthy == (value < 32));
+    if (value >= 32) { f.expectFault(); continue; }
+    assert(f.node.telemetry_history_tx_types == value);
+    assert(f.node.saveTelemetryHistoryTxPrefs() && f.fs.files.at(target) == image);
+    f.boot(); assert(f.node.telemetry_history_tx_types == value);
+  }
+  Fixture f; f.seed();
+  assert(f.node.command("get telemetry.tx.types") ==
+      "> temp=on volt=on volt.i2c=on noise=on noise2=on");
+  for (unsigned i = 0; i < 5; ++i) {
+    const std::string key = std::string("telemetry.tx.") + type_keys[i];
+    assert(f.node.command(("get " + key).c_str()) == "> on");
+    assert(f.node.command(("set " + key + " off").c_str()) == "OK - " + key + "=off");
+    assert(f.node.telemetry_history_tx_types == uint8_t(31 & ~(1U << i)));
+    assert(f.fs.files.at(target) == current(true, 7, uint8_t(31 & ~(1U << i))));
+    f.boot(); assert(f.node.command(("get " + key).c_str()) == "> off");
+    const auto writes = f.fs.writes;
+    assert(f.node.command(("set " + key + " off").c_str()) == "OK - " + key + "=off");
+    assert(f.fs.writes == writes); // idempotent settings don't wear flash
+    assert(f.node.command(("set " + key + " on").c_str()) == "OK - " + key + "=on");
+    assert(f.node.telemetry_history_tx_types == 31);
+    for (const auto& command : {"get " + key, "set " + key + " off"}) {
+      ClientInfo unauthorized; unauthorized.admin = false;
+      const auto before = f.node.state(); const auto files = f.fs.files;
+      assert(f.node.command(command.c_str(), &unauthorized) == "Err - not permitted");
+      assert(f.node.state() == before && f.fs.files == files);
+    }
+  }
+  for (const char* command : {"set telemetry.tx.types off", "set telemetry.tx.types on"}) {
+    const uint8_t expected = strstr(command, " off") ? 0 : 31;
+    assert(f.node.command(command).find("OK -") == 0);
+    assert(f.node.telemetry_history_tx_types == expected);
+    f.boot(); assert(f.node.telemetry_history_tx_types == expected);
+  }
+  for (const char* command : {"set telemetry.tx.temp", "set telemetry.tx.temp ",
+       "set telemetry.tx.temp true", "set telemetry.tx.temp 1", "set telemetry.tx.temp OFF",
+       "set telemetry.tx.temp on junk", "set telemetry.tx.noise2x off",
+       "get telemetry.tx.noise extra", "get telemetry.tx.types ",
+       "set telemetry.tx.volt.i2cx off", "set telemetry.tx.gps on", "get telemetry.tx.gps"}) {
+    const auto before = f.node.state(); const auto files = f.fs.files; const auto writes = f.fs.writes;
+    assert(f.node.command(command).find("Err -") == 0);
+    assert(f.node.state() == before && f.fs.files == files && f.fs.writes == writes);
+  }
+  ClientInfo unauthorized; unauthorized.admin = false;
+  for (const char* command : {"get telemetry.tx.types", "set telemetry.tx.types off"})
+    assert(f.node.command(command, &unauthorized) == "Err - not permitted");
+}
+
+static void checkSelectedManualAndScheduledBatches() {
+  test_millis = 0;
+  for (const bool manual : {false, true}) {
+    for (uint8_t types = 0; types < 32; ++types) {
+      Fixture f; f.seed(current(!manual, 2, types)); f.history(); f.noiseHistory(); externalHistory(f);
+      f.node.dual = true;
+      if (manual) {
+        const auto reply = f.node.command("send telemetry.tx now");
+        if (types == 0) assert(reply == "Err - no telemetry packet types enabled");
+        else {
+          const std::string expected = "OK - telemetry.tx queued temp=" + std::to_string(types & 1 ? 165 : 0)
+              + " volt=" + std::to_string(types & 2 ? 165 : 0)
+              + " i2c=" + std::to_string(types & 4 ? 2 : 0) + "/" + std::to_string(types & 4 ? 6 : 0)
+              + " noise=" + std::to_string(bool(types & 8)) + "/" + std::to_string(bool(types & 16));
+          assert(reply == expected);
+        }
+      }
+      serviceDue(f.node); finishPending(f.node);
+      assert(f.node.attempts == selectedMagics(types));
+      assert(f.node.packets.size() == selectedMagics(types).size());
+      for (size_t i = 1; i < f.node.packet_times.size(); ++i)
+        assert(f.node.packet_times[i] - f.node.packet_times[i - 1] == 90000);
+      assert(!f.node.telemetry_history_tx_pending && !f.node.telemetry_history_tx_manual);
+      assert(f.node.telemetry_history_tx_types == types);
+    }
+  }
+  // Manual selections use their own available history, without requiring base samples.
+  for (const uint8_t types : {uint8_t(4), uint8_t(8), uint8_t(16)}) {
+    Fixture f; f.seed(current(false, 2, types)); f.node.dual = true;
+    if (types == 4) externalHistory(f); else f.noiseHistory(1);
+    assert(f.node.telemetry_history.voltageSampleCount() == 0);
+    assert(f.node.command("send telemetry.tx now").find("OK - telemetry.tx queued temp=0 volt=0") == 0);
+    serviceDue(f.node); finishPending(f.node);
+    assert(f.node.packets.size() == (types == 4 ? 6U : 1U));
+    assert(f.node.attempts.front() == (types == 4 ? "IVB1" : types == 8 ? "N1B1" : "N2B1"));
+  }
+  for (const uint8_t types : {uint8_t(1), uint8_t(2), uint8_t(4), uint8_t(8), uint8_t(16)}) {
+    Fixture f; f.seed(current(false, 2, types)); const auto before = f.node.state();
+    assert(f.node.command("send telemetry.tx now") == "Err - no enabled telemetry data available");
+    assert(f.node.state() == before && f.node.packets.empty());
+  }
+  Fixture warmup; warmup.seed(current(true, 2, 8)); warmup.noiseHistory(1);
+  warmup.node.telemetry_history.record(1000000, 22, true, 3750, 0, 0, false);
+  warmup.node.serviceTelemetryHistoryTx(); assert(warmup.node.packets.empty());
+  warmup.history(); warmup.node.serviceTelemetryHistoryTx();
+  assert(warmup.node.attempts == std::vector<std::string>{"N1B1"});
+}
+
+static void checkTypeSaveRollbackAndAmbiguity() {
+  for (const bool all : {false, true}) {
+    for (unsigned failure = 0; failure < 6; ++failure) {
+      Fixture f; f.seed(); f.history(); externalHistory(f);
+      f.node.telemetry_history_tx_pending = 31; f.node.telemetry_history_tx_manual = true;
+      f.node.telemetry_history_tx_external_channel = 1; f.node.telemetry_history_tx_external_chunk = 2;
+      f.node.telemetry_history_next_tx_uptime = 90000; f.node.telemetry_history_tx_resume_uptime = 9000000;
+      const auto before = f.node.state(); const auto prior = f.fs.files.at(target);
+      if (failure == 0) f.fs.fail_write_open.insert(temp);
+      if (failure == 1) f.fs.write_limit[temp] = 6;
+      if (failure == 2) f.fs.fail_rename.insert({temp, target});
+      if (failure == 3) f.fs.fail_final_read = true;
+      if (failure == 4) f.fs.final_read_limit = 6;
+      if (failure == 5) f.fs.corrupt_publish = true;
+      assert(f.node.command(all ? "set telemetry.tx.types off" : "set telemetry.tx.volt.i2c off") ==
+          "Err - unable to save telemetry.tx types");
+      assert(f.node.state() == before); // failed publication cannot prune work or reset timers/cursors
+      if (failure < 3) {
+        assert(f.node.telemetry_history_tx_prefs_healthy && f.fs.files.at(target) == prior);
+        f.fs.clearFaults();
+        assert(f.node.command(all ? "set telemetry.tx.types off" : "set telemetry.tx.volt.i2c off").find("OK -") == 0);
+        assert(f.fs.files.at(target) == current(true, 7, all ? 0 : 27));
+      } else {
+        assert(!f.node.telemetry_history_tx_prefs_healthy); f.expectFault();
+        f.boot(); f.expectFault(); // ambiguous storage remains closed across reboot
+        f.fs.clearFaults(); f.boot();
+        if (failure == 5) f.expectFault(); // corrupt published bytes never become authoritative
+        else {
+          assert(f.node.telemetry_history_tx_prefs_healthy);
+          assert(f.node.telemetry_history_tx_types == (all ? 0 : 27));
+          assert(f.node.telemetry_history_tx_enabled && f.node.telemetry_history_tx_interval_days == 7);
+          assert(!f.node.telemetry_history_tx_pending && !f.node.telemetry_history_tx_manual);
+        }
+      }
+    }
+  }
+}
+
+static void checkTypeChangesDuringBatches() {
+  test_millis = 0;
+  Fixture f; f.seed(current(false, 2, 12)); f.noiseHistory(1); externalHistory(f);
+  f.node.telemetry_history_next_tx_uptime = 9000000;
+  assert(f.node.command("send telemetry.tx now").find("OK -") == 0);
+  serviceDue(f.node); serviceDue(f.node); // N1B1, then first I2C chunk
+  assert(f.node.attempts == std::vector<std::string>({"N1B1", "IVB1"}));
+  assert(f.node.telemetry_history_tx_external_chunk == 1);
+  const auto due = f.node.telemetry_history_next_tx_uptime;
+  assert(f.node.command("set telemetry.tx.noise off").find("OK -") == 0);
+  assert(f.node.command("set telemetry.tx.noise on").find("OK -") == 0);
+  assert(f.node.telemetry_history_tx_pending == 4); // enabling adds nothing to the current batch
+  assert(f.node.telemetry_history_next_tx_uptime == due && f.node.telemetry_history_tx_external_chunk == 1);
+  f.node.uptime_millis = due - 1; f.node.last_millis = test_millis;
+  f.node.serviceTelemetryHistoryTx(); assert(f.node.packets.size() == 2);
+  serviceDue(f.node); // second I2C chunk, never repeat chunk zero
+  assert(read32(f.node.packets[2].payload + 12) == read32(f.node.packets[1].payload + 12) + 64 * 1800);
+  const size_t admitted = f.node.packets.size();
+  assert(f.node.command("set telemetry.tx.volt.i2c off").find("OK -") == 0);
+  assert(f.node.telemetry_history_tx_pending == 0 && !f.node.telemetry_history_tx_manual);
+  assert(f.node.telemetry_history_tx_external_channel == 0 && f.node.telemetry_history_tx_external_chunk == 0);
+  assert(f.node.telemetry_history_next_tx_uptime == 9000000 && !f.node.telemetry_history_tx_resume_uptime);
+  assert(f.node.packets.size() == admitted); // producer cancellation cannot retract admitted radio packets
+  f.node.uptime_millis += 90000; f.node.serviceTelemetryHistoryTx();
+  assert(f.node.packets.size() == admitted);
+  assert(f.node.command("set telemetry.tx.volt.i2c on").find("OK -") == 0);
+  assert(!f.node.telemetry_history_tx_pending);
+  assert(f.node.command("send telemetry.tx now").find("noise=1/0") != std::string::npos);
+  assert(f.node.telemetry_history_tx_pending == 12);
+
+  Fixture automatic; automatic.seed(); automatic.history();
+  automatic.node.serviceTelemetryHistoryTx(); assert(automatic.node.packets.size() == 1);
+  const uint64_t now = automatic.node.uptime_millis;
+  assert(automatic.node.command("set telemetry.tx.volt off").find("OK -") == 0);
+  assert(!automatic.node.telemetry_history_tx_pending);
+  assert(automatic.node.telemetry_history_next_tx_uptime == now + 7ULL * 24 * 60 * 60 * 1000);
+  automatic.node.serviceTelemetryHistoryTx(); assert(automatic.node.packets.size() == 1);
+
+  Fixture stale; stale.seed(current(false)); stale.history();
+  assert(stale.node.command("send telemetry.tx now").find("OK -") == 0);
+  stale.node.telemetry_history_tx_types = 0; // defensive service filtering also works before its old due time
+  stale.node.telemetry_history_next_tx_uptime = 1000000;
+  stale.node.serviceTelemetryHistoryTx();
+  assert(stale.node.packets.empty() && !stale.node.telemetry_history_tx_pending && !stale.node.telemetry_history_tx_manual);
+}
+
 int main() {
   checkFreshAndValid();
   checkLoadFailures();
@@ -850,5 +1088,9 @@ int main() {
   checkLastTxCompletionAndOwnership();
   checkLastTxAgeAndClockWrap();
   checkLastTxSurvivesScheduleAndStatusTruncation();
+  checkTypePreferencesAndCommands();
+  checkSelectedManualAndScheduledBatches();
+  checkTypeSaveRollbackAndAmbiguity();
+  checkTypeChangesDuringBatches();
   puts("telemetry persistence checks passed");
 }
