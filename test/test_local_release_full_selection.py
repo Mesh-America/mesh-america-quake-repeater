@@ -2,12 +2,19 @@
 """Full selection preserves qualified transports and board capacity exceptions."""
 
 from copy import deepcopy
+from contextlib import redirect_stderr, redirect_stdout
+import io
+import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from build_local_release import select_ordinary_full_records
+import build_local_release as release
 
 
 def record(target: str, profile: str = "full", platform: str = "ESP32_PLATFORM",
@@ -653,6 +660,276 @@ class ReleaseFullSelectionTest(unittest.TestCase):
         legacy = record("heltec_v4_tft_repeater_bridge_espnow", capabilities=("bridge.espnow",))
         with self.assertRaisesRegex(ValueError, "verified"):
             select_ordinary_full_records([primary, legacy])
+
+
+class BootloaderReleaseOrchestrationTest(unittest.TestCase):
+    PROFILE = {"id": "test_board", "files": {"zip": {"sha256": "a" * 64}}}
+
+    def catalog(self):
+        return mock.patch.multiple(release, load_bootloader_manifest=mock.Mock(return_value={}),
+            select_bootloader_profile=mock.Mock(return_value=(self.PROFILE, {})),
+            target_profiles=mock.Mock(side_effect=lambda targets: {target: {
+                "role": "room" if "room_" in target else "repeater",
+                "sourceHardware": "source_" + target, "hardware": "hardware_" + target}
+                for target in targets}))
+
+    def embedded(self, ordinary):
+        result = deepcopy(ordinary)
+        for item in result:
+            manifest = item["manifest"]
+            sensor = release.nrf52_sensor_profile(manifest)
+            manifest["artifact_target"] = (manifest["target"] + "-with-bootloader-2.4.12-"
+                                            + sensor + "-ota")
+            manifest["embedded_bootloader"] = dict(release="2.4.12", profile=self.PROFILE["id"],
+                manifest_sha256=release.BOOTLOADER_MANIFEST_SHA256, asset_sha256="a" * 64,
+                legacy_sha256=None)
+        return result
+
+    def test_target_selection_is_exact_role_platform_sorted_and_unique(self):
+        eligible = sensor_pair("z_repeater") + sensor_pair("a_room_server")
+        excluded = [record("n_companion_radio_full", platform="NRF52_PLATFORM"),
+                    record("n_sensor", platform="NRF52_PLATFORM"), record("esp_repeater"),
+                    record("rp_room_server", platform="RP2040_PLATFORM")]
+        with self.catalog():
+            self.assertEqual(release.embedded_bootloader_targets(eligible + excluded),
+                             ["a_room_server", "z_repeater"])
+            self.assertEqual([call.args[1] for call in release.select_bootloader_profile.call_args_list],
+                             ["a_room_server", "z_repeater"])
+        with mock.patch.object(release, "load_bootloader_manifest") as load:
+            self.assertEqual(release.embedded_bootloader_targets(excluded), [])
+            load.assert_not_called()
+
+    def test_unsupported_requested_infrastructure_fails_instead_of_being_omitted(self):
+        with self.catalog(), mock.patch.object(release, "select_bootloader_profile",
+                side_effect=ValueError("unsupported exact board")):
+            with self.assertRaisesRegex(ValueError, "unsupported exact board"):
+                release.embedded_bootloader_targets(sensor_pair("missing_repeater"))
+
+    def test_only_unique_exact_source_hardware_catalog_exclusions_are_allowed(self):
+        target = "pending_repeater"
+        records = sensor_pair(target)
+        unavailable = dict(id="pending_board", meshcoreHardware=["source_" + target],
+            qualification={"status": "source-pending"}, reason="Exact hardware is not qualified.")
+        catalog = {"profiles": [], "unavailableProfiles": [unavailable]}
+        expected = dict(target=target, profile="pending_board", source_hardware="source_" + target,
+                        status="source-pending", reason=unavailable["reason"])
+        with self.catalog(), mock.patch.object(release, "load_bootloader_manifest", return_value=catalog):
+            self.assertEqual(release.embedded_bootloader_selection(records), ([], [expected]))
+            release.select_bootloader_profile.assert_not_called()
+            receipt = release.validate_embedded_bootloader_records(records, [])
+            self.assertEqual(receipt["targets"], [])
+            self.assertEqual(receipt["firmware_count"], 0)
+            self.assertEqual(receipt["exclusions"], [expected])
+        for fault in ("alias_only", "duplicate", "available_conflict", "unknown_status", "empty_reason"):
+            invalid = deepcopy(catalog)
+            if fault == "alias_only":
+                invalid["unavailableProfiles"][0]["meshcoreHardware"] = ["hardware_" + target]
+            elif fault == "duplicate":
+                invalid["unavailableProfiles"].append(deepcopy(unavailable))
+            elif fault == "available_conflict":
+                invalid["profiles"] = [{"meshcoreHardware": ["hardware_" + target]}]
+            elif fault == "unknown_status":
+                invalid["unavailableProfiles"][0]["qualification"]["status"] = "unknown"
+            else:
+                invalid["unavailableProfiles"][0]["reason"] = " "
+            with self.subTest(fault=fault), self.catalog(), \
+                    mock.patch.object(release, "load_bootloader_manifest", return_value=invalid), \
+                    mock.patch.object(release, "select_bootloader_profile", side_effect=ValueError("unmapped")):
+                with self.assertRaises(ValueError):
+                    release.embedded_bootloader_selection(records)
+
+    def test_embedded_builds_are_sequential_resumable_and_in_separate_scrubbed_output(self):
+        ordinary = sensor_pair("z_repeater") + sensor_pair("a_room_server")
+        environment = {"OUTPUT_DIR": "old", "OTHER": "keep", "PLATFORMIO_BUILD_DIR": "/pinned",
+                       "MESHCORE_NRF52_EMBED_BOOTLOADER": "wrong",
+                       "MESHCORE_NRF52_LEGACY_BOOTLOADER": "/unrelated"}
+        previous = environment.copy()
+        calls = []
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            def run(command, log, child):
+                self.assertFalse(calls and calls[-1][0] == "running")
+                calls.append(("running", command, log, child.copy()))
+                self.assertEqual(child["OUTPUT_DIR"], str(root / "embedded"))
+                self.assertEqual(child["PLATFORMIO_BUILD_DIR"], "/pinned")
+                self.assertEqual(child["OTHER"], "keep")
+                self.assertFalse(set(release.BOOTLOADER_ENVIRONMENT) & child.keys())
+                calls[-1] = ("finished", command, log, child.copy())
+            with self.catalog(), mock.patch.object(release, "collect_artifacts", return_value=ordinary) as collect, \
+                    mock.patch.object(release, "run_logged", side_effect=run):
+                release.build_embedded_bootloader_artifacts(root / "ordinary", root / "embedded",
+                    release.DEFAULT_VERSION, "deadbeef", environment)
+            collect.assert_called_once_with(root / "ordinary", release.DEFAULT_VERSION + "-deadbeef")
+            self.assertEqual([item[1][3] for item in calls], ["a_room_server", "z_repeater"])
+            for _, command, log, _ in calls:
+                self.assertEqual(command, ["bash", "build_legacy.sh", "build-firmware", command[3],
+                    "--with-bootloader", "2.4.12", "--firmware-version", release.DEFAULT_VERSION,
+                    "--radio-preset", "usa-cascade-fixed", "--profile", "cascade",
+                    "--require-ota", "--resume"])
+                self.assertEqual(log.parent, root / "embedded/build-logs")
+            self.assertEqual(environment, previous)
+            for ordinary_dir, embedded_dir in ((root, root / "."), (root, root / "child"),
+                                               (root / "child", root)):
+                with mock.patch.object(release, "collect_artifacts") as collect:
+                    with self.assertRaisesRegex(ValueError, "separate output"):
+                        release.build_embedded_bootloader_artifacts(ordinary_dir, embedded_dir, "v", "sha", {})
+                    collect.assert_not_called()
+
+    def test_embedded_build_failure_stops_the_next_target_and_variant_contamination_rejected(self):
+        ordinary = sensor_pair("a_repeater") + sensor_pair("z_repeater")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.catalog(), mock.patch.object(release, "collect_artifacts", return_value=ordinary), \
+                    mock.patch.object(release, "run_logged", side_effect=RuntimeError("capacity rejected")) as run:
+                with self.assertRaisesRegex(RuntimeError, "capacity rejected"):
+                    release.build_embedded_bootloader_artifacts(root / "ordinary", root / "embedded", "v", "sha", {})
+                self.assertEqual(run.call_count, 1)
+            for contaminant in self.embedded(sensor_pair("a_repeater")):
+                contaminant["manifest"].pop("embedded_bootloader")
+            with mock.patch.object(release, "collect_artifacts", return_value=[contaminant]), \
+                    mock.patch.object(release, "run_logged") as run:
+                with self.assertRaisesRegex(ValueError, "ordinary firmware directory"):
+                    release.build_embedded_bootloader_artifacts(root / "ordinary", root / "embedded", "v", "sha", {})
+                run.assert_not_called()
+            # A resumed stale Standard image would be discarded by ordinary
+            # selection. It must not hide an embedded image in the ordinary root.
+            filtered = record("heltec_v4_repeater", "standard")
+            filtered["manifest"]["artifact_target"] = "heltec_v4_repeater-with-bootloader-2.4.12"
+            with mock.patch.object(release, "collect_artifacts", return_value=ordinary + [filtered]), \
+                    mock.patch.object(release, "run_logged") as run, \
+                    mock.patch.object(release, "resolve_pio_build_dir", return_value=root / "pinned"), \
+                    mock.patch.object(release, "git", return_value="a" * 40):
+                with self.assertRaisesRegex(ValueError, "ordinary firmware directory"):
+                    release.build_embedded_bootloader_artifacts(root / "ordinary", root / "embedded", "v", "sha", {})
+                with self.assertRaisesRegex(ValueError, "ordinary firmware directory"):
+                    release.stage_release(root / "ordinary", root / "migration", root / "release", "v", "a" * 40,
+                                          root / "pinned", embedded_work=root / "embedded")
+                run.assert_not_called()
+
+    def test_embedded_receipt_requires_each_ordinary_profile_exactly_once(self):
+        ordinary = sensor_pair("board_repeater")
+        embedded = self.embedded(ordinary)
+        before = deepcopy(ordinary + embedded)
+        with self.catalog():
+            receipt = release.validate_embedded_bootloader_records(ordinary, list(reversed(embedded)))
+            self.assertEqual(receipt, dict(release="2.4.12", manifest_sha256=release.BOOTLOADER_MANIFEST_SHA256,
+                targets=["board_repeater"], firmware_count=2, exclusions=[]))
+            for wrong in ([], embedded[:1], embedded + embedded[:1], self.embedded(sensor_pair("other_repeater"))):
+                with self.subTest(artifacts=[item["manifest"]["artifact_target"] for item in wrong]):
+                    with self.assertRaises(ValueError):
+                        release.validate_embedded_bootloader_records(ordinary, wrong)
+            for field, value in (("release", "2.4.11"), ("profile", "other"),
+                    ("manifest_sha256", "b" * 64), ("asset_sha256", "c" * 64), ("legacy_sha256", "d" * 64)):
+                wrong = deepcopy(embedded)
+                wrong[0]["manifest"]["embedded_bootloader"][field] = value
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, "qualification differs"):
+                    release.validate_embedded_bootloader_records(ordinary, wrong)
+            for field, value in (("platform", "ESP32_PLATFORM"), ("target", "other_repeater"),
+                                 ("build_profile", "standard")):
+                wrong = deepcopy(embedded)
+                wrong[0]["manifest"][field] = value
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    release.validate_embedded_bootloader_records(ordinary, wrong)
+        self.assertEqual(ordinary + embedded, before)
+
+    def test_main_default_and_explicit_version_keep_all_four_phases_isolated(self):
+        for version_arg in ([], ["--firmware-version", "v1.18.0.2-halo-keymind-cascade-dev"]):
+            with self.subTest(argv=version_arg), tempfile.TemporaryDirectory() as temp:
+                root, source = Path(temp), "deadbeef" + "a" * 32
+                version = version_arg[-1] if version_arg else "v1.18.0.1-halo-keymind-cascade-dev"
+                label = version + "-deadbeef"
+                phases = []
+                environment = {"OTHER": "keep", "MESHCORE_NRF52_EMBED_BOOTLOADER": "2.4.11",
+                               "MESHCORE_NRF52_LEGACY_BOOTLOADER": "wrong"}
+                def capture(name, env):
+                    self.assertEqual(env["OTHER"], "keep")
+                    self.assertFalse(set(release.BOOTLOADER_ENVIRONMENT) & env.keys())
+                    self.assertEqual(env["PLATFORMIO_BUILD_DIR"], str(root / "pinned"))
+                    phases.append(name)
+                with mock.patch.object(release, "ROOT", root), \
+                        mock.patch.object(release, "git", side_effect=lambda *args: "" if args[0] == "status" else source), \
+                        mock.patch.dict(os.environ, environment, clear=True), \
+                        mock.patch.object(release, "resolve_pio_build_dir", return_value=root / "pinned"), \
+                        mock.patch.object(release, "run_logged", side_effect=lambda command, log, env: capture("matrix", env)) as matrix, \
+                        mock.patch.object(release, "build_embedded_bootloader_artifacts", side_effect=lambda *args: capture("embedded", args[4])) as embed, \
+                        mock.patch.object(release, "build_migration_artifacts", side_effect=lambda *args: capture("migration", args[4])) as migration, \
+                        mock.patch.object(release, "stage_release", side_effect=lambda *args, **kwargs: phases.append("stage")) as stage, \
+                        mock.patch.object(sys, "argv", ["release"] + version_arg), redirect_stdout(io.StringIO()):
+                    release.main()
+                self.assertEqual(phases, ["matrix", "embedded", "migration", "stage"])
+                ordinary = root / ".releases" / (".build-" + label)
+                embedded = root / ".releases" / (".bootloader-build-" + label)
+                migrated = root / ".releases" / (".migration-build-" + label)
+                self.assertEqual(matrix.call_args.args[2]["OUTPUT_DIR"], str(ordinary))
+                self.assertEqual(embed.call_args.args[:4], (ordinary, embedded, version, "deadbeef"))
+                self.assertEqual(migration.call_args.args[:3], (migrated, version, "deadbeef"))
+                self.assertEqual(stage.call_args.args[:5], (ordinary, migrated, root / ".releases" / label, version, source))
+                self.assertEqual(stage.call_args.kwargs, {"embedded_work": embedded})
+                self.assertEqual(environment["MESHCORE_NRF52_EMBED_BOOTLOADER"], "2.4.11")
+
+    def test_nonempty_embedded_resume_requires_opt_in_and_dry_run_never_builds(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, source = Path(temp), "deadbeef" + "a" * 32
+            work = root / ".releases" / (".bootloader-build-" + release.DEFAULT_VERSION + "-deadbeef")
+            work.mkdir(parents=True)
+            proof = work / "prior-artifact"
+            proof.write_bytes(b"preserve")
+            with mock.patch.object(release, "ROOT", root), \
+                    mock.patch.object(release, "git", side_effect=lambda *args: "" if args[0] == "status" else source), \
+                    mock.patch.object(release, "run_logged") as run, \
+                    mock.patch.object(release, "resolve_pio_build_dir") as resolve, \
+                    mock.patch.object(sys, "argv", ["release"]), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    release.main()
+                run.assert_not_called()
+                resolve.assert_not_called()
+                with mock.patch.object(sys, "argv", ["release", "--dry-run"]):
+                    release.main()
+                run.assert_not_called()
+                resolve.assert_not_called()
+            self.assertEqual(proof.read_bytes(), b"preserve")
+
+    def test_stage_keeps_both_variants_and_auditable_standalone_metadata(self):
+        ordinary = sensor_pair("board_repeater")
+        embedded = self.embedded(ordinary)
+        source = "deadbeef" + "a" * 32
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work, embedded_work = root / "ordinary", root / "embedded"
+            work.mkdir(); embedded_work.mkdir()
+            for item in ordinary + embedded:
+                stem = item["manifest"]["artifact_target"]
+                path = (embedded_work if "embedded_bootloader" in item["manifest"] else work) / (stem + ".zip")
+                path.write_bytes(stem.encode("ascii"))
+                item["files"] = [path]
+            catalog = {"version": "2.4.12", "inventory_path": "inventory.json", "profile_count": 23}
+            def stage_catalog(destination, *, project_root):
+                destination.mkdir()
+                (destination / "inventory.json").write_text(json.dumps(catalog))
+                return catalog
+            with self.catalog(), mock.patch.object(release, "git", return_value=source), \
+                    mock.patch.object(release, "resolve_pio_build_dir", return_value=root / "pinned"), \
+                    mock.patch.object(release, "collect_artifacts", side_effect=[ordinary, embedded]) as collect, \
+                    mock.patch.object(release, "BOARDS", {}), mock.patch.object(release, "bundle_release"), \
+                    mock.patch.object(release.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+                    mock.patch("package_nrf52_bootloaders.stage_bootloader_catalog", side_effect=stage_catalog), \
+                    redirect_stdout(io.StringIO()):
+                release.stage_release(work, root / "migration", root / "release", release.DEFAULT_VERSION,
+                                      source, root / "pinned", embedded_work=embedded_work)
+            self.assertEqual([call.args[0] for call in collect.call_args_list], [work, embedded_work])
+            manifest = json.loads((root / "release/manifest.json").read_text())
+            self.assertEqual(manifest["firmware_target_count"], 4)
+            self.assertEqual([item["embedded_bootloader"] is not None for item in manifest["firmware"]],
+                             [False, False, True, True])
+            self.assertEqual(manifest["nrf52_bootloader_variants"]["firmware_count"], 2)
+            self.assertEqual(manifest["nrf52_bootloaders"], catalog)
+            for entry in manifest["firmware"]:
+                self.assertEqual(len(entry["files"]), 1)
+                path = root / "release" / entry["files"][0]
+                self.assertEqual(path.read_bytes(), entry["artifact_target"].encode("ascii"))
+            sums = (root / "release/SHA256SUMS.txt").read_text()
+            self.assertIn("nrf52-bootloaders/inventory.json", sums)
+            self.assertIn("70 seconds", (root / "release/README.md").read_text())
 
 
 if __name__ == "__main__":

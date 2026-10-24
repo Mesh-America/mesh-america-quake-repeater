@@ -33,6 +33,47 @@ def is_companion(target):
     return "companion" in target.lower() or "comp_radio" in target.lower()
 
 
+def embedded_bootloader_variant(manifest):
+    """Keep ordinary and exact, qualified bootloader-carrying images distinct."""
+    metadata = manifest.get("embedded_bootloader")
+    target = manifest["target"]
+    artifact = manifest.get("artifact_target", target)
+    capability = "bootloader.embedded"
+    if metadata is None:
+        if "-with-bootloader-" in artifact or capability in manifest.get("capabilities", []):
+            raise ValueError(f"{artifact}: embedded bootloader lacks qualified metadata")
+        return ""
+    from nrf52_embedded_bootloader import (BOOT_SIZE, LEGACY_SHA256, MANIFEST_SHA256,
+                                          VERSION, load_manifest, select_profile)
+    if not isinstance(metadata, dict):
+        raise ValueError(f"{artifact}: invalid embedded bootloader metadata")
+    try:
+        profile, _ = select_profile(load_manifest(), target)
+    except (ValueError, KeyError) as exc:
+        raise ValueError(f"{artifact}: embedded bootloader requires an exact supported profile") from exc
+    verified = any(check.get("capability") == capability
+                   and check.get("present") is True
+                   and check.get("source") == "packaged application"
+                   for check in manifest.get("verification", []))
+    offset = metadata.get("app_offset")
+    if (manifest.get("platform") != "NRF52_PLATFORM"
+            or metadata.get("release") != VERSION
+            or metadata.get("profile") != profile["id"]
+            or metadata.get("manifest_sha256") != MANIFEST_SHA256
+            or metadata.get("asset_sha256") != profile["files"]["zip"]["sha256"]
+            or not isinstance(metadata.get("candidate_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", metadata["candidate_sha256"])
+            or metadata.get("legacy_sha256") not in (None, LEGACY_SHA256)
+            or metadata.get("image_bytes") != BOOT_SIZE
+            or type(offset) is not int or offset < 0 or offset % 4
+            or metadata.get("activation") != "ota bootloader update"
+            or metadata.get("automatic_delay_seconds") != 70
+            or capability not in manifest.get("capabilities", []) or not verified
+            or not artifact.startswith(target + "-with-bootloader-" + VERSION + "-")):
+        raise ValueError(f"{artifact}: embedded bootloader qualification disagrees with its pinned release")
+    return VERSION
+
+
 def nrf52_sensor_profile(manifest):
     """Read the qualified sensor policy, never infer it from an artifact name."""
     choices = {value.removeprefix("sensor.profile.")
@@ -91,40 +132,49 @@ def omit_retired_onboard_qspi_records(records):
         # collect_artifacts() has already checked the packaged OTA identity
         # and layout-matched sensor pair. Do not let retired leftovers
         # conceal a missing normal release pair for this exact hardware.
-        replacements = [record["manifest"] for record in records
-                        if record["manifest"]["target"].lower() == primary]
-        error = (legacy + ": ordinary onboard-QSPI release requires the qualified "
-                 "external-QSPI Full/Reduced pair for " + primary
-                 + "; retired artifacts cannot substitute for its distinct OTA identity")
-        try:
-            profiles = [nrf52_sensor_profile(manifest) for manifest in replacements]
-        except ValueError as cause:
-            raise ValueError(error) from cause
-        if (sorted(profiles) != ["full", "reduced"]
-                or any("hardware.qualification.pending" in manifest.get("capabilities", [])
-                       or (manifest.get("ota_update_requirements") or {})
-                       .get("lora", {}).get("storage") != "external_qspi"
-                       for manifest in replacements)
-                or replacements[0].get("source_commit") != replacements[1].get("source_commit")
-                or replacements[0].get("ota_update_requirements") !=
-                   replacements[1].get("ota_update_requirements")):
-            raise ValueError(error)
-        if legacy in bridge_legacy:
-            # The ordinary QSPI repeater may retire the separate UART role
-            # only when both sensor profiles retain the linked driver and
-            # prove its runtime controls in the packaged application.
-            required = {"bridge.rs232": "linked image",
-                        "bridge.rs232.merged": "packaged application"}
-            for manifest in replacements:
-                proven = {check.get("capability") for check in manifest.get("verification", [])
-                          if check.get("present") is True
-                          and required.get(check.get("capability")) == check.get("source")
-                          and isinstance(check.get("evidence"), str) and check["evidence"].strip()}
-                if (not required.keys() <= set(manifest.get("capabilities", []))
-                        or not required.keys() <= proven):
-                    raise ValueError(error + "; replacement requires a verified runtime RS232 bridge")
+        variants = {embedded_bootloader_variant(record["manifest"]) for record in records
+                    if record["manifest"]["target"].lower() == legacy}
+        for variant in variants:
+            replacements = [record["manifest"] for record in records
+                            if record["manifest"]["target"].lower() == primary
+                            and embedded_bootloader_variant(record["manifest"]) == variant]
+            _require_onboard_qspi_replacement(legacy, primary, replacements, bridge_legacy)
     return [record for record in records
             if record["manifest"]["target"].lower() not in legacy_targets]
+
+
+def _require_onboard_qspi_replacement(legacy, primary, replacements, bridge_legacy):
+    # A bootloader-carrying pair cannot retire an ordinary pair, or vice versa.
+    error = (legacy + ": ordinary onboard-QSPI release requires the qualified "
+             "external-QSPI Full/Reduced pair for " + primary
+             + "; retired artifacts cannot substitute for its distinct OTA identity")
+    try:
+        profiles = [nrf52_sensor_profile(manifest) for manifest in replacements]
+    except ValueError as cause:
+        raise ValueError(error) from cause
+    if (sorted(profiles) != ["full", "reduced"]
+            or any("hardware.qualification.pending" in manifest.get("capabilities", [])
+                   or (manifest.get("ota_update_requirements") or {})
+                   .get("lora", {}).get("storage") != "external_qspi"
+                   for manifest in replacements)
+            or replacements[0].get("source_commit") != replacements[1].get("source_commit")
+            or replacements[0].get("ota_update_requirements") !=
+               replacements[1].get("ota_update_requirements")):
+        raise ValueError(error)
+    if legacy in bridge_legacy:
+        # The ordinary QSPI repeater may retire the separate UART role
+        # only when both sensor profiles retain the linked driver and
+        # prove its runtime controls in the packaged application.
+        required = {"bridge.rs232": "linked image",
+                    "bridge.rs232.merged": "packaged application"}
+        for manifest in replacements:
+            proven = {check.get("capability") for check in manifest.get("verification", [])
+                      if check.get("present") is True
+                      and required.get(check.get("capability")) == check.get("source")
+                      and isinstance(check.get("evidence"), str) and check["evidence"].strip()}
+            if (not required.keys() <= set(manifest.get("capabilities", []))
+                    or not required.keys() <= proven):
+                raise ValueError(error + "; replacement requires a verified runtime RS232 bridge")
 
 
 def omit_internal_solar_room_records(records):
@@ -135,8 +185,11 @@ def omit_internal_solar_room_records(records):
 def release_profile_label(manifest):
     sensor = nrf52_sensor_profile(manifest)
     if sensor:
-        return ("Full supported sensors" if sensor == "full" else "Reduced sensors") + " + LoRa OTA"
-    return manifest["build_profile"]
+        label = ("Full supported sensors" if sensor == "full" else "Reduced sensors") + " + LoRa OTA"
+    else:
+        label = manifest["build_profile"]
+    bootloader = embedded_bootloader_variant(manifest)
+    return label + " + OTAFIX " + bootloader + " bootloader" if bootloader else label
 
 
 def validate_nrf52_sensor_pairs(records):
@@ -149,6 +202,7 @@ def validate_nrf52_sensor_pairs(records):
     groups = {}
     for record in records:
         manifest = record["manifest"]
+        bootloader = embedded_bootloader_variant(manifest)
         sensor = nrf52_sensor_profile(manifest)
         artifact_target = manifest.get("artifact_target", manifest["target"])
         hint = (manifest.get("platform") == "NRF52_PLATFORM"
@@ -161,6 +215,8 @@ def validate_nrf52_sensor_pairs(records):
             continue
         if not artifact_target.endswith("-" + sensor + "-ota"):
             raise ValueError(f"{artifact_target}: sensor pair publication suffix disagrees with metadata")
+        if bootloader and artifact_target != manifest["target"] + "-with-bootloader-" + bootloader + "-" + sensor + "-ota":
+            raise ValueError(f"{artifact_target}: embedded bootloader sensor pair publication suffix disagrees")
         if any(not path.name.startswith(artifact_target + "-v") for path in record["files"]
                if path.suffix in FIRMWARE_SUFFIXES):
             raise ValueError(f"{artifact_target}: sensor pair artifact filename disagrees with metadata")
@@ -181,11 +237,22 @@ def validate_nrf52_sensor_pairs(records):
             raise ValueError(f"{artifact_target}: sensor pair packaged target ID disagrees with logical target")
         if len(application) > layout.linked_app_end - layout.app_base:
             raise ValueError(f"{artifact_target}: sensor pair application exceeds its linked flash region")
+        embedded = manifest.get("embedded_bootloader")
+        if embedded:
+            offset, size = embedded["app_offset"], embedded["image_bytes"]
+            candidate = application[offset:offset + size]
+            if (len(candidate) != size
+                    or hashlib.sha256(candidate).hexdigest() != embedded["candidate_sha256"]
+                    or b"BL embedded 2.4.12" not in application):
+                raise ValueError(f"{artifact_target}: packaged embedded bootloader differs from qualification")
         proof = (identity.target_id, identity.hw_id, identity.fw_version,
                  layout.app_base, layout.linked_app_end, layout.stage_ceiling, layout.flags,
-                 manifest.get("ota_update_requirements", {}), manifest.get("source_commit"))
-        groups.setdefault(manifest["target"], []).append((sensor, proof))
-    for target, pair in groups.items():
+                 manifest.get("ota_update_requirements", {}), manifest.get("source_commit"),
+                 tuple((key, embedded.get(key)) for key in ("profile", "candidate_sha256", "legacy_sha256"))
+                 if embedded else ())
+        groups.setdefault((manifest["target"], bootloader), []).append((sensor, proof))
+    for (target, bootloader), pair in groups.items():
+        target += "-with-bootloader-" + bootloader if bootloader else ""
         if sorted(item[0] for item in pair) != ["full", "reduced"]:
             raise ValueError(f"{target}: sensor pair requires exactly one full and one reduced profile")
         if pair[0][1] != pair[1][1]:
@@ -200,6 +267,7 @@ def validate_manifest(manifest):
         raise ValueError(f"{target}: firmware capability qualification failed")
     if not is_companion(target) and not manifest.get("ota_update_verified"):
         raise ValueError(f"{target}: infrastructure has no verified wireless updater")
+    embedded_bootloader_variant(manifest)
     nrf52_sensor_profile(manifest)
     if "companion_radio_full" in target.lower():
         required = {"companion.usb_mota_source", "companion.mota_sender",
@@ -400,6 +468,7 @@ def collect_local_release(directory, version, source):
                 or qualified.get("source_commit", source) != source
                 or qualified["platform"] != entry["platform"]
                 or qualified["build_profile"] != entry["profile"]
+                or qualified.get("embedded_bootloader") != entry.get("embedded_bootloader")
                 or set(entry["files"]) != {
                     str(p.relative_to(directory)) for p in record["files"]}):
             raise ValueError("local release manifest disagrees with qualified files")
@@ -420,6 +489,26 @@ def collect_local_release(directory, version, source):
             if hashlib.sha256(archive.read(path.name)).hexdigest() != sha256(path):
                 raise ValueError("migration bundle differs from individual packages")
     extras.extend(bundles)
+    bootloader_directory = directory / "nrf52-bootloaders"
+    if (manifest.get("nrf52_bootloader_variants") is not None
+            or manifest.get("nrf52_bootloaders") is not None
+            or bootloader_directory.exists()
+            or any(record["manifest"].get("embedded_bootloader") is not None for record in records)):
+        if (manifest.get("nrf52_bootloader_variants") is None
+                or manifest.get("nrf52_bootloaders") is None):
+            raise ValueError("local release bootloader inventories are incomplete")
+        from build_local_release import validate_embedded_bootloader_records
+        from package_nrf52_bootloaders import validate_bootloader_catalog
+        ordinary = [record for record in records
+                    if not embedded_bootloader_variant(record["manifest"])]
+        embedded = [record for record in records
+                    if embedded_bootloader_variant(record["manifest"])]
+        if manifest["nrf52_bootloader_variants"] != validate_embedded_bootloader_records(ordinary, embedded):
+            raise ValueError("local release embedded bootloader inventory disagrees with qualified files")
+        bootloaders = bootloader_directory
+        if manifest.get("nrf52_bootloaders") != validate_bootloader_catalog(bootloaders):
+            raise ValueError("local release standalone bootloader inventory disagrees with pinned files")
+        extras.extend(sorted(path for path in bootloaders.iterdir() if path.is_file()))
     return records, extras, {"frequency": "910.525", "bandwidth": "62.5", "sf": "7", "cr": "5"}
 
 
@@ -573,7 +662,7 @@ def main():
                 f"This page contains **{len(summaries)} qualified firmware profiles**. Full Companions send MOTA and normally update over USB. Infrastructure has a verified wireless update path; see each capability manifest.\n\n"
                 f"[Feature on/off and update directions]({source_url}/docs/full_companion_features.md) | "
                 f"[Release details]({source_url}/docs/releases/{args.version}.md)\n\n"
-                "Match the exact board, radio, display, and storage variant. ESP32 WiFi updates use the application `.bin`; the merged image installs boot/partition data over USB. nRF52 `.zip` files are native application DFU packages. LoRa MOTA installation requires an exact destination package; nRF52 also requires its matching OTAFIX bootloader. Full Companions do not LoRa-install onto themselves.\n\n"
+                "Match the exact board, radio, display, and storage variant. ESP32 WiFi updates use the application `.bin`; the merged image installs boot/partition data over USB. nRF52 firmware `.zip` files are native application DFU packages. Separate `with-bootloader-2.4.12` firmware embeds its exact-board OTAFIX image and checks it for installation after 70 seconds; ordinary firmware preserves the installed bootloader. Standalone bootloader downloads are separate utilities. LoRa MOTA installation requires an exact destination package and matching bootloader. Full Companions do not LoRa-install onto themselves.\n\n"
                 "Firmware and capability checks passed in the build matrix. Hardware update testing across every board was not performed.\n\n"
                 + partial_note + portable_note + links + "\n")
         (args.output / (group["key"] + "-notes.md")).write_text(body)

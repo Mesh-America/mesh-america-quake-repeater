@@ -8,6 +8,7 @@ import subprocess
 import struct
 import sys
 import hashlib
+from copy import deepcopy
 from unittest.mock import patch
 import zipfile
 
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("package_cascade_release", ROOT / "scripts/package_cascade_release.py")
 package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
-from motalib import FwIdent, Nrf52Layout, ensure_endf, ensure_nrf52_layout, target_id_for_env
+from motalib import ENDF_LEN, FwIdent, Nrf52Layout, ensure_endf, ensure_nrf52_layout, target_id_for_env
 
 
 class ReleaseQualificationTest(unittest.TestCase):
@@ -106,8 +107,9 @@ class ReleaseQualificationTest(unittest.TestCase):
     def sensor_record(self, directory, sensor, *, target='test_repeater', target_id=None,
                       hw_id='TEST', app_base=0x26000, flags=0x10, fw_version=0x01110107,
                       version='v1.17.1.7-dev-deadbeef', storage='internal_flash_and_retained_ram',
-                      extra_application=b''):
-        stem = target + '-' + sensor + '-ota-' + version
+                      extra_application=b'', artifact_variant=''):
+        artifact_target = target + artifact_variant + '-' + sensor + '-ota'
+        stem = artifact_target + '-' + version
         application, _ = ensure_endf(ensure_nrf52_layout(b'OTA: status\0invalid in-place patch geometry\0'
                                                        + extra_application,
             Nrf52Layout(app_base, 0xED000, 0xED000, flags)),
@@ -118,7 +120,7 @@ class ReleaseQualificationTest(unittest.TestCase):
             archive.writestr('manifest.json', json.dumps({'manifest': {
                 'application': {'bin_file': 'application.bin', 'dat_file': 'application.dat'}}}))
             archive.writestr('application.dat', b'fixture init')
-        manifest = self.manifest(target, artifact_target=target + '-' + sensor + '-ota',
+        manifest = self.manifest(target, artifact_target=artifact_target,
             platform='NRF52_PLATFORM', build_profile='auto', capabilities=['sensor.profile.' + sensor,
                 'ota.update.lora'], ota_update_methods=['lora'],
             verification=[dict(capability='ota.update.lora', present=True, source='linked image')],
@@ -159,6 +161,183 @@ class ReleaseQualificationTest(unittest.TestCase):
                      files={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in files})
         path.with_suffix('.memory.json').write_text(json.dumps(proof))
         return record['manifest']
+
+    def embedded_sensor_record(self, directory, sensor, *, target='RAK_4631_repeater',
+                               candidate=None, **options):
+        import nrf52_embedded_bootloader as bootloader
+        profile, _ = bootloader.select_profile(bootloader.load_manifest(), target)
+        candidate = b'\xa5' * bootloader.BOOT_SIZE if candidate is None else candidate
+        prefix = b'OTA: status\0invalid in-place patch geometry\0'
+        padding = b'\0' * (-len(prefix) % 4)
+        item = self.sensor_record(directory, sensor, target=target,
+            extra_application=padding + candidate + b'BL embedded 2.4.12\0',
+            artifact_variant='-with-bootloader-2.4.12', **options)
+        manifest = item['manifest']
+        manifest['capabilities'].append('bootloader.embedded')
+        manifest['verification'].append(dict(capability='bootloader.embedded', present=True,
+            source='packaged application', evidence='exact pinned candidate in packaged application'))
+        manifest['embedded_bootloader'] = dict(release=bootloader.VERSION, profile=profile['id'],
+            manifest_sha256=bootloader.MANIFEST_SHA256, asset_sha256=profile['files']['zip']['sha256'],
+            candidate_sha256=hashlib.sha256(candidate).hexdigest(), legacy_sha256=None,
+            image_bytes=bootloader.BOOT_SIZE, app_offset=len(prefix) + len(padding),
+            activation='ota bootloader update', automatic_delay_seconds=70)
+        return item
+
+    def test_ordinary_and_embedded_pairs_coexist_without_satisfying_each_other(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            ordinary = [self.sensor_record(directory, sensor, target='RAK_4631_repeater')
+                        for sensor in ('full', 'reduced')]
+            embedded = [self.embedded_sensor_record(directory, sensor) for sensor in ('full', 'reduced')]
+            before = {p.name: p.read_bytes() for p in directory.iterdir()}
+            for inputs in (ordinary + embedded, list(reversed(ordinary + embedded))):
+                package.validate_nrf52_sensor_pairs(inputs)
+            self.assertEqual(package.embedded_bootloader_variant(ordinary[0]['manifest']), '')
+            self.assertEqual(package.embedded_bootloader_variant(embedded[0]['manifest']), '2.4.12')
+            self.assertIn('OTAFIX 2.4.12 bootloader', package.release_profile_label(embedded[0]['manifest']))
+            for wrong in (ordinary + embedded[:1], ordinary[:1] + embedded,
+                          [ordinary[0], embedded[1]], ordinary + embedded + embedded[:1]):
+                with self.subTest(count=len(wrong)), self.assertRaisesRegex(ValueError, 'exactly one full'):
+                    package.validate_nrf52_sensor_pairs(wrong)
+            self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, before)
+
+    def test_embedded_metadata_requires_exact_pinned_profile_and_packaged_proof(self):
+        with tempfile.TemporaryDirectory() as temp:
+            item = self.embedded_sensor_record(Path(temp), 'full')
+            package.validate_manifest(item['manifest'])
+            for key, value in (('release', '2.4.11'), ('profile', 'another_board'),
+                    ('manifest_sha256', 'b' * 64), ('asset_sha256', 'c' * 64),
+                    ('candidate_sha256', 'A' * 64), ('image_bytes', 40959),
+                    ('app_offset', -4), ('app_offset', 1), ('app_offset', True),
+                    ('activation', 'automatic'), ('automatic_delay_seconds', 69),
+                    ('legacy_sha256', 'd' * 64)):
+                manifest = deepcopy(item['manifest'])
+                manifest['embedded_bootloader'][key] = value
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, 'pinned release'):
+                    package.validate_manifest(manifest)
+            for fault in ('metadata', 'capability', 'proof', 'false_proof', 'wrong_proof', 'platform'):
+                manifest = deepcopy(item['manifest'])
+                if fault == 'metadata':
+                    manifest.pop('embedded_bootloader')
+                elif fault == 'capability':
+                    manifest['capabilities'].remove('bootloader.embedded')
+                elif fault == 'proof':
+                    manifest['verification'].pop()
+                elif fault == 'false_proof':
+                    manifest['verification'][-1]['present'] = False
+                elif fault == 'wrong_proof':
+                    manifest['verification'][-1]['source'] = 'filename'
+                else:
+                    manifest['platform'] = 'ESP32_PLATFORM'
+                with self.subTest(fault=fault), self.assertRaises(ValueError):
+                    package.validate_manifest(manifest)
+
+    def test_embedded_pair_checks_actual_candidate_marker_and_same_candidate_in_both_profiles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            full = self.embedded_sensor_record(directory, 'full')
+            reduced = self.embedded_sensor_record(directory, 'reduced', candidate=b'\x5a' * 40960)
+            with self.assertRaisesRegex(ValueError, 'storage layout'):
+                package.validate_nrf52_sensor_pairs([full, reduced])
+            reduced = self.embedded_sensor_record(directory, 'reduced')
+            for fault in ('hash', 'offset', 'marker'):
+                damaged = deepcopy(full)
+                if fault == 'hash':
+                    damaged['manifest']['embedded_bootloader']['candidate_sha256'] = '0' * 64
+                elif fault == 'offset':
+                    damaged['manifest']['embedded_bootloader']['app_offset'] += 4
+                else:
+                    path = directory / 'damaged' / damaged['files'][0].name
+                    path.parent.mkdir(exist_ok=True)
+                    with zipfile.ZipFile(full['files'][0]) as source, zipfile.ZipFile(path, 'w') as out:
+                        for name in source.namelist():
+                            data = source.read(name)
+                            if name == 'application.bin':
+                                identity = package.parse_endf_ident(data)
+                                data, _ = ensure_endf(data[:-ENDF_LEN].replace(
+                                    b'BL embedded 2.4.12', b'NO embedded 2.4.12'), identity)
+                            out.writestr(name, data)
+                    damaged['files'] = [path]
+                with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, 'differs from qualification'):
+                    package.validate_nrf52_sensor_pairs([damaged, reduced])
+
+    def test_qspi_retirement_requires_matching_bootloader_variant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            legacy_target = 'Xiao_nrf52_room_server'
+            primary_target = legacy_target + '_lora_ota'
+            legacy = [self.sensor_record(directory, sensor, target=legacy_target) for sensor in ('full', 'reduced')]
+            primary = [self.sensor_record(directory, sensor, target=primary_target, storage='external_qspi')
+                       for sensor in ('full', 'reduced')]
+            embedded_legacy = [self.embedded_sensor_record(directory, sensor, target=legacy_target)
+                               for sensor in ('full', 'reduced')]
+            embedded_primary = [self.embedded_sensor_record(directory, sensor, target=primary_target,
+                storage='external_qspi') for sensor in ('full', 'reduced')]
+            before = {p.name: p.read_bytes() for p in directory.iterdir()}
+            for mixed in (legacy + embedded_primary, embedded_legacy + primary):
+                with self.assertRaisesRegex(ValueError, 'qualified external-QSPI Full/Reduced pair'):
+                    package.omit_retired_onboard_qspi_records(mixed)
+            inputs = legacy + embedded_primary + embedded_legacy + primary
+            self.assertCountEqual(package.omit_retired_onboard_qspi_records(inputs), primary + embedded_primary)
+            self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, before)
+
+    def test_local_release_cannot_drop_or_forge_its_bootloader_receipts(self):
+        from build_local_release import validate_embedded_bootloader_records
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            folder = directory / 'firmware/lora-ota'
+            folder.mkdir(parents=True)
+            ordinary = [self.sensor_record(folder, sensor, target='RAK_4631_repeater')
+                        for sensor in ('full', 'reduced')]
+            embedded = [self.embedded_sensor_record(folder, sensor) for sensor in ('full', 'reduced')]
+            source, version = 'deadbeef' + 'a' * 32, 'v1.17.1.7-dev'
+            records = ordinary + embedded
+            standalone = directory / 'nrf52-bootloaders'
+            standalone.mkdir()
+            (standalone / 'verified-inventory.json').write_text('{}')
+            receipt = validate_embedded_bootloader_records(ordinary, embedded)
+            catalog_receipt = {'kind': 'nrf52-standalone-bootloader-catalog', 'version': '2.4.12'}
+            manifest = dict(format='meshcore-local-release-v1', source_commit=source,
+                firmware_version=version, profile='cascade', publication='local-only',
+                radio=dict(frequency_mhz=910.525, bandwidth_khz=62.5, spreading_factor=7, coding_rate=5),
+                firmware_target_count=4, migration_board_role_count=0,
+                nrf52_bootloader_variants=receipt, nrf52_bootloaders=catalog_receipt,
+                firmware=[dict(target=item['manifest']['target'], artifact_target=item['manifest']['artifact_target'],
+                    platform='NRF52_PLATFORM', profile='auto',
+                    embedded_bootloader=item['manifest'].get('embedded_bootloader'),
+                    files=[str(p.relative_to(directory)) for p in item['files']]) for item in records])
+            bundle = directory / ('esp32-partition-migration-' + version + '-deadbeef-release.zip')
+            with zipfile.ZipFile(bundle, 'w') as archive:
+                archive.writestr('release-manifest.json', '{}')
+            def write_inventory():
+                (directory / 'manifest.json').write_text(json.dumps(manifest))
+                (directory / 'SHA256SUMS.txt').write_text(''.join(
+                    hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + str(path.relative_to(directory)) + '\n'
+                    for path in sorted(directory.rglob('*')) if path.is_file() and path.name != 'SHA256SUMS.txt'))
+            with patch.object(package, 'collect_artifacts', return_value=records), \
+                    patch('package_esp32_partition_migration.BOARDS', {}), \
+                    patch('package_nrf52_bootloaders.validate_bootloader_catalog', return_value=catalog_receipt):
+                write_inventory()
+                qualified, extras, _ = package.collect_local_release(directory, version, source)
+                self.assertEqual(qualified, records)
+                self.assertIn(standalone / 'verified-inventory.json', extras)
+                for fault in ('drop_variants', 'drop_catalog', 'drop_both', 'wrong_variants', 'wrong_catalog', 'entry'):
+                    saved = deepcopy(manifest)
+                    if fault in ('drop_variants', 'drop_both'):
+                        manifest.pop('nrf52_bootloader_variants')
+                    if fault in ('drop_catalog', 'drop_both'):
+                        manifest.pop('nrf52_bootloaders')
+                    if fault == 'wrong_variants':
+                        manifest['nrf52_bootloader_variants']['firmware_count'] += 1
+                    elif fault == 'wrong_catalog':
+                        manifest['nrf52_bootloaders'] = {'version': '2.4.11'}
+                    elif fault == 'entry':
+                        manifest['firmware'][2]['embedded_bootloader'] = None
+                    write_inventory()
+                    with self.subTest(fault=fault), self.assertRaisesRegex(ValueError,
+                            'inventor|manifest disagrees'):
+                        package.collect_local_release(directory, version, source)
+                    manifest = saved
 
     def matrix_package_command(self, directory):
         commit = 'deadbeef' + '0' * 32

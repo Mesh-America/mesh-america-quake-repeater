@@ -22,12 +22,19 @@ from package_cascade_release import (category, collect_artifacts, nrf52_sensor_p
 from station_g3_profiles import omit_redundant_slot_records
 from t114_profiles import omit_legacy_display_records
 from consolidated_profiles import omit_redundant_records
+from generate_mesh_america_release import target_profiles
+from nrf52_embedded_bootloader import (VERSION as BOOTLOADER_VERSION,
+                                      MANIFEST_SHA256 as BOOTLOADER_MANIFEST_SHA256,
+                                      load_manifest as load_bootloader_manifest,
+                                      select_profile as select_bootloader_profile)
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_VERSION = "v1.17.1.9-halo-keymind-cascade-dev"
+DEFAULT_VERSION = "v1.18.0.1-halo-keymind-cascade-dev"
 RADIO = {"frequency_mhz": 910.525, "bandwidth_khz": 62.5,
          "spreading_factor": 7, "coding_rate": 5}
+BOOTLOADER_ENVIRONMENT = ("MESHCORE_NRF52_EMBED_BOOTLOADER",
+                          "MESHCORE_NRF52_LEGACY_BOOTLOADER")
 
 
 def git(*args: str) -> str:
@@ -208,12 +215,154 @@ def migration_bridges() -> list[str]:
                                 spec.get("expander_bridge")) if name})
 
 
+def ordinary_build_environment(environment: dict[str, str]) -> dict[str, str]:
+    """An inherited opt-in must not relabel the ordinary release or utilities."""
+    result = environment.copy()
+    for name in BOOTLOADER_ENVIRONMENT:
+        result.pop(name, None)
+    return result
+
+
+def has_embedded_bootloader_variant(manifest: dict) -> bool:
+    return (manifest.get("embedded_bootloader") is not None
+            or "-with-bootloader-" in str(manifest.get("artifact_target", "")))
+
+
+def require_separate_build_directories(ordinary: Path, embedded: Path) -> None:
+    ordinary, embedded = ordinary.resolve(), embedded.resolve()
+    if ordinary == embedded or ordinary in embedded.parents or embedded in ordinary.parents:
+        raise ValueError("ordinary and embedded bootloader builds require separate output directories")
+
+
+def embedded_bootloader_selection(records: list[dict]) -> tuple[list[str], list[dict]]:
+    """Exclude only exact hardware explicitly unavailable in the pinned catalog."""
+    targets = sorted({record["manifest"]["target"] for record in records
+                      if record["manifest"]["platform"] == "NRF52_PLATFORM"
+                      and re.search(r"_(?:repeater|room_server|room_svr)(?:_|$)",
+                                    record["manifest"]["target"], re.I)})
+    if not targets:
+        return [], []
+    catalog = load_bootloader_manifest()
+    parsed = target_profiles(targets)
+    supported, exclusions = [], []
+    for target in targets:
+        identity = parsed.get(target)
+        if (not isinstance(identity, dict) or identity.get("role") not in ("repeater", "room")
+                or not isinstance(identity.get("sourceHardware"), str)
+                or not identity["sourceHardware"] or not isinstance(identity.get("hardware"), str)):
+            raise ValueError(f"{target}: invalid embedded bootloader hardware/role metadata")
+        unavailable = [profile for profile in catalog.get("unavailableProfiles", [])
+                       if identity["sourceHardware"] in profile.get("meshcoreHardware", [])]
+        if unavailable:
+            names = {identity["sourceHardware"], identity["hardware"]}
+            available = [profile for profile in catalog.get("profiles", [])
+                         if names.intersection(profile.get("meshcoreHardware", []))]
+            if len(unavailable) != 1 or available:
+                raise ValueError(f"{target}: ambiguous available/unavailable bootloader catalog mapping")
+            profile = unavailable[0]
+            status = profile.get("qualification", {}).get("status")
+            reason, profile_id = profile.get("reason"), profile.get("id")
+            if (not isinstance(profile_id, str) or not re.fullmatch(r"[a-z0-9_]+", profile_id)
+                    or status not in ("retired", "source-pending", "source-blocked")
+                    or not isinstance(reason, str) or not reason.strip() or not reason.isascii()):
+                raise ValueError(f"{target}: invalid unavailable bootloader catalog metadata")
+            exclusions.append({"target": target, "profile": profile_id,
+                               "source_hardware": identity["sourceHardware"],
+                               "status": status, "reason": reason})
+            continue
+        # The shared selector checks role and one exact normal board/storage
+        # profile. An unmapped/ambiguous board is not a declared exclusion.
+        select_bootloader_profile(catalog, target)
+        supported.append(target)
+    return supported, exclusions
+
+
+def embedded_bootloader_targets(records: list[dict]) -> list[str]:
+    """Select exact catalog-qualified infrastructure, never Companion/Sensor."""
+    return embedded_bootloader_selection(records)[0]
+
+
+def build_embedded_bootloader_artifacts(ordinary_work: Path, work: Path,
+                                       version: str, short_source: str,
+                                       environment: dict[str, str]) -> None:
+    require_separate_build_directories(ordinary_work, work)
+    records = collect_artifacts(ordinary_work, f"{version}-{short_source}")
+    if any(has_embedded_bootloader_variant(record["manifest"]) for record in records):
+        raise ValueError("ordinary firmware directory contains embedded bootloader variants")
+    records = select_ordinary_full_records(records)
+    targets, exclusions = embedded_bootloader_selection(records)
+    for exclusion in exclusions:
+        print(f"No embedded bootloader variant for {exclusion['target']}: "
+              f"{exclusion['profile']} ({exclusion['status']}); {exclusion['reason']}", flush=True)
+    environment = ordinary_build_environment(environment)
+    environment["OUTPUT_DIR"] = str(work)
+    work.mkdir(parents=True, exist_ok=True)
+    for target in targets:
+        # Each invocation and its Full/Reduced pair finish before the next
+        # starts. The existing wrapper owns the shared PlatformIO lock and
+        # checks the exact source/recipe/package before reusing --resume data.
+        run_logged([
+            "bash", "build_legacy.sh", "build-firmware", target,
+            "--with-bootloader", BOOTLOADER_VERSION,
+            "--firmware-version", version,
+            "--radio-preset", "usa-cascade-fixed", "--profile", "cascade",
+            "--require-ota", "--resume",
+        ], work / "build-logs" / f"embedded-{target}.log", environment)
+
+
+def validate_embedded_bootloader_records(ordinary: list[dict], embedded: list[dict]) -> dict:
+    """Require every requested variant beside its unchanged ordinary package."""
+    targets, exclusions = embedded_bootloader_selection(ordinary)
+    catalog = load_bootloader_manifest()
+    expected = {}
+    for record in ordinary:
+        manifest = record["manifest"]
+        if manifest["target"] not in targets:
+            continue
+        sensor = nrf52_sensor_profile(manifest)
+        artifact_target = manifest["artifact_target"]
+        suffix = "-" + sensor + "-ota" if sensor else ""
+        if suffix and not artifact_target.endswith(suffix):
+            raise ValueError(f"{artifact_target}: ordinary sensor publication suffix is invalid")
+        base = artifact_target[:-len(suffix)] if suffix else artifact_target
+        variant = base + "-with-bootloader-" + BOOTLOADER_VERSION + suffix
+        if variant in expected:
+            raise ValueError(f"{variant}: duplicate ordinary bootloader variant identity")
+        expected[variant] = manifest
+    observed = set()
+    for record in embedded:
+        manifest = record["manifest"]
+        artifact_target = manifest["artifact_target"]
+        ordinary_manifest = expected.get(artifact_target)
+        metadata = manifest.get("embedded_bootloader")
+        if ordinary_manifest is None or artifact_target in observed:
+            raise ValueError(f"{artifact_target}: unexpected or duplicate embedded bootloader variant")
+        profile, _ = select_bootloader_profile(catalog, ordinary_manifest["target"])
+        if (manifest["platform"] != "NRF52_PLATFORM"
+                or manifest["target"] != ordinary_manifest["target"]
+                or manifest["build_profile"] != ordinary_manifest["build_profile"]
+                or nrf52_sensor_profile(manifest) != nrf52_sensor_profile(ordinary_manifest)
+                or not isinstance(metadata, dict)
+                or metadata.get("release") != BOOTLOADER_VERSION
+                or metadata.get("profile") != profile["id"]
+                or metadata.get("manifest_sha256") != BOOTLOADER_MANIFEST_SHA256
+                or metadata.get("asset_sha256") != profile["files"]["zip"]["sha256"]
+                or metadata.get("legacy_sha256") is not None):
+            raise ValueError(f"{artifact_target}: embedded bootloader qualification differs from its ordinary target/catalog")
+        observed.add(artifact_target)
+    if observed != set(expected):
+        raise ValueError("missing embedded bootloader variants: " + ", ".join(sorted(set(expected) - observed)))
+    return {"release": BOOTLOADER_VERSION,
+            "manifest_sha256": BOOTLOADER_MANIFEST_SHA256,
+            "targets": targets, "firmware_count": len(embedded), "exclusions": exclusions}
+
+
 def build_migration_artifacts(work: Path, version: str, short_source: str,
                               jobs: int, environment: dict[str, str],
                               pio_build_dir: Path | None = None) -> None:
     utility_build_dir = resolve_pio_build_dir(
         pio_build_dir, environment=environment, project_dir=ROOT)
-    environment = environment.copy()
+    environment = ordinary_build_environment(environment)
     environment["PLATFORMIO_BUILD_DIR"] = str(utility_build_dir)
     for target in migration_targets():
         matches = list(work.glob(full_image_pattern(target, version, short_source)))
@@ -458,19 +607,36 @@ def select_ordinary_full_records(records: list[dict]) -> list[dict]:
 
 
 def stage_release(work: Path, migration_work: Path, destination: Path, version: str,
-                  source: str, pio_build_dir: Path | None = None) -> None:
+                  source: str, pio_build_dir: Path | None = None, *,
+                  embedded_work: Path | None = None) -> None:
     if destination.exists():
         raise FileExistsError(f"release already exists: {destination}")
     utility_build_dir = resolve_pio_build_dir(pio_build_dir, project_dir=ROOT)
-    package_environment = os.environ.copy()
+    package_environment = ordinary_build_environment(os.environ.copy())
     package_environment["PLATFORMIO_BUILD_DIR"] = str(utility_build_dir)
     destination.parent.mkdir(parents=True, exist_ok=True)
     short_source = source[:8]
     tooling_source = git("rev-parse", "HEAD")
     artifact_version = f"{version}-{short_source}"
-    records = select_ordinary_full_records(collect_artifacts(work, artifact_version))
+    records = collect_artifacts(work, artifact_version)
+    if any(has_embedded_bootloader_variant(record["manifest"]) for record in records):
+        raise ValueError("ordinary firmware directory contains embedded bootloader variants")
+    records = select_ordinary_full_records(records)
     if not records:
         raise ValueError("firmware matrix produced no qualified artifacts")
+    variants = None
+    if embedded_work is not None:
+        require_separate_build_directories(work, embedded_work)
+        # Apply retirement and consolidation within each variant only. An
+        # embedded successor must never hide a missing ordinary sensor pair.
+        embedded_records = []
+        if (any(embedded_work.glob("*.capabilities.json"))
+                or any(path.suffix in (".bin", ".uf2", ".hex", ".zip")
+                       for path in embedded_work.glob("*"))):
+            embedded_records = select_ordinary_full_records(
+                collect_artifacts(embedded_work, artifact_version))
+        variants = validate_embedded_bootloader_records(records, embedded_records)
+        records.extend(embedded_records)
 
     with tempfile.TemporaryDirectory(prefix=".staging-", dir=destination.parent) as temp:
         staging = Path(temp)
@@ -492,8 +658,14 @@ def stage_release(work: Path, migration_work: Path, destination: Path, version: 
             entries.append({"target": manifest["target"], "artifact_target": manifest["artifact_target"],
                             "platform": manifest["platform"], "profile": manifest["build_profile"],
                             "sensor_profile": nrf52_sensor_profile(manifest),
+                            "embedded_bootloader": manifest.get("embedded_bootloader"),
                             "ota_update_methods": manifest.get("ota_update_methods", []),
                             "files": files})
+
+        bootloaders = None
+        if embedded_work is not None:
+            from package_nrf52_bootloaders import stage_bootloader_catalog
+            bootloaders = stage_bootloader_catalog(staging / "nrf52-bootloaders", project_root=ROOT)
 
         migrations = staging / "esp32-partition-migration"
         migrations.mkdir()
@@ -528,9 +700,19 @@ def stage_release(work: Path, migration_work: Path, destination: Path, version: 
             "publication": "local-only",
             "firmware_target_count": len(entries),
             "migration_board_role_count": len(BOARDS),
+            "nrf52_bootloader_variants": variants,
+            "nrf52_bootloaders": bootloaders,
             "firmware": entries,
         }
         (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")
+        bootloader_note = (
+            "Normal nRF52 application images preserve the installed bootloader. Separate\n"
+            "with-bootloader variants for supported Repeater/Room targets embed exact-board\n"
+            "OTAFIX 2.4.12 and check it for installation 70 seconds after startup. Standalone\n"
+            "exact-board bootloader files for all normal profiles are under nrf52-bootloaders;\n"
+            "do not substitute another board/storage image.\n" if bootloaders is not None else
+            "nRF52 bootloader updates require the matching OTAFIX board/storage image\n"
+            "before application firmware.\n")
         (staging / "README.md").write_text(
             f"# MeshCore local release {version}\n\n"
             f"Firmware source commit: `{source}`. Release tooling commit: `{tooling_source}`.\n"
@@ -539,8 +721,7 @@ def stage_release(work: Path, migration_work: Path, destination: Path, version: 
             "Select firmware by exact board, radio, storage, and role. ESP32 merged images install\n"
             "bootloader, partition table, and application over USB. Existing 1.25 MiB ESP32\n"
             "layouts require their exact board/role package under esp32-partition-migration\n"
-            "before a Full image can use the expanded layout. nRF52 bootloader updates require\n"
-            "the matching OTAFIX board/storage image before application firmware.\n",
+            "before a Full image can use the expanded layout.\n" + bootloader_note,
             encoding="ascii")
         files = sorted(path for path in staging.rglob("*") if path.is_file()
                        and path.name != "SHA256SUMS.txt")
@@ -568,18 +749,23 @@ def main() -> None:
         parser.error("commit or remove worktree changes before building a versioned release")
     label = f"{args.firmware_version}-{short_source}"
     work = ROOT / ".releases" / f".build-{label}"
+    embedded_work = ROOT / ".releases" / f".bootloader-build-{label}"
     destination = ROOT / ".releases" / label
     if destination.exists():
         parser.error(f"local release already exists: {destination}")
     if work.exists() and any(work.iterdir()) and not args.resume and not args.dry_run:
         parser.error(f"work directory already has files: {work}; pass --resume to reuse them")
+    if embedded_work.exists() and any(embedded_work.iterdir()) and not args.resume and not args.dry_run:
+        parser.error(f"embedded bootloader work directory already has files: {embedded_work}; "
+                     "pass --resume to reuse them")
     print(f"Source: {source}")
-    print(f"Firmware targets: canonical matrix; migration roles: {len(BOARDS)}; "
+    print(f"Firmware targets: canonical matrix plus supported nRF52 Repeater/Room "
+          f"OTAFIX {BOOTLOADER_VERSION} variants; migration roles: {len(BOARDS)}; "
           f"migration utilities: {len(migration_bridges())}")
     print(f"Output: {destination}", flush=True)
     if args.dry_run:
         return
-    environment = os.environ.copy()
+    environment = ordinary_build_environment(os.environ.copy())
     environment["OPTION3_PIO_JOBS"] = str(args.pio_jobs)
     try:
         utility_build_dir = resolve_pio_build_dir(environment=environment, project_dir=ROOT)
@@ -603,6 +789,10 @@ def main() -> None:
         "--radio-preset", "usa-cascade-fixed", "--profile", "cascade",
         "--require-ota", "--skip-kiss", "--resume",
     ], work / "release-build.log", environment)
+    # Embedding is an application variant, not a replacement bootloader/SD
+    # package. Keep its recipe and resume artifacts outside the ordinary pass.
+    build_embedded_bootloader_artifacts(work, embedded_work, args.firmware_version,
+                                       short_source, environment)
     # Keep exact-identity migration inputs outside the ordinary firmware
     # matrix. collect_artifacts() walks recursively, so nesting these under
     # work would still publish a second Full image for the same G2 role.
@@ -612,7 +802,7 @@ def main() -> None:
     build_migration_artifacts(migration_work, args.firmware_version, short_source,
                               args.pio_jobs, migration_environment, utility_build_dir)
     stage_release(work, migration_work, destination, args.firmware_version, source,
-                  utility_build_dir)
+                  utility_build_dir, embedded_work=embedded_work)
 
 
 if __name__ == "__main__":

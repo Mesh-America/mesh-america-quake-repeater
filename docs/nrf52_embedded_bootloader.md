@@ -21,6 +21,20 @@ storage and does not replace the SoftDevice or change the filesystem layout.
 
 ## Build
 
+The complete USA Cascade release build includes ordinary application images,
+Full and Reduced sensor profiles, and separate bootloader-carrying Repeater
+and Room Server variants for hardware in the pinned normal OTAFIX catalog:
+
+```sh
+bash build.sh release-build --firmware-version v1.18.0.1-halo-keymind-cascade-dev
+```
+
+The local release also includes the exact-board standalone OTAFIX 2.4.12
+UF2, SoftDevice/bootloader DFU ZIP, and SWD HEX downloads. These serve
+Companion and Sensor installations as well as the infrastructure roles.
+Pending, blocked and retired bootloader profiles are excluded and identified
+in the catalog. A normal application image does not update its bootloader.
+
 From the repository root, replace `TARGET` with the exact OTA-enabled nRF52840
 Repeater or Room Server target:
 

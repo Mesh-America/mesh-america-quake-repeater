@@ -1074,6 +1074,7 @@ jobs:
           python3 -B test/test_release_publication.py
           python3 -B test/test_local_release_full_selection.py
           python3 -B test/test_local_release_capacity_archive.py
+          python3 -B test/test_nrf52_bootloader_release_catalog.py
           python3 -B test/test_t096_full_memory.py
           python3 -B test/test_st7735_framebuffer.py -v
           python3 -B test/test_nrf52_ble_startup.py

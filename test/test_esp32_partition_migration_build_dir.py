@@ -495,7 +495,7 @@ class MigrationMetadataTest(unittest.TestCase):
         archive, = (output_root / "packages").glob("*.zip")
         self.fixture.check_archive(archive, "heltec-v4", expected, identity)
 
-    def test_local_release_main_passes_one_canonical_directory_to_both_later_phases(self):
+    def test_local_release_main_passes_one_canonical_directory_to_all_later_phases(self):
         import build_local_release as recipe
         environment = self.environment(MIGRATION_TEST_CONFIGURED_DIR=str(self.fixture.custom))
         captured = []
@@ -505,20 +505,22 @@ class MigrationMetadataTest(unittest.TestCase):
                 mock.patch.dict(os.environ, environment, clear=True), \
                 mock.patch.object(recipe, "run_logged", side_effect=lambda command, log, env:
                                   captured.append(("matrix", env.copy()))), \
+                mock.patch.object(recipe, "build_embedded_bootloader_artifacts", side_effect=lambda *args:
+                                  captured.append(("embedded", args[4].copy()))), \
                 mock.patch.object(recipe, "build_migration_artifacts", side_effect=lambda *args:
                                   captured.append(("migration", args[4].copy(), args[5]))), \
-                mock.patch.object(recipe, "stage_release", side_effect=lambda *args:
+                mock.patch.object(recipe, "stage_release", side_effect=lambda *args, **kwargs:
                                   captured.append(("package", args[5]))), \
                 mock.patch.object(sys, "argv", ["local-release"]), \
                 redirect_stdout(io.StringIO()):
             recipe.main()
         self.assertEqual(len(self.queries()), 1)
-        self.assertEqual([value[0] for value in captured], ["matrix", "migration", "package"])
-        for item in captured[:2]:
+        self.assertEqual([value[0] for value in captured], ["matrix", "embedded", "migration", "package"])
+        for item in captured[:3]:
             self.assertEqual(item[1]["PLATFORMIO_BUILD_DIR"], str(self.fixture.custom.resolve()))
             self.assertEqual(item[1]["MIGRATION_TEST_OTHER"], "preserved-option")
-        self.assertEqual(captured[1][2], self.fixture.custom.resolve())
-        self.assertEqual(captured[2][1], self.fixture.custom.resolve())
+        self.assertEqual(captured[2][2], self.fixture.custom.resolve())
+        self.assertEqual(captured[3][1], self.fixture.custom.resolve())
 
     def test_local_utility_builder_preserves_environment_and_never_requeries_pinned_directory(self):
         import build_local_release as recipe
