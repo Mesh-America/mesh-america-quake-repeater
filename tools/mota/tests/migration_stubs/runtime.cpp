@@ -1,6 +1,11 @@
 #include "Arduino.h"
 #include "BootloaderMigrationResource.h"
 #include "SHA256.h"
+// The test app-base override bypasses the target linker's declarations.
+namespace mesh { namespace ota {
+extern "C" uint32_t __flash_arduino_end[];
+extern "C" const uint8_t g_meshcore_internal_extrafs __attribute__((weak));
+} }
 #include "helpers/ota/OtaSelf.h"
 #include "nrf.h"
 #include "nrf_mbr.h"
@@ -119,6 +124,48 @@ using namespace mesh::ota;
 const char confirmation[] = "0123456789ABCDEF";
 char reply[160];
 
+void wr16(uint8_t *p, uint16_t value) {
+  p[0] = value;
+  p[1] = value >> 8;
+}
+
+void wr32(uint8_t *p, uint32_t value) {
+  wr16(p, value);
+  wr16(p + 2, value >> 16);
+}
+
+uint8_t *installed_manifest(uint32_t version) {
+  uint8_t *boot = reinterpret_cast<uint8_t *>(migration::BOOT_BASE);
+  std::memset(boot, 0xFF, migration::BOOT_SIZE);
+  uint8_t *p = boot + OTA_BOOT_CANDIDATE_MANIFEST_OFFSET;
+  wr32(p, OTA_BOOT_MANIFEST_MAGIC0);
+  wr32(p + 4, OTA_BOOT_MANIFEST_MAGIC1);
+  wr16(p + 8, 1);
+  wr16(p + 10, 44);
+  wr32(p + 12, migration::BOOT_BASE);
+  wr32(p + 16, migration::BOOT_SIZE);
+  wr32(p + 20, migration_board_id);
+  std::memcpy(p + 24, migration_device_name, 16);
+  wr32(p + 44, OTA_BOOT_CONTINUITY_MAGIC0);
+  wr32(p + 48, OTA_BOOT_CONTINUITY_MAGIC1);
+  wr16(p + 52, 2);
+  wr16(p + 54, 32);
+  wr32(p + 56, version);
+  wr16(p + 60, 140);
+  wr16(p + 62, migration_softdevice_fwid);
+  wr32(p + 64, migration_app_base);
+  wr16(p + 68, 1);
+  wr16(p + 70, 0);
+  wr32(p + 72, 0);
+  return p;
+}
+
+void seal_manifest(uint8_t *p) {
+  const uint8_t *boot = reinterpret_cast<const uint8_t *>(migration::BOOT_BASE);
+  wr32(p + 40, ota_boot_image_crc32(boot, migration::BOOT_SIZE,
+                                  OTA_BOOT_CANDIDATE_MANIFEST_OFFSET + 40));
+}
+
 void arm() {
   assert(bootloader_migration_request(confirmation, reply, sizeof(reply)));
   assert(bootloader_migration_pending());
@@ -162,6 +209,64 @@ int main(int argc, char **argv) {
     no_install();
     bootloader_migration_status(reply, sizeof(reply));
     assert(std::strstr(reply, "already installed"));
+  } else if (std::strcmp(scenario, "same-version") == 0 ||
+             std::strcmp(scenario, "newer-version") == 0) {
+    const uint32_t version = std::strcmp(scenario, "same-version") == 0
+                                 ? migration_boot_version : 0x02040D01;
+    seal_manifest(installed_manifest(version));
+    // Live status has to detect this before any request, as it would after reboot.
+    bootloader_migration_status(reply, sizeof(reply));
+    assert(std::strstr(reply, "up to date"));
+    assert(!bootloader_migration_pending());
+    assert(!bootloader_migration_request("0123456789ABCDE0", reply, sizeof(reply)));
+    assert(!bootloader_migration_pending());
+    softdevice_checks = 0; // Status may read the retained diagnostic result.
+    const char *tokens[] = {nullptr, confirmation};
+    for (const char *token : tokens) {
+      assert(bootloader_migration_request(token, reply, sizeof(reply)));
+      assert(!bootloader_migration_pending());
+      assert(std::strstr(reply, "up to date"));
+      now += 2000;
+      bootloader_migration_tick(true, true);
+      no_install();
+    }
+  } else if (std::strcmp(scenario, "easy-update") == 0 ||
+             std::strcmp(scenario, "older-preview") == 0) {
+    if (std::strcmp(scenario, "older-preview") == 0)
+      seal_manifest(installed_manifest(0x02040CFE));
+    assert(bootloader_migration_request(nullptr, reply, sizeof(reply)));
+    assert(bootloader_migration_pending());
+    assert(std::strstr(reply, "OK migration armed"));
+    now = 1499;
+    bootloader_migration_tick(true, true);
+    no_install();
+    ++now;
+    bootloader_migration_tick(true, true);
+    assert(endf_checks == 1);
+    assert(!bootloader_migration_pending());
+  } else if (std::strncmp(scenario, "invalid-version-", 16) == 0) {
+    uint8_t *p = installed_manifest(0x02040DFF);
+    const char *mutation = scenario + 16;
+    if (std::strcmp(mutation, "board") == 0) wr32(p + 20, migration_board_id ^ 1);
+    else if (std::strcmp(mutation, "name") == 0) p[24] = 'X';
+    else if (std::strcmp(mutation, "family") == 0) wr16(p + 60, 132);
+    else if (std::strcmp(mutation, "fwid") == 0) wr16(p + 62, 0x123);
+    else if (std::strcmp(mutation, "app") == 0) wr32(p + 64, 0x27000);
+    else if (std::strcmp(mutation, "abi") == 0) wr16(p + 68, 2);
+    else if (std::strcmp(mutation, "continuity") == 0) std::memset(p + 44, 0xFF, 32);
+    else assert(std::strcmp(mutation, "crc") == 0);
+    seal_manifest(p);
+    if (std::strcmp(mutation, "crc") == 0) p[40] ^= 1;
+    bootloader_migration_status(reply, sizeof(reply));
+    assert(!std::strstr(reply, "up to date"));
+    assert(bootloader_migration_request(nullptr, reply, sizeof(reply)));
+    assert(bootloader_migration_pending());
+    assert(!std::strstr(reply, "up to date"));
+    now = 1500;
+    bootloader_migration_tick(true, true);
+    // The production install preflight still runs, and the EndF stub refuses it.
+    assert(endf_checks == 1);
+    assert(!bootloader_migration_pending());
   } else if (std::strcmp(scenario, "wrong-confirmation") == 0) {
     assert(!bootloader_migration_request("0123456789ABCDE0", reply, sizeof(reply)));
     assert(!bootloader_migration_request("0123456789abcdef", reply, sizeof(reply)));
@@ -190,7 +295,11 @@ int main(int argc, char **argv) {
   } else if (std::strcmp(scenario, "duplicate-arm") == 0) {
     arm();
     now = 1499;
-    assert(!bootloader_migration_request(confirmation, reply, sizeof(reply)));
+    assert(!bootloader_migration_request("0123456789ABCDE0", reply, sizeof(reply)));
+    assert(bootloader_migration_pending());
+    assert(bootloader_migration_request(nullptr, reply, sizeof(reply)));
+    assert(std::strstr(reply, "OK bootloader update already armed"));
+    assert(bootloader_migration_request(confirmation, reply, sizeof(reply)));
     assert(std::strstr(reply, "already armed"));
     now = 1500;
     bootloader_migration_tick(true, true);

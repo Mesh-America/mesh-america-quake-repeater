@@ -6,6 +6,7 @@
 namespace mesh {
 namespace ota {
 bool bootloader_migration_pending();
+// nullptr selects the pinned embedded image; a supplied hash must match exactly.
 bool bootloader_migration_request(const char *confirmation, char *reply, size_t capacity);
 void bootloader_migration_status(char *reply, size_t capacity);
 void bootloader_migration_audit(char *reply, size_t capacity);

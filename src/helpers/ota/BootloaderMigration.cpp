@@ -68,6 +68,15 @@ void hash_region(uint32_t address, uint32_t size, uint8_t output[32]) {
   hash.finalize(output, 32);
 }
 
+bool installed_up_to_date() {
+  OtaBootloaderIdentity installed;
+  return ota_bootloader_identity_from_image(
+             reinterpret_cast<const uint8_t *>(migration::BOOT_BASE), migration::BOOT_SIZE, installed) &&
+         migration::installed_up_to_date(installed, migration_board_id, migration_device_name,
+                                         migration_boot_version, mota_nrf52_app_base(),
+                                         migration_softdevice_fwid);
+}
+
 uint8_t retained_result() {
   if (result_is_current) return last_result;
   uint8_t enabled = 0;
@@ -186,19 +195,27 @@ void bootloader_migration_status(char *reply, size_t capacity) {
   char hash[17];
   hex8(migration_candidate_sha256, hash);
   snprintf(reply, capacity, "BL embedded 2.4.12: 40960 B; hash=%s; %s; last=%u", hash,
-           pending ? "armed" : already_installed ? "already installed" : "idle", retained_result());
+           pending ? "armed" : already_installed ? "already installed" :
+           installed_up_to_date() ? "up to date" : "idle", retained_result());
 }
 
 bool bootloader_migration_request(const char *confirmation, char *reply, size_t capacity) {
   char hash[17];
   hex8(migration_candidate_sha256, hash);
-  if (pending) {
-    snprintf(reply, capacity, "ERR bootloader migration is already armed");
-    return false;
-  }
-  if (strcmp(confirmation, hash) != 0) {
+  if (confirmation && strcmp(confirmation, hash) != 0) {
     snprintf(reply, capacity, "ERR confirm exact image: ota bootloader embedded install %s", hash);
     return false;
+  }
+  if (pending) {
+    snprintf(reply, capacity, "OK bootloader update already armed");
+    return true;
+  }
+  if (installed_up_to_date()) {
+    already_installed = false;
+    last_result = 0;
+    result_is_current = true;
+    snprintf(reply, capacity, "OK bootloader already up to date");
+    return true;
   }
   // Bootloader diagnostics already read this memory-mapped region while
   // SoftDevice runs. Detect a no-op before stopping it so BLE stays usable.

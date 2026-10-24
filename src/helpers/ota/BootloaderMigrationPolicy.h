@@ -101,6 +101,16 @@ inline bool installed_can_migrate(const OtaBootloaderIdentity &installed,
                                        140, fwid, app_base, 1) == OTA_BOOT_CONTINUITY_OK;
 }
 
+inline bool installed_up_to_date(const OtaBootloaderIdentity &installed,
+                                 uint32_t board_id, const char name[16],
+                                 uint32_t version, uint32_t app_base, uint16_t fwid) {
+  return installed.present && installed.crc_ok &&
+         installed.image_start == BOOT_BASE && installed.image_size == BOOT_SIZE &&
+         installed.board_id == board_id && memcmp(installed.device_name, name, 16) == 0 &&
+         ota_bootloader_continuity_matches_runtime(installed, 140, fwid, app_base, 1) &&
+         installed.boot_version >= version;
+}
+
 } // namespace migration
 } // namespace ota
 } // namespace mesh

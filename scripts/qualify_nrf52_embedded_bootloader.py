@@ -51,7 +51,7 @@ def qualify(directory, manifest_path):
         "manifest_sha256": MANIFEST_SHA256,
         "legacy_sha256": metadata.get("legacy_sha256"),
         "app_offset": offset, "image_bytes": BOOT_SIZE,
-        "activation": "ota bootloader embedded install HASH16",
+        "activation": "ota bootloader update",
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest["embedded_bootloader"]

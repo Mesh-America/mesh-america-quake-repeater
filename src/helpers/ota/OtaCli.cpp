@@ -1031,6 +1031,17 @@ static __attribute__((noinline)) bool handle_control_command(
 
   } else if (is_cmd(a, "bootloader|blupdate", &rest)) {
 #if defined(OTA_BOOTLOADER_MIGRATION)
+    const char* update_args = nullptr;
+    if (is_cmd(rest, "update", &update_args)) {
+      if (*update_args) {
+        strcpy(reply, "ERR usage: ota bootloader update");
+      } else if (!c.embeddedBootloaderIdle()) {
+        strcpy(reply, "ERR another OTA operation is active");
+      } else {
+        bootloader_migration_request(nullptr, reply, 160);
+      }
+      return true;
+    }
     const char* embedded = nullptr;
     if (is_cmd(rest, "embedded", &embedded)) {
       if (*embedded == 0 || strcmp(embedded, "status") == 0) {

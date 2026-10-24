@@ -100,7 +100,43 @@ int main(int argc,char **argv) {
     auto v7=identity(0x02040CFF,0x27000,0x123);
     assert(candidate_matches_resource(v7,0x239A0029,name,0x02040CFF,0x27000,0x123));
     assert(installed_can_migrate(installed,candidate,false,false,0x26000,0xB6));
-    if (!std::strcmp(argv[1],"monotonic")) {
+    if (!std::strcmp(argv[1],"up-to-date")) {
+      assert(!installed_up_to_date(installed,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      installed.boot_version=0x02040CFE; // Preview precedes the stable release.
+      assert(!installed_up_to_date(installed,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      installed.boot_version=0x02040CFF;
+      assert(installed_up_to_date(installed,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      installed.boot_version=0x02040D01; // Even a later preview must not be downgraded.
+      assert(installed_up_to_date(installed,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.present=false;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.crc_ok=false;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.board_id^=1;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.device_name[0]='X';
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.image_start+=4096;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; --bad.image_size;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.continuity_present=false;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.softdevice_family=132;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.softdevice_fwid=0x123;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.app_base=0x27000;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.layout_abi=2;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.compat_flags=1;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.boot_version=0;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+      bad=installed; bad.boot_version=UINT32_MAX;
+      assert(!installed_up_to_date(bad,0x239A0029,name,0x02040CFF,0x26000,0xB6));
+    } else if (!std::strcmp(argv[1],"monotonic")) {
       installed.boot_version=candidate.boot_version;
       assert(!installed_can_migrate(installed,candidate,true,true,0x26000,0xB6));
       ++installed.boot_version;
@@ -158,6 +194,9 @@ class MigrationPolicyTests(unittest.TestCase):
 
     def test_modern_loader_requires_strictly_newer_candidate(self):
         self.scenario('monotonic')
+
+    def test_installed_version_noop_requires_exact_identity_and_platform(self):
+        self.scenario('up-to-date')
 
     def test_crc_exact_identity_and_runtime_platform(self):
         self.scenario('identity')
