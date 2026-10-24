@@ -180,6 +180,7 @@ class PackagedApplicationTests(unittest.TestCase):
         self.assertEqual(result["profile"], self.profile["id"])
         self.assertEqual(result["candidate_sha256"], hashlib.sha256(self.candidate).hexdigest())
         self.assertEqual(result["activation"], "ota bootloader update")
+        self.assertEqual(result["automatic_delay_seconds"], 70)
         self.patches["select_profile"].assert_called_once_with(
             {"profiles": [self.profile]}, TARGET)
         self.patches["validate_candidate_zip"].assert_called_once_with(

@@ -24,6 +24,10 @@ static_assert(migration::ACL_READ_DENIED == ACL_ACL_PERM_READ_Msk, "ACL read per
 static_assert(migration::ACL_WRITE_DENIED == ACL_ACL_PERM_WRITE_Msk, "ACL write permission bit");
 namespace {
 bool pending = false;
+bool automatic_attempted = false;
+bool automatic_blocked = false;
+constexpr uint32_t AUTOMATIC_DELAY_MS = 70000u;
+constexpr uint8_t ATTEMPT_MARKER = 0xD0;
 uint32_t armed_at = 0;
 uint8_t last_result = 0;
 bool result_is_current = false;
@@ -77,17 +81,38 @@ bool installed_up_to_date() {
                                          migration_softdevice_fwid);
 }
 
-uint8_t retained_result() {
-  if (result_is_current) return last_result;
+bool read_reboot_marker(uint32_t &result) {
   uint8_t enabled = 0;
-  uint32_t result = 0;
-  if (sd_softdevice_is_enabled(&enabled) != NRF_SUCCESS) return 0;
+  if (sd_softdevice_is_enabled(&enabled) != NRF_SUCCESS) return false;
   if (enabled) {
-    if (sd_power_gpregret_get(0, &result) != NRF_SUCCESS) return 0;
+    if (sd_power_gpregret_get(0, &result) != NRF_SUCCESS) return false;
   } else {
     result = NRF_POWER->GPREGRET;
   }
+  return true;
+}
+
+uint8_t retained_result() {
+  if (result_is_current) return last_result;
+  uint32_t result = 0;
+  if (!read_reboot_marker(result)) return 0;
   return result >= 0xC0 && result <= 0xCF ? result & 15 : last_result;
+}
+
+bool write_reboot_marker(uint8_t marker) {
+  uint8_t enabled = 0;
+  if (sd_softdevice_is_enabled(&enabled) != NRF_SUCCESS) return false;
+  if (enabled) {
+    uint32_t current = 0;
+    if (sd_power_gpregret_get(0, &current) != NRF_SUCCESS) return false;
+    // Arming after the automatic image check must preserve its existing
+    // guard, rather than creating an unguarded gap between clear and set.
+    if (current == marker) return true;
+    if (sd_power_gpregret_clr(0, 0xFF) != NRF_SUCCESS) return false;
+    return marker == 0 || sd_power_gpregret_set(0, marker) == NRF_SUCCESS;
+  }
+  NRF_POWER->GPREGRET = marker;
+  return NRF_POWER->GPREGRET == marker;
 }
 
 // Called only after the operator reply has drained and SoftDevice is stopped.
@@ -174,7 +199,10 @@ void install() {
       if (NRF_WDT->RREN & (1u << i)) NRF_WDT->RR[i] = 0x6E524635u;
     }
   }
-  NRF_POWER->GPREGRET = 0;
+  // The installed loader preserves our non-DFU marker. If COPY_BL or its
+  // preflight is interrupted, the next application boot will stay available
+  // instead of automatically trying the same operation again.
+  NRF_POWER->GPREGRET = ATTEMPT_MARKER;
   NRF_POWER->GPREGRET2 = 0;
   sd_mbr_command_t command = {};
   command.command = SD_MBR_COMMAND_COPY_BL;
@@ -191,12 +219,17 @@ bool bootloader_migration_pending() {
   return pending;
 }
 
+bool bootloader_migration_service_due() {
+  return pending || (!automatic_attempted && millis() >= AUTOMATIC_DELAY_MS);
+}
+
 void bootloader_migration_status(char *reply, size_t capacity) {
   char hash[17];
   hex8(migration_candidate_sha256, hash);
-  snprintf(reply, capacity, "BL embedded 2.4.12: 40960 B; hash=%s; %s; last=%u", hash,
+  snprintf(reply, capacity, "BL embedded 2.4.12: 40960 B; hash=%s; %s; last=%u; auto=%s", hash,
            pending ? "armed" : already_installed ? "already installed" :
-           installed_up_to_date() ? "up to date" : "idle", retained_result());
+           installed_up_to_date() ? "up to date" : "idle", retained_result(),
+           automatic_blocked ? "blocked" : automatic_attempted ? "checked" : "70s after boot");
 }
 
 bool bootloader_migration_request(const char *confirmation, char *reply, size_t capacity) {
@@ -206,6 +239,10 @@ bool bootloader_migration_request(const char *confirmation, char *reply, size_t 
     snprintf(reply, capacity, "ERR confirm exact image: ota bootloader embedded install %s", hash);
     return false;
   }
+  // A manual attempt also satisfies the startup check, including a cancelled
+  // or failed attempt. Only another explicit command may retry it this boot.
+  automatic_attempted = true;
+  automatic_blocked = false;
   if (pending) {
     snprintf(reply, capacity, "OK bootloader update already armed");
     return true;
@@ -229,6 +266,12 @@ bool bootloader_migration_request(const char *confirmation, char *reply, size_t 
     return true;
   }
   already_installed = false;
+  if (!write_reboot_marker(ATTEMPT_MARKER)) {
+    last_result = 17;
+    result_is_current = true;
+    snprintf(reply, capacity, "ERR bootloader reboot guard unavailable");
+    return false;
+  }
   pending = true;
   armed_at = millis();
   last_result = 0;
@@ -258,7 +301,34 @@ void bootloader_migration_audit(char *reply, size_t capacity) {
 }
 
 void bootloader_migration_tick(bool outbound_idle, bool ota_idle) {
-  if (!pending) return;
+  if (!pending) {
+    if (!bootloader_migration_service_due() || !outbound_idle || !ota_idle) return;
+    // A failed MBR/preflight reset leaves this marker. Do not create a loop
+    // that retries and resets every 70 seconds; the CLI can retry explicitly.
+    uint32_t marker = 0;
+    if (!read_reboot_marker(marker) || marker == ATTEMPT_MARKER ||
+        (marker > 0xC0 && marker <= 0xCF)) {
+      automatic_attempted = true;
+      automatic_blocked = true;
+      return;
+    }
+    automatic_attempted = true;
+    // Mark before reading either image too, so a reset in the version/hash
+    // check cannot turn into a recurring 70-second reboot loop.
+    if (!write_reboot_marker(ATTEMPT_MARKER)) {
+      last_result = 17;
+      result_is_current = true;
+      automatic_blocked = true;
+      return;
+    }
+    char reply[160];
+    bootloader_migration_request(nullptr, reply, sizeof(reply));
+    if (!pending && last_result == 0 && !write_reboot_marker(0)) {
+      last_result = 17;
+      result_is_current = true;
+    }
+    return;
+  }
   const uint32_t elapsed = millis() - armed_at;
   // An incoming advert may have started autofetch since the admin command.
   // Never disable SoftDevice while another OTA session owns the flash store.

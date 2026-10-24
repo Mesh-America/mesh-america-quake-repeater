@@ -481,13 +481,14 @@ void __attribute__((noinline)) Mesh::serviceLoopMaintenance() {
   }
 #if defined(ENABLE_OTA)
 #if defined(OTA_BOOTLOADER_MIGRATION)
-  if (ota::bootloader_migration_pending()) {
+  if (ota::bootloader_migration_service_due()) {
     // This bridge owns no OTA workspace. Service it even after a dynamic
     // context has been released, and never allocate one just to poll it.
     const ota::OtaContext* context = ota::ota_context_if_active();
     const bool ota_idle = !context || context->embeddedBootloaderIdle();
     const bool outbound_idle = !hasPendingRadioWork();
-    const bool ready = outbound_idle && ota_idle && prepareForOtaReboot();
+    const bool ready = outbound_idle && ota_idle &&
+        (!ota::bootloader_migration_pending() || prepareForOtaReboot());
     ota::bootloader_migration_tick(ready, ota_idle);
   }
 #endif

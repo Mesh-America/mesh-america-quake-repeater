@@ -40,6 +40,56 @@ class MigrationRuntimeTests(unittest.TestCase):
     def run_scenario(self, scenario):
         subprocess.run([str(self.binary), scenario], check=True)
 
+    def test_automatic_update_waits_70_seconds_then_observes_install_grace(self):
+        for scenario in ('automatic-delay', 'automatic-arm-enabled'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_automatic_update_defers_until_radio_and_ota_are_idle(self):
+        self.run_scenario('automatic-busy')
+
+    def test_automatic_update_skips_same_or_newer_version_and_exact_image(self):
+        for scenario in ('automatic-same-version', 'automatic-same-version-enabled',
+                         'automatic-newer-version',
+                         'automatic-exact-image'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_retained_failure_prevents_automatic_retry_but_allows_manual_retry(self):
+        self.run_scenario('automatic-retained-failure')
+
+    def test_manual_attempt_prevents_a_second_automatic_attempt(self):
+        for scenario in ('manual-cancel-consumes-automatic',
+                         'manual-failure-consumes-automatic'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_cancelled_automatic_update_is_not_rearmed(self):
+        self.run_scenario('automatic-cancel')
+
+    def test_invalid_confirmation_does_not_cancel_the_automatic_update(self):
+        self.run_scenario('invalid-confirmation-preserves-automatic')
+
+    def test_reboot_guard_is_written_through_softdevice_before_arming(self):
+        self.run_scenario('guard-softdevice-enabled')
+
+    def test_reboot_guard_read_errors_block_the_automatic_attempt(self):
+        for scenario in ('automatic-status-read-failure', 'automatic-marker-read-failure'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_reboot_guard_api_failures_refuse_to_arm(self):
+        for scenario in ('guard-softdevice-status-failure', 'guard-marker-read-failure',
+                         'guard-clear-failure',
+                         'guard-set-failure'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_reset_during_check_or_armed_attempt_cannot_create_an_update_loop(self):
+        for scenario in ('automatic-interrupted-check', 'automatic-interrupted-arm'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
     def test_wrong_confirmation_cannot_arm(self):
         self.run_scenario('wrong-confirmation')
 
