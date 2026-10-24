@@ -401,6 +401,66 @@ int main(){
 }
 ''', (40400, 50200, 50500))
 
+    def test_compact_espnow_frames_keep_every_length_and_all_queue_slots(self):
+        self.run_fixture(r'''
+int main(){
+ using namespace mesh::espnow;
+ static_assert(ESPNOW_RAW_MAX_SECOND_FRAME_SIZE==31);
+ static_assert(sizeof(ESPNowRawFrames)==288);
+ static_assert(sizeof(ESPNowRawFrameData)==281);
+ const uint8_t mac[6]={1,2,3,4,5,6};
+ for(size_t length=2;length<=255;++length){
+   auto original=packet(1,length);
+   for(size_t i=1;i<length;++i)original.data[i]=uint8_t(i*37+length);
+   ESPNowRawFrames frames;
+   assert(encodeEspNowRawFrames(original.data,length,frames));
+   assert(frames.count==(length<=250?1:2));
+   assert(frames.data.capacity(0)==250&&frames.data.capacity(1)==31);
+   assert(frames.data.capacity(2)==0&&frames.data[2]==nullptr);
+   const ESPNowRawFrames copy=frames;
+   memset(&frames,0,sizeof(frames)); // Queue copies must own both arrays.
+   ESPNowRawReassembler assembler;uint8_t out[255]={};size_t size=0;
+   ESPNowRawReassemblyResult result=ESPNowRawReassemblyResult::REJECTED;
+   // Reverse-order fragments exercise the compact tail independently.
+   for(unsigned index=copy.count;index-->0;){
+     assert(copy.lengths[index]<=copy.data.capacity(index));
+     result=assembler.acceptFrame(mac,copy.data[index],copy.lengths[index],100,out,sizeof(out),size);
+   }
+   assert(result==(length<=250?ESPNowRawReassemblyResult::PASSTHROUGH:ESPNowRawReassemblyResult::PACKET_COMPLETE));
+   assert(size==length&&!memcmp(out,original.data,length));
+ }
+ Backend backend;backend.wifi=true;mesh::wireless::control().begin(backend);
+ sdk_initialized=sdk_started=true;sdk_mode=WIFI_STA;
+ NodePrefs prefs;mesh::PacketManager mgr;mesh::RTCClock rtc;ESPNowBridge bridge(&prefs,&mgr,&rtc);bridge.begin();
+ ESPNowRawFrames invalid;auto source=packet(1,255);
+ assert(encodeEspNowRawFrames(source.data,source.length,invalid));
+ invalid.lengths[1]=32;
+ assert(!bridge.queueTransmitFrames(invalid,source)&&bridge._tx_count==0);
+ invalid.lengths[1]=0;
+ assert(!bridge.queueTransmitFrames(invalid,source)&&bridge._tx_count==0);
+ invalid.lengths[1]=31;invalid.lengths[0]=251;
+ assert(!bridge.queueTransmitFrames(invalid,source)&&bridge._tx_count==0);
+ assert(send_calls==0);
+ // Retain all six largest packets at once, then overwrite the caller's copy.
+ for(uint8_t id=1;id<=6;++id){
+   auto p=packet(id,255);bridge.sendPacket(&p);memset(p.data,0,sizeof(p.data));
+ }
+ assert(bridge._tx_count==6);
+ bridge.loop();
+ for(unsigned i=0;i<12;++i)complete(bridge);
+ assert(bridge._tx_count==0&&sent.size()==12);
+ for(unsigned i=0;i<6;++i){
+   ESPNowRawReassembler assembler;uint8_t out[255];size_t size=0;
+   assert(sent[2*i].size()==250&&sent[2*i+1].size()==31);
+   assembler.acceptFrame(mac,sent[2*i].data(),sent[2*i].size(),100,out,sizeof(out),size);
+   assert(assembler.acceptFrame(mac,sent[2*i+1].data(),sent[2*i+1].size(),101,out,sizeof(out),size)==ESPNowRawReassemblyResult::PACKET_COMPLETE);
+   auto expected=packet(uint8_t(i+1),255);
+   assert(size==255&&!memcmp(out,expected.data,size));
+ }
+ bridge.end();
+}
+''', (40400, 50200, 50500))
+
     def test_missing_callback_restarts_session_and_failed_teardown_blocks_admission(self):
         self.run_fixture(r'''
 int main(){

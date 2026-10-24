@@ -1,4 +1,4 @@
-"""Prove compact ref10 products against unrolled code and integer arithmetic."""
+"""Prove compact ref10 field operations against unrolled code and integers."""
 
 import ctypes
 from pathlib import Path
@@ -61,6 +61,14 @@ class Ed25519CompactFieldTest(unittest.TestCase):
             for name in ("fe_cmov", "fe_cswap"):
                 getattr(library, name).argtypes = [ctypes.POINTER(ctypes.c_int32)] * 2 + [ctypes.c_uint]
                 getattr(library, name).restype = None
+            library.fe_mul121666.argtypes = [ctypes.POINTER(ctypes.c_int32)] * 2
+            library.fe_mul121666.restype = None
+            library.fe_frombytes.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.c_void_p]
+            library.fe_frombytes.restype = None
+            library.fe_tobytes.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)]
+            library.fe_tobytes.restype = None
+            library.fe_isnonzero.argtypes = [ctypes.POINTER(ctypes.c_int32)]
+            library.fe_isnonzero.restype = ctypes.c_int
             cls.libraries.append(library)
 
     @classmethod
@@ -145,6 +153,123 @@ class Ed25519CompactFieldTest(unittest.TestCase):
                     a = Field(*first)
                     getattr(self.libraries[1], name)(a, a, select)
                     self.assertEqual(list(a), first)
+
+    def test_decode_matches_original_limbs_and_modular_integer_including_sign_bit(self):
+        rng = random.Random(0xDEC0DE)
+        values = [0, PRIME - 1, PRIME, PRIME + 1, 2**255 - 1]
+        values += [value for bit in range(255)
+                   for value in ((1 << bit) - 1, 1 << bit, (1 << bit) + 1)]
+        values += [rng.getrandbits(255) for _ in range(10000)]
+        for index, value in enumerate(values):
+            for sign in (0, 1):
+                encoded = (value | sign << 255).to_bytes(32, "little")
+                outputs = []
+                for library in self.libraries:
+                    output = Field()
+                    library.fe_frombytes(output, encoded)
+                    outputs.append(list(output))
+                self.assertEqual(outputs[0], outputs[1], (index, sign))
+                self.assertEqual(integer(outputs[1]), value % PRIME, (index, sign))
+                # The entire source is consumed before any destination write.
+                overlap = ctypes.create_string_buffer(40)
+                ctypes.memmove(overlap, encoded, 32)
+                self.libraries[1].fe_frombytes(ctypes.cast(overlap, ctypes.POINTER(ctypes.c_int32)), overlap)
+                self.assertEqual(list(Field.from_buffer(overlap)), outputs[0])
+
+    def test_encode_and_nonzero_match_original_and_canonical_integer(self):
+        values = vectors(0xEAC0DE, 10000)
+        # Encoding and multiplication-by-121666 have a tighter ref10 bound.
+        bounds = [110 * (1 << (26 - (i & 1))) // 100 for i in range(10)]
+        values = [[min(bound, max(-bound, limb))
+                   for limb, bound in zip(value, bounds)] for value in values]
+        # Include nonzero representations of field zero and reduction edges.
+        values += [[-19, 0, 0, 0, 0, 0, 0, 0, 0, 1 << 25],
+                   [19, 0, 0, 0, 0, 0, 0, 0, 0, -(1 << 25)]]
+        for index, value in enumerate(values):
+            outputs = []
+            for library in self.libraries:
+                output = ctypes.create_string_buffer(32)
+                library.fe_tobytes(output, Field(*value))
+                outputs.append(output.raw)
+                self.assertEqual(library.fe_isnonzero(Field(*value)), int(integer(value) != 0), index)
+            self.assertEqual(outputs[0], outputs[1], index)
+            self.assertEqual(int.from_bytes(outputs[1], "little"), integer(value), index)
+            overlap = Field(*value)
+            self.libraries[1].fe_tobytes(overlap, overlap)
+            self.assertEqual(ctypes.string_at(overlap, 32), outputs[0])
+
+    def test_multiply_constant_matches_original_integer_and_aliases(self):
+        bounds = [110 * (1 << (26 - (i & 1))) // 100 for i in range(10)]
+        for index, value in enumerate(vectors(0x121666, 10000)):
+            value = [min(bound, max(-bound, limb)) for limb, bound in zip(value, bounds)]
+            reference = Field()
+            self.libraries[0].fe_mul121666(reference, Field(*value))
+            for alias in (False, True):
+                data = Field(*value)
+                output = data if alias else Field()
+                self.libraries[1].fe_mul121666(output, data)
+                self.assertEqual(list(output), list(reference), (index, alias))
+                self.assertEqual(integer(output), integer(value) * 121666 % PRIME, (index, alias))
+                for limb, result in enumerate(output):
+                    self.assertLessEqual(abs(result), 110 * (1 << (25 - (limb & 1))) // 100)
+
+    def test_serialization_and_constant_multiply_under_sanitizers(self):
+        values = vectors(0xC0DE, 128)
+        bounds = [110 * (1 << (26 - (i & 1))) // 100 for i in range(10)]
+        rows = []
+        for index, value in enumerate(values):
+            value = [min(bound, max(-bound, limb)) for limb, bound in zip(value, bounds)]
+            encoded = ctypes.create_string_buffer(32)
+            multiplied = Field()
+            decoded = Field()
+            self.libraries[0].fe_tobytes(encoded, Field(*value))
+            # Alternate ignored high bits while retaining the encoded value.
+            source = encoded.raw[:31] + bytes([encoded.raw[31] | ((index & 1) << 7)])
+            self.libraries[0].fe_frombytes(decoded, source)
+            self.libraries[0].fe_mul121666(multiplied, Field(*value))
+            row = (value, list(multiplied), list(decoded), list(source), list(encoded.raw))
+            rows.append("{" + ",".join("{" + ",".join(map(str, item)) + "}"
+                                       for item in row) + "}")
+        source = r'''
+#include <assert.h>
+#include <string.h>
+#include "fe.h"
+struct Vector { fe input, multiplied, decoded; unsigned char source[32], encoded[32]; };
+static const struct Vector vectors[] = { @VECTORS@ };
+int main(void) {
+    for (unsigned int i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+        const struct Vector *v = &vectors[i];
+        fe output;
+        unsigned char bytes[32];
+        fe_frombytes(output, v->source);
+        assert(memcmp(output, v->decoded, sizeof(fe)) == 0);
+        fe_tobytes(bytes, v->input);
+        assert(memcmp(bytes, v->encoded, sizeof(bytes)) == 0);
+        unsigned char nonzero = 0;
+        for (unsigned int j = 0; j < sizeof(bytes); ++j) nonzero |= bytes[j];
+        assert(fe_isnonzero(v->input) == (nonzero != 0));
+        memcpy(output, v->input, sizeof(fe));
+        fe_mul121666(output, output);
+        assert(memcmp(output, v->multiplied, sizeof(fe)) == 0);
+        union { fe limbs; unsigned char bytes[40]; } overlap;
+        memcpy(overlap.bytes, v->source, 32);
+        fe_frombytes(overlap.limbs, overlap.bytes);
+        assert(memcmp(overlap.limbs, v->decoded, sizeof(fe)) == 0);
+        memcpy(overlap.limbs, v->input, sizeof(fe));
+        fe_tobytes(overlap.bytes, overlap.limbs);
+        assert(memcmp(overlap.bytes, v->encoded, 32) == 0);
+    }
+}
+'''.replace("@VECTORS@", ",\n".join(rows))
+        with tempfile.TemporaryDirectory() as directory:
+            harness = Path(directory) / "encoding.c"
+            harness.write_text(source)
+            executable = Path(directory) / "encoding"
+            subprocess.run(["cc", "-std=c99", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
+                            "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-no-pie",
+                            "-DED25519_COMPACT_FIELD=1", "-I", str(ED25519),
+                            str(harness), str(ED25519 / "fe.c"), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
 
     def test_compact_products_under_address_and_undefined_sanitizers(self):
         values = vectors(0xC0FE, 128)

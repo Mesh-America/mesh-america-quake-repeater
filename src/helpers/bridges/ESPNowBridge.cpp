@@ -381,7 +381,7 @@ bool ESPNowBridge::queueTransmitFrames(
   }
   for (uint8_t i = 0; i < frames.count; ++i) {
     if (frames.lengths[i] == 0
-        || frames.lengths[i] > MAX_ESPNOW_PACKET_SIZE) {
+        || frames.lengths[i] > frames.data.capacity(i)) {
       return false;
     }
   }
@@ -486,7 +486,8 @@ void ESPNowBridge::pumpTransmitQueue() {
     QueuedTransmit& queued_tx = _tx_queue[_tx_tail];
     if (queued_tx.next_frame < queued_tx.frames.count) {
       frame_len = queued_tx.frames.lengths[queued_tx.next_frame];
-      if (frame_len > 0 && frame_len <= sizeof(frame)) {
+      if (frame_len > 0 && frame_len <= sizeof(frame)
+          && frame_len <= queued_tx.frames.data.capacity(queued_tx.next_frame)) {
         memcpy(frame, queued_tx.frames.data[queued_tx.next_frame], frame_len);
       } else {
         frame_len = 0;
@@ -869,7 +870,7 @@ bool ESPNowBridge::sendTest(uint32_t nonce) {
   probe.nonce = nonce;
   probe.format = _active_format;
   probe.channel = _prefs->bridge_channel;
-  if (!encodeProbe(frames.data[0], sizeof(frames.data[0]), probe)) {
+  if (!encodeProbe(frames.data[0], frames.data.capacity(0), probe)) {
     recordError(Stage::TestQueue, ESP_ERR_INVALID_ARG);
     return false;
   }

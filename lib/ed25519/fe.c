@@ -9,6 +9,7 @@
 /*
     helper functions
 */
+#if !defined(ED25519_COMPACT_FIELD) || !ED25519_COMPACT_FIELD
 static uint64_t load_3(const unsigned char *in) {
     uint64_t result;
 
@@ -29,6 +30,7 @@ static uint64_t load_4(const unsigned char *in) {
     
     return result;
 }
+#endif
 
 
 
@@ -301,6 +303,7 @@ void fe_copy(fe h, const fe f) {
 
 #endif
 
+#if !defined(ED25519_COMPACT_FIELD) || !ED25519_COMPACT_FIELD
 void fe_frombytes(fe h, const unsigned char *s) {
     int64_t h0 = load_4(s);
     int64_t h1 = load_3(s + 4) << 6;
@@ -367,6 +370,8 @@ void fe_frombytes(fe h, const unsigned char *s) {
 }
 
 
+
+#endif
 
 void fe_invert(fe out, const fe z) {
     fe t0;
@@ -482,6 +487,7 @@ int fe_isnegative(const fe f) {
        |f| bounded by 1.1*2^26,1.1*2^25,1.1*2^26,1.1*2^25,etc.
 */
 
+#if !defined(ED25519_COMPACT_FIELD) || !ED25519_COMPACT_FIELD
 int fe_isnonzero(const fe f) {
     unsigned char s[32];
     unsigned char r;
@@ -525,6 +531,7 @@ int fe_isnonzero(const fe f) {
 
     return r != 0;
 }
+#endif
 
 
 
@@ -785,6 +792,7 @@ Postconditions:
    |h| bounded by 1.1*2^25,1.1*2^24,1.1*2^25,1.1*2^24,etc.
 */
 
+#if !defined(ED25519_COMPACT_FIELD) || !ED25519_COMPACT_FIELD
 void fe_mul121666(fe h, fe f) {
     int32_t f0 = f[0];
     int32_t f1 = f[1];
@@ -852,7 +860,6 @@ Postconditions:
    |h| bounded by 1.1*2^25,1.1*2^24,1.1*2^25,1.1*2^24,etc.
 */
 
-#if !defined(ED25519_COMPACT_FIELD) || !ED25519_COMPACT_FIELD
 void fe_neg(fe h, const fe f) {
     int32_t f0 = f[0];
     int32_t f1 = f[1];
@@ -1400,6 +1407,7 @@ Proof:
 
 #endif
 
+#if !defined(ED25519_COMPACT_FIELD) || !ED25519_COMPACT_FIELD
 void fe_tobytes(unsigned char *s, const fe h) {
     int32_t h0 = h[0];
     int32_t h1 = h[1];
@@ -1506,3 +1514,4 @@ void fe_tobytes(unsigned char *s, const fe h) {
     s[30] = (unsigned char) (h9 >> 10);
     s[31] = (unsigned char) (h9 >> 18);
 }
+#endif

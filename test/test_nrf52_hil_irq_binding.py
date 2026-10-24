@@ -1,6 +1,7 @@
 """Verify explicit HIL observer bindings without editing the installed core."""
 
 import importlib.util
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -180,6 +181,9 @@ class Nrf52HilIrqBindingTest(unittest.TestCase):
         # The original same-object weak aliases reproduce the final-ELF failure.
         # Explicit vector targets must call each wrapper and each real handler
         # exactly once, including when the other C++ translation unit uses LTO.
+        # Keep the synthetic real definitions public: native LTO cannot see the
+        # later linker rewrite from __real_* to the real symbol. The separate
+        # ARM-toolchain check below uses unannotated real definitions.
         with tempfile.TemporaryDirectory(prefix="mesh-hil-irq-link-", dir="/var/tmp") as directory:
             directory = Path(directory)
             source = '#include <cassert>\n#include <cstdint>\n'
@@ -187,7 +191,8 @@ class Nrf52HilIrqBindingTest(unittest.TestCase):
             source += 'extern "C" void SVC_Handler() {}\nextern "C" void PendSV_Handler() {}\n'
             source += f"static unsigned real_calls[{len(PATCH.IRQ_HANDLERS)}], wrapped_calls[{len(PATCH.IRQ_HANDLERS)}];\n"
             for index, symbol in enumerate(PATCH.IRQ_HANDLERS):
-                source += f'extern "C" void {symbol}() {{ ++real_calls[{index}]; }}\n'
+                source += (f'extern "C" __attribute__((used, externally_visible)) '
+                           f'void {symbol}() {{ ++real_calls[{index}]; }}\n')
                 source += f'extern "C" void __real_{symbol}();\n'
                 source += (f'extern "C" void __wrap_{symbol}() {{ ++wrapped_calls[{index}]; '
                            f'__real_{symbol}(); }}\n')
@@ -208,6 +213,62 @@ class Nrf52HilIrqBindingTest(unittest.TestCase):
                     self.assertEqual(built.returncode, 0, built.stderr)
                     result = subprocess.run([str(binary)], capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_target_lto_retains_unannotated_real_handlers_and_explicit_wrappers(self):
+        core = Path(os.environ.get("PLATFORMIO_CORE_DIR", Path.home() / ".platformio"))
+        toolchain = core / "packages/toolchain-gccarmnoneeabi/bin"
+        suffix = ".exe" if os.name == "nt" else ""
+        compiler = toolchain / ("arm-none-eabi-g++" + suffix)
+        nm = toolchain / ("arm-none-eabi-nm" + suffix)
+        if not compiler.is_file() or not nm.is_file():
+            self.skipTest("installed nRF52 target toolchain unavailable")
+        # Link the real target architecture with the nRF52 LTO profile. Native
+        # GCC 11 and target GCC 14 differ in their late --wrap symbol retention.
+        # No used/externally_visible annotations hide a target liveness failure.
+        source = 'extern "C" const unsigned test_vectors[];\n'
+        source += f"static volatile unsigned calls[{len(PATCH.IRQ_HANDLERS)}];\n"
+        for index, symbol in enumerate(PATCH.IRQ_HANDLERS):
+            source += f'extern "C" void {symbol}() {{ ++calls[{index}]; }}\n'
+            source += f'extern "C" void __real_{symbol}();\n'
+            source += f'extern "C" void __wrap_{symbol}() {{ __real_{symbol}(); }}\n'
+        source += 'extern "C" void SVC_Handler() {}\nextern "C" void PendSV_Handler() {}\n'
+        source += f"int main() {{ for (unsigned i=0; i<{len(PATCH.IRQ_HANDLERS)}; ++i) "
+        source += "reinterpret_cast<void(*)()>(test_vectors[i+2])(); return 0; }\n"
+        flags = [
+            "-std=c++17", "-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16",
+            "-Oz", "-flto", "-flto-partition=one", "-fno-inline-small-functions", "-fipa-pta",
+            "-fmerge-all-constants", "-fno-ipa-cp-clone", "-fno-partial-inlining", "-fno-jump-tables",
+            "-fno-tree-switch-conversion", "-fno-semantic-interposition", "-fno-unwind-tables",
+            "-fno-asynchronous-unwind-tables", "-fno-schedule-insns2", "-ffunction-sections",
+            "-fdata-sections", "-fno-exceptions", "-fno-rtti", "-nostdlib", "-Wl,-e,main",
+            "-Wl,--gc-sections", "-Wl,--sort-section=alignment",
+        ]
+        with tempfile.TemporaryDirectory(prefix="mesh-hil-irq-arm-link-") as directory:
+            directory = Path(directory)
+            handlers = directory / "handlers.cpp"
+            handlers.write_text(source)
+            for patched in (False, True):
+                with self.subTest(patched=patched):
+                    startup = PATCH.patched_startup(STARTUP) if patched else STARTUP
+                    startup = ".syntax unified\n.thumb\n" + startup.replace(
+                        "    .text\n", "    .text\n    .thumb_func\n")
+                    startup = startup.replace("    ret\n", "    bx lr\n").replace(
+                        "    .set ", "    .thumb_set ").replace("@progbits", "%progbits")
+                    assembly = directory / "startup.S"
+                    assembly.write_text(startup)
+                    binary = directory / "vectors.elf"
+                    built = subprocess.run([
+                        str(compiler), *flags, str(handlers), str(assembly),
+                        *("-Wl,--wrap=" + name for name in PATCH.IRQ_HANDLERS), "-o", str(binary),
+                    ], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(built.returncode, 0, built.stderr)
+                    listed = subprocess.run([str(nm), "--defined-only", str(binary)],
+                                            check=True, capture_output=True, text=True, timeout=20)
+                    symbols = {line.split()[-1]: line.split()[-2] for line in listed.stdout.splitlines()
+                               if len(line.split()) >= 3}
+                    for symbol in PATCH.IRQ_HANDLERS:
+                        self.assertEqual(symbols.get(symbol), "T")
+                        self.assertEqual("__wrap_" + symbol in symbols, patched)
 
     def test_nrf52_base_installs_binding_hook_once(self):
         config = (ROOT / "platformio.ini").read_text()

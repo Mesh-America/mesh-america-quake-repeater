@@ -29,15 +29,15 @@ $.lw = $.c5 = () => {};
 $.a4 = null;
 A.au = value => Promise.resolve(value);
 A.aN = bytes => Buffer.from(bytes).toString("hex");
-A.jV = (items, predicate) => items.find(item => predicate.$1(item)) || null;
+A.jU = (items, predicate) => items.find(item => predicate.$1(item)) || null;
 // SQLite's map and insert boundaries retain values produced by real app code.
 A.z = () => ({fields: {}, l(_, key, value) { this.fields[key] = value.a; }});
 context.Date = {now: () => 1900000000000};
-for (const name of ["VU", "Nu", "be", "ax", "VW", "bZ7", "aS1", "aS2", "aS3", "aS4"])
+for (const name of ["VT", "Nt", "be", "ax", "VV", "bZ1", "aS1", "aS2", "aS3", "aS4"])
   constructor(name);
-for (const name of ["VW", "bZ7", "aS1", "aS2", "aS3", "aS4"])
+for (const name of ["VV", "bZ1", "aS1", "aS2", "aS3", "aS4"])
   vm.runInContext(extract(`A.${name}.prototype={`), context);
-Object.assign(A, vm.runInContext(`({${extract("czU(a,b,c,d,e,f,g,h,i,j,k,l,m,n){")}})`, context));
+Object.assign(A, vm.runInContext(`({${extract("czO(a,b,c,d,e,f,g,h,i,j,k,l,m,n){")}})`, context));
 const methods = vm.runInContext(`({${extract("\nbA0(a,b,c){")},${extract("\nbCv(a,b,c){")}})`, context);
 
 function connection() {
@@ -47,8 +47,8 @@ function connection() {
     i: (_, key) => listeners.get(key), Z: (_, key) => listeners.has(key),
     ey: (_, fn) => { for (const [key, value] of listeners) fn.$2(key, value); }
   };
-  for (const name of ["eY", "N", "bCk", "bu", "dT", "W7"])
-    client[name] = A.b0V.prototype[name];
+  for (const name of ["eY", "N", "bCk", "bu", "dT", "W6"])
+    client[name] = A.b0O.prototype[name];
   client.writes = [];
   client.d6 = async bytes => { client.writes.push(Buffer.from(bytes)); };
   return client;
@@ -75,7 +75,7 @@ async function persist(message) {
     abP(owner, contact, decoded) { return methods.bA0.call(this, owner, contact, decoded); },
     a33: async () => null
   };
-  $.e_ = {d: ownerKey}; $.aj = database;
+  $.dZ = {d: ownerKey}; $.aj = database;
   // This is the stock app's ordinary/backlog message intake, with widget
   // notifications disabled and its SQL duplicate-query boundary mocked.
   await methods.bCv.call({k2: [room]}, message, false, false);

@@ -209,6 +209,7 @@ int main() {
   assert(h.driver.n_recv==0&&h.driver.n_sent==0&&h.driver.n_recv_errors==0);
   assert(h.driver._rx_ps_arm_failures==0);
   assert(h.driver._rx_ps_arm_retry.consecutiveFailures()==0&&h.driver._rx_ps_arm_retry.canAttempt());
+  assert(h.driver._rx_ps_enabled&&h.driver._rx_ps_rx_us==123456&&h.driver._rx_ps_sleep_us==765432);
   assert(h.dispatcher.n_sent_flood==0&&h.dispatcher.n_sent_direct==0&&h.dispatcher.n_recv_flood==0&&h.dispatcher.n_recv_direct==0);
   assert(h.dispatcher._err_flags==0&&h.tables._direct_dups==0&&h.tables._flood_dups==0);
   assert(h.driver.n_wd_soft==11&&h.driver.n_wd_hard==13&&h.driver.last_rx==1234);

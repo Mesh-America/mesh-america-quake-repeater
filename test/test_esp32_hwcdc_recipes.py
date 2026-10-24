@@ -247,7 +247,10 @@ class Esp32HwcdcRecipeTests(unittest.TestCase):
                 self.assertFalse(self.sdk["native_primary_enabled"](row["env"]))
                 self.assertEqual(self.config.get(f"env:{name}", "platform"),
                                  "platformio/espressif32@6.11.0")
-                self.assertFalse(self.config.get(f"env:{name}", "platform_packages", []))
+                self.assertEqual(self.config.get(f"env:{name}", "platform_packages", []), [
+                    "framework-arduinoespressif32 @ https://github.com/IoTThinks/"
+                    "powersaving-arduino-lib/releases/download/2.0.17/esp32-2.0.17.zip",
+                ])
                 self.assertIn("pre:scripts/esp32_usb_session_fix.py",
                               self.config.get(f"env:{name}", "extra_scripts", []))
                 if name not in PREVIOUS_G2_HWCDC:
