@@ -29,10 +29,15 @@ jobs:
           python3 -B scripts/check_nrf52_companion_reader.py .pio/build/RAK_4631_companion_radio_full/firmware.elf
           python3 -B scripts/check_nrf52_companion_ota_workspace.py .pio/build/RAK_4631_companion_radio_full/firmware.elf
 
-      - name: Qualify direct-OTA-only XIAO Full Companion
-        # This configuration has no Meshtext/Ethernet application callbacks.
+      - name: Qualify XIAO Full Companion with Meshtext and direct OTA
         run: >-
           bash build.sh build-firmware Xiao_nrf52_companion_radio_full
+          --firmware-version v1.18.0.1-halo-keymind-cascade-dev
+          --radio-preset usa-cascade-fixed --profile cascade --require-ota
+
+      - name: Qualify T1000-E Full Companion with LR1110 Meshtext
+        run: >-
+          bash build.sh build-firmware t1000e_companion_radio_full
           --firmware-version v1.18.0.1-halo-keymind-cascade-dev
           --radio-preset usa-cascade-fixed --profile cascade --require-ota
 
@@ -161,6 +166,34 @@ jobs:
           bash build.sh build-firmware Heltec_v2_companion_radio_ble
           --firmware-version v1.18.0.1-halo-keymind-cascade-dev
           --radio-preset usa-cascadia --profile cascade --auto
+
+      - name: Qualify Heltec V2 Full Companion with SX1276 Meshtext
+        run: >-
+          bash build.sh build-firmware Heltec_v2_companion_radio_full
+          --firmware-version v1.18.0.1-halo-keymind-cascade-dev
+          --radio-preset usa-cascade-fixed --profile cascade --require-ota
+
+  esp32-constrained-companion-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Build Environment
+        uses: ./.github/actions/setup-build-environment
+      - name: Qualify C3 Full Companion with all transports and Meshtext
+        run: >-
+          bash build.sh build-firmware Xiao_C3_companion_radio_full
+          --firmware-version v1.18.0.1-halo-keymind-cascade-dev
+          --radio-preset usa-cascade-fixed --profile cascade --require-ota
+      - name: Qualify C6 Full Companion with Meshtext
+        run: >-
+          bash build.sh build-firmware Xiao_C6_companion_radio_full_
+          --firmware-version v1.18.0.1-halo-keymind-cascade-dev
+          --radio-preset usa-cascade-fixed --profile cascade --require-ota
+      - name: Qualify Tracker V2 Full Companion with shared cold storage
+        run: >-
+          bash build.sh build-firmware heltec_tracker_v2_companion_radio_full_femon
+          --firmware-version v1.18.0.1-halo-keymind-cascade-dev
+          --radio-preset usa-cascade-fixed --profile cascade --require-ota
 
   cross-platform-smoke:
     runs-on: ubuntu-latest
@@ -584,6 +617,9 @@ jobs:
           python3 -B test/test_identity_and_settings_recovery.py -v
           python3 -B test/test_contact_cache.py -v
           python3 -B test/test_one_key_dm_shared_queue.py -v
+          python3 -B test/test_one_key_dm_compact_held.py -v
+          python3 -B test/test_companion_shared_ota_capacity.py -v
+          python3 -B test/test_espnow_raw_initialization.py -v
 
       - name: Verify Ethernet RF harness framing, TX lock, isolation and safe serial ownership
         run: |
