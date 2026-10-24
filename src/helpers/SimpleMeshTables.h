@@ -199,6 +199,16 @@ private:
     }
   }
 
+  void clearHash(const uint8_t* hash) {
+    uint8_t* sp = _hashes;
+    for (int i = 0; i < MAX_PACKET_HASHES; i++, sp += MAX_HASH_SIZE) {
+      if (memcmp(hash, sp, MAX_HASH_SIZE) == 0) {
+        memset(sp, 0, MAX_HASH_SIZE);
+        break;
+      }
+    }
+  }
+
   int8_t weightedSnrX4RoundUp(int8_t curr_snr_x4, int8_t new_snr_x4) const {
     // Keep existing SNR heavier than a single new sample: 75% existing + 25% new.
     int32_t weighted_sum = ((int32_t)curr_snr_x4 * 3) + (int32_t)new_snr_x4;
@@ -433,17 +443,22 @@ public:
       return;
     }
 
-    uint8_t* sp = _hashes;
-    for (int i = 0; i < MAX_PACKET_HASHES; i++, sp += MAX_HASH_SIZE) {
-      if (memcmp(key.hash, sp, MAX_HASH_SIZE) == 0) {
-        memset(sp, 0, MAX_HASH_SIZE);
-        break;
-      }
-    }
+    clearHash(key.hash);
   }
 
   void clear(const mesh::Packet* packet) override {
-    clearSeenKey(seenKey(*packet));
+    // Packet callers do not need a retained token. Keep this path direct so
+    // small targets avoid its initialization and return-value overhead.
+    if (isDedicatedAckPacket(packet)) {
+      uint8_t hash[MAX_HASH_SIZE];
+      packet->calculatePacketHash(hash);
+      clearAckHash(hash);
+      return;
+    }
+
+    uint8_t hash[MAX_HASH_SIZE];
+    packet->calculatePacketHash(hash);
+    clearHash(hash);
   }
 
   uint32_t getNumDirectDups() const { return _direct_dups; }

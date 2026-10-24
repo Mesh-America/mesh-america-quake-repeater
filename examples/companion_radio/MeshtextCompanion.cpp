@@ -775,11 +775,11 @@ bool MyMesh::handleMeshtextCommand(const char* command, char* reply, size_t capa
     ChannelDetails channel;
     if (!nextToken(nodeinfo_args, index_text, sizeof(index_text)) || !endTokens(nodeinfo_args)
         || !mesh::cli::parseUnsignedIntegerStrict(index_text, index) || index >= MAX_GROUP_CHANNELS) {
-      snprintf(reply, capacity, "Error: use send mt.nodeinfo <channel slot>");
+      mesh::cli::formatError(reply, capacity, "use send mt.nodeinfo <channel slot>");
     } else if (!getChannelForSave(index, channel) || !isMeshtextChannel(channel)) {
-      snprintf(reply, capacity, "Error: configured Meshtext channel required");
+      mesh::cli::formatError(reply, capacity, "configured Meshtext channel required");
     } else if (!sendMeshtextNodeInfo(channel)) {
-      snprintf(reply, capacity, "Error: NodeInfo not queued; check get mt.status, TX mode or pending TX");
+      mesh::cli::formatError(reply, capacity, "NodeInfo not queued; check get mt.status, TX mode or pending TX");
     } else {
       snprintf(reply, capacity, "OK - NodeInfo queued on Meshtext channel %lu; no GPS",
           (unsigned long)index);
@@ -794,19 +794,19 @@ bool MyMesh::handleMeshtextCommand(const char* command, char* reply, size_t capa
     char index_text[12]; uint32_t index = 0;
     if (!nextToken(cursor, index_text, sizeof(index_text))
         || !mesh::cli::parseUnsignedIntegerStrict(index_text, index) || index >= MAX_GROUP_CHANNELS) {
-      snprintf(reply, capacity, "Error: invalid channel slot"); return true;
+      mesh::cli::formatError(reply, capacity, "invalid channel slot"); return true;
     }
     ChannelDetails previous{}, channel{};
     if (!getChannelForSave(index, previous)) {
-      snprintf(reply, capacity, "Error: channel slot unavailable"); return true;
+      mesh::cli::formatError(reply, capacity, "channel slot unavailable"); return true;
     }
     if (channel_get || channel_delete) {
       if (!endTokens(cursor) || !previous.name[0] || !isMeshtextChannel(previous)) {
-        snprintf(reply, capacity, "Error: Meshtext channel not found or extra arguments"); return true;
+        mesh::cli::formatError(reply, capacity, "Meshtext channel not found or extra arguments"); return true;
       }
       if (channel_get) {
         mesh::mt::Channel wire;
-        if (!describe(previous, wire)) snprintf(reply, capacity, "Error: invalid Meshtext channel");
+        if (!describe(previous, wire)) mesh::cli::formatError(reply, capacity, "invalid Meshtext channel");
         else snprintf(reply, capacity, "> %lu %s; wire=%s; AES-%u; key not displayed",
             (unsigned long)index, previous.name, wire.name, unsigned(wire.key_length * 8));
         return true;
@@ -816,24 +816,24 @@ bool MyMesh::handleMeshtextCommand(const char* command, char* reply, size_t capa
       if (!nextToken(cursor, channel.name, sizeof(channel.name))
           || !nextToken(cursor, key_text, sizeof(key_text)) || !endTokens(cursor)
           || !isMeshtextChannel(channel)) {
-        snprintf(reply, capacity, "Error: use set mt.channel <slot> <mt-name> <32/64 hex digits|AQ==>"); return true;
+        mesh::cli::formatError(reply, capacity, "use set mt.channel <slot> <mt-name> <32/64 hex digits|AQ==>"); return true;
       }
       if (!strcmp(key_text, "AQ==")) memcpy(channel.channel.secret, mesh::mt::DefaultPsk, 16);
       else {
         const size_t digits = strlen(key_text);
         if ((digits != 32 && digits != 64)
             || !mesh::Utils::fromHex(channel.channel.secret, digits / 2, key_text)) {
-          snprintf(reply, capacity, "Error: key must be 32/64 hex digits or AQ=="); return true;
+          mesh::cli::formatError(reply, capacity, "key must be 32/64 hex digits or AQ=="); return true;
         }
       }
       if (!validateMeshtextChannelChange(index, channel)) {
-        snprintf(reply, capacity, "Error: conflicting Meshtext preset, region, manual radio2 or busy owner"); return true;
+        mesh::cli::formatError(reply, capacity, "conflicting Meshtext preset, region, manual radio2 or busy owner"); return true;
       }
     }
-    if (!setChannel(index, channel)) snprintf(reply, capacity, "Error: invalid Meshtext channel");
+    if (!setChannel(index, channel)) mesh::cli::formatError(reply, capacity, "invalid Meshtext channel");
     else if (!saveChannels()) {
       setChannel(index, previous);
-      snprintf(reply, capacity, "Error: channel not saved; previous channel restored");
+      mesh::cli::formatError(reply, capacity, "channel not saved; previous channel restored");
     } else {
       _mt_seen.clear(); _mt_profile_dirty = true;
       refreshMeshtextProfile();
@@ -848,7 +848,7 @@ bool MyMesh::handleMeshtextCommand(const char* command, char* reply, size_t capa
     if (!mesh::mt::parsePreset(preset_value, preset)
         || !mesh::mt::modemConfig(meshtextRegion(), preset, requested, _mt_slot)
         || !_radio->supportsMeshtext() || !_radio->validateProfile(requested)) {
-      snprintf(reply, capacity, "Error: invalid Meshtext preset/region/slot; use set mt.region first"); return true;
+      mesh::cli::formatError(reply, capacity, "invalid Meshtext preset/region/slot; use set mt.region first"); return true;
     }
     // Explicit provisioning for custom private names. This is a manual saved
     // radio2 choice, not an automatic alias owner, so deletion cannot undo it.
@@ -896,16 +896,16 @@ bool MyMesh::handleMeshtextCommand(const char* command, char* reply, size_t capa
     if (rebroadcast_value) {
       if (!strcmp(rebroadcast_value, "on")) rebroadcast = 1;
       else if (!strcmp(rebroadcast_value, "off")) rebroadcast = 0;
-      else { snprintf(reply, capacity, "Error: use set mt.rebroadcast on|off"); return true; }
+      else { mesh::cli::formatError(reply, capacity, "use set mt.rebroadcast on|off"); return true; }
     }
     if (region_value && !mesh::mt::parseRegion(region_value, region)) {
-      snprintf(reply, capacity, "Error: use set mt.region auto|us|eu868|eu433|anz"); return true;
+      mesh::cli::formatError(reply, capacity, "use set mt.region auto|us|eu868|eu433|anz"); return true;
     }
     if (slot_value && (!mesh::cli::parseUnsignedIntegerStrict(slot_value, slot) || slot > 1024)) {
-      snprintf(reply, capacity, "Error: mt.slot must be 0 (preset default) or 1..1024"); return true;
+      mesh::cli::formatError(reply, capacity, "mt.slot must be 0 (preset default) or 1..1024"); return true;
     }
     if (hops_value && (!mesh::cli::parseUnsignedIntegerStrict(hops_value, hops) || hops > 7)) {
-      snprintf(reply, capacity, "Error: mt.hops must be 0..7"); return true;
+      mesh::cli::formatError(reply, capacity, "mt.hops must be 0..7"); return true;
     }
     if (node_value) {
       if (!strcmp(node_value, "default")) node_override = 0;
@@ -913,23 +913,23 @@ bool MyMesh::handleMeshtextCommand(const char* command, char* reply, size_t capa
         if (*node_value == '!') ++node_value;
         uint8_t bytes[4];
         if (strlen(node_value) != 8 || !mesh::Utils::fromHex(bytes, sizeof(bytes), node_value)) {
-          snprintf(reply, capacity, "Error: use set mt.node !<8 hex digits>|default"); return true;
+          mesh::cli::formatError(reply, capacity, "use set mt.node !<8 hex digits>|default"); return true;
         }
         node_override = (uint32_t(bytes[0]) << 24) | (uint32_t(bytes[1]) << 16)
             | (uint32_t(bytes[2]) << 8) | uint32_t(bytes[3]);
         if (!node_override || !validNodeOverride(node_override)) {
-          snprintf(reply, capacity, "Error: mt.node IDs 0..3 and ffffffff are reserved; use default to reset"); return true;
+          mesh::cli::formatError(reply, capacity, "mt.node IDs 0..3 and ffffffff are reserved; use default to reset"); return true;
         }
       }
     }
     if (short_name_value) {
       short_name = !strcmp(short_name_value, "default") ? "" : short_name_value;
       if ((!*short_name && strcmp(short_name_value, "default")) || !validShortName(short_name)) {
-        snprintf(reply, capacity, "Error: mt.shortname must be 1..4 UTF-8 characters (no spaces/control/colon), or default"); return true;
+        mesh::cli::formatError(reply, capacity, "mt.shortname must be 1..4 UTF-8 characters (no spaces/control/colon), or default"); return true;
       }
     }
     if (!saveMeshtextSettings(region, slot, hops, short_name, node_override, rebroadcast))
-      snprintf(reply, capacity, "Error: Meshtext settings not saved (pending TX or storage error)");
+      mesh::cli::formatError(reply, capacity, "Meshtext settings not saved (pending TX or storage error)");
     else if (rebroadcast_value)
       snprintf(reply, capacity, "OK - mt.rebroadcast=%s; extra wait=5 packet airtimes", rebroadcast ? "on" : "off");
     else if (node_value)
