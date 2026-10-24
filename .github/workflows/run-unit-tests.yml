@@ -264,9 +264,12 @@ jobs:
 
       - name: Install host identity test dependencies
         run: |
-          python3 -m pip install cryptography
+          python3 -m pip install cryptography detools
           sudo apt-get update
           sudo apt-get install -y libssl-dev
+
+      - name: Verify MOTA containers and build profile contracts
+        run: python3 -B tools/mota/test_mota.py
 
       - name: Verify embedded bootloader variant and guarded activation
         run: |

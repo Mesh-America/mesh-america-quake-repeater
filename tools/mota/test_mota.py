@@ -247,15 +247,21 @@ def test_flash_constrained_stm32_repeaters_pin_the_size_qualified_toolchain():
     repeater = (
         root / "examples/simple_repeater/MyMesh.cpp"
     ).read_text(encoding="utf-8")
-    assert "#if MESH_PACKET_LOGGING_COMPACT" in dispatcher
-    assert 'line.printf("T");' in dispatcher
-    assert "line.hex(raw, len);" in dispatcher
-    assert "line.flush(usbLoggingPort(), false);" in dispatcher
+    # RX/TX share one bounded formatter to keep these flash-constrained builds
+    # small. The production-method tests in test_mini_repeater_logging.py also
+    # compile both callers and verify exact bytes, LF endings and stall recovery.
+    for source, call in (
+        (dispatcher, "serialLogCompactPacket(usbLoggingPort(), 'T', raw, len);"),
+        (repeater, "mesh::serialLogCompactPacket(mesh::usbLoggingPort(), 'R', raw, len);"),
+    ):
+        compact = source.split("#if MESH_PACKET_LOGGING_COMPACT", 1)[1].split("#else", 1)[0]
+        assert call in compact
     assert "!MESH_PACKET_LOGGING_COMPACT" in dispatcher
-    assert "#if MESH_PACKET_LOGGING_COMPACT" in repeater
-    assert 'line.printf("R");' in repeater
-    assert "line.hex(raw, len);" in repeater
-    assert "line.flush(mesh::usbLoggingPort(), false);" in repeater
+    logger = (root / "src/helpers/SerialPacketLog.h").read_text(encoding="utf-8")
+    formatter = logger.split("inline bool serialLogCompactPacket(", 1)[1].split("\n}", 1)[0]
+    assert "SerialLogLine<> line(direction);" in formatter
+    assert "line.hex(raw, len);" in formatter
+    assert "return line.flush(out, false);" in formatter
 
 
 def test_flash_constrained_stm32_companions_pin_the_size_qualified_toolchain():
@@ -603,6 +609,10 @@ def test_full_companion_wireless_startup_and_psram_contacts_are_resilient():
 
 
 def test_esp32_s3_full_profiles_use_arduino2_and_dio_boot_mode():
+    import configparser
+    import re
+    from unittest import TestCase
+
     root = Path(__file__).resolve().parents[2]
     project = (root / "platformio.ini").read_text(encoding="utf-8")
     esp32_base = project.split("[esp32_base]", 1)[1].split("\n[", 1)[0]
@@ -656,25 +666,70 @@ def test_esp32_s3_full_profiles_use_arduino2_and_dio_boot_mode():
         "station_g3_esp32",
         "xiao_s3_wio",
     }
-    profile_count = 0
+    config = configparser.ConfigParser(
+        interpolation=None, inline_comment_prefixes=(";", "#")
+    )
+    config.read(root / "platformio.ini", encoding="utf-8")
+
+    def option(section, key, seen=()):
+        pair = (section, key)
+        assert pair not in seen, f"cyclic recipe reference: {pair}"
+        seen = (*seen, pair)
+        if config.has_option(section, key):
+            return re.sub(
+                r"\$\{([^}]+)\}",
+                lambda match: option(*match[1].split(".", 1), seen),
+                config.get(section, key),
+            )
+        parents = config.get(section, "extends", fallback="").replace(",", " ").split()
+        # PlatformIO checks the last listed parent first.
+        for parent in reversed(parents):
+            value = option(parent, key, seen)
+            if value is not None:
+                return value
+        return None
+
+    profiles = []
     for variant_dir in sorted(s3_full_variant_dirs):
         path = root / "variants" / variant_dir / "platformio.ini"
-        content = path.read_text(encoding="utf-8")
-        for section in content.split("\n["):
-            header = section.split("]", 1)[0].lower()
-            if "companion_radio_full" not in header:
+        variant = configparser.ConfigParser(interpolation=None)
+        variant.read(path, encoding="utf-8")
+        config.read(path, encoding="utf-8")
+        for section in variant.sections():
+            if not section.startswith("env:") or "companion_radio_full" not in section.lower():
                 continue
-            profile_count += 1
-            assert (
-                "board_build.flash_mode = "
-                "${esp32_s3_full.board_build.flash_mode}"
-            ) in section, f"ESP32-S3 Full profile lacks shared DIO mode: {path}"
-            assert "esp32_s3_dual_cdc_full" not in section
-            if variant_dir != "heltec_rc32":
-                assert "55.03.311" not in section
-                assert "esp32-core-3.3.11" not in section
+            profiles.append((variant_dir, section))
 
-    assert profile_count == 18
+    def check_profile(variant_dir, section):
+        # Full aliases inherit the same boot policy as their canonical image.
+        # Check effective settings so local overrides and parent changes count.
+        assert option(section, "board_build.flash_mode") == "dio", section
+        if variant_dir == "heltec_rc32":
+            assert "55.03.311" in option(section, "platform"), section
+            assert "esp32-core-3.3.11" in option(section, "platform_packages"), section
+        else:
+            assert option(section, "platform") == "platformio/espressif32@6.11.0", section
+            assert option(section, "platform_packages") == option("esp32_base", "platform_packages"), section
+
+    assert len(profiles) == 18
+    for variant_dir, section in profiles:
+        check_profile(variant_dir, section)
+
+    # An alias must not hide a conflicting override behind its DIO parent.
+    alias = "env:heltec_v4_expansionkit_tft_companion_radio_full_femon"
+    config.set(alias, "board_build.flash_mode", "qio")
+    with TestCase().assertRaises(AssertionError):
+        check_profile("heltec_v4", alias)
+    config.set(alias, "board_build.flash_mode", "dio")
+    check_profile("heltec_v4", alias)
+
+    # A conflicting later parent must also fail, even when the first uses DIO.
+    config.remove_option(alias, "board_build.flash_mode")
+    config.add_section("mota_qio_control")
+    config.set("mota_qio_control", "board_build.flash_mode", "qio")
+    config.set(alias, "extends", config.get(alias, "extends") + ", mota_qio_control")
+    with TestCase().assertRaises(AssertionError):
+        check_profile("heltec_v4", alias)
 
 
 def test_tbeam_1w_release_hardware_fixes_are_preserved():
