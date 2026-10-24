@@ -78,8 +78,6 @@ struct NodePrefs {
 };
 @HELPERS@
 void ensureRxPowerSavingDefaults(uint32_t*, uint32_t*) {}
-void recalcRxPowerSavingFromLevel(uint8_t, uint8_t, float, uint8_t,
-                                uint32_t*, uint32_t*) {}
 @LEGACY@
 @SERIALIZER@
 @STORE@;
@@ -119,6 +117,9 @@ struct CommonCLI {
   void savePrefs(PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Common);
   bool trySavePrefs(PrefsSaveRouting::Scope scope = PrefsSaveRouting::Scope::Common);
   void loadPrefsInt(FILESYSTEM*, const char*);
+  // Persistence tests leave radio timing untouched. The separate RXPS
+  // capability suite exercises this production API and its timing model.
+  static bool recalculateRxPowerSavingFromLevel(NodePrefs*) { return false; }
   bool recoverCommonPrefsFiles(FILESYSTEM*);
   bool saveCommonPrefsImageAtomically(FILESYSTEM*);
   bool saveMQTTPrefs(FILESYSTEM*) { return true; }

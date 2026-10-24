@@ -1,3 +1,7 @@
+<!-- meshcore-hosted-doc-link:start -->
+<p class="meshcore-hosted-doc-link"><a href="https://mikecarper.github.io/MeshCore/test-results/2026-10-23-meshtext-full-defaults/">View this page on MeshCore Docs</a>.</p>
+<!-- meshcore-hosted-doc-link:end -->
+
 # Full Companion Meshtext defaults, 2026-10-23
 
 The T1000-E image originally installed on MercerWoodMesh did not expose
