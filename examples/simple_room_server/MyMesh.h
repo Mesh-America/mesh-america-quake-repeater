@@ -153,9 +153,10 @@ namespace mesh { class RoomJsonWriter; }
 #if ROOM_POSTS_RTC_SLOW_STORAGE != 0 && ROOM_POSTS_RTC_SLOW_STORAGE != 1
 #error "ROOM_POSTS_RTC_SLOW_STORAGE must be 0 or 1"
 #endif
-#if ROOM_POSTS_RTC_SLOW_STORAGE && (!defined(ESP32_PLATFORM) || !defined(LILYGO_TLORA) \
+#if ROOM_POSTS_RTC_SLOW_STORAGE && (!defined(ESP32_PLATFORM) \
+    || (!defined(LILYGO_TLORA) && !defined(TBEAM_SX1262) && !defined(TBEAM_SX1276)) \
     || !defined(MESHCORE_EXPANDED_PARTITION_PROFILE))
-#error "RTC slow Room posts require the qualified Full TLora ESP32 recipe"
+#error "RTC slow Room posts require a qualified Full TLora or Tbeam ESP32 recipe"
 #endif
 
 struct PostInfo {

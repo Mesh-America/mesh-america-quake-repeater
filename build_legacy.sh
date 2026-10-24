@@ -3872,7 +3872,8 @@ apply_esp32_iram_advert_storage_profile() {
     lilygo_tlora_v2_1_1_6_repeater_observer_mqtt|lilygo_tlora_v2_1_1_6_repeater_observer_mqtt_|\
     lilygo_tlora_v2_1_1_6_room_server|lilygo_tlora_v2_1_1_6_room_server_|\
     lilygo_tlora_v2_1_1_6_room_server_observer_mqtt|lilygo_tlora_v2_1_1_6_room_server_observer_mqtt_|\
-    tbeam_sx1262_repeater_observer_mqtt|tbeam_sx1276_repeater_observer_mqtt)
+    tbeam_sx1262_repeater_observer_mqtt|tbeam_sx1276_repeater_observer_mqtt|\
+    tbeam_sx1262_room_server_observer_mqtt|tbeam_sx1276_room_server_observer_mqtt)
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFLOOD_ADVERT_IRAM_WORD_STORAGE=1"
       ;;
   esac
@@ -3907,7 +3908,8 @@ apply_esp32_full_size_profile() {
 
   case "${env_name,,}" in
     lilygo_tlora_v2_1_1_6_room_server|lilygo_tlora_v2_1_1_6_room_server_|\
-    lilygo_tlora_v2_1_1_6_room_server_observer_mqtt|lilygo_tlora_v2_1_1_6_room_server_observer_mqtt_)
+    lilygo_tlora_v2_1_1_6_room_server_observer_mqtt|lilygo_tlora_v2_1_1_6_room_server_observer_mqtt_|\
+    tbeam_sx1262_room_server_observer_mqtt|tbeam_sx1276_room_server_observer_mqtt)
       # Preserve all 32 Room posts in genuine byte-accessible RTC SLOW memory.
       # The bounded proof implementation serves the same maximum 4096 leaves
       # without retaining the legacy 16 KiB leaf cache alongside Room services.

@@ -129,6 +129,41 @@ int main() {
                     f"-DENV_INCLUDE_BME680_BSEC={sensors}",
                 ])
 
+    def test_tbeam_full_rooms_preserve_maximum_source_and_bounded_ownership(self):
+        for board in ("TBEAM_SX1262", "TBEAM_SX1276"):
+            with self.subTest(board=board):
+                self.check_grouped_equivalence([
+                    "-DESP32_PLATFORM=1", "-D" + board + "=1", "-DBOARD_HAS_PSRAM=1",
+                    "-DOTA_BOUNDED_SOURCE_PROOFS=1",
+                ])
+
+    def test_tbeam_room_budget_changes_only_actual_source_workspace(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from check_firmware_ram import requirements
+        flags = dict(ENABLE_OTA=1, OTA_HEAP_CONTEXT=1, WITH_MQTT_BRIDGE=1,
+                     ADMIN_PASSWORD="password", BOARD_HAS_PSRAM=1,
+                     DISPLAY_CLASS="SSD1306Display", MESH_ENABLE_ROOM_FLOOD_RULE_ENGINE=1,
+                     MESHCORE_OTA_DEVICE_DEFLATE=1)
+        for radio in ("SX1262", "SX1276"):
+            with self.subTest(radio=radio):
+                target = "Tbeam_" + radio + "_room_server_observer_mqtt"
+                before = requirements("ESP32_PLATFORM", flags, target)
+                after = requirements("ESP32_PLATFORM", dict(flags, OTA_BOUNDED_SOURCE_PROOFS=1), target)
+                self.assertEqual(before["required_heap_bytes"], 212784)
+                self.assertEqual(after["required_heap_bytes"], 197936)
+                self.assertEqual(before["required_contiguous_bytes"], 18464)
+                self.assertEqual(after["required_contiguous_bytes"], 16400)
+                self.assertEqual(before["components"]["ota_generic_source_buffers"], 18464)
+                self.assertEqual(after["components"]["ota_generic_source_buffers"], 3616)
+                before_parts = dict(before["components"])
+                after_parts = dict(after["components"])
+                before_parts.pop("ota_generic_source_buffers")
+                after_parts.pop("ota_generic_source_buffers")
+                self.assertEqual(before_parts, after_parts)
+                self.assertEqual(before["mqtt"], after["mqtt"])
+                self.assertEqual(after_parts["allocation_and_transient_margin"], 16384)
+
     def test_tlora_full_room_preserves_maximum_source_and_bounded_ownership(self):
         self.check_grouped_equivalence([
             "-DESP32_PLATFORM=1", "-DLILYGO_TLORA=1", "-DOTA_BOUNDED_SOURCE_PROOFS=1",

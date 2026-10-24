@@ -131,13 +131,71 @@ int main(int argc,char** argv) {
                  (["-DROOM_POSTS_RTC_SLOW_STORAGE=1", "-DNRF52_PLATFORM=1"], False),
                  (["-DROOM_POSTS_RTC_SLOW_STORAGE=1", "-DESP32_PLATFORM=1"], False),
                  (["-DROOM_POSTS_RTC_SLOW_STORAGE=1", "-DESP32_PLATFORM=1", "-DLILYGO_TLORA=1",
-                   "-DMESHCORE_EXPANDED_PARTITION_PROFILE=1"], True))
+                   "-DMESHCORE_EXPANDED_PARTITION_PROFILE=1"], True),
+                 *((["-DROOM_POSTS_RTC_SLOW_STORAGE=1", "-DESP32_PLATFORM=1", "-D" + board + "=1",
+                     "-DMESHCORE_EXPANDED_PARTITION_PROFILE=1"], True)
+                   for board in ("TBEAM_SX1262", "TBEAM_SX1276")),
+                 *((["-DROOM_POSTS_RTC_SLOW_STORAGE=1", "-DESP32_PLATFORM=1", "-D" + board + "=1"], False)
+                   for board in ("LILYGO_TLORA", "TBEAM_SX1262", "TBEAM_SX1276")))
         for flags, valid in cases:
             with self.subTest(flags=flags):
                 result = subprocess.run([shutil.which("g++") or "clang++", "-std=c++17", "-x", "c++",
                                          "-fsyntax-only", *flags, "-"], input=policy + "\nint main() {}\n",
                                         capture_output=True, text=True, timeout=20)
                 self.assertEqual(result.returncode == 0, valid, result.stderr)
+
+    def test_only_qualified_full_room_recipes_select_complete_storage_policy(self):
+        text = (ROOT / "build_legacy.sh").read_text()
+        functions = []
+        for name in ("apply_esp32_full_size_profile", "apply_esp32_iram_advert_storage_profile"):
+            start = text.index(name + "() {")
+            functions.append(text[start:text.index("\n}\n", start) + 2])
+        targets = {
+            "Tbeam_SX1262_room_server_observer_mqtt": True,
+            "Tbeam_SX1276_room_server_observer_mqtt": True,
+            "LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt_": True,
+            "Tbeam_SX1262_room_server": False,
+            "Tbeam_SX1276_room_server": False,
+            "Tbeam_SX1262_repeater_observer_mqtt": False,
+            "Tbeam_SX1276_companion_radio_ble": False,
+            "T_Beam_S3_Supreme_SX1262_room_server_observer_mqtt": False,
+            "RAK_4631_room_server": False,
+        }
+        for full in ("0", "1"):
+            for supported in ("0", "1"):
+                for target, selected in targets.items():
+                    with self.subTest(full=full, supported=supported, target=target):
+                        code = r'''
+ESP32_FULL_BUILD="$1"
+QUALIFIED="$2"
+ESP32_FULL_MAX_NEIGHBOURS=254
+DRAM_LIMITED_MAX_NEIGHBOURS=50
+PLATFORMIO_BUILD_FLAGS="-DEXISTING=1"
+declare -A PIO_ENV_FULL_WIFI_OTA_BY_NAME=()
+supports_esp32_full_build() { [ "$QUALIFIED" = 1 ]; }
+is_room_server_role_target() { [[ "$1" == *room_server* ]]; }
+requires_dram_limited_neighbors() { [[ "$1" == Tbeam_SX12* ]]; }
+requires_esp32_companion_full_ota_fallback() { return 1; }
+append_platformio_build_unflags() { :; }
+record_build_reduction() { :; }
+''' + "\n".join(functions) + r'''
+apply_esp32_full_size_profile "$3"
+apply_esp32_iram_advert_storage_profile "$3"
+printf "%s" "$PLATFORMIO_BUILD_FLAGS"
+'''
+                        result = subprocess.run(["bash", "-c", code, "bash", full, supported, target],
+                                                capture_output=True, text=True, check=True, timeout=10)
+                        enabled = full == "1" and supported == "1" and selected
+                        flags = result.stdout.split()
+                        for name in ("ROOM_POSTS_RTC_SLOW_STORAGE", "OTA_BOUNDED_SOURCE_PROOFS"):
+                            self.assertEqual(flags.count("-D" + name + "=1"), int(enabled), result.stdout)
+                        if enabled:
+                            self.assertIn("-DFLOOD_ADVERT_IRAM_WORD_STORAGE=1", flags)
+                            self.assertNotIn("-DFLOOD_PACKET_FILTER_SLOTS=31", flags)
+                            self.assertIn("-DMESH_ENABLE_ROOM_FLOOD_RULE_ENGINE=1", flags)
+                            self.assertIn("-DMAX_NEIGHBOURS=" + ("50" if target.startswith("Tbeam_") else "254"), flags)
+                        self.assertNotIn("-DMAX_UNSYNCED_POSTS", result.stdout)
+                        self.assertNotIn("-DFLOOD_ADVERT_SOURCE_SLOTS", result.stdout)
 
     def test_real_post_fifo_history_reload_maximum_text_and_catchup(self):
         source, header, bank, initializer, clear, destructor, post = self.sources()
