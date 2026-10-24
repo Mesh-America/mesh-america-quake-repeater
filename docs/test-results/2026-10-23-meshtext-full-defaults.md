@@ -47,6 +47,19 @@ remains time-shared; these checks do not promise lossless simultaneous reception
 Private raw evidence and identity-bound flashing logs are retained under
 `/home/mesh/hwtest/mt-longfast-20261023` and the matching Pi directory.
 
+### Post-campaign device state
+
+The T1000-E and V4 were subsequently installed with pushed source `5aac9570b`.
+Both answered their identity/settings checks and exchanged Meshtext messages
+in both directions. V4 retains `mt.rebroadcast on`.
+
+Restoring the stock XIAO S3 WIO witness remains unfinished. Its original USB
+serial identity still enumerates, but CDC control requests fail with protocol
+error 71 and the stock serial API does not complete configuration. Software
+ROM-entry requests have not produced a verified ROM connection; no restore
+write was attempted without one. This is a recovery failure and is not counted
+as a qualified final MeshCore installation.
+
 ## Build and memory checks
 
 The T1000-E, V4.3 Full and Heltec V2 Full images passed linking, executable
@@ -67,6 +80,31 @@ packaging and override contracts, real-crypto protocol interoperability,
 224/128 queue ownership and wraparound, compact-message ACK/dedup/FIFO/retry
 behavior, and ESP-NOW initialization/fragmentation under sanitizers. CI now
 builds T1000-E and SX1276 Full plus constrained C3/C6/Tracker Full images.
+
+### CI follow-up
+
+The incoming CI baseline also failed the Tracker and Station G3 Full MQTT RAM
+checks. Their ESP-NOW TX queues retained both encoded frames and a complete
+packet used only for clearing an unsent duplicate-cache admission. Each slot
+now keeps the full encoded frames and an immutable hash/cache-domain token.
+All six slots, both fragments, retry paths and diagnostic behavior remain.
+The linked Tracker object shrank by 1632 bytes; RAM reserves were unchanged.
+
+| Build | Internal bytes available | Required | Result |
+| --- | ---: | ---: | --- |
+| Wireless Tracker Full MQTT | 224608 | 223410 | Pass |
+| Station G3 r2 Full MQTT, exact identity | 196744 | 195760 | Pass |
+| W12 LR2021 Full Companion | 224944 | 169760 | Pass |
+
+Native tests cover ordinary/ACK cache separation, TRACE keys, caller packet
+reuse, six-slot overflow, full fragment draining, failed admission retries,
+restart/timeout cleanup, and preserving admissions after a send has started.
+Stale preference and radio-diagnostics test fixtures were also brought up to
+the production APIs, and the hosted documentation links were repaired.
+
+The separate STM32 RAK3x72 USB Companion flash overflow was already present
+before this change (772 bytes in both baseline and feature CI). It remains
+unresolved; passing the builds above does not mean the entire workflow passes.
 
 LLCC68 still cannot use SF11 at BW250. Its manufacturer modulation limits
 exclude LongFast; enabling software cannot add that hardware mode.
