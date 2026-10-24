@@ -49,7 +49,8 @@ struct MyMesh {
   uint8_t out_frame[MAX_FRAME_SIZE]{};
   int offline_queue_len=0, offline_queue_head=0;
 #if defined(OTA_SHARED_COMPANION_QUEUE)
-  mesh::BorrowableFrameBuffer<Frame,OFFLINE_QUEUE_SIZE,128,mesh::ota::OtaContext> offline_queue;
+@OTA_RETAINED@
+  mesh::BorrowableFrameBuffer<Frame,OFFLINE_QUEUE_SIZE,OTA_RETAINED_OFFLINE_FRAMES,mesh::ota::OtaContext> offline_queue;
 #elif ONE_KEY_DM_SHARED_OFFLINE_QUEUE
   Frame offline_queue[OFFLINE_QUEUE_SIZE]{};
   unsigned held_dm_count=15;
@@ -337,6 +338,10 @@ printf '%s\n' "$PLATFORMIO_BUILD_FLAGS" "$PLATFORMIO_BUILD_UNFLAGS"
             source, re.MULTILINE))
         native = (ROOT / "test/test_serial_mode_switch/test_serial_mode_switch.cpp").read_text()
         harness = HARNESS.replace("@METHODS@", methods).replace("@CONSTANTS@", constants)
+        retained = re.search(
+            r"static constexpr unsigned OTA_RETAINED_OFFLINE_FRAMES = \d+;", header)
+        self.assertIsNotNone(retained)
+        harness = harness.replace("@OTA_RETAINED@", retained[0])
         harness = harness.replace("@STREAM@", extract_braced(native, "class BufferStream") + ";")
         harness = harness.replace("@FRAME@", extract_braced(header, "struct Frame {") + ";")
         harness = harness.replace("@SYNC@", extract_braced(source, "if (cmd_frame[0] == CMD_SYNC_NEXT_MESSAGE)"))

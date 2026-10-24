@@ -1259,7 +1259,10 @@ int main() {
 
     def test_affected_esp32_full_overlay_keeps_documented_capacity_and_transports(self):
         for target in ("Heltec_v3_companion_radio_full", "Xiao_C3_companion_radio_full",
+                       "Heltec_ct62_companion_radio_full",
                        "heltec_tracker_v2_companion_radio_full_femon",
+                       "heltec_tracker_v2_companion_radio_full_femoff",
+                       "generic_espnow_companion_radio_full",
                        "Heltec_Wireless_Paper_companion_radio_full"):
             result = subprocess.run(["bash", "-c", '''
 source build.sh
@@ -1280,7 +1283,16 @@ printf '%s\\n' "$PLATFORMIO_BUILD_FLAGS"
                     self.assertNotIn("-DOFFLINE_QUEUE_SIZE=", result.stdout)
                 else:
                     self.assertIn("-DOFFLINE_QUEUE_SIZE=224", result.stdout)
-                self.assertNotIn("-DOTA_SHARED_COMPANION_QUEUE", result.stdout)
+                if target in ("Xiao_C3_companion_radio_full", "Heltec_ct62_companion_radio_full",
+                              "heltec_tracker_v2_companion_radio_full_femon",
+                              "heltec_tracker_v2_companion_radio_full_femoff"):
+                    self.assertIn("-DOTA_SHARED_COMPANION_QUEUE=1", result.stdout)
+                    self.assertIn("-DONE_KEY_DM_COMPACT_HELD=1", result.stdout)
+                else:
+                    self.assertNotIn("-DOTA_SHARED_COMPANION_QUEUE", result.stdout)
+            if target in ("Heltec_v3_companion_radio_full", "generic_espnow_companion_radio_full",
+                          "Heltec_Wireless_Paper_companion_radio_full"):
+                self.assertNotIn("-DONE_KEY_DM_COMPACT_HELD", result.stdout)
             self.assertIn("-DWIFI_OTA_SEEDER=1", result.stdout)
             self.assertIn("-DBLE_PIN_CODE=123456", result.stdout)
 
