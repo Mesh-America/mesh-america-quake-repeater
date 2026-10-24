@@ -272,6 +272,8 @@ You can get the latitude and longitude from Google Maps by right-clicking the lo
 
 `password {new-password}`
 
+Repeaters and rooms send `CHANGE YOUR PASSWORD` to admins on login while the
+admin password still matches the firmware default.
 
 ### 3.4. Q: What is the password to join a room server?
 **A:** The default guest password to a room server is `hello`. Use the following command to change the guest password:

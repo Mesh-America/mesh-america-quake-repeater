@@ -2532,6 +2532,10 @@ Older Companion firmware is not a safe transport for this backup flow.
 
 **Default:** `password`
 
+Repeaters and room servers send `CHANGE YOUR PASSWORD` as a separate CLI reply
+after a successful admin radio login while the saved password still matches
+the build's `ADMIN_PASSWORD`. Saving a different password stops the warning.
+
 `get password` returns the current admin password only on a local connection:
 USB, Ethernet, or the authenticated LAN browser CLI. It is rejected over LoRa.
 ESP32 WiFi Companion instead reports management-password status without revealing

@@ -2,6 +2,7 @@
 """Execute the real room login/replay handlers against controlled storage faults."""
 
 from pathlib import Path
+import json
 import re
 import shutil
 import subprocess
@@ -36,6 +37,8 @@ HARNESS = r'''
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/LazyPersistence.h>
 #include <helpers/LogicalMessageCache.h>
+#include <helpers/DefaultPasswordWarning.h>
+#define ADMIN_PASSWORD "password"
 @CONSTANTS@
 @STR_HELPER@
 #define MESH_CLIENT_REPEATER_ONLY 0
@@ -190,8 +193,8 @@ struct MyMesh {
   mesh::Packet* createAck(uint32_t ack) { ++post_acks; response.payload_len = 4; memcpy(response.payload, &ack, 4); return &response; }
   mesh::Packet* createMultiAck(uint32_t ack, uint8_t) { return createAck(ack); }
   struct Prefs {
-    char password[32] = "admin";
-    char guest_password[32] = "guest";
+    char password[16] = "admin";
+    char guest_password[16] = "guest";
     bool allow_read_only = false;
     uint8_t direct_retry_enabled = 1;
   } _prefs;
@@ -201,6 +204,10 @@ struct MyMesh {
   uint8_t contacts_save_failures = 0, reply_data[32] = {};
   unsigned creations = 0, direct_sends = 0, flood_sends = 0, path_returns = 0;
   bool create_ok = true, queue_ok = true;
+  unsigned fail_creation_on = 0;
+  uint8_t created_type = 0;
+  struct Sent { uint8_t type; std::vector<uint8_t> data; unsigned long delay; bool direct; bool radio_reply; uint8_t hash_size; };
+  std::vector<Sent> sent;
   mesh::Packet response;
   uint8_t response_secret[PUB_KEY_SIZE] = {}, response_key[PUB_KEY_SIZE] = {};
   uint8_t returned_path[MAX_PATH_SIZE] = {}, direct_path[MAX_PATH_SIZE] = {};
@@ -218,13 +225,15 @@ struct MyMesh {
   mesh::Packet* createDatagram(uint8_t type, const mesh::Identity& sender,
                                const uint8_t* secret, const uint8_t* data, size_t len) {
     ++creations;
+    created_type = type;
+    response.radio_reply = false;
     assert(type == PAYLOAD_TYPE_RESPONSE || type == PAYLOAD_TYPE_TXT_MSG);
     assert(len <= sizeof(captured_reply));
     memcpy(response_key, sender.pub_key, PUB_KEY_SIZE);
     memcpy(response_secret, secret, PUB_KEY_SIZE);
     memcpy(captured_reply, data, len);
     captured_reply_length = len;
-    return create_ok ? &response : nullptr;
+    return create_ok && creations != fail_creation_on ? &response : nullptr;
   }
   mesh::Packet* createPathReturn(const mesh::Identity& sender, const uint8_t* secret,
       const uint8_t* path, uint8_t path_len, uint8_t type, const uint8_t* data, size_t len) {
@@ -235,17 +244,23 @@ struct MyMesh {
   }
   bool sendDirect(mesh::Packet* packet, const uint8_t* path, uint8_t path_len,
                   unsigned long delay) {
-    assert(packet == &response && (delay == SERVER_RESPONSE_DELAY || delay == TXT_ACK_DELAY));
+    assert(packet == &response && (delay == SERVER_RESPONSE_DELAY || delay == TXT_ACK_DELAY
+        || (packet->radio_reply && delay == SERVER_RESPONSE_DELAY + 2000UL)));
     assert(mesh::Packet::isValidPathLen(path_len));
     ++direct_sends;
     direct_path_len = path_len;
     memcpy(direct_path, path, (path_len & 63) * ((path_len >> 6) + 1));
+    if (queue_ok) sent.push_back({created_type, std::vector<uint8_t>(captured_reply,
+        captured_reply + captured_reply_length), delay, true, packet->radio_reply, 0});
     return queue_ok;
   }
   bool sendFloodReply(mesh::Packet* packet, unsigned long delay, uint8_t hash_size) {
-    assert(packet == &response && (delay == SERVER_RESPONSE_DELAY || delay == TXT_ACK_DELAY));
+    assert(packet == &response && (delay == SERVER_RESPONSE_DELAY || delay == TXT_ACK_DELAY
+        || (packet->radio_reply && delay == SERVER_RESPONSE_DELAY + 2000UL)));
     ++flood_sends;
     reply_hash_size = hash_size;
+    if (queue_ok) sent.push_back({created_type, std::vector<uint8_t>(captured_reply,
+        captured_reply + captured_reply_length), delay, false, packet->radio_reply, hash_size});
     return queue_ok;
   }
   bool store_ok = true;
@@ -275,7 +290,9 @@ struct MyMesh {
   bool onPeerPathRecv(mesh::Packet*, int, const uint8_t*, uint8_t*, uint8_t, uint8_t, uint8_t*, uint8_t);
   void onAnonDataRecv(mesh::Packet*, const uint8_t*, const mesh::Identity&,
                        uint8_t*, size_t);
+  void sendDefaultPasswordWarning(ClientInfo*, uint32_t, uint8_t);
 };
+@PASSWORD_WARNING@
 @LOGIN_HANDLER@
 @PEER_HANDLER@
 @PATH_HANDLER@
@@ -818,6 +835,52 @@ static void allRequestQuotaCases() {
   }
   puts("actual request quota covers status, telemetry, ACL, board, and exact payload retries passed");
 }
+static void useFactoryPassword(MyMesh& mesh) {
+  memset(mesh._prefs.password, 0, sizeof(mesh._prefs.password));
+  const size_t limit = sizeof(mesh._prefs.password) - 1;
+  const size_t length = strlen(ADMIN_PASSWORD) < limit ? strlen(ADMIN_PASSWORD) : limit;
+  memcpy(mesh._prefs.password, ADMIN_PASSWORD, length);
+}
+static void defaultPasswordWarnings() {
+  for (bool flood : {false, true}) {
+    MyMesh mesh; useFactoryPassword(mesh);
+    const uint32_t requested = mesh.clock.now + 2; // Force the warning timestamp collision guard.
+    login(mesh, mesh._prefs.password, requested, 0, flood);
+    assert(mesh.sent.size() == 2 && mesh.creations == 2);
+    const auto& response = mesh.sent[0]; const auto& warning = mesh.sent[1];
+    assert(response.type == PAYLOAD_TYPE_RESPONSE && response.data.size() == 13);
+    assert(response.data[4] == RESP_SERVER_LOGIN_OK && response.data[12] == FIRMWARE_VER_LEVEL);
+    assert(response.delay == SERVER_RESPONSE_DELAY);
+    assert(warning.type == PAYLOAD_TYPE_TXT_MSG && warning.data.size() == 25);
+    assert(warning.data[4] == (TXT_TYPE_CLI_DATA << 2));
+    assert(!memcmp(warning.data.data() + 5, "CHANGE YOUR PASSWORD", 20));
+    uint32_t timestamp; memcpy(&timestamp, warning.data.data(), 4);
+    assert(timestamp != requested && warning.radio_reply);
+    assert(warning.delay == SERVER_RESPONSE_DELAY + 2000UL && !warning.direct && warning.hash_size == 2);
+    assert(mesh.path_returns == (flood ? 1U : 0U));
+  }
+  MyMesh assigned; useFactoryPassword(assigned);
+  seedKnown(assigned, PERM_ACL_ADMIN); login(assigned, "");
+  assert(assigned.sent.size() == 2 && assigned.sent[1].direct);
+  for (unsigned failure = 0; failure < 7; ++failure) {
+    MyMesh mesh; useFactoryPassword(mesh);
+    const char* password = mesh._prefs.password;
+    if (failure == 0) { strcpy(mesh._prefs.password, "changed-secret"); password = "changed-secret"; }
+    if (failure == 1) password = "wrong";
+    if (failure == 2) password = "guest";
+    if (failure == 3) mesh.acl.storage.write_ok = false;
+    if (failure == 4) mesh.create_ok = false;
+    if (failure == 5) mesh.queue_ok = false;
+    if (failure == 6) mesh.fail_creation_on = 2;
+    login(mesh, password);
+    assert(mesh.sent.size() == (failure == 0 || failure == 2 || failure == 6 ? 1U : 0U));
+    for (const auto& sent : mesh.sent) assert(sent.type == PAYLOAD_TYPE_RESPONSE);
+  }
+  MyMesh replay; useFactoryPassword(replay);
+  login(replay, replay._prefs.password); login(replay, replay._prefs.password);
+  assert(replay.sent.size() == 2);
+  puts("default password warning follows successful admin login without changing the binary response passed");
+}
 int main(int argc, char** argv) {
   assert(argc == 2);
   if (!strcmp(argv[1], "authorization")) authorizationCases();
@@ -830,6 +893,7 @@ int main(int argc, char** argv) {
   else if (!strcmp(argv[1], "requests")) allRequestQuotaCases();
   else if (!strcmp(argv[1], "observed")) observedLoginPath();
   else if (!strcmp(argv[1], "reconnect")) reconnectCursor();
+  else if (!strcmp(argv[1], "default-password")) defaultPasswordWarnings();
   else assert(false);
 }
 '''
@@ -898,6 +962,7 @@ class RoomLoginIntegrationTests(unittest.TestCase):
                 room, "uint8_t MyMesh::getUnsyncedCount(")),
             "@ROOM_MAIL_STATUS@": extract_braced(room, "bool MyMesh::roomClientChatEnabled("),
             "@LOGIN_HANDLER@": extract_braced(room, "void MyMesh::onAnonDataRecv("),
+            "@PASSWORD_WARNING@": extract_braced(room, "void MyMesh::sendDefaultPasswordWarning("),
         }
         generated = HARNESS
         for marker, text in replacements.items():
@@ -929,6 +994,25 @@ class RoomLoginIntegrationTests(unittest.TestCase):
 
     def test_unknown_blank_read_only_disabled_passwords_and_payload_bounds(self):
         self.run_case("authorization", "real-handler credentials, disabled passwords, and minimum payload cases passed")
+
+    def test_default_password_admin_login_warns_after_the_binary_reply(self):
+        self.run_case("default-password", "default password warning follows successful admin login")
+
+    def test_custom_factory_password_and_bounded_long_factory_password(self):
+        for index, factory in enumerate(("factory-admin", "12345678901234567890")):
+            with self.subTest(factory=factory):
+                source = Path(self.directory.name) / ("factory-" + str(index) + ".cpp")
+                source.write_text(self.generated.replace('#define ADMIN_PASSWORD "password"',
+                    '#define ADMIN_PASSWORD ' + json.dumps(factory)))
+                binary = source.with_suffix("")
+                command = [str(source) if value == str(self.source)
+                           else str(binary) if value == str(self.binary) else value
+                           for value in self.compile_command]
+                built = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                checked = subprocess.run([str(binary), "default-password"],
+                                         capture_output=True, text=True, timeout=15)
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
     def test_non_demotion_all_roles_and_exact_replay_preserve_session(self):
         self.run_case("roles", "2048 real-handler preserved roles and replay rejects plus 256 admin upgrades passed")

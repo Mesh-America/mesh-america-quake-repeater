@@ -68,6 +68,8 @@ struct MyMesh {
   uint8_t handleAnonOwnerReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t);
   uint8_t handleAnonClockReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t);
   void onAnonDataRecv(mesh::Packet*, const uint8_t*, const mesh::Identity&, uint8_t*, size_t);
+  // Warning authorization/transport is exercised by the full login suites.
+  void sendDefaultPasswordWarning(ClientInfo*, uint32_t, uint8_t) {}
   uint8_t handleLoginReq(const mesh::Identity&, const uint8_t*, uint32_t timestamp,
                          const uint8_t* password, bool flood) {
     ++logins;

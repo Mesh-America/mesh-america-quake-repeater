@@ -2,6 +2,7 @@
 """Execute repeater guest authorization, saved toggles, and receive admission."""
 from pathlib import Path
 import re
+import json
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,8 @@ HARNESS = r'''
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 #include <helpers/GuestLoginSettings.h>
 #include <helpers/ClientLoginPersistence.h>
 #include <helpers/ClientPathObservation.h>
@@ -25,10 +28,15 @@ HARNESS = r'''
 #include <helpers/LazyPersistence.h>
 #include <helpers/FloodCommandAliases.h>
 #include <helpers/LoginHistory.h>
+#include <helpers/DefaultPasswordWarning.h>
 #define PUB_KEY_SIZE 32
 #define MAX_PATH_SIZE 64
 #define MAX_PACKET_PAYLOAD 184
 #define PAYLOAD_TYPE_ANON_REQ 0x07
+#define PAYLOAD_TYPE_RESPONSE 0x01
+#define PAYLOAD_TYPE_TXT_MSG 0x02
+#define TXT_TYPE_CLI_DATA 1
+#define ADMIN_PASSWORD "password"
 #define MAX_CLIENTS 16
 #define MESH_CLIENT_REPEATER_ONLY 1
 #define MESH_ENABLE_FLOOD_RULE_ENGINE 1
@@ -44,11 +52,19 @@ struct Identity {
 };
 struct Packet {
   bool direct = true;
+  bool radio_reply = false, path_return = false;
   uint8_t type = PAYLOAD_TYPE_ANON_REQ;
+  uint8_t path_len = 0, path[MAX_PATH_SIZE]{}, payload[MAX_PACKET_PAYLOAD]{};
+  size_t payload_len = 0;
   bool isRouteDirect() const { return direct; }
   bool isRouteFlood() const { return !direct; }
   uint8_t getPayloadType() const { return type; }
+  uint8_t getPathHashSize() const { return (path_len >> 6) + 1; }
+  static bool isValidPathLen(uint8_t);
+  static size_t writePath(uint8_t*, const uint8_t*, uint8_t);
 };
+@PACKET_HELPERS@
+@ROUTING_HELPERS@
 }
 @CLIENT_INFO@;
 struct ClientACL {
@@ -110,15 +126,57 @@ struct MyMesh {
   unsigned received = 0;
   unsigned anonymous_requests = 0;
   uint8_t reply_path_len = 0;
+  uint8_t reply_path[MAX_PATH_SIZE]{};
+  struct Sent { mesh::Packet packet; unsigned long delay; uint8_t hash_size; };
+  std::vector<Sent> sent;
+  mesh::Packet response;
+  unsigned creations = 0, path_returns = 0, client_replies = 0, fail_creation_on = 0;
+  bool create_ok = true, queue_ok = true;
+  bool metadata_reply = false;
   MyMesh() { assert(guest_login.begin(&fs)); }
   Clock* getRTCClock() { return &clock; }
   RNG* getRNG() { return &rng; }
   unsigned long futureMillis(unsigned long delay) { return 10000 + delay; }
   uint8_t handleLoginReq(const mesh::Identity&, const uint8_t*, uint32_t, const uint8_t*, bool);
   void onAnonDataRecv(mesh::Packet*, const uint8_t*, const mesh::Identity&, uint8_t*, size_t);
-  uint8_t handleAnonRegionsReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t) { ++anonymous_requests; return 0; }
-  uint8_t handleAnonOwnerReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t) { ++anonymous_requests; return 0; }
-  uint8_t handleAnonClockReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t) { ++anonymous_requests; return 0; }
+  void sendDefaultPasswordWarning(ClientInfo*, uint32_t, uint8_t);
+  mesh::Packet* createDatagram(uint8_t type, const mesh::Identity& to, const uint8_t* key,
+                               const uint8_t* data, size_t length) {
+    ++creations;
+    assert(length <= sizeof(response.payload));
+    assert(to.matches(acl.clients[0].id) && !memcmp(key, acl.clients[0].shared_secret, PUB_KEY_SIZE));
+    if (!create_ok || creations == fail_creation_on) return nullptr;
+    response = mesh::Packet{}; response.type = type; response.payload_len = length;
+    memcpy(response.payload, data, length); return &response;
+  }
+  mesh::Packet* createPathReturn(const mesh::Identity& to, const uint8_t* key,
+      const uint8_t*, uint8_t, uint8_t type, const uint8_t* data, size_t length) {
+    ++path_returns;
+    auto* packet = createDatagram(type, to, key, data, length);
+    if (packet) packet->path_return = true;
+    return packet;
+  }
+  bool sendDirect(mesh::Packet* packet, const uint8_t*, uint8_t length, unsigned long delay) {
+    assert(packet && mesh::Packet::isValidPathLen(length));
+    packet->direct = true; packet->path_len = length;
+    if (queue_ok) sent.push_back({*packet, delay, 0});
+    return queue_ok;
+  }
+  bool sendFloodReply(mesh::Packet* packet, unsigned long delay, uint8_t hash_size) {
+    assert(packet); packet->direct = false;
+    if (queue_ok) sent.push_back({*packet, delay, hash_size});
+    return queue_ok;
+  }
+  bool sendClientReply(ClientInfo* client, mesh::Packet* packet, unsigned long delay, uint8_t hash_size) {
+    ++client_replies;
+    assert(client);
+    return mesh::Packet::isValidPathLen(client->out_path_len)
+        ? sendDirect(packet, client->out_path, client->out_path_len, delay)
+        : sendFloodReply(packet, delay, hash_size);
+  }
+  uint8_t handleAnonRegionsReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t) { ++anonymous_requests; return metadata_reply ? 13 : 0; }
+  uint8_t handleAnonOwnerReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t) { ++anonymous_requests; return metadata_reply ? 13 : 0; }
+  uint8_t handleAnonClockReq(const mesh::Identity&, uint32_t, const uint8_t*, size_t) { ++anonymous_requests; return metadata_reply ? 13 : 0; }
   bool handleGuestCommand(const char*, char*, size_t);
   int searchPeersByHash(const uint8_t*);
   void onPeerDataRecv(mesh::Packet*, uint8_t, int, const uint8_t*, uint8_t*, size_t);
@@ -127,6 +185,7 @@ struct MyMesh {
   void dispatch(ClientInfo*, const char*, char*);
 };
 @LOGIN@
+@PASSWORD_WARNING@
 @ANONYMOUS@
 @COMMAND@
 @SEARCH@
@@ -408,6 +467,72 @@ static void anonymousRequestsAreNotLogins() {
   history(mesh, 1, 1, LoginResult::GuestsDisabled);
   assert(mesh.anonymous_requests == 3);
 }
+static void useFactoryPassword(MyMesh& mesh) {
+  memset(mesh._prefs.password, 0, sizeof(mesh._prefs.password));
+  const size_t limit = sizeof(mesh._prefs.password) - 1;
+  const size_t length = strlen(ADMIN_PASSWORD) < limit ? strlen(ADMIN_PASSWORD) : limit;
+  memcpy(mesh._prefs.password, ADMIN_PASSWORD, length);
+}
+static void defaultPasswordWarnings() {
+  const auto dispatch = [](MyMesh& mesh, const char* password, bool flood, uint32_t timestamp = 100) {
+    guest_metadata_fs = &mesh.fs;
+    uint8_t data[40]{}; memcpy(data, &timestamp, 4);
+    memcpy(data + 4, password, strlen(password));
+    mesh::Packet request; request.direct = !flood; request.path_len = 0x42;
+    mesh.onAnonDataRecv(&request, secret, identity(1), data, 4 + strlen(password));
+  };
+  for (bool flood : {false, true}) {
+    MyMesh mesh; useFactoryPassword(mesh);
+    dispatch(mesh, mesh._prefs.password, flood);
+    assert(mesh.sent.size() == 2 && mesh.creations == 2);
+    const auto& login = mesh.sent[0]; const auto& warning = mesh.sent[1];
+    assert(login.packet.type == PAYLOAD_TYPE_RESPONSE && login.packet.payload_len == 13);
+    assert(login.packet.payload[4] == RESP_SERVER_LOGIN_OK && login.packet.payload[12] == FIRMWARE_VER_LEVEL);
+    assert(login.delay == SERVER_RESPONSE_DELAY);
+    assert(warning.packet.type == PAYLOAD_TYPE_TXT_MSG && warning.packet.payload_len == 25);
+    assert(warning.packet.payload[4] == (TXT_TYPE_CLI_DATA << 2));
+    assert(!memcmp(warning.packet.payload + 5, "CHANGE YOUR PASSWORD", 20));
+    assert(warning.packet.radio_reply && warning.delay == SERVER_RESPONSE_DELAY + 2000UL);
+    assert(!warning.packet.direct && warning.hash_size == 2);
+    assert(mesh.path_returns == (flood ? 1U : 0U));
+    assert(mesh.client_replies == 0); // Unknown routes use the scoped flood reply boundary.
+  }
+  // An assigned administrator may reconnect without resending the password.
+  MyMesh assigned; useFactoryPassword(assigned);
+  add(assigned, 1, PERM_ACL_ADMIN); dispatch(assigned, "", false);
+  assert(assigned.sent.size() == 2 && assigned.sent[1].packet.direct);
+  assert(assigned.client_replies == 1);
+  assigned.metadata_reply = true;
+  uint8_t query[7]{}; query[4] = ANON_REQ_TYPE_OWNER;
+  mesh::Packet metadata;
+  assigned.onAnonDataRecv(&metadata, secret, identity(1), query, sizeof(query) - 1);
+  assert(assigned.sent.size() == 3 && assigned.client_replies == 1);
+  for (unsigned failure = 0; failure < 9; ++failure) {
+    MyMesh mesh; useFactoryPassword(mesh);
+    const char* password = mesh._prefs.password;
+    if (failure == 0) { strcpy(mesh._prefs.password, "changed-secret"); password = "changed-secret"; }
+    if (failure == 1) password = "wrong";
+    if (failure == 2) { assert(mesh.guest_login.setEnabled(true)); password = ""; }
+    if (failure == 3) mesh.acl.authorize_ok = false;
+    if (failure == 4) mesh.create_ok = false;
+    if (failure == 5) mesh.queue_ok = false;
+    if (failure == 6) { add(mesh, 1, PERM_ACL_FILTER_MGR); password = ""; }
+    if (failure == 7) mesh.acl.allocate_ok = false;
+    if (failure == 8) mesh.fail_creation_on = 2;
+    dispatch(mesh, password, false);
+    assert(mesh.sent.size() == (failure == 0 || failure == 2 || failure == 6 || failure == 8 ? 1U : 0U));
+    for (const auto& sent : mesh.sent) assert(sent.packet.type == PAYLOAD_TYPE_RESPONSE);
+  }
+  MyMesh replay; useFactoryPassword(replay);
+  dispatch(replay, replay._prefs.password, false);
+  dispatch(replay, replay._prefs.password, false);
+  assert(replay.sent.size() == 2);
+  MyMesh empty; auto* admin = add(empty, 1, PERM_ACL_ADMIN);
+  empty._prefs.password[0] = 0;
+  empty.sendDefaultPasswordWarning(admin, 100, 1);
+  empty.sendDefaultPasswordWarning(nullptr, 100, 1);
+  assert(empty.creations == 0 && empty.sent.empty());
+}
 int main(int argc, char** argv) {
   assert(argc == 2);
   if (!strcmp(argv[1], "passwords")) defaultsAndPasswords();
@@ -417,6 +542,7 @@ int main(int argc, char** argv) {
   else if (!strcmp(argv[1], "receive")) receiveAdmission();
   else if (!strcmp(argv[1], "history")) loginHistoryDecisions();
   else if (!strcmp(argv[1], "anonymous")) anonymousRequestsAreNotLogins();
+  else if (!strcmp(argv[1], "default-password")) defaultPasswordWarnings();
   else assert(false);
   printf("repeater guest %s passed\n", argv[1]);
 }
@@ -437,6 +563,10 @@ class RepeaterGuestAccessTests(unittest.TestCase):
         for name in ("FIRMWARE_VER_LEVEL", "RESP_SERVER_LOGIN_OK", "LAZY_CONTACTS_WRITE_DELAY",
                      "ANON_REQ_TYPE_REGIONS", "ANON_REQ_TYPE_OWNER", "ANON_REQ_TYPE_BASIC"):
             constants += "\n" + re.search(r"^#define\s+" + name + r"\s+.*$", source, re.MULTILINE).group()
+        constants += "\n" + re.search(
+            r"static constexpr uint32_t LOGIN_PATH_OBSERVATION_TIMEOUT_MS[^;]*;", source).group()
+        constants += "\n" + re.search(r"^\s*#define SERVER_RESPONSE_DELAY[^\n]*",
+            source, re.MULTILINE).group()
         manager_helpers = "\n".join(extract_braced(source, signature) for signature in (
             "static bool commandFamilyMatches(", "static bool commandListMatches(",
             "static bool isCommonManagerReadOnlyAllowed(", "static bool isRegionMgrAllowed(",
@@ -457,14 +587,20 @@ class RepeaterGuestAccessTests(unittest.TestCase):
         request = extract_braced(source, "int MyMesh::handleRequest(")
         request_admission = request[:request.index("  if (reply_capacity >")] + "++received; return 1;\n}"
         anonymous = extract_braced(source, "void MyMesh::onAnonDataRecv(")
-        anonymous = anonymous[:anonymous.index("    if (reply_len == 0) return;")] + "    (void)reply_len;\n  }\n}"
         cls.source_text = source
+        packet = (ROOT / "src/Packet.cpp").read_text()
+        routing = (ROOT / "src/helpers/RoutingPolicy.h").read_text()
         replacements = {
             "@CONSTANTS@": constants,
             "@CLIENT_INFO@": extract_braced(acl_header, "struct ClientInfo {"),
             "@REMOVE_GUESTS@": extract_braced(acl_source, "int ClientACL::removeGuestClients("),
             "@MANAGER_HELPERS@": manager_helpers,
             "@LOGIN@": extract_braced(source, "uint8_t MyMesh::handleLoginReq("),
+            "@PASSWORD_WARNING@": extract_braced(source, "void MyMesh::sendDefaultPasswordWarning("),
+            "@PACKET_HELPERS@": "\n".join(extract_braced(packet, signature) for signature in (
+                "bool Packet::isValidPathLen(", "size_t Packet::writePath(")),
+            "@ROUTING_HELPERS@": extract_braced(routing, "enum ReplyRoute") + ";\n"
+                + extract_braced(routing, "inline ReplyRoute chooseReplyRoute("),
             "@ANONYMOUS@": anonymous,
             "@COMMAND@": extract_braced(source, "bool MyMesh::handleGuestCommand("),
             "@SEARCH@": extract_braced(source, "int MyMesh::searchPeersByHash("),
@@ -485,15 +621,19 @@ class RepeaterGuestAccessTests(unittest.TestCase):
         sanitizer = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                       "-fno-omit-frame-pointer", "-fno-pie", "-no-pie"]
                      if sys.platform.startswith("linux") else [])
-        result = subprocess.run([
+        command = [
             compiler, "-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
             "-Wno-unused-parameter", "-Wno-sign-compare", "-Wno-misleading-indentation",
             "-DESP32_PLATFORM", "-DESP32", *sanitizer,
             "-I", str(FIXTURE / "mocks"), "-I", str(ROOT / "src"),
             str(cpp), str(ROOT / "src/helpers/GuestLoginSettings.cpp"), "-o", str(cls.binary),
-        ], capture_output=True, text=True, timeout=60)
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(result.stdout + result.stderr)
+        cls.generated = generated
+        cls.compile_command = command
+        cls.source = cpp
 
     def scenario(self, name):
         result = subprocess.run([str(self.binary), name], capture_output=True, text=True, timeout=15)
@@ -520,6 +660,25 @@ class RepeaterGuestAccessTests(unittest.TestCase):
 
     def test_only_login_requests_enter_history(self):
         self.scenario("anonymous")
+
+    def test_default_password_admin_login_warns_after_the_binary_reply(self):
+        self.scenario("default-password")
+
+    def test_custom_factory_password_and_bounded_long_factory_password(self):
+        for index, factory in enumerate(("factory-admin", "12345678901234567890")):
+            with self.subTest(factory=factory):
+                source = Path(self.work.name) / ("factory-" + str(index) + ".cpp")
+                source.write_text(self.generated.replace('#define ADMIN_PASSWORD "password"',
+                    '#define ADMIN_PASSWORD ' + json.dumps(factory)))
+                binary = source.with_suffix("")
+                command = [str(source) if value == str(self.source)
+                           else str(binary) if value == str(self.binary) else value
+                           for value in self.compile_command]
+                built = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                checked = subprocess.run([str(binary), "default-password"],
+                                         capture_output=True, text=True, timeout=15)
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
     def test_password_bytes_are_not_logged(self):
         login = extract_braced(self.source_text, "uint8_t MyMesh::handleLoginReq(")

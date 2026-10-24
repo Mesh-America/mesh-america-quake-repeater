@@ -73,7 +73,9 @@ struct MyMesh {
     return createDatagram(type, sender, secret, data, length);
   }
   bool sendFloodReply(mesh::Packet*, unsigned long, uint8_t) { return true; }
-  void sendDirect(mesh::Packet*, const uint8_t*, uint8_t, unsigned long) {}
+  bool sendDirect(mesh::Packet*, const uint8_t*, uint8_t, unsigned long) { return true; }
+  // The production warning sender is covered by RoomLoginIntegrationTests.
+  void sendDefaultPasswordWarning(ClientInfo*, uint32_t, uint8_t) {}
   static bool saveFilter(ClientInfo*);
   void onAnonDataRecv(mesh::Packet*, const uint8_t*, const mesh::Identity&, uint8_t*, size_t);
 };

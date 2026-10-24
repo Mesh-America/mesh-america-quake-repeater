@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/DefaultPasswordWarning.h>
 #if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
     && HELTEC_TFT_RUNTIME_ROTATION == 1
 #include <helpers/ui/DisplayRotationSettings.h>
@@ -656,6 +657,29 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
   reply_data[12] = FIRMWARE_VER_LEVEL;  // New field
 
   return 13;  // reply length
+}
+
+void MyMesh::sendDefaultPasswordWarning(ClientInfo* client,
+                                        uint32_t sender_timestamp,
+                                        uint8_t path_hash_size) {
+  if (client == NULL || !client->isAdmin()
+      || !mesh::defaultAdminPasswordUnchanged(
+          _prefs.password, ADMIN_PASSWORD, sizeof(_prefs.password))) return;
+  uint8_t data[5 + sizeof(mesh::DEFAULT_PASSWORD_LOGIN_WARNING) - 1];
+  uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+  if (timestamp == sender_timestamp) timestamp++;
+  memcpy(data, &timestamp, 4);
+  data[4] = TXT_TYPE_CLI_DATA << 2;
+  memcpy(data + 5, mesh::DEFAULT_PASSWORD_LOGIN_WARNING, sizeof(data) - 5);
+  mesh::Packet* warning = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id,
+                                        client->shared_secret, data, sizeof(data));
+  if (warning == NULL) return;
+  warning->radio_reply = true;
+  if (mesh::Packet::isValidPathLen(client->out_path_len)) {
+    sendClientReply(client, warning, SERVER_RESPONSE_DELAY + 2000UL, path_hash_size);
+  } else {
+    sendFloodReply(warning, SERVER_RESPONSE_DELAY + 2000UL, path_hash_size);
+  }
 }
 
 // Comparison functions for qsort() - defined at file scope to avoid heap allocations
@@ -2781,6 +2805,7 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
     memcpy(&timestamp, data, 4);
 
     data[len] = 0;  // ensure null terminator
+    const bool login_request = data[4] == 0 || data[4] >= ' ';
     uint8_t reply_len;
 
     reply_path_len = 0xFF;
@@ -2816,6 +2841,8 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
               *client, OUT_PATH_UNKNOWN,
               futureMillis(LOGIN_PATH_OBSERVATION_TIMEOUT_MS));
         }
+        if (login_request && login_path_sent)
+          sendDefaultPasswordWarning(client, timestamp, packet->getPathHashSize());
       }
       return;
     }
@@ -2823,13 +2850,16 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
     mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, secret, reply_data, reply_len);
     if (reply == NULL) return;
 
+    bool reply_queued;
     if (route == mesh::REPLY_ROUTE_DIRECT_SUPPLIED) {
-      sendDirect(reply, reply_path, reply_path_len, SERVER_RESPONSE_DELAY);
+      reply_queued = sendDirect(reply, reply_path, reply_path_len, SERVER_RESPONSE_DELAY);
     } else if (route == mesh::REPLY_ROUTE_DIRECT_OUT_PATH) {
-      sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
+      reply_queued = sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
     } else {
-      sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+      reply_queued = sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
     }
+    if (login_request && reply_queued)
+      sendDefaultPasswordWarning(client, timestamp, packet->getPathHashSize());
   }
 }
 

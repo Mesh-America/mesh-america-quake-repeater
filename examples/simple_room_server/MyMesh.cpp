@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/DefaultPasswordWarning.h>
 #if defined(HELTEC_V4_R8_TFT) && defined(HELTEC_TFT_RUNTIME_ROTATION) \
     && HELTEC_TFT_RUNTIME_ROTATION == 1
 #include <helpers/ui/DisplayRotationSettings.h>
@@ -1836,6 +1837,25 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
   return action;
 }
 
+void MyMesh::sendDefaultPasswordWarning(ClientInfo* client,
+                                        uint32_t sender_timestamp,
+                                        uint8_t path_hash_size) {
+  if (client == NULL || !client->isAdmin()
+      || !mesh::defaultAdminPasswordUnchanged(
+          _prefs.password, ADMIN_PASSWORD, sizeof(_prefs.password))) return;
+  uint8_t data[5 + sizeof(mesh::DEFAULT_PASSWORD_LOGIN_WARNING) - 1];
+  uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+  if (timestamp == sender_timestamp) timestamp++;
+  memcpy(data, &timestamp, 4);
+  data[4] = TXT_TYPE_CLI_DATA << 2;
+  memcpy(data + 5, mesh::DEFAULT_PASSWORD_LOGIN_WARNING, sizeof(data) - 5);
+  mesh::Packet* warning = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id,
+                                        client->shared_secret, data, sizeof(data));
+  if (warning == NULL) return;
+  warning->radio_reply = true;
+  sendClientReply(client, warning, SERVER_RESPONSE_DELAY + 2000UL, path_hash_size);
+}
+
 void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const mesh::Identity &sender,
                             uint8_t *data, size_t len) {
   if (!room_access.allowsIdentity(sender.pub_key)) return;
@@ -1934,23 +1954,27 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
 
     next_push = futureMillis(PUSH_NOTIFY_DELAY_MILLIS); // delay next push, give RESPONSE packet time to arrive first
 
+    bool login_reply_queued = false;
     if (packet->isRouteFlood()) {
       // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
       mesh::Packet *path = createPathReturn(sender, client->shared_secret, packet->path, packet->path_len,
                                             PAYLOAD_TYPE_RESPONSE, reply_data, 13);
-      if (path && sendFloodReply(path, SERVER_RESPONSE_DELAY, packet->getPathHashSize())) {
+      if (path && (login_reply_queued = sendFloodReply(
+          path, SERVER_RESPONSE_DELAY, packet->getPathHashSize()))) {
         mesh::beginObservedClientPath(*client, OUT_PATH_UNKNOWN, futureMillis(60000));
       }
     } else {
       mesh::Packet *reply = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, client->shared_secret, reply_data, 13);
       if (reply) {
         if (mesh::Packet::isValidPathLen(client->out_path_len)) { // we have an out_path, so send DIRECT
-          sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
+          login_reply_queued = sendDirect(reply, client->out_path, client->out_path_len, SERVER_RESPONSE_DELAY);
         } else {
-          sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+          login_reply_queued = sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
         }
       }
     }
+    if (login_reply_queued)
+      sendDefaultPasswordWarning(client, sender_timestamp, packet->getPathHashSize());
   }
 }
 

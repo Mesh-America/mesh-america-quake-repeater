@@ -462,6 +462,8 @@ protected:
   bool allowPacketForward(const mesh::Packet* packet) override;
   bool allowPacketTransmit(const mesh::Packet* packet) const override;
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender, uint8_t* data, size_t len) override;
+  void sendDefaultPasswordWarning(ClientInfo* client, uint32_t sender_timestamp,
+                                  uint8_t path_hash_size);
   int searchPeersByHash(const uint8_t* hash) override ;
   void getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) override;
   void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override;
