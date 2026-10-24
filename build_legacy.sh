@@ -4541,6 +4541,10 @@ apply_companion_radio_full_profile() {
     heltec_tracker_v2_companion_radio_full_*)
       append_platformio_build_unflags "-DMAX_CONTACTS=350 -DOFFLINE_QUEUE_SIZE=256"
       export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DMAX_CONTACTS=100 -DOFFLINE_QUEUE_SIZE=224"
+      # Reuse idle queue storage during explicit OTA; retain all 224 normal slots.
+      if [[ "${env_name,,}" != generic_espnow_companion_radio_full ]]; then
+        export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DOTA_SHARED_COMPANION_QUEUE=1 -DONE_KEY_DM_COMPACT_HELD=1"
+      fi
       record_build_reduction \
         "companion.capacity limited to 100 contacts for runtime RAM; 224 queued frames and all Full transports retained"
       ;;
@@ -4678,6 +4682,76 @@ copy_build_output() {
   cp -- "$source_path" "$output_path"
 }
 
+requires_meshtext_companion_code() {
+  local env_name=$1
+  local pio_env_name=$2
+  local decision_status=0
+  is_companion_radio_full_target "$env_name" || return 1
+
+  # Check the effective recipe and overlay, including explicit feature-off
+  # builds and the Indicator LoRa recipe's inherited ESP-NOW undefine.
+  python3 -c '
+import json, os, re, shlex, sys
+rows = {name: dict(options) for name, options in json.load(sys.stdin)}
+options = rows.get("env:" + sys.argv[1], {})
+
+def operations(value):
+    words = iter(shlex.split(value if isinstance(value, str) else "\n".join(map(str, value))))
+    result = []
+    for word in words:
+        if word in ("-D", "-U"):
+            word += next(words, "")
+        match = re.fullmatch(r"-([DU])(\w+)(?:=(.*))?", word)
+        if match:
+            result.append(match.groups())
+    return result
+
+flags = operations(options.get("build_flags", []))
+flags += operations(os.environ.get("PLATFORMIO_BUILD_FLAGS", ""))
+removed = set(operations(options.get("build_unflags", []))
+              + operations(os.environ.get("PLATFORMIO_BUILD_UNFLAGS", "")))
+flags = [flag for flag in flags if flag not in removed
+         and not (flag[0] == "D" and ("D", flag[1], None) in removed)]
+defines = {name: "1" if value is None else value
+           for kind, name, value in flags if kind == "D"}
+# PlatformIO emits CPPDEFINES before CCFLAGS, so every surviving -U wins.
+for kind, name, _value in flags:
+    if kind == "U":
+        defines.pop(name, None)
+
+def enabled(name, default=False, seen=()):
+    if name not in defines:
+        return default
+    if name in seen:
+        return None
+    value = defines[name].strip().strip("() ")
+    if value in ("false", "true"):
+        return value == "true"
+    if re.fullmatch(r"[A-Za-z_]\w*", value):
+        return enabled(value, False, (*seen, name))
+    number = re.fullmatch(r"([+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+))[uUlL]*", value)
+    if number:
+        value = number[1]
+        base = 16 if "x" in value.lower() else 8 if re.fullmatch(r"[+-]?0[0-7]+", value) else 10
+        return int(value, base) != 0
+    return None
+
+# Explicit enablement overrides the normal ESP-NOW exclusion, as in the header.
+# Unknown expressions retain the requirement rather than silently dropping it.
+if "MESH_ENABLE_MESHTEXT_CHAT" in defines:
+    required = enabled("MESH_ENABLE_MESHTEXT_CHAT") is not False
+else:
+    required = (enabled("COMPANION_RADIO_FULL", True) is not False
+                and enabled("MESH_PRIMARY_ESPNOW") is not True)
+sys.exit(0 if required else 3)
+' "$pio_env_name" <<<"$PIO_CONFIG_JSON" || decision_status=$?
+  case "$decision_status" in
+    0) return 0 ;;
+    3) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 write_build_capability_manifest() {
   local env_name=$1
   local env_platform=$2
@@ -4705,10 +4779,15 @@ write_build_capability_manifest() {
       || is_xiao_qspi_canonical_repeater_build "$env_name"; then
     checker_args+=(--require-ota)
   fi
-  if [ "$env_name" = "RAK_4631_companion_radio_full" ]; then
-    # This profile is offered for MeshTalk testing. Check executable codec and
-    # Companion transport definitions, not a channel name or CLI help string.
+  local meshtext_status=0
+  requires_meshtext_companion_code "$env_name" "$pio_env_name" || meshtext_status=$?
+  if [ "$meshtext_status" -eq 0 ]; then
+    # Every enabled Full LoRa Companion must retain executable codec and
+    # transport definitions, not merely a channel name or CLI help string.
     checker_args+=(--require-meshtext)
+  elif [ "$meshtext_status" -ne 1 ]; then
+    echo "Cannot determine the Full Companion Meshtext capability contract." >&2
+    return "$meshtext_status"
   fi
   if [ "$env_platform" = "ESP32_PLATFORM" ]; then
     checker_args+=(--firmware-bin "${build_output_dir}/firmware.bin"

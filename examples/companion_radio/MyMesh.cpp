@@ -567,9 +567,9 @@ uint16_t MyMesh::drainOfflineQueueForOta(void* owner) {
   MyMesh* mesh = static_cast<MyMesh*>(owner);
   uint8_t discarded[MAX_FRAME_SIZE];
   uint16_t removed = 0;
-  // Explicit OTA work borrows the upper half of this volatile queue. Keep the
-  // newest 128 frames and notify the UI for each oldest frame consumed.
-  while (mesh->offline_queue_len > 128) {
+  // Explicit OTA work borrows the queue's workspace region. Keep the newest
+  // retained frames and notify the UI for each oldest frame consumed.
+  while (mesh->offline_queue_len > static_cast<int>(OTA_RETAINED_OFFLINE_FRAMES)) {
     if (mesh->getFromOfflineQueue(discarded) <= 0) break;
     ++removed;
   }
@@ -1442,8 +1442,14 @@ bool MyMesh::onAddressedTextPacket(mesh::Packet* packet, uint8_t src_hash,
     uint8_t id[ONE_KEY_DM_ID_SIZE];
     makeOneKeyDMId(id, timestamp, text);
     for (uint8_t j = 0; j < held_dm_count; ++j) {
+#if ONE_KEY_DM_COMPACT_HELD
+      uint8_t held_id[ONE_KEY_DM_ID_SIZE];
+      makeOneKeyDMId(held_id, held_dms[j].timestamp, held_dms[j].text);
+#else
+      const uint8_t* held_id = held_dms[j].id;
+#endif
       if (memcmp(held_dms[j].sender_key, pub_key, PUB_KEY_SIZE) == 0 &&
-          memcmp(held_dms[j].id, id, ONE_KEY_DM_ID_SIZE) == 0) return true;
+          memcmp(held_id, id, ONE_KEY_DM_ID_SIZE) == 0) return true;
     }
 
     // Only verified and decryptable messages count toward the FIFO of 15.
@@ -1483,8 +1489,19 @@ bool MyMesh::onAddressedTextPacket(mesh::Packet* packet, uint8_t src_hash,
     }
     HeldOneKeyDM& entry = held_dms[held_dm_count++];
     memcpy(entry.sender_key, pub_key, PUB_KEY_SIZE);
+#if ONE_KEY_DM_COMPACT_HELD
+    entry.timestamp = timestamp;
+    // Preserve the exact ACK of the authenticated original plaintext,
+    // including its attempt/type byte; the delivery ID is derived separately.
+    mesh::Utils::sha256(entry.ack_hash, sizeof(entry.ack_hash), data,
+                        5 + strlen(text), pub_key, PUB_KEY_SIZE);
+    entry.path_len = packet->isRouteFlood() ? packet->path_len : 0xFF;
+    entry.snr = packet->_snr;
+    memcpy(entry.text, text, strlen(text) + 1);
+#else
     memcpy(entry.id, id, ONE_KEY_DM_ID_SIZE);
     entry.packet = *packet;
+#endif
 #endif
     return true;
   }
@@ -1541,6 +1558,19 @@ void MyMesh::releaseHeldOneKeyDMs() {
 #else
     if (offline_queue_len >= getOfflineQueueCapacity()) break;
 
+#if ONE_KEY_DM_COMPACT_HELD
+    uint8_t id[ONE_KEY_DM_ID_SIZE];
+    makeOneKeyDMId(id, entry.timestamp, entry.text);
+    if (!wasDeliveredOneKeyDM(entry.sender_key, id)) {
+      mesh::Packet packet;
+      packet.header = entry.path_len == 0xFF ? ROUTE_TYPE_DIRECT : ROUTE_TYPE_FLOOD;
+      packet.path_len = entry.path_len == 0xFF ? 0 : entry.path_len;
+      packet._snr = entry.snr;
+      onMessageRecv(*contact, &packet, entry.timestamp, entry.text);
+      rememberDeliveredOneKeyDM(entry.sender_key, id);
+    }
+    sendAckTo(*contact, entry.ack_hash, sizeof(entry.ack_hash));
+#else
     uint8_t data[MAX_PACKET_PAYLOAD + 1];
     const int decoded_len = mesh::Utils::MACThenDecrypt(
         contact->getSharedSecret(self_id), data, &entry.packet.payload[2],
@@ -1563,6 +1593,7 @@ void MyMesh::releaseHeldOneKeyDMs() {
         }
       }
     }
+#endif
     for (uint8_t j = i + 1; j < held_dm_count; ++j) held_dms[j - 1] = held_dms[j];
     --held_dm_count;
 #endif
@@ -2062,8 +2093,14 @@ void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t 
   bool replaced_held_dm = false;
 #endif
   for (uint8_t i = 0; i < held_dm_count; ++i) {
+#if ONE_KEY_DM_COMPACT_HELD
+    uint8_t held_id[ONE_KEY_DM_ID_SIZE];
+    makeOneKeyDMId(held_id, held_dms[i].timestamp, held_dms[i].text);
+#else
+    const uint8_t* held_id = held_dms[i].id;
+#endif
     if (memcmp(held_dms[i].sender_key, from.id.pub_key, PUB_KEY_SIZE) == 0 &&
-        memcmp(held_dms[i].id, dm_id, ONE_KEY_DM_ID_SIZE) == 0) {
+        memcmp(held_id, dm_id, ONE_KEY_DM_ID_SIZE) == 0) {
 #if ONE_KEY_DM_SHARED_OFFLINE_QUEUE
       // Removing the held frame frees exactly one ordinary slot for this retry.
       removeHeldOneKeyDM(i);

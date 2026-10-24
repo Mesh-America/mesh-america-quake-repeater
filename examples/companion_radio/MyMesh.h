@@ -124,6 +124,18 @@ namespace mesh { class BeaconManager; }
 #define ONE_KEY_DM_SHARED_OFFLINE_QUEUE 0
 #endif
 
+// Constrained Full recipes may retain only the authenticated plain DM data.
+// This is independent of the ordinary offline queue and its OTA workspace.
+#ifndef ONE_KEY_DM_COMPACT_HELD
+#define ONE_KEY_DM_COMPACT_HELD 0
+#endif
+#if ONE_KEY_DM_COMPACT_HELD != 0 && ONE_KEY_DM_COMPACT_HELD != 1
+#error "ONE_KEY_DM_COMPACT_HELD must be 0 or 1"
+#endif
+#if ONE_KEY_DM_COMPACT_HELD && ONE_KEY_DM_SHARED_OFFLINE_QUEUE
+#error "Compact held DMs and shared held-DM queue storage are separate policies"
+#endif
+
 #ifndef OFFLINE_QUEUE_SIZE
 #if defined(ESP32_PLATFORM) && defined(BOARD_HAS_PSRAM)
 #define OFFLINE_QUEUE_SIZE 512
@@ -955,8 +967,13 @@ private:
   // Local onboarding only: RAM-backed like the receive queue, not RF traffic.
   uint8_t pending_emergency_notices[(MAX_GROUP_CHANNELS + 7) / 8] = {};
 #if defined(OTA_SHARED_COMPANION_QUEUE)
-  static_assert(OFFLINE_QUEUE_SIZE == 256, "Shared mOTA queue requires 256 normal slots");
-  mesh::BorrowableFrameBuffer<Frame, OFFLINE_QUEUE_SIZE, 128, mesh::ota::OtaContext> offline_queue;
+  static constexpr unsigned OTA_RETAINED_OFFLINE_FRAMES = 128;
+  static_assert(OFFLINE_QUEUE_SIZE > OTA_RETAINED_OFFLINE_FRAMES,
+                "Shared mOTA queue must retain 128 frames and provide workspace storage");
+  // The buffer also asserts that the complete context fits in the remaining
+  // frames. Constrained ESP32 recipes keep 224 normal slots; nRF52 and Paper keep 256.
+  mesh::BorrowableFrameBuffer<Frame, OFFLINE_QUEUE_SIZE,
+                             OTA_RETAINED_OFFLINE_FRAMES, mesh::ota::OtaContext> offline_queue;
   static mesh::ota::OtaContext* acquireOfflineQueueForOta(void* owner);
   static uint16_t drainOfflineQueueForOta(void* owner);
   static void releaseOfflineQueueFromOta(void* owner);
@@ -1021,11 +1038,23 @@ private:
   uint8_t verified_pending_count = 0;
   struct HeldOneKeyDM {
     uint8_t sender_key[PUB_KEY_SIZE];
+#if ONE_KEY_DM_COMPACT_HELD
+    uint32_t timestamp;
+    uint8_t ack_hash[4];
+    uint8_t path_len;
+    int8_t snr;
+    char text[MAX_TEXT_LEN + 1];
+#else
     uint8_t id[ONE_KEY_DM_ID_SIZE];
 #if !ONE_KEY_DM_SHARED_OFFLINE_QUEUE
     mesh::Packet packet;
 #endif
+#endif
   };
+#if ONE_KEY_DM_COMPACT_HELD
+  static_assert(sizeof(HeldOneKeyDM) <= PUB_KEY_SIZE + MAX_TEXT_LEN + 12,
+                "Compact held DMs must not retain a complete packet or duplicate ID");
+#endif
   HeldOneKeyDM held_dms[MAX_HELD_ONE_KEY_DMS];
   uint8_t held_dm_count = 0;
   struct DeliveredOneKeyDM {

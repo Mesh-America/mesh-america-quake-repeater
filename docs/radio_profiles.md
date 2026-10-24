@@ -568,6 +568,9 @@ accepts an `mt-` name; a factory reset cannot add code omitted from an image.
 The common default and modem support do not establish physical qualification
 for every board. Each release image must still pass its flash and runtime RAM
 budgets, and hardware interoperability must be checked separately.
+For example, [LLCC68 modulation limits](https://www.semtech.com/products/wireless-rf/lora-connect/llcc68)
+exclude LongFast (SF11 at BW250): enabling the backend cannot add that modem
+combination. Compatible presets such as MediumSlow or LongTurbo remain available.
 
 In an enabled build, an `mt-` name always requests Meshtext, even if radio2 is
 off or setup is blocked. It never falls back to sending MeshCore frames. In a

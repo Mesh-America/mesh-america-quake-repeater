@@ -152,10 +152,10 @@ class ESPNowRawReassemblerT {
  public:
   static_assert(SlotCount > 0, "ESP-NOW reassembly needs at least one slot");
 
-  explicit ESPNowRawReassemblerT(uint32_t timeout_ms = 2000)
-      : _timeout_ms(timeout_ms) {
-    reset();
-  }
+  // Constant initialization also lets the linker discard the primary-radio
+  // workspace when this shared source is compiled into a LoRa-only image.
+  explicit constexpr ESPNowRawReassemblerT(uint32_t timeout_ms = 2000)
+      : _timeout_ms(timeout_ms), _slots{} {}
 
   void reset() {
     memset(_slots, 0, sizeof(_slots));

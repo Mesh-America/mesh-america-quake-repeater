@@ -1,6 +1,7 @@
 """Qualify linked chat code and ship its MIT notice without touching firmware."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import struct
@@ -42,6 +43,107 @@ def elf32(path, symbols=SYMBOLS, flags=6, undefined=(), zero=()):
 
 
 class MeshtextLicenseTest(unittest.TestCase):
+    def builder_contract(self, target, platform, *, flags=(), overlay="", unflags="",
+                         config_unflags=(), symbols=("unrelated_defined_function",), invalid_config=False):
+        with tempfile.TemporaryDirectory(prefix="meshtext-build-contract-") as folder:
+            root = Path(folder)
+            build = root / "build/base"
+            build.mkdir(parents=True)
+            elf32(build / "firmware.elf", symbols=symbols)
+            config = [["env:base", [["build_flags", ["-DCOMPANION_RADIO_FULL=1", *flags]],
+                                    ["build_unflags", list(config_unflags)]]]]
+            script = r'''
+set -euo pipefail
+pio() { printf 'unexpected PlatformIO invocation\n' >&2; return 99; }
+source build.sh
+PIO_ENV_PLATFORM_BY_NAME[$1]=$2
+PIO_CONFIG_JSON=$MESH_TEST_CONFIG
+OUTPUT_DIR=$MESH_TEST_DIRECTORY/out
+PIO_BUILD_DIR_OVERRIDE=$MESH_TEST_DIRECTORY/build
+BUILD_PROFILE_FOR_TARGET=full
+BUILD_RECIPE_SHA256=test
+BUILD_CAPABILITIES=(); BUILD_EXPECTATIONS=()
+BUILD_APPLICATION_EXPECTATIONS=(); BUILD_REDUCTIONS=()
+requires_wireless_self_update() { return 1; }
+is_xiao_qspi_canonical_repeater_build() { return 1; }
+is_nrf52_sensor_ota_pair_target() { return 1; }
+embedded_bootloader_artifact_target() { printf '%s\n' "$1"; }
+python3() {
+  # Only the unrelated recipe attachment is substituted. The real builder
+  # decision and ELF capability checker must reject omitted chat code.
+  if [ "$1" = scripts/firmware_build_recipe.py ]; then return 0; fi
+  command "$MESH_TEST_PYTHON" "$@"
+}
+write_build_capability_manifest "$1" "$2" base fixture
+'''
+            result = subprocess.run(["bash", "-c", script, "meshtext-contract", target, platform],
+                cwd=ROOT, text=True, capture_output=True, env={**os.environ,
+                    "MESH_TEST_CONFIG": "invalid JSON" if invalid_config else json.dumps(config),
+                    "MESH_TEST_DIRECTORY": str(root), "MESH_TEST_PYTHON": sys.executable,
+                    "PLATFORMIO_BUILD_FLAGS": overlay, "PLATFORMIO_BUILD_UNFLAGS": unflags})
+            manifest = root / "out/fixture.capabilities.json"
+            return result, json.loads(manifest.read_text()) if manifest.exists() else None
+
+    def test_builder_requires_real_chat_on_every_full_companion_family(self):
+        for target, platform in (
+            ("RAK_4631_companion_radio_full", "NRF52_PLATFORM"),
+            ("RAK_3401_companion_radio_full", "NRF52_PLATFORM"),
+            ("t1000e_companion_radio_full", "NRF52_PLATFORM"),
+            ("Xiao_nrf52_companion_radio_full", "NRF52_PLATFORM"),
+            ("Heltec_v2_companion_radio_full", "ESP32_PLATFORM"),
+            ("heltec_v4_companion_radio_full_femon", "ESP32_PLATFORM"),
+            ("Xiao_C3_companion_radio_full", "ESP32_PLATFORM"),
+            ("Xiao_C6_companion_radio_full_", "ESP32_PLATFORM"),
+        ):
+            with self.subTest(target=target):
+                result, manifest = self.builder_contract(target, platform)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertFalse(manifest["verified"])
+                self.assertIn("promised", result.stderr)
+        result, manifest = self.builder_contract("t1000e_companion_radio_full", "NRF52_PLATFORM",
+                                                 symbols=SYMBOLS)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(manifest["verified"])
+        self.assertIn(license.CAPABILITY, manifest["capabilities"])
+
+    def test_builder_preserves_effective_feature_overrides_and_espnow_exclusion(self):
+        cases = (
+            (dict(flags=["-DMESH_ENABLE_MESHTEXT_CHAT=0"]), False),
+            (dict(overlay="-D MESH_ENABLE_MESHTEXT_CHAT=0"), False),
+            (dict(flags=["-DMESH_ENABLE_MESHTEXT_CHAT=0"], overlay="-DMESH_ENABLE_MESHTEXT_CHAT=1"), True),
+            (dict(flags=["-DMESH_ENABLE_MESHTEXT_CHAT=1"], overlay="-DMESH_ENABLE_MESHTEXT_CHAT=0"), False),
+            (dict(flags=["-DMESH_PRIMARY_ESPNOW=1"]), False),
+            (dict(flags=["-DMESH_PRIMARY_ESPNOW=1", "-UMESH_PRIMARY_ESPNOW"]), True),
+            (dict(flags=["-DMESH_PRIMARY_ESPNOW=1"], overlay="-DMESH_PRIMARY_ESPNOW=0"), True),
+            (dict(flags=["-DMESH_PRIMARY_ESPNOW=1", "-DMESH_ENABLE_MESHTEXT_CHAT=1"]), True),
+            (dict(flags=["-DMESH_ENABLE_MESHTEXT_CHAT=0"], overlay="-UMESH_ENABLE_MESHTEXT_CHAT"), True),
+            (dict(flags=["-DMESH_ENABLE_MESHTEXT_CHAT=0"], unflags="-D MESH_ENABLE_MESHTEXT_CHAT=0"), True),
+            (dict(flags=["-DMESH_ENABLE_MESHTEXT_CHAT=0"], config_unflags=["-DMESH_ENABLE_MESHTEXT_CHAT"]), True),
+            (dict(flags=["-DMESH_PRIMARY_ESPNOW=1", "-UMESH_PRIMARY_ESPNOW"],
+                  config_unflags=["-UMESH_PRIMARY_ESPNOW"]), False),
+            (dict(flags=["-DCHAT_POLICY=0", "-DMESH_ENABLE_MESHTEXT_CHAT=CHAT_POLICY"]), False),
+            (dict(flags=["-DMESH_ENABLE_MESHTEXT_CHAT=(0UL)"]), False),
+            (dict(flags=["-DCOMPANION_RADIO_FULL=0"]), False),
+        )
+        for options, required in cases:
+            with self.subTest(options=options):
+                result, manifest = self.builder_contract("Heltec_v2_companion_radio_full",
+                                                         "ESP32_PLATFORM", **options)
+                self.assertEqual(result.returncode, int(required), result.stdout + result.stderr)
+                self.assertEqual(manifest["verified"], not required)
+        for target, platform in (("t1000e_companion_radio_usb", "NRF52_PLATFORM"),
+                                 ("PicoW_companion_radio_full", "RP2040_PLATFORM"),
+                                 ("RAK_3x72_companion_radio_full", "STM32_PLATFORM")):
+            with self.subTest(target=target):
+                result, manifest = self.builder_contract(target, platform)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(manifest["verified"])
+        result, manifest = self.builder_contract("Heltec_v2_companion_radio_full", "ESP32_PLATFORM",
+                                                 invalid_config=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIsNone(manifest)
+        self.assertIn("Cannot determine", result.stderr)
+
     def qualify(self, build, stem):
         output = stem.parent / (stem.name + ".capabilities.json")
         result = subprocess.run([sys.executable, str(ROOT / "scripts/check_firmware_capabilities.py"),

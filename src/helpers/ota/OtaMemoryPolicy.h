@@ -24,6 +24,9 @@
 
 // Qualified Full Companions stream host-provided firmware and need no permanent
 // mOTA workspace. Apply the same policy to build.sh and direct PlatformIO builds.
+// Other qualified recipes, including the constrained ESP32 224-frame queue, opt in through
+// OTA_SHARED_COMPANION_QUEUE. The queue checks the complete context size against
+// its actual upper region and retains the same 128 frames during explicit OTA.
 #if defined(OTA_SEEDER_ONLY) && defined(COMPANION_RADIO_FULL) && \
     (defined(NRF52_PLATFORM) || \
      (defined(ESP32_PLATFORM) && defined(HELTEC_WIRELESS_PAPER)))
