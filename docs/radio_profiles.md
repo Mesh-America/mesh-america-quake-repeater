@@ -556,11 +556,18 @@ download can discard it.
 ### Meshtext channel chat
 
 `MESH_ENABLE_MESHTEXT_CHAT` enables the text-only Meshtext backend in the
-Companion. It defaults on for ESP32-S3 **Full Companion** builds using
-SX1262 LoRa and for the RAK4631 **Full Companion** starting with 1.17.1.10
-preview3. An ESP-NOW primary and other builds default off. RAK4631 1.17.1.10
-preview2 and earlier builds did not include this backend. This is not
-a replacement for stock peer firmware or a cross-protocol bridge.
+Companion. It defaults on for **Full Companion** builds on ESP32 and nRF52,
+including classic ESP32, C3, C6, S3, T1000-E, XIAO nRF52, RAK3401, Nano G2,
+T114 and the other Full families. The installed radio driver must support
+Meshtext and the selected frequency/modulation. An ESP-NOW primary, non-Full
+builds, and other platforms default off; an explicit build override is retained.
+This default replaces the earlier ESP32-S3/SX1262 and RAK4631-only scope.
+Older images can therefore lack the backend even when their channel editor
+accepts an `mt-` name; a factory reset cannot add code omitted from an image.
+
+The common default and modem support do not establish physical qualification
+for every board. Each release image must still pass its flash and runtime RAM
+budgets, and hardware interoperability must be checked separately.
 
 In an enabled build, an `mt-` name always requests Meshtext, even if radio2 is
 off or setup is blocked. It never falls back to sending MeshCore frames. In a
