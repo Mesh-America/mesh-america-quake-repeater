@@ -5,7 +5,8 @@ The ARM SVC adapter is replaced by a failing trap, and the EndF stub refuses
 installation before hardware access. Real CRC-bound installed manifests test
 the version check; a controlled digest exercises the exact candidate no-op.
 This tests scheduling and cancellation, not cryptography, MBR copying or
-power-loss recovery; those require separate qualification.
+power-loss recovery; those require separate qualification. The durable-store
+boundary is modeled here and tested against real file faults separately.
 """
 import os
 from pathlib import Path
@@ -39,6 +40,84 @@ class MigrationRuntimeTests(unittest.TestCase):
 
     def run_scenario(self, scenario):
         subprocess.run([str(self.binary), scenario], check=True)
+
+    def test_recovery_unknown_or_damaged_bootloaders_require_an_explicit_command(self):
+        for scenario in ('automatic-recovery-prefix', 'automatic-recovery-suffix',
+                         'automatic-unlabelled-loader', 'automatic-ambiguous-loader',
+                         'automatic-foreign-loader', 'automatic-damaged-loader'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_same_firmware_remains_locked_after_a_cold_boot(self):
+        for scenario in ('durable-same-firmware-cold-boot',
+                         'durable-same-firmware-old-loader'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_new_image_classification_interruption_is_locked_before_reboot(self):
+        self.run_scenario('previous-image-interrupted-classification')
+
+    def test_a_different_full_firmware_hash_allows_a_new_automatic_check(self):
+        for scenario in ('durable-different-firmware',
+                         'durable-different-firmware-failure-marker'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_missing_or_failed_durable_state_refuses_a_genuine_update(self):
+        for scenario in ('automatic-store-unavailable', 'automatic-store-null',
+                         'automatic-invalid-application', 'automatic-store-write-failure'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_automatic_update_waits_70_seconds_then_observes_install_grace(self):
+        for scenario in ('automatic-delay', 'automatic-arm-enabled'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_automatic_update_defers_until_radio_and_ota_are_idle(self):
+        self.run_scenario('automatic-busy')
+
+    def test_automatic_update_skips_same_or_newer_version_and_exact_image(self):
+        for scenario in ('automatic-same-version', 'automatic-same-version-enabled',
+                         'automatic-newer-version',
+                         'automatic-exact-image'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_retained_failure_prevents_automatic_retry_but_allows_manual_retry(self):
+        self.run_scenario('automatic-retained-failure')
+
+    def test_manual_attempt_prevents_a_second_automatic_attempt(self):
+        for scenario in ('manual-cancel-consumes-automatic',
+                         'manual-failure-consumes-automatic'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_cancelled_automatic_update_is_not_rearmed(self):
+        self.run_scenario('automatic-cancel')
+
+    def test_invalid_confirmation_does_not_cancel_the_automatic_update(self):
+        self.run_scenario('invalid-confirmation-preserves-automatic')
+
+    def test_reboot_guard_is_written_through_softdevice_before_arming(self):
+        self.run_scenario('guard-softdevice-enabled')
+
+    def test_reboot_guard_read_errors_block_the_automatic_attempt(self):
+        for scenario in ('automatic-status-read-failure', 'automatic-marker-read-failure'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_reboot_guard_api_failures_refuse_to_arm(self):
+        for scenario in ('guard-softdevice-status-failure', 'guard-marker-read-failure',
+                         'guard-clear-failure',
+                         'guard-set-failure'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
+
+    def test_reset_during_check_or_armed_attempt_cannot_create_an_update_loop(self):
+        for scenario in ('automatic-interrupted-check', 'automatic-interrupted-arm'):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario)
 
     def test_wrong_confirmation_cannot_arm(self):
         self.run_scenario('wrong-confirmation')
@@ -94,6 +173,26 @@ class MigrationRuntimeTests(unittest.TestCase):
             result = subprocess.run([str(binary), 'same-version'], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('!bootloader_migration_pending()', result.stderr)
+
+    def test_negative_control_automatic_check_must_lock_before_classification(self):
+        driver = (ROOT / 'src/helpers/ota/BootloaderMigration.cpp').read_text()
+        start = driver.index('void bootloader_migration_tick(')
+        changed_tick = driver[start:].replace(
+            'if (!lock_automatic_for_firmware()) {', 'if (false) {', 1)
+        self.assertNotEqual(driver[start:], changed_tick)
+        changed = driver[:start] + changed_tick
+        harness = (STUBS / 'runtime.cpp').read_text().replace(
+            '#include "helpers/ota/BootloaderMigration.cpp"', changed)
+        with tempfile.TemporaryDirectory(prefix='migration-auto-lock-negative-') as directory:
+            directory = Path(directory)
+            source = directory / 'runtime.cpp'
+            source.write_text(harness)
+            binary = self.compile(directory, source)
+            result = subprocess.run(
+                [str(binary), 'previous-image-interrupted-classification'],
+                capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('durable_lock_present && store_writes == 1', result.stderr)
 
     def test_grace_and_radio_drain_are_both_required(self):
         self.run_scenario('grace-and-drain')

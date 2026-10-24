@@ -654,6 +654,12 @@ public:
     return mesh::wireless::WiFi;
   }
   void loop();
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  bool prepareForOtaReboot() override {
+    // Let the normal ACL save finish, including its failure backoff.
+    return dirty_contacts_expiry == 0;
+  }
+#endif
   bool canRecoverUsbLogging() const {
     return dirty_contacts_expiry == 0 && !hasOutbound() && !isAnyTempRadioActive()
         && !hasPendingOtaApply() && !saved_radio_apply_pending

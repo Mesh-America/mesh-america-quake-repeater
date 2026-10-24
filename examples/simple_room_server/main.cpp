@@ -18,6 +18,9 @@
 #endif
 
 #include "MyMesh.h"
+#if defined(OTA_BOOTLOADER_MIGRATION)
+#include <helpers/ota/BootloaderMigration.h>
+#endif
 
 #if defined(ESP32_PLATFORM)
   #include <helpers/ESP32TrueRandom.h>
@@ -253,6 +256,9 @@ void setup() {
   sensors.begin();
 
   the_mesh.begin(fs);
+#if defined(OTA_BOOTLOADER_MIGRATION)
+  mesh::ota::bootloader_migration_begin(volatile_primary_fs ? nullptr : fs);
+#endif
 
 #if defined(NRF52_PLATFORM)
   mesh::loadUsbLoggingWatchdog(fs, !volatile_primary_fs,

@@ -47,9 +47,73 @@ static Snapshot good() {
   s.app_image_size=s.app_body_size+ENDF_LEN;
   return s;
 }
+static std::array<uint8_t, BOOT_SIZE> labelled(const char *text, size_t offset=100) {
+  std::array<uint8_t, BOOT_SIZE> bytes;
+  bytes.fill(0xFF);
+  assert(offset + std::strlen(text) + 1 <= bytes.size());
+  std::memcpy(bytes.data() + offset, text, std::strlen(text) + 1);
+  return bytes;
+}
+static InstalledVariant variant(const std::array<uint8_t, BOOT_SIZE> &image,
+                                uint32_t version=0x02040CFF) {
+  return installed_variant(image.data(), image.size(), version);
+}
 int main(int argc,char **argv) {
   assert(argc==2);
-  if (!std::strcmp(argv[1],"geometry")) {
+  if (!std::strcmp(argv[1],"normal-labels")) {
+    assert(variant(labelled("UF2 Bootloader v0.11.0-OTAFIX2.4.12\r\nModel: test\r\n")) == InstalledVariant::Normal);
+    assert(variant(labelled("UF2 Bootloader 0.11.0-OTAFIX2.4.12\r\n")) == InstalledVariant::Normal);
+    assert(variant(labelled("UF2 Bootloader BL_0x02040CFF\r\n")) == InstalledVariant::Normal);
+    assert(variant(labelled("UF2 Bootloader v0.11.0-OTAFIX2.4.11\r\n"),0x02040BFF) == InstalledVariant::Normal);
+    assert(variant(labelled("UF2 Bootloader v0.11.0-OTAFIX2.4.12-preview.16\r\n"),0x02040C10) == InstalledVariant::Normal);
+    assert(variant(labelled("UF2 Bootloader BL_0x02040C10\r\n"),0x02040C10) == InstalledVariant::Normal);
+    assert(variant(labelled("UF2 Bootloader v0.11.0-OTAFIX255.255.254-preview.254\r\n"),0xFFFFFEFE) == InstalledVariant::Normal);
+  } else if (!std::strcmp(argv[1],"recovery-labels")) {
+    for (const char *text: {"R_0x02040CFF", "UF2 Bootloader R_0x02040CFF\r\n",
+                           "UF2 Bootloader R_v0.11.0-OTAFIX2.4.12\r\n",
+                           "0.11.0-OTAFIX2.4.7-preview.2-recovery-allow-all s140 6.1.1"}) {
+      auto bytes=labelled("UF2 Bootloader v0.11.0-OTAFIX2.4.12\r\n");
+      std::memcpy(bytes.data()+500,text,std::strlen(text)+1);
+      assert(variant(bytes)==InstalledVariant::Recovery); // Recovery wins over a normal decoy.
+      assert(variant(labelled(text))==InstalledVariant::Recovery);
+    }
+    // Historical compact recovery images have neither version label nor flag.
+    assert(variant(labelled(""))==InstalledVariant::Unknown);
+    auto bytes=labelled("UF2 Bootloader v0.11.0-OTAFIX2.4.12\r\n");
+    std::memcpy(bytes.data()+BOOT_SIZE-4,"R_0x",4);
+    assert(variant(bytes)==InstalledVariant::Recovery);
+  } else if (!std::strcmp(argv[1],"unknown-labels")) {
+    for (const char *text: {"", "v0.11.0-OTAFIX2.4.12", "UF2 Bootloader ",
+                           "UF2 Bootloader v0.11.0-OTAFIX2.4.11\r\n",
+                           "UF2 Bootloader v0.11.0-OTAFIX2.4.12-preview.1\r\n",
+                           "UF2 Bootloader v0.11.0-OTAFIX2.4.12-dirty\r\n",
+                           "UF2 Bootloader v0.11.0-OTAFIX2.4.12\n",
+                           "UF2 Bootloader v0.11.0-OTAFIX2.4.12",
+                           "UF2 Bootloader vBL_0x02040CFF\r\n",
+                           "UF2 Bootloader BL_0x02040DFF\r\n"})
+      assert(variant(labelled(text))==InstalledVariant::Unknown);
+    auto bytes=labelled("UF2 Bootloader v0.11.0-OTAFIX2.4.12\r\n");
+    assert(installed_variant(nullptr,BOOT_SIZE,0x02040CFF)==InstalledVariant::Unknown);
+    assert(installed_variant(bytes.data(),BOOT_SIZE-1,0x02040CFF)==InstalledVariant::Unknown);
+    assert(variant(bytes,0)==InstalledVariant::Unknown);
+    assert(variant(bytes,UINT32_MAX)==InstalledVariant::Unknown);
+    assert(variant(bytes,0x02040C00)==InstalledVariant::Unknown);
+    const char *duplicate="UF2 Bootloader BL_0x02040CFF\r\n";
+    std::memcpy(bytes.data()+500,duplicate,std::strlen(duplicate)+1);
+    assert(variant(bytes)==InstalledVariant::Unknown);
+    bytes=labelled("UF2 Bootloader v0.11.0-OTAFIX2.4.12\r\n");
+    const char *conflict="UF2 Bootloader v0.11.0-OTAFIX2.4.11\r\n";
+    std::memcpy(bytes.data()+500,conflict,std::strlen(conflict)+1);
+    assert(variant(bytes)==InstalledVariant::Unknown);
+    for (size_t tail=1;tail<40;++tail) {
+      bytes.fill(0xFF);
+      const char *label="UF2 Bootloader v0.11.0-OTAFIX2.4.12\r\n";
+      size_t count=std::strlen(label);
+      if (tail>=count) continue;
+      std::memcpy(bytes.data()+BOOT_SIZE-tail,label,tail);
+      assert(variant(bytes)==InstalledVariant::Unknown);
+    }
+  } else if (!std::strcmp(argv[1],"geometry")) {
     assert(preflight(good())==Gate::Ok);
     Snapshot s=good(); s.part=0x52833; assert(preflight(s)==Gate::Chip);
     s=good(); s.flash_page_size=2048; assert(preflight(s)==Gate::Chip);
@@ -101,6 +165,7 @@ int main(int argc,char **argv) {
     assert(candidate_matches_resource(v7,0x239A0029,name,0x02040CFF,0x27000,0x123));
     assert(installed_can_migrate(installed,candidate,false,false,0x26000,0xB6));
     if (!std::strcmp(argv[1],"up-to-date")) {
+      assert(installed_matches_resource(installed,0x239A0029,name,0x26000,0xB6));
       assert(!installed_up_to_date(installed,0x239A0029,name,0x02040CFF,0x26000,0xB6));
       installed.boot_version=0x02040CFE; // Preview precedes the stable release.
       assert(!installed_up_to_date(installed,0x239A0029,name,0x02040CFF,0x26000,0xB6));
@@ -189,6 +254,15 @@ class MigrationPolicyTests(unittest.TestCase):
     def test_actual_v6_v7_geometry_and_linked_source_bounds(self):
         self.scenario('geometry')
 
+    def test_automatic_variant_recognizes_complete_normal_release_labels(self):
+        self.scenario('normal-labels')
+
+    def test_recovery_markers_override_normal_labels_and_missing_text_fails_closed(self):
+        self.scenario('recovery-labels')
+
+    def test_automatic_variant_rejects_unknown_ambiguous_or_truncated_labels(self):
+        self.scenario('unknown-labels')
+
     def test_all_acl_slots_protect_source_bootloader_and_parameter_page(self):
         self.scenario('acl')
 
@@ -216,6 +290,22 @@ class MigrationPolicyTests(unittest.TestCase):
                                                '#include "helpers/ota/OtaBootloaderUpdate.h"'))
             binary = self.compile(directory, HARNESS, directory)
             result = subprocess.run([str(binary), 'identity'], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Assertion', result.stderr)
+
+    def test_negative_control_cannot_ignore_recovery_version_marker(self):
+        original = (ROOT / 'src/helpers/ota/BootloaderMigrationPolicy.h').read_text()
+        changed = original.replace(
+            'boot_text_matches(image + i, left, recovery, sizeof(recovery) - 1)', 'false')
+        self.assertNotEqual(original, changed)
+        with tempfile.TemporaryDirectory(prefix='migration-recovery-negative-') as directory:
+            directory = Path(directory)
+            header = directory / 'helpers/ota/BootloaderMigrationPolicy.h'
+            header.parent.mkdir(parents=True)
+            header.write_text(changed.replace('#include "OtaBootloaderUpdate.h"',
+                                               '#include "helpers/ota/OtaBootloaderUpdate.h"'))
+            binary = self.compile(directory, HARNESS, directory)
+            result = subprocess.run([str(binary), 'recovery-labels'], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('Assertion', result.stderr)
 
